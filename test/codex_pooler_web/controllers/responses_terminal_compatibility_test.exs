@@ -210,7 +210,8 @@ defmodule CodexPoolerWeb.ResponsesTerminalCompatibilityTest do
       refute response.resp_body =~ "synthetic upstream detail"
 
       if shape == :failed_without_nested_code do
-        assert terminal == expected_failed_terminal()
+        assert hd(events)["type"] == "response.created"
+        assert terminal == Map.put(expected_failed_terminal(), "sequence_number", 1)
         assert_hostile_failed_sentinels_absent(response.resp_body)
       end
     end

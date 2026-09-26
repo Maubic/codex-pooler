@@ -23,6 +23,20 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.NativeHttpToolObservationStreamT
     assert eligible?(state)
   end
 
+  test "chunk boundaries preserve reasoning and controls before a tool at a nonzero index" do
+    reasoning = %{"type" => "response.output_item.added", "output_index" => 0, "item" => %{"type" => "reasoning", "id" => "rs_synthetic"}}
+    control = %{"type" => "codex.rate_limits"}
+    prefix = Enum.map_join([reasoning, control], fn event -> "event: #{event["type"]}\ndata: #{CodexPooler.JSON.encode!(event)}\n\n" end)
+    wire = prefix <> String.replace(partial_tool_wire(), ~s("output_index":0), ~s("output_index":1))
+
+    for split <- 1..(byte_size(wire) - 1) do
+      <<first::binary-size(^split), rest::binary>> = wire
+      {output, state} = observe([first, rest])
+      assert output == wire
+      assert eligible?(state), "lost reasoning/tool authority at byte #{split}"
+    end
+  end
+
   test "a complete final JSON event is observed at EOF without a blank separator" do
     wire = String.trim_trailing(partial_tool_wire(), "\n")
     {output, state} = observe([wire])

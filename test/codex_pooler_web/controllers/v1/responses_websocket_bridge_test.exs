@@ -2598,7 +2598,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
     response = post_stream(conn, setup, session, stream_payload(setup, "fallback incomplete"))
 
     assert response.status == 200
-    assert event_types(response.resp_body) == ["response.failed"]
+    assert event_types(response.resp_body) == ["response.created", "response.failed"]
     assert response.resp_body =~ "resp_failed_incomplete"
     refute response.resp_body =~ "resp_incomplete_fallback"
 

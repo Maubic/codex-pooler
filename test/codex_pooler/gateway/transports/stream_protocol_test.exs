@@ -667,7 +667,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocolTest do
       assert chunk =~ "split text"
     end
 
-    test "emits early response.failed without synthetic success prefix" do
+    test "opens early response.failed with a created snapshot and no synthesized output" do
       state = StreamProtocol.public_openai_responses_stream_state()
 
       failed =
@@ -684,8 +684,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocolTest do
       assert {chunk, _state} =
                StreamProtocol.normalize_public_openai_responses_sse_data(failed, state)
 
-      assert String.starts_with?(chunk, "event: response.failed\n")
-      refute chunk =~ "event: response.created\n"
+      assert String.starts_with?(chunk, "event: response.created\n")
+      assert chunk =~ "event: response.failed\n"
       refute chunk =~ "event: response.output_text.delta\n"
     end
 
@@ -706,7 +706,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocolTest do
       assert {chunk, _state} =
                StreamProtocol.normalize_public_openai_responses_sse_data(failed, state)
 
-      assert [%{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
+      assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
       assert data["error"]["code"] == "context_length_exceeded"
       assert data["error"]["message"] == "upstream request failed"
 
@@ -735,7 +735,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocolTest do
              }
     end
 
-    test "emits early top-level error without synthetic success prefix" do
+    test "opens early top-level error with a created snapshot and no synthesized output" do
       state = StreamProtocol.public_openai_responses_stream_state()
 
       error =
@@ -751,8 +751,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocolTest do
       assert {chunk, _state} =
                StreamProtocol.normalize_public_openai_responses_sse_data(error, state)
 
-      assert String.starts_with?(chunk, "event: error\n")
-      refute chunk =~ "event: response.created\n"
+      assert String.starts_with?(chunk, "event: response.created\n")
+      assert chunk =~ "event: error\n"
       refute chunk =~ "event: response.output_text.delta\n"
     end
   end

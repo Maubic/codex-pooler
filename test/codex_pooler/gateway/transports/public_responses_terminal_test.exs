@@ -169,7 +169,7 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesTerminalTest do
       {output, state} =
         normalize_sse(event_line <> "data: " <> CodexPooler.JSON.encode!(failed) <> "\n\n")
 
-      assert [%{event: "response.failed", data: decoded}] = public_events(output)
+      assert [%{event: "response.created"}, %{event: "response.failed", data: decoded}] = public_events(output)
       assert decoded["response"]["status"] == "failed"
       assert decoded["response"]["error"]["message"] == "upstream request failed"
       refute output =~ "private-prompt-sentinel"
@@ -1073,7 +1073,7 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesTerminalTest do
 
         assert decoded == %{
                  "type" => "response.failed",
-                 "sequence_number" => 0,
+                 "sequence_number" => if(transport == :sse, do: 1, else: 0),
                  "response" => expected_failed_response()
                }
       end
@@ -1367,7 +1367,7 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesTerminalTest do
 
   defp normalize_public_wire(:sse, terminal) do
     {wire, _state} = normalize_sse(sse_event("response.failed", terminal))
-    [%{event: "response.failed", data: decoded}] = public_events(wire)
+    [%{event: "response.created"}, %{event: "response.failed", data: decoded}] = public_events(wire)
     {wire, decoded}
   end
 

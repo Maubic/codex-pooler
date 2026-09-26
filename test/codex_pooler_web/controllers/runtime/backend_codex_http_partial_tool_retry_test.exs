@@ -49,6 +49,32 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpPartialToolRetryTest do
     end
   end
 
+  for mode <- ["full", "lite"], tool_type <- ["custom_tool_call", "function_call"] do
+    @tag mode: mode, tool_type: tool_type
+    test "#{mode} native HTTP retries an incomplete #{tool_type} after reasoning and controls", %{mode: mode, tool_type: tool_type} do
+      contract = partial_retry_contract()
+      assert contract.incomplete_reasoning_prefix
+      assert contract.tool_index == :tracked_non_negative
+      assert contract.requires_trailing_tool_item
+      assert "codex.rate_limits" in contract.neutral_controls
+      [created | tool_events] = partial_events(tool_type)
+      reasoning = %{"type" => "response.output_item.added", "output_index" => 0, "item" => %{"type" => "reasoning", "id" => "rs_synthetic", "summary" => []}}
+      summary = %{"type" => "response.reasoning_summary_text.delta", "item_id" => "rs_synthetic", "output_index" => 0, "summary_index" => 0, "delta" => "synthetic"}
+      tool_events = Enum.map(tool_events, fn {type, event} -> {type, Map.put(event, "output_index", 1)} end)
+      events = [created, {reasoning["type"], reasoning}, {summary["type"], summary}] ++ tool_events ++ [{"codex.rate_limits", %{"type" => "codex.rate_limits"}}]
+      {upstream, setup, port, thread_id, payload} = scenario(mode, :opening, events, [FakeUpstream.sse_stream([completed_event()])])
+      assert_cut!(port, setup, payload, thread_id, tool_type)
+      [first] = pool_requests(setup)
+      attempt = Repo.get_by!(Attempt, request_id: first.id)
+      assert attempt.response_metadata["native_http_partial_tool"]["poisoned"] == false
+      {status, body} = post_stream!(port, setup, payload, thread_id)
+      assert {status, body =~ "response.completed"} == {200, true}
+      assert_refused!(port, setup, payload, thread_id)
+      assert FakeUpstream.count(upstream) == 2
+      assert_settled_once!(Enum.map(pool_requests(setup), & &1.id))
+    end
+  end
+
   for control <- [:completed_item, :created_output, :unknown_event, :malformed_event, :truncated_event, :oversized_event, :missing_proof, :poisoned_proof, :incomplete_proof, :changed_body, :anchor, :replay_generation, :expired, :missing_digest, :changed_epoch] do
     @tag control: control
     test "a partial native HTTP tool call keeps the duplicate fence for #{control}", %{control: control} do

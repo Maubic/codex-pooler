@@ -45,6 +45,32 @@ defmodule CodexPoolerWeb.V1.ResponsesSSETerminalPrefixTest do
     assert Map.new(captured.headers)["x-openai-internal-codex-responses-lite"] == "true"
   end
 
+  for mode <- ["full", "lite"], status <- ["failed", "incomplete"] do
+    @tag mode: mode, terminal_status: status
+    test "#{mode} terminal-only #{status} opens its response before the terminal", %{mode: mode, terminal_status: status} do
+      type = "response." <> status
+      response = opening_response() |> Map.put("status", status) |> Map.put("output", [message("msg_incomplete", @marker)])
+      response = if status == "incomplete", do: Map.put(response, "incomplete_details", %{"reason" => "max_output_tokens"}), else: Map.put(response, "error", %{"code" => "server_error"})
+      upstream = start_upstream(FakeUpstream.sse_stream([{type, %{"type" => type, "response" => response}}]))
+      setup = gateway_setup(upstream)
+      if mode == "lite", do: put_serving_mode!(setup, mode)
+      events = stream_events!(setup)
+      assert hd(events).event == "response.created"
+      assert List.last(events).event == type
+      assert Enum.count(events, &(&1.event == "response.created")) == 1
+      assert sequence_numbers(events) == Enum.to_list(0..(length(events) - 1))
+      grammar = assert_responses_grammar!(events)
+
+      if status == "incomplete" do
+        assert grammar.text == %{{0, 0} => @marker}
+      else
+        # Failed response metadata keeps its existing strict output projection.
+        assert grammar.items == []
+        assert List.last(events).data["response"]["output"] == []
+      end
+    end
+  end
+
   test "terminal-only reasoning and tool output is announced in order and never surfaces reasoning text as output text" do
     reasoning = %{
       "id" => "rs_prefix",
@@ -272,7 +298,7 @@ defmodule CodexPoolerWeb.V1.ResponsesSSETerminalPrefixTest do
   # the streamed text per {output_index, content_index}.
   defp assert_responses_grammar!(events) do
     assert [%{event: "response.created", data: %{"response" => %{"output" => []}}} | _rest] = events
-    assert %{event: "response.completed"} = List.last(events)
+    assert List.last(events).event in ["response.completed", "response.failed", "response.incomplete"]
 
     sequence = sequence_numbers(events)
     assert sequence == Enum.sort(Enum.uniq(sequence)), "sequence numbers must strictly increase"

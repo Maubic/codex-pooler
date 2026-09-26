@@ -506,15 +506,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
     {[prefix, terminal], state}
   end
 
-  defp terminal_prefix(type, _decoded, %{created?: false, text_delta?: false} = state)
-       when type in ["response.failed", "response.incomplete", "error"],
-       do: {[], state}
-
   # A terminal that closes a response the upstream never opened is preceded by
   # the grammar the Responses stream contract requires, so SDK stream helpers
   # (openai-python `responses.stream()`, openai-node `responses.stream()`,
   # `@ai-sdk/openai`) can follow it: a `response.created` snapshot, then every
-  # terminal output item announced in order with its content parts and text
+  # projected terminal output item announced in order with its content parts and text
   # (findings#254). Only what the terminal carries is replayed; items the
   # upstream already relayed, or text it already streamed, are never repeated.
   defp terminal_prefix(_type, decoded, state) do

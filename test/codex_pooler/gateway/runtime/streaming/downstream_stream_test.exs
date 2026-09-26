@@ -711,7 +711,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStreamTest do
       assert {chunk, state} =
                DownstreamStream.normalize_data(second, "/v1/responses", opts, state)
 
-      assert [%{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
+      assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
       assert data["error"]["code"] == "context_length_exceeded"
       assert data["error"]["message"] == "upstream request failed"
       refute chunk =~ "large incomplete text"
@@ -779,7 +779,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStreamTest do
       assert {chunk, state} =
                DownstreamStream.normalize_data(second, "/v1/responses", opts, state)
 
-      assert [%{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
+      assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
       assert data["error"]["code"] == "context_length_exceeded"
       assert data["error"]["message"] == "upstream request failed"
       refute chunk =~ "invalid_request_error"
@@ -816,7 +816,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStreamTest do
       assert {chunk, state} =
                DownstreamStream.normalize_data(failed, "/v1/responses", opts, state)
 
-      assert [%{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
+      assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
       assert data["error"]["code"] == "context_length_exceeded"
 
       assert {:failed, failure} = DownstreamStream.terminal_outcome(state)
@@ -858,11 +858,11 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStreamTest do
       assert {chunk, state} =
                DownstreamStream.normalize_data(failed, "/v1/responses", opts, state)
 
-      assert [%{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
+      assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
 
       assert data == %{
                "type" => "response.failed",
-               "sequence_number" => 0,
+               "sequence_number" => 1,
                "error" => %{
                  "code" => "context_length_exceeded",
                  "message" => "upstream request failed",
@@ -924,7 +924,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStreamTest do
       assert {chunk, state} =
                DownstreamStream.normalize_data(failed, "/v1/responses", opts, state)
 
-      assert [%{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
+      assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
       refute Map.has_key?(data, "error")
       assert data["response"]["error"]["code"] == "nested_safe_code"
 
@@ -963,7 +963,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStreamTest do
       assert {chunk, state} =
                DownstreamStream.normalize_data(failed, "/v1/responses", opts, state)
 
-      assert [%{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
+      assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] = public_sse_events(chunk)
       assert data["error"]["code"] == "top_safe_code"
       assert data["response"]["error"]["code"] == "nested_safe_code"
 

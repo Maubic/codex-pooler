@@ -621,7 +621,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTerminalTest do
   defp expected_relayed_failed_terminal do
     %{
       "type" => "response.failed",
-      "sequence_number" => 0,
+      "sequence_number" => 1,
       "response" => %{
         "id" => "resp_terminal_failed",
         "created_at" => 0,

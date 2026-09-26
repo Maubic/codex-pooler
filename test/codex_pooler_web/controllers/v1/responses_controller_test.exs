@@ -7746,7 +7746,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     assert [content_type] = get_resp_header(conn, "content-type")
     assert content_type =~ "text/event-stream"
     assert conn.status == 200
-    assert [%{"event" => "response.failed", "data" => data}] = public_sse_events(conn.resp_body)
+    assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] = public_sse_events(conn.resp_body)
 
     for error <- [data["error"], get_in(data, ["response", "error"])] do
       assert error["message"] == "upstream request failed"
@@ -7760,7 +7760,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     refute conn.resp_body =~ "sk-secret"
     refute conn.resp_body =~ "SENTINEL_STREAM"
     refute conn.resp_body =~ "\"param\""
-    refute conn.resp_body =~ "event: response.created\n"
+    assert conn.resp_body =~ "event: response.created\n"
     refute conn.resp_body =~ "event: response.output_text.delta\n"
     assert FakeUpstream.count(upstream) == 1
   end
@@ -8129,7 +8129,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     assert [content_type] = get_resp_header(conn, "content-type")
     assert content_type =~ "text/event-stream"
     assert conn.status == 200
-    assert [%{"event" => "response.failed", "data" => data}] = public_sse_events(conn.resp_body)
+    assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] = public_sse_events(conn.resp_body)
     assert get_in(data, ["error", "message"]) == "upstream request failed"
     assert get_in(data, ["error", "type"]) == "server_error"
     assert get_in(data, ["error", "code"]) == "internal_error"
@@ -8138,7 +8138,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     refute conn.resp_body =~ "upstream.internal.example"
     refute conn.resp_body =~ "/internal/stream"
     refute conn.resp_body =~ "provider_stack"
-    refute conn.resp_body =~ "event: response.created\n"
+    assert conn.resp_body =~ "event: response.created\n"
     refute conn.resp_body =~ "event: response.output_text.delta\n"
 
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
@@ -8186,7 +8186,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     assert [content_type] = get_resp_header(conn, "content-type")
     assert content_type =~ "text/event-stream"
     assert conn.status == 200
-    assert [%{"event" => "response.failed", "data" => data}] = public_sse_events(conn.resp_body)
+    assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] = public_sse_events(conn.resp_body)
 
     for error <- [data["error"], get_in(data, ["response", "error"])] do
       assert error["message"] == "upstream request failed"
@@ -8199,7 +8199,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     refute conn.resp_body =~ "upstream.internal.example"
     refute conn.resp_body =~ "/internal/stream"
     refute conn.resp_body =~ "provider_stack"
-    refute conn.resp_body =~ "event: response.created\n"
+    assert conn.resp_body =~ "event: response.created\n"
     refute conn.resp_body =~ "event: response.output_text.delta\n"
 
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
@@ -8209,7 +8209,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
   end
 
   @tag :streaming_sequence
-  test "POST /v1/responses streaming emits early response.failed as the first event", %{
+  test "POST /v1/responses streaming prefixes early response.failed with its opening snapshot", %{
     conn: conn
   } do
     upstream =
@@ -8250,9 +8250,9 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     assert [content_type] = get_resp_header(conn, "content-type")
     assert content_type =~ "text/event-stream"
     assert conn.status == 200
-    assert [%{"event" => "response.failed", "data" => data}] = public_sse_events(conn.resp_body)
+    assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] = public_sse_events(conn.resp_body)
     assert get_in(data, ["error", "code"]) == "invalid_request_error"
-    refute conn.resp_body =~ "event: response.created\n"
+    assert conn.resp_body =~ "event: response.created\n"
     refute conn.resp_body =~ "event: response.output_text.delta\n"
 
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
@@ -8307,8 +8307,8 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       })
 
     assert conn.status == 200
-    assert [%{"event" => "response.failed", "data" => data}] = public_sse_events(conn.resp_body)
-    assert data["sequence_number"] == 0
+    assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] = public_sse_events(conn.resp_body)
+    assert data["sequence_number"] == 1
     assert data["response"]["status"] == "failed"
     assert data["response"]["error"]["code"] == "context_length_exceeded"
     assert data["response"]["error"]["message"] == "upstream request failed"
@@ -8327,7 +8327,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
   end
 
   @tag :streaming_sequence
-  test "POST /v1/responses streaming emits early top-level error as the first event", %{
+  test "POST /v1/responses streaming prefixes early top-level error with its opening snapshot", %{
     conn: conn
   } do
     upstream =
@@ -8359,9 +8359,9 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     assert [content_type] = get_resp_header(conn, "content-type")
     assert content_type =~ "text/event-stream"
     assert conn.status == 200
-    assert [%{"event" => "error", "data" => data}] = public_sse_events(conn.resp_body)
+    assert [%{"event" => "response.created"}, %{"event" => "error", "data" => data}] = public_sse_events(conn.resp_body)
     assert get_in(data, ["error", "code"]) == "invalid_request_error"
-    refute conn.resp_body =~ "event: response.created\n"
+    assert conn.resp_body =~ "event: response.created\n"
     refute conn.resp_body =~ "event: response.output_text.delta\n"
 
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
@@ -9255,11 +9255,11 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
 
     assert conn.status == 200
 
-    assert [%{"event" => "response.failed", "data" => data}] =
+    assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] =
              public_sse_events(conn.resp_body)
 
     assert data["type"] == "response.failed"
-    assert data["sequence_number"] == 0
+    assert data["sequence_number"] == 1
     assert data["response"]["id"] == "resp_v1_large_failed_incomplete_without_separator"
     assert data["response"]["status"] == "failed"
 
@@ -9346,7 +9346,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
 
     assert conn.status == 200
 
-    assert [%{"event" => "response.incomplete", "data" => data}] =
+    assert [%{"event" => "response.created"}, %{"event" => "response.incomplete", "data" => data}] =
              public_sse_events(conn.resp_body)
 
     assert data["type"] == "response.incomplete"
@@ -9409,7 +9409,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       })
 
     assert conn.status == 200
-    assert [%{"event" => "response.failed", "data" => data}] = public_sse_events(conn.resp_body)
+    assert [%{"event" => "response.created"}, %{"event" => "response.failed", "data" => data}] = public_sse_events(conn.resp_body)
     assert data["type"] == "response.failed"
     assert data["response"]["status"] == "failed"
     assert data["error"]["code"] == "context_length_exceeded"

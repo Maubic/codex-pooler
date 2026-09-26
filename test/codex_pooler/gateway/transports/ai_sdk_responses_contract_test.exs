@@ -133,7 +133,7 @@ defmodule CodexPooler.Gateway.Transports.AISDKResponsesContractTest do
                StreamProtocol.public_openai_responses_stream_state()
              )
 
-    assert [relayed_event] = sse_events(relayed_failed)
+    assert [%{"type" => "response.created"}, relayed_event] = sse_events(relayed_failed)
 
     assert relayed_event == %{
              "type" => "response.failed",
