@@ -66,6 +66,14 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress.ForwardedClientIPTest do
       )
     end
 
+    test "invalid stored forwarding depths return an unresolved policy instead of raising" do
+      conn = forwarded_conn(@peer, [{"x-forwarded-for", "198.51.100.20"}, {"x-real-ip", "198.51.100.20"}])
+
+      for {source, depth} <- [{:x_forwarded_for, 17}, {:x_forwarded_for, -1}, {:x_forwarded_for, nil}, {:x_real_ip, 1}, {:peer, 1}] do
+        assert_error(ForwardedClientIP.resolve(conn, settings(["10.0.0.1"], source, depth)), @peer, :forwarded_depth_unsatisfied, 0)
+      end
+    end
+
     test "uses the compiled trusted proxy snapshot instead of the raw rule list" do
       {:ok, compiled} = IPRules.compile(["10.0.0.1"])
 

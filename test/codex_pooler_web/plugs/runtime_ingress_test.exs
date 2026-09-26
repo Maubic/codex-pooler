@@ -60,6 +60,19 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
   end
 
   describe "unencoded ingress characterization" do
+    test "transcription authenticates JSON requests before parsing for canonical and encoded paths" do
+      setup_runtime_ingress(%OperationalSettings{})
+
+      for path <- ["/backend-api/transcribe", "/backend-api/%74ranscribe"],
+          body <- [~s({"model":), "{}"] do
+        conn = build_conn() |> put_req_header("content-type", "application/json") |> post(path, body)
+        assert json_response(conn, 401)["error"]["code"] == "api_key_missing"
+      end
+
+      assert Repo.aggregate(Request, :count) == 0
+      assert Repo.aggregate(Attempt, :count) == 0
+    end
+
     test "preserves runtime, MCP, multipart, usage, pruned-helper, and passthrough order", %{
       conn: conn
     } do

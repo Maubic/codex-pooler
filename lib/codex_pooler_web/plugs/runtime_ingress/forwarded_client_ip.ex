@@ -88,6 +88,9 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress.ForwardedClientIP do
     resolve_x_real_ip(conn, peer_ip)
   end
 
+  defp resolve_forwarded(_conn, peer_ip, _source, _depth, _trusted_rules),
+    do: error(peer_ip, :forwarded_depth_unsatisfied, 0)
+
   defp resolve_x_real_ip(conn, peer_ip) do
     case Plug.Conn.get_req_header(conn, "x-real-ip") do
       [] ->

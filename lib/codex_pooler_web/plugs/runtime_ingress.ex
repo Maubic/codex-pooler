@@ -70,7 +70,6 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
         |> authenticate_v1_request()
         |> reject_unsupported_v1_request()
         |> authenticate_multipart_transcribe_request()
-        |> authenticate_protected_backend_raw_request()
         |> authenticate_protected_backend_json_request()
         |> enforce_image_generation_permission()
         |> maybe_decode_compressed_body(settings)
@@ -311,10 +310,6 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
     authenticate_when(conn, &multipart_transcribe_request?/1)
   end
 
-  defp authenticate_protected_backend_raw_request(conn) do
-    authenticate_when(conn, &protected_backend_raw_request?/1)
-  end
-
   defp authenticate_protected_backend_json_request(conn) do
     authenticate_when(conn, &protected_backend_json_request?/1)
   end
@@ -417,13 +412,12 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
       ["backend-api", "codex", "images", "edits"],
       ["backend-api", "codex", "responses", "compact"],
       ["backend-api", "codex", "v1", "responses", "compact"],
+      ["backend-api", "transcribe"],
       ["backend-api", "files"]
     ] or match?(["backend-api", "files", file_id, "uploaded"] when is_binary(file_id), path_info)
   end
 
   def protected_backend_json_request?(_conn), do: false
-
-  def protected_backend_raw_request?(_conn), do: false
 
   @spec pruned_runtime_helper_request?(Plug.Conn.t()) :: boolean()
   defp pruned_runtime_helper_request?(%Plug.Conn{method: method} = conn) do
