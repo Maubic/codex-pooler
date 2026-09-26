@@ -1682,6 +1682,8 @@ On phones, the numeric column is fixed at 4.5rem so token/cache text cannot take
 
 Model name, separator and reasoning share one typographic line: Roboto Condensed, 12px, normal weight, 16px line height and a common text baseline. Preserve the established tones: model name uses base-content, reasoning and separator use base-content/60, and `model default` uses base-content/45. The effort and `model default` inherit the same font metrics; neither uses the smaller secondary-line size. The model swatch remains vertically centered beside the text.
 
+Request timestamps display the complete date and time using the operator's selected format and timezone. Use the same Roboto Condensed, 12px, normal weight and 16px line height as the model name; do not apply bold. Keep the date visible, and allow longer formats to wrap within the time column instead of truncating the value. The tooltip and accessible label retain the same complete timestamp.
+
 Status icons reuse the shared status mapping: clock for in progress, check-circle for succeeded, x-circle for failed, shield-exclamation for rejected, no-symbol for cancelled and question-mark-circle for unknown. Each 12px icon centers against the status/latency text's cap-to-baseline box using the shared `admin-control-label` primitive on that text group. The icon is decorative (`aria-hidden`) because visible and accessible status text already names the outcome. Preserve the surrounding 16px row rhythm, status colors and 4px horizontal gap.
 
 **Status tick.** Opt in with `admin-status-tick` and put `data-tone` on the row

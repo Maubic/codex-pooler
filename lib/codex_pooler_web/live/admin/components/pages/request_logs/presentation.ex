@@ -9,7 +9,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
   alias CodexPoolerWeb.Admin.RequestLogFilterForm
   alias CodexPoolerWeb.Admin.RequestLogsPresentation.Metrics
   alias CodexPoolerWeb.Admin.RequestLogsPresentation.Usage
-  alias CodexPoolerWeb.DateTimeDisplay
 
   import CodexPoolerWeb.Admin.RequestLogsDisplay,
     only: [
@@ -353,10 +352,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
   attr :prefix, :string, required: true
 
   def request_log_timestamp_cell(assigns) do
-    assigns =
-      assigns
-      |> assign(:timestamp_parts, DateTimeDisplay.format_datetime_parts(assigns.request_log.admitted_at, assigns.datetime_preferences))
-      |> assign(:latency, format_route_latency(assigns.request_log.latency_ms))
+    assigns = assign(assigns, :latency, format_route_latency(assigns.request_log.latency_ms))
 
     ~H"""
     <button
@@ -370,14 +366,10 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
     >
       <span
         data-role="timestamp-datetime"
-        class="block min-w-0 truncate tabular-nums text-base-content"
+        class="block min-w-0 whitespace-normal break-words font-sans text-xs font-normal leading-4 tabular-nums text-base-content"
         title={format_datetime(@request_log.admitted_at, @datetime_preferences)}
       >
-        <%= if @timestamp_parts do %>
-          <span class="sr-only">{@timestamp_parts.date} </span>{@timestamp_parts.time}
-        <% else %>
-          {format_datetime(@request_log.admitted_at, @datetime_preferences)}
-        <% end %>
+        {format_datetime(@request_log.admitted_at, @datetime_preferences)}
       </span>
       <span
         data-role="status-label"
