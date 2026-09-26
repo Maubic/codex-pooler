@@ -21,59 +21,104 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
   alias CodexPooler.Upstreams.Assignments.PoolAssignments
   alias CodexPooler.Upstreams.Lifecycle.IdentityLifecycle
 
-  @expected_features ~w(
-    files
-    backend_transcription
-    backend_image_proxy_surface
-    backend_models_etag
-    backend_responses_etag
-    pool_model_serving_modes
-    backend_responses_envelope
-    upstream_error_param
-    terminal_failure_diagnostics
-    rejection_metadata
-    upstream_validation_rejection_relay
-    pooler_authored_error_type
-    backend_fast_service_tier
-    responses_chat
-    response_body_cap
-    backend_v1_alias_surface
-    usage_alias_meter_identity
-    websocket_continuity
-    duplicate_turn_fence
-    reasoning_minimal
-    reasoning_none
-    reasoning_ultra
-    api_key_reasoning_availability
-    api_key_reservation_policy_refusals
-    api_key_terminal_policy_denials
-    exhausted_pool_usage_limit
-    reasoning_context
-    unsupported_upstream_fields
-    api_key_websocket_revocation
-    firewall
-    pruned_runtime_helper_firewall
-    decompression
-    bulkheads
-    database_unavailable
-    degraded_routing
-    strict_schema_validation
-    public_strict_schema_object_roots
-    unsupported_input_image_reference
-    first_event_stream_retry
-    request_compression
-    upstream_websocket_bridge
-    image_generation_permission
-    responses_access_programs
-    responses_allowed_tools
-    responses_executable_custom_tools
-    backend_agent_v2_handoffs
-    multi_agent_product_certification
-    function_tool_schema_lowering
-    direct_responses_strict_schema_repair
-    v1_supported_surface
-    v1_unsupported_public_surface
-  )a
+  @expected_feature_categories [
+    files: [:route, :auth, :error, :ownership],
+    backend_transcription: [:route, :auth, :multipart, :ownership],
+    backend_image_proxy_surface: [:route, :auth, :error, :ownership],
+    backend_models_etag: [:route, :auth, :error, :ownership],
+    backend_responses_etag: [:route, :auth, :error, :streaming, :ownership, :degraded],
+    pool_model_serving_modes: [:route, :error, :streaming, :ownership, :degraded],
+    backend_responses_envelope: [:route, :auth, :error, :streaming, :ownership],
+    upstream_error_param: [:error, :ownership, :degraded],
+    terminal_failure_diagnostics: [:error, :ownership, :degraded],
+    rejection_metadata: [:error, :ownership, :degraded],
+    upstream_validation_rejection_relay: [:error, :streaming],
+    pooler_authored_error_type: [:error, :route, :overload, :ownership],
+    backend_fast_service_tier: [:route, :auth, :error, :streaming, :ownership],
+    responses_chat: [:route, :auth, :error, :streaming, :ownership],
+    response_body_cap: [:error, :degraded, :ownership],
+    backend_v1_alias_surface: [:route, :auth, :error, :streaming, :ownership],
+    usage_alias_meter_identity: [:route, :auth, :ownership],
+    websocket_continuity: [:route, :auth, :streaming, :ownership, :degraded],
+    duplicate_turn_fence: [:route, :auth, :error, :ownership],
+    reasoning_minimal: [:route, :auth, :ownership],
+    reasoning_none: [:route, :auth, :ownership],
+    reasoning_ultra: [:route, :auth, :ownership],
+    api_key_reasoning_availability: [:route, :auth, :error, :streaming, :ownership],
+    api_key_reservation_policy_refusals: [:route, :auth, :error, :streaming, :ownership],
+    api_key_terminal_policy_denials: [:route, :auth, :error, :streaming],
+    exhausted_pool_usage_limit: [:route, :error, :streaming, :ownership],
+    reasoning_context: [:route, :auth, :error, :ownership],
+    unsupported_upstream_fields: [:route, :auth, :ownership],
+    api_key_websocket_revocation: [:auth, :error, :streaming, :ownership],
+    firewall: [:route, :auth, :error, :ownership],
+    pruned_runtime_helper_firewall: [:route, :error],
+    decompression: [:route, :error, :overload],
+    bulkheads: [:overload, :degraded],
+    database_unavailable: [:error, :degraded],
+    degraded_routing: [:route, :error, :ownership, :degraded],
+    strict_schema_validation: [:route, :auth, :error, :ownership],
+    public_strict_schema_object_roots: [:route, :auth, :error, :streaming, :ownership],
+    unsupported_input_image_reference: [:route, :auth, :error, :ownership],
+    first_event_stream_retry: [:route, :auth, :error, :streaming, :ownership, :degraded],
+    request_compression: [:route, :auth, :error, :streaming, :ownership, :degraded],
+    upstream_websocket_bridge: [:route, :auth, :error, :streaming, :ownership, :degraded],
+    image_generation_permission: [:route, :auth, :error],
+    responses_access_programs: [:route, :auth, :error, :streaming],
+    responses_allowed_tools: [:route, :auth, :error, :streaming, :ownership],
+    responses_executable_custom_tools: [:route, :auth, :error, :streaming, :ownership],
+    backend_agent_v2_handoffs: [:route, :streaming, :ownership],
+    multi_agent_product_certification: [:route, :streaming, :ownership],
+    function_tool_schema_lowering: [:route, :auth, :error, :streaming, :ownership],
+    direct_responses_strict_schema_repair: [:route, :auth, :error, :streaming, :ownership],
+    v1_supported_surface: [:route, :auth, :error, :multipart, :streaming, :ownership],
+    v1_unsupported_public_surface: [:route, :auth, :error]
+  ]
+  @expected_features Keyword.keys(@expected_feature_categories)
+
+  @expected_route_features %{
+    {:delete, "/v1/files/:file_id"} => ~w(v1_supported_surface)a,
+    {:delete, "/v1/responses/:response_id"} => ~w(v1_unsupported_public_surface)a,
+    {:get, "/api/codex/usage"} => ~w(firewall usage_alias_meter_identity)a,
+    {:get, "/backend-api/codex/models"} => ~w(api_key_reasoning_availability backend_models_etag database_unavailable firewall pool_model_serving_modes)a,
+    {:get, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable duplicate_turn_fence exhausted_pool_usage_limit firewall function_tool_schema_lowering multi_agent_product_certification pool_model_serving_modes pooler_authored_error_type rejection_metadata request_compression terminal_failure_diagnostics upstream_error_param websocket_continuity)a,
+    {:get, "/backend-api/codex/v1/models"} => ~w(backend_models_etag backend_v1_alias_surface pool_model_serving_modes)a,
+    {:get, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface duplicate_turn_fence function_tool_schema_lowering multi_agent_product_certification pool_model_serving_modes request_compression)a,
+    {:get, "/backend-api/wham/usage"} => ~w(firewall usage_alias_meter_identity)a,
+    {:get, "/v1/files"} => ~w(v1_supported_surface)a,
+    {:get, "/v1/files/:file_id"} => ~w(v1_supported_surface)a,
+    {:get, "/v1/files/:file_id/content"} => ~w(v1_supported_surface)a,
+    {:get, "/v1/models"} => ~w(firewall v1_supported_surface)a,
+    {:get, "/v1/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_responses_envelope direct_responses_strict_schema_repair exhausted_pool_usage_limit firewall function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type public_strict_schema_object_roots request_compression responses_access_programs responses_allowed_tools responses_executable_custom_tools v1_supported_surface)a,
+    {:get, "/v1/responses/:response_id"} => ~w(v1_unsupported_public_surface)a,
+    {:get, "/v1/usage"} => ~w(v1_supported_surface)a,
+    {:get, "/wham/usage"} => ~w(firewall usage_alias_meter_identity)a,
+    {:post, "/backend-api/codex/images/edits"} => ~w(api_key_terminal_policy_denials backend_image_proxy_surface image_generation_permission)a,
+    {:post, "/backend-api/codex/images/generations"} => ~w(api_key_terminal_policy_denials backend_image_proxy_surface image_generation_permission)a,
+    {:post, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable decompression degraded_routing duplicate_turn_fence exhausted_pool_usage_limit firewall first_event_stream_retry function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type reasoning_minimal reasoning_none reasoning_ultra rejection_metadata request_compression response_body_cap responses_chat strict_schema_validation terminal_failure_diagnostics unsupported_input_image_reference unsupported_upstream_fields upstream_error_param upstream_validation_rejection_relay)a,
+    {:post, "/backend-api/codex/responses/compact"} => ~w(api_key_reasoning_availability bulkheads duplicate_turn_fence pool_model_serving_modes pooler_authored_error_type reasoning_ultra request_compression)a,
+    {:post, "/backend-api/codex/v1/chat/completions"} => ~w(api_key_reasoning_availability backend_responses_envelope backend_v1_alias_surface pool_model_serving_modes public_strict_schema_object_roots request_compression upstream_validation_rejection_relay)a,
+    {:post, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface function_tool_schema_lowering pool_model_serving_modes request_compression response_body_cap upstream_validation_rejection_relay)a,
+    {:post, "/backend-api/codex/v1/responses/compact"} => ~w(api_key_reasoning_availability backend_v1_alias_surface pool_model_serving_modes request_compression)a,
+    {:post, "/backend-api/files"} => ~w(files firewall pooler_authored_error_type)a,
+    {:post, "/backend-api/files/:file_id/uploaded"} => ~w(files firewall)a,
+    {:post, "/backend-api/transcribe"} => ~w(backend_transcription firewall response_body_cap)a,
+    {:post, "/mcp"} => ~w(firewall)a,
+    {:post, "/v1/audio/transcriptions"} => ~w(v1_supported_surface)a,
+    {:post, "/v1/batches"} => ~w(v1_unsupported_public_surface)a,
+    {:post, "/v1/chat/completions"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_responses_envelope exhausted_pool_usage_limit pool_model_serving_modes public_strict_schema_object_roots request_compression response_body_cap responses_chat responses_executable_custom_tools unsupported_input_image_reference upstream_validation_rejection_relay v1_supported_surface)a,
+    {:post, "/v1/content_provenance_checks"} => ~w(v1_unsupported_public_surface)a,
+    {:post, "/v1/embeddings"} => ~w(v1_unsupported_public_surface)a,
+    {:post, "/v1/files"} => ~w(v1_supported_surface)a,
+    {:post, "/v1/fine_tuning/jobs"} => ~w(v1_unsupported_public_surface)a,
+    {:post, "/v1/images/edits"} => ~w(image_generation_permission v1_supported_surface)a,
+    {:post, "/v1/images/generations"} => ~w(image_generation_permission v1_supported_surface)a,
+    {:post, "/v1/images/variations"} => ~w(v1_unsupported_public_surface)a,
+    {:post, "/v1/moderations"} => ~w(v1_unsupported_public_surface)a,
+    {:post, "/v1/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_responses_envelope database_unavailable direct_responses_strict_schema_repair exhausted_pool_usage_limit firewall function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type public_strict_schema_object_roots reasoning_context request_compression response_body_cap responses_access_programs responses_allowed_tools responses_chat responses_executable_custom_tools unsupported_input_image_reference upstream_validation_rejection_relay upstream_websocket_bridge v1_supported_surface)a,
+    {:post, "/v1/responses/:response_id/cancel"} => ~w(v1_unsupported_public_surface)a,
+    {:post, "/v1/responses/compact"} => ~w(v1_supported_surface)a
+  }
 
   @url_citation_fixture_id "vercel-ai.responses.url_citation_replay.v1"
   @stream_id_fixture_id "openai.responses.websocket_stream_id.v1"
@@ -311,6 +356,29 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
         |> Enum.sort()
 
       assert covered_categories == Enum.sort(CompatibilityMatrix.required_categories())
+
+      for {slug, categories} <- @expected_feature_categories do
+        feature = CompatibilityMatrix.by_slug!(slug)
+        assert Enum.sort(feature.categories) == Enum.sort(categories), "regression categories changed for #{slug}"
+      end
+    end
+
+    test "every matrix route resolves to an actual Phoenix route" do
+      routes = CodexPoolerWeb.Router |> Phoenix.Router.routes() |> MapSet.new(&{router_method(&1.verb), &1.path})
+
+      for feature <- CompatibilityMatrix.features(), route <- feature.routes do
+        assert MapSet.member?(routes, {route.method, route.path}), "missing route for #{feature.slug}: #{route.method} #{route.path}"
+      end
+    end
+
+    test "each route retains the compatibility features that own its regression coverage" do
+      actual =
+        for feature <- CompatibilityMatrix.features(), route <- feature.routes, reduce: %{} do
+          acc -> Map.update(acc, {route.method, route.path}, [feature.slug], &[feature.slug | &1])
+        end
+
+      actual = Map.new(actual, fn {route, slugs} -> {route, Enum.sort(Enum.uniq(slugs))} end)
+      assert actual == @expected_route_features
     end
 
     test "has no pending compatibility gaps" do
