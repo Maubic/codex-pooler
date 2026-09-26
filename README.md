@@ -1069,22 +1069,15 @@ Use a URL reachable from the Windmill server; private addresses require
 
 ![Codex Pooler OpenHands integration](.github/assets/codex-pooler-openhands.png)
 
-Run these commands on macOS or Linux, or inside WSL on Windows:
+In OpenHands Agent Canvas, select the native **OpenHands** agent. Under **Settings → LLM → Add LLM Profile → Advanced**, set:
 
-```bash
-export LLM_API_KEY="$CODEX_POOLER_API_KEY"
-export LLM_BASE_URL=http://localhost:4000/v1
-export LLM_MODEL=openai/gpt-6-sol
+- **Custom Model:** `openai/gpt-6-luna` (or another exact model ID served by your Pool)
+- **Base URL:** `https://codex-pooler.example.com/v1`, reachable from the Canvas backend
+- **API Key:** your Pool API key
 
-openhands --override-with-envs
-```
+Link this LLM profile under **Settings → Agent** and use Full serving mode for the verified tool workflow. For a local Pooler with Canvas on Docker Desktop, use `http://host.docker.internal:4000/v1`.
 
-These settings apply to this run. The full guide explains how to save them.
-
-To switch models, set `LLM_MODEL` to a model available to your Pool, keeping the
-`openai/` prefix.
-
-**[Full setup & extras](https://docs.codex-pooler.com/clients/openhands/)** — installation, persistent settings and model options.
+**[Full setup & extras](https://docs.codex-pooler.com/clients/openhands/)** — Docker setup, screenshots and model profiles.
 
 </details>
 

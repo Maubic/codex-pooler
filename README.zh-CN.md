@@ -1053,21 +1053,15 @@ metadata_model:
 
 ![Codex Pooler OpenHands integration](.github/assets/codex-pooler-openhands.png)
 
-在 macOS、Linux 或 Windows 的 WSL 终端中运行以下命令：
+在 OpenHands Agent Canvas 中选择原生 **OpenHands** 智能体。打开 **Settings → LLM → Add LLM Profile → Advanced**，填写：
 
-```bash
-export LLM_API_KEY="$CODEX_POOLER_API_KEY"
-export LLM_BASE_URL=http://localhost:4000/v1
-export LLM_MODEL=openai/gpt-6-sol
+- **Custom Model：** `openai/gpt-6-luna`（或 Pool 提供的其他准确模型 ID）
+- **Base URL：** `https://codex-pooler.example.com/v1`，必须能从 Canvas 后端访问
+- **API Key：** 你的 Pool API key
 
-openhands --override-with-envs
-```
+在 **Settings → Agent** 中关联此 LLM 配置，并使用 Full 服务模式运行已验证的工具流程。如果 Pooler 在本机运行，而 Canvas 使用 Docker Desktop，请填写 `http://host.docker.internal:4000/v1`。
 
-这些设置仅用于本次运行。完整指南说明如何保存设置。
-
-更换模型时，将 `LLM_MODEL` 设置为你的 Pool 提供的模型，并保留 `openai/` 前缀。
-
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/openhands/)** — 安装、持久设置和模型选项。
+**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/openhands/)** — Docker 配置、截图和模型配置。
 
 </details>
 
