@@ -46,6 +46,9 @@ defmodule CodexPooler.Access.APIKeys.Deletion do
   # foreign key indexes serve. History is detached, as the foreign key's SET NULL would do; the
   # rows the key owns are deleted, as its CASCADE would do.
   @history_steps [
+    # Replay entitlements pin immutable request snapshots and reference session turns.
+    # Remove them before either detaching requests or cascading session deletion.
+    {:delete, "request_replay_entitlements", 2_000},
     {:detach, "requests", 2_000},
     {:detach, "ledger_entries", 1_000},
     {:delete, "codex_sessions", 500},

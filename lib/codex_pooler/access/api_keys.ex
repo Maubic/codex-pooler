@@ -231,7 +231,9 @@ defmodule CodexPooler.Access.APIKeys do
   # would otherwise believe it changed a limit while nothing happened, so they
   # are refused before any lock or write (findings#206 row 206-505).
   defp refuse_binding_fields(attrs) do
-    if Enum.any?(@binding_fields, &Map.has_key?(attrs, &1)) do
+    nested_policy = Map.get(attrs, :policy) || Map.get(attrs, "policy")
+
+    if Enum.any?(@binding_fields, &(Map.has_key?(attrs, &1) or (is_map(nested_policy) and Map.has_key?(nested_policy, &1)))) do
       {:error, Errors.access_error(:unsupported_field, "default_policy and model_policies change bindings; use update_api_key_with_policy")}
     else
       :ok
@@ -300,6 +302,7 @@ defmodule CodexPooler.Access.APIKeys do
              RuntimeAuthorization.advance_epoch_for_pool_move(transition, target_pool_id),
            {:ok, policy_attrs} <- key_row_policy_attrs(scope, target_pool_id, previous_api_key, attrs),
            update_attrs = attrs |> api_key_update_attrs(target_pool_id) |> Map.merge(policy_attrs),
+           {:ok, update_attrs} <- RuntimeAuthorization.prepare_status_update_attrs(previous_api_key, update_attrs),
            {:ok, updated_api_key} <-
              update_api_key_record(previous_api_key, update_attrs, transition) do
         {:ok,
@@ -424,15 +427,7 @@ defmodule CodexPooler.Access.APIKeys do
       {key_prefix, raw_key, key_hash} = Material.generate()
 
       mutation = fn ->
-        locked = Repo.one!(from key in APIKey, where: key.id == ^api_key.id, lock: "FOR UPDATE")
-
-        locked
-        |> APIKey.changeset(%{key_prefix: key_prefix, key_hash: key_hash})
-        |> Ecto.Changeset.put_change(
-          :runtime_revocation_epoch,
-          locked.runtime_revocation_epoch + 1
-        )
-        |> Repo.update()
+        rotate_api_key_record(scope, api_key.id, %{key_prefix: key_prefix, key_hash: key_hash})
       end
 
       api_key
@@ -488,6 +483,18 @@ defmodule CodexPooler.Access.APIKeys do
 
   def revoke_api_key(_scope, _api_key),
     do: {:error, Errors.access_error(:invalid_request, "user scope is required")}
+
+  defp rotate_api_key_record(scope, api_key_id, attrs) do
+    locked = Repo.one!(from key in APIKey, where: key.id == ^api_key_id, lock: "FOR UPDATE")
+
+    with :ok <- ensure_api_key_rotatable(locked),
+         {:ok, _decision} <- authorize_status_change(scope, locked) do
+      locked
+      |> APIKey.changeset(attrs)
+      |> Ecto.Changeset.put_change(:runtime_revocation_epoch, locked.runtime_revocation_epoch + 1)
+      |> Repo.update()
+    end
+  end
 
   @doc """
   Deletes an API key. A key with a small history is deleted at once (`{:ok, api_key}`); a larger

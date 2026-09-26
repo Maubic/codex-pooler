@@ -4,6 +4,7 @@ defmodule CodexPooler.Access.APIKeys.RuntimeAuthorization do
   import Ecto.Query
 
   alias CodexPooler.Access.APIKey
+  alias CodexPooler.Access.APIKeys.Errors
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
 
@@ -163,6 +164,23 @@ defmodule CodexPooler.Access.APIKeys.RuntimeAuthorization do
 
       nil ->
         missing_disposition()
+    end
+  end
+
+  @doc false
+  @spec prepare_status_update_attrs(APIKey.t(), map()) :: {:ok, map()} | {:error, Errors.access_error()}
+  def prepare_status_update_attrs(%APIKey{} = api_key, attrs) do
+    target_status = Map.get(attrs, :status, api_key.status)
+
+    cond do
+      api_key.status == @revoked_status and target_status != @revoked_status ->
+        {:error, Errors.access_error(:api_key_revoked, "revoked api keys cannot be changed")}
+
+      target_status == @revoked_status and is_nil(api_key.revoked_at) ->
+        {:ok, Map.put(attrs, :revoked_at, DateTime.utc_now() |> DateTime.truncate(:microsecond))}
+
+      true ->
+        {:ok, attrs}
     end
   end
 

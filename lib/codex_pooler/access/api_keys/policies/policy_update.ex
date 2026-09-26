@@ -89,6 +89,7 @@ defmodule CodexPooler.Access.APIKeys.PolicyUpdate do
              attrs
              |> api_key_update_attrs(target_pool_id)
              |> Map.merge(policy_attrs),
+           {:ok, update_attrs} <- RuntimeAuthorization.prepare_status_update_attrs(previous_api_key, update_attrs),
            {:ok, updated} <-
              persist_policy_update(previous_api_key, update_attrs, policy_inputs, transition) do
         {:ok,

@@ -83,9 +83,8 @@ defmodule CodexPooler.Access.APIKeys.Policy do
       maximum_reasoning_effort: api_key.maximum_reasoning_effort
     })
     |> put_unless_submitted(@service_tier_keys, %{enforced_service_tier: api_key.enforced_service_tier})
-    # `normalize_inputs/1` reads the bindings from the top level only.
-    |> put_unless_submitted(@default_policy_keys, %{default_policy: stored_default_policy(bindings)}, :top_level)
-    |> put_unless_submitted(@model_policies_keys, %{model_policies: stored_model_policies(bindings)}, :top_level)
+    |> put_unless_submitted(@default_policy_keys, %{default_policy: stored_default_policy(bindings)})
+    |> put_unless_submitted(@model_policies_keys, %{model_policies: stored_model_policies(bindings)})
   end
 
   @doc """
@@ -173,8 +172,8 @@ defmodule CodexPooler.Access.APIKeys.Policy do
 
   @spec normalize_inputs(map()) :: {:ok, [map()]} | {:error, access_error()}
   def normalize_inputs(attrs) do
-    default_policy = Map.get(attrs, :default_policy) || Map.get(attrs, "default_policy") || %{}
-    model_policies = Map.get(attrs, :model_policies) || Map.get(attrs, "model_policies") || []
+    default_policy = input(attrs, @default_policy_keys) || %{}
+    model_policies = input(attrs, @model_policies_keys) || []
 
     with {:ok, default_policy} <- normalize_default_policy(default_policy),
          {:ok, model_policies} <- normalize_model_policies(model_policies) do
