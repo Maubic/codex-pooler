@@ -4206,6 +4206,27 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     refute log =~ "closed between requests"
   end
 
+  for pong_mode <- [:ignore_ping, :match_active_ping] do
+    test "in-flight keepalive cannot extend a silent response timeout with #{pong_mode}" do
+      with_short_keepalive(keepalive_interval_ms: 25, keepalive_pong_timeout_ms: @held_pong_timeout_ms)
+
+      peer = start_raw_websocket_peer(response_mode: :hold, pong_mode: unquote(pong_mode))
+      session = start_supervised!(UpstreamWebsocketSession)
+      task_supervisor = start_supervised!({Task.Supervisor, []})
+      request = %{raw_websocket_request(peer.url, self()) | timeouts: %{connect_timeout_ms: 1_000, receive_timeout_ms: 300}}
+      request_task = Task.Supervisor.async_nolink(task_supervisor, fn -> UpstreamWebsocketSession.request(session, request) end)
+
+      assert_receive {:raw_upstream_websocket_request, 1, 1}, @message_detection_timeout_ms
+      assert_receive {:raw_upstream_websocket_control, :ping, 1, 1, _payload_bytes}, @message_detection_timeout_ms
+
+      result = Task.yield(request_task, @detection_timeout_ms) || Task.shutdown(request_task, :brutal_kill)
+
+      assert {:ok, {:error, %{reason: :upstream_websocket_receive_timeout, transport_failure: %{"termination_source" => "pooler_receive_timeout"}}}} = result
+      assert :closed = wait_for_raw_websocket_connection_closed(1, @detection_timeout_ms)
+      refute Map.has_key?(:sys.get_state(session), :conn)
+    end
+  end
+
   @tag :upstream_websocket_pong_liveness
   test "active receive loop fails promptly when pong deadline fires during an in-flight request" do
     with_held_keepalive(keepalive_pong_timeout_ms: @held_pong_timeout_ms)

@@ -1307,8 +1307,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # interval until the request ends; the reply re-arms the idle keepalive.
   defp await_sent_request(state, receive_state) do
     :erlang.garbage_collect(self())
-    {result, state} = receive_events(schedule_keepalive(state), receive_state)
+    {result, state} = receive_events(schedule_keepalive(state), renew_receive_deadline(receive_state))
     {:ok, result, state}
+  end
+
+  # Only response data renews this idle deadline. Local keepalive ticks and
+  # peer control frames prove connection liveness, not response progress.
+  defp renew_receive_deadline(%ReceiveState{} = receive_state) do
+    %{receive_state | receive_deadline_ms: System.monotonic_time(:millisecond) + receive_state.timeouts.receive_timeout_ms}
   end
 
   defp request_error(reason, state) do
@@ -1538,7 +1544,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       {:upstream_websocket_keepalive, ^keepalive_token} when is_reference(keepalive_token) ->
         send_in_flight_keepalive(state, receive_state)
     after
-      receive_state.timeouts.receive_timeout_ms ->
+      max(receive_state.receive_deadline_ms - System.monotonic_time(:millisecond), 0) ->
         result =
           {:error,
            %{
@@ -1982,6 +1988,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   defp handle_frame({:text, raw_text}, {:continue, state, receive_state}) do
+    receive_state = renew_receive_deadline(receive_state)
     raw_decoded = decode_text_frame(raw_text)
 
     {mapped_text, mapped_decoded} =

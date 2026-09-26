@@ -25,6 +25,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Rece
   defstruct [
     :writer,
     :timeouts,
+    :receive_deadline_ms,
     :message_mapper,
     :frame_observer,
     :native_codex_response_control,
@@ -64,6 +65,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Rece
   @type t :: %__MODULE__{
           writer: CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request.writer(),
           timeouts: map(),
+          receive_deadline_ms: integer() | nil,
           message_mapper: CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.message_mapper(),
           frame_observer: CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request.frame_observer(),
           native_codex_response_control: TurnSnapshot.t() | nil,
