@@ -569,6 +569,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
     end
   end
 
+  def rebind_steered_turn_claim(_prepared, _steered_claim), do: {:error, :binding_mismatch}
+
   @spec reseal_runtime_frame(PreparedWebsocketFrame.t(), RequestOptions.t()) ::
           {:ok, PreparedWebsocketFrame.t()} | {:error, :consumed | :invalid}
   def reseal_runtime_frame(%PreparedWebsocketFrame{} = prepared, %RequestOptions{} = options) do

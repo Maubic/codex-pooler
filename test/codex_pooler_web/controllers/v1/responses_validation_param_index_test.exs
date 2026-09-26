@@ -49,6 +49,39 @@ defmodule CodexPoolerWeb.V1.ResponsesValidationParamIndexTest do
     end
   end
 
+  for mode <- ["full", "lite"], dropped <- ["instruction", "reasoning"] do
+    @tag mode: mode, dropped: dropped
+    test "/v1/responses #{mode} drops an unprovable client index after #{dropped} removal", %{conn: conn, mode: mode, dropped: dropped} do
+      prefix =
+        case dropped do
+          "instruction" -> %{"type" => "message", "role" => "developer", "content" => "synthetic instruction"}
+          "reasoning" -> %{"type" => "reasoning", "summary" => [], "encrypted_content" => "synthetic-cipher"}
+        end
+
+      provider_index = if mode == "full", do: 1, else: if(dropped == "instruction", do: 3, else: 2)
+      provider_param = "input[#{provider_index}].id"
+      {upstream, setup} = rejecting_setup(provider_param, mode)
+      response = conn |> auth(setup) |> post("/v1/responses", %{"model" => setup.model.exposed_model_id, "input" => [prefix | client_input()], "stream" => true})
+      assert json_response(response, 400)["error"]["param"] == "input[].id"
+      assert_provider_names_the_item!(upstream, provider_index, ".id")
+      assert attempt_rejection_param!(setup) == provider_param
+    end
+  end
+
+  test "adapter removals cannot be hidden by tool-call expansion to the same length", %{conn: conn} do
+    {upstream, setup} = rejecting_setup("input[3].id", "full")
+
+    input = [
+      %{"role" => "developer", "content" => "synthetic instruction"},
+      %{"role" => "assistant", "tool_calls" => Enum.map(["one", "two"], fn name -> %{"id" => "call_#{name}", "type" => "function", "function" => %{"name" => name, "arguments" => "{}"}} end)}
+      | client_input()
+    ]
+
+    response = conn |> auth(setup) |> post("/v1/responses", %{"model" => setup.model.exposed_model_id, "input" => input, "stream" => true})
+    assert json_response(response, 400)["error"]["param"] == "input[].id"
+    assert_provider_names_the_item!(upstream, 3, ".id")
+  end
+
   test "native /backend-api/codex/responses Lite: the streaming answer names the client's position", %{conn: conn} do
     {upstream, setup} = rejecting_setup("input[2].id", "lite")
 

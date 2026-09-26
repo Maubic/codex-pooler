@@ -318,6 +318,8 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
   # count is a shift. Anything else, including a Lite list that also lost an
   # item, is `:unknown`, and the relayed param then drops the index rather
   # than name another item.
+  defp upstream_input_index_map(_payload, _upstream_payload, _endpoint, %RequestOptions{runtime: %{upstream_input_index_map: :unknown}}), do: :unknown
+
   defp upstream_input_index_map(%{"input" => client} = payload, %{"input" => upstream} = upstream_payload, endpoint, %RequestOptions{} = request_options)
        when is_list(client) and is_list(upstream) do
     cond do

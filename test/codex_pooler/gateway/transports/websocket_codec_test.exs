@@ -21,6 +21,15 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodecTest do
                                                  )
   @external_resource @remote_compaction_v2_incremental_fixture_path
 
+  test "invalid steered claim arguments return a binding mismatch" do
+    options = RequestOptions.build(%{transport: "websocket"}, "/backend-api/codex/responses", %{})
+    frame = %PreparedWebsocketFrame{variant: :native_response_create, endpoint: "/backend-api/codex/responses", payload: %{}, request_options: options}
+
+    for {prepared, claim} <- [{frame, nil}, {nil, "sample-claim"}] do
+      assert {:error, :binding_mismatch} = WebsocketCodec.rebind_steered_turn_claim(prepared, claim)
+    end
+  end
+
   test "prepared seal rejects changing the full-history delivery discriminator" do
     payload = %{
       "type" => "response.create",

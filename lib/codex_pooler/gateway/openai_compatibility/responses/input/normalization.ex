@@ -253,6 +253,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
        when type in ["function_call_output", "custom_tool_call_output"] and is_list(output),
        do: invalid_image_detail_in(output, "input[#{index}].output")
 
+  defp invalid_input_image_detail(%{"type" => type, "output" => %{"content" => content}}, index)
+       when type in ["function_call_output", "custom_tool_call_output"] and is_list(content),
+       do: invalid_image_detail_in(content, "input[#{index}].output.content")
+
   # A Chat-style `image_url` part is translated only in a `role: "tool"`
   # item, where it becomes a tool-output `input_image` carrying
   # `image_url.detail`, so only there is that detail checked, under the field

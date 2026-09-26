@@ -3258,6 +3258,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
          ], "input[1].output[1].detail"},
         {[%{"role" => "tool", "tool_call_id" => "call_bogus", "content" => [bogus_image]}], "input[0].content[0].detail"},
         {[%{"type" => "custom_tool_call_output", "call_id" => "call_bogus", "output" => [bogus_image]}], "input[0].output[0].detail"},
+        {[%{"type" => "function_call_output", "call_id" => "call_bogus", "output" => %{"content" => [bogus_image]}}], "input[0].output.content[0].detail"},
+        {[%{"type" => "custom_tool_call_output", "call_id" => "call_bogus", "output" => %{"content" => [bogus_image]}}], "input[0].output.content[0].detail"},
         {[%{"role" => "system", "content" => "lifted"}, %{"role" => "user", "content" => [%{"type" => "input_text", "text" => "look"}, bogus_image]}], "input[1].content[1].detail"},
         {[%{"type" => "function_call_output", "call_id" => "call_bogus", "output" => [%{bogus_image | "detail" => 3}]}], "input[0].output[0].detail"},
         {[%{"type" => "function_call_output", "call_id" => "call_bogus", "output" => [%{bogus_image | "detail" => "HIGH"}]}], "input[0].output[0].detail"}
@@ -3268,6 +3270,15 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
                  Responses.coerce(%{"model" => "gpt-fixture-text", "input" => input})
 
         assert message == "invalid value for parameter #{param} (invalid_value); supported values: low, high, auto, original"
+      end
+    end
+
+    test "object tool outputs retain valid image detail values" do
+      for type <- ["function_call_output", "custom_tool_call_output"], detail <- [nil, "low", "high", "auto", "original"] do
+        output = %{"content" => [%{"type" => "input_image", "image_url" => "https://example.com/sample.png", "detail" => detail}]}
+        assert {:ok, %{payload: payload}} = Responses.coerce(%{"model" => "sample-model", "input" => [%{"type" => type, "call_id" => "call_sample", "output" => output}]})
+        assert [%{"output" => %{"content" => [image]}}] = payload["input"]
+        assert image["detail"] == detail
       end
     end
 

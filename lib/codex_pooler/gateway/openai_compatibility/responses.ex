@@ -66,6 +66,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
           {:ok, %{endpoint: String.t(), payload: map(), request_options: RequestOptions.t()}}
           | {:error, Error.reason()}
   def coerce(payload, opts \\ %{}) do
+    original_input = if is_map(payload), do: Map.get(payload, "input")
+
     with {:ok, payload} <- validate(payload, opts),
          {:ok, payload} <-
            payload
@@ -80,10 +82,26 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
         |> drop_surface()
         |> RequestOptions.build(@endpoint, payload)
         |> RequestOptions.put_openai_compatibility(custom_tool_namespaces: custom_tool_namespaces(payload))
+        |> preserve_client_input_coordinates(original_input, Map.get(payload, "input"))
 
       {:ok, %{endpoint: @endpoint, payload: payload, request_options: request_options}}
     end
   end
+
+  # Adapter removals can occur at any position (reasoning replay and lifted
+  # instruction messages). The upstream length proof cannot reconstruct those
+  # client coordinates: keep the field path, but do not guess its item index.
+  defp preserve_client_input_coordinates(options, original, normalized)
+       when is_list(original) and is_list(normalized) do
+    if length(original) == length(normalized) and not Enum.any?(original, &expands_input_positions?/1),
+      do: options,
+      else: RequestOptions.put_runtime_context(options, upstream_input_index_map: :unknown)
+  end
+
+  defp preserve_client_input_coordinates(options, _original, _normalized), do: options
+
+  defp expands_input_positions?(%{"role" => "assistant", "tool_calls" => calls}) when is_list(calls), do: length(calls) != 1
+  defp expands_input_positions?(_item), do: false
 
   defp validate_access_programs(%{"access_programs" => programs}) when is_map(programs) do
     cond do

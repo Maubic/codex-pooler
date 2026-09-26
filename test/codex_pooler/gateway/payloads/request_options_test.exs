@@ -19,6 +19,18 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptionsTest do
 
   @assignment_id "00000000-0000-0000-0000-000000000001"
 
+  test "invalid carried native compaction admission returns an error during accounting and cleanup" do
+    alias CodexPooler.Gateway.Payloads.RequestOptions.NativeCompactionAdmission, as: AdmissionContext
+    capability = native_compaction_capability()
+    options = RequestOptions.build(%{}, "/backend-api/codex/responses", %{})
+    admission = %AdmissionContext{capability: capability, owner: {:direct, self()}, expected_connection_lifecycle: %{lifecycle_id: Ecto.UUID.generate(), generation: 1}}
+    options = %{options | native_compaction_admission: admission}
+    assert {:error, :invalid_input} = RequestOptions.native_compaction_admission(options)
+    assert {:error, :invalid_input} = RequestOptions.mark_native_compaction_accounting_started(options, 0)
+    assert {:error, :invalid_input} = RequestOptions.cancel_native_compaction_reservation(options, 0)
+    assert {:error, :invalid_input} = RequestOptions.clear_native_compaction_admission(options)
+  end
+
   test "portable history classification follows the current payload, moves compaction checkpoints and preserves opaque fences" do
     endpoint = "/backend-api/codex/responses"
     base = RequestOptions.build(%{}, endpoint, %{})

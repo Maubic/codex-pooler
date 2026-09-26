@@ -348,9 +348,9 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
   # A refusal recorded without a turn claim was made before the request was
   # claimed, so it never takes a durable claim: the same request resent once
   # the refusal's cause is gone would meet it and get `409 duplicate_turn` for
-  # good. It takes the socket's handshake request id, or a fresh id when an
-  # earlier refusal of the socket holds that one (findings#206 rows 206-361
-  # and 206-429).
+  # good. It takes the socket's handshake request id, or a fresh id when none
+  # is present. Reservation.record_denied_request/3 retries a duplicate id
+  # under a fresh UUID (findings#206 rows 206-361 and 206-429).
   def websocket_denial_correlation_id(
         %__MODULE__{
           request_metadata: %{request_id: request_id},
@@ -619,6 +619,9 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
 
       :none ->
         :ok
+
+      {:error, :invalid_input} = error ->
+        error
     end
   end
 
@@ -631,6 +634,9 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
 
       :none ->
         :ok
+
+      {:error, :invalid_input} = error ->
+        error
     end
   end
 
@@ -653,6 +659,9 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
 
       :none ->
         :ok
+
+      {:error, :invalid_input} = error ->
+        error
     end
   end
 

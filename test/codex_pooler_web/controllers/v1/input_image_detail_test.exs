@@ -122,6 +122,25 @@ defmodule CodexPoolerWeb.V1.InputImageDetailTest do
       assert Repo.aggregate(from(r in Request, where: r.pool_id == ^setup.pool.id), :count) == 0
     end
 
+    @tag serving_mode: mode
+    test "/v1/responses rejects invalid object tool-output detail before reservation on a #{mode} model", %{conn: conn, serving_mode: mode} do
+      upstream = start_upstream(FakeUpstream.json_response(@completed))
+      setup = gateway_setup(upstream, model_metadata: @vision_metadata)
+      _revision = set_model_serving_mode!(model_serving_scope(), setup, mode)
+
+      response =
+        conn
+        |> auth(setup)
+        |> post("/v1/responses", %{
+          "model" => setup.model.exposed_model_id,
+          "input" => [%{"type" => "function_call_output", "call_id" => "call_sample", "output" => %{"content" => [%{"type" => "input_image", "image_url" => "https://example.com/sample.png", "detail" => "unsupported"}]}}]
+        })
+
+      assert %{"error" => %{"code" => "invalid_value", "param" => "input[0].output.content[0].detail"}} = json_response(response, 400)
+      assert FakeUpstream.count(upstream) == 0
+      assert Repo.aggregate(from(r in Request, where: r.pool_id == ^setup.pool.id), :count) == 0
+    end
+
     # Hermes in its default `chat_completions` mode sends a screenshot tool
     # result as a Chat tool message with `image_url` parts; the rebuild carries
     # them into the `function_call_output`, which the Codex backend accepts.
