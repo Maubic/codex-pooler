@@ -148,7 +148,7 @@ defmodule CodexPooler.MCP.AuditLogsToolsTest do
   end
 
   test "audit-log list text handles empty results without echoing caller filters", %{auth: auth} do
-    sentinels = caller_filter_sentinels()
+    sentinels = Map.put(caller_filter_sentinels(), "outcome", "failure")
 
     assert {:ok, result} =
              ToolDispatch.call(

@@ -60,6 +60,10 @@ defmodule CodexPooler.MCP.RequestLogsBoundedCountTest do
 
     near_end = list!(auth, %{"pool_id" => pool.id, "limit" => 5, "offset" => @count_window - 1})
     assert %{"total" => 10_002, "totalExact" => true, "nextOffset" => nil} = near_end
+
+    last_page = list!(auth, %{"pool_id" => pool.id, "limit" => 1, "offset" => @count_window})
+    assert %{"total" => 10_002, "totalExact" => true, "nextOffset" => nil} = last_page
+    assert length(last_page["items"]) == 1
   end
 
   test "every count the list tool issues stops at the window past its offset", %{auth: auth, pool: pool, api_key: api_key} do

@@ -127,23 +127,25 @@ defmodule CodexPooler.MCP.ToolDispatch do
   defp valid_value?(value, %{"enum" => values} = schema) when is_list(values),
     do: value in values and valid_value?(value, Map.delete(schema, "enum"))
 
-  defp valid_value?(value, %{"type" => types}) when is_list(types),
-    do: Enum.any?(types, &valid_type?(value, &1))
+  defp valid_value?(value, %{"type" => types} = schema) when is_list(types),
+    do: Enum.any?(types, &valid_value?(value, Map.put(schema, "type", &1)))
 
   defp valid_value?(value, %{"type" => "string"}), do: is_binary(value)
-  defp valid_value?(value, %{"type" => "integer"}), do: is_integer(value)
+
+  defp valid_value?(value, %{"type" => "integer"} = schema) do
+    is_integer(value) and
+      value >= Map.get(schema, "minimum", value) and
+      value <= Map.get(schema, "maximum", value)
+  end
+
   defp valid_value?(value, %{"type" => "boolean"}), do: is_boolean(value)
   defp valid_value?(value, %{"type" => "object"} = schema), do: valid_output?(value, schema)
-  defp valid_value?(value, %{"type" => "array"}), do: is_list(value)
-  defp valid_value?(_value, _schema), do: true
 
-  defp valid_type?(nil, "null"), do: true
-  defp valid_type?(value, "string"), do: is_binary(value)
-  defp valid_type?(value, "integer"), do: is_integer(value)
-  defp valid_type?(value, "boolean"), do: is_boolean(value)
-  defp valid_type?(value, "object"), do: is_map(value)
-  defp valid_type?(value, "array"), do: is_list(value)
-  defp valid_type?(_value, _type), do: false
+  defp valid_value?(value, %{"type" => "array"} = schema),
+    do: is_list(value) and Enum.all?(value, &valid_value?(&1, Map.get(schema, "items", %{})))
+
+  defp valid_value?(value, %{"type" => "null"}), do: is_nil(value)
+  defp valid_value?(_value, _schema), do: true
 
   defp success_result(structured_content, text) do
     %{
