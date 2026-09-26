@@ -72,7 +72,7 @@ defmodule CodexPooler.Accounting.RequestLogs.ModelHistory do
       query
       |> group_by([a], selected_as(:bucket_index))
       |> counts_query()
-      |> select_merge([a], %{bucket_index: selected_as(fragment("floor(extract(epoch from (? - ?::timestamp)) / ?)::integer", a.started_at, type(^from_time, :utc_datetime_usec), ^seconds), :bucket_index)})
+      |> select_merge([a], %{bucket_index: selected_as(fragment("floor(extract(epoch from ((? AT TIME ZONE 'UTC') - ?::timestamp)) / ?)::integer", a.started_at, type(^from_time, :utc_datetime_usec), ^seconds), :bucket_index)})
       |> Repo.all(timeout: 15_000)
       |> Map.new(&{&1.bucket_index, Map.delete(&1, :bucket_index)})
 

@@ -47,6 +47,7 @@ defmodule CodexPoolerWeb.Admin.AuditLogsComponents.Prose do
     "upstream_account.import" => {:named, "imported the upstream account"},
     "upstream_account.oauth_browser_link" => {:named_suffix, "linked the upstream account", "through the browser OAuth flow"},
     "upstream_account.oauth_device_link" => {:named_suffix, "linked the upstream account", "with a device code"},
+    "upstream_account.rename" => {:named, "renamed the upstream account"},
     "upstream_account.pause" => {:named, "paused the upstream account"},
     "upstream_account.reactivate" => {:named, "reactivated the upstream account"},
     "upstream_account.refresh_enqueue" => {:named, "queued a token refresh for the upstream account"},

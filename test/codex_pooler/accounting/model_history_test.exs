@@ -126,6 +126,13 @@ defmodule CodexPooler.Accounting.ModelHistoryTest do
       assert ModelHistory.for_scope(scope, filters, now: now).timeline |> Enum.all?(&(&1.total == 0))
     end
 
+    for timezone <- ["America/New_York", "Asia/Kathmandu"] do
+      Repo.query!("SELECT set_config('TimeZone', $1, true)", [timezone])
+      shifted = ModelHistory.for_scope(scope, %{"window" => "1h"}, now: now)
+      assert shifted.counts == history.counts
+      assert shifted.timeline == history.timeline
+    end
+
     hidden_scope = Scope.for_user(operator_fixture(scope, %{"role" => "instance_admin"}).user)
     assert ModelHistory.for_scope(hidden_scope, %{}, now: now).timeline |> Enum.all?(&(&1.total == 0))
     week = ModelHistory.for_scope(scope, %{"window" => "7d"}, now: now)

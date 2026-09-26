@@ -58,9 +58,15 @@ defmodule CodexPooler.Accounting.RequestLogs do
     list_for_pool_filter(nil, Keyword.put(opts, :visible_pool_ids, visible_pool_ids))
   end
 
-  @spec get_for_scope(CodexPooler.Accounts.Scope.t(), Ecto.UUID.t(), keyword()) :: map() | nil
-  def get_for_scope(%CodexPooler.Accounts.Scope{} = scope, request_id, opts \\ [])
-      when is_binary(request_id) do
+  @spec get_for_scope(CodexPooler.Accounts.Scope.t(), term(), keyword()) :: map() | nil
+  def get_for_scope(%CodexPooler.Accounts.Scope{} = scope, request_id, opts \\ []) do
+    case Ecto.UUID.cast(request_id) do
+      {:ok, request_id} -> get_valid_request_for_scope(scope, request_id, opts)
+      :error -> nil
+    end
+  end
+
+  defp get_valid_request_for_scope(scope, request_id, opts) do
     visible_pool_ids = scope |> Pools.list_log_filter_pools() |> Enum.map(& &1.id)
 
     item =
@@ -108,12 +114,23 @@ defmodule CodexPooler.Accounting.RequestLogs do
 
   @spec list_models(term(), keyword()) :: [String.t()]
   def list_models(pool_or_id, opts \\ []) do
-    case request_model_pool_ids(id_for(pool_or_id), Keyword.get(opts, :visible_pool_ids)) do
+    pool_ids =
+      pool_or_id
+      |> model_pool_id()
+      |> request_model_pool_ids(Keyword.get(opts, :visible_pool_ids))
+      |> Enum.flat_map(fn pool_id ->
+        case Ecto.UUID.dump(pool_id) do
+          {:ok, uuid} -> [uuid]
+          :error -> []
+        end
+      end)
+
+    case pool_ids do
       [] ->
         []
 
       pool_ids ->
-        %{rows: rows} = Repo.query!(@request_models_sql, [Enum.map(pool_ids, &Ecto.UUID.dump!/1)])
+        %{rows: rows} = Repo.query!(@request_models_sql, [pool_ids])
 
         rows
         |> Enum.map(fn [model] -> model end)
@@ -158,12 +175,15 @@ defmodule CodexPooler.Accounting.RequestLogs do
   # left join (facts, key, assignment, identity) as it does for the exact count.
   defp count_request_log_rows(query, nil), do: {Repo.aggregate(query, :count, :id), true}
 
-  defp count_request_log_rows(query, count_limit) when is_integer(count_limit) and count_limit > 0 do
+  defp count_request_log_rows(query, count_limit) when is_integer(count_limit) do
+    count_limit = max(count_limit, 0)
     bounded = from([request, ...] in query, select: %{id: request.id}, limit: ^(count_limit + 1))
     counted = Repo.one(from(row in subquery(bounded), select: count()))
 
     if counted > count_limit, do: {count_limit, false}, else: {counted, true}
   end
+
+  defp count_request_log_rows(query, _count_limit), do: count_request_log_rows(query, nil)
 
   defp request_log_options(opts) do
     %{
@@ -489,6 +509,9 @@ defmodule CodexPooler.Accounting.RequestLogs do
 
   defp maybe_filter_request_log_visible_pools(query, pool_ids) when is_list(pool_ids),
     do: from([request, ...] in query, where: request.pool_id in ^pool_ids)
+
+  defp model_pool_id(nil), do: nil
+  defp model_pool_id(value), do: id_for(value) || :invalid_pool_id
 
   # The Pools whose history the model list reads: the selected Pool, only when
   # the viewer can see it, else every visible Pool, else every Pool.

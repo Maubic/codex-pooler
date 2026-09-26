@@ -42,6 +42,7 @@ defmodule CodexPooler.Audit do
     {"Upstream account imported", "upstream_account.import"},
     {"Upstream account linked via browser OAuth", "upstream_account.oauth_browser_link"},
     {"Upstream account linked via device code", "upstream_account.oauth_device_link"},
+    {"Upstream account renamed", "upstream_account.rename"},
     {"Upstream account paused", "upstream_account.pause"},
     {"Upstream account reactivated", "upstream_account.reactivate"},
     {"Upstream account token refresh queued", "upstream_account.refresh_enqueue"},
@@ -94,7 +95,7 @@ defmodule CodexPooler.Audit do
           | {:filters, audit_filters()}
           | {:visible_pool_ids, [Ecto.UUID.t()]}
           | {:include_global_events, boolean()}
-          | {:count_limit, pos_integer()}
+          | {:count_limit, non_neg_integer()}
         ]
   @type audit_result ::
           {:ok, AuditEvent.t()}
@@ -306,12 +307,15 @@ defmodule CodexPooler.Audit do
   # events match (`total_exact?: false`), and never pays for more.
   defp count_events(query, nil), do: {Repo.aggregate(query, :count, :id), true}
 
-  defp count_events(query, count_limit) when is_integer(count_limit) and count_limit > 0 do
+  defp count_events(query, count_limit) when is_integer(count_limit) do
+    count_limit = max(count_limit, 0)
     bounded = from([event, ...] in query, select: %{id: event.id}, limit: ^(count_limit + 1))
     counted = Repo.one(from(row in subquery(bounded), select: count()))
 
     if counted > count_limit, do: {count_limit, false}, else: {counted, true}
   end
+
+  defp count_events(query, _count_limit), do: count_events(query, nil)
 
   defp id_for(%{id: id}), do: id
   defp id_for(id) when is_binary(id), do: id
