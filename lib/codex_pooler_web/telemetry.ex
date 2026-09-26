@@ -989,7 +989,6 @@ defmodule CodexPoolerWeb.Telemetry do
     }
   end
 
-  @spec admin_stats_enum_value(term(), [String.t()]) :: String.t()
   @spec duplicate_turn_refused_tag_values(map()) :: duplicate_turn_refused_tags()
   defp duplicate_turn_refused_tag_values(metadata) do
     %{
@@ -998,6 +997,7 @@ defmodule CodexPoolerWeb.Telemetry do
     }
   end
 
+  @spec admin_stats_enum_value(term(), [String.t()]) :: String.t()
   defp admin_stats_enum_value(value, allowed_values) when is_atom(value) do
     value
     |> Atom.to_string()

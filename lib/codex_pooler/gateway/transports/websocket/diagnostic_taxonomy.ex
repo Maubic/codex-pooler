@@ -35,6 +35,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy do
                                task_exception
                                lifecycle_cut
                                partial_reasoning_cut
+                               partial_http_tool_cut
                                quota_rejection
                                advanced_http_resume
                                previsible_disconnect

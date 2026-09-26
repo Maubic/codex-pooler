@@ -173,6 +173,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionLifecycleObse
       :binding_mismatch,
       :expired,
       :invalid_input,
+      :invalid,
+      :replayed,
       :owner_unavailable,
       :request_rejected,
       :connection_invalidated,
