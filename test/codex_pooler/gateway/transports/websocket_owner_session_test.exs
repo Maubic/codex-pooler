@@ -1742,12 +1742,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
   test "local gateway owners capture node settings only when each owner starts" do
     previous_operational_settings = Application.get_env(:codex_pooler, OperationalSettings)
 
-    previous_forwarding =
-      Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
 
     on_exit(fn ->
       restore_operational_settings(previous_operational_settings)
-      restore_owner_forwarding(previous_forwarding)
     end)
 
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
@@ -1794,10 +1792,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
   # accepted by `start_owner/1`, but the local gateway start path forwarded
   # only the upstream boundary, so the started owner silently kept defaults.
   test "local gateway owners start with the handoff timeouts from the forwarder options" do
-    previous_forwarding =
-      Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-
-    on_exit(fn -> restore_owner_forwarding(previous_forwarding) end)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
 
     auth = auth_context()
@@ -6542,17 +6537,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
   defp restore_operational_settings(previous_settings),
     do: Application.put_env(:codex_pooler, OperationalSettings, previous_settings)
-
-  defp restore_owner_forwarding(nil),
-    do: Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-
-  defp restore_owner_forwarding(previous_forwarding),
-    do:
-      Application.put_env(
-        :codex_pooler,
-        :websocket_owner_forwarding_enabled,
-        previous_forwarding
-      )
 
   defp db_owner_context do
     %{user: owner} = bootstrap_owner_fixture()

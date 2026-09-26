@@ -42,17 +42,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
   @signal_driven_handoff_absolute_timeout_ms 60_000
 
   setup do
-    previous = Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
 
     on_exit(fn ->
       TurnBudgetNodeClient.reset()
       ReplayRemoteNodeClient.reset()
-
-      case previous do
-        nil -> Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-        value -> Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, value)
-      end
     end)
   end
 
@@ -2387,30 +2382,37 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
       native_turn_payload(thread_id, model, "incremental-turn-b", 300, history_a ++ [synthetic_assistant_item(), resend_tail])
 
     port = start_public_endpoint!()
-    {conn, websocket, ref} = public_websocket_connect!(port, setup, turn_state)
-    {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(turn_a))
-    {conn, websocket, completed_a} = receive_until_terminal!(conn, websocket, ref)
-    assert completed_a["type"] == "response.completed"
+    {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
+    {:ok, state} = CodexResponsesSocket.init(%{auth: auth, opts: %{request_id: turn_state, accepted_turn_state: turn_state, client_ip: "127.0.0.1"}})
+    Process.put(:incremental_replay_socket_state, state)
 
-    # `:after_settlement`: the next turn starts once the client has its answer
-    # and the socket has retired turn A's task, as between two user prompts.
-    # `:immediate`: it goes out as soon as turn A's terminal arrives, as a tool
-    # continuation does.
-    if turn_gap == :after_settlement do
-      assert [%Request{id: request_a_id}] = request_logs(setup.pool.id)
-      assert_request_settled!(request_a_id, System.monotonic_time(:millisecond) + @handoff_detection_timeout_ms)
-      await_socket_idle!()
-    end
+    {request_id, upstream_pid} =
+      try do
+        assert {:ok, state} = CodexResponsesSocket.handle_in({CodexPooler.JSON.encode!(turn_a), [opcode: :text]}, state)
+        Process.put(:incremental_replay_socket_state, state)
+        assert {:push, {:text, completed_a}, state} = receive_owner_socket_push(state)
+        assert CodexPooler.JSON.decode!(completed_a)["type"] == "response.completed"
 
-    {conn, _websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(turn_b))
+        # Drive the actual socket callbacks. Keeping completion messages pending
+        # makes the immediate arm deterministically queue; draining them makes
+        # the after-settlement arm dispatch with no tracked task.
+        state = if turn_gap == :after_settlement, do: drain_incremental_socket_tasks!(state), else: state
+        Process.put(:incremental_replay_socket_state, state)
+        assert MapSet.size(state.tasks) == if(turn_gap == :after_settlement, do: 0, else: 1)
+        assert :queue.is_empty(state.queued_response_payloads)
 
-    assert_receive {:fake_upstream_websocket_barrier, :before_close, upstream_pid, ^release_ref},
-                   @handoff_detection_timeout_ms
-
-    assert [%Request{status: "succeeded"}, %Request{id: request_id, status: "in_progress"}] = request_logs(setup.pool.id)
+        assert {:ok, state} = CodexResponsesSocket.handle_in({CodexPooler.JSON.encode!(turn_b), [opcode: :text]}, state)
+        Process.put(:incremental_replay_socket_state, state)
+        assert :queue.len(state.queued_response_payloads) == if(turn_gap == :immediate, do: 1, else: 0)
+        {state, upstream_pid} = pump_incremental_socket_until_barrier!(state, release_ref)
+        Process.put(:incremental_replay_socket_state, state)
+        assert [%Request{status: "succeeded"}, %Request{id: request_id, status: "in_progress"}] = request_logs(setup.pool.id)
+        {request_id, upstream_pid}
+      after
+        if state = Process.delete(:incremental_replay_socket_state), do: CodexResponsesSocket.terminate(:closed, state)
+      end
 
     retry_deadline_ms = System.monotonic_time(:millisecond) + @released_client_stream_retry_ms
-    _result = Mint.HTTP.close(conn)
     armed = await_replay_armed(request_id, retry_deadline_ms)
     send(upstream_pid, {:fake_upstream_release_websocket, release_ref})
 
@@ -2425,7 +2427,47 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
     %{setup: setup, upstream: upstream, request_id: request_id, retry_result: retry_result, armed: armed}
   end
 
-  defp await_socket_idle!, do: Process.sleep(100)
+  @incremental_socket_messages [
+    :codex_response_chunk,
+    :websocket_owner_frame,
+    :websocket_owner_output_commit_probe,
+    :websocket_owner_cleanup_witness,
+    :websocket_response_activity,
+    :codex_response_done,
+    :websocket_response_delivery_complete,
+    :direct_request_cleanup
+  ]
+
+  defp drain_incremental_socket_tasks!(state) do
+    if MapSet.size(state.tasks) == 0 do
+      state
+    else
+      receive do
+        message when is_tuple(message) and elem(message, 0) in @incremental_socket_messages ->
+          message |> handle_incremental_socket_message!(state) |> drain_incremental_socket_tasks!()
+      after
+        @handoff_detection_timeout_ms -> flunk("the first turn's socket task never retired")
+      end
+    end
+  end
+
+  defp pump_incremental_socket_until_barrier!(state, release_ref) do
+    receive do
+      {:fake_upstream_websocket_barrier, :before_close, upstream_pid, ^release_ref} ->
+        {state, upstream_pid}
+
+      message when is_tuple(message) and elem(message, 0) in @incremental_socket_messages ->
+        pump_incremental_socket_until_barrier!(handle_incremental_socket_message!(message, state), release_ref)
+    after
+      @handoff_detection_timeout_ms -> flunk("the incremental turn never reached the upstream barrier")
+    end
+  end
+
+  defp handle_incremental_socket_message!(message, state) do
+    assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+    Process.put(:incremental_replay_socket_state, state)
+    state
+  end
 
   defp native_turn_payload(thread_id, model, turn_id, start_ms, input) do
     %{

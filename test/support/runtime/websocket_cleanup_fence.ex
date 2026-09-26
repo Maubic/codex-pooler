@@ -345,44 +345,46 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFence do
     end
   end
 
-  @doc """
-  Counts the sockets of the calling test's registered listeners whose session
-  cleanup has finished (`cleanup_finished` with the socket as `caller`).
+  @doc "Snapshots the identities of the calling test's registered listener sockets."
+  @spec listener_sockets() :: MapSet.t(pid())
+  def listener_sockets, do: Agent.get(installed_fence!(), & &1.sockets)
 
-  A wire socket's cleanup runs in its own process, after the client closed
-  it; read this before the socket that is about to close was opened, and wait
-  for one more with `await_listener_socket_cleanups!/1` (findings#206 row
-  206-425).
-  """
-  @spec listener_socket_cleanups() :: non_neg_integer()
-  def listener_socket_cleanups do
-    state = Agent.get(installed_fence!(), & &1)
-    state.sockets |> MapSet.intersection(state.finished) |> MapSet.size()
+  @doc "Waits for the single socket opened since `before`, failing on ambiguous concurrent opens."
+  @spec await_new_listener_socket!(MapSet.t(pid())) :: pid()
+  def await_new_listener_socket!(before) do
+    await_new_listener_socket(before, System.monotonic_time(:millisecond) + @budget_ms)
   end
 
-  @doc """
-  Waits, within the detection budget, until at least `count` sockets of the
-  calling test's registered listeners have finished their session cleanup,
-  deferred or not, and fails the test otherwise.
-  """
-  @spec await_listener_socket_cleanups!(non_neg_integer()) :: :ok
-  def await_listener_socket_cleanups!(count) when is_integer(count) and count >= 0 do
-    await_listener_socket_cleanups(count, System.monotonic_time(:millisecond) + @budget_ms)
+  defp await_new_listener_socket(before, deadline) do
+    case MapSet.difference(listener_sockets(), before) |> MapSet.to_list() do
+      [socket] -> socket
+      [] -> poll_listener!(fn -> await_new_listener_socket(before, deadline) end, deadline, "listener socket did not start")
+      _many -> flunk("multiple listener sockets started; the cleanup socket is ambiguous")
+    end
   end
 
-  defp await_listener_socket_cleanups(count, deadline) do
-    cond do
-      listener_socket_cleanups() >= count ->
-        :ok
+  @doc "Waits for the exact listener socket's cleanup; another socket cannot satisfy this barrier."
+  @spec await_listener_socket_cleanup!(pid(), non_neg_integer()) :: :ok
+  def await_listener_socket_cleanup!(socket, timeout \\ @budget_ms) when is_pid(socket) and is_integer(timeout) and timeout >= 0 do
+    fence = installed_fence!()
+    unless MapSet.member?(Agent.get(fence, & &1.sockets), socket), do: flunk("socket does not belong to this listener fence")
+    await_listener_socket_cleanup(fence, socket, System.monotonic_time(:millisecond) + timeout)
+  end
 
-      System.monotonic_time(:millisecond) >= deadline ->
-        flunk("#{count - listener_socket_cleanups()} listener socket cleanup(s) did not finish within #{@budget_ms} ms")
+  defp await_listener_socket_cleanup(fence, socket, deadline) do
+    if Agent.get(fence, &MapSet.member?(&1.finished, socket)) do
+      :ok
+    else
+      poll_listener!(fn -> await_listener_socket_cleanup(fence, socket, deadline) end, deadline, "listener socket cleanup did not finish")
+    end
+  end
 
-      true ->
-        receive do
-        after
-          @poll_ms -> await_listener_socket_cleanups(count, deadline)
-        end
+  defp poll_listener!(next, deadline, message) do
+    if System.monotonic_time(:millisecond) >= deadline, do: flunk(message)
+
+    receive do
+    after
+      @poll_ms -> next.()
     end
   end
 

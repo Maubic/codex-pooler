@@ -19,8 +19,7 @@ defmodule CodexPoolerWeb.Runtime.RequestLoggingTest do
 
     previous_level = Logger.level()
 
-    previous_owner_forwarding =
-      Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
 
     Logger.configure(level: :info)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
@@ -28,11 +27,6 @@ defmodule CodexPoolerWeb.Runtime.RequestLoggingTest do
 
     on_exit(fn ->
       Logger.configure(level: previous_level)
-
-      case previous_owner_forwarding do
-        nil -> Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-        value -> Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, value)
-      end
     end)
 
     :ok

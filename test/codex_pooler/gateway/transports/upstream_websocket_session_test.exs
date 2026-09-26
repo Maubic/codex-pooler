@@ -3647,7 +3647,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
       request = raw_websocket_request(peer.url, self())
       initial_lifecycle = lifecycle_state(session)
 
-      {result, log} = with_info_log(fn -> UpstreamWebsocketSession.request(session, request) end)
+      {result, log} =
+        with_info_log(fn ->
+          result = UpstreamWebsocketSession.request(session, request)
+          release_delayed_peer_close!(@response_mode)
+          assert :closed = wait_for_raw_websocket_connection_closed(1, @message_detection_timeout_ms)
+          assert_disconnected_lifecycle(session, %{initial_lifecycle | generation: 1})
+          result
+        end)
+
       assert {:ok, %{terminal: "response.completed", status: 200, headers: headers}} = result
       assert_coalesced_close_log(log, @response_mode, "terminal", initial_lifecycle)
 
@@ -3657,9 +3665,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
 
       established_lifecycle = %{initial_lifecycle | generation: 1}
 
-      # Below the peer loop's own 1 s receive timeout: past that the peer tears
-      # the connection down itself and the witness stops discriminating.
-      assert :closed = wait_for_raw_websocket_connection_closed(1, 500)
       assert_disconnected_lifecycle(session, established_lifecycle)
 
       set_raw_websocket_peer_response_mode(peer, :terminal)
@@ -3696,16 +3701,21 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
       request = raw_websocket_request(peer.url, self())
       initial_lifecycle = lifecycle_state(session)
 
-      {result, log} = with_info_log(fn -> UpstreamWebsocketSession.request(session, request) end)
+      {result, log} =
+        with_info_log(fn ->
+          result = UpstreamWebsocketSession.request(session, request)
+          release_delayed_peer_close!(@response_mode)
+          assert :closed = wait_for_raw_websocket_connection_closed(1, @message_detection_timeout_ms)
+          assert_disconnected_lifecycle(session, %{initial_lifecycle | generation: 1})
+          result
+        end)
+
       assert {:error, %{reason: {:quota_exhausted_first_event, %{code: "usage_limit_reached"}}}} = result
       assert_coalesced_close_log(log, @response_mode, "retryable_first_frame", initial_lifecycle)
       refute log =~ "synthetic quota denial"
 
       refute_received {:upstream_websocket_frame, _frame}
 
-      # Below the peer loop's own 1 s receive timeout: past that the peer tears
-      # the connection down itself and the witness stops discriminating.
-      assert :closed = wait_for_raw_websocket_connection_closed(1, 500)
       assert_disconnected_lifecycle(session, %{initial_lifecycle | generation: 1})
 
       set_raw_websocket_peer_response_mode(peer, :terminal)
@@ -5994,7 +6004,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
 
   # The drain of a Close decoded behind a halting frame leaves exactly one
   # bounded line naming the halt, the close code and the connection it retired;
-  # a Close read on its own goes through the idle path and leaves none
+  # a Close read on its own goes through the idle path and names that cause
   # (icoretech/codex-pooler-findings#225).
   defp assert_coalesced_close_log(log, response_mode, halt, initial_lifecycle) do
     if response_mode in [:terminal_then_coalesced_close, :retryable_first_then_coalesced_close] do
@@ -6009,6 +6019,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
       refute log =~ "closed between requests"
       refute log =~ "synthetic-upstream-token"
     else
+      assert log =~ "upstream websocket connection closed between requests reason_code=peer_close_frame closed_by=peer close_code=1000"
+      assert log =~ "lifecycle_id=#{initial_lifecycle.lifecycle_id} generation=1"
       refute log =~ "coalesced close drained"
     end
   end
@@ -6487,6 +6499,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
         send(owner, {:raw_upstream_websocket_request, connection_id, request_count})
         response = %{"id" => "resp_raw_ws_#{connection_id}_#{request_count}"}
 
+        notify_delayed_peer_close(owner, mode)
+
         send_raw_websocket_peer_terminal_then_control(
           mode,
           socket,
@@ -6505,6 +6519,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
           }
         }
 
+        notify_delayed_peer_close(owner, mode)
         send_raw_websocket_peer_retryable_first_then_control(mode, socket, CodexPooler.JSON.encode!(response))
 
       :unexpected_binary ->
@@ -6570,7 +6585,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     # The control arm: the same two frames, two reads. The session has always
     # answered this one, through its idle path.
     :ok = :gen_tcp.send(socket, raw_websocket_server_text_frame(terminal))
-    Process.sleep(50)
+    await_delayed_peer_close_release!()
     :ok = :gen_tcp.send(socket, raw_websocket_server_close_frame(1000))
   end
 
@@ -6586,8 +6601,28 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
 
   defp send_raw_websocket_peer_retryable_first_then_control(:retryable_first_then_delayed_close, socket, frame) do
     :ok = :gen_tcp.send(socket, raw_websocket_server_text_frame(frame))
-    Process.sleep(50)
+    await_delayed_peer_close_release!()
     :ok = :gen_tcp.send(socket, raw_websocket_server_close_frame(1000))
+  end
+
+  defp notify_delayed_peer_close(owner, mode) when mode in [:terminal_then_delayed_close, :retryable_first_then_delayed_close],
+    do: send(owner, {:raw_upstream_delayed_close, self()})
+
+  defp notify_delayed_peer_close(_owner, _mode), do: :ok
+
+  defp release_delayed_peer_close!(mode) when mode in [:terminal_then_delayed_close, :retryable_first_then_delayed_close] do
+    assert_receive {:raw_upstream_delayed_close, peer}, @message_detection_timeout_ms
+    send(peer, :release_delayed_peer_close)
+  end
+
+  defp release_delayed_peer_close!(_mode), do: :ok
+
+  defp await_delayed_peer_close_release! do
+    receive do
+      :release_delayed_peer_close -> :ok
+    after
+      @raw_peer_release_timeout_ms -> raise "delayed peer Close was never released"
+    end
   end
 
   defp maybe_send_raw_websocket_peer_pong(state, socket, payload, first_ping_payload) do

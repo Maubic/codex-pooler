@@ -22,14 +22,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StreamFlagTest do
   @terminal_types ["response.completed", "response.failed", "response.incomplete", "error"]
 
   setup do
-    previous = Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-
-    on_exit(fn ->
-      case previous do
-        nil -> Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-        value -> Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, value)
-      end
-    end)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
+    :ok
   end
 
   for topology <- [:direct, :local_owner] do

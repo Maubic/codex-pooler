@@ -27,11 +27,26 @@ defmodule CodexPooler.StallingPostgresProxy do
   def start! do
     config = Repo.config()
     target = {String.to_charlist(config[:hostname]), config[:port]}
-    {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
-    {:ok, port} = :inet.port(listen)
     # slot 1: connections accepted so far; slot 2: connections with a sequence at or below it are frozen
     counters = :atomics.new(2, [])
-    acceptor = spawn(fn -> accept_loop(listen, target, counters) end)
+    caller = self()
+    ref = make_ref()
+
+    # The supervised task owns all sockets. Even a failing test that never
+    # reaches stop!/1 closes its listener, upstream connections and linked relays.
+    acceptor =
+      start_supervised!(
+        {Task,
+         fn ->
+           {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+           {:ok, port} = :inet.port(listen)
+           send(caller, {ref, listen, port})
+           accept_loop(listen, target, counters)
+         end},
+        id: {__MODULE__, ref}
+      )
+
+    assert_receive {^ref, listen, port}, 15_000
     %{port: port, listen: listen, acceptor: acceptor, counters: counters}
   end
 
@@ -57,8 +72,11 @@ defmodule CodexPooler.StallingPostgresProxy do
 
   @spec stop!(t()) :: :ok
   def stop!(%{listen: listen, acceptor: acceptor}) do
+    monitor = Process.monitor(acceptor)
     Process.exit(acceptor, :kill)
     :ok = :gen_tcp.close(listen)
+    assert_receive {:DOWN, ^monitor, :process, ^acceptor, _reason}, 15_000
+    :ok
   end
 
   # Every pooled connection must have finished its handshake before the stall,
@@ -87,19 +105,28 @@ defmodule CodexPooler.StallingPostgresProxy do
     end)
   end
 
-  defp accept_loop(listen, {host, port} = target, counters) do
+  defp accept_loop(listen, target, counters) do
     case :gen_tcp.accept(listen) do
       {:ok, client} ->
         sequence = :atomics.add_get(counters, 1, 1)
-        {:ok, upstream} = :gen_tcp.connect(host, port, [:binary, active: false])
-        # Linked to the acceptor, so `stop!/1` ends the relays of frozen
-        # connections too.
-        spawn_link(fn -> relay(client, upstream, sequence, counters) end)
-        spawn_link(fn -> relay(upstream, client, sequence, counters) end)
+
+        start_relays(client, target, sequence, counters)
         accept_loop(listen, target, counters)
 
       {:error, _closed} ->
         :ok
+    end
+  end
+
+  defp start_relays(client, {host, port}, sequence, counters) do
+    case :gen_tcp.connect(host, port, [:binary, active: false]) do
+      {:ok, upstream} ->
+        # Linked to the supervised socket owner, including frozen relays.
+        spawn_link(fn -> relay(client, upstream, sequence, counters) end)
+        spawn_link(fn -> relay(upstream, client, sequence, counters) end)
+
+      {:error, _reason} ->
+        :ok = :gen_tcp.close(client)
     end
   end
 

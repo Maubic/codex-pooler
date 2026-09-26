@@ -91,14 +91,7 @@ defmodule CodexPoolerWeb.ResponsesTerminalCompatibilityTest do
   ]
 
   setup do
-    previous = Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-
-    on_exit(fn ->
-      case previous do
-        nil -> Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-        value -> Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, value)
-      end
-    end)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
 
     :ok
   end

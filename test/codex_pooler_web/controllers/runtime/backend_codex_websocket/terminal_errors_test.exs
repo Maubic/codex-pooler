@@ -195,20 +195,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.TerminalErrorsTest do
   end
 
   test "native websocket remains reusable after a neutral misalignment policy terminal" do
-    previous_owner_forwarding =
-      Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
 
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
-
-    on_exit(fn ->
-      case previous_owner_forwarding do
-        nil ->
-          Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-
-        value ->
-          Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, value)
-      end
-    end)
 
     provider_wording = "Provider policy wording remains transient."
 

@@ -19,16 +19,12 @@ defmodule CodexPoolerWeb.Runtime.AnchoredOwnerDrainSupport do
   def fixture(opts \\ []) do
     cache = InstanceSettings.snapshot_cache_for_test()
     on_exit(fn -> InstanceSettings.restore_cache_for_test(cache) end)
-    previous = Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
     Sandbox.mode(Repo, :auto)
 
     on_exit(fn ->
       Sandbox.mode(Repo, :manual)
-
-      if previous == nil,
-        do: Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled),
-        else: Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, previous)
     end)
 
     release_ref = make_ref()

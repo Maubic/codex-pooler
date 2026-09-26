@@ -320,8 +320,11 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
   # settlement decides that, and on a starved machine it can come later: the
   # first retry is then refused with the take-over logged
   # `inherited_turn_unsettled`, and the next one is served, which is the bound
-  # the product sets and `:observed_cut_settlement_held` pins with the
-  # settlement held (findings#206 row 206-580: once in about 120 runs at a load
+  # the product sets and `:observed_cut_settlement_held` pins as a refusal
+  # followed by a served retry, not as an elapsed-time assertion. First-send
+  # success after take-over is covered by InheritedTurnTakeOverTest; shortening
+  # the wait can fail that contract while preserving this allowed outcome.
+  # The settlement is held (findings#206 row 206-580: once in about 120 runs at a load
   # average of 15-27). Any other refusal, or that one followed by anything but
   # a served retry, stays in the result.
   defp within_settlement_bound([{409, "duplicate_turn", :inherited_turn_unsettled}, :served], ctx) do
@@ -446,7 +449,6 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
   # row 206-580: a peer arm's first retry refused once in about 120 runs
   # under a busy machine, with nothing but `cleanup_deferred` in its log).
   defp full_history_resend!(ctx, port) do
-    cleanups = WebsocketCleanupFence.listener_socket_cleanups()
     client = connect!(port, ctx.setup)
 
     {outcome, log} =
@@ -474,7 +476,7 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
       end
     end
 
-    :ok = WebsocketCleanupFence.await_listener_socket_cleanups!(cleanups + 1)
+    :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(client.cleanup_socket)
     refused_retry(outcome, log)
   end
 
@@ -754,6 +756,7 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
   end
 
   defp connect!(port, setup) do
+    sockets = WebsocketCleanupFence.listener_sockets()
     {:ok, conn} = Mint.HTTP.connect(:http, "127.0.0.1", port, protocols: [:http1])
 
     headers = [
@@ -767,7 +770,7 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
     {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/backend-api/codex/responses", headers)
     {:ok, conn, status, response_headers} = await_public_websocket_upgrade(conn, ref)
     {conn, websocket} = mint_websocket_new!(conn, ref, status, response_headers)
-    %{conn: conn, websocket: websocket, ref: ref}
+    %{conn: conn, websocket: websocket, ref: ref, cleanup_socket: WebsocketCleanupFence.await_new_listener_socket!(sockets)}
   end
 
   defp ordinary_turn!(client, frame), do: client |> send_frame!(frame) |> ordinary_turn!()

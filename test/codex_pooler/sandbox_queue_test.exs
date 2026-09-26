@@ -7,7 +7,8 @@ defmodule CodexPooler.SandboxQueueTest do
   failed "dropped from queue", which is how a response task's settlement, running after its
   terminal frame, broke the test's next read, upgrade or cleanup under load (findings#206 rows
   206-161/206-163, findings#232 row 232-222). `config/test.exs` raises `queue_target`, so the read
-  waits for the connection instead.
+  waits for the connection instead. This test asserts only that configured wait policy;
+  the default-policy drop was reproduced in a separate experiment, not by an arm in this file.
   """
   use CodexPooler.DataCase, async: false
 

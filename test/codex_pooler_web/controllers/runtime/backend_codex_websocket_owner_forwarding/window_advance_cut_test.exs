@@ -556,7 +556,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
   defp websocket_retries!(_ctx, _port, _frame, 0, outcomes), do: Enum.reverse(outcomes)
 
   defp websocket_retries!(ctx, port, frame, remaining, outcomes) do
-    cleanups = WebsocketCleanupFence.listener_socket_cleanups()
     client = connect!(port, ctx.setup, @window_1)
 
     outcome =
@@ -573,7 +572,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
         Mint.HTTP.close(client.conn)
       end
 
-    :ok = WebsocketCleanupFence.await_listener_socket_cleanups!(cleanups + 1)
+    :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(client.cleanup_socket)
 
     case outcome do
       :served -> Enum.reverse([:served | outcomes])
@@ -659,6 +658,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
   end
 
   defp connect!(port, setup, window) do
+    sockets = WebsocketCleanupFence.listener_sockets()
     {:ok, conn} = Mint.HTTP.connect(:http, "127.0.0.1", port, protocols: [:http1])
 
     headers = [
@@ -672,13 +672,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
     {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/backend-api/codex/responses", headers)
     {:ok, conn, status, response_headers} = await_public_websocket_upgrade(conn, ref)
     {conn, websocket} = mint_websocket_new!(conn, ref, status, response_headers)
-    %{conn: conn, websocket: websocket, ref: ref}
+    %{conn: conn, websocket: websocket, ref: ref, cleanup_socket: WebsocketCleanupFence.await_new_listener_socket!(sockets)}
   end
 
   defp close!(client) do
-    cleanups = WebsocketCleanupFence.listener_socket_cleanups()
     Mint.HTTP.close(client.conn)
-    :ok = WebsocketCleanupFence.await_listener_socket_cleanups!(cleanups + 1)
+    :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(client.cleanup_socket)
   end
 
   defp completed!(client) do

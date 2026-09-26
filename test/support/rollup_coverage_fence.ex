@@ -21,6 +21,11 @@ defmodule CodexPooler.RollupCoverageFence do
   rollup row still fails its test through the guard, and so does a coverage row written after the
   fence ran, by a process that outlived the test.
 
+  This restore is not a provenance check: a direct write to this table during a fenced test is
+  indistinguishable from a trigger-created row with the same contents. Tests of the coverage
+  mutation itself must assert it before teardown. Treating every restored date as a leak would
+  reject the legitimate midnight-trigger cases this fence exists to isolate.
+
   The reads and writes go over a connection of the fence's own, opened by `start!/0` before the
   guard starts counting, so the fence never makes a call the guard counts. A sync test pays one
   single-table read when it starts; the closing read runs only when the test made a call the guard

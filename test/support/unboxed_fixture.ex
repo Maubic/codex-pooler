@@ -38,6 +38,12 @@ defmodule CodexPooler.UnboxedFixture do
   assertion that failed inside an earlier `run_unboxed/2` block. It first
   waits for every websocket session cleanup still running, since one can
   still write rows of the fixture (findings#206 row 206-405).
+
+  A timed-out barrier fails teardown without deleting the rows: a live writer
+  can still commit references to them. This is deliberate fail-closed behavior,
+  not successful cleanup. The generic fixture has no socket/task ownership
+  proof with which to cancel those writers; the owning scenario must release
+  its barriers and stop its processes before this callback runs.
   """
   @spec register_unboxed_cleanup!((-> term()), timeout()) :: :ok
   def register_unboxed_cleanup!(fun, timeout \\ @default_timeout) when is_function(fun, 0) do

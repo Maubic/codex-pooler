@@ -376,6 +376,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
       # this Pool's rows (a ledger entry of a committed attempt); deleting them
       # first failed on a foreign key and left the whole graph committed
       # (findings#206 row 206-405).
+      # If the barrier fails, deliberately leave the graph intact and fail
+      # teardown. An unconditional after-delete would race those live writers.
       :ok = WebsocketCleanupFence.await_session_cleanups!()
 
       unboxed_run(fn ->

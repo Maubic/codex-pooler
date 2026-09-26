@@ -31,15 +31,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayRefu
   alias Ecto.Adapters.SQL.Sandbox
 
   setup do
-    previous = Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
-
-    on_exit(fn ->
-      case previous do
-        nil -> Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-        value -> Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, value)
-      end
-    end)
   end
 
   test "a new turn meeting the busy owner gets the owner's refusal while a resend of the running turn stays a counted duplicate" do

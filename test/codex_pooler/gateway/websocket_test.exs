@@ -329,15 +329,8 @@ defmodule CodexPooler.Gateway.WebsocketTest do
 
   describe "retarget_websocket_owner_runtime/4" do
     setup do
-      previous = Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+      CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
       Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
-
-      on_exit(fn ->
-        case previous do
-          nil -> Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-          value -> Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, value)
-        end
-      end)
 
       key = active_api_key_fixture()
       BackendCodexWebsocketOwnerForwardingSupport.stop_pool_owners_on_exit(key.pool)

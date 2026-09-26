@@ -1540,14 +1540,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
   # met `409 duplicate_turn` and the turn failed (findings#232 row 232-174).
   @tag :stream_cut_resend
   test "with owner forwarding off a lifecycle-only stream cut of a turn's opening request admits the byte-identical resend" do
-    previous = Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, false)
-
-    on_exit(fn ->
-      if is_nil(previous),
-        do: Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled),
-        else: Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, previous)
-    end)
 
     upstream =
       start_upstream(
@@ -1934,17 +1928,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
   # reconnect is admitted as one fresh turn on that connection. Any further
   # send fails the fixture.
   defp provider_terminal_resend_scenario(input, label) do
-    previous_owner_forwarding =
-      Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
 
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
-
-    on_exit(fn ->
-      case previous_owner_forwarding do
-        nil -> Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-        value -> Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, value)
-      end
-    end)
 
     completed_response_id = "resp_after_provider_failure_#{label}"
 
@@ -2344,17 +2330,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
   end
 
   defp enable_owner_forwarding! do
-    previous_owner_forwarding =
-      Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
 
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
-
-    on_exit(fn ->
-      case previous_owner_forwarding do
-        nil -> Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-        value -> Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, value)
-      end
-    end)
   end
 
   defp provider_terminal_failure_frames(label) do

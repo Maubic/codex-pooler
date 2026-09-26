@@ -569,17 +569,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ReplayTest do
     setup = gateway_setup(upstream)
     assert :ok = Events.subscribe_pool(setup.pool)
 
-    previous_owner_forwarding =
-      Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
 
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
-
-    on_exit(fn ->
-      case previous_owner_forwarding do
-        nil -> Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-        value -> Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, value)
-      end
-    end)
 
     {:ok, _auth} = Access.authenticate_authorization_header(setup.authorization)
     turn_state = Ecto.UUID.generate()
@@ -953,17 +945,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ReplayTest do
     @tag legacy_snapshot?: legacy_snapshot?
     test "native replay #{label} never relays a provider x-models-etag",
          %{legacy_snapshot?: legacy_snapshot?} do
-      previous_owner_forwarding =
-        Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+      CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
 
       Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
-
-      on_exit(fn ->
-        case previous_owner_forwarding do
-          nil -> Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-          value -> Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, value)
-        end
-      end)
 
       release_ref = make_ref()
       provider_etag = ~s(W/"provider-models-etag-replay-sentinel")
@@ -1221,17 +1205,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ReplayTest do
   end
 
   defp assert_replay_red_boundary(payload_builder, expected_claim_prefix) do
-    previous_owner_forwarding =
-      Application.get_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
 
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
-
-    on_exit(fn ->
-      case previous_owner_forwarding do
-        nil -> Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
-        value -> Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, value)
-      end
-    end)
 
     release_ref = make_ref()
 

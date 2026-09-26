@@ -6,6 +6,41 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFenceTest do
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
   alias CodexPoolerWeb.WebsocketControlPath
 
+  test "an earlier socket's cleanup cannot complete the next socket's fence" do
+    :ok = WebsocketCleanupFence.install!(server: self())
+    earlier = start_fence_socket!()
+    current = start_fence_socket!()
+
+    send(earlier, :finish)
+    assert :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(earlier)
+
+    assert_raise ExUnit.AssertionError, ~r/listener socket cleanup did not finish/, fn ->
+      WebsocketCleanupFence.await_listener_socket_cleanup!(current, 0)
+    end
+
+    send(current, :finish)
+    assert :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(current)
+  end
+
+  defp start_fence_socket! do
+    before = WebsocketCleanupFence.listener_sockets()
+    parent = self()
+
+    socket =
+      spawn_link(fn ->
+        Process.put(:"$ancestors", [parent])
+        :telemetry.execute([:bandit, :websocket, :start], %{}, %{})
+
+        receive do
+          :finish -> :telemetry.execute([:codex_pooler, :gateway, :websocket_control, :cleanup_finished], %{}, %{caller: self()})
+        end
+      end)
+
+    on_exit(fn -> Process.exit(socket, :kill) end)
+    assert WebsocketCleanupFence.await_new_listener_socket!(before) == socket
+    socket
+  end
+
   @slow_handler :websocket_cleanup_fence_test_slow_config
   # Long enough to outlast the fence's release under load; on_exit time is
   # outside the duration guard.
