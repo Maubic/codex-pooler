@@ -80,6 +80,114 @@ defmodule CodexPooler.Dev.SeedUpstreamTargetsTest do
     refute pool_by_slug("dev-primary")
   end
 
+  test "real traffic seed refuses a symlinked output parent without changing its target" do
+    root = Path.join(System.tmp_dir!(), "real-traffic-parent-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(root) end)
+    File.mkdir_p!(Path.join(root, "tmp"))
+    target = Path.join(root, "outside")
+    File.mkdir!(target)
+    File.write!(Path.join(target, "real-traffic.env"), "sentinel")
+    File.ln_s!(target, Path.join(root, "tmp/dev-seed"))
+
+    File.cd!(root, fn ->
+      assert_raise RuntimeError, ~r/private directory/, fn -> Seeds.real_traffic() end
+    end)
+
+    assert File.read!(Path.join(target, "real-traffic.env")) == "sentinel"
+    refute Repo.get_by(Pool, slug: RealTraffic.pool_slug())
+  end
+
+  test "real traffic seed refuses a final symlink without removing it or changing its target" do
+    root = Path.join(System.tmp_dir!(), "real-traffic-file-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(root) end)
+    File.mkdir_p!(Path.join(root, "tmp/dev-seed"))
+    File.chmod!(Path.join(root, "tmp/dev-seed"), 0o700)
+    target = Path.join(root, "outside.env")
+    File.write!(target, "sentinel")
+    File.ln_s!(target, Path.join(root, RealTraffic.env_path()))
+
+    File.cd!(root, fn ->
+      assert_raise RuntimeError, ~r/private regular file/, fn -> Seeds.real_traffic() end
+      assert File.lstat!(RealTraffic.env_path()).type == :symlink
+    end)
+
+    assert File.read!(target) == "sentinel"
+    refute Repo.get_by(Pool, slug: RealTraffic.pool_slug())
+  end
+
+  test "real traffic rotation holds a database lock while publishing its key" do
+    root = Path.join(System.tmp_dir!(), "real-traffic-lock-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(root) end)
+    File.mkdir_p!(root)
+    connection = start_supervised!({Postgrex, Keyword.take(Repo.config(), [:hostname, :port, :username, :password, :database])})
+    handler = "real-traffic-lock-#{System.unique_integer([:positive])}"
+    owner = self()
+    owner_record = Seeds.compact().owner
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:codex_pooler, :repo, :query],
+        fn _, _, metadata, _ ->
+          if self() == owner and String.starts_with?(metadata.query, "INSERT INTO \"api_keys\"") do
+            %{rows: [[acquired]]} = Postgrex.query!(connection, "SELECT pg_try_advisory_lock($1)", [7_391_204_018])
+            if acquired, do: Postgrex.query!(connection, "SELECT pg_advisory_unlock($1)", [7_391_204_018])
+            send(owner, {:rotation_lock_available, acquired})
+
+            second_writer =
+              try do
+                RealTraffic.run(%{owner: owner_record})
+                :unexpected_success
+              rescue
+                error in RuntimeError -> Exception.message(error)
+              end
+
+            send(owner, {:second_writer, second_writer})
+          end
+        end,
+        nil
+      )
+
+    File.cd!(root, fn -> Seeds.real_traffic() end)
+    :telemetry.detach(handler)
+    assert_receive {:rotation_lock_available, false}
+    assert_receive {:second_writer, "seed output is locked; verify that its previous publisher stopped before removing the lock"}
+  end
+
+  test "failed real traffic publication rolls back key rotation and preserves the prior env file" do
+    root = Path.join(System.tmp_dir!(), "real-traffic-rollback-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(root) end)
+    File.mkdir_p!(root)
+    handler = "real-traffic-rollback-#{System.unique_integer([:positive])}"
+    owner = self()
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    File.cd!(root, fn ->
+      first = Seeds.real_traffic()
+      original_digest = :crypto.hash(:sha256, File.read!(RealTraffic.env_path()))
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:codex_pooler, :repo, :query],
+          fn _, _, metadata, _ ->
+            if self() == owner and String.starts_with?(metadata.query, "INSERT INTO \"api_keys\"") do
+              File.chmod!(RealTraffic.env_path(), 0o644)
+            end
+          end,
+          nil
+        )
+
+      assert_raise RuntimeError, ~r/private regular file/, fn -> Seeds.real_traffic() end
+      :telemetry.detach(handler)
+      assert :crypto.hash(:sha256, File.read!(RealTraffic.env_path())) == original_digest
+      assert File.ls!(Path.dirname(RealTraffic.env_path())) == ["real-traffic.env"]
+      assert Repo.get!(APIKey, first.api_key.id).status == "active"
+      assert Repo.aggregate(from(key in APIKey, where: key.pool_id == ^first.pool.id), :count) == 1
+    end)
+  end
+
   test "real_traffic seeds an empty dedicated Pool and keeps exactly one active seed key across reruns" do
     on_exit(fn -> File.rm(RealTraffic.env_path()) end)
 

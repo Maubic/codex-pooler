@@ -46,6 +46,26 @@ defmodule CodexPooler.Dev.SeedsTest do
     :ok
   end
 
+  test "full seed refuses an operator Pool using a seed slug before deleting rows" do
+    %{owner: owner} = Seeds.compact()
+    scope = Scope.for_user(owner, ["instance_owner"])
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "dev-primary", name: "Operator Pool"})
+
+    assert_raise RuntimeError, ~r/not owned by the full seed/, fn -> Seeds.full() end
+    assert Repo.get!(Pool, pool.id).name == "Operator Pool"
+  end
+
+  test "full seed preserves operator invites whose email matches the seed namespace" do
+    %{owner: owner} = Seeds.compact()
+    scope = Scope.for_user(owner, ["instance_owner"])
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "operator-pool", name: "Operator Pool"})
+    timestamp = DateTime.utc_now()
+    invite = %Invite{} |> Invite.changeset(%{pool_id: pool.id, token_hash: :crypto.hash(:sha256, "operator-invite"), invited_email: "dev-invite-operator@example.com", status: "active", created_at: timestamp, updated_at: timestamp}) |> Repo.insert!()
+
+    Seeds.full()
+    assert Repo.get!(Invite, invite.id).pool_id == pool.id
+  end
+
   test "compact seed creates one owner and four operator accounts idempotently" do
     first = Seeds.compact()
     second = Seeds.compact()

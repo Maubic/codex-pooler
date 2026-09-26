@@ -25,7 +25,6 @@ defmodule CodexPooler.Dev.MCPFixture do
   @database "codex_pooler_dev"
   @receipt_root Path.join(["tmp", "mcp-fixture"])
   @default_receipt_path Path.join(@receipt_root, "setup.json")
-  @loopback_hosts ["127.0.0.1", "localhost", "::1"]
 
   @type options :: [
           environment: atom(),
@@ -92,20 +91,7 @@ defmodule CodexPooler.Dev.MCPFixture do
 
   defp development_database?(options, repo_config) do
     Keyword.get(repo_config, :database) == @database or
-      (Keyword.get(options, :allow_isolated_dev_database, false) and isolated_dev_database?(repo_config))
-  end
-
-  # A disposable isolated QA database: the owned `codex_pooler_relqa_*` name the
-  # smoke suite's isolated runtime creates, reached over loopback TCP only. A URL
-  # or socket directory in the repo config could point anywhere, so either one
-  # refuses the database regardless of its name.
-  defp isolated_dev_database?(repo_config) do
-    database = Keyword.get(repo_config, :database)
-
-    is_binary(database) and Regex.match?(~r/\Acodex_pooler_relqa_[a-z0-9_]{8,63}\z/, database) and
-      Keyword.get(repo_config, :hostname) in @loopback_hosts and
-      is_nil(Keyword.get(repo_config, :url)) and is_nil(Keyword.get(repo_config, :socket_dir)) and
-      is_nil(Keyword.get(repo_config, :socket))
+      (Keyword.get(options, :allow_isolated_dev_database, false) and LocalTarget.isolated_dev_database?(repo_config))
   end
 
   defp validate_isolated_status(options) do

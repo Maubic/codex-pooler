@@ -86,6 +86,13 @@ defmodule CodexPooler.Dev.LocalTarget do
 
   def upstream_base_url(_value, _default), do: {:error, "upstream base URL is invalid"}
 
+  @doc "Accepts only an isolated QA database name reached directly over loopback TCP."
+  @spec isolated_dev_database?(keyword()) :: boolean()
+  def isolated_dev_database?(repo_config) do
+    database = Keyword.get(repo_config, :database)
+    is_binary(database) and Regex.match?(~r/\Acodex_pooler_relqa_[a-z0-9_]{8,63}\z/, database) and loopback_repo?(repo_config)
+  end
+
   @doc "True for loopback hosts."
   @spec loopback_host?(term()) :: boolean()
   def loopback_host?(host), do: host in @loopback_hosts

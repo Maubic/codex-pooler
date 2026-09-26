@@ -30,6 +30,7 @@ defmodule CodexPooler.Dev.Seeds.Full do
          }
 
   @seed_key "codex_pooler_dev_seed"
+  @pool_slugs ["dev-primary", "dev-secondary", "dev-disabled"]
 
   # The Fast tier the provider's catalog declares for the seeded gpt-6 models,
   # in the shape the upstream sync stores per source assignment. The "Dev
@@ -53,6 +54,8 @@ defmodule CodexPooler.Dev.Seeds.Full do
     # fake by default, a replica's in-cluster fake when given), never at the
     # real provider with a fake token.
     upstream_base_url = Map.get(context, :upstream_base_url, LocalTarget.default_fake_upstream_base_url())
+
+    validate_pool_ownership!()
 
     {:ok, _settings} =
       InstanceSettings.update_system_settings(InstanceSettings.ensure_singleton!(), %{
@@ -128,9 +131,10 @@ defmodule CodexPooler.Dev.Seeds.Full do
 
     Repo.delete_all(from event in AuditEvent, where: fragment("?->>?", event.details, "dev_seed") == ^@seed_key)
 
-    Repo.delete_all(from invite in Invite, where: like(invite.invited_email, "dev-invite-%@example.com"))
-
-    Repo.delete_all(from pool in Pool, where: pool.slug in ["dev-primary", "dev-secondary", "dev-disabled"])
+    invite_ids = Enum.map(1..4, &seed_id("invite-#{&1}"))
+    pool_ids = Enum.map(@pool_slugs, &seed_id/1)
+    Repo.delete_all(from invite in Invite, where: invite.id in ^invite_ids)
+    Repo.delete_all(from pool in Pool, where: pool.id in ^pool_ids)
 
     Repo.delete_all(
       from identity in UpstreamIdentity,
@@ -138,10 +142,22 @@ defmodule CodexPooler.Dev.Seeds.Full do
     )
   end
 
+  # Pools and invites have no metadata column. Stable namespace IDs are the
+  # ownership marker; a matching slug or email alone never authorizes deletion.
+  defp seed_id(name) do
+    :crypto.hash(:sha256, "#{@seed_key}:#{name}") |> binary_part(0, 16) |> Ecto.UUID.load!()
+  end
+
+  defp validate_pool_ownership! do
+    for pool <- Repo.all(from pool in Pool, where: pool.slug in ^@pool_slugs) do
+      if pool.id != seed_id(pool.slug), do: raise("Pool #{pool.slug} is not owned by the full seed; preserve it or explicitly remove it before seeding")
+    end
+  end
+
   defp seed_pool!(owner, attrs) do
     timestamp = now()
 
-    %Pool{}
+    %Pool{id: seed_id(attrs.slug)}
     |> Pool.changeset(%{
       slug: attrs.slug,
       name: attrs.name,
@@ -867,7 +883,7 @@ defmodule CodexPooler.Dev.Seeds.Full do
     |> Enum.with_index(1)
     |> Enum.map(fn {attrs, index} ->
       attrs = Map.put(attrs, :token_hash, :crypto.hash(:sha256, "dev-seed-invite-#{index}"))
-      %Invite{} |> Invite.changeset(Map.put_new(attrs, :created_at, timestamp)) |> Repo.insert!()
+      %Invite{id: seed_id("invite-#{index}")} |> Invite.changeset(Map.put_new(attrs, :created_at, timestamp)) |> Repo.insert!()
     end)
   end
 

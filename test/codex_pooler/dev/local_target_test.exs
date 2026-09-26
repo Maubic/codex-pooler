@@ -20,6 +20,20 @@ defmodule CodexPooler.Dev.LocalTargetTest do
   @in_cluster "http://fake-upstream:4058"
 
   describe "target database" do
+    test "isolated QA fixtures reject remote and indirect Repo targets" do
+      database = "codex_pooler_relqa_fixture_12345678"
+      local = [database: database, hostname: "127.0.0.1"]
+
+      for fixture <- [MCPFixture, OpenAIV1Fixture, RoutingStrategyFixture] do
+        options = [environment: :dev, allow_isolated_dev_database: true]
+        assert :ok = fixture.validate_environment(Keyword.put(options, :repo_config, local))
+
+        for config <- [Keyword.put(local, :hostname, "db.example.com"), Keyword.delete(local, :hostname), Keyword.put(local, :url, "ecto://db.example.com/test"), Keyword.put(local, :socket_dir, "/tmp"), Keyword.put(local, :socket, "/tmp/postgres")] do
+          assert {:error, _} = fixture.validate_environment(Keyword.put(options, :repo_config, config))
+        end
+      end
+    end
+
     test "accepts exactly the configured database over a loopback host" do
       assert :ok = LocalTarget.validate_target_database(@replica, @replica_repo)
       assert :ok = LocalTarget.validate_target_database(@replica, Keyword.put(@replica_repo, :hostname, "localhost"))

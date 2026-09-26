@@ -6,6 +6,7 @@ defmodule CodexPooler.Dev.Seeds.RealTraffic do
   alias CodexPooler.Access
   alias CodexPooler.Access.APIKey
   alias CodexPooler.Accounts.{Scope, User}
+  alias CodexPooler.Dev.UpstreamAccountBundle.PrivateFile
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
 
@@ -25,6 +26,80 @@ defmodule CodexPooler.Dev.Seeds.RealTraffic do
   # earlier run minted and mint one new key, so exactly one seed key is active.
   @spec run(%{required(:owner) => User.t()}) :: map()
   def run(%{owner: owner}) do
+    ensure_private_directory!()
+    validate_output!()
+
+    with_output_lock(fn -> rotate(owner) end)
+  end
+
+  # This local file lock outlives a PostgreSQL disconnect at COMMIT. A second
+  # publisher cannot replace this path while confirmed rollback is compensated.
+  # A hard exit or uncertain connection failure retains the lock for inspection.
+  defp with_output_lock(operation) do
+    lock_path = @env_path <> ".lock"
+
+    case File.open(lock_path, [:write, :binary, :exclusive]) do
+      {:ok, lock} ->
+        try do
+          File.chmod!(lock_path, 0o600)
+          result = operation.()
+          File.rm!(lock_path)
+
+          case result do
+            {:ok, result} -> result
+            {:error, error, stacktrace} -> reraise error, stacktrace
+          end
+        after
+          File.close(lock)
+        end
+
+      {:error, _reason} ->
+        raise "seed output is locked; verify that its previous publisher stopped before removing the lock"
+    end
+  end
+
+  defp rotate(owner) do
+    validate_output!()
+    previous = File.read(@env_path)
+
+    try do
+      result =
+        Repo.transaction(fn ->
+          # The database lock also serializes writers from other local checkouts.
+          Repo.query!("SELECT pg_advisory_xact_lock($1)", [7_391_204_018])
+          seed!(owner)
+        end)
+
+      case result do
+        {:ok, _seeded} -> result
+        {:error, _reason} -> raise "seed key transaction rolled back"
+      end
+    rescue
+      error in DBConnection.ConnectionError ->
+        # Losing the COMMIT response does not establish whether it committed.
+        # Retain both output and lock rather than guess which key is active.
+        reraise error, __STACKTRACE__
+
+      error ->
+        stacktrace = __STACKTRACE__
+        restore_previous!(previous)
+        {:error, error, stacktrace}
+    end
+  end
+
+  defp restore_previous!({:ok, bytes}) do
+    if File.read(@env_path) != {:ok, bytes}, do: publish_bytes!(bytes)
+  end
+
+  defp restore_previous!({:error, :enoent}) do
+    case File.rm(@env_path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, _reason} -> raise "seed output rollback failed; output lock retained"
+    end
+  end
+
+  defp seed!(owner) do
     scope = Scope.for_user(owner, ["instance_owner"])
     pool = ensure_pool!(owner)
     revoked = revoke_seed_keys!(scope, pool)
@@ -75,12 +150,42 @@ defmodule CodexPooler.Dev.Seeds.RealTraffic do
     |> length()
   end
 
+  defp ensure_private_directory! do
+    File.mkdir_p!(Path.dirname(@bootstrap_dir))
+
+    case File.mkdir(@bootstrap_dir) do
+      :ok -> File.chmod!(@bootstrap_dir, 0o700)
+      {:error, :eexist} -> :ok
+      {:error, _reason} -> raise "seed output requires a private directory"
+    end
+
+    case File.lstat(@bootstrap_dir) do
+      {:ok, %File.Stat{type: :directory, mode: mode}} when Bitwise.band(mode, 0o777) == 0o700 -> :ok
+      _unsafe -> raise "seed output requires a private directory"
+    end
+  end
+
+  defp validate_output! do
+    case File.lstat(@env_path) do
+      {:error, :enoent} -> :ok
+      {:ok, %File.Stat{type: :regular, mode: mode}} when Bitwise.band(mode, 0o777) == 0o600 -> :ok
+      _unsafe -> raise "seed output must be a private regular file"
+    end
+  end
+
   defp write_env!(pool, raw_key) do
-    File.mkdir_p!(@bootstrap_dir)
-    File.chmod!(@bootstrap_dir, 0o700)
-    File.rm(@env_path)
-    File.touch!(@env_path)
-    File.chmod!(@env_path, 0o600)
-    File.write!(@env_path, "CODEX_POOLER_REAL_TRAFFIC_API_KEY=#{raw_key}\nCODEX_POOLER_REAL_TRAFFIC_POOL_SLUG=#{pool.slug}\n")
+    validate_output!()
+    publish_bytes!("CODEX_POOLER_REAL_TRAFFIC_API_KEY=#{raw_key}\nCODEX_POOLER_REAL_TRAFFIC_POOL_SLUG=#{pool.slug}\n")
+  end
+
+  defp publish_bytes!(bytes) do
+    temporary = @env_path <> "." <> Ecto.UUID.generate()
+
+    try do
+      {:ok, "0600"} = PrivateFile.write(temporary, bytes)
+      File.rename!(temporary, @env_path)
+    after
+      File.rm(temporary)
+    end
   end
 end

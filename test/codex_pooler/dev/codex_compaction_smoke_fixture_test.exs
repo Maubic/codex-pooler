@@ -357,6 +357,39 @@ defmodule CodexPooler.Dev.CodexCompactionSmokeFixtureTest do
   end
 
   @tag :unix_integration
+  test "failed override journal write rolls back the row and release remains complete", context do
+    options = fixture_options(context)
+    assert {:ok, acquired} = CodexCompactionSmokeFixture.acquire(options)
+    paths = Journal.paths(context.root, context.run_id)
+    original = File.read!(paths.journal)
+    handler = "override-journal-#{context.run_id}"
+    owner = self()
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:codex_pooler, :repo, :query],
+        fn _, _, metadata, _ ->
+          if self() == owner and String.starts_with?(metadata.query, "INSERT INTO \"pool_model_serving_overrides\"") do
+            File.rm!(paths.journal)
+            File.mkdir!(paths.journal)
+          end
+        end,
+        nil
+      )
+
+    assert {:error, "fixture serving override failed"} = CodexCompactionSmokeFixture.serving_override(Keyword.put(options, :mode, "full"))
+    :telemetry.detach(handler)
+    assert File.dir?(paths.journal)
+    refute Repo.get_by(ModelServingOverride, pool_id: acquired.pool_id)
+    File.rmdir!(paths.journal)
+    File.write!(paths.journal, original)
+    File.chmod!(paths.journal, 0o600)
+    assert {:ok, %{status: "released"}} = CodexCompactionSmokeFixture.release(options)
+  end
+
+  @tag :unix_integration
   test "serving override writes through the product and release drops the journalled row", context do
     options = fixture_options(context)
     assert {:ok, acquired} = CodexCompactionSmokeFixture.acquire(options)
@@ -384,7 +417,7 @@ defmodule CodexPooler.Dev.CodexCompactionSmokeFixtureTest do
              CodexCompactionSmokeFixture.serving_override(Keyword.put(options, :mode, "auto"))
 
     refute Repo.get(ModelServingOverride, override_id)
-    assert {:ok, %{"serving_override_id" => nil}} = Journal.read_journal(paths, context.run_id)
+    assert {:ok, %{"serving_override_id" => ^override_id}} = Journal.read_journal(paths, context.run_id)
 
     assert {:ok, %{serving_override_id: reacquired_id}} =
              CodexCompactionSmokeFixture.serving_override(Keyword.put(options, :mode, "full"))

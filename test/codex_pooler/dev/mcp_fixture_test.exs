@@ -267,6 +267,26 @@ defmodule CodexPooler.Dev.MCPFixtureTest do
              MCPFixture.status(Keyword.put(options, :repo_config, database: isolated, hostname: "db.example.com"))
   end
 
+  test "default absence is scoped to its receipt and cannot release another target", context do
+    root = Path.dirname(context.path)
+    File.mkdir_p!(root)
+    target = "codex_pooler_replica_test"
+    options = [environment: :dev, target_database: target, repo_config: [database: target, hostname: "localhost"]]
+
+    File.cd!(root, fn ->
+      assert {:ok, %{status: "ready", receipt_path: scoped}} = MCPFixture.acquire(options)
+      assert String.ends_with?(scoped, "/target-#{target}/setup.json")
+      assert {:ok, %{status: "absent", receipt_path: default}} = MCPFixture.status()
+      assert default != scoped
+      assert {:ok, %{status: "absent", receipt_path: ^default}} = MCPFixture.release(environment: :dev, repo_config: [database: "codex_pooler_dev"])
+      assert {:ok, %{status: "ready", leases: 1, receipt_path: ^scoped}} = MCPFixture.status(options)
+      assert InstanceSettings.current().mcp.enabled
+      assert {:ok, %{status: "released", receipt_path: ^scoped}} = MCPFixture.release(options)
+      refute InstanceSettings.current().mcp.enabled
+      assert Repo.aggregate(OperatorMCPKey, :count) == 0
+    end)
+  end
+
   test "the Mix task accepts the isolated database flag and still applies the environment guard" do
     assert_raise Mix.Error, "MCP fixture runs only with MIX_ENV=dev", fn ->
       MCPFixtureTask.run(["status", "--allow-isolated-dev-database"])

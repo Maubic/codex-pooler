@@ -116,8 +116,13 @@ defmodule CodexPooler.Dev.CodexCompactionSmokeFixture do
          {:ok, mode} <- fetch_override_mode(options),
          {:ok, journal} <- read_ready_journal(options, run_id) do
       paths = paths(options, run_id)
-      override_id = Provisioner.set_serving_override!(journal, mode)
-      :ok = Journal.write_journal(paths, Journal.put_serving_override(journal, override_id))
+
+      {:ok, override_id} =
+        Repo.transaction(fn ->
+          override_id = Provisioner.set_serving_override!(journal, mode)
+          :ok = journal_serving_override(paths, journal, mode, override_id)
+          override_id
+        end)
 
       {:ok,
        %{
@@ -131,6 +136,13 @@ defmodule CodexPooler.Dev.CodexCompactionSmokeFixture do
   rescue
     _exception -> {:error, "fixture serving override failed"}
   end
+
+  # Keep the last exact ownership id when clearing. A rejected COMMIT
+  # restores that row, and release already tolerates a committed delete.
+  defp journal_serving_override(_paths, _journal, "auto", _override_id), do: :ok
+
+  defp journal_serving_override(paths, journal, _mode, override_id),
+    do: Journal.write_journal(paths, Journal.put_serving_override(journal, override_id))
 
   @spec receipt(options()) :: {:ok, map()} | {:error, String.t()}
   def receipt(options) do

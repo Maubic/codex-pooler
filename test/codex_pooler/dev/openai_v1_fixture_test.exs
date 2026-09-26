@@ -315,7 +315,7 @@ defmodule CodexPooler.Dev.OpenAIV1FixtureTest do
              OpenAIV1Fixture.validate_environment(
                environment: :dev,
                allow_isolated_dev_database: true,
-               repo_config: [database: "codex_pooler_relqa_fixture_12345678"]
+               repo_config: [database: "codex_pooler_relqa_fixture_12345678", hostname: "127.0.0.1"]
              )
 
     for database <- [

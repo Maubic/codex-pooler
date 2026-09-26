@@ -88,14 +88,13 @@ defmodule CodexPooler.Dev.OpenAIV1Fixture do
     repo_config = Keyword.get(options, :repo_config, Repo.config())
     allow_test_database? = Keyword.get(options, :allow_test_database, false)
     allow_isolated_dev_database? = Keyword.get(options, :allow_isolated_dev_database, false)
-    database = Keyword.get(repo_config, :database)
     target_database = Keyword.get(options, :target_database)
 
     cond do
       environment == :dev and is_binary(target_database) ->
         LocalTarget.validate_target_database(target_database, repo_config)
 
-      allowed_environment?(environment, database, allow_isolated_dev_database?, allow_test_database?) ->
+      allowed_environment?(environment, repo_config, allow_isolated_dev_database?, allow_test_database?) ->
         :ok
 
       environment != :dev ->
@@ -110,16 +109,13 @@ defmodule CodexPooler.Dev.OpenAIV1Fixture do
     if Keyword.has_key?(options, :target_database), do: validate_environment(options), else: :ok
   end
 
-  defp isolated_dev_database?(database) when is_binary(database) do
-    Regex.match?(~r/^codex_pooler_relqa_[a-z0-9_]{8,63}$/, database)
+  defp allowed_environment?(:dev, repo_config, allow_isolated_dev_database?, _allow_test_database?) do
+    Keyword.get(repo_config, :database) == @database or
+      (allow_isolated_dev_database? and LocalTarget.isolated_dev_database?(repo_config))
   end
 
-  defp isolated_dev_database?(_database), do: false
-
-  defp allowed_environment?(:dev, @database, _allow_isolated_dev_database?, _allow_test_database?), do: true
-  defp allowed_environment?(:dev, database, true, _allow_test_database?), do: isolated_dev_database?(database)
-  defp allowed_environment?(:test, _database, _allow_isolated_dev_database?, true), do: true
-  defp allowed_environment?(_environment, _database, _allow_isolated_dev_database?, _allow_test_database?), do: false
+  defp allowed_environment?(:test, _repo_config, _allow_isolated_dev_database?, true), do: true
+  defp allowed_environment?(_environment, _repo_config, _allow_isolated_dev_database?, _allow_test_database?), do: false
 
   defp acquire_locked(path, upstream_base_url, request_compression_mode) do
     case Receipt.read(path) do
