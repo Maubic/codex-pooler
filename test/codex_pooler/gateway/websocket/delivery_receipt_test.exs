@@ -12,6 +12,7 @@ defmodule CodexPooler.Gateway.Websocket.DeliveryReceiptTest do
     ]
 
   alias CodexPooler.Accounting.Attempt
+  alias CodexPooler.Accounting.RequestLogs.DebugProjection.DownstreamDelivery
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
   alias CodexPooler.Gateway.Websocket.DeliveryReceipt
   alias CodexPooler.Repo
@@ -57,6 +58,14 @@ defmodule CodexPooler.Gateway.Websocket.DeliveryReceiptTest do
     assert unknown["transport"] == "websocket"
     refute inspect(unknown) =~ "secret"
     refute inspect(unknown) =~ "prompt"
+  end
+
+  test "the defensive unknown outcome survives the admin projection" do
+    receipt = DeliveryReceipt.build(%{outcome: :unrecognized})
+    assert receipt["outcome"] in DeliveryReceipt.outcomes()
+
+    assert %{outcome: "unknown"} =
+             DownstreamDelivery.build(%{"downstream_delivery" => receipt})
   end
 
   # findings#232 row 232-203: the released Codex client resends the identical

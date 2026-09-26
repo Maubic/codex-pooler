@@ -19,6 +19,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketDeliveryReceiptTest do
       gateway_setup: 1,
       mint_websocket_new!: 4,
       public_websocket_send_text!: 4,
+      receive_mint_socket_message!: 3,
       start_public_endpoint!: 0,
       start_upstream: 1
     ]
@@ -28,14 +29,16 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketDeliveryReceiptTest do
   alias CodexPooler.Events
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Repo
+  alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
 
   @frame_timeout_ms 15_000
   @response_id "resp_public_ws_delivery_receipt"
 
-  for topology <- [:direct, :local_owner] do
+  for {topology, completion_order} <- [{:direct, :immediate}, {:local_owner, :immediate}, {:local_owner, :after_cleanup}] do
     @tag :v1_websocket
     @tag topology: topology
-    test "a #{topology} public websocket turn whose completed terminal reached the client before it closed records a delivered receipt", %{topology: topology} do
+    @tag completion_order: completion_order
+    test "a #{topology} public websocket turn with #{completion_order} completion records its delivered terminal", %{topology: topology, completion_order: completion_order} do
       if topology == :local_owner, do: enable_owner_forwarding!()
       release_ref = make_ref()
       events = Enum.map(upstream_events(), &CodexPooler.JSON.encode!/1)
@@ -43,7 +46,10 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketDeliveryReceiptTest do
       setup = gateway_setup(upstream)
       assert :ok = Events.subscribe_pool(setup.pool)
       port = start_public_endpoint!()
+      sockets_before = WebsocketCleanupFence.listener_sockets()
       {conn, websocket, ref} = public_v1_websocket_connect!(port, setup, topology)
+
+      gate = if completion_order == :after_cleanup, do: install_completion_gate!(WebsocketCleanupFence.await_new_listener_socket!(sockets_before))
 
       payload = CodexPooler.JSON.encode!(%{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => "synthetic public receipt turn", "stream" => true})
       {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, payload)
@@ -58,8 +64,25 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketDeliveryReceiptTest do
       assert :ok = FakeUpstream.release_frame(upstream, release_ref)
       {conn, texts} = receive_until_terminal!(conn, websocket, ref, [])
       assert %{"type" => "response.completed"} = texts |> List.last() |> CodexPooler.JSON.decode!()
+
+      task_pid =
+        if gate do
+          assert_receive {:completion_gate, task_pid}, @frame_timeout_ms
+          task_pid
+        end
+
       # The SDK closes the moment its last turn completes.
       _closed = Mint.HTTP.close(conn)
+
+      if gate do
+        # Release only after the socket's pre-cleanup drain expired and its
+        # owner cleanup completed. The result must reach the post-cleanup drain.
+        assert_receive {:socket_cleanup_finished, socket}, @frame_timeout_ms
+        assert socket == gate.socket
+        monitor = Process.monitor(task_pid)
+        send(task_pid, {:release_completion, gate.ref})
+        assert_receive {:DOWN, ^monitor, :process, ^task_pid, :normal}, @frame_timeout_ms
+      end
 
       assert_receive {Events, %{reason: "request_finalized", payload: %{"status" => "succeeded"}}}, @frame_timeout_ms
       assert [attempt] = await_delivery_receipt(setup.pool.id, System.monotonic_time(:millisecond) + @frame_timeout_ms)
@@ -70,6 +93,44 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketDeliveryReceiptTest do
       assert attempt.response_metadata["downstream_delivery"]["highest_frame_class"] == "terminal"
     end
   end
+
+  defp install_completion_gate!(socket) do
+    test = self()
+    ref = make_ref()
+    handler_id = {__MODULE__, ref}
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    :ok = :telemetry.attach(handler_id, [:codex_pooler, :gateway, :websocket_control, :cleanup_finished], &__MODULE__.notify_cleanup/4, %{test: test, socket: socket})
+
+    gate = fn ->
+      monitor = Process.monitor(test)
+      send(test, {:completion_gate, self()})
+
+      try do
+        receive do
+          {:release_completion, ^ref} -> :ok
+          {:DOWN, ^monitor, :process, ^test, _reason} -> :ok
+        after
+          @frame_timeout_ms -> raise "completion gate was not released"
+        end
+      after
+        Process.demonitor(monitor, [:flush])
+      end
+    end
+
+    :sys.replace_state(socket, fn {state_name, data} ->
+      options = [before_local_completion_handoff: gate]
+      state = Map.put(data.connection.websock_state, :response_task_start_options, options)
+      {state_name, %{data | connection: %{data.connection | websock_state: state}}}
+    end)
+
+    %{socket: socket, ref: ref}
+  end
+
+  def notify_cleanup(_event, _measurements, %{caller: socket}, %{test: test, socket: socket}),
+    do: send(test, {:socket_cleanup_finished, socket})
+
+  def notify_cleanup(_event, _measurements, _metadata, _config), do: :ok
 
   defp await_delivery_receipt(pool_id, deadline_ms) do
     attempts =
@@ -122,25 +183,22 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketDeliveryReceiptTest do
   end
 
   defp receive_until_terminal!(conn, websocket, ref, texts) do
-    receive do
-      message ->
-        case Mint.WebSocket.stream(conn, message) do
-          {:ok, conn, responses} ->
-            {websocket, new_texts} = decode_texts(websocket, ref, responses)
-            texts = texts ++ new_texts
+    message = receive_mint_socket_message!(conn, @frame_timeout_ms, "timed out waiting for the public terminal; received #{length(texts)} frames")
 
-            if Enum.any?(new_texts, &terminal_text?/1),
-              do: {conn, texts},
-              else: receive_until_terminal!(conn, websocket, ref, texts)
+    case Mint.WebSocket.stream(conn, message) do
+      {:ok, conn, responses} ->
+        {websocket, new_texts} = decode_texts(websocket, ref, responses)
+        texts = texts ++ new_texts
 
-          {:error, _conn, reason, _responses} ->
-            flunk("websocket receive failed: #{inspect(reason)}")
+        if Enum.any?(new_texts, &terminal_text?/1),
+          do: {conn, texts},
+          else: receive_until_terminal!(conn, websocket, ref, texts)
 
-          :unknown ->
-            receive_until_terminal!(conn, websocket, ref, texts)
-        end
-    after
-      @frame_timeout_ms -> flunk("timed out waiting for the public terminal; received #{length(texts)} frames")
+      {:error, _conn, reason, _responses} ->
+        flunk("websocket receive failed: #{inspect(reason)}")
+
+      :unknown ->
+        receive_until_terminal!(conn, websocket, ref, texts)
     end
   end
 

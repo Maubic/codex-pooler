@@ -1310,10 +1310,13 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp handle_public_owner_payload({:data, data}, state), do: public_chunk_result(data, state)
 
   defp handle_public_owner_payload(
-         {:error, _reason, _payload},
+         {:error, _reason, _payload} = error,
          %{public_turn_owner_complete?: true} = state
-       ),
-       do: {:ok, state}
+       ) do
+    if public_owner_attempt_reopenable?(state),
+      do: handle_public_owner_payload(error, reopen_public_owner_attempt(state)),
+      else: {:ok, state}
+  end
 
   defp handle_public_owner_payload({:error, :owner_drained, payload}, state) do
     log_failed_native_websocket_turn(
@@ -4483,7 +4486,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp record_drained_delivery_receipt(state, pid, outcome) do
     if MapSet.member?(Map.get(state, :terminate_acknowledged_tasks, MapSet.new()), pid),
       do: :ok,
-      else: record_downstream_delivery_receipt(state, pid, outcome)
+      else: record_downstream_delivery_receipt(state, pid, termination_receipt_outcome(state, pid, outcome))
   end
 
   defp response_task_cleanup_outcome(state, pid, token, pid, registry) do
@@ -4870,10 +4873,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp maybe_put_public_stream_id(payload, _stream_id), do: payload
 
   defp handle_output_commit_probe(message, state) do
-    state = maybe_reopen_public_owner_attempt(state)
-
     with false <- public_turn_aborted?(state),
-         false <- Map.get(state, :public_turn_owner_complete?, false),
          %{epoch: epoch, correlation_id: correlation_id} <-
            Map.get(state, :websocket_owner_downstream),
          owner_turn_id when is_pid(owner_turn_id) <- output_commit_probe_task_pid(message, state),
@@ -4883,14 +4883,18 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
              epoch,
              correlation_id,
              owner_turn_id
-           ) do
+           ),
+         state = maybe_reopen_public_owner_attempt(state),
+         false <- Map.get(state, :public_turn_owner_complete?, false) do
       send(
         owner_pid,
         {:websocket_owner_output_commit_ack, correlation_id, epoch, owner_turn_id, active_turn_ref, probe_ref, output_commit_probe_visible?(state, owner_turn_id)}
       )
-    end
 
-    {:ok, state}
+      {:ok, state}
+    else
+      _rejected -> {:ok, state}
+    end
   end
 
   defp output_commit_probe_task_pid(message, state) do

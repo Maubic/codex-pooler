@@ -74,7 +74,7 @@ defmodule CodexPooler.Gateway.Websocket.DeliveryReceipt do
   def metadata_key, do: @metadata_key
 
   @spec outcomes() :: [String.t()]
-  def outcomes, do: @outcomes
+  def outcomes, do: @outcomes ++ [@unknown]
 
   @doc """
   Every value `build/1` can persist under `terminal_class`: the provider

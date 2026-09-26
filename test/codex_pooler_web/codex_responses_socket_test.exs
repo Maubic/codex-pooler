@@ -1378,6 +1378,33 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTest do
     end
   end
 
+  test "public owner errors reopen a completed attempt while the response task is running" do
+    for reason <- [:owner_drained, :upstream_stream_error] do
+      task_pid = owner_turn_pid()
+      on_exit(fn -> send(task_pid, :stop) end)
+
+      state =
+        public_turn_state(task_pid, %{
+          public_turn_owner_complete?: true,
+          websocket_owner_downstream: %{pid: self(), epoch: 8, correlation_id: "corr-error", active_turn_reconnect?: false}
+        })
+
+      {:ok, payload} = WebsocketOwnerContract.safe_error_payload(reason, nil)
+      frame = {:websocket_owner_frame, "corr-error", 8, task_pid, {:error, reason, payload}}
+      {result, logs} = with_native_turn_log(:info, fn -> CodexResponsesSocket.handle_info(frame, state) end)
+      assert logs =~ "websocket native turn failed"
+      assert elem(result, 0) == :push
+      {:push, {:text, encoded}, next} = result
+      assert CodexPooler.JSON.decode!(encoded)["type"] == "error"
+      refute next.public_turn_owner_complete?
+
+      aborted = Map.put(state, :public_turn_aborted?, true)
+      assert {:ok, ^aborted} = CodexResponsesSocket.handle_info(frame, aborted)
+      stale = {:websocket_owner_frame, "corr-error", 9, task_pid, {:error, reason, payload}}
+      assert {:ok, ^state} = CodexResponsesSocket.handle_info(stale, state)
+    end
+  end
+
   test "public owner frames drop stale turn ids and legacy tuples on the current epoch" do
     active_task_pid = self()
     stale_task_pid = owner_turn_pid()
@@ -1676,6 +1703,30 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTest do
           probe.("corr-native-probe-reject", 32, task_pid, :not_a_pid)
         ] do
       assert {:ok, ^base} = CodexResponsesSocket.handle_info(invalid_probe, base)
+    end
+
+    refute_received {:websocket_owner_output_commit_ack, _, _, _, _, _, _}
+  end
+
+  test "invalid commitment probes leave a completed public owner attempt closed" do
+    task_pid = self()
+
+    state =
+      public_turn_state(task_pid, %{
+        public_turn_owner_complete?: true,
+        websocket_owner_downstream: %{pid: self(), epoch: 22, correlation_id: "corr-probe", active_turn_reconnect?: false}
+      })
+
+    for {correlation, epoch, turn, owner} <- [
+          {"stale-correlation", 22, task_pid, self()},
+          {"corr-probe", 23, task_pid, self()},
+          {"corr-probe", 22, nil, self()},
+          {"corr-probe", 22, task_pid, :invalid_owner}
+        ] do
+      probe = {:websocket_owner_output_commit_probe, correlation, epoch, turn, make_ref(), owner, make_ref()}
+      assert {:ok, next} = CodexResponsesSocket.handle_info(probe, state)
+      assert next.public_turn_owner_complete?
+      assert next == state
     end
 
     refute_received {:websocket_owner_output_commit_ack, _, _, _, _, _, _}
