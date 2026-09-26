@@ -114,16 +114,22 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
 
     {pushes, state} =
       try do
-        assert {:ok, state} = CodexResponsesSocket.handle_in({processed, [opcode: :text]}, state)
-        assert_receive {:short_frame_remote_call, ^remote_node, :remote_submit_frame}, @detection_timeout_ms
-        drive_until_done(state)
+        Enum.reduce(1..2, {[], state}, fn _ack, {pushes, current_state} ->
+          assert {:ok, current_state} = CodexResponsesSocket.handle_in({processed, [opcode: :text]}, current_state)
+          assert_receive {:short_frame_remote_call, ^remote_node, :remote_submit_frame}, @detection_timeout_ms
+          {next_pushes, current_state} = drive_until_done(current_state)
+          {pushes ++ next_pushes, current_state}
+        end)
       after
         :ok = :sys.resume(owner_pid)
       end
 
-    assert [error_frame] = pushes
-    assert %{"status" => 502, "error" => %{"code" => "upstream_websocket_forward_failed"}} = CodexPooler.JSON.decode!(error_frame)
-    assert CodexPooler.JSON.decode!(error_frame)["error"]["message"] =~ "owner_forward_timeout"
+    assert length(pushes) == 2
+
+    for error_frame <- pushes do
+      assert %{"status" => 502, "error" => %{"code" => "upstream_websocket_forward_failed"}} = CodexPooler.JSON.decode!(error_frame)
+      assert CodexPooler.JSON.decode!(error_frame)["error"]["message"] =~ "owner_forward_timeout"
+    end
 
     # Ordered behind every call the stalled owner had queued.
     assert %{downstream: ^attached} = :sys.get_state(owner_pid)
@@ -133,16 +139,24 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
     assert Enum.any?(pushes, &(CodexPooler.JSON.decode!(&1)["id"] == "resp_remote_frame_timeout"))
     refute Enum.any?(pushes, &(CodexPooler.JSON.decode!(&1)["type"] == "error"))
 
+    # The owner deduplicates the same provider response acknowledgement, while
+    # each client operation still receives and records its own timeout.
     assert ["response.create", "response.processed", "response.create"] = Enum.map(FakeUpstream.requests(upstream), & &1.json["type"])
 
     # The client's 502 stays the only answer on the wire, and the ack the
     # provider still received is on record as a forward that timed out with an
     # unknown upstream delivery, not missing (findings#206 row 206-300).
-    assert [ack] = Repo.all(from request in Request, where: fragment("?->>'response_processed' = 'true'", request.request_metadata))
+    acks = Repo.all(from request in Request, where: fragment("?->>'response_processed' = 'true'", request.request_metadata))
+    assert length(acks) == 2
+    ids = Enum.map(acks, & &1.correlation_id)
+    assert length(Enum.uniq(ids)) == 2
+    assert "ws-remote-frame-timeout-processed" in ids
 
-    assert %Request{status: "failed", response_status_code: 502, last_error_code: "owner_forward_timeout", correlation_id: "ws-remote-frame-timeout-processed"} = ack
+    for ack <- acks do
+      assert %Request{status: "failed", response_status_code: 502, last_error_code: "owner_forward_timeout"} = ack
+      assert ack.request_metadata["response_processed_forward"] == %{"outcome" => "owner_forward_timeout", "upstream_delivery" => "unknown"}
+    end
 
-    assert ack.request_metadata["response_processed_forward"] == %{"outcome" => "owner_forward_timeout", "upstream_delivery" => "unknown"}
     assert :ok = CodexResponsesSocket.terminate(:closed, state)
   end
 

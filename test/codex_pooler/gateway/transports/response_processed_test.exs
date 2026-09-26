@@ -135,6 +135,24 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ResponseProcessedTest do
     assert :ok = FakeUpstream.verify!(upstream)
   end
 
+  test "repeated acknowledgements keep separate rows when their correlation id is reused", %{auth: auth} do
+    {session, upstream, ack_ref} = connected_session(3)
+    opts = options(%{upstream_websocket_session: session, request_id: "shared-socket-request"})
+
+    for frame <- [payload(), payload(), Map.put(payload(), "request_id", "shared-socket-request")] do
+      assert {:ok, %{websocket_messages: []}} = ResponseProcessed.handle_prepared(auth, frame, opts)
+      assert_ack_forwarded(upstream, ack_ref)
+    end
+
+    requests = Repo.all(Request)
+    ids = Enum.map(requests, & &1.correlation_id)
+    assert length(requests) == 3
+    assert length(Enum.uniq(ids)) == 3
+    assert "shared-socket-request" in ids
+    assert Enum.all?(requests, &(&1.status == "succeeded" and &1.response_status_code == 200))
+    assert :ok = FakeUpstream.verify!(upstream)
+  end
+
   describe "durable API-key authorization before forwarding" do
     for {invalidation, expected_code} <- [
           deleted: :api_key_missing,

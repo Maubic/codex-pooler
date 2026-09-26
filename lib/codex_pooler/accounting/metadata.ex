@@ -112,7 +112,7 @@ defmodule CodexPooler.Accounting.Metadata do
           upstream_account_plan_label: metadata_identity_plan_label(attrs),
           upstream_account_plan_family: metadata_identity_plan_family(attrs)
         }
-        |> Repo.insert!()
+        |> insert_metadata_request!()
 
       RequestLogFacts.record_request_created!(request)
 
@@ -124,6 +124,21 @@ defmodule CodexPooler.Accounting.Metadata do
 
   def record_metadata_request(_auth, _attrs),
     do: {:error, accounting_error(:invalid_request, "authenticated pool and api key are required")}
+
+  # Metadata rows record separate operations, not idempotent turn claims. A
+  # websocket handshake or caller correlation can name several acknowledgements.
+  # Keep the original row intact and assign only the colliding operation a new id.
+  defp insert_metadata_request!(%Request{} = request) do
+    changeset =
+      request
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.unique_constraint(:correlation_id, name: :requests_correlation_id_uq)
+
+    case Repo.insert(changeset, mode: :savepoint) do
+      {:ok, inserted} -> inserted
+      {:error, %Ecto.Changeset{}} -> Repo.insert!(%{request | correlation_id: Ecto.UUID.generate()})
+    end
+  end
 
   @spec record_upstream_identity_metadata_request(UpstreamIdentity.t(), map()) :: request_result()
   def record_upstream_identity_metadata_request(identity, attrs \\ %{})
