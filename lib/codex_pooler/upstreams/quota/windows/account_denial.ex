@@ -1,6 +1,6 @@
 defmodule CodexPooler.Upstreams.Quota.Windows.AccountDenial do
   @moduledoc """
-  Reads a workspace-level provider denial out of a routing quota snapshot.
+  Reads an account-level provider denial out of a routing quota snapshot.
 
   The provider names why it refused a request in `x-codex-rate-limit-reached-type`,
   which the header parser keeps on every window it records from that response.
@@ -11,15 +11,19 @@ defmodule CodexPooler.Upstreams.Quota.Windows.AccountDenial do
   limit whose percentage already says whether it is spent; but a window
   recorded from a provider usage-limit refusal (`rate_limit_error_code`
   `usage_limit_reached`/`usage_limit_exceeded`, set by the header parser when
-  the refusing `429` or wrapped error named it) denies the account too, whatever
-  its reached type: the provider refused the account until its reset, and an
+  the refusing `429` or wrapped error named it) on an account or feature window
+  denies the account too, whatever its reached type: the provider refused the account until its reset, and an
   exhausted-window reading alone could lose to a fresh `allowed` Usage API
   reading while the provider kept refusing (findings#206 row 206-594).
+
+  Model-scoped usage refusals do not deny unrelated models. Explicit workspace
+  markers still deny the account regardless of the window carrying them.
 
   A denial is in force from the observation that carried it until the earliest
   reset that observation reported, and it ends earlier when a later
   provider-attested `available` reading for the identity's current credential
-  epoch arrives (the next usage poll after the workspace regains credits). An
+  epoch is still fresh (the next usage poll after the workspace regains credits).
+  Once that reading expires it no longer overrides an unexpired denial. An
   observation without a reset instant holds only while it is fresh.
 
   This is deliberately not part of `Windows.Routing` eligibility: that answer
@@ -67,8 +71,8 @@ defmodule CodexPooler.Upstreams.Quota.Windows.AccountDenial do
 
   def active(_snapshot), do: nil
 
-  defp account_denial_window?(%AccountQuotaWindow{metadata: %{"rate_limit_error_code" => code}, observed_at: %DateTime{}})
-       when code in @usage_limit_refusal_codes,
+  defp account_denial_window?(%AccountQuotaWindow{quota_scope: scope, metadata: %{"rate_limit_error_code" => code}, observed_at: %DateTime{}})
+       when scope in ["account", "feature"] and code in @usage_limit_refusal_codes,
        do: true
 
   defp account_denial_window?(%AccountQuotaWindow{metadata: %{"rate_limit_reached_type" => type}, observed_at: %DateTime{}}),
@@ -77,13 +81,14 @@ defmodule CodexPooler.Upstreams.Quota.Windows.AccountDenial do
   defp account_denial_window?(%AccountQuotaWindow{}), do: false
 
   # A later provider-attested `available` reading for the current credential
-  # epoch is newer evidence about the same account and ends the denial.
+  # epoch is newer evidence about the same account while it remains fresh.
   defp superseded?(%AccountQuotaWindow{observed_at: denied_at}, %RoutingQuotaSnapshot{
-         availability: %AccountAvailabilityStore.Snapshot{state: :available, credential_epoch: epoch, observed_at: available_at},
+         availability: %AccountAvailabilityStore.Snapshot{observed_at: available_at} = availability,
          credential_epoch: epoch,
          as_of: as_of
        }) do
-    DateTime.compare(available_at, denied_at) == :gt and DateTime.compare(available_at, as_of) != :gt
+    AccountAvailabilityStore.available?(availability, epoch, as_of) and
+      DateTime.compare(available_at, denied_at) == :gt and DateTime.compare(available_at, as_of) != :gt
   end
 
   defp superseded?(%AccountQuotaWindow{}, %RoutingQuotaSnapshot{}), do: false

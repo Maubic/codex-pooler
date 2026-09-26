@@ -184,6 +184,16 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.Quota do
     end
   end
 
+  @doc "Whether this candidate is admitted specifically by its confirmed reset lifecycle."
+  @spec reset_probe_candidate?(Model.t(), CandidateEligibility.candidate(), RouteState.t()) :: boolean()
+  def reset_probe_candidate?(%Model{} = model, {_assignment, identity}, %RouteState{} = route_state) do
+    case routing_quota_eligibility(identity, model, route_state) do
+      %{routing_state: state} when state in @routable_routing_states -> false
+      %{exclusions: [_ | _] = reasons} -> reset_probe_routeable?(identity, reasons)
+      _other -> false
+    end
+  end
+
   @spec windowless_candidate?(
           Model.t(),
           CodexPooler.Gateway.Routing.CandidateEligibility.candidate(),

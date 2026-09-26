@@ -12,14 +12,16 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.AccountDenial do
 
   It runs after quota eligibility and after the saved-reset decisions, so it
   never changes when an automatic redemption fires or which candidate a
-  guarded reset probe claims: a route whose quota decision admitted a reset
-  probe is left untouched. The exclusion carries `reason_codes`
+  guarded reset probe claims: only the candidate bound to that probe or
+  admitted by its confirmed reset lifecycle is exempt. Siblings are still filtered.
+  The exclusion carries `reason_codes`
   `["exhausted", "provider_denied"]`, so the public answer is the ordinary
   `quota_exhausted` one with the provider's reset instant, while the
   saved-reset scans, which require exhaustion-only account reasons, can never
   read it as a weekly exhaustion.
   """
 
+  alias CodexPooler.Gateway.Payloads.RequestOptions.ResetProbe
   alias CodexPooler.Gateway.Routing.CandidateEligibility.FilterInput
   alias CodexPooler.Gateway.Routing.CandidateEligibility.Quota
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
@@ -29,17 +31,13 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.AccountDenial do
 
   @spec filter_candidates(FilterInput.t(), [FilterInput.candidate()], map() | nil, RouteState.t()) ::
           {:ok, [FilterInput.candidate()]} | {:error, map()}
-  def filter_candidates(%FilterInput{} = input, candidates, quota_decision, %RouteState{} = route_state)
+  def filter_candidates(%FilterInput{} = input, candidates, _quota_decision, %RouteState{} = route_state)
       when is_list(candidates) do
-    if reset_probe_route?(quota_decision, route_state) do
-      {:ok, candidates}
-    else
-      {kept, exclusions} = Enum.reduce(candidates, {[], []}, &classify_candidate(&1, &2, route_state))
+    {kept, exclusions} = Enum.reduce(candidates, {[], []}, &classify_candidate(&1, &2, input.model, route_state))
 
-      case {Enum.reverse(kept), Enum.reverse(exclusions)} do
-        {[], [_ | _] = exclusions} -> Quota.quota_unavailable_error(input, quota_dropped_exclusions(input, candidates, route_state) ++ exclusions, false)
-        {kept, _exclusions} -> {:ok, kept}
-      end
+    case {Enum.reverse(kept), Enum.reverse(exclusions)} do
+      {[], [_ | _] = exclusions} -> Quota.quota_unavailable_error(input, quota_dropped_exclusions(input, candidates, route_state) ++ exclusions, false)
+      {kept, _exclusions} -> {:ok, kept}
     end
   end
 
@@ -65,20 +63,24 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.AccountDenial do
     Quota.candidate_exclusions(model, dropped, route_state)
   end
 
-  defp classify_candidate({assignment, identity} = candidate, {kept, exclusions}, %RouteState{} = route_state) do
+  defp classify_candidate({assignment, identity} = candidate, {kept, exclusions}, model, %RouteState{} = route_state) do
     case QuotaWindows.routing_account_denial(Map.get(route_state.quota_snapshots, identity.id)) do
-      nil -> {[candidate | kept], exclusions}
-      denial -> {kept, [exclusion(assignment, identity, denial) | exclusions]}
+      nil ->
+        {[candidate | kept], exclusions}
+
+      denial ->
+        if bound_probe_candidate?(candidate, route_state.reset_probe) or Quota.reset_probe_candidate?(model, candidate, route_state) do
+          {[candidate | kept], exclusions}
+        else
+          {kept, [exclusion(assignment, identity, denial) | exclusions]}
+        end
     end
   end
 
-  defp reset_probe_route?(_quota_decision, %RouteState{reset_probe: reset_probe}) when not is_nil(reset_probe), do: true
+  defp bound_probe_candidate?({assignment, identity}, %ResetProbe{} = probe),
+    do: ResetProbe.bound?(probe) and probe.pool_upstream_assignment_id == assignment.id and probe.upstream_identity_id == identity.id
 
-  defp reset_probe_route?(%{"reset_probe_candidate_count" => count}, _route_state) when is_integer(count) and count > 0,
-    do: true
-
-  defp reset_probe_route?(%{"routing_state" => "reset_probe"}, _route_state), do: true
-  defp reset_probe_route?(_quota_decision, _route_state), do: false
+  defp bound_probe_candidate?(_candidate, _probe), do: false
 
   defp exclusion(assignment, identity, denial) do
     %{

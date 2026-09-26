@@ -3,6 +3,8 @@ defmodule CodexPooler.Gateway.Runtime.WebsocketQuotaDenialTest do
 
   import CodexPooler.PoolerFixtures
 
+  alias CodexPooler.Gateway.Routing.CandidateEligibility.AccountDenial
+  alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
   alias CodexPooler.Gateway.Runtime.Finalization.SideEffects
   alias CodexPooler.Repo
@@ -96,6 +98,9 @@ defmodule CodexPooler.Gateway.Runtime.WebsocketQuotaDenialTest do
              })
 
     refute eligibility(context).eligible?
+    denied_snapshot = Windows.load_routing_quota_snapshots([context.identity.id], DateTime.utc_now())
+    denied_state = %RouteState{visible_model: nil, quota_snapshots: denied_snapshot}
+    assert AccountDenial.candidate_exclusion({context.assignment, context.identity}, denied_state)
     recovered_at = DateTime.add(reset_at, 1, :second)
 
     recovered_headers =
@@ -119,6 +124,8 @@ defmodule CodexPooler.Gateway.Runtime.WebsocketQuotaDenialTest do
       |> Map.fetch!(context.identity.id)
 
     assert Windows.routing_quota_eligibility_from_snapshot(snapshot).eligible?
+    recovered_state = %RouteState{visible_model: nil, quota_snapshots: %{context.identity.id => snapshot}}
+    refute AccountDenial.candidate_exclusion({context.assignment, context.identity}, recovered_state)
   end
 
   test "denial does not attach to a non-exhausted window in the same observation" do
@@ -223,7 +230,7 @@ defmodule CodexPooler.Gateway.Runtime.WebsocketQuotaDenialTest do
   end
 
   defp permitted_context do
-    %{identity: identity} = active_upstream_assignment_fixture()
+    %{identity: identity, assignment: assignment} = active_upstream_assignment_fixture()
     observed_at = DateTime.add(DateTime.utc_now(), -1, :second)
     reset_at = observed_at |> DateTime.add(3600, :second) |> DateTime.truncate(:second)
 
@@ -260,7 +267,7 @@ defmodule CodexPooler.Gateway.Runtime.WebsocketQuotaDenialTest do
       "x-codex-primary-reset-at" => Integer.to_string(DateTime.to_unix(reset_at))
     }
 
-    {%SelectedCandidateContext{identity: identity, model: %{upstream_model_id: "sample-model"}}, headers, reset_at}
+    {%SelectedCandidateContext{identity: identity, assignment: assignment, model: %{upstream_model_id: "sample-model"}}, headers, reset_at}
   end
 
   defp eligibility(context) do
