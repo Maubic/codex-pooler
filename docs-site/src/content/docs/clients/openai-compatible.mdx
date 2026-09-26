@@ -482,7 +482,9 @@ transcription quality, model discovery, or general Audio API coverage.
 
 A successful transcription response must contain a string `text` field. An empty string is valid for silence; missing or invalid text and error objects are reported as upstream failures rather than successful transcriptions.
 
-`POST /v1/responses` lifts system and developer input-message text into top-level `instructions` before dispatching to Codex-compatible work. Streaming `/v1/responses` and `/v1/chat/completions` return early upstream terminal errors as the first public SSE event or data chunk, without synthetic assistant/success prefixes. Non-streaming failures remain OpenAI-shaped JSON errors.
+`POST /v1/responses` lifts system and developer input-message text into top-level `instructions` before dispatching to Codex-compatible work. When the provider supplies only a failed, incomplete, or error terminal, the public SSE adapter adds a `response.created` lifecycle prefix so SDK accumulators can initialize; this prefix does not imply success. Chat Completions streams still return early upstream errors without a synthetic assistant prefix. Non-streaming failures remain OpenAI-shaped JSON errors.
+
+Relayed validation errors name a client input index only when its original position remains known. If coercion removed or expanded items, the public parameter uses `input[]` rather than an incorrect index. Tool-output image `detail` is validated for both list outputs and object outputs containing a `content` list.
 
 Streaming `/v1/responses` clients must also handle a terminal `type: "error"` SSE event whose flat fields and nested `error` object both carry the sanitized `server_error` code.
 
@@ -736,6 +738,8 @@ Within `POST /v1/responses`, OpenAI Responses remote MCP tool definitions are un
 The operator MCP endpoint is rooted at `/mcp`, not under `/v1`. It uses operator-owned MCP bearer tokens and returns metadata only.
 
 The root `/mcp` endpoint is not a `/v1/responses` remote MCP bridge and is not invoked by Responses `tools[type=mcp]` definitions.
+
+Request-log and audit-log tools accept offsets from 0 through 10,000. Refine the filters to inspect more distant history. Their `totalExact` field distinguishes an exact total from a bounded lower estimate; `nextOffset` becomes null at the traversal cap. Audit outcomes are `success` or `failure`. Clients that cache tool schemas should refresh the tool list after upgrading.
 
 ```text
 MCP URL:
