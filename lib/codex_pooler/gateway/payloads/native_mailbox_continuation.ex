@@ -111,7 +111,8 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
 
   defp prefix_witnesses(semantic_key, payload) do
     frame = Map.put(payload, "type", "response.create")
-    marked = Map.put(frame, "client_metadata", Map.put(Map.get(frame, "client_metadata") || %{}, @lite_marker, "true"))
+    metadata = Map.get(frame, "client_metadata")
+    marked = if is_map(metadata) or is_nil(metadata), do: Map.put(frame, "client_metadata", Map.put(metadata || %{}, @lite_marker, "true")), else: frame
 
     with {:ok, http} <- WebsocketTurnIdentity.http_resume_input_digest(semantic_key, payload["input"]),
          {:ok, plain} <- WebsocketTurnIdentity.replay_claim_digest(semantic_key, frame),

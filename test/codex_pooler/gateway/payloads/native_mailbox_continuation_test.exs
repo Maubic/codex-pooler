@@ -90,6 +90,21 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuationTest do
     assert witness(update_in(candidate, ["client_metadata", "x-codex-turn-metadata"], &Map.delete(&1, "agent_name"))).mailbox == []
   end
 
+  test "header metadata with non-object client metadata fails closed without raising" do
+    original = payload()
+    output = reasoning("first")
+    candidate = append(original, [output, mailbox("first")])
+    metadata = candidate["client_metadata"]["x-codex-turn-metadata"]
+    options = options(forwarded_headers: [{"x-codex-turn-metadata", CodexPooler.JSON.encode!(metadata)}])
+    {turn, request, attempt} = predecessor(original, output, "http_sse")
+
+    for invalid <- ["not-a-map", 42, [], true] do
+      assert witness(Map.put(candidate, "client_metadata", invalid), options).mailbox == []
+    end
+
+    assert ClientRetry.verified_mailbox_continuation?(turn, request, attempt, witness(Map.put(candidate, "client_metadata", nil), options), nil)
+  end
+
   test "candidate work is bounded by mailbox runs independently of mailbox batch size" do
     many_mail = Enum.map(1..20, &mailbox(Integer.to_string(&1)))
     assert length(witness(append(payload(), [reasoning("first") | many_mail])).mailbox) == 1
