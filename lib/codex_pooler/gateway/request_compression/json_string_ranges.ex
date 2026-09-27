@@ -38,10 +38,11 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
     limits = %{
       size: byte_size(json),
       max_depth: Keyword.get(opts, :max_depth, @default_max_depth),
-      max_path_length: Keyword.get(opts, :max_path_length, :infinity)
+      max_path_length: Keyword.get(opts, :max_path_length, :infinity),
+      string_stops: :binary.compile_pattern([<<?">>, <<?\\>> | for(byte <- 0..31, do: <<byte>>)])
     }
 
-    with true <- String.valid?(json),
+    with true <- valid_utf8?(json),
          offset = skip_whitespace(json, 0, limits.size),
          {:ok, offset, ranges} <- parse_value(json, offset, {[], 0}, [], limits),
          true <- skip_whitespace(json, offset, limits.size) == limits.size do
@@ -115,7 +116,7 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
   defp parse_value_at(_byte, _json, _offset, _path, _ranges, _limits), do: :error
 
   defp parse_string_value(json, offset, {segments, depth}, ranges, limits) do
-    with {:ok, byte_start, byte_end} <- parse_string(json, offset, limits.size) do
+    with {:ok, byte_start, byte_end} <- parse_string(json, offset, limits) do
       if depth <= limits.max_path_length do
         range = %{
           path: Enum.reverse(segments),
@@ -142,7 +143,7 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
   end
 
   defp parse_object_members(json, offset, {segments, depth} = path, ranges, limits) do
-    with {:ok, key_start, key_end} <- parse_string(json, offset, limits.size),
+    with {:ok, key_start, key_end} <- parse_string(json, offset, limits),
          {:ok, key} <- decode_string_range(json, key_start, key_end),
          after_key = skip_whitespace(json, key_end, limits.size),
          ?: <- byte_at(json, after_key, limits.size),
@@ -282,33 +283,33 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
     end
   end
 
-  defp parse_string(json, offset, size) do
-    case byte_at(json, offset, size) do
-      ?" -> parse_string_bytes(json, offset + 1, size, offset)
+  defp parse_string(json, offset, limits) do
+    case byte_at(json, offset, limits.size) do
+      ?" -> parse_string_bytes(json, offset + 1, limits, offset)
       _byte -> :error
     end
   end
 
-  defp parse_string_bytes(json, offset, size, byte_start) when offset < size do
-    case :binary.at(json, offset) do
-      ?" ->
-        {:ok, byte_start, offset + 1}
-
-      ?\\ ->
-        case parse_escape(json, offset + 1, size) do
-          {:ok, offset} -> parse_string_bytes(json, offset, size, byte_start)
-          :error -> :error
-        end
-
-      byte when byte < 0x20 ->
-        :error
-
-      _byte ->
-        parse_string_bytes(json, offset + 1, size, byte_start)
+  # Jump straight to the next quote, backslash, or control byte instead of
+  # reading the string byte by byte: a long value (a base64 image) costs one
+  # native scan.
+  defp parse_string_bytes(json, offset, limits, byte_start) do
+    case :binary.match(json, limits.string_stops, scope: {offset, limits.size - offset}) do
+      {stop, 1} -> parse_string_stop(:binary.at(json, stop), json, stop, limits, byte_start)
+      :nomatch -> :error
     end
   end
 
-  defp parse_string_bytes(_json, _offset, _size, _byte_start), do: :error
+  defp parse_string_stop(?", _json, stop, _limits, byte_start), do: {:ok, byte_start, stop + 1}
+
+  defp parse_string_stop(?\\, json, stop, limits, byte_start) do
+    case parse_escape(json, stop + 1, limits.size) do
+      {:ok, offset} -> parse_string_bytes(json, offset, limits, byte_start)
+      :error -> :error
+    end
+  end
+
+  defp parse_string_stop(_control_byte, _json, _stop, _limits, _byte_start), do: :error
 
   defp parse_escape(json, offset, size) when offset < size do
     case :binary.at(json, offset) do
@@ -443,6 +444,8 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
     suffix = binary_part(json, cursor, byte_size(json) - cursor)
     IO.iodata_to_binary(Enum.reverse([suffix | parts]))
   end
+
+  defp valid_utf8?(json), do: is_binary(:unicode.characters_to_binary(json))
 
   defp skip_whitespace(json, offset, size) when offset < size do
     case :binary.at(json, offset) do

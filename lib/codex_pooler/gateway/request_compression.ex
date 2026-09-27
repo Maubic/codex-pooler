@@ -22,9 +22,12 @@ defmodule CodexPooler.Gateway.RequestCompression do
   }
   @lossy_strategies MapSet.new([:diff, :log_output, :search_results])
 
-  # Compression is opportunistic: bodies above 1 MiB skip before JSON scanning.
-  @max_body_bytes 1_048_576
-  # At most 50 planned output candidates are processed for one dispatch.
+  # Bodies above the default ingress ceiling (64 MiB decompressed) skip before
+  # JSON scanning. Below it the scan is linear, string contents are skipped
+  # natively, and a long history keeps compressing the outputs it started with.
+  @max_body_bytes 67_108_864
+  # The first 50 candidates in body order are processed; later ones are sent
+  # unchanged, so crossing the cap never reverts earlier rewrites.
   @max_candidate_count 50
   # Deterministic cap on the strategy and tokenizer work of one dispatch, in
   # bytes read (see WorkBudget). Ordinary outputs stay far below it; it bounds
@@ -94,10 +97,13 @@ defmodule CodexPooler.Gateway.RequestCompression do
   defp compress_payload(upstream_payload, context, request_options, metadata, started)
        when is_binary(upstream_payload) do
     with {:ok, opts} <- strategy_opts(context, request_options),
-         {:ok, plan} <- ResponsesLiveZone.plan(upstream_payload, opts) do
-      metadata = put_protected_tool_output_skips(metadata, plan)
+         {:ok, plan} <- ResponsesLiveZone.plan(upstream_payload, Keyword.put(opts, :max_candidates, @max_candidate_count)) do
+      metadata =
+        metadata
+        |> put_protected_tool_output_skips(plan)
+        |> put_deferred_candidates(plan)
 
-      maybe_rewrite_candidates(
+      rewrite_candidates(
         upstream_payload,
         plan.candidates,
         opts,
@@ -156,40 +162,6 @@ defmodule CodexPooler.Gateway.RequestCompression do
       })
 
     {upstream_payload, put_compression_metadata(request_options, metadata, :skipped, reason, started)}
-  end
-
-  defp maybe_rewrite_candidates(
-         upstream_payload,
-         candidates,
-         opts,
-         context,
-         request_options,
-         metadata,
-         started
-       ) do
-    candidate_count = length(candidates)
-
-    if candidate_count > @max_candidate_count do
-      skip_over_limit(
-        upstream_payload,
-        request_options,
-        metadata,
-        :over_candidate_limit,
-        candidate_count,
-        candidate_count,
-        started
-      )
-    else
-      rewrite_candidates(
-        upstream_payload,
-        candidates,
-        opts,
-        context,
-        request_options,
-        metadata,
-        started
-      )
-    end
   end
 
   defp rewrite_candidates(
@@ -338,12 +310,14 @@ defmodule CodexPooler.Gateway.RequestCompression do
     reason = no_rewrite_reason(candidates, skip_reasons, metadata)
     status = no_rewrite_status(reason)
 
+    candidate_count = length(candidates) + deferred_candidate_count(metadata)
+
     metadata =
       metadata
       |> Map.merge(%{
-        candidate_count: length(candidates),
+        candidate_count: candidate_count,
         compressed_count: 0,
-        skipped_count: length(candidates),
+        skipped_count: candidate_count,
         original_bytes: byte_size(upstream_payload),
         compressed_bytes: byte_size(upstream_payload)
       })
@@ -361,11 +335,13 @@ defmodule CodexPooler.Gateway.RequestCompression do
          strategy_metadata,
          skip_reasons
        ) do
+    candidate_count = length(candidates) + deferred_candidate_count(metadata)
+
     metadata
     |> Map.merge(%{
-      candidate_count: length(candidates),
+      candidate_count: candidate_count,
       compressed_count: length(strategy_metadata),
-      skipped_count: length(candidates) - length(strategy_metadata),
+      skipped_count: candidate_count - length(strategy_metadata),
       original_bytes: byte_size(upstream_payload),
       compressed_bytes: byte_size(compressed_payload)
     })
@@ -415,6 +391,14 @@ defmodule CodexPooler.Gateway.RequestCompression do
   end
 
   defp put_protected_tool_output_skips(metadata, _plan), do: metadata
+
+  defp put_deferred_candidates(metadata, %{deferred_candidate_count: count}) when is_integer(count) and count > 0 do
+    Map.put(metadata, :candidate_limit_skipped_count, count)
+  end
+
+  defp put_deferred_candidates(metadata, _plan), do: metadata
+
+  defp deferred_candidate_count(metadata), do: Map.get(metadata, :candidate_limit_skipped_count, 0)
 
   defp put_skip_summary(metadata, skip_reasons) do
     metadata

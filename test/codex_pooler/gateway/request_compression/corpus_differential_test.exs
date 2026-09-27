@@ -26,7 +26,9 @@ defmodule CodexPooler.Gateway.RequestCompression.CorpusDifferentialTest do
     json_document: {"f465332536042e4107919c5c2bfda0f08984ca7d60889de32267c92fe8abe6a5", "d3d23894a6c513a25cd4a2a9eb64004da6042d100594be4b70144aa6355347eb"},
     mixed_replacement_order: {"69422c6021cf1c2f278eacdb3fdff2a2e1f38b78705ef16734e8f5dbb393f41b", "3c2cb2de9802d505a9d8701d686c4ae74b9ea75122587db352698e9f25602fbe"},
     one_mib_boundary: {"ea465b954650b2651ebab7426b9bd2de66b55145e72d2e4d8afbb4fd7fa336eb", "205f74debd7dcfb752d0f1ed7778bb82bbf3219e7041f45ec04211e9607bf6cf"},
-    over_candidate_boundary: {"200a101b06b6fa87966412579c629fdf5a51e904b7f45978cf95c3d012c0a31f", "bfdec4cb7d930d3da6149d454971b5b3ac5ee9fc45334d8ebd7ea5d1a30b1427"}
+    # Same output; 51 candidates no longer skip the whole request: the first 50
+    # are processed (none of these shrink) and the metadata counts the 51st.
+    over_candidate_boundary: {"200a101b06b6fa87966412579c629fdf5a51e904b7f45978cf95c3d012c0a31f", "75bd28dfc8ca3fd37e4b4c0d7fddff3858dc95af71007affe2da7db1503b4a8c"}
   }
 
   setup_all do

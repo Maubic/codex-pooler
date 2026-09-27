@@ -14,8 +14,9 @@ defmodule CodexPooler.Gateway.RequestCompression.PerformanceTest do
 
   # Keep these test constants in sync with the operational guardrails in
   # CodexPooler.Gateway.RequestCompression.
-  @max_body_bytes 1_048_576
+  @max_body_bytes 67_108_864
   @max_candidate_count 50
+  @large_body_bytes 1_048_576
   @local_budget_ms 500
   @supported_model "gpt-4o"
 
@@ -50,7 +51,7 @@ defmodule CodexPooler.Gateway.RequestCompression.PerformanceTest do
       assert finite_elapsed_ms?(compressed_options.runtime.payload_compression)
     end
 
-    test "skips deterministically when candidate count exceeds the compression limit" do
+    test "processes the first candidates and counts the rest when the count exceeds the cap" do
       over_candidate_count = @max_candidate_count + 1
       body = encode_request(candidate_items(over_candidate_count))
       {context, request_options} = request_context()
@@ -61,11 +62,12 @@ defmodule CodexPooler.Gateway.RequestCompression.PerformanceTest do
       assert %{
                "enabled" => true,
                "attempted" => true,
-               "status" => "skipped",
-               "reason" => "over_candidate_limit",
+               "status" => "no_change",
+               "reason" => "no_rewrites",
                "candidate_count" => ^over_candidate_count,
                "compressed_count" => 0,
                "skipped_count" => ^over_candidate_count,
+               "candidate_limit_skipped_count" => 1,
                "original_bytes" => original_bytes,
                "compressed_bytes" => compressed_bytes
              } = compressed_options.runtime.payload_compression
@@ -237,9 +239,9 @@ defmodule CodexPooler.Gateway.RequestCompression.PerformanceTest do
       }
 
       base_items = [rewrite_call_item, rewrite_output_item, skip_item]
-      body = encode_request(base_items ++ [near_limit_padding_item(@max_body_bytes, base_items)])
+      body = encode_request(base_items ++ [near_limit_padding_item(@large_body_bytes, base_items)])
 
-      assert byte_size(body) == @max_body_bytes
+      assert byte_size(body) == @large_body_bytes
 
       {context, request_options} = request_context()
       started = System.monotonic_time(:millisecond)
@@ -280,14 +282,14 @@ defmodule CodexPooler.Gateway.RequestCompression.PerformanceTest do
                "compressed_count" => 1,
                "skipped_count" => 1,
                "tokenizer_input_skipped_count" => 1,
-               "original_bytes" => @max_body_bytes,
+               "original_bytes" => @large_body_bytes,
                "compressed_bytes" => compressed_bytes,
                "original_tokens_lower_bound" => original_tokens_lower_bound,
                "compressed_tokens" => compressed_tokens
              } = compression
 
       assert compressed_bytes == byte_size(compressed_body)
-      assert compressed_bytes < @max_body_bytes
+      assert compressed_bytes < @large_body_bytes
       assert compression["token_count_mode"] == "bounded_original"
       assert compressed_tokens < original_tokens_lower_bound
       assert "log_output" in compression["strategies"]
@@ -300,6 +302,46 @@ defmodule CodexPooler.Gateway.RequestCompression.PerformanceTest do
       refute inspect(compression) =~ "SANITIZED_NEAR_LIMIT_SKIP_SENTINEL"
       refute inspect(compression) =~ "call_near_limit_completed_rewrite"
       refute inspect(compression) =~ "call_near_limit_tokenizer_skip"
+    end
+
+    test "keeps earlier rewrites byte-identical when the history grows past the candidate cap" do
+      output = ordinary_json_output()
+      {context, request_options} = request_context()
+      at_cap = encode_request(shell_output_items(List.duplicate(output, @max_candidate_count)))
+      past_cap = encode_request(shell_output_items(List.duplicate(output, @max_candidate_count + 1)))
+
+      assert {compressed_at_cap, _options} = RequestCompression.maybe_compress(at_cap, context, request_options)
+      assert {compressed_past_cap, compressed_options} = RequestCompression.maybe_compress(past_cap, context, request_options)
+
+      # The request that crosses the cap must keep the provider-cacheable prefix
+      # it already had: every earlier output byte-identical, the new one as sent.
+      assert String.starts_with?(compressed_past_cap, shared_input_prefix(compressed_at_cap))
+      assert Enum.all?(outputs(compressed_at_cap), &(&1 != output))
+      assert List.last(outputs(compressed_past_cap)) == output
+
+      assert %{
+               "status" => "compressed",
+               "candidate_count" => 51,
+               "compressed_count" => @max_candidate_count,
+               "skipped_count" => 1,
+               "candidate_limit_skipped_count" => 1
+             } = compressed_options.runtime.payload_compression
+    end
+
+    test "keeps earlier rewrites byte-identical when the body grows past one MiB" do
+      output = ordinary_json_output()
+      {context, request_options} = request_context()
+      history = shell_output_items(List.duplicate(output, 10))
+      padding = %{"type" => "message", "role" => "user", "content" => String.duplicate("p", 1_000_000)}
+      under = encode_request(history ++ [padding])
+      over = encode_request(history ++ [padding, padding])
+
+      assert byte_size(under) < 1_048_576 and byte_size(over) > 1_048_576
+      assert {compressed_under, _options} = RequestCompression.maybe_compress(under, context, request_options)
+      assert {compressed_over, compressed_options} = RequestCompression.maybe_compress(over, context, request_options)
+
+      assert String.starts_with?(compressed_over, shared_input_prefix(compressed_under))
+      assert %{"status" => "compressed", "compressed_count" => 10} = compressed_options.runtime.payload_compression
     end
 
     test "bounds per-dispatch work deterministically for outputs that are expensive to tokenize" do
@@ -364,7 +406,7 @@ defmodule CodexPooler.Gateway.RequestCompression.PerformanceTest do
     end
 
     test "handles a sanitized one MiB fixture within the local dispatch budget" do
-      body = fixed_size_request(@max_body_bytes, @max_candidate_count)
+      body = fixed_size_request(@large_body_bytes, @max_candidate_count)
       {context, request_options} = request_context()
 
       started = System.monotonic_time(:millisecond)
@@ -386,8 +428,8 @@ defmodule CodexPooler.Gateway.RequestCompression.PerformanceTest do
                "candidate_count" => @max_candidate_count,
                "compressed_count" => 0,
                "skipped_count" => @max_candidate_count,
-               "original_bytes" => @max_body_bytes,
-               "compressed_bytes" => @max_body_bytes
+               "original_bytes" => @large_body_bytes,
+               "compressed_bytes" => @large_body_bytes
              } = compression
 
       assert finite_elapsed_ms?(compression)
@@ -426,6 +468,18 @@ defmodule CodexPooler.Gateway.RequestCompression.PerformanceTest do
       exposed_model_id: @supported_model,
       upstream_model_id: @supported_model
     }
+  end
+
+  defp ordinary_json_output do
+    rows = Enum.map_join(1..40, ",\n", &~s(    {"id": #{&1}, "name": "synthetic row #{&1}", "ok": true, "tags": ["alpha", "beta"]}))
+    "{\n  \"rows\": [\n#{rows}\n  ]\n}"
+  end
+
+  # The serialized request up to the end of its input list: everything a longer
+  # history shares with it.
+  defp shared_input_prefix(body) do
+    {position, _length} = :binary.match(body, ~S(],"model":))
+    binary_part(body, 0, position)
   end
 
   defp shell_output_items(outputs) do

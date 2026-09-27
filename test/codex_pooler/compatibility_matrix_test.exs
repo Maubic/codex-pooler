@@ -1154,8 +1154,9 @@ defmodule CodexPooler.CompatibilityMatrixTest do
              }
 
       assert Map.fetch!(fixture, :guardrails) == %{
-               max_body_bytes: 1_048_576,
+               max_body_bytes: 67_108_864,
                max_candidates: 50,
+               candidate_cap: "first_candidates_in_body_order_rest_unchanged",
                max_nesting_depth: 512,
                work_budget: "deterministic_per_dispatch_remaining_candidates_unchanged",
                bounded_original_count: "stable_prefix_lower_bound"

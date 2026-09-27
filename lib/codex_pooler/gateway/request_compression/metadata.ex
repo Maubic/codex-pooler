@@ -55,6 +55,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Metadata do
     protected_tool_output_skipped_count
     lossy_unrecoverable_tool_output_skipped_count
     work_budget_skipped_count
+    candidate_limit_skipped_count
   ))
   @number_keys MapSet.new(~w(
     byte_savings_percent
@@ -93,6 +94,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Metadata do
     protected_tool_output_skipped_count
     lossy_unrecoverable_tool_output_skipped_count
     work_budget_skipped_count
+    candidate_limit_skipped_count
     tokenizer
     transport
   ))
@@ -142,6 +144,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Metadata do
         metadata_value(metadata, :lossy_unrecoverable_tool_output_skipped_count)
       )
       |> put_optional_integer("work_budget_skipped_count", metadata_value(metadata, :work_budget_skipped_count))
+      |> put_optional_integer("candidate_limit_skipped_count", metadata_value(metadata, :candidate_limit_skipped_count))
       |> put_byte_savings(metadata)
       |> put_token_savings(metadata)
       |> put_optional_strategies(metadata_value(metadata, :strategies))

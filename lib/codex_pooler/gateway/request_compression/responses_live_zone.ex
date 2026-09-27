@@ -72,6 +72,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
   @type plan :: %{
           required(:candidate_count) => non_neg_integer(),
           required(:candidates) => [Candidate.t()],
+          required(:deferred_candidate_count) => non_neg_integer(),
           required(:protected_tool_output_skipped_count) => non_neg_integer()
         }
   @type scan_context :: %{
@@ -93,6 +94,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
        %{
          candidate_count: length(details.candidates),
          candidates: details.candidates,
+         deferred_candidate_count: details.deferred_candidate_count,
          protected_tool_output_skipped_count: details.protected_tool_output_skipped_count
        }}
     end
@@ -115,7 +117,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
 
     with {:ok, ranges} <- JsonStringRanges.scan(json, max_path_length: @max_output_path_length),
          {:ok, payload} <- decode_json(json) do
-      {:ok, collect_candidates(json, payload, ranges, min_bytes, excluded_function_tool_names)}
+      {:ok, collect_candidates(json, payload, ranges, min_bytes, excluded_function_tool_names, max_candidates(opts))}
     end
   end
 
@@ -133,7 +135,8 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
          %{"input" => input} = payload,
          ranges,
          min_bytes,
-         excluded_function_tool_names
+         excluded_function_tool_names,
+         max_candidates
        )
        when is_list(input) do
     range_by_path = Map.new(ranges, &{&1.path, &1})
@@ -155,27 +158,35 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
       min_bytes: min_bytes
     }
 
-    candidates =
+    # Candidates are taken in body order and only the first `max_candidates`
+    # are detected and processed. Later ones stay unchanged, so a growing
+    # history never reverts the rewrites of the outputs it already had.
+    {processed, deferred} =
       items
-      |> Enum.reduce([], fn {item, path}, candidates ->
-        case candidate(context, item, path) do
-          {:ok, candidate} -> [candidate | candidates]
-          :skip -> candidates
+      |> Enum.reduce([], fn {item, path}, located ->
+        case located_output(context, item, path) do
+          {:ok, output} -> [output | located]
+          :skip -> located
         end
       end)
       |> Enum.sort_by(&{&1.byte_start, &1.byte_end, &1.output_path})
+      |> split_at_limit(max_candidates)
 
     %{
-      candidates: candidates,
+      candidates: Enum.map(processed, &detected_candidate(context, &1)),
+      deferred_candidate_count: length(deferred),
       protected_tool_output_skipped_count: protected_tool_output_skipped_count(context, items)
     }
   end
 
-  defp collect_candidates(_json, _payload, _ranges, _min_bytes, _excluded_function_tool_names),
-    do: %{candidates: [], protected_tool_output_skipped_count: 0}
+  defp collect_candidates(_json, _payload, _ranges, _min_bytes, _excluded_function_tool_names, _max_candidates),
+    do: %{candidates: [], deferred_candidate_count: 0, protected_tool_output_skipped_count: 0}
 
-  @spec candidate(scan_context(), map(), JsonStringRanges.path()) :: {:ok, Candidate.t()} | :skip
-  defp candidate(context, item, path) do
+  defp split_at_limit(located, :infinity), do: {located, []}
+  defp split_at_limit(located, max_candidates), do: Enum.split(located, max_candidates)
+
+  @spec located_output(scan_context(), map(), JsonStringRanges.path()) :: {:ok, map()} | :skip
+  defp located_output(context, item, path) do
     with item_type when is_binary(item_type) <- Map.get(item, "type"),
          true <- supported_output_item_type?(item_type),
          false <- protected_tool_output?(item, context),
@@ -184,24 +195,36 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
            range <- Map.get(context.range_by_path, output_path),
          {:ok, output} <- JsonStringRanges.decode_string(context.json, range),
          true <- byte_size(output) >= context.min_bytes do
-      decision = ContentDetector.detect(output, command: command_provenance(item, context.command_owners))
-
       {:ok,
-       %Candidate{
+       %{
+         item: item,
          item_type: item_type,
          output_path: output_path,
          byte_start: byte_start,
          byte_end: byte_end,
          encoded_byte_size: encoded_byte_size,
-         output_byte_size: byte_size(output),
-         content_kind: decision.kind,
-         content_confidence: decision.confidence,
-         compressible: decision.compressible,
-         strategy: decision.strategy
+         output: output
        }}
     else
       _not_candidate -> :skip
     end
+  end
+
+  defp detected_candidate(context, located) do
+    decision = ContentDetector.detect(located.output, command: command_provenance(located.item, context.command_owners))
+
+    %Candidate{
+      item_type: located.item_type,
+      output_path: located.output_path,
+      byte_start: located.byte_start,
+      byte_end: located.byte_end,
+      encoded_byte_size: located.encoded_byte_size,
+      output_byte_size: byte_size(located.output),
+      content_kind: decision.kind,
+      content_confidence: decision.confidence,
+      compressible: decision.compressible,
+      strategy: decision.strategy
+    }
   end
 
   defp call_id_sets(items, excluded_function_tool_names, schema_bound_tool_names) do
@@ -507,6 +530,13 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
   end
 
   defp min_bytes(_opts), do: @default_min_bytes
+
+  defp max_candidates(opts) when is_list(opts), do: opts |> Keyword.get(:max_candidates) |> normalize_max_candidates()
+  defp max_candidates(opts) when is_map(opts), do: opts |> Map.get(:max_candidates) |> normalize_max_candidates()
+  defp max_candidates(_opts), do: :infinity
+
+  defp normalize_max_candidates(value) when is_integer(value) and value > 0, do: value
+  defp normalize_max_candidates(_value), do: :infinity
 
   defp normalize_min_bytes(value) when is_integer(value) and value >= 0, do: value
   defp normalize_min_bytes(_value), do: @default_min_bytes

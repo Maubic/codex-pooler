@@ -135,6 +135,19 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRangesTest do
       assert {:error, :invalid_json} = JsonStringRanges.scan(~S({"a":"shallow","b":{"c":[1,]}}), max_path_length: 1)
     end
 
+    test "skips long string contents without per-byte work" do
+      long_value = String.duplicate("QUJD", 1_000_000)
+      json = CodexPooler.JSON.encode!(%{"input" => [%{"type" => "message", "content" => long_value}], "model" => "gpt-4o"})
+      JsonStringRanges.scan(json)
+
+      {:reductions, before} = Process.info(self(), :reductions)
+      assert {:ok, _ranges} = JsonStringRanges.scan(json)
+      {:reductions, later} = Process.info(self(), :reductions)
+
+      # Reading the 4 MB string byte by byte cost about 12 million reductions.
+      assert later - before < 200_000
+    end
+
     test "builds paths only for the ranges it returns" do
       json = nested_schema(500)
 
