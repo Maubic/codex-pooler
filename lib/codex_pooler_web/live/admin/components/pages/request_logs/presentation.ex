@@ -7,6 +7,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
   alias CodexPoolerWeb.Admin.Components, as: AdminComponents
   alias CodexPoolerWeb.Admin.LogPagination
   alias CodexPoolerWeb.Admin.RequestLogFilterForm
+  alias CodexPoolerWeb.Admin.RequestLogsPresentation.Issues
   alias CodexPoolerWeb.Admin.RequestLogsPresentation.Metrics
   alias CodexPoolerWeb.Admin.RequestLogsPresentation.Usage
 
@@ -14,7 +15,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
     only: [
       format_api_key: 1,
       format_datetime: 2,
-      format_errors: 2,
       format_latency_title: 1,
       format_model_details_title: 1,
       format_model_name: 1,
@@ -24,7 +24,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
       format_record_id: 1,
       format_requested_tier_detail: 1,
       format_requested_reasoning_detail: 1,
-      format_served_model_detail: 1,
       format_route_latency: 1,
       format_route_metadata: 1,
       format_total: 1,
@@ -89,10 +88,10 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
         class="overflow-hidden rounded-box border border-base-300 bg-base-100"
       >
         <Usage.token_composition_legend />
-        <div class="lg:overflow-x-auto">
+        <div class="request-log-table-scroll lg:overflow-x-auto">
           <table
             data-ledger-dense
-            class="admin-request-explorer admin-ledger-table table table-sm admin-log-table font-sans lg:min-w-[58rem]"
+            class="admin-request-explorer admin-ledger-table table table-sm admin-log-table font-sans lg:min-w-[66rem]"
           >
             <%!-- The count is the footer's job; the caption repeats it only for
           assistive tech, which reads it before the rows. --%>
@@ -100,13 +99,14 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
               Request logs, {format_total(@request_logs.total)}{if Map.get(@request_logs, :total_exact?) == false,
                 do: " or more"} matching sanitized request logs
             </caption>
-            <%!-- Endpoint is the elastic column. The table's floor preserves the
-          six groups on desktop; below lg the same cells reflow as a ledger. --%>
+            <%!-- Model, attribution, issues and endpoint share spare width. The table's floor preserves the
+          seven groups on desktop; below lg the same cells reflow as a ledger. --%>
             <colgroup>
               <col class="request-log-time-column" />
               <col class="request-log-model-column" />
               <col class="request-log-attribution-column" />
               <col />
+              <col class="request-log-issues-column" />
               <col class="request-log-tokens-column" />
               <col class="request-log-cost-column" />
             </colgroup>
@@ -116,6 +116,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
                 <th scope="col" class="whitespace-nowrap">Model · Effort · Tier</th>
                 <th scope="col" class="whitespace-nowrap">Upstream · Pool · Key</th>
                 <th scope="col" class="whitespace-nowrap">Endpoint · Transport · Client</th>
+                <th scope="col" class="whitespace-nowrap">Errors · Warnings</th>
                 <th scope="col" class="whitespace-nowrap" title="Each bar shows this request's token composition; cache percentage is calculated over input tokens">Tokens · Cached</th>
                 <th scope="col" class="whitespace-nowrap text-right">Cost</th>
               </tr>
@@ -153,6 +154,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
                   <td class="min-w-0 align-middle max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-4 max-lg:sm:col-span-1 max-lg:sm:col-start-2 max-lg:sm:row-start-2">
                     <.request_log_route_cell request_log={request_log} prefix="request-log" />
                   </td>
+                  <Issues.request_log_issues_cell request_log={request_log} datetime_preferences={@datetime_preferences} prefix="request-log" />
                   <td class="align-middle max-lg:col-start-2 max-lg:row-start-1 max-lg:sm:col-start-3">
                     <Usage.request_log_token_lines request_log={request_log} prefix="request-log" />
                   </td>
@@ -160,10 +162,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
                     <Usage.request_log_cost_lines request_log={request_log} prefix="request-log" />
                   </td>
                 </tr>
-                <.request_log_failure_row
-                  request_log={request_log}
-                  datetime_preferences={@datetime_preferences}
-                />
               <% end %>
             </tbody>
           </table>
@@ -255,7 +253,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
         <span
           id={@plan_badge_id}
           data-role="plan-badge"
-          class="max-w-20 shrink-0 truncate whitespace-nowrap text-base-content/50"
+          class="max-w-[50%] shrink-0 truncate whitespace-nowrap text-base-content/50"
           title={"Upstream account plan: #{@plan_label}"}
         >
           <span :if={@account_named? && @plan_label != "—"} data-role="upstream-plan-separator" aria-hidden="true">·</span>{" "}<span data-role="plan-name" class={AdminBadges.plan_text_class(@request_log.upstream_account_plan_label || @request_log.upstream_account_plan_family)}>{@plan_label}</span>
@@ -287,63 +285,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
     case log.upstream_account_plan_label || log.upstream_account_plan_family do
       nil -> "—"
       label -> AdminBadges.plan_badge_label(label)
-    end
-  end
-
-  attr :request_log, :map, required: true
-  attr :datetime_preferences, :map, required: true
-
-  def request_log_failure_row(assigns) do
-    # format_errors/2 answers ["—"] when a request had none; the row exists only
-    # when something actually went wrong, so the placeholder is dropped here
-    # rather than printed under every healthy record.
-    errors =
-      assigns.request_log
-      |> format_errors(assigns.datetime_preferences)
-      |> Enum.reject(&(&1 == "—"))
-
-    assigns =
-      assigns
-      |> assign(:errors, Enum.take(errors, 2))
-      |> assign(:errors_title, Enum.join(errors, "; "))
-
-    ~H"""
-    <tr
-      :if={@errors != []}
-      id={"request-log-row-#{@request_log.id}-errors"}
-      data-role="request-log-failure"
-      data-tone={request_log_tone(@request_log.status)}
-      phx-click="open_request_log"
-      phx-value-request-id={@request_log.id}
-      class="cursor-pointer transition-colors group-hover/request-log:bg-base-200/80"
-    >
-      <td colspan="6" class="!border-t-0 !pt-0 align-top max-lg:col-span-2 max-lg:col-start-1 max-lg:sm:col-span-3">
-        <%!-- Failure evidence remains directly below its record, aligned with
-        the first column. The status icon and label already identify the outcome. --%>
-        <span
-          id={"request-log-#{@request_log.id}-errors"}
-          data-role="errors"
-          class={[
-            "flex h-5 min-w-0 items-center gap-1.5 truncate text-[0.72rem] leading-5",
-            failure_row_text(@request_log.status)
-          ]}
-          title={@errors_title}
-        >
-          <span :for={{error, index} <- Enum.with_index(@errors)} class="contents">
-            <span :if={index > 0} aria-hidden="true" class="shrink-0 opacity-40">·</span>
-            <span data-role="error-line" class="min-w-0 truncate">{error}</span>
-          </span>
-        </span>
-      </td>
-    </tr>
-    """
-  end
-
-  defp failure_row_text(status) do
-    case request_log_tone(status) do
-      "error" -> "text-error"
-      "warning" -> "text-warning"
-      _tone -> "text-base-content/65"
     end
   end
 
@@ -426,21 +367,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
           >
             model default
           </span>
-        </span>
-        <span
-          :if={format_served_model_detail(@request_log)}
-          id={"#{@prefix}-#{@request_log.id}-served-model"}
-          data-role="served-model"
-          class="inline-flex min-w-0 items-center gap-1 text-warning"
-          title={"Upstream declared model: #{@request_log.served_model}; differs from the model sent upstream"}
-          aria-label={"Upstream declared model: #{@request_log.served_model}; differs from the model sent upstream"}
-        >
-          <.icon name="hero-exclamation-triangle" class="size-3.5 shrink-0 text-error" />
-          <span class="truncate">{@request_log.served_model}</span>
-        </span>
-        <span :if={Map.get(@request_log, :model_conflict_attempts, []) != []} data-role="model-declaration-conflict" class="inline-flex shrink-0 text-warning" title={"The provider reported different model names during the same response on attempts #{Enum.join(@request_log.model_conflict_attempts, ", ")}"}>
-          <.icon name="hero-exclamation-triangle" class="size-3.5" />
-          <span class="sr-only">model name changed · attempts {Enum.join(@request_log.model_conflict_attempts, ", ")}</span>
         </span>
       </span>
       <span :if={@model_known?} data-role="model-context-line" class="min-w-0 truncate whitespace-nowrap pl-3.5 text-[11px] text-base-content/55">

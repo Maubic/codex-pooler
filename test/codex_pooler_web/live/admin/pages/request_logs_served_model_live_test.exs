@@ -50,11 +50,11 @@ defmodule CodexPoolerWeb.Admin.RequestLogsServedModelLiveTest do
 
     assert has_element?(
              view,
-             "#request-log-#{substituted.id}-model-details [data-role='model-identity-line'] > [data-role='served-model']",
+             "#request-log-row-#{substituted.id} [data-role='request-issues-cell'] [data-role='served-model']",
              "gpt-6-luna"
            )
 
-    assert has_element?(view, "#request-log-#{substituted.id}-served-model .hero-exclamation-triangle.text-error")
+    assert has_element?(view, "#request-log-#{substituted.id}-served-model.text-warning .hero-exclamation-triangle")
     assert has_element?(view, "#request-log-#{substituted.id}-served-model[aria-label*='Upstream declared model: gpt-6-luna']")
     assert has_element?(view, "#request-log-#{substituted.id}-model-details [data-role='model-identity-line'] > [data-role='model-name']", "gpt-6-astra")
     refute has_element?(view, "#request-log-#{substituted.id}-served-model", "served")
@@ -66,7 +66,50 @@ defmodule CodexPoolerWeb.Admin.RequestLogsServedModelLiveTest do
 
     refute has_element?(view, "#request-log-#{echoed.id}-served-model")
     refute has_element?(view, "#request-log-#{undeclared.id}-served-model")
+    assert has_element?(view, "#request-log-row-#{echoed.id} [data-role='no-request-issues']", "—")
+    refute has_element?(view, "#request-log-#{substituted.id}-model-details [data-role='served-model']")
     refute render(view) =~ @sensitive_marker
+  end
+
+  test "one issues cell contains all failure summaries and both model warnings", %{conn: conn, scope: scope} do
+    pool = create_pool!(scope, "combined-request-issues")
+
+    %{request: request} =
+      request_log_fixture(pool, %{
+        correlation_id: "req-combined-issues",
+        requested_model: "sample-model",
+        upstream_model_id: "sample-model",
+        served_model: "sample-alternative",
+        status: "failed",
+        response_status_code: 502,
+        last_error_code: "stream_incomplete",
+        network_error_code: "upstream_network_error",
+        request_metadata: %{"retryable_summary" => %{"code" => "upstream_status"}},
+        model_observation: %{"version" => 1, "coverage" => "full", "conflict" => true, "first_conflicting_model" => "sample-third-model", "terminal_status" => "failed"}
+      })
+
+    {:ok, view, _html} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}")
+    row = "#request-log-row-#{request.id}"
+    issues = "#{row} > td:nth-child(5)[data-role='request-issues-cell']"
+
+    for code <- ~w(stream_incomplete upstream_status upstream_network_error) do
+      assert has_element?(view, "#{issues} [data-role='error-line']", code)
+    end
+
+    assert view |> render() |> LazyHTML.from_fragment() |> LazyHTML.query("#{issues} [data-role='error-line'] .hero-exclamation-triangle.text-error") |> Enum.count() == 3
+
+    assert has_element?(view, "#{issues} [data-role='served-model']", "Model mismatch: sample-alternative")
+    assert has_element?(view, "#{issues} [data-role='model-declaration-conflict']", "model name changed · attempts 1")
+    assert has_element?(view, "#{row} > td:nth-child(4) [data-role='route']", "/backend-api/codex/responses")
+    assert has_element?(view, "#{row} > td:nth-child(6) [data-role='token-totals']", "3")
+    assert has_element?(view, "#{row} [data-role='status-text']", "Failed")
+    refute has_element?(view, "#{row}-errors")
+    refute has_element?(view, "#{row} [data-role='model-details'] [data-role='model-declaration-conflict']")
+    refute render(view) =~ @sensitive_marker
+
+    view |> element(row) |> render_click()
+    assert has_element?(view, "#request-log-detail-request-id", request.id)
+    assert has_element?(view, "#request-log-detail-attempt-1-model-conflict", "Model name changed within response")
   end
 
   test "drawer separates the requested, sent, and served models", %{conn: conn, scope: scope} do
@@ -115,23 +158,26 @@ defmodule CodexPoolerWeb.Admin.RequestLogsServedModelLiveTest do
 
     request =
       request_fixture(%{pool: pool, api_key: api_key}, %{
-        requested_model: "gpt-6-astra",
+        requested_model: Map.get(attrs, :requested_model, "gpt-6-astra"),
         endpoint: "/backend-api/codex/responses",
-        status: "succeeded",
+        status: Map.get(attrs, :status, "succeeded"),
         correlation_id: Map.fetch!(attrs, :correlation_id),
         transport: "websocket",
-        request_metadata: %{"prompt" => @sensitive_marker},
-        response_status_code: 200,
+        request_metadata: Map.put(Map.get(attrs, :request_metadata, %{}), "prompt", @sensitive_marker),
+        response_status_code: Map.get(attrs, :response_status_code, 200),
+        last_error_code: Map.get(attrs, :last_error_code),
         usage_status: "usage_known"
       })
 
     attempt =
       attempt_fixture(request, assignment, %{
-        status: "succeeded",
+        status: Map.get(attrs, :status, "succeeded"),
         usage_status: "usage_known",
-        upstream_status_code: 200,
+        upstream_status_code: Map.get(attrs, :response_status_code, 200),
+        network_error_code: Map.get(attrs, :network_error_code),
         upstream_model_id: Map.fetch!(attrs, :upstream_model_id),
-        served_model: Map.get(attrs, :served_model)
+        served_model: Map.get(attrs, :served_model),
+        model_observation: Map.get(attrs, :model_observation)
       })
 
     ledger_entry_fixture(request, %{

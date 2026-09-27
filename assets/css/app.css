@@ -27,30 +27,68 @@
   font-size: 11px;
   line-height: 1;
   font-weight: 650;
-  letter-spacing: .01em;
+  letter-spacing: 0.01em;
   text-transform: none;
   border: 1px solid hsl(var(--plan-hue) var(--plan-sat) 69%);
   border-radius: 999px;
-  background: linear-gradient(165deg, hsl(var(--plan-hue) var(--plan-sat) 96%), hsl(var(--plan-hue) var(--plan-sat) 80%) 50%, hsl(var(--plan-hue) var(--plan-sat) 89%));
-  box-shadow: inset 0 1px 0 #ffffffa0, 0 1px 2px #00000012;
+  background: linear-gradient(
+    165deg,
+    hsl(var(--plan-hue) var(--plan-sat) 96%),
+    hsl(var(--plan-hue) var(--plan-sat) 80%) 50%,
+    hsl(var(--plan-hue) var(--plan-sat) 89%)
+  );
+  box-shadow:
+    inset 0 1px 0 #ffffffa0,
+    0 1px 2px #00000012;
 }
-.admin-plan-badge--go { --plan-hue: 190; --plan-sat: 70%; }
-.admin-plan-badge--plus { --plan-hue: 245; --plan-sat: 65%; }
-.admin-plan-badge--pro { --plan-hue: 42; --plan-sat: 80%; }
-.admin-plan-badge--prolite { --plan-hue: 32; --plan-sat: 48%; }
-.admin-plan-badge--team { --plan-hue: 213; --plan-sat: 72%; }
-.admin-plan-badge--business { --plan-hue: 163; --plan-sat: 48%; }
-.admin-plan-badge--enterprise { --plan-hue: 300; --plan-sat: 22%; }
-.admin-plan-badge--edu { --plan-hue: 275; --plan-sat: 62%; }
+.admin-plan-badge--go {
+  --plan-hue: 190;
+  --plan-sat: 70%;
+}
+.admin-plan-badge--plus {
+  --plan-hue: 245;
+  --plan-sat: 65%;
+}
+.admin-plan-badge--pro {
+  --plan-hue: 42;
+  --plan-sat: 80%;
+}
+.admin-plan-badge--prolite {
+  --plan-hue: 32;
+  --plan-sat: 48%;
+}
+.admin-plan-badge--team {
+  --plan-hue: 213;
+  --plan-sat: 72%;
+}
+.admin-plan-badge--business {
+  --plan-hue: 163;
+  --plan-sat: 48%;
+}
+.admin-plan-badge--enterprise {
+  --plan-hue: 300;
+  --plan-sat: 22%;
+}
+.admin-plan-badge--edu {
+  --plan-hue: 275;
+  --plan-sat: 62%;
+}
 [data-theme="dark"] .admin-plan-badge,
 [data-theme="dark"] .admin-plan-text {
   color: hsl(var(--plan-hue) var(--plan-sat) 82%);
 }
 
 [data-theme="dark"] .admin-plan-badge {
-  border-color: hsl(var(--plan-hue) calc(var(--plan-sat) * .65) 39%);
-  background: linear-gradient(165deg, hsl(var(--plan-hue) 35% 31%), hsl(var(--plan-hue) 38% 19%) 55%, hsl(var(--plan-hue) 32% 25%));
-  box-shadow: inset 0 1px 0 #ffffff20, 0 1px 2px #00000040;
+  border-color: hsl(var(--plan-hue) calc(var(--plan-sat) * 0.65) 39%);
+  background: linear-gradient(
+    165deg,
+    hsl(var(--plan-hue) 35% 31%),
+    hsl(var(--plan-hue) 38% 19%) 55%,
+    hsl(var(--plan-hue) 32% 25%)
+  );
+  box-shadow:
+    inset 0 1px 0 #ffffff20,
+    0 1px 2px #00000040;
 }
 
 /* The same recent-burn signal as quota bars, with a fixed badge cadence. */
@@ -65,13 +103,24 @@
   inset: 0;
   pointer-events: none;
   border-radius: inherit;
-  background: linear-gradient(110deg, transparent 25%, #ffffff70 50%, transparent 75%);
+  background: linear-gradient(
+    110deg,
+    transparent 25%,
+    #ffffff70 50%,
+    transparent 75%
+  );
   transform: translateX(-140%);
   animation: admin-plan-badge-shine 3.2s ease-in-out infinite;
 }
 @keyframes admin-plan-badge-shine {
-  0%, 15% { transform: translateX(-140%); }
-  55%, 100% { transform: translateX(140%); }
+  0%,
+  15% {
+    transform: translateX(-140%);
+  }
+  55%,
+  100% {
+    transform: translateX(140%);
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .upstream-account-card.admin-token-burn-active .admin-plan-badge::after {
@@ -81,53 +130,143 @@
 }
 
 /* Alternative development badge materials remain scoped to the comparison. */
-.plan-badge-review .plan-proposal-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
-.plan-badge-review .plan-proposal-palette { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 108px; }
-.plan-badge-review [data-direction] > h2 + p { min-block-size: 40px; }
-.plan-badge-review [data-family] { --plan-hue: 220; --plan-sat: 10%; }
-.plan-badge-review [data-family="go"] { --plan-hue: 190; --plan-sat: 70%; }
-.plan-badge-review [data-family="plus"] { --plan-hue: 245; --plan-sat: 65%; }
-.plan-badge-review [data-family="pro"] { --plan-hue: 42; --plan-sat: 80%; }
-.plan-badge-review [data-family="prolite"] { --plan-hue: 32; --plan-sat: 48%; }
-.plan-badge-review [data-family="team"] { --plan-hue: 213; --plan-sat: 72%; }
-.plan-badge-review [data-family="business"] { --plan-hue: 163; --plan-sat: 48%; }
-.plan-badge-review [data-family="enterprise"] { --plan-hue: 300; --plan-sat: 22%; }
-.plan-badge-review [data-family="edu"] { --plan-hue: 275; --plan-sat: 62%; }
+.plan-badge-review .plan-proposal-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+}
+.plan-badge-review .plan-proposal-palette {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-height: 108px;
+}
+.plan-badge-review [data-direction] > h2 + p {
+  min-block-size: 40px;
+}
+.plan-badge-review [data-family] {
+  --plan-hue: 220;
+  --plan-sat: 10%;
+}
+.plan-badge-review [data-family="go"] {
+  --plan-hue: 190;
+  --plan-sat: 70%;
+}
+.plan-badge-review [data-family="plus"] {
+  --plan-hue: 245;
+  --plan-sat: 65%;
+}
+.plan-badge-review [data-family="pro"] {
+  --plan-hue: 42;
+  --plan-sat: 80%;
+}
+.plan-badge-review [data-family="prolite"] {
+  --plan-hue: 32;
+  --plan-sat: 48%;
+}
+.plan-badge-review [data-family="team"] {
+  --plan-hue: 213;
+  --plan-sat: 72%;
+}
+.plan-badge-review [data-family="business"] {
+  --plan-hue: 163;
+  --plan-sat: 48%;
+}
+.plan-badge-review [data-family="enterprise"] {
+  --plan-hue: 300;
+  --plan-sat: 22%;
+}
+.plan-badge-review [data-family="edu"] {
+  --plan-hue: 275;
+  --plan-sat: 62%;
+}
 .plan-badge-review .plan-proposal-badge,
 .plan-badge-review .plan-proposal-account [aria-label^="Account plan:"] {
-  display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px;
-  width: fit-content; max-width: 100%; white-space: nowrap; font-size: 11px;
-  line-height: 1; font-weight: 650; letter-spacing: .01em; text-transform: none;
-  border: 1px solid hsl(var(--plan-hue) var(--plan-sat) 69%); border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
+  width: fit-content;
+  max-width: 100%;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  text-transform: none;
+  border: 1px solid hsl(var(--plan-hue) var(--plan-sat) 69%);
+  border-radius: 5px;
   background: hsl(var(--plan-hue) var(--plan-sat) 91%);
-  color: hsl(var(--plan-hue) var(--plan-sat) 24%); box-shadow: none;
+  color: hsl(var(--plan-hue) var(--plan-sat) 24%);
+  box-shadow: none;
 }
 [data-theme="dark"] .plan-badge-review .plan-proposal-badge,
-[data-theme="dark"] .plan-badge-review .plan-proposal-account [aria-label^="Account plan:"] {
-  background: hsl(var(--plan-hue) calc(var(--plan-sat) * .65) 21%);
+[data-theme="dark"]
+  .plan-badge-review
+  .plan-proposal-account
+  [aria-label^="Account plan:"] {
+  background: hsl(var(--plan-hue) calc(var(--plan-sat) * 0.65) 21%);
   color: hsl(var(--plan-hue) var(--plan-sat) 82%);
-  border-color: hsl(var(--plan-hue) calc(var(--plan-sat) * .65) 39%);
+  border-color: hsl(var(--plan-hue) calc(var(--plan-sat) * 0.65) 39%);
 }
 .plan-badge-review [data-direction="satin"] .plan-proposal-badge,
 .plan-badge-review [data-direction="satin"] [aria-label^="Account plan:"] {
-  border-radius: 999px; background: linear-gradient(165deg, hsl(var(--plan-hue) var(--plan-sat) 96%), hsl(var(--plan-hue) var(--plan-sat) 80%) 50%, hsl(var(--plan-hue) var(--plan-sat) 89%));
-  box-shadow: inset 0 1px 0 #ffffffa0, 0 1px 2px #00000012;
+  border-radius: 999px;
+  background: linear-gradient(
+    165deg,
+    hsl(var(--plan-hue) var(--plan-sat) 96%),
+    hsl(var(--plan-hue) var(--plan-sat) 80%) 50%,
+    hsl(var(--plan-hue) var(--plan-sat) 89%)
+  );
+  box-shadow:
+    inset 0 1px 0 #ffffffa0,
+    0 1px 2px #00000012;
 }
-[data-theme="dark"] .plan-badge-review [data-direction="satin"] .plan-proposal-badge,
-[data-theme="dark"] .plan-badge-review [data-direction="satin"] [aria-label^="Account plan:"] {
-  background: linear-gradient(165deg, hsl(var(--plan-hue) 35% 31%), hsl(var(--plan-hue) 38% 19%) 55%, hsl(var(--plan-hue) 32% 25%));
-  box-shadow: inset 0 1px 0 #ffffff20, 0 1px 2px #00000040;
+[data-theme="dark"]
+  .plan-badge-review
+  [data-direction="satin"]
+  .plan-proposal-badge,
+[data-theme="dark"]
+  .plan-badge-review
+  [data-direction="satin"]
+  [aria-label^="Account plan:"] {
+  background: linear-gradient(
+    165deg,
+    hsl(var(--plan-hue) 35% 31%),
+    hsl(var(--plan-hue) 38% 19%) 55%,
+    hsl(var(--plan-hue) 32% 25%)
+  );
+  box-shadow:
+    inset 0 1px 0 #ffffff20,
+    0 1px 2px #00000040;
 }
 .plan-badge-review [data-direction="split"] .plan-proposal-badge,
 .plan-badge-review [data-direction="split"] [aria-label^="Account plan:"] {
-  border-radius: 4px; border-left-width: 3px; background: var(--color-base-100);
+  border-radius: 4px;
+  border-left-width: 3px;
+  background: var(--color-base-100);
 }
 .plan-badge-review [data-direction="split"] .plan-proposal-tier {
-  margin-right: -9px; margin-left: 3px; padding: 6px 7px; border-left: 1px solid currentColor;
-  background: hsl(var(--plan-hue) var(--plan-sat) 90%); font-size: 10px;
+  margin-right: -9px;
+  margin-left: 3px;
+  padding: 6px 7px;
+  border-left: 1px solid currentColor;
+  background: hsl(var(--plan-hue) var(--plan-sat) 90%);
+  font-size: 10px;
 }
-[data-theme="dark"] .plan-badge-review [data-direction="split"] .plan-proposal-tier { background: hsl(var(--plan-hue) 35% 24%); }
-@media (max-width: 959px) { .plan-badge-review .plan-proposal-columns { grid-template-columns: minmax(0, 1fr); } }
+[data-theme="dark"]
+  .plan-badge-review
+  [data-direction="split"]
+  .plan-proposal-tier {
+  background: hsl(var(--plan-hue) 35% 24%);
+}
+@media (max-width: 959px) {
+  .plan-badge-review .plan-proposal-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 
 /* A Tailwind plugin that makes "hero-#{ICON}" classes available.
    The heroicons installation itself is managed by your mix.exs */
@@ -221,11 +360,17 @@
 
 /* Add variants based on LiveView classes */
 @custom-variant phx-click-loading (.phx-click-loading&, .phx-click-loading &);
-@custom-variant phx-submit-loading (.phx-submit-loading&, .phx-submit-loading &);
-@custom-variant phx-change-loading (.phx-change-loading&, .phx-change-loading &);
+@custom-variant phx-submit-loading (
+  .phx-submit-loading&,
+  .phx-submit-loading &
+);
+@custom-variant phx-change-loading (
+  .phx-change-loading&,
+  .phx-change-loading &
+);
 
 /* Use the data attribute for dark mode  */
-@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /* Observatory breakpoints stay named at the Tailwind boundary so component
    CSS and HEEx never carry one-off media-query values. Tailwind resolves
@@ -286,7 +431,8 @@
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: url("/fonts/roboto-condensed/roboto-condensed-400.ttf") format("truetype");
+  src: url("/fonts/roboto-condensed/roboto-condensed-400.ttf")
+    format("truetype");
 }
 
 @font-face {
@@ -294,7 +440,8 @@
   font-style: normal;
   font-weight: 500;
   font-display: swap;
-  src: url("/fonts/roboto-condensed/roboto-condensed-500.ttf") format("truetype");
+  src: url("/fonts/roboto-condensed/roboto-condensed-500.ttf")
+    format("truetype");
 }
 
 @font-face {
@@ -302,7 +449,8 @@
   font-style: normal;
   font-weight: 600;
   font-display: swap;
-  src: url("/fonts/roboto-condensed/roboto-condensed-600.ttf") format("truetype");
+  src: url("/fonts/roboto-condensed/roboto-condensed-600.ttf")
+    format("truetype");
 }
 
 @font-face {
@@ -310,7 +458,8 @@
   font-style: normal;
   font-weight: 700;
   font-display: swap;
-  src: url("/fonts/roboto-condensed/roboto-condensed-700.ttf") format("truetype");
+  src: url("/fonts/roboto-condensed/roboto-condensed-700.ttf")
+    format("truetype");
 }
 
 @font-face {
@@ -318,7 +467,8 @@
   font-style: normal;
   font-weight: 800;
   font-display: swap;
-  src: url("/fonts/roboto-condensed/roboto-condensed-800.ttf") format("truetype");
+  src: url("/fonts/roboto-condensed/roboto-condensed-800.ttf")
+    format("truetype");
 }
 
 @font-face {
@@ -326,7 +476,8 @@
   font-style: normal;
   font-weight: 900;
   font-display: swap;
-  src: url("/fonts/roboto-condensed/roboto-condensed-900.ttf") format("truetype");
+  src: url("/fonts/roboto-condensed/roboto-condensed-900.ttf")
+    format("truetype");
 }
 
 @theme {
@@ -407,8 +558,7 @@ body {
 }
 
 .upstream-account-token-model-grid {
-  grid-template-columns:
-    minmax(0, 1fr) clamp(1.5rem, 9cqi, 2.25rem) max-content max-content;
+  grid-template-columns: minmax(0, 1fr) clamp(1.5rem, 9cqi, 2.25rem) max-content max-content;
   column-gap: clamp(0.25rem, 2cqi, 0.625rem);
 }
 
@@ -420,15 +570,13 @@ body {
 
 @container upstream-account-card (width >= 18.5rem) {
   .upstream-account-token-model-grid {
-    grid-template-columns:
-      minmax(7.45rem, 1fr) clamp(1.5rem, 9cqi, 2.25rem) max-content max-content;
+    grid-template-columns: minmax(7.45rem, 1fr) clamp(1.5rem, 9cqi, 2.25rem) max-content max-content;
   }
 }
 
 @media (width >= 40rem) {
   .upstream-filter-fields {
-    grid-template-columns:
-      minmax(0, 1.55fr) minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr) minmax(0, 1fr);
   }
 
   .upstream-filter-query {
@@ -438,8 +586,7 @@ body {
 
 @container upstream-account-card (width >= 20rem) {
   .upstream-account-token-model-grid {
-    grid-template-columns:
-      minmax(7.45rem, 1fr) clamp(1.5rem, 15cqi, 4rem) max-content max-content;
+    grid-template-columns: minmax(7.45rem, 1fr) clamp(1.5rem, 15cqi, 4rem) max-content max-content;
   }
 
   .upstream-account-quota-limits-multiple {
@@ -580,30 +727,7 @@ body {
     padding-left: 0;
   }
 
-  .admin-status-tick.admin-ledger-table
-    > tbody
-    > tr
-    > td:first-child::before {
-    content: none;
-  }
-
-  /* The failure line is the tail of the record above it: no tick, no rule,
-     and no gap between the two. In ledger mode the entry rule sits on the row
-     itself, not on its cells, so the table-mode rule that clears it (which
-     targets > td) does not reach here and the pair needs its own. */
-  .admin-ledger-table
-    > tbody
-    > tr:has(+ tr[data-role="request-log-failure"]) {
-    border-bottom: 0;
-  }
-
-  .admin-ledger-table > tbody > tr[data-role="request-log-failure"] {
-    padding-top: 0;
-  }
-
-  .admin-status-tick.admin-ledger-table
-    > tbody
-    > tr[data-role="request-log-failure"]::before {
+  .admin-status-tick.admin-ledger-table > tbody > tr > td:first-child::before {
     content: none;
   }
 }
@@ -646,34 +770,6 @@ body {
   }
 }
 
-/* A failure line is the tail of its record, not a record of its own: the tone
-   bar runs on through it, the two ends meeting so the rail reads continuous,
-   and the message indents to the record's own text. */
-@media (width >= 64rem) {
-  .admin-status-tick tbody > tr[data-role="request-log-failure"] > td:first-child {
-    padding-left: 1.625rem;
-  }
-}
-
-/* Overlapping by a pixel: row heights land on fractional device pixels, so two
-   bars that merely meet can still show a hairline between them. */
-.admin-status-tick
-  tbody
-  > tr:has(+ tr[data-role="request-log-failure"])
-  > td:first-child::before {
-  bottom: -1px;
-}
-
-/* daisyUI rules every row off from the next; between a record and its own
-   failure line that rule is what makes the two read as separate entries. */
-.admin-status-tick tbody > tr:has(+ tr[data-role="request-log-failure"]) > td {
-  border-bottom: 0;
-}
-
-.admin-status-tick tbody > tr[data-role="request-log-failure"] > td::before {
-  top: 0;
-}
-
 .policy-editor-tabs > li {
   flex: 1 1 0;
 }
@@ -696,7 +792,8 @@ body {
   color: var(--color-base-content);
 }
 
-.policy-editor-tab:is(:hover, :focus-visible) [data-role="policy-editor-step-marker"] {
+.policy-editor-tab:is(:hover, :focus-visible)
+  [data-role="policy-editor-step-marker"] {
   border-color: var(--color-primary);
   background: var(--color-primary);
   color: var(--color-primary-content);
@@ -741,7 +838,8 @@ body {
   grid-template-columns: minmax(0, 11rem) minmax(0, 1fr);
   gap: 1rem;
   align-items: start;
-  border-top: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+  border-top: 1px solid
+    color-mix(in oklab, var(--color-base-content) 12%, transparent);
   padding-top: 0.8rem;
 }
 
@@ -761,7 +859,8 @@ body {
   grid-template-columns: minmax(0, 11rem) minmax(0, 1fr);
   gap: 1rem;
   align-items: start;
-  border-top: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+  border-top: 1px solid
+    color-mix(in oklab, var(--color-base-content) 12%, transparent);
   padding-top: 0.8rem;
 }
 
@@ -775,7 +874,8 @@ body {
   min-width: 0;
   gap: 1px;
   overflow: hidden;
-  border: 1px solid color-mix(in oklab, var(--color-base-content) 10%, transparent);
+  border: 1px solid
+    color-mix(in oklab, var(--color-base-content) 10%, transparent);
   border-radius: var(--radius-box);
   background: color-mix(in oklab, var(--color-base-content) 10%, transparent);
 }
@@ -817,7 +917,8 @@ body {
   min-width: 0;
   gap: 0;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  border: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+  border: 1px solid
+    color-mix(in oklab, var(--color-base-content) 12%, transparent);
   border-radius: var(--radius-box);
   background: var(--color-base-100);
 }
@@ -878,7 +979,8 @@ body {
   border-width: 1px 0 0;
   border-radius: 0;
   box-shadow: none;
-  border-top: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+  border-top: 1px solid
+    color-mix(in oklab, var(--color-base-content) 12%, transparent);
   background: color-mix(in oklab, var(--color-base-200) 35%, transparent);
   padding: 0.85rem 1rem 1rem;
 }
@@ -921,7 +1023,13 @@ body {
   padding-left: 0.25rem;
   padding-right: 0.15rem;
   letter-spacing: 0;
-  clip-path: polygon(0 0, calc(100% - 7px) 0, 100% 50%, calc(100% - 7px) 100%, 0 100%);
+  clip-path: polygon(
+    0 0,
+    calc(100% - 7px) 0,
+    100% 50%,
+    calc(100% - 7px) 100%,
+    0 100%
+  );
 }
 
 .route-chevron:last-child {
@@ -933,7 +1041,8 @@ body {
    by the header compat-flag icons. Being in normal flow it needs no anchoring
    and works at any viewport width. */
 .pool-compat-panel {
-  border-top: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+  border-top: 1px solid
+    color-mix(in oklab, var(--color-base-content) 12%, transparent);
   background: color-mix(in oklab, var(--color-base-200) 55%, transparent);
   padding: 0.75rem 1rem 0.85rem;
   animation: pool-compat-panel-in 160ms ease-out;
@@ -1018,7 +1127,8 @@ body {
   width: 1.65rem;
   height: 1.65rem;
   place-items: center;
-  border: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+  border: 1px solid
+    color-mix(in oklab, var(--color-base-content) 12%, transparent);
   border-radius: var(--radius-field);
   background: color-mix(in oklab, var(--color-base-200) 36%, transparent);
   color: color-mix(in oklab, var(--color-base-content) 34%, transparent);
@@ -1232,7 +1342,8 @@ body {
 /* Striped meters inside an active-burn card compose both layers: the shine
    sweep on top, the stripes underneath (kept static by the second position
    layer in the admin-progress-shine keyframes). */
-.admin-token-burn-active .admin-live-progress.progress-striped::-webkit-progress-value {
+.admin-token-burn-active
+.admin-live-progress.progress-striped::-webkit-progress-value {
   background-image:
     linear-gradient(
       105deg,
@@ -1251,7 +1362,8 @@ body {
   background-repeat: no-repeat, repeat;
 }
 
-.admin-token-burn-active .admin-live-progress.progress-striped::-moz-progress-bar {
+.admin-token-burn-active
+  .admin-live-progress.progress-striped::-moz-progress-bar {
   background-image:
     linear-gradient(
       105deg,
@@ -1284,7 +1396,11 @@ body {
 }
 
 .admin-apex-bar-chart .apexcharts-tooltip {
-  border-color: color-mix(in oklab, var(--color-base-content) 16%, transparent) !important;
+  border-color: color-mix(
+    in oklab,
+    var(--color-base-content) 16%,
+    transparent
+  ) !important;
   background: var(--color-base-100) !important;
   color: var(--color-base-content) !important;
   padding: 0.45rem 0.55rem !important;
@@ -1297,7 +1413,11 @@ body {
   border-bottom: 0 !important;
   background: transparent !important;
   padding: 0 !important;
-  color: color-mix(in oklab, var(--color-base-content) 62%, transparent) !important;
+  color: color-mix(
+    in oklab,
+    var(--color-base-content) 62%,
+    transparent
+  ) !important;
   font-family: inherit !important;
   font-size: 0.7rem !important;
   font-weight: 600 !important;
@@ -1324,7 +1444,11 @@ body {
 }
 
 .admin-apex-bar-chart .apexcharts-tooltip-text-y-label {
-  color: color-mix(in oklab, var(--color-base-content) 72%, transparent) !important;
+  color: color-mix(
+    in oklab,
+    var(--color-base-content) 72%,
+    transparent
+  ) !important;
 }
 
 .admin-apex-bar-chart .apexcharts-tooltip-text-y-value {
@@ -1357,7 +1481,7 @@ body {
   padding-inline: calc(0.25rem * 2);
 }
 
-/* Request explorer: six paired facts, aligned to a shared two-line rhythm.
+/* Request explorer: paired facts and issues, aligned to a shared two-line rhythm.
    This table uses status icons; the other ledgers keep their own status rails. */
 .admin-request-explorer.table {
   --request-log-half-gap: 0.4375rem;
@@ -1365,11 +1489,24 @@ body {
   table-layout: fixed;
 }
 
-.admin-request-explorer .request-log-time-column { width: 9.3125rem; }
-.admin-request-explorer .request-log-model-column { width: 10.875rem; }
-.admin-request-explorer .request-log-attribution-column { width: 9.625rem; }
-.admin-request-explorer .request-log-tokens-column { width: 11.5rem; }
-.admin-request-explorer .request-log-cost-column { width: 5.3125rem; }
+.admin-request-explorer .request-log-time-column {
+  width: 9.3125rem;
+}
+.admin-request-explorer .request-log-model-column {
+  width: calc(9.375rem + max(0px, 100cqw - 66rem) * 0.2);
+}
+.admin-request-explorer .request-log-attribution-column {
+  width: calc(8.75rem + max(0px, 100cqw - 66rem) * 0.25);
+}
+.admin-request-explorer .request-log-issues-column {
+  width: calc(11.375rem + max(0px, 100cqw - 66rem) * 0.25);
+}
+.admin-request-explorer .request-log-tokens-column {
+  width: 11.5rem;
+}
+.admin-request-explorer .request-log-cost-column {
+  width: 5.3125rem;
+}
 
 .admin-request-explorer.table > thead > tr > th {
   height: 2.125rem;
@@ -1388,6 +1525,10 @@ body {
 }
 
 @media (width >= 64rem) {
+  .request-log-table-scroll {
+    container-type: inline-size;
+  }
+
   .admin-request-explorer.table :is(th, td):first-child {
     padding-left: var(--request-log-edge);
   }
@@ -1396,7 +1537,7 @@ body {
     padding-right: var(--request-log-edge);
   }
 
-  .admin-request-explorer.table > tbody > tr:not([data-role="request-log-failure"]) {
+  .admin-request-explorer.table > tbody > tr {
     height: 3.25rem;
   }
 }
@@ -1462,7 +1603,11 @@ body {
 
 /* Selected filter options retain semantic icon colors in both themes. */
 [phx-hook="AdminFilterDropdowns"] .menu {
-  --menu-active-bg: color-mix(in oklab, var(--color-primary) 12%, var(--color-base-100));
+  --menu-active-bg: color-mix(
+    in oklab,
+    var(--color-primary) 12%,
+    var(--color-base-100)
+  );
   --menu-active-fg: var(--color-base-content);
 }
 
@@ -1519,10 +1664,16 @@ body {
   height: 2.75rem;
   margin-left: -1px;
   border: 1px solid var(--color-base-300);
-  background: color-mix(in oklab, var(--color-base-100) 92%, var(--color-base-200));
+  background: color-mix(
+    in oklab,
+    var(--color-base-100) 92%,
+    var(--color-base-200)
+  );
   color: var(--color-base-content);
   text-align: center;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    monospace;
   font-size: 1.125rem;
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -1699,7 +1850,11 @@ body {
   min-width: 0;
   flex-wrap: nowrap;
   align-items: center;
-  border-bottom-color: color-mix(in oklab, var(--color-base-300) 70%, transparent);
+  border-bottom-color: color-mix(
+    in oklab,
+    var(--color-base-300) 70%,
+    transparent
+  );
   background: var(--color-base-100);
 }
 
@@ -1794,10 +1949,11 @@ body {
   line-height: var(--observatory-type-control-leading);
   transition:
     border-color var(--observatory-motion-control-duration)
-      var(--observatory-motion-control-easing),
+    var(--observatory-motion-control-easing),
     background-color var(--observatory-motion-control-duration)
-      var(--observatory-motion-control-easing),
-    color var(--observatory-motion-control-duration) var(--observatory-motion-control-easing);
+    var(--observatory-motion-control-easing),
+    color var(--observatory-motion-control-duration)
+    var(--observatory-motion-control-easing);
 }
 
 .observatory-window-button:hover,
@@ -1858,7 +2014,11 @@ body {
 }
 
 .observatory-freshness.is-paused {
-  color: color-mix(in oklab, var(--color-warning) 80%, var(--color-base-content));
+  color: color-mix(
+    in oklab,
+    var(--color-warning) 80%,
+    var(--color-base-content)
+  );
 }
 
 .observatory-freshness.is-paused .observatory-live-dot {
@@ -1888,8 +2048,9 @@ body {
   color: color-mix(in oklab, var(--color-base-content) 65%, transparent);
   transition:
     background-color var(--observatory-motion-control-duration)
-      var(--observatory-motion-control-easing),
-    color var(--observatory-motion-control-duration) var(--observatory-motion-control-easing);
+    var(--observatory-motion-control-easing),
+    color var(--observatory-motion-control-duration)
+    var(--observatory-motion-control-easing);
 }
 
 .observatory-icon-button {
@@ -2116,8 +2277,9 @@ body {
    shared form id so the cockpit accordion (submit-only, no server
    re-render while editing) and the saved-reset dialog behave identically
    and instantly. */
-#saved-reset-policy-form:has(#saved-reset-policy-auto-redeem-enabled:not(:checked))
-  [data-role="saved-reset-policy-tunables"] {
+#saved-reset-policy-form:has(
+  #saved-reset-policy-auto-redeem-enabled:not(:checked)
+) [data-role="saved-reset-policy-tunables"] {
   opacity: 0.55;
 }
 
@@ -2140,7 +2302,9 @@ body {
   display: inline-flex;
 }
 
-[data-role="saved-reset-policy-trigger-card"]:has(input[type="radio"]:focus-visible) {
+[data-role="saved-reset-policy-trigger-card"]:has(
+  input[type="radio"]:focus-visible
+) {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
 }
@@ -2176,13 +2340,18 @@ body {
   opacity: 1;
 }
 
-.admin-nav-hold[data-hold-state="armed"] [data-role="admin-nav-hold-ring"] .hero-sparkles,
-.admin-nav-hold[data-hold-state="launched"] [data-role="admin-nav-hold-ring"] .hero-sparkles {
+.admin-nav-hold[data-hold-state="armed"]
+  [data-role="admin-nav-hold-ring"]
+  .hero-sparkles,
+.admin-nav-hold[data-hold-state="launched"]
+  [data-role="admin-nav-hold-ring"]
+  .hero-sparkles {
   color: var(--color-primary);
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .admin-nav-hold[data-hold-state="launched"] [data-role="admin-nav-hold-ring"] {
+  .admin-nav-hold[data-hold-state="launched"]
+    [data-role="admin-nav-hold-ring"] {
     animation: admin-nav-hold-pop 300ms ease;
   }
 }
@@ -2201,7 +2370,7 @@ body {
    actually blocks the submit; this only stops the button from lying about it.
    `:placeholder-shown` is exactly "the operator has typed nothing". */
 #oauth-link-dialog:has(#oauth-link-callback-url:placeholder-shown)
-  #oauth-link-submit-callback,
+#oauth-link-submit-callback,
 #oauth-relink-dialog:has(#oauth-relink-callback-url:placeholder-shown)
   #oauth-relink-submit-callback {
   pointer-events: none;
@@ -2228,7 +2397,8 @@ body {
   --opd-line: color-mix(in oklab, var(--color-base-content) 12%, transparent);
   --opd-ink: color-mix(in oklab, var(--color-base-content) 62%, transparent);
   --opd-faint: color-mix(in oklab, var(--color-base-content) 38%, transparent);
-  --opd-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --opd-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 
 .oauth-paste-demo .opd-panel {
@@ -2236,14 +2406,21 @@ body {
   stroke: var(--opd-line);
   stroke-width: 1;
 }
-.oauth-paste-demo .opd-panel--dialog { fill: var(--color-base-100); }
-.oauth-paste-demo .opd-dot { fill: color-mix(in oklab, var(--color-base-content) 20%, transparent); }
+.oauth-paste-demo .opd-panel--dialog {
+  fill: var(--color-base-100);
+}
+.oauth-paste-demo .opd-dot {
+  fill: color-mix(in oklab, var(--color-base-content) 20%, transparent);
+}
 .oauth-paste-demo .opd-omnibox {
   fill: var(--color-base-100);
   stroke: var(--opd-line);
   stroke-width: 1;
 }
-.oauth-paste-demo .opd-rule { stroke: color-mix(in oklab, var(--color-base-content) 9%, transparent); stroke-width: 1; }
+.oauth-paste-demo .opd-rule {
+  stroke: color-mix(in oklab, var(--color-base-content) 9%, transparent);
+  stroke-width: 1;
+}
 .oauth-paste-demo .opd-arrow {
   fill: none;
   stroke: color-mix(in oklab, var(--color-base-content) 28%, transparent);
@@ -2251,12 +2428,15 @@ body {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.oauth-paste-demo .opd-body-text { fill: var(--opd-faint); font-size: 8px; }
+.oauth-paste-demo .opd-body-text {
+  fill: var(--opd-faint);
+  font-size: 8px;
+}
 .oauth-paste-demo .opd-field-label {
   fill: color-mix(in oklab, var(--color-base-content) 55%, transparent);
   font-size: 7.2px;
   font-weight: 600;
-  letter-spacing: .09em;
+  letter-spacing: 0.09em;
 }
 .oauth-paste-demo .opd-input {
   fill: var(--color-base-100);
@@ -2274,9 +2454,21 @@ body {
   font-weight: 600;
   text-anchor: middle;
 }
-.oauth-paste-demo .opd-url { fill: var(--opd-ink); font-family: var(--opd-mono); font-size: 9px; }
-.oauth-paste-demo .opd-placeholder { fill: color-mix(in oklab, var(--color-base-content) 30%, transparent); font-family: var(--opd-mono); font-size: 8.4px; }
-.oauth-paste-demo .opd-pasted { fill: var(--opd-ink); font-family: var(--opd-mono); font-size: 8.4px; }
+.oauth-paste-demo .opd-url {
+  fill: var(--opd-ink);
+  font-family: var(--opd-mono);
+  font-size: 9px;
+}
+.oauth-paste-demo .opd-placeholder {
+  fill: color-mix(in oklab, var(--color-base-content) 30%, transparent);
+  font-family: var(--opd-mono);
+  font-size: 8.4px;
+}
+.oauth-paste-demo .opd-pasted {
+  fill: var(--opd-ink);
+  font-family: var(--opd-mono);
+  font-size: 8.4px;
+}
 .oauth-paste-demo .opd-selection {
   fill: color-mix(in oklab, var(--color-primary) 30%, transparent);
   transform-box: fill-box;
@@ -2288,99 +2480,265 @@ body {
   stroke: color-mix(in oklab, var(--color-primary) 45%, transparent);
   stroke-width: 1;
 }
-.oauth-paste-demo .opd-chip-text { fill: var(--opd-ink); font-family: var(--opd-mono); font-size: 9px; }
-.oauth-paste-demo .opd-chip { opacity: 0; }
+.oauth-paste-demo .opd-chip-text {
+  fill: var(--opd-ink);
+  font-family: var(--opd-mono);
+  font-size: 9px;
+}
+.oauth-paste-demo .opd-chip {
+  opacity: 0;
+}
 .oauth-paste-demo .opd-cursor {
   fill: color-mix(in oklab, var(--color-base-content) 78%, transparent);
   stroke: var(--color-base-100);
-  stroke-width: .9;
+  stroke-width: 0.9;
   stroke-linejoin: round;
   translate: 320px 40px;
 }
-.oauth-paste-demo .opd-pill { opacity: 0; transform-box: fill-box; transform-origin: 12px 7px; }
-.oauth-paste-demo .opd-pill--copy { translate: 158px 24px; }
-.oauth-paste-demo .opd-pill--paste { translate: 126px 103px; }
-.oauth-paste-demo .opd-pill-body { fill: color-mix(in oklab, var(--color-base-content) 90%, transparent); }
-.oauth-paste-demo .opd-pill-glyph { fill: none; stroke: var(--color-base-100); stroke-width: .9; }
-.oauth-paste-demo .opd-pill-text { fill: var(--color-base-100); font-size: 8px; font-weight: 600; }
+.oauth-paste-demo .opd-pill {
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: 12px 7px;
+}
+.oauth-paste-demo .opd-pill--copy {
+  translate: 158px 24px;
+}
+.oauth-paste-demo .opd-pill--paste {
+  translate: 126px 103px;
+}
+.oauth-paste-demo .opd-pill-body {
+  fill: color-mix(in oklab, var(--color-base-content) 90%, transparent);
+}
+.oauth-paste-demo .opd-pill-glyph {
+  fill: none;
+  stroke: var(--color-base-100);
+  stroke-width: 0.9;
+}
+.oauth-paste-demo .opd-pill-text {
+  fill: var(--color-base-100);
+  font-size: 8px;
+  font-weight: 600;
+}
 
 @media (prefers-reduced-motion: no-preference) {
-  .oauth-paste-demo .opd-play { animation: opd-veil var(--opd-loop) linear infinite; }
-  .oauth-paste-demo .opd-cursor { animation: opd-cursor var(--opd-loop) ease-in-out infinite; }
-  .oauth-paste-demo .opd-selection { animation: opd-select var(--opd-loop) ease-out infinite; }
-  .oauth-paste-demo .opd-pill--copy { animation: opd-pill-copy var(--opd-loop) ease-out infinite; }
-  .oauth-paste-demo .opd-pill--paste { animation: opd-pill-paste var(--opd-loop) ease-out infinite; }
-  .oauth-paste-demo .opd-chip { animation: opd-chip var(--opd-loop) ease-in-out infinite; }
-  .oauth-paste-demo .opd-placeholder { animation: opd-placeholder var(--opd-loop) linear infinite; }
-  .oauth-paste-demo .opd-pasted { animation: opd-pasted var(--opd-loop) ease-out infinite; }
-  .oauth-paste-demo .opd-input { animation: opd-input var(--opd-loop) linear infinite; }
-  .oauth-paste-demo .opd-submit { animation: opd-submit var(--opd-loop) linear infinite; }
-  .oauth-paste-demo .opd-submit-label { animation: opd-submit-label var(--opd-loop) linear infinite; }
+  .oauth-paste-demo .opd-play {
+    animation: opd-veil var(--opd-loop) linear infinite;
+  }
+  .oauth-paste-demo .opd-cursor {
+    animation: opd-cursor var(--opd-loop) ease-in-out infinite;
+  }
+  .oauth-paste-demo .opd-selection {
+    animation: opd-select var(--opd-loop) ease-out infinite;
+  }
+  .oauth-paste-demo .opd-pill--copy {
+    animation: opd-pill-copy var(--opd-loop) ease-out infinite;
+  }
+  .oauth-paste-demo .opd-pill--paste {
+    animation: opd-pill-paste var(--opd-loop) ease-out infinite;
+  }
+  .oauth-paste-demo .opd-chip {
+    animation: opd-chip var(--opd-loop) ease-in-out infinite;
+  }
+  .oauth-paste-demo .opd-placeholder {
+    animation: opd-placeholder var(--opd-loop) linear infinite;
+  }
+  .oauth-paste-demo .opd-pasted {
+    animation: opd-pasted var(--opd-loop) ease-out infinite;
+  }
+  .oauth-paste-demo .opd-input {
+    animation: opd-input var(--opd-loop) linear infinite;
+  }
+  .oauth-paste-demo .opd-submit {
+    animation: opd-submit var(--opd-loop) linear infinite;
+  }
+  .oauth-paste-demo .opd-submit-label {
+    animation: opd-submit-label var(--opd-loop) linear infinite;
+  }
 }
 
 @keyframes opd-veil {
-  0%, 86% { opacity: 1; }
-  90%, 94% { opacity: 0; }
-  98%, 100% { opacity: 1; }
+  0%,
+  86% {
+    opacity: 1;
+  }
+  90%,
+  94% {
+    opacity: 0;
+  }
+  98%,
+  100% {
+    opacity: 1;
+  }
 }
 @keyframes opd-cursor {
-  0%, 6% { translate: 320px 40px; }
-  18%, 44% { translate: 150px 13px; }
-  54%, 72% { translate: 118px 92px; }
-  80%, 91% { translate: 298px 92px; }
-  91.5%, 100% { translate: 320px 40px; }
+  0%,
+  6% {
+    translate: 320px 40px;
+  }
+  18%,
+  44% {
+    translate: 150px 13px;
+  }
+  54%,
+  72% {
+    translate: 118px 92px;
+  }
+  80%,
+  91% {
+    translate: 298px 92px;
+  }
+  91.5%,
+  100% {
+    translate: 320px 40px;
+  }
 }
 @keyframes opd-select {
-  0%, 20% { scale: 0 1; }
-  26%, 91% { scale: 1 1; }
-  91.5%, 100% { scale: 0 1; }
+  0%,
+  20% {
+    scale: 0 1;
+  }
+  26%,
+  91% {
+    scale: 1 1;
+  }
+  91.5%,
+  100% {
+    scale: 0 1;
+  }
 }
 @keyframes opd-pill-copy {
-  0%, 26% { opacity: 0; scale: .85; }
-  30%, 42% { opacity: 1; scale: 1; }
-  46%, 100% { opacity: 0; scale: .85; }
+  0%,
+  26% {
+    opacity: 0;
+    scale: 0.85;
+  }
+  30%,
+  42% {
+    opacity: 1;
+    scale: 1;
+  }
+  46%,
+  100% {
+    opacity: 0;
+    scale: 0.85;
+  }
 }
 @keyframes opd-pill-paste {
-  0%, 57% { opacity: 0; scale: .85; }
-  61%, 70% { opacity: 1; scale: 1; }
-  74%, 100% { opacity: 0; scale: .85; }
+  0%,
+  57% {
+    opacity: 0;
+    scale: 0.85;
+  }
+  61%,
+  70% {
+    opacity: 1;
+    scale: 1;
+  }
+  74%,
+  100% {
+    opacity: 0;
+    scale: 0.85;
+  }
 }
 @keyframes opd-chip {
-  0%, 42% { opacity: 0; translate: 0 0; }
-  45% { opacity: 1; translate: 0 0; }
-  55% { opacity: 1; translate: -26px 82px; }
-  55.5%, 91% { opacity: 0; translate: -26px 82px; }
-  91.5%, 100% { opacity: 0; translate: 0 0; }
+  0%,
+  42% {
+    opacity: 0;
+    translate: 0 0;
+  }
+  45% {
+    opacity: 1;
+    translate: 0 0;
+  }
+  55% {
+    opacity: 1;
+    translate: -26px 82px;
+  }
+  55.5%,
+  91% {
+    opacity: 0;
+    translate: -26px 82px;
+  }
+  91.5%,
+  100% {
+    opacity: 0;
+    translate: 0 0;
+  }
 }
 @keyframes opd-placeholder {
-  0%, 50% { opacity: 1; }
-  53%, 91% { opacity: 0; }
-  91.5%, 100% { opacity: 1; }
+  0%,
+  50% {
+    opacity: 1;
+  }
+  53%,
+  91% {
+    opacity: 0;
+  }
+  91.5%,
+  100% {
+    opacity: 1;
+  }
 }
 /* The chip and the pasted value swap in one frame rather than crossfading:
    the value is one thing arriving, not two overlapping strings. */
 @keyframes opd-pasted {
-  0%, 55% { opacity: 0; }
-  55.5%, 91% { opacity: 1; }
-  91.5%, 100% { opacity: 0; }
+  0%,
+  55% {
+    opacity: 0;
+  }
+  55.5%,
+  91% {
+    opacity: 1;
+  }
+  91.5%,
+  100% {
+    opacity: 0;
+  }
 }
 /* The field and the button live in the frame rather than under the veil, so
    they cannot snap back the way the veiled parts do: they cool back to their
    resting color across the reset instead. */
 @keyframes opd-input {
-  0%, 55% { stroke: color-mix(in oklab, var(--color-base-content) 18%, transparent); }
-  58%, 88% { stroke: var(--color-primary); }
-  100% { stroke: color-mix(in oklab, var(--color-base-content) 18%, transparent); }
+  0%,
+  55% {
+    stroke: color-mix(in oklab, var(--color-base-content) 18%, transparent);
+  }
+  58%,
+  88% {
+    stroke: var(--color-primary);
+  }
+  100% {
+    stroke: color-mix(in oklab, var(--color-base-content) 18%, transparent);
+  }
 }
 @keyframes opd-submit {
-  0%, 78% { fill: color-mix(in oklab, var(--color-base-content) 7%, transparent); stroke: var(--opd-line); }
-  82%, 88% { fill: var(--color-primary); stroke: var(--color-primary); }
-  100% { fill: color-mix(in oklab, var(--color-base-content) 7%, transparent); stroke: var(--opd-line); }
+  0%,
+  78% {
+    fill: color-mix(in oklab, var(--color-base-content) 7%, transparent);
+    stroke: var(--opd-line);
+  }
+  82%,
+  88% {
+    fill: var(--color-primary);
+    stroke: var(--color-primary);
+  }
+  100% {
+    fill: color-mix(in oklab, var(--color-base-content) 7%, transparent);
+    stroke: var(--opd-line);
+  }
 }
 @keyframes opd-submit-label {
-  0%, 78% { fill: color-mix(in oklab, var(--color-base-content) 45%, transparent); }
-  82%, 88% { fill: var(--color-primary-content); }
-  100% { fill: color-mix(in oklab, var(--color-base-content) 45%, transparent); }
+  0%,
+  78% {
+    fill: color-mix(in oklab, var(--color-base-content) 45%, transparent);
+  }
+  82%,
+  88% {
+    fill: var(--color-primary-content);
+  }
+  100% {
+    fill: color-mix(in oklab, var(--color-base-content) 45%, transparent);
+  }
 }
 
 /* Reduced motion keeps the drawing and drops the clock: the finished frame
@@ -2388,14 +2746,31 @@ body {
    button, which is the whole instruction without a single moving part. */
 @media (prefers-reduced-motion: reduce) {
   .oauth-paste-demo .opd-cursor,
-  .oauth-paste-demo .opd-chip { display: none; }
-  .oauth-paste-demo .opd-selection { scale: 1 1; }
-  .oauth-paste-demo .opd-pill { opacity: 1; }
-  .oauth-paste-demo .opd-placeholder { opacity: 0; }
-  .oauth-paste-demo .opd-pasted { opacity: 1; }
-  .oauth-paste-demo .opd-input { stroke: var(--color-primary); }
-  .oauth-paste-demo .opd-submit { fill: var(--color-primary); stroke: var(--color-primary); }
-  .oauth-paste-demo .opd-submit-label { fill: var(--color-primary-content); }
+  .oauth-paste-demo .opd-chip {
+    display: none;
+  }
+  .oauth-paste-demo .opd-selection {
+    scale: 1 1;
+  }
+  .oauth-paste-demo .opd-pill {
+    opacity: 1;
+  }
+  .oauth-paste-demo .opd-placeholder {
+    opacity: 0;
+  }
+  .oauth-paste-demo .opd-pasted {
+    opacity: 1;
+  }
+  .oauth-paste-demo .opd-input {
+    stroke: var(--color-primary);
+  }
+  .oauth-paste-demo .opd-submit {
+    fill: var(--color-primary);
+    stroke: var(--color-primary);
+  }
+  .oauth-paste-demo .opd-submit-label {
+    fill: var(--color-primary-content);
+  }
 }
 
 /* Touch-target floor for dialogs.
@@ -2472,9 +2847,12 @@ body {
    reject. The field id carries a form version, so the selector goes through the
    form: it holds exactly one text input. */
 #api-key-delete-dialog:has(#api-key-delete-form input[type="text"]:invalid)
-  #api-key-delete-submit,
-#pool-delete-dialog:has(#pool-delete-form input[type="text"]:invalid) #pool-delete-submit,
-#delete-upstream-account-dialog:has(#delete-upstream-account-form input[type="text"]:invalid)
+#api-key-delete-submit,
+#pool-delete-dialog:has(#pool-delete-form input[type="text"]:invalid)
+  #pool-delete-submit,
+#delete-upstream-account-dialog:has(
+    #delete-upstream-account-form input[type="text"]:invalid
+  )
   #delete-upstream-account-submit,
 #cockpit-delete-upstream-account-dialog:has(
     #cockpit-delete-upstream-account-form input[type="text"]:invalid

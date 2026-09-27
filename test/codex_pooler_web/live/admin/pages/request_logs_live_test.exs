@@ -2250,6 +2250,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
       "Model · Effort · Tier",
       "Upstream · Pool · Key",
       "Endpoint · Transport · Client",
+      "Errors · Warnings",
       "Tokens · Cached",
       "Cost"
     ]
@@ -2498,7 +2499,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
     refute has_element?(view, "#{row_selector} [data-role='usage-cost-line']", "·")
 
     # 10. Errors
-    assert has_element?(view, "#{row_selector}-errors [data-role='errors']", "sanitized_denial")
+    assert has_element?(view, "#{row_selector} [data-role='request-issues-cell'] [data-role='errors']", "sanitized_denial")
   end
 
   test "renders stored request timestamps with current operator datetime preferences", %{
@@ -2781,7 +2782,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
 
     assert has_element?(
              view,
-             "#{row_selector}-errors [data-role='errors']",
+             "#{row_selector} [data-role='request-issues-cell'] [data-role='errors']",
              "no_eligible_backend"
            )
   end
@@ -2804,7 +2805,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
     row_selector = "#request-log-row-#{request.id}"
 
     assert has_element?(view, row_selector)
-    refute has_element?(view, "#{row_selector}-errors")
+    refute has_element?(view, "#{row_selector} [data-role='errors']")
   end
 
   test "active routing demotions do not render as request errors on successful rows", %{
@@ -2837,9 +2838,9 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
              "Status: Succeeded"
            )
 
-    # A routing demotion is not a request error: the row succeeds and no failure
-    # line is rendered at all.
-    refute has_element?(view, "#{row_selector}-errors")
+    # A routing demotion is not a request error: the row succeeds and its issues
+    # cell stays empty.
+    refute has_element?(view, "#{row_selector} [data-role='errors']")
   end
 
   test "row with no ledger entry renders safely without token counts",
@@ -3021,11 +3022,11 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
     assert has_element?(view, "#{in_progress_row} [data-role='status-label'] [data-role='status-icon'][data-status='in_progress'] .hero-clock")
     assert has_element?(view, "#{failed_row} [data-role='status-label'] [data-role='status-icon'][data-status='failed'] .hero-x-circle")
 
-    assert has_element?(view, "#{in_progress_row}-errors [data-role='errors']", "owner_drained")
+    assert has_element?(view, "#{in_progress_row} [data-role='errors']", "owner_drained")
 
     refute has_element?(
              view,
-             "#{in_progress_row}-errors [data-role='errors']",
+             "#{in_progress_row} [data-role='errors']",
              in_progress_secret
            )
 
@@ -3043,8 +3044,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
              "Status: Failed"
            )
 
-    assert has_element?(view, "#{failed_row}-errors [data-role='errors']", "owner_drained")
-    refute has_element?(view, "#{failed_row}-errors [data-role='errors']", failed_secret)
+    assert has_element?(view, "#{failed_row} [data-role='errors']", "owner_drained")
+    refute has_element?(view, "#{failed_row} [data-role='errors']", failed_secret)
 
     refute has_element?(
              view,
