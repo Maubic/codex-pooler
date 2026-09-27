@@ -801,7 +801,7 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
          %{pool: pool, api_key: api_key},
          %RequestOptions{} = request_options
        ) do
-    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    %{rows: [[now]]} = Repo.query!("SELECT clock_timestamp()", [])
 
     candidates = codex_session_affinity_aliases(request_options)
 

@@ -40,6 +40,24 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuityTest do
   end
 
   describe "attach_file_affinity/4" do
+    test "existing session file conflict uses the database clock" do
+      setup = active_pinned_assignment_setup()
+      api_key = active_api_key_fixture(setup.pool)
+      {:ok, auth} = Access.authenticate_authorization_header(api_key.authorization)
+      file_id = "file-clock-conflict"
+      insert_response_file!(setup, api_key.api_key, file_id)
+      payload = %{"input" => [%{"type" => "input_file", "file_id" => file_id}]}
+      options = RequestOptions.build(%{session_header: "file-clock-session", session_header_source: "x-codex-window-id"}, @endpoint, payload)
+      {:ok, session} = CodexPooler.Gateway.Persistence.SessionContinuity.start_codex_session(auth, options)
+      other = active_upstream_assignment_fixture(setup.pool)
+      Repo.update!(Ecto.Changeset.change(session, pool_upstream_assignment_id: other.assignment.id))
+      handler = {__MODULE__, make_ref()}
+      on_exit(fn -> :telemetry.detach(handler) end)
+      :ok = :telemetry.attach(handler, [:codex_pooler, :repo, :query], &__MODULE__.capture_clock_query/4, self())
+      assert {:error, %{code: "file_assignment_conflict"}} = SessionContinuity.attach_file_affinity(auth, @endpoint, payload, options)
+      assert_received :database_clock_sampled
+    end
+
     test "collects nested mixed-key file ids once while preserving one assignment" do
       setup = active_pinned_assignment_setup()
       api_key = active_api_key_fixture(setup.pool)
@@ -1426,5 +1444,9 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuityTest do
              "pool_upstream_assignment_id" => setup.pinned.assignment.id,
              "upstream_identity_id" => setup.pinned.identity.id
            }
+  end
+
+  def capture_clock_query(_event, _measurements, metadata, parent) do
+    if self() == parent and metadata.query == "SELECT clock_timestamp()", do: send(parent, :database_clock_sampled)
   end
 end
