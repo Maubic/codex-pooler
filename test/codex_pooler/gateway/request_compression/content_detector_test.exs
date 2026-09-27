@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ContentDetectorTest do
   use ExUnit.Case, async: true
 
   alias CodexPooler.Gateway.RequestCompression.ContentDetector
+  alias CodexPooler.RequestCompressionFixtures
 
   describe "detect/1 order" do
     test "classifies empty or whitespace-only content as text" do
@@ -478,6 +479,39 @@ defmodule CodexPooler.Gateway.RequestCompression.ContentDetectorTest do
       assert confidence >= 0.5
       assert_noop(:source_code, decision)
       assert_noop(:text, ContentDetector.detect(negative))
+    end
+  end
+
+  describe "diagnostic and search ambiguity" do
+    test "routes real compiler diagnostics that share the grep location shape to build output" do
+      assert %{kind: :build, compressible: true, strategy: :log_output} =
+               ContentDetector.detect(RequestCompressionFixtures.clang_undeclared_identifier_diagnostics())
+    end
+
+    test "routes bare severity and rule-code diagnostic lines to build output" do
+      severity = Enum.map_join(1..24, "\n", &"src/sample.ts:#{&1}:5: error TS2322: Synthetic diagnostic #{&1} is not assignable")
+      rule_code = Enum.map_join(1..12, "\n", &"app/sample_#{&1}.py:#{&1}:1: F401 'module_#{&1}' imported but unused")
+
+      for body <- [severity, rule_code] do
+        assert %{kind: :build, compressible: true, strategy: :log_output} = ContentDetector.detect(body)
+      end
+    end
+
+    test "keeps search output whose matched text only occasionally starts with a severity word" do
+      body =
+        Enum.map(1..11, &"lib/sample_#{&1}.ex:#{&1}: synthetic needle #{&1}")
+        |> Kernel.++(["lib/sample_log.ex:12: error: synthetic needle in a log message"])
+        |> Enum.join("\n")
+
+      assert %{kind: :search, strategy: :search_results} = ContentDetector.detect(body)
+    end
+
+    test "vetoes search classification when the producing command is not a search" do
+      grep_shaped = Enum.map_join(1..12, "\n", &"lib/sample_#{&1}.go:#{&1}:2: should omit type in synthetic declaration #{&1}")
+
+      assert %{kind: :search} = ContentDetector.detect(grep_shaped)
+      assert %{kind: :search} = ContentDetector.detect(grep_shaped, command: :search)
+      assert %{kind: :build, strategy: :log_output} = ContentDetector.detect(grep_shaped, command: :other)
     end
   end
 

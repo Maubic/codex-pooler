@@ -3,12 +3,13 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.JsonArrayLossless do
   Conservative JSON-array request compression.
 
   This strategy only minifies valid JSON array text and returns a rewrite when
-  local token counting proves a strict reduction. Dropping rows, object keys,
-  values, or nested data is intentionally left out until a recoverability design
-  exists.
+  local token counting proves a strict reduction. Minification is lexical, so
+  every token keeps its original bytes. Dropping rows, object keys, values, or
+  nested data is intentionally left out until a recoverability design exists.
   """
 
   alias CodexPooler.Gateway.RequestCompression.ContentDetector
+  alias CodexPooler.Gateway.RequestCompression.JsonMinifier
   alias CodexPooler.Gateway.RequestCompression.Strategies
 
   @strategy :json_array_lossless
@@ -19,7 +20,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.JsonArrayLossless do
   def compress(content, opts) when is_binary(content) do
     case CodexPooler.JSON.decode(content, objects: :ordered_objects) do
       {:ok, rows} when is_list(rows) ->
-        finalize(content, rows, length(rows), opts)
+        Strategies.finalize(@strategy, content, JsonMinifier.minify(content), %{row_count: length(rows)}, opts)
 
       _not_array ->
         compress_concatenated_object_stream(content, opts)
@@ -34,16 +35,6 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.JsonArrayLossless do
         Strategies.finalize(@strategy, content, normalized, %{row_count: row_count}, opts)
 
       :error ->
-        :skip
-    end
-  end
-
-  defp finalize(original, rows, row_count, opts) do
-    case CodexPooler.JSON.encode(rows) do
-      {:ok, compressed} ->
-        Strategies.finalize(@strategy, original, compressed, %{row_count: row_count}, opts)
-
-      {:error, _reason} ->
         :skip
     end
   end

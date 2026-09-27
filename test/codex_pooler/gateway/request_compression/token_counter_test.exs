@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.RequestCompression.TokenCounterTest do
   use ExUnit.Case, async: true
 
   alias CodexPooler.Gateway.RequestCompression.TokenCounter
+  alias CodexPooler.Gateway.RequestCompression.WorkBudget
 
   @gpt6_models ~w(gpt-6-astra gpt-6-sol gpt-6-luna)
 
@@ -155,6 +156,37 @@ defmodule CodexPooler.Gateway.RequestCompression.TokenCounterTest do
       refute inspect(metadata) =~ sentinel
     end
 
+    test "never exceeds the exact count when the cut falls inside a token" do
+      # Tokenizing a cut-off piece can take more tokens than the whole piece:
+      # "cti" costs more than "ction", so the plain prefix count claimed 8191
+      # tokens for this 8190-token text.
+      stem = "\n" <> String.duplicate("z\n", 4_094)
+      text = stem <> "ction"
+
+      for model <- ["o200k_base", "cl100k_base"] do
+        assert {:ok, stem_tokens, _metadata} = TokenCounter.count(model, stem)
+        assert {:ok, tail_tokens, _metadata} = TokenCounter.count(model, "ction")
+        assert {:ok, lower, _metadata} = TokenCounter.count_lower_bound(model, text)
+
+        assert lower <= stem_tokens + tail_tokens
+        assert lower > 0
+      end
+    end
+
+    test "stays a lower bound wherever the cut lands inside the final word" do
+      words = ["ction", "internationalization", "tokenization's", "Straße", "漢字仮名交じり文"]
+
+      for word <- words, cut <- 1..(byte_size(word) - 1), model <- ["gpt-4o", "gpt-4-turbo"] do
+        # The stem ends in a newline and the word starts with a letter: a chunk
+        # boundary with no lookahead across it, so the exact count adds up.
+        stem = newline_stem(TokenCounter.max_input_bytes() - cut)
+        assert {:ok, stem_tokens, _metadata} = TokenCounter.count(model, stem)
+        assert {:ok, word_tokens, _metadata} = TokenCounter.count(model, word)
+        assert {:ok, lower, _metadata} = TokenCounter.count_lower_bound(model, stem <> word)
+        assert lower <= stem_tokens + word_tokens, "#{model} #{word} cut after #{cut} bytes"
+      end
+    end
+
     test "returns controlled errors for invalid oversized binaries" do
       invalid = String.duplicate("valid ", 2_000) <> <<255>>
 
@@ -167,6 +199,25 @@ defmodule CodexPooler.Gateway.RequestCompression.TokenCounterTest do
     end
   end
 
+  describe "work budget" do
+    test "charges each text before tokenizing and stays spent once a charge does not fit" do
+      budget = WorkBudget.new(20)
+
+      assert {:ok, 4, _metadata} = TokenCounter.count("gpt-4o", "Hello, world!", work_budget: budget)
+      assert {:error, :work_budget_exhausted} = TokenCounter.count("gpt-4o", "Hello, world!", work_budget: budget)
+      assert {:error, :work_budget_exhausted} = TokenCounter.count("gpt-4o", "x", work_budget: budget)
+      assert {:error, :work_budget_exhausted} = TokenCounter.count_lower_bound("gpt-4o", "x", work_budget: budget)
+      assert {:ok, 1, _metadata} = TokenCounter.count("gpt-4o", "x")
+    end
+
+    test "surcharges pieces long enough for the heap merge" do
+      piece = String.duplicate("a", 64)
+
+      assert {:error, :work_budget_exhausted} = TokenCounter.count("gpt-4o", piece, work_budget: WorkBudget.new(64 * 5 - 1))
+      assert {:ok, _count, _metadata} = TokenCounter.count("gpt-4o", piece, work_budget: WorkBudget.new(64 * 5))
+    end
+  end
+
   test "invalid API types are rejected and empty input counts zero" do
     assert TokenCounter.count(nil, "text") == {:error, :unsupported_model}
     assert TokenCounter.count_lower_bound("gpt-4o", nil) == {:error, :unsupported_model}
@@ -176,7 +227,15 @@ defmodule CodexPooler.Gateway.RequestCompression.TokenCounterTest do
 
   test "bounded prefix trims incomplete multibyte characters" do
     prefix = String.duplicate("a ", 4095)
-    assert {:ok, expected, _} = TokenCounter.count("gpt-4o", prefix)
-    assert {:ok, ^expected, _} = TokenCounter.count_lower_bound("gpt-4o", prefix <> "😀 tail")
+    assert {:ok, prefix_tokens, _} = TokenCounter.count("gpt-4o", prefix)
+    assert {:ok, lower, _} = TokenCounter.count_lower_bound("gpt-4o", prefix <> "😀 tail")
+
+    # The chunks next to the cut are not counted, so the bound sits a few
+    # tokens under the prefix count.
+    assert lower <= prefix_tokens
+    assert lower >= prefix_tokens - 8
   end
+
+  defp newline_stem(size) when rem(size, 2) == 0, do: String.duplicate("z\n", div(size, 2))
+  defp newline_stem(size), do: "\n" <> newline_stem(size - 1)
 end

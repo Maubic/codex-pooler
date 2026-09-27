@@ -10,6 +10,7 @@ defmodule CodexPooler.Gateway.RequestCompression do
   alias CodexPooler.Gateway.RequestCompression.ResponsesLiveZone
   alias CodexPooler.Gateway.RequestCompression.Strategies
   alias CodexPooler.Gateway.RequestCompression.TokenCounter
+  alias CodexPooler.Gateway.RequestCompression.WorkBudget
 
   @strategy_modules %{
     diff: Strategies.Diff,
@@ -25,6 +26,10 @@ defmodule CodexPooler.Gateway.RequestCompression do
   @max_body_bytes 1_048_576
   # At most 50 planned output candidates are processed for one dispatch.
   @max_candidate_count 50
+  # Deterministic cap on the strategy and tokenizer work of one dispatch, in
+  # bytes read (see WorkBudget). Ordinary outputs stay far below it; it bounds
+  # inputs that pass every size limit yet are expensive to tokenize.
+  @max_work_units 1_048_576
   @type upstream_payload :: binary() | {:multipart, list()}
 
   @spec maybe_compress(upstream_payload(), term(), RequestOptions.t()) ::
@@ -104,6 +109,9 @@ defmodule CodexPooler.Gateway.RequestCompression do
     else
       {:error, :tokenizer_unavailable} ->
         skip_tokenizer_unavailable(upstream_payload, request_options, metadata, started)
+
+      {:error, :depth_limit} ->
+        skip_over_limit(upstream_payload, request_options, metadata, :over_depth_limit, 0, 0, started)
 
       {:error, :invalid_json} ->
         fail_open(
@@ -264,6 +272,7 @@ defmodule CodexPooler.Gateway.RequestCompression do
          {:ok, module} <- strategy_module(strategy),
          {:ok, output} <-
            JsonStringRanges.decode_string(upstream_payload, Map.from_struct(candidate)),
+         :ok <- WorkBudget.charge(WorkBudget.from_opts(opts), byte_size(output)),
          {:ok, compressed_content, strategy_metadata} <-
            compress_with_strategy(module, output, opts) do
       replacement = %{
@@ -277,6 +286,7 @@ defmodule CodexPooler.Gateway.RequestCompression do
       true -> {:skip, :lossy_unrecoverable_tool_output}
       {:skip, reason} when is_atom(reason) -> {:skip, reason}
       :skip -> :skip
+      {:error, :work_budget_exhausted} -> {:skip, :work_budget_exhausted}
       {:error, :invalid_json} -> {:error, :scanner_error}
       {:error, reason} -> {:error, reason}
     end
@@ -365,7 +375,7 @@ defmodule CodexPooler.Gateway.RequestCompression do
   end
 
   defp increment_skip_reason(skip_reasons, reason)
-       when reason in [:tokenizer_input_limit, :lossy_unrecoverable_tool_output] do
+       when reason in [:tokenizer_input_limit, :lossy_unrecoverable_tool_output, :work_budget_exhausted] do
     Map.update(skip_reasons, reason, 1, &(&1 + 1))
   end
 
@@ -385,6 +395,9 @@ defmodule CodexPooler.Gateway.RequestCompression do
       Map.get(skip_reasons, :lossy_unrecoverable_tool_output, 0) == length(candidates) ->
         :lossy_unrecoverable_tool_output
 
+      Map.get(skip_reasons, :work_budget_exhausted, 0) == length(candidates) ->
+        :work_budget_exhausted
+
       true ->
         :no_rewrites
     end
@@ -393,6 +406,7 @@ defmodule CodexPooler.Gateway.RequestCompression do
   defp no_rewrite_status(:tokenizer_input_limit), do: :skipped
   defp no_rewrite_status(:protected_tool_outputs), do: :skipped
   defp no_rewrite_status(:lossy_unrecoverable_tool_output), do: :skipped
+  defp no_rewrite_status(:work_budget_exhausted), do: :skipped
   defp no_rewrite_status(_reason), do: :no_change
 
   defp put_protected_tool_output_skips(metadata, %{protected_tool_output_skipped_count: count})
@@ -414,6 +428,7 @@ defmodule CodexPooler.Gateway.RequestCompression do
       :lossy_unrecoverable_tool_output,
       :lossy_unrecoverable_tool_output_skipped_count
     )
+    |> put_skip_reason_count(skip_reasons, :work_budget_exhausted, :work_budget_skipped_count)
   end
 
   defp put_skip_reason_count(metadata, skip_reasons, reason, metadata_key) do
@@ -512,7 +527,7 @@ defmodule CodexPooler.Gateway.RequestCompression do
   defp strategy_opts(context, request_options) do
     case supported_model(context, request_options) do
       nil -> {:error, :tokenizer_unavailable}
-      model -> {:ok, [model: model]}
+      model -> {:ok, [model: model, work_budget: WorkBudget.new(@max_work_units)]}
     end
   end
 

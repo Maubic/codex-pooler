@@ -46,7 +46,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.BoundariesTest do
       Enum.map_join(1..20, "\n", fn n -> "src/sample.ex:#{n}:3: synthetic matching line #{n}" end)
 
     content =
-      "malformed\0one\0two\nsrc/sample.ex\n1-2- adjacent context\n2:3: first grouped match\n3:3: second grouped match\n\n" <>
+      "src/sample.ex\n1-2- adjacent context\n2:3: first grouped match\n3:3: second grouped match\n\n" <>
         content
 
     for opts <- [%{}, %{"model" => "gpt-4o"}, %{model: "gpt-4o"}] do
@@ -56,7 +56,19 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.BoundariesTest do
       assert compressed =~ "1-2- adjacent context"
       assert metadata.original_match_count == 22
       assert metadata.compressed_match_count == 3
-      refute compressed =~ "malformed"
+    end
+
+    # A malformed nul-delimited line has no rendered form, so dropping it would
+    # lose it silently; the output stays unchanged instead.
+    assert :skip = SearchResults.compress("malformed\0one\0two\n" <> content, %{model: "gpt-4o"})
+  end
+
+  test "finalization never accepts a bounded rewrite that saves no token" do
+    original = "\n" <> String.duplicate("z\n", 4_094) <> "ction"
+    same_token_count = String.duplicate("z\n", 4_095)
+
+    for model <- ["o200k_base", "cl100k_base"] do
+      assert :skip = Strategies.finalize(:log_output, original, same_token_count, %{}, model: model)
     end
   end
 

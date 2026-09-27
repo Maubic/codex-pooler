@@ -24,7 +24,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.EmbeddedJsonLossless
          {:ok, compressed} <- JsonStringRanges.replace_ranges(content, replacements) do
       Strategies.finalize(@strategy, content, compressed, counts, opts)
     else
-      {:skip, :tokenizer_input_limit} -> {:skip, :tokenizer_input_limit}
+      {:skip, reason} when reason in [:tokenizer_input_limit, :work_budget_exhausted] -> {:skip, reason}
       _not_rewritable -> :skip
     end
   end
@@ -32,25 +32,35 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.EmbeddedJsonLossless
   def compress(_content, _opts), do: :skip
 
   defp span_replacements(content, spans, opts) do
-    {replacements, kinds, tokenizer_input_skips} =
-      Enum.reduce(spans, {[], [], 0}, fn span, {replacements, kinds, skips} ->
-        case compress_span(content, span, opts) do
-          {:ok, replacement} ->
-            {[replacement | replacements], [span.kind | kinds], skips}
+    spans
+    |> Enum.reduce_while({[], [], 0}, fn span, {replacements, kinds, skips} ->
+      case compress_span(content, span, opts) do
+        {:ok, replacement} ->
+          {:cont, {[replacement | replacements], [span.kind | kinds], skips}}
 
-          {:skip, :tokenizer_input_limit} ->
-            {replacements, kinds, skips + 1}
+        {:skip, :tokenizer_input_limit} ->
+          {:cont, {replacements, kinds, skips + 1}}
 
-          :skip ->
-            {replacements, kinds, skips}
-        end
-      end)
+        # A spent budget stays spent: the remaining spans and the whole output
+        # keep their original bytes.
+        {:skip, :work_budget_exhausted} ->
+          {:halt, :work_budget_exhausted}
 
+        :skip ->
+          {:cont, {replacements, kinds, skips}}
+      end
+    end)
+    |> span_replacement_result(length(spans))
+  end
+
+  defp span_replacement_result(:work_budget_exhausted, _span_count), do: {:skip, :work_budget_exhausted}
+
+  defp span_replacement_result({replacements, kinds, tokenizer_input_skips}, span_count) do
     replacements = Enum.reverse(replacements)
 
     cond do
       replacements != [] -> {:ok, replacements, counts(kinds)}
-      tokenizer_input_skips == length(spans) -> {:skip, :tokenizer_input_limit}
+      tokenizer_input_skips == span_count -> {:skip, :tokenizer_input_limit}
       true -> :skip
     end
   end
@@ -68,8 +78,8 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.EmbeddedJsonLossless
            replacement: compressed
          }}
 
-      {:skip, :tokenizer_input_limit} ->
-        {:skip, :tokenizer_input_limit}
+      {:skip, reason} when reason in [:tokenizer_input_limit, :work_budget_exhausted] ->
+        {:skip, reason}
 
       _not_compressed ->
         :skip

@@ -1142,6 +1142,27 @@ defmodule CodexPooler.CompatibilityMatrixTest do
 
       assert feature.contract =~ "malformed or unrecognized commands retain existing behavior"
       assert feature.contract =~ "valid JSON object or array spans embedded in ordinary prose"
+      assert feature.contract =~ "minified lexically"
+      assert feature.contract =~ "deterministic per-dispatch work budget"
+
+      assert Map.fetch!(fixture, :fidelity) == %{
+               json_minification: "lexical_token_bytes_preserved",
+               search_tool_output_envelope: "preserved_verbatim",
+               search_omission_markers: "always_including_context_output",
+               diff_hunkless_file_sections: "preserved_verbatim",
+               diff_hunk_headers: "kept_with_every_hunk"
+             }
+
+      assert Map.fetch!(fixture, :guardrails) == %{
+               max_body_bytes: 1_048_576,
+               max_candidates: 50,
+               max_nesting_depth: 512,
+               work_budget: "deterministic_per_dispatch_remaining_candidates_unchanged",
+               bounded_original_count: "stable_prefix_lower_bound"
+             }
+
+      assert "diagnostic_evidence" in get_in(fixture, [:supported_input_shapes, :false_positive_guards])
+      assert "non_search_command_provenance" in get_in(fixture, [:supported_input_shapes, :false_positive_guards])
 
       assert Map.fetch!(fixture, :pool_gate) == %{
                setting: "request_compression_enabled",

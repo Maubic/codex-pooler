@@ -62,6 +62,28 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.JsonDocumentLossless
       assert Enum.count(values, fn {key, _value} -> key == "repeat" end) == 2
     end
 
+    test "keeps number, string, and literal lexemes byte-identical while removing structural whitespace" do
+      original = """
+      {
+        "exact_decimal": 9007199254740993.0,
+        "long_fraction": 0.12345678901234567890123456789,
+        "negative_zero": -0,
+        "negative_zero_float": -0.0,
+        "exponent": 1E+2,
+        "trailing_zeros": [1.10, 2.50],
+        "big_integer": 123456789012345678901234567890,
+        "escapes": "caf\\u00e9 \\/ \\"quoted\\" \\\\ tab\\t",
+        "spaced value": "keep  inner   spacing",
+        "literals": [true, false, null]
+      }
+      """
+
+      assert {:ok, %{content: compressed}} = JsonDocumentLossless.compress(original, model: @model)
+
+      assert compressed ==
+               ~S({"exact_decimal":9007199254740993.0,"long_fraction":0.12345678901234567890123456789,"negative_zero":-0,"negative_zero_float":-0.0,"exponent":1E+2,"trailing_zeros":[1.10,2.50],"big_integer":123456789012345678901234567890,"escapes":"caf\u00e9 \/ \"quoted\" \\ tab\t","spaced value":"keep  inner   spacing","literals":[true,false,null]})
+    end
+
     test "preserves synthetic high-entropy values while keeping JSON parseable" do
       synthetic_high_entropy_value =
         "synthetic-high-entropy-placeholder-Zx9Kq3Wm7Pv2Lr8Nt4Bc6Df1Gh5Jy"

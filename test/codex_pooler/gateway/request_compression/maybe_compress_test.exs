@@ -8,6 +8,7 @@ defmodule CodexPooler.Gateway.RequestCompression.MaybeCompressTest do
   alias CodexPooler.Gateway.Runtime.Dispatch.Context
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Pools.RoutingSettings
+  alias CodexPooler.RequestCompressionFixtures
 
   @endpoint "/backend-api/codex/responses"
   @supported_model "gpt-4o"
@@ -900,6 +901,45 @@ defmodule CodexPooler.Gateway.RequestCompression.MaybeCompressTest do
       refute inspect(metadata) =~ "call_json_document_compression"
     end
 
+    test "keeps JSON number and escape lexemes exact through the dispatch boundary" do
+      rows = Enum.map_join(1..24, ",\n", &~s(    {"id": #{&1}, "ratio": #{&1}.10, "status": "complete"}))
+
+      original_output = """
+      {
+        "exact_decimal": 9007199254740993.0,
+        "long_fraction": 0.12345678901234567890123456789,
+        "negative_zero": -0,
+        "escaped": "caf\\u00e9 \\/ path",
+        "rows": [
+      #{rows}
+        ]
+      }
+      """
+
+      expected_output =
+        ~S({"exact_decimal":9007199254740993.0,"long_fraction":0.12345678901234567890123456789,"negative_zero":-0,"escaped":"caf\u00e9 \/ path","rows":[) <>
+          Enum.map_join(1..24, ",", &~s({"id":#{&1},"ratio":#{&1}.10,"status":"complete"})) <> "]}"
+
+      body =
+        CodexPooler.JSON.encode!(%{
+          "model" => @supported_model,
+          "input" => [
+            %{"type" => "function_call", "call_id" => "call_json_lexemes", "name" => "run_command", "arguments" => "{}"},
+            %{"type" => "function_call_output", "call_id" => "call_json_lexemes", "output" => original_output}
+          ]
+        })
+
+      {context, request_options} = request_context(body)
+
+      assert {compressed_body, compressed_options} =
+               RequestCompression.maybe_compress(body, context, request_options)
+
+      assert first_output(compressed_body) == expected_output
+
+      assert %{"status" => "compressed", "compressed_count" => 1, "strategies" => ["json_document_lossless"]} =
+               compressed_options.runtime.payload_compression
+    end
+
     test "rewrites embedded JSON in eligible prose tool output while preserving surrounding bytes" do
       prefix = "synthetic report begins\n"
       suffix = "\nsynthetic report ends"
@@ -969,6 +1009,53 @@ defmodule CodexPooler.Gateway.RequestCompression.MaybeCompressTest do
       assert "embedded_json_lossless" in metadata["strategies"]
       assert metadata["original_tokens"] > metadata["compressed_tokens"]
       refute inspect(metadata) =~ "call_embedded_json_compression"
+    end
+
+    test "preserves every real compiler diagnostic that shares the grep location shape" do
+      original_output = RequestCompressionFixtures.clang_undeclared_identifier_diagnostics()
+      body = command_output_body("call_clang_diagnostics", "{}", original_output)
+      {context, request_options} = request_context(body)
+
+      assert {compressed_body, compressed_options} =
+               RequestCompression.maybe_compress(body, context, request_options)
+
+      output = first_output(compressed_body)
+
+      for index <- 1..24 do
+        assert output =~ ~r/^src\/sample\.c:#{index}:\d+: error: use of undeclared identifier 'missing_value_#{index}'$/m
+      end
+
+      assert output =~ "24 errors generated."
+      refute "search_results" in Map.get(compressed_options.runtime.payload_compression, "strategies", [])
+    end
+
+    test "uses the producing command to decide whether grep-shaped output is search output" do
+      original_output = Enum.map_join(1..24, "\n", &"lib/sample_#{rem(&1, 3)}.go:#{&1}:2: should omit type in synthetic declaration #{&1}")
+
+      for {command, search?} <- [{"staticcheck ./...", false}, {"rg -n 'should omit' lib", true}] do
+        body = command_output_body("call_command_provenance", CodexPooler.JSON.encode!(%{"cmd" => command}), original_output)
+        {context, request_options} = request_context(body)
+
+        assert {compressed_body, compressed_options} =
+                 RequestCompression.maybe_compress(body, context, request_options)
+
+        strategies = Map.get(compressed_options.runtime.payload_compression, "strategies", [])
+        assert "search_results" in strategies == search?
+        unless search?, do: assert(first_output(compressed_body) == original_output)
+      end
+    end
+
+    test "keeps the exec_command output envelope when compressing search output" do
+      envelope = "Chunk ID: 5f2c1a\nWall time: 0.0412 seconds\nProcess exited with code 0\nOriginal token count: 310\nOutput:\n"
+      matches = Enum.map_join(1..24, "\n", &"lib/sample_#{rem(&1, 3)}.ex:#{&1}: synthetic needle line #{&1} with filler text")
+      body = command_output_body("call_exec_envelope", CodexPooler.JSON.encode!(%{"cmd" => "rg -n needle lib"}), envelope <> matches)
+      {context, request_options} = request_context(body)
+
+      assert {compressed_body, compressed_options} =
+               RequestCompression.maybe_compress(body, context, request_options)
+
+      assert String.starts_with?(first_output(compressed_body), envelope <> "[compressed search results: 9/24 matches, 3/3 files]\n")
+      assert %{"strategies" => ["search_results"]} = compressed_options.runtime.payload_compression
     end
 
     test "rewrites nul-delimited search-result function-output strings" do
@@ -1539,6 +1626,16 @@ defmodule CodexPooler.Gateway.RequestCompression.MaybeCompressTest do
   defp unsupported_only_matching_fixture do
     1..80
     |> Enum.map_join("\n", &"lib/only_#{&1}.ex:needle")
+  end
+
+  defp command_output_body(call_id, arguments, output) do
+    CodexPooler.JSON.encode!(%{
+      "model" => @supported_model,
+      "input" => [
+        %{"type" => "function_call", "call_id" => call_id, "name" => "exec_command", "arguments" => arguments},
+        %{"type" => "function_call_output", "call_id" => call_id, "output" => output}
+      ]
+    })
   end
 
   defp first_output(body) do

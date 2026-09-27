@@ -34,6 +34,11 @@ defmodule CodexPooler.Gateway.RequestCompression.MetadataTest do
              }
   end
 
+  test "runtime metadata keeps work-budget skips" do
+    assert %{"reason" => "work_budget_exhausted", "work_budget_skipped_count" => 3} =
+             Metadata.runtime_metadata(%{attempted: true, reason: :work_budget_exhausted, work_budget_skipped_count: 3})
+  end
+
   test "exact savings are derived from counts and bounded counts never claim exact savings" do
     base = %{
       attempted: true,
@@ -67,6 +72,8 @@ defmodule CodexPooler.Gateway.RequestCompression.MetadataTest do
           {:route_class, "proxy_http"},
           {:status, "compressed"},
           {:reason, "rewritten"},
+          {:reason, "work_budget_exhausted"},
+          {:work_budget_skipped_count, 3},
           {:token_count_mode, "exact"}
         ] do
       assert Metadata.sanitize_map(%{key => valid}) == %{key => valid}

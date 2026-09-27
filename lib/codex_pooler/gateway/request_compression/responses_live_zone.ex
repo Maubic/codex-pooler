@@ -1,6 +1,7 @@
 defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
   @moduledoc false
 
+  alias CodexPooler.Gateway.RequestCompression.CommandProvenance
   alias CodexPooler.Gateway.RequestCompression.ContentDetector
   alias CodexPooler.Gateway.RequestCompression.DirectReadCommand
   alias CodexPooler.Gateway.RequestCompression.JsonStringRanges
@@ -51,6 +52,10 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
   end
 
   @default_min_bytes 512
+  # Candidate outputs sit at `["input", index, "output"]`, one segment deeper
+  # per nested input list; string ranges below this path length are never
+  # looked up, so the scanner does not build their paths.
+  @max_output_path_length 8
   @supported_output_item_types MapSet.new([
                                  "function_call_output",
                                  "local_shell_call_output",
@@ -81,7 +86,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
           required(:min_bytes) => non_neg_integer()
         }
 
-  @spec plan(binary(), opts()) :: {:ok, plan()} | {:error, :invalid_json}
+  @spec plan(binary(), opts()) :: {:ok, plan()} | {:error, :invalid_json | :depth_limit}
   def plan(json, opts \\ []) do
     with {:ok, details} <- plan_details(json, opts) do
       {:ok,
@@ -93,7 +98,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
     end
   end
 
-  @spec plan_candidates(binary(), opts()) :: {:ok, [Candidate.t()]} | {:error, :invalid_json}
+  @spec plan_candidates(binary(), opts()) :: {:ok, [Candidate.t()]} | {:error, :invalid_json | :depth_limit}
   def plan_candidates(json, opts \\ [])
 
   def plan_candidates(json, opts) when is_binary(json) do
@@ -108,7 +113,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
     min_bytes = min_bytes(opts)
     excluded_function_tool_names = excluded_function_tool_names(opts)
 
-    with {:ok, ranges} <- JsonStringRanges.scan(json),
+    with {:ok, ranges} <- JsonStringRanges.scan(json, max_path_length: @max_output_path_length),
          {:ok, payload} <- decode_json(json) do
       {:ok, collect_candidates(json, payload, ranges, min_bytes, excluded_function_tool_names)}
     end
@@ -179,7 +184,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
            range <- Map.get(context.range_by_path, output_path),
          {:ok, output} <- JsonStringRanges.decode_string(context.json, range),
          true <- byte_size(output) >= context.min_bytes do
-      decision = ContentDetector.detect(output)
+      decision = ContentDetector.detect(output, command: command_provenance(item, context.command_owners))
 
       {:ok,
        %Candidate{
@@ -234,11 +239,14 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
         nil
 
       call_id ->
+        arguments = decoded_arguments(item["arguments"])
+
         %{
           path: path,
           kind: :function_call,
           aliases: [call_id],
-          read?: DirectReadCommand.read?(item["arguments"])
+          read?: DirectReadCommand.read?(arguments),
+          command: CommandProvenance.classify(arguments)
         }
     end
   end
@@ -253,12 +261,23 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
         path: path,
         kind: :local_shell_call,
         aliases: aliases,
-        read?: DirectReadCommand.read?(item)
+        read?: DirectReadCommand.read?(item),
+        command: CommandProvenance.classify(item)
       }
     end
   end
 
   defp producer(_item, _path), do: nil
+
+  defp decoded_arguments(arguments) when is_binary(arguments) do
+    case CodexPooler.JSON.decode(arguments) do
+      {:ok, decoded} when is_map(decoded) -> decoded
+      _invalid -> nil
+    end
+  end
+
+  defp decoded_arguments(arguments) when is_map(arguments), do: arguments
+  defp decoded_arguments(_arguments), do: nil
 
   defp put_owner(registry, owner) do
     aliases =
@@ -331,6 +350,15 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
   defp protected_tool_output?(item, context) do
     command_output_protected?(item, context.command_owners) or
       skipped_call_id?(item, context.skipped_call_ids)
+  end
+
+  # The producing command, when one resolves unambiguously, lets content
+  # detection tell search output from grep-shaped output of other commands.
+  defp command_provenance(item, command_owners) do
+    case resolve_command_owner(item, command_owners) do
+      {:resolved, %{command: command}} -> command
+      _unresolved -> :unknown
+    end
   end
 
   defp command_output_protected?(item, command_owners) do

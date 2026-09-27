@@ -183,6 +183,39 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.JsonArrayLosslessTes
       assert Enum.count(second_values, fn {key, _value} -> key == "repeat" end) == 2
     end
 
+    test "keeps numeric and escaped lexemes byte-identical in arrays and object streams" do
+      array = """
+      [
+        {"id": 9007199254740993.0, "ratio": 1.10, "zero": -0},
+        {"id": 2, "ratio": 0.12345678901234567890123456789, "label": "caf\\u00e9 \\/ path"}
+      ]
+      """
+
+      assert {:ok, %{content: compressed}} = JsonArrayLossless.compress(array, model: @model)
+
+      assert compressed ==
+               ~S([{"id":9007199254740993.0,"ratio":1.10,"zero":-0},{"id":2,"ratio":0.12345678901234567890123456789,"label":"caf\u00e9 \/ path"}])
+
+      stream = """
+      {
+        "id": 9007199254740993.0,
+        "ratio": 1.10,
+        "label": "first streamed row"
+      }
+      {
+        "id": -0,
+        "ratio": 1E+2,
+        "label": "second streamed row"
+      }
+      """
+
+      assert {:ok, %{content: compressed_stream, metadata: %{row_count: 2}}} =
+               JsonArrayLossless.compress(stream, model: @model)
+
+      assert compressed_stream ==
+               ~S([{"id":9007199254740993.0,"ratio":1.10,"label":"first streamed row"},{"id":-0,"ratio":1E+2,"label":"second streamed row"}])
+    end
+
     test "skips single objects and mixed concatenated JSON tokens" do
       assert :skip = JsonArrayLossless.compress(~S({"status":"ok"}), model: @model)
       assert :skip = JsonArrayLossless.compress(~S({"first":1}{"second":2}), model: @model)

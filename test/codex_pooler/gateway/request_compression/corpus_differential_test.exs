@@ -19,8 +19,11 @@ defmodule CodexPooler.Gateway.RequestCompression.CorpusDifferentialTest do
     combined_diff: {"7f360d6f696093d0d663cf6ab101729b6117766e7e2b670b389d2dccb0322858", "4a117b64c2fbc23b0707ec6e99c0a2abdfcbc14366c0931012b0de0ef4a935c5"},
     failure_log: {"3e01cc4dbc4299cfe5939d529e0b01beec3e2120e4d6f162f5cd56c7e520e5cc", "ce59dcd14011b2614f6c4dec20d24e59a8d0d419f58298974fb78adfcb6192f5"},
     grouped_search: {"552ee8caa4a53baa7defc1c4a4c8ebfc431b4eba48267276db97c5aa31a72825", "047e93f4181ff27e29de46af4c6005866831c7c1d05f07050381cb368fa612b9"},
-    json_array: {"605780d686f0a89b8c8fca0779d650d863be08eab3f05c4be63d668f979de51e", "29fe807ba31c08b8e6b3942b66013046d4ea8c2ed153e0c59197a69628ff52f7"},
-    json_document: {"f465332536042e4107919c5c2bfda0f08984ca7d60889de32267c92fe8abe6a5", "cc8a60b707cb45d4e87bb2f1549ce5fda2354f2329221b0ec65d04cf7ef80eff"},
+    # Same outputs for the two JSON cases; their originals exceed 8 KiB and the
+    # metadata now carries the sound lower bound (json_array 2831 tokens,
+    # json_document 2385, where the plain 8 KiB prefix claimed 2836 and 2389).
+    json_array: {"605780d686f0a89b8c8fca0779d650d863be08eab3f05c4be63d668f979de51e", "9c160114bea0836bbcab0a9f6f4d7a02dc7ea99dfe576d8111c41d706c4a0a15"},
+    json_document: {"f465332536042e4107919c5c2bfda0f08984ca7d60889de32267c92fe8abe6a5", "d3d23894a6c513a25cd4a2a9eb64004da6042d100594be4b70144aa6355347eb"},
     mixed_replacement_order: {"69422c6021cf1c2f278eacdb3fdff2a2e1f38b78705ef16734e8f5dbb393f41b", "3c2cb2de9802d505a9d8701d686c4ae74b9ea75122587db352698e9f25602fbe"},
     one_mib_boundary: {"ea465b954650b2651ebab7426b9bd2de66b55145e72d2e4d8afbb4fd7fa336eb", "205f74debd7dcfb752d0f1ed7778bb82bbf3219e7041f45ec04211e9607bf6cf"},
     over_candidate_boundary: {"200a101b06b6fa87966412579c629fdf5a51e904b7f45978cf95c3d012c0a31f", "bfdec4cb7d930d3da6149d454971b5b3ac5ee9fc45334d8ebd7ea5d1a30b1427"}

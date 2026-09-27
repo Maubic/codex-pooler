@@ -24,6 +24,8 @@ defmodule CodexPooler.Gateway.RequestCompression.Metadata do
     no_token_shrink
     over_body_limit
     over_candidate_limit
+    over_depth_limit
+    work_budget_exhausted
     compression_error
     native_load_failed
     rewritten
@@ -52,6 +54,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Metadata do
     tokenizer_input_skipped_count
     protected_tool_output_skipped_count
     lossy_unrecoverable_tool_output_skipped_count
+    work_budget_skipped_count
   ))
   @number_keys MapSet.new(~w(
     byte_savings_percent
@@ -89,6 +92,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Metadata do
     tokenizer_input_skipped_count
     protected_tool_output_skipped_count
     lossy_unrecoverable_tool_output_skipped_count
+    work_budget_skipped_count
     tokenizer
     transport
   ))
@@ -137,6 +141,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Metadata do
         "lossy_unrecoverable_tool_output_skipped_count",
         metadata_value(metadata, :lossy_unrecoverable_tool_output_skipped_count)
       )
+      |> put_optional_integer("work_budget_skipped_count", metadata_value(metadata, :work_budget_skipped_count))
       |> put_byte_savings(metadata)
       |> put_token_savings(metadata)
       |> put_optional_strategies(metadata_value(metadata, :strategies))

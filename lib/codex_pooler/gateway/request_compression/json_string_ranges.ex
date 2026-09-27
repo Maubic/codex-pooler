@@ -15,21 +15,44 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
           required(:replacement) => binary()
         }
 
-  @spec scan(binary()) :: {:ok, [range()]} | {:error, :invalid_json}
-  def scan(json) when is_binary(json) do
+  @default_max_depth 512
+
+  @doc """
+  Byte ranges of the string literals in a JSON document.
+
+  Options:
+
+    * `:max_depth` - container nesting accepted before the scan gives up with
+      `{:error, :depth_limit}` (default #{@default_max_depth}).
+    * `:max_path_length` - only string values whose path has at most this many
+      segments are returned (default: all).
+
+  Paths are built newest segment first and shared between siblings, so the scan
+  allocates per value rather than per value and nesting level; only the paths
+  of returned ranges are materialized.
+  """
+  @spec scan(binary(), keyword()) :: {:ok, [range()]} | {:error, :invalid_json | :depth_limit}
+  def scan(json, opts \\ [])
+
+  def scan(json, opts) when is_binary(json) do
+    limits = %{
+      size: byte_size(json),
+      max_depth: Keyword.get(opts, :max_depth, @default_max_depth),
+      max_path_length: Keyword.get(opts, :max_path_length, :infinity)
+    }
+
     with true <- String.valid?(json),
-         size = byte_size(json),
-         offset = skip_whitespace(json, 0, size),
-         {:ok, offset, ranges} <- parse_value(json, offset, [], [], size),
-         true <- skip_whitespace(json, offset, size) == size do
+         offset = skip_whitespace(json, 0, limits.size),
+         {:ok, offset, ranges} <- parse_value(json, offset, {[], 0}, [], limits),
+         true <- skip_whitespace(json, offset, limits.size) == limits.size do
       {:ok, Enum.reverse(ranges)}
     else
-      _error ->
-        {:error, :invalid_json}
+      {:error, :depth_limit} -> {:error, :depth_limit}
+      _error -> {:error, :invalid_json}
     end
   end
 
-  def scan(_json), do: {:error, :invalid_json}
+  def scan(_json, _opts), do: {:error, :invalid_json}
 
   @spec decode_string(binary(), range()) :: {:ok, String.t()} | {:error, :invalid_json}
   def decode_string(json, %{byte_start: byte_start, byte_end: byte_end})
@@ -56,84 +79,90 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
 
   def replace_ranges(_json, _replacements), do: {:error, :invalid_range}
 
-  defp parse_value(json, offset, path, ranges, size) do
-    offset = skip_whitespace(json, offset, size)
-    parse_value_at(byte_at(json, offset, size), json, offset, path, ranges, size)
+  # `path` is `{reversed_segments, segment_count}`; a value at segment count
+  # `n` sits inside `n` containers.
+  defp parse_value(json, offset, path, ranges, limits) do
+    offset = skip_whitespace(json, offset, limits.size)
+    parse_value_at(byte_at(json, offset, limits.size), json, offset, path, ranges, limits)
   end
 
-  defp parse_value_at(?{, json, offset, path, ranges, size),
-    do: parse_object(json, offset + 1, path, ranges, size)
+  defp parse_value_at(opener, _json, _offset, {_segments, depth}, _ranges, %{max_depth: max_depth})
+       when opener in [?{, ?[] and depth >= max_depth,
+       do: {:error, :depth_limit}
 
-  defp parse_value_at(?[, json, offset, path, ranges, size),
-    do: parse_array(json, offset + 1, path, ranges, size)
+  defp parse_value_at(?{, json, offset, path, ranges, limits),
+    do: parse_object(json, offset + 1, path, ranges, limits)
 
-  defp parse_value_at(?", json, offset, path, ranges, size),
-    do: parse_string_value(json, offset, path, ranges, size)
+  defp parse_value_at(?[, json, offset, path, ranges, limits),
+    do: parse_array(json, offset + 1, path, ranges, limits)
 
-  defp parse_value_at(?t, json, offset, _path, ranges, size),
-    do: parse_literal(json, offset, "true", ranges, size)
+  defp parse_value_at(?", json, offset, path, ranges, limits),
+    do: parse_string_value(json, offset, path, ranges, limits)
 
-  defp parse_value_at(?f, json, offset, _path, ranges, size),
-    do: parse_literal(json, offset, "false", ranges, size)
+  defp parse_value_at(?t, json, offset, _path, ranges, limits),
+    do: parse_literal(json, offset, "true", ranges, limits.size)
 
-  defp parse_value_at(?n, json, offset, _path, ranges, size),
-    do: parse_literal(json, offset, "null", ranges, size)
+  defp parse_value_at(?f, json, offset, _path, ranges, limits),
+    do: parse_literal(json, offset, "false", ranges, limits.size)
 
-  defp parse_value_at(byte, json, offset, _path, ranges, size)
+  defp parse_value_at(?n, json, offset, _path, ranges, limits),
+    do: parse_literal(json, offset, "null", ranges, limits.size)
+
+  defp parse_value_at(byte, json, offset, _path, ranges, limits)
        when byte == ?- or byte in ?0..?9,
-       do: parse_number(json, offset, ranges, size)
+       do: parse_number(json, offset, ranges, limits.size)
 
-  defp parse_value_at(_byte, _json, _offset, _path, _ranges, _size), do: :error
+  defp parse_value_at(_byte, _json, _offset, _path, _ranges, _limits), do: :error
 
-  defp parse_string_value(json, offset, path, ranges, size) do
-    with {:ok, byte_start, byte_end} <- parse_string(json, offset, size) do
-      range = %{
-        path: path,
-        byte_start: byte_start,
-        byte_end: byte_end,
-        encoded_byte_size: byte_end - byte_start
-      }
+  defp parse_string_value(json, offset, {segments, depth}, ranges, limits) do
+    with {:ok, byte_start, byte_end} <- parse_string(json, offset, limits.size) do
+      if depth <= limits.max_path_length do
+        range = %{
+          path: Enum.reverse(segments),
+          byte_start: byte_start,
+          byte_end: byte_end,
+          encoded_byte_size: byte_end - byte_start
+        }
 
-      {:ok, byte_end, [range | ranges]}
+        {:ok, byte_end, [range | ranges]}
+      else
+        {:ok, byte_end, ranges}
+      end
     end
   end
 
-  defp parse_object(json, offset, path, ranges, size) do
-    offset = skip_whitespace(json, offset, size)
+  defp parse_object(json, offset, path, ranges, limits) do
+    offset = skip_whitespace(json, offset, limits.size)
 
-    case byte_at(json, offset, size) do
+    case byte_at(json, offset, limits.size) do
       ?} -> {:ok, offset + 1, ranges}
-      ?" -> parse_object_members(json, offset, path, ranges, size)
+      ?" -> parse_object_members(json, offset, path, ranges, limits)
       _byte -> :error
     end
   end
 
-  defp parse_object_members(json, offset, path, ranges, size) do
-    with {:ok, key_start, key_end} <- parse_string(json, offset, size),
-         {:ok, key} <- decode_string_range(json, key_start, key_end) do
-      after_key = skip_whitespace(json, key_end, size)
-
-      with ?: <- byte_at(json, after_key, size),
-           {:ok, offset, ranges} <-
-             parse_value(json, after_key + 1, path ++ [key], ranges, size) do
-        parse_object_separator(json, offset, path, ranges, size)
-      else
-        _error -> :error
-      end
+  defp parse_object_members(json, offset, {segments, depth} = path, ranges, limits) do
+    with {:ok, key_start, key_end} <- parse_string(json, offset, limits.size),
+         {:ok, key} <- decode_string_range(json, key_start, key_end),
+         after_key = skip_whitespace(json, key_end, limits.size),
+         ?: <- byte_at(json, after_key, limits.size),
+         {:ok, offset, ranges} <- parse_value(json, after_key + 1, {[key | segments], depth + 1}, ranges, limits) do
+      parse_object_separator(json, offset, path, ranges, limits)
     else
+      {:error, :depth_limit} -> {:error, :depth_limit}
       _error -> :error
     end
   end
 
-  defp parse_object_separator(json, offset, path, ranges, size) do
-    offset = skip_whitespace(json, offset, size)
+  defp parse_object_separator(json, offset, path, ranges, limits) do
+    offset = skip_whitespace(json, offset, limits.size)
 
-    case byte_at(json, offset, size) do
+    case byte_at(json, offset, limits.size) do
       ?, ->
-        next_offset = skip_whitespace(json, offset + 1, size)
+        next_offset = skip_whitespace(json, offset + 1, limits.size)
 
-        case byte_at(json, next_offset, size) do
-          ?" -> parse_object_members(json, next_offset, path, ranges, size)
+        case byte_at(json, next_offset, limits.size) do
+          ?" -> parse_object_members(json, next_offset, path, ranges, limits)
           _byte -> :error
         end
 
@@ -145,37 +174,37 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
     end
   end
 
-  defp parse_array(json, offset, path, ranges, size) do
-    offset = skip_whitespace(json, offset, size)
+  defp parse_array(json, offset, path, ranges, limits) do
+    offset = skip_whitespace(json, offset, limits.size)
 
-    case byte_at(json, offset, size) do
+    case byte_at(json, offset, limits.size) do
       ?] -> {:ok, offset + 1, ranges}
-      _byte -> parse_array_values(json, offset, path, ranges, size, 0)
+      _byte -> parse_array_values(json, offset, path, ranges, limits, 0)
     end
   end
 
-  defp parse_array_values(json, offset, path, ranges, size, index) do
-    with {:ok, offset, ranges} <- parse_value(json, offset, path ++ [index], ranges, size) do
-      parse_array_separator(json, offset, path, ranges, size, index)
+  defp parse_array_values(json, offset, {segments, depth} = path, ranges, limits, index) do
+    with {:ok, offset, ranges} <- parse_value(json, offset, {[index | segments], depth + 1}, ranges, limits) do
+      parse_array_separator(json, offset, path, ranges, limits, index)
     end
   end
 
-  defp parse_array_separator(json, offset, path, ranges, size, index) do
-    offset = skip_whitespace(json, offset, size)
+  defp parse_array_separator(json, offset, path, ranges, limits, index) do
+    offset = skip_whitespace(json, offset, limits.size)
 
-    case byte_at(json, offset, size) do
-      ?, -> parse_array_next_value(json, offset + 1, path, ranges, size, index + 1)
+    case byte_at(json, offset, limits.size) do
+      ?, -> parse_array_next_value(json, offset + 1, path, ranges, limits, index + 1)
       ?] -> {:ok, offset + 1, ranges}
       _byte -> :error
     end
   end
 
-  defp parse_array_next_value(json, offset, path, ranges, size, index) do
-    next_offset = skip_whitespace(json, offset, size)
+  defp parse_array_next_value(json, offset, path, ranges, limits, index) do
+    next_offset = skip_whitespace(json, offset, limits.size)
 
-    case byte_at(json, next_offset, size) do
+    case byte_at(json, next_offset, limits.size) do
       ?] -> :error
-      _byte -> parse_array_values(json, next_offset, path, ranges, size, index)
+      _byte -> parse_array_values(json, next_offset, path, ranges, limits, index)
     end
   end
 

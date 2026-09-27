@@ -302,6 +302,67 @@ defmodule CodexPooler.Gateway.RequestCompression.PerformanceTest do
       refute inspect(compression) =~ "call_near_limit_tokenizer_skip"
     end
 
+    test "bounds per-dispatch work deterministically for outputs that are expensive to tokenize" do
+      dense = CodexPooler.JSON.encode!(%{"rows" => List.duplicate(String.duplicate("a", 1_023), 7)}, pretty: true)
+      body = encode_request(shell_output_items(List.duplicate(dense, @max_candidate_count)))
+      {context, request_options} = request_context()
+
+      {reductions, {compressed_body, compressed_options}} =
+        with_reductions(fn -> RequestCompression.maybe_compress(body, context, request_options) end)
+
+      assert %{"status" => "compressed", "candidate_count" => @max_candidate_count, "compressed_count" => compressed, "work_budget_skipped_count" => budget_skipped} =
+               compressed_options.runtime.payload_compression
+
+      assert compressed > 0 and budget_skipped > 0
+      assert compressed + budget_skipped == @max_candidate_count
+
+      {rewritten, untouched} = compressed_body |> outputs() |> Enum.split(compressed)
+      assert Enum.all?(rewritten, &(&1 != dense and CodexPooler.JSON.decode!(&1) == CodexPooler.JSON.decode!(dense)))
+      assert Enum.all?(untouched, &(&1 == dense))
+
+      # Measured about 25 million reductions; the former all-pairs BPE spent
+      # about 2.4 billion (45 s) on this request.
+      assert reductions < 60_000_000
+      assert {^compressed_body, _options} = RequestCompression.maybe_compress(body, context, request_options)
+    end
+
+    test "keeps ordinary heavy dispatches inside the work budget" do
+      rows = Enum.map_join(1..40, ",\n", &~s(    {"id": #{&1}, "name": "synthetic row #{&1}", "ok": true, "tags": ["alpha", "beta"]}))
+      ordinary = "{\n  \"rows\": [\n#{rows}\n  ]\n}"
+      body = encode_request(shell_output_items(List.duplicate(ordinary, @max_candidate_count)))
+      {context, request_options} = request_context()
+
+      assert {_compressed_body, compressed_options} = RequestCompression.maybe_compress(body, context, request_options)
+      compression = compressed_options.runtime.payload_compression
+
+      assert %{"status" => "compressed", "compressed_count" => @max_candidate_count} = compression
+      refute Map.has_key?(compression, "work_budget_skipped_count")
+    end
+
+    test "skips requests nested beyond the structural limit before building their paths" do
+      body = deep_schema_request(4_096)
+      {context, request_options} = request_context()
+
+      # The former scanner held about 378 MB of copied paths for this 102 KB
+      # request before finding that it had no candidates.
+      assert {:ok, {^body, compressed_options}} =
+               run_with_heap_cap(2_097_152, fn -> RequestCompression.maybe_compress(body, context, request_options) end)
+
+      assert %{"status" => "skipped", "reason" => "over_depth_limit", "candidate_count" => 0} =
+               compressed_options.runtime.payload_compression
+    end
+
+    test "compresses requests nested within the structural limit" do
+      body = deep_schema_request(400)
+      {context, request_options} = request_context()
+
+      assert {:ok, {compressed_body, compressed_options}} =
+               run_with_heap_cap(2_097_152, fn -> RequestCompression.maybe_compress(body, context, request_options) end)
+
+      assert compressed_body != body
+      assert %{"status" => "compressed", "compressed_count" => 1} = compressed_options.runtime.payload_compression
+    end
+
     test "handles a sanitized one MiB fixture within the local dispatch budget" do
       body = fixed_size_request(@max_body_bytes, @max_candidate_count)
       {context, request_options} = request_context()
@@ -365,6 +426,53 @@ defmodule CodexPooler.Gateway.RequestCompression.PerformanceTest do
       exposed_model_id: @supported_model,
       upstream_model_id: @supported_model
     }
+  end
+
+  defp shell_output_items(outputs) do
+    outputs
+    |> Enum.with_index()
+    |> Enum.map(fn {output, index} -> %{"type" => "local_shell_call_output", "call_id" => "call_budget_#{index}", "output" => output} end)
+  end
+
+  defp outputs(body) do
+    body
+    |> CodexPooler.JSON.decode!()
+    |> Map.fetch!("input")
+    |> Enum.map(&Map.fetch!(&1, "output"))
+  end
+
+  defp deep_schema_request(depth) do
+    schema = String.duplicate(~S({"type":"array","items":), depth) <> ~S({"type":"string"}) <> String.duplicate("}", depth)
+    output = CodexPooler.JSON.encode!(Enum.map(1..30, &%{"id" => &1, "label" => "synthetic row #{&1}"}), pretty: true)
+
+    ~s({"model":"#{@supported_model}","input":[{"type":"local_shell_call_output","call_id":"call_deep_schema","output":) <>
+      CodexPooler.JSON.encode!(output) <> ~S(}],"tools":[{"type":"function","name":"sample","parameters":) <> schema <> "}]}"
+  end
+
+  defp run_with_heap_cap(words, fun) do
+    parent = self()
+
+    {pid, monitor} =
+      spawn_monitor(fn ->
+        Process.flag(:max_heap_size, %{size: words, kill: true, error_logger: false})
+        send(parent, {:heap_capped, self(), fun.()})
+      end)
+
+    receive do
+      {:heap_capped, ^pid, result} ->
+        Process.demonitor(monitor, [:flush])
+        {:ok, result}
+
+      {:DOWN, ^monitor, :process, ^pid, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp with_reductions(fun) do
+    {:reductions, before} = Process.info(self(), :reductions)
+    result = fun.()
+    {:reductions, later} = Process.info(self(), :reductions)
+    {later - before, result}
   end
 
   defp candidate_items(count) do

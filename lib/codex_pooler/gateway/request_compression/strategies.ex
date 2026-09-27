@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies do
   @moduledoc false
 
   alias CodexPooler.Gateway.RequestCompression.TokenCounter
+  alias CodexPooler.Gateway.RequestCompression.WorkBudget
 
   @type opts :: keyword() | map()
   @type metadata :: %{
@@ -14,7 +15,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies do
           optional(:original_tokens_lower_bound) => non_neg_integer(),
           optional(atom()) => non_neg_integer()
         }
-  @type skip_reason :: :tokenizer_input_limit
+  @type skip_reason :: :tokenizer_input_limit | :work_budget_exhausted
   @type result ::
           {:ok, %{content: binary(), metadata: metadata()}} | :skip | {:skip, skip_reason()}
 
@@ -26,10 +27,12 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies do
     original_bytes = byte_size(original)
     compressed_bytes = byte_size(compressed)
 
+    counter_opts = [work_budget: WorkBudget.from_opts(opts)]
+
     with {:ok, model} <- model(opts),
          true <- compressed_bytes < original_bytes,
-         {:ok, original_token_count} <- count_original_tokens(model, original),
-         {:ok, compressed_tokens} <- count_tokens(model, compressed),
+         {:ok, original_token_count} <- count_original_tokens(model, original, counter_opts),
+         {:ok, compressed_tokens} <- count_tokens(model, compressed, counter_opts),
          true <- compressed_tokens < original_token_count.count do
       metadata =
         counts
@@ -45,7 +48,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies do
 
       {:ok, %{content: compressed, metadata: metadata}}
     else
-      {:error, :tokenizer_input_limit} -> {:skip, :tokenizer_input_limit}
+      {:error, reason} when reason in [:tokenizer_input_limit, :work_budget_exhausted] -> {:skip, reason}
       _not_smaller -> :skip
     end
   end
@@ -176,28 +179,28 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies do
 
   defp normalize_model(_model), do: :error
 
-  defp count_tokens(model, content) do
-    case TokenCounter.count(model, content) do
+  defp count_tokens(model, content, counter_opts) do
+    case TokenCounter.count(model, content, counter_opts) do
       {:ok, count, _metadata} -> {:ok, count}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp count_original_tokens(model, content) do
-    case count_tokens(model, content) do
+  defp count_original_tokens(model, content, counter_opts) do
+    case count_tokens(model, content, counter_opts) do
       {:ok, count} ->
         {:ok, %{count: count, mode: :exact}}
 
       {:error, :tokenizer_input_limit} ->
-        count_original_token_lower_bound(model, content)
+        count_original_token_lower_bound(model, content, counter_opts)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp count_original_token_lower_bound(model, content) do
-    case TokenCounter.count_lower_bound(model, content) do
+  defp count_original_token_lower_bound(model, content, counter_opts) do
+    case TokenCounter.count_lower_bound(model, content, counter_opts) do
       {:ok, count, _metadata} -> {:ok, %{count: count, mode: :bounded_original}}
       {:error, reason} -> {:error, reason}
     end

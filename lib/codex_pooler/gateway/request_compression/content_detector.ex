@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ContentDetector do
   @moduledoc false
 
   alias CodexPooler.Gateway.RequestCompression.EmbeddedJson
+  alias CodexPooler.Gateway.RequestCompression.JsonMinifier
 
   @type kind ::
           :json_array
@@ -71,6 +72,10 @@ defmodule CodexPooler.Gateway.RequestCompression.ContentDetector do
   @diagnostic_path_regex ~r/^\s*\S+\.(?:c|cc|cpp|cs|css|ex|exs|go|h|hpp|html|java|js|jsx|json|kt|m|md|mjs|mm|php|py|rb|rs|scss|svelte|swift|toml|ts|tsx|vue|xml|ya?ml)(?:\(\d+,\d+\)|:\d+(?::\d+)?)[:\s].+/im
   @diagnostic_summary_regex ~r/^\s*(?:Build\s+(?:FAILED|succeeded)|BUILD\s+(?:FAILED|SUCCESSFUL)|\*\*\s+BUILD\s+(?:FAILED|SUCCEEDED)\s+\*\*|Failed!\s+-\s+Failed:|Passed!\s+-\s+Failed:|Test summary:|Found\s+\d+\s+(?:errors?|warnings?)|Executed\s+\d+\s+tests?,\s+with\s+\d+|\d+\s+(?:Warning|Error)\(s\)|\d+\s+(?:tests?|examples?)\s+(?:completed|run|passed|failed)|\d+\s+actionable tasks?:)/im
   @lint_rule_regex ~r/\b(?:lint|style|correctness|suspicious|complexity|nursery|performance|security)\/[a-z0-9_\/-]+\b/i
+  # Compilers and linters print grep's `path:line[:col]:` location shape. A
+  # severity word or a rule code right after the location marks a diagnostic.
+  @diagnostic_location_regex ~r/^\s*[\w.\/-]+:\d+(?::\d+)?:\s*(?:(?i:(?:fatal\s+)?error|warning|note|remark|info)\b|[A-Z]{1,4}\d{2,5}\b)/m
+  @compiler_summary_regex ~r/^\s*(?:\d+\s+(?:errors?|warnings?)(?:\s+and\s+\d+\s+(?:errors?|warnings?))?\s+generated\b|compilation\s+terminated\b|make(?:\[\d+\])?:\s+\*\*\*)|^\W*\d+\s+problems?\b/imu
 
   @source_keyword_regex ~r/^\s*(?:defmodule|defp?\s+\w+|class\s+\w+|function\s+\w+|import\s+|export\s+|const\s+\w+|let\s+\w+|var\s+\w+|pub\s+fn\s+\w+|fn\s+\w+|impl\s+\w+|module\s+\w+|alias\s+)/m
   @source_punctuation_regex ~r/[{}();]/
@@ -79,8 +84,15 @@ defmodule CodexPooler.Gateway.RequestCompression.ContentDetector do
   @source_comment_regex ~r/^\s*(?:#|\/\/|\/\*|\*)/m
   @source_closing_regex ~r/^\s*(?:end|})\s*$/m
 
-  @spec detect(term()) :: decision()
-  def detect(content) when is_binary(content) do
+  @doc """
+  Classifies a tool output. `command:` carries the provenance of the command
+  that printed it (`:search`, `:other`, or `:unknown`); `:other` rules out the
+  lossy search strategy even when the output has search-result shape.
+  """
+  @spec detect(term(), keyword()) :: decision()
+  def detect(content, opts \\ [])
+
+  def detect(content, opts) when is_binary(content) do
     trimmed = String.trim(content)
 
     if trimmed == "" do
@@ -88,15 +100,30 @@ defmodule CodexPooler.Gateway.RequestCompression.ContentDetector do
     else
       case json_kind(trimmed) do
         {:ok, kind} -> decision(kind, 100)
-        :error -> scored_decision(content)
+        :error -> scored_decision(content, Keyword.get(opts, :command, :unknown))
       end
     end
   end
 
-  def detect(_content), do: decision(:text, 100)
+  def detect(_content, _opts), do: decision(:text, 100)
 
-  @spec scored_decision(String.t()) :: decision()
-  defp scored_decision(content) do
+  @doc """
+  Whether text reads as compiler or linter diagnostics: a diagnostic summary
+  line, or diagnostic locations on at least half of the grep-shaped lines.
+  """
+  @spec diagnostic_output?(String.t()) :: boolean()
+  def diagnostic_output?(content) when is_binary(content) do
+    regex_match?(@compiler_summary_regex, content) or regex_match?(@diagnostic_summary_regex, content) or
+      diagnostic_location_majority?(content)
+  end
+
+  defp diagnostic_location_majority?(content) do
+    diagnostic_lines = scan_count(@diagnostic_location_regex, content)
+    diagnostic_lines > 0 and diagnostic_lines * 2 >= scan_count(@path_match_regex, content)
+  end
+
+  @spec scored_decision(String.t(), atom()) :: decision()
+  defp scored_decision(content, command) do
     cond do
       (points = diff_points(content)) >= 70 ->
         decision(:diff, points)
@@ -105,15 +132,34 @@ defmodule CodexPooler.Gateway.RequestCompression.ContentDetector do
         decision(:html, points)
 
       true ->
-        scored_text_decision(content, lines(content))
+        scored_text_decision(content, lines(content), command)
     end
   end
 
-  defp scored_text_decision(content, lines) do
-    cond do
-      (points = search_points(content, lines)) >= 60 ->
-        decision(:search, points)
+  defp scored_text_decision(content, lines, command) do
+    case search_decision(content, lines, command) do
+      {:ok, decision} -> decision
+      :error -> non_search_text_decision(content, lines)
+    end
+  end
 
+  # Diagnostics share the search location shape, so the ambiguity is resolved
+  # here, before a lossy strategy is chosen: a non-search command or diagnostic
+  # evidence rules search out and lets the build score decide.
+  defp search_decision(_content, _lines, :other), do: :error
+
+  defp search_decision(content, lines, _command) do
+    points = search_points(content, lines)
+
+    if points >= 60 and not diagnostic_output?(content) do
+      {:ok, decision(:search, points)}
+    else
+      :error
+    end
+  end
+
+  defp non_search_text_decision(content, lines) do
+    cond do
       (points = build_points(content, lines)) >= 50 ->
         decision(:build, points)
 
@@ -143,10 +189,10 @@ defmodule CodexPooler.Gateway.RequestCompression.ContentDetector do
 
   @spec normalize_concatenated_json_objects(term()) :: {:ok, String.t(), pos_integer()} | :error
   def normalize_concatenated_json_objects(content) when is_binary(content) do
-    with {:ok, rows} <- decode_concatenated_json_objects(content),
-         row_count when row_count >= 2 <- length(rows),
-         {:ok, normalized} <- CodexPooler.JSON.encode(rows) do
-      {:ok, normalized, row_count}
+    with {:ok, objects} <- decode_concatenated_json_objects(content),
+         row_count when row_count >= 2 <- length(objects) do
+      rows = objects |> Enum.map(&JsonMinifier.minify/1) |> Enum.intersperse(",")
+      {:ok, IO.iodata_to_binary(["[", rows, "]"]), row_count}
     else
       _not_concatenated -> :error
     end
@@ -176,39 +222,41 @@ defmodule CodexPooler.Gateway.RequestCompression.ContentDetector do
     end
   end
 
-  defp decode_object_stream("", _rows), do: :error
+  defp decode_object_stream("", _objects), do: :error
 
-  defp decode_object_stream(content, rows) do
+  defp decode_object_stream(content, objects) do
     case decode_leading_json_object(content) do
-      {:ok, row, rest} ->
+      {:ok, object_json, rest} ->
         rest
         |> trim_leading_json_whitespace()
-        |> continue_object_stream([row | rows])
+        |> continue_object_stream([object_json | objects])
 
       :error ->
         :error
     end
   end
 
-  defp continue_object_stream({"", _separator_bytes}, [_last, _previous | _rest] = rows) do
-    {:ok, Enum.reverse(rows)}
+  defp continue_object_stream({"", _separator_bytes}, [_last, _previous | _rest] = objects) do
+    {:ok, Enum.reverse(objects)}
   end
 
-  defp continue_object_stream({"", _separator_bytes}, _rows), do: :error
+  defp continue_object_stream({"", _separator_bytes}, _objects), do: :error
 
-  defp continue_object_stream({next, separator_bytes}, rows) when separator_bytes > 0 do
-    decode_object_stream(next, rows)
+  defp continue_object_stream({next, separator_bytes}, objects) when separator_bytes > 0 do
+    decode_object_stream(next, objects)
   end
 
-  defp continue_object_stream({_next, _separator_bytes}, _rows), do: :error
+  defp continue_object_stream({_next, _separator_bytes}, _objects), do: :error
 
+  # Returns the validated object text itself, so normalization can keep every
+  # token byte instead of re-encoding decoded values.
   defp decode_leading_json_object(<<?{, _rest::binary>> = content) do
     with {:ok, byte_end} <- json_object_byte_end(content),
          object_json = binary_part(content, 0, byte_end),
-         {:ok, %CodexPooler.JSON.OrderedObject{} = row} <-
+         {:ok, %CodexPooler.JSON.OrderedObject{}} <-
            CodexPooler.JSON.decode(object_json, objects: :ordered_objects) do
       rest = binary_part(content, byte_end, byte_size(content) - byte_end)
-      {:ok, row, rest}
+      {:ok, object_json, rest}
     else
       _invalid -> :error
     end

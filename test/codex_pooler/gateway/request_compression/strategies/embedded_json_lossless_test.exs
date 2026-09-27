@@ -3,6 +3,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.EmbeddedJsonLossless
 
   alias CodexPooler.Gateway.RequestCompression.Strategies.EmbeddedJsonLossless
   alias CodexPooler.Gateway.RequestCompression.TokenCounter
+  alias CodexPooler.Gateway.RequestCompression.WorkBudget
 
   @model "gpt-4o"
 
@@ -82,6 +83,33 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.EmbeddedJsonLossless
         |> then(&("synthetic prefix\n" <> &1 <> "\nsynthetic suffix"))
 
       assert :skip = EmbeddedJsonLossless.compress(over_limit, model: @model)
+    end
+
+    test "keeps numeric lexemes byte-identical inside embedded JSON spans" do
+      object = """
+      {
+        "exact_decimal": 9007199254740993.0,
+        "long_fraction": 0.12345678901234567890123456789,
+        "negative_zero": -0,
+        "rows": [1.10, 2.50, 1E+2]
+      }
+      """
+
+      original = "synthetic prefix\n" <> object <> "synthetic suffix"
+
+      assert {:ok, %{content: compressed}} = EmbeddedJsonLossless.compress(original, model: @model)
+
+      assert compressed ==
+               "synthetic prefix\n" <>
+                 ~S({"exact_decimal":9007199254740993.0,"long_fraction":0.12345678901234567890123456789,"negative_zero":-0,"rows":[1.10,2.50,1E+2]}) <>
+                 "\nsynthetic suffix"
+    end
+
+    test "reports a spent work budget instead of a plain skip" do
+      original = "synthetic prefix\n" <> pretty_object("first") <> "\nsynthetic middle\n" <> pretty_object("second")
+
+      assert {:skip, :work_budget_exhausted} =
+               EmbeddedJsonLossless.compress(original, model: @model, work_budget: WorkBudget.new(10))
     end
 
     test "preserves duplicate object keys and keeps metadata content-free" do

@@ -10,6 +10,7 @@ defmodule CodexPooler.Gateway.RequestCompression.TokenCounter do
   alias CodexPooler.Gateway.RequestCompression.TokenCounter.BPE
   alias CodexPooler.Gateway.RequestCompression.TokenCounter.Pretokenizer
   alias CodexPooler.Gateway.RequestCompression.TokenCounter.Ranks
+  alias CodexPooler.Gateway.RequestCompression.WorkBudget
 
   @type encoding :: :cl100k_base | :o200k_base
   @type metadata :: %{
@@ -22,44 +23,63 @@ defmodule CodexPooler.Gateway.RequestCompression.TokenCounter do
           | :rank_file_unavailable
           | :invalid_rank_file
           | :tokenizer_input_limit
+          | :work_budget_exhausted
   @type count_result :: {:ok, non_neg_integer(), metadata()} | {:error, error_reason()}
   @type lower_bound_result :: {:ok, non_neg_integer(), metadata()} | {:error, error_reason()}
 
   @max_input_bytes 8_192
   @max_bpe_chunk_bytes 1_024
+  # Work budget surcharge per byte of a piece that takes the heap merge, on top
+  # of the byte charged for reading the text: measured, such pieces cost about
+  # five times as much per byte as ordinary tool output.
+  @heap_surcharge_per_byte 4
+  # A lower bound counts only the prefix chunks that the whole text is sure to
+  # split the same way. Matching a non-space chunk reads at most four bytes past
+  # its end (the optional contraction suffix), so a chunk ending this far before
+  # the cut, and not followed only by whitespace, cannot change.
+  @stable_chunk_margin 8
 
-  @spec count(String.t(), String.t()) :: count_result()
-  def count(model, text) when is_binary(model) and is_binary(text) do
+  @doc """
+  Counts tokens exactly. `work_budget:` (a `WorkBudget`) is charged for the
+  text before any tokenization and fails the count once it is spent.
+  """
+  @spec count(String.t(), String.t(), keyword()) :: count_result()
+  def count(model, text, opts \\ [])
+
+  def count(model, text, opts) when is_binary(model) and is_binary(text) do
     with :ok <- input_within_limit(text),
          {:ok, encoding} <- encoding_for_model(model),
          {:ok, ranks} <- Ranks.load(encoding),
-         {:ok, chunks} <- safe_chunks(text, encoding) do
-      count =
-        Enum.reduce(chunks, 0, fn chunk, acc -> acc + BPE.count(chunk, ranks) end)
-
-      {:ok, count, metadata(encoding)}
+         {:ok, chunks} <- charged_chunks(text, encoding, ranks, opts) do
+      {:ok, count_chunks(chunks, ranks), metadata(encoding)}
     end
   end
 
-  def count(_model, _text), do: {:error, :unsupported_model}
+  def count(_model, _text, _opts), do: {:error, :unsupported_model}
 
   @spec count_tokens(String.t(), String.t()) :: count_result()
   def count_tokens(model, text), do: count(model, text)
 
-  @spec count_lower_bound(String.t(), String.t()) :: lower_bound_result()
-  def count_lower_bound(model, text) when is_binary(model) and is_binary(text) do
+  @doc """
+  Counts tokens exactly up to #{@max_input_bytes} bytes; beyond that, returns a
+  count the whole text is guaranteed to reach. Tokenizing a cut-off prefix is
+  not such a bound (completing a piece can merge it into fewer tokens), so only
+  prefix chunks that stay identical in the whole text are counted.
+  """
+  @spec count_lower_bound(String.t(), String.t(), keyword()) :: lower_bound_result()
+  def count_lower_bound(model, text, opts \\ [])
+
+  def count_lower_bound(model, text, opts) when is_binary(model) and is_binary(text) do
     with {:ok, encoding} <- encoding_for_model(model),
          {:ok, ranks} <- Ranks.load(encoding),
-         {:ok, bounded_text} <- bounded_prefix(text),
-         {:ok, chunks} <- safe_chunks(bounded_text, encoding) do
-      count =
-        Enum.reduce(chunks, 0, fn chunk, acc -> acc + BPE.count(chunk, ranks) end)
-
-      {:ok, count, metadata(encoding)}
+         {:ok, bounded_text, truncated?} <- bounded_prefix(text),
+         {:ok, chunks} <- charged_chunks(bounded_text, encoding, ranks, opts),
+         {:ok, chunks} <- stable_chunks(chunks, byte_size(bounded_text), truncated?) do
+      {:ok, count_chunks(chunks, ranks), metadata(encoding)}
     end
   end
 
-  def count_lower_bound(_model, _text), do: {:error, :unsupported_model}
+  def count_lower_bound(_model, _text, _opts), do: {:error, :unsupported_model}
 
   @spec max_input_bytes() :: pos_integer()
   def max_input_bytes, do: @max_input_bytes
@@ -118,7 +138,7 @@ defmodule CodexPooler.Gateway.RequestCompression.TokenCounter do
         {:error, :tokenizer_input_limit}
 
       byte_size(text) <= @max_input_bytes ->
-        {:ok, text}
+        {:ok, text, false}
 
       true ->
         text
@@ -129,13 +149,61 @@ defmodule CodexPooler.Gateway.RequestCompression.TokenCounter do
 
   defp trim_to_valid_prefix(prefix) do
     if String.valid?(prefix) do
-      {:ok, prefix}
+      {:ok, prefix, true}
     else
       prefix
       |> binary_part(0, byte_size(prefix) - 1)
       |> trim_to_valid_prefix()
     end
   end
+
+  defp stable_chunks(chunks, _prefix_size, false), do: {:ok, chunks}
+
+  # Drop the chunk the cut runs through, then every chunk that ends within the
+  # margin before the cut or is only whitespace (a whitespace run reaching the
+  # cut may regroup with what follows it).
+  defp stable_chunks(chunks, prefix_size, true) do
+    {chunks_with_ends, covered} =
+      Enum.map_reduce(chunks, 0, fn chunk, offset -> {{chunk, offset + byte_size(chunk)}, offset + byte_size(chunk)} end)
+
+    if covered == prefix_size do
+      stable =
+        chunks_with_ends
+        |> Enum.reverse()
+        |> Enum.drop(1)
+        |> Enum.drop_while(fn {chunk, chunk_end} -> chunk_end > prefix_size - @stable_chunk_margin or whitespace_only?(chunk) end)
+        |> Enum.reverse()
+        |> Enum.map(fn {chunk, _chunk_end} -> chunk end)
+
+      {:ok, stable}
+    else
+      {:error, :tokenizer_input_limit}
+    end
+  end
+
+  defp whitespace_only?(chunk), do: Regex.match?(~r/\A\s+\z/u, chunk)
+
+  defp charged_chunks(text, encoding, ranks, opts) do
+    budget = WorkBudget.from_opts(opts)
+
+    with :ok <- WorkBudget.charge(budget, byte_size(text)),
+         {:ok, chunks} <- safe_chunks(text, encoding),
+         :ok <- WorkBudget.charge(budget, heap_surcharge(chunks, ranks)) do
+      {:ok, chunks}
+    end
+  end
+
+  defp heap_surcharge(chunks, ranks) do
+    Enum.reduce(chunks, 0, fn chunk, units ->
+      if byte_size(chunk) >= BPE.heap_min_bytes() and not Map.has_key?(ranks, chunk) do
+        units + byte_size(chunk) * @heap_surcharge_per_byte
+      else
+        units
+      end
+    end)
+  end
+
+  defp count_chunks(chunks, ranks), do: Enum.reduce(chunks, 0, fn chunk, acc -> acc + BPE.count(chunk, ranks) end)
 
   defp safe_chunks(text, encoding) do
     chunks = Pretokenizer.split(text, encoding)

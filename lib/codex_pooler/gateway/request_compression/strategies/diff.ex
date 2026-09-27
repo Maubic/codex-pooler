@@ -22,19 +22,25 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.Diff do
     min_bytes = Strategies.integer_option(opts, :min_bytes, @default_min_bytes, 0)
     min_hunks = Strategies.integer_option(opts, :min_hunks, @default_min_hunks, 1)
 
+    # Every file section counts, including those without text hunks (mode
+    # changes, binary files, renames, empty files): they are rendered verbatim
+    # or counted as omitted, never dropped unseen.
     with true <- byte_size(content) >= min_bytes,
          {:ok, lines} <- Strategies.lines(content),
          files when files != [] <- parse_files(lines),
-         files <- Enum.filter(files, &(hunk_count(&1) > 0)),
          original_hunk_count when original_hunk_count >= min_hunks <- total_hunk_count(files),
-         true <- total_change_count(files) > 0 do
+         true <- total_change_count(files) > 0,
+         true <- every_hunk_changes?(files) do
       selected_files = select_files(files, opts)
       compressed_hunk_count = total_hunk_count(selected_files)
 
-      if compressed_hunk_count > 0 do
-        {compressed_lines, kept_context_line_count, omitted_context_line_count} =
-          render_files(files, selected_files, opts)
+      {compressed_lines, kept_context_line_count, omitted_context_line_count} =
+        render_files(files, selected_files, opts)
 
+      omitted_anything? =
+        omitted_context_line_count > 0 or compressed_hunk_count < original_hunk_count or length(selected_files) < length(files)
+
+      if compressed_hunk_count > 0 and omitted_anything? do
         compressed = Strategies.join_lines(compressed_lines)
 
         finalize(
@@ -110,7 +116,6 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.Diff do
       hunks
       |> append_hunk(current_hunk)
       |> Enum.reverse()
-      |> Enum.filter(&(change_count(&1) > 0))
 
     %{header: Enum.reverse(header), hunks: hunks}
   end
@@ -224,14 +229,8 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.Diff do
         not changed_line?(line, hunk) and MapSet.member?(selected_index_set, index)
       end)
 
-    hunk_lines =
-      if kept_context_line_count == 0 and omitted_context_line_count == 0 do
-        body_lines
-      else
-        [hunk.header | body_lines]
-      end
-
-    {hunk_lines, kept_context_line_count, omitted_context_line_count}
+    # The header carries the hunk position, so it stays with every kept hunk.
+    {[hunk.header | body_lines], kept_context_line_count, omitted_context_line_count}
   end
 
   defp selected_hunk_indexes(%{body: lines} = hunk, context_lines) do
@@ -264,6 +263,12 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.Diff do
 
   defp omitted_file_marker(count) do
     ["[compressed diff output: omitted #{count} files]"]
+  end
+
+  # A hunk without changed lines means the input is not the diff it looks like;
+  # there is no faithful compressed form for it.
+  defp every_hunk_changes?(files) do
+    Enum.all?(files, fn file -> Enum.all?(file.hunks, &(change_count(&1) > 0)) end)
   end
 
   defp total_hunk_count(files) do

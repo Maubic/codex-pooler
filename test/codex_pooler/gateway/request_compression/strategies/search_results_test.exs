@@ -3,6 +3,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResultsTest do
 
   alias CodexPooler.Gateway.RequestCompression.Strategies.SearchResults
   alias CodexPooler.Gateway.RequestCompression.TokenCounter
+  alias CodexPooler.RequestCompressionFixtures
 
   @model "gpt-4o"
 
@@ -181,11 +182,12 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResultsTest do
       assert compressed =~ "  19- grouped context before second"
       assert compressed =~ "  20: grouped match two kept"
       assert compressed =~ "  21- grouped context after second"
+      assert compressed =~ "  [omitted 7 matches in file]"
       refute compressed =~ sentinel
 
       assert metadata.strategy == :search_results
       assert metadata.original_file_count == 1
-      assert metadata.original_match_count == 3
+      assert metadata.original_match_count == 9
       assert metadata.compressed_match_count == 2
       assert_safe_metadata(metadata, :search_results, sentinel)
     end
@@ -247,6 +249,54 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResultsTest do
                    max_matches_per_file: 1,
                    max_matches: 1
                  )
+      end
+    end
+
+    test "marks omitted matches in grep context output too" do
+      content =
+        Enum.map_join(1..12, "\n--\n", fn index ->
+          "lib/context.ex-#{index * 10 - 1}- before match #{index}\nlib/context.ex:#{index * 10}: context match #{index} kept\nlib/context.ex-#{index * 10 + 1}- after match #{index}"
+        end)
+
+      assert {:ok, %{content: compressed, metadata: metadata}} =
+               SearchResults.compress(content, model: @model, min_bytes: 0, min_matches: 2)
+
+      assert String.starts_with?(compressed, "[compressed search results: 3/12 matches, 1/1 files]\nlib/context.ex\n  9- before match 1\n")
+      assert compressed =~ "  [omitted 9 matches in file]"
+      assert metadata.omitted_match_count == 9
+    end
+
+    test "skips outputs with lines the search rendering cannot represent" do
+      trailing_summary =
+        Enum.map_join(1..12, "\n", &"lib/sample_#{rem(&1, 2)}.ex:#{&1}: synthetic needle line #{&1} kept") <>
+          "\n12 matches across 2 files"
+
+      for content <- [trailing_summary, RequestCompressionFixtures.clang_undeclared_identifier_diagnostics()] do
+        assert :skip =
+                 SearchResults.compress(content,
+                   model: @model,
+                   min_bytes: 0,
+                   min_matches: 2,
+                   max_matches_per_file: 1,
+                   max_matches: 2
+                 )
+      end
+    end
+
+    test "keeps a leading tool-output envelope verbatim" do
+      matches = Enum.map_join(1..12, "\n", &"lib/sample_#{rem(&1, 2)}.ex:#{&1}: synthetic needle line #{&1} with filler text")
+
+      envelopes = [
+        "Exit code: 0\nWall time: 0.2 seconds\nOutput:\n",
+        "Chunk ID: 5f2c1a\nWall time: 0.0412 seconds\nProcess exited with code 0\nOriginal token count: 310\nOutput:\n"
+      ]
+
+      for envelope <- envelopes do
+        assert {:ok, %{content: compressed, metadata: metadata}} =
+                 SearchResults.compress(envelope <> matches, model: @model, min_bytes: 0, min_matches: 2)
+
+        assert String.starts_with?(compressed, envelope <> "[compressed search results: 6/12 matches, 2/2 files]\nlib/sample_1.ex\n")
+        assert metadata.original_match_count == 12
       end
     end
 
@@ -367,6 +417,12 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResultsTest do
     20: grouped match two kept
     21- grouped context after second
     30: grouped match three #{sentinel}
+    31: grouped match four with omitted synthetic detail
+    32: grouped match five with omitted synthetic detail
+    33: grouped match six with omitted synthetic detail
+    34: grouped match seven with omitted synthetic detail
+    35: grouped match eight with omitted synthetic detail
+    36: grouped match nine with omitted synthetic detail
     """
   end
 

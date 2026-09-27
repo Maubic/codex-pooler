@@ -118,6 +118,33 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRangesTest do
     end
   end
 
+  describe "structural bounds" do
+    test "stops at the nesting limit instead of scanning arbitrarily deep documents" do
+      assert {:ok, _ranges} = JsonStringRanges.scan(nested_schema(511))
+      assert {:error, :depth_limit} = JsonStringRanges.scan(nested_schema(512))
+      assert {:ok, _ranges} = JsonStringRanges.scan("[[[1]]]", max_depth: 3)
+      assert {:error, :depth_limit} = JsonStringRanges.scan("[[[[1]]]]", max_depth: 3)
+      assert {:error, :invalid_json} = JsonStringRanges.scan("[[[1]]", max_depth: 3)
+    end
+
+    test "returns only ranges within the path length while validating the whole document" do
+      json = ~S({"a":"shallow","b":{"c":"deeper","d":["deepest"]}})
+
+      assert {:ok, [%{path: ["a"]}]} = JsonStringRanges.scan(json, max_path_length: 1)
+      assert {:ok, [%{path: ["a"]}, %{path: ["b", "c"]}]} = JsonStringRanges.scan(json, max_path_length: 2)
+      assert {:error, :invalid_json} = JsonStringRanges.scan(~S({"a":"shallow","b":{"c":[1,]}}), max_path_length: 1)
+    end
+
+    test "builds paths only for the ranges it returns" do
+      json = nested_schema(500)
+
+      # The former scanner copied the whole path at every level and kept each
+      # copy: about 8 MB for this 12 KB document.
+      assert {:ok, {:ok, ranges}} = run_with_heap_cap(262_144, fn -> JsonStringRanges.scan(json, max_path_length: 8) end)
+      assert Enum.all?(ranges, &(length(&1.path) <= 8))
+    end
+  end
+
   describe "replace_ranges/2" do
     test "replaces escaped and unicode string literals without changing surrounding bytes" do
       json =
@@ -262,5 +289,28 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRangesTest do
              after_second_replacement,
              byte_size(replaced) - after_second_replacement
            ) == suffix
+  end
+
+  defp nested_schema(depth) do
+    String.duplicate(~S({"type":"array","items":), depth) <> ~S({"type":"string"}) <> String.duplicate("}", depth)
+  end
+
+  defp run_with_heap_cap(words, fun) do
+    parent = self()
+
+    {pid, monitor} =
+      spawn_monitor(fn ->
+        Process.flag(:max_heap_size, %{size: words, kill: true, error_logger: false})
+        send(parent, {:heap_capped, self(), fun.()})
+      end)
+
+    receive do
+      {:heap_capped, ^pid, result} ->
+        Process.demonitor(monitor, [:flush])
+        {:ok, result}
+
+      {:DOWN, ^monitor, :process, ^pid, reason} ->
+        {:error, reason}
+    end
   end
 end

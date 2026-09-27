@@ -3,10 +3,12 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.JsonDocumentLossless
   Conservative JSON-object request compression.
 
   This strategy only minifies valid top-level JSON object text and returns a
-  rewrite when local token counting proves a strict reduction. Arrays keep using
-  the existing array strategy so row-oriented metadata stays stable.
+  rewrite when local token counting proves a strict reduction. Minification is
+  lexical, so every token keeps its original bytes. Arrays keep using the
+  existing array strategy so row-oriented metadata stays stable.
   """
 
+  alias CodexPooler.Gateway.RequestCompression.JsonMinifier
   alias CodexPooler.Gateway.RequestCompression.Strategies
 
   @strategy :json_document_lossless
@@ -15,18 +17,18 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.JsonDocumentLossless
   def compress(content, opts \\ [])
 
   def compress(content, opts) when is_binary(content) do
-    with {:ok, %CodexPooler.JSON.OrderedObject{} = document} <-
-           CodexPooler.JSON.decode(content, objects: :ordered_objects),
-         {:ok, compressed} <- CodexPooler.JSON.encode(document) do
-      Strategies.finalize(
-        @strategy,
-        content,
-        compressed,
-        %{top_level_key_count: top_level_key_count(document)},
-        opts
-      )
-    else
-      _skip -> :skip
+    case CodexPooler.JSON.decode(content, objects: :ordered_objects) do
+      {:ok, %CodexPooler.JSON.OrderedObject{} = document} ->
+        Strategies.finalize(
+          @strategy,
+          content,
+          JsonMinifier.minify(content),
+          %{top_level_key_count: top_level_key_count(document)},
+          opts
+        )
+
+      _skip ->
+        :skip
     end
   end
 

@@ -1,6 +1,7 @@
 defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
   @moduledoc false
 
+  alias CodexPooler.Gateway.RequestCompression.ContentDetector
   alias CodexPooler.Gateway.RequestCompression.Strategies
 
   @strategy :search_results
@@ -11,6 +12,10 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
   @default_max_matches_per_file 3
   @default_model "gpt-4o"
   @max_heading_bytes 240
+  # Tool runners put a short header before the command output and end it with
+  # this line (Codex shell and exec_command outputs, MCP tool results).
+  @envelope_terminator "Output:"
+  @max_envelope_lines 8
 
   @match_line_regex ~r/^\s*(?<path>[\w.\/-][\w.\/-]*):(?<line>\d+)(?::(?<column>\d+))?:\s*(?<text>\S.*)$/u
   @context_line_regex ~r/^\s*(?<path>[\w.\/-][\w.\/-]*)-(?<line>\d+)(?:-(?<column>\d+))?-\s*(?<text>\S.*)$/u
@@ -23,7 +28,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
   @binary_match_regex ~r/^\s*(?:Binary file .+ matches|.+?:\s*(?:WARNING:\s*)?(?:stopped searching )?binary file (?:matches|after match)\b.*)$/i
   @engine_command_regex ~r/^\s*(?:[$>]|\++)?\s*(?:\S+=\S+\s+)*(?:(?:rg|ripgrep|grep|ag|ack|ugrep)|git\s+grep|(?:(?:\/|\.\.?\/)[\w.\/-]*)(?:rg|ripgrep|grep|ag|ack|ugrep))(?:\s|$)/i
   @engine_stderr_regex ~r/^\s*(?:(?:(?:(?:\/|\.\.?\/)[\w.\/-]*)?(?:rg|ripgrep|grep|ag|ack|ugrep)|git grep):|stderr\b|standard error\b)/i
-  @exit_code_regex ~r/^\s*(?:exit\s+(?:code|status)|status|returned)\s*[:=]?\s*[1-9]\d*\b/i
+  @exit_code_regex ~r/^\s*(?:exit\s+(?:code|status)|status|returned|process\s+exited\s+with\s+code)\s*[:=]?\s*[1-9]\d*\b/i
 
   @spec compress(term(), Strategies.opts()) :: Strategies.result()
   def compress(content, opts \\ [])
@@ -33,10 +38,12 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
     min_matches = Strategies.integer_option(opts, :min_matches, @default_min_matches, 1)
 
     with true <- byte_size(content) >= min_bytes,
-         {:ok, lines} <- Strategies.lines(content),
-         grouped_entries = parse_grouped_entries(lines),
-         false <- unsafe_search_output?(lines, grouped_entries),
+         {:ok, all_lines} <- Strategies.lines(content),
+         {envelope, lines} = split_envelope(all_lines),
+         {grouped_entries, grouped_heading_indexes} = parse_grouped_entries(lines),
+         false <- unsafe_search_output?(content, envelope, lines, grouped_entries),
          entries <- parse_entries(lines, grouped_entries),
+         true <- every_line_represented?(lines, entries, grouped_heading_indexes),
          true <- count_matches(entries) >= min_matches,
          groups when groups != [] <- group_entries(entries) do
       selected_groups = select_groups(groups, opts)
@@ -44,7 +51,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
       original_match_count = count_matches(entries)
 
       if compressed_match_count > 0 do
-        compressed_lines = render_groups(groups, selected_groups, compressed_match_count)
+        compressed_lines = envelope ++ render_groups(groups, selected_groups, compressed_match_count)
         compressed = Strategies.join_lines(compressed_lines)
 
         finalize(
@@ -52,7 +59,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
           content,
           compressed,
           %{
-            original_line_count: length(lines),
+            original_line_count: length(all_lines),
             compressed_line_count: length(compressed_lines),
             original_file_count: length(groups),
             compressed_file_count: length(selected_groups),
@@ -81,9 +88,29 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
 
   def compress(_content, _opts), do: :skip
 
-  defp unsafe_search_output?(lines, grouped_entries) do
-    Enum.any?(lines, &unsafe_passthrough_line?/1) or
-      ungrouped_line_match_output?(lines, grouped_entries)
+  # Keep a leading tool-runner header verbatim instead of dropping it with the
+  # lines the search rendering does not represent.
+  defp split_envelope(lines) do
+    case lines |> Enum.take(@max_envelope_lines) |> Enum.find_index(&(&1 == @envelope_terminator)) do
+      nil -> {[], lines}
+      index -> Enum.split(lines, index + 1)
+    end
+  end
+
+  defp unsafe_search_output?(content, envelope, lines, grouped_entries) do
+    Enum.any?(envelope, &unsafe_passthrough_line?/1) or Enum.any?(lines, &unsafe_passthrough_line?/1) or
+      ungrouped_line_match_output?(lines, grouped_entries) or ContentDetector.diagnostic_output?(content)
+  end
+
+  # The rendering keeps only parsed entries and group headings, so any other
+  # nonblank line (a summary, a source excerpt, a diagnostic caret) would vanish
+  # without a trace; such output is left unchanged instead.
+  defp every_line_represented?(lines, entries, grouped_heading_indexes) do
+    represented = MapSet.union(MapSet.new(entries, & &1.index), grouped_heading_indexes)
+
+    lines
+    |> Enum.with_index()
+    |> Enum.all?(fn {line, index} -> MapSet.member?(represented, index) or String.trim(line) == "" end)
   end
 
   defp unsafe_passthrough_line?(line) do
@@ -181,45 +208,44 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
   end
 
   defp parse_grouped_entries(lines) do
-    parse_grouped_entries(lines, 0, nil, [])
+    parse_grouped_entries(lines, 0, nil, {[], []})
   end
 
-  defp parse_grouped_entries([], _index, current, entries) do
-    entries
-    |> finish_grouped_entries(current)
-    |> Enum.reverse()
+  defp parse_grouped_entries([], _index, current, found) do
+    {entries, heading_indexes} = finish_grouped_entries(found, current)
+    {Enum.reverse(entries), MapSet.new(heading_indexes)}
   end
 
-  defp parse_grouped_entries([line | rest], index, nil, entries) do
+  defp parse_grouped_entries([line | rest], index, nil, found) do
     path = String.trim(line)
-    current = if path_like_heading?(path), do: %{path: path, entries: []}, else: nil
-    parse_grouped_entries(rest, index + 1, current, entries)
+    current = if path_like_heading?(path), do: %{path: path, heading_index: index, entries: []}, else: nil
+    parse_grouped_entries(rest, index + 1, current, found)
   end
 
-  defp parse_grouped_entries([line | rest] = lines, index, current, entries) do
+  defp parse_grouped_entries([line | rest] = lines, index, current, found) do
     case parse_grouped_fragment(current.path, line, index) do
       {:ok, entry} ->
         parse_grouped_entries(
           rest,
           index + 1,
           %{current | entries: [entry | current.entries]},
-          entries
+          found
         )
 
       :skip ->
-        parse_grouped_entries(lines, index, nil, finish_grouped_entries(entries, current))
+        parse_grouped_entries(lines, index, nil, finish_grouped_entries(found, current))
     end
   end
 
-  defp finish_grouped_entries(entries, nil), do: entries
+  defp finish_grouped_entries(found, nil), do: found
 
-  defp finish_grouped_entries(entries, current) do
+  defp finish_grouped_entries({entries, heading_indexes}, current) do
     current_entries = Enum.reverse(current.entries)
 
     if count_matches(current_entries) >= 2 do
-      Enum.reverse(current_entries, entries)
+      {Enum.reverse(current_entries, entries), [current.heading_index | heading_indexes]}
     else
-      entries
+      {entries, heading_indexes}
     end
   end
 
@@ -339,21 +365,18 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
     original_file_count = length(groups)
     compressed_file_count = length(selected_groups)
 
-    header =
-      if context_shape?(selected_groups) do
-        []
-      else
-        [
-          "[compressed search results: #{compressed_match_count}/#{original_match_count} matches, #{compressed_file_count}/#{original_file_count} files]"
-        ]
-      end
+    # Grep context output gets the same markers: a truncated result must not
+    # read as the complete one.
+    header = [
+      "[compressed search results: #{compressed_match_count}/#{original_match_count} matches, #{compressed_file_count}/#{original_file_count} files]"
+    ]
 
     body =
       Enum.flat_map(selected_groups, fn group ->
         group_lines =
           [group.path] ++ Enum.map(group.entries, &format_entry/1)
 
-        if group.omitted_match_count > 0 and not context_shape?([group]) do
+        if group.omitted_match_count > 0 do
           group_lines ++ ["  [omitted #{group.omitted_match_count} matches in file]"]
         else
           group_lines
@@ -385,12 +408,6 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
       selected_entry?(entry, position, entries, selected_indexes, first_index, last_index)
     end)
     |> Enum.map(fn {entry, _position} -> entry end)
-  end
-
-  defp context_shape?(selected_groups) do
-    Enum.any?(selected_groups, fn group ->
-      Enum.any?(group.entries, &(&1.kind in [:context, :separator]))
-    end)
   end
 
   defp selected_entry?(
