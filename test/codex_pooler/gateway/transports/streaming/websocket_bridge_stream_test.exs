@@ -739,6 +739,29 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStreamTest do
            }
   end
 
+  for {scenario, source, expected} <- [
+        {:declared_usage, %{response_usage: %{served_model: "model-old-owner", status: "usage_unknown"}}, %{served_model: "model-old-owner"}},
+        {:missing_usage, %{response_usage: %{status: "usage_unknown"}}, %{}},
+        {:projected_body, %{body: "data: {\"type\":\"response.failed\",\"response\":{\"model\":\"unknown\",\"status\":\"failed\",\"created_at\":0,\"object\":\"response\",\"output\":[],\"tools\":[],\"parallel_tool_calls\":false}}\n\n"}, %{}},
+        {:declared_unknown, %{body: "data: {\"type\":\"response.created\",\"response\":{\"model\":\"unknown\"}}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"model\":\"unknown\",\"status\":\"failed\",\"created_at\":0,\"object\":\"response\",\"output\":[],\"tools\":[],\"parallel_tool_calls\":false}}\n\n"}, %{served_model: "unknown"}},
+        {:declared_unknown_completed, %{body: "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"unknown\",\"status\":\"completed\"}}\n\n"}, %{served_model: "unknown"}},
+        {:unprojected_failure, %{body: "data: {\"type\":\"response.failed\",\"response\":{\"model\":\"unknown\",\"status\":\"failed\"}}\n\n"}, %{served_model: "unknown"}},
+        {:declared_body, %{body: "data: {\"type\":\"response.created\",\"response\":{\"model\":\"model-old-owner\"}}\n\n"}, %{served_model: "model-old-owner"}}
+      ] do
+    @tag model_provenance: true
+    test "legacy bridge #{scenario} retains only available source model facts" do
+      stream = start_armed(fn -> {:ok, unquote(Macro.escape(source))} end)
+      ref = stream.ref
+      owner_frame(stream, {:data, CodexPooler.JSON.encode!(%{"type" => "response.failed", "response" => %{"status" => "failed", "model" => "unknown"}})})
+      assert_receive {^ref, {:preflight, :stream}}, @detection_timeout_ms
+      assert_receive {^ref, {:data, _data}}, @detection_timeout_ms
+      assert_receive {^ref, :done}, @detection_timeout_ms
+      metadata = WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream)
+      assert metadata.model_usage == unquote(Macro.escape(expected))
+      refute Map.has_key?(metadata.model_usage, :model_observation)
+    end
+  end
+
   test "committed terminal delivery timeout becomes a stream error without fallback" do
     connection = connection_metadata()
 

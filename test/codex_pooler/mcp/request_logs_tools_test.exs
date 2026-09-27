@@ -2677,6 +2677,26 @@ defmodule CodexPooler.MCP.RequestLogsToolsTest do
     assert detail_text =~ "first_conflicting_model=model-other"
   end
 
+  @tag model_provenance: true
+  test "model placeholders in historical public failures are absent in both MCP representations", %{auth: auth} do
+    setup = active_api_key_fixture()
+    %{assignment: assignment} = upstream_assignment_fixture(setup.pool)
+    request = request_fixture(setup, %{status: "failed"})
+    attempt_fixture(request, assignment, %{status: "failed", transport: "websocket", upstream_model_id: "model-a", served_model: "unknown", response_metadata: %{"upstream_websocket_bridge" => true, "public_openai_responses_stream" => %{"mode" => "normalized", "created_seen" => false, "visible_seen" => false, "delta_count" => 0, "terminal_seen" => true, "terminal_kind" => "failed"}}})
+
+    assert {:ok, listed} = ToolDispatch.call("codex_pooler_list_request_logs", %{"pool_id" => setup.pool.id}, %{auth: auth})
+    assert [item] = listed["structuredContent"]["items"]
+    assert item["served_model"] == nil
+    refute hd(listed["content"])["text"] =~ "served_model=unknown"
+
+    assert {:ok, detail} = ToolDispatch.call("codex_pooler_get_request_log", %{"id" => request.id}, %{auth: auth})
+    assert detail["structuredContent"]["item"]["served_model"] == nil
+    assert [attempt] = detail["structuredContent"]["item"]["debug"]["attempts"]
+    assert attempt["served_model"] == nil
+    assert attempt["model_observation"] == nil
+    refute hd(detail["content"])["text"] =~ "served_model=unknown"
+  end
+
   defp attempt_with_latency(request, assignment, latency_ms, response_metadata \\ %{}) do
     attempt_fixture(request, assignment, %{
       latency_ms: latency_ms,

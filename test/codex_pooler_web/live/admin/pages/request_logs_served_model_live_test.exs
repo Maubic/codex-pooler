@@ -112,6 +112,20 @@ defmodule CodexPoolerWeb.Admin.RequestLogsServedModelLiveTest do
     assert has_element?(view, "#request-log-detail-attempt-1-model-conflict", "Model name changed within response")
   end
 
+  @tag model_provenance: true
+  test "historical public failure keeps its error but does not claim a different provider model", %{conn: conn, scope: scope} do
+    pool = create_pool!(scope, "projected-model-history")
+    setup = active_api_key_fixture(pool)
+    %{assignment: assignment} = upstream_assignment_fixture(pool)
+    request = request_fixture(setup, %{status: "failed", last_error_code: "invalid_request_error", response_status_code: 200})
+    attempt_fixture(request, assignment, %{transport: "websocket", status: "failed", served_model: "unknown", network_error_code: "invalid_request_error", response_metadata: %{"upstream_websocket_bridge" => true, "public_openai_responses_stream" => %{"mode" => "normalized", "created_seen" => false, "visible_seen" => false, "delta_count" => 0, "terminal_seen" => true, "terminal_kind" => "failed"}}})
+    {:ok, view, _} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}")
+    assert has_element?(view, "#request-log-row-#{request.id} [data-role=error-line]", "invalid_request_error")
+    refute has_element?(view, "#request-log-#{request.id}-served-model")
+    view |> element("#request-log-row-#{request.id}") |> render_click()
+    assert has_element?(view, "#request-log-detail-attempt-1-model-first", "Unavailable")
+  end
+
   test "drawer separates the requested, sent, and served models", %{conn: conn, scope: scope} do
     pool = create_pool!(scope, "served-model-drawer")
 

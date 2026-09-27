@@ -51,6 +51,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
   attempt metadata, which the take collects after the client-visible report.
   """
 
+  alias CodexPooler.Gateway.Runtime.Finalization.ResponseUsage
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponses
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser
@@ -867,6 +868,12 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
   defp put_submit_result_connection(state, _result), do: state
 
   defp model_usage(%{response_usage: %{model_observation: %{"version" => 1}} = usage}), do: Map.take(usage, [:served_model, :model_observation])
+  defp model_usage(%{response_usage: %{} = usage}), do: Map.take(usage, [:served_model])
+
+  # Old owners retain mapped response bodies without collection provenance.
+  # Their public failure placeholder cannot identify a provider model.
+  defp model_usage(%{body: body}) when is_binary(body), do: ResponseUsage.legacy_websocket_model_usage(body)
+
   defp model_usage(_result), do: nil
 
   defp quota_rejection?(%{quota_rejection: {429, _body, _headers}, upstream_committed: false}), do: true

@@ -118,6 +118,13 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
   def from_websocket_body(body) when is_binary(body),
     do: decode_stream_body(body, "websocket_usage_missing", true)
 
+  @doc "Reads first-model facts from older mapped owner bodies without inventing collection coverage."
+  @spec legacy_websocket_model_usage(binary()) :: map()
+  def legacy_websocket_model_usage(body) when is_binary(body) do
+    observer = Enum.reduce(stream_records(body, true), ModelDeclarationObserver.new(), &stream_record_model(&1, &2, :legacy))
+    %{} |> ModelDeclarationObserver.put_usage(observer) |> Map.take([:served_model])
+  end
+
   defp decode_stream_body(body, missing_source, websocket?) do
     records = stream_records(body, websocket?)
     usage = Enum.reduce_while(records, nil, &stream_record_usage/2)
@@ -133,12 +140,21 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
     ModelDeclarationObserver.put_usage(usage, observer)
   end
 
-  defp stream_record_model({json, event_type}, observer) do
+  defp stream_record_model(record, observer, source \\ :provider)
+
+  defp stream_record_model({json, event_type}, observer, source) do
     case CodexPooler.JSON.decode(json) do
-      {:ok, decoded} when is_map(decoded) -> ModelDeclarationObserver.observe(observer, decoded, event_type)
+      {:ok, decoded} when is_map(decoded) -> ModelDeclarationObserver.observe(observer, model_event(decoded, event_type || decoded["type"], source), event_type)
       _malformed -> ModelDeclarationObserver.partial(observer)
     end
   end
+
+  # PublicResponses authors this empty failed envelope. A first declaration
+  # from an earlier event, even the literal "unknown", remains authoritative.
+  defp model_event(%{"response" => %{"model" => "unknown", "status" => "failed", "created_at" => 0, "object" => "response", "output" => [], "tools" => [], "parallel_tool_calls" => false} = response} = event, "response.failed", :legacy),
+    do: Map.put(event, "response", Map.delete(response, "model"))
+
+  defp model_event(event, _type, _source), do: event
 
   defp stream_record_usage({json, event_type}, previous) do
     case CodexPooler.JSON.decode(json) do

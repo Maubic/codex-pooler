@@ -132,7 +132,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
       error_message: "upstream stream returned retryable first event #{code}",
       latency_ms: elapsed_ms(context.started),
       usage_status: ResponseUsage.from_sse(body)[:status] || "usage_unknown",
-      usage: first_event_usage(body, response_context),
+      usage: first_event_usage(body, response_context) |> merge_model_observation(websocket_attempt_metadata),
       attempt_metadata:
         first_event_attempt_metadata(
           response_context,
@@ -217,7 +217,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
       AttemptSettlement.finalize_partial_stream_failure(
         context.reserved.request,
         context.attempt,
-        first_event_usage(body, response_context),
+        first_event_usage(body, response_context) |> merge_model_observation(websocket_attempt_metadata),
         SettlementAttrs.partial_stream_failure(
           context,
           response.status,
@@ -403,6 +403,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
          response: %Req.Response{body: %WebsocketBridgeStream{} = stream}
        }) do
     WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream)
+    |> Map.put_new(:model_usage, %{})
   end
 
   defp upstream_websocket_attempt_metadata(%ResponseContext{}),
@@ -784,7 +785,9 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
 
   defp stream_usage(body, _stream_state), do: ResponseUsage.from_sse(body)
 
-  defp merge_model_observation(usage, %{model_usage: %{} = model_usage}), do: Map.merge(usage, model_usage)
+  # A bridge carries normalized public frames. Only its owner observed the
+  # original declarations; an absent field there must erase derived evidence.
+  defp merge_model_observation(usage, %{model_usage: %{} = model_usage}), do: usage |> Map.drop([:served_model, :model_observation]) |> Map.merge(model_usage)
   defp merge_model_observation(usage, _metadata), do: usage
 
   defp merge_usage_observation(metadata, %{usage_observer: %{} = observer}) do

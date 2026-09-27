@@ -55,6 +55,45 @@ defmodule CodexPooler.Accounting.ModelHistoryTest do
     assert ModelHistory.for_scope(scope, %{}, now: now).counts.conflicts == 1
   end
 
+  @tag model_provenance: true
+  test "historical public failure placeholders stay unknown without hiding real declarations" do
+    scope = Scope.for_user(bootstrap_owner_fixture().user)
+    setup = active_api_key_fixture()
+    %{assignment: assignment} = upstream_assignment_fixture(setup.pool)
+    now = DateTime.utc_now()
+    metadata = %{"upstream_websocket_bridge" => true, "public_openai_responses_stream" => %{"mode" => "normalized", "created_seen" => false, "visible_seen" => false, "delta_count" => 0, "terminal_seen" => true, "terminal_kind" => "failed"}}
+    absent = %{evidence(nil, "failed") | "terminal_model" => nil}
+
+    for {observation, served, response_metadata, status, expected} <- [
+          {nil, "unknown", metadata, "failed", nil},
+          {absent, "unknown", metadata, "failed", nil},
+          {nil, "model-other", metadata, "failed", "model-other"},
+          {%{evidence(false, "failed") | "terminal_model" => "unknown"}, "unknown", metadata, "failed", "unknown"},
+          {nil, "unknown", %{}, "failed", "unknown"},
+          {nil, "unknown", metadata, "succeeded", "unknown"},
+          {nil, "unknown", put_in(metadata, ["public_openai_responses_stream", "created_seen"], true), "failed", "unknown"},
+          {%{"version" => 2}, "unknown", metadata, "failed", "unknown"},
+          {%{"version" => 1}, "unknown", metadata, "failed", "unknown"}
+        ] do
+      request = request_fixture(setup)
+      attempt = attempt_fixture(request, assignment, %{transport: "websocket", status: status, upstream_model_id: "model-a", served_model: served, model_observation: observation, response_metadata: response_metadata})
+      Repo.update!(Ecto.Changeset.change(attempt, started_at: DateTime.add(now, -1, :second)))
+      log = Accounting.get_request_log_for_scope(scope, request.id)
+      assert log.served_model == expected
+      assert hd(log.debug.attempts).served_model == expected
+      assert Repo.get!(Attempt, attempt.id).served_model == served
+    end
+
+    history = ModelHistory.for_scope(scope, %{"evidence" => "all"}, now: now)
+    assert %{total: 9, comparable: 7, mismatches: 7, missing: 1, uncollected: 6, observed: 1} = history.counts
+    assert Enum.count(history.attempts, &is_nil(&1.served_model)) == 2
+    assert Enum.sum(Enum.map(history.timeline, & &1.mismatches)) == 7
+    assert Enum.sum(Enum.map(history.groups, & &1.total)) == 7
+    assert Enum.sum(Enum.map(history.model_pairs, & &1.total)) == 7
+    assert length(ModelHistory.for_scope(scope, %{"evidence" => "signals"}, now: now).attempts) == 7
+    assert length(ModelHistory.for_scope(scope, %{"evidence" => "missing"}, now: now).attempts) == 1
+  end
+
   test "time bounds include start and exclude end, foreign pools fail closed, filters are exact" do
     owner = bootstrap_owner_fixture()
     scope = Scope.for_user(owner.user)

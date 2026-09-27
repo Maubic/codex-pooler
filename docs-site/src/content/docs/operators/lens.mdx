@@ -85,6 +85,8 @@ The client, route and transport can affect what evidence is available. A missing
 
 Older attempts may already have a stored first reported model. Lens can compare that value with the model sent upstream. It cannot reconstruct later names that were never recorded, so historical first-model comparisons and within-response changes have different coverage.
 
+Some older failed responses stored the placeholder `unknown` from Pooler's public error formatting. When the retained metadata identifies that case, Lens and Request logs show the model as unavailable and exclude it from model-difference counts. This does not hide the request's error or rewrite its stored history. A model name explicitly recorded from the provider, including `unknown`, remains evidence.
+
 The two rates use different denominators: **Different from sent** uses attempts with both the sent and first reported names; **Name changed within a response** uses attempts recorded by the newer observer with a reported model name. Neither rate describes attempts whose relevant evidence is missing.
 
 Lens reads retained attempt history. Deleting or expiring those attempts removes their contribution; there is no permanent historical total independent of the source rows.

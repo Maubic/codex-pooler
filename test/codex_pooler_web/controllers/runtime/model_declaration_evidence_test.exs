@@ -3,11 +3,15 @@ defmodule CodexPoolerWeb.Runtime.ModelDeclarationEvidenceTest do
 
   import Ecto.Query
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [enter_peer_owner_topology!: 0, start_peer_session_owner!: 2]
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
   alias CodexPooler.FakeUpstream
+  alias CodexPooler.Gateway.Persistence.CodexSession
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Pools.ModelServingOverride
   alias CodexPooler.Repo
+  alias CodexPooler.TestAppEnv
 
   @usage %{"input_tokens" => 3, "output_tokens" => 2, "total_tokens" => 5}
 
@@ -70,6 +74,53 @@ defmodule CodexPoolerWeb.Runtime.ModelDeclarationEvidenceTest do
       assert attempt.model_observation["terminal_status"] == if(ctx.failure == :failed, do: "failed", else: nil)
       assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "settlement"), :count) == 1
       assert FakeUpstream.count(upstream) == 1
+    end
+  end
+
+  for mode <- ~w(full lite), topology <- [:http, :owner, :peer], declared <- [nil, "model-other", "unknown"] do
+    @tag mode: mode, topology: topology, declared: declared, model_provenance: true
+    test "#{mode} #{topology} failed response with provider model #{inspect(declared)} never collects the public placeholder", ctx do
+      TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
+      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, ctx.topology != :http)
+      if ctx.topology == :peer, do: enter_peer_owner_topology!()
+
+      response = %{"id" => "resp_model_failure", "status" => "failed", "error" => %{"code" => "invalid_request_error", "type" => "invalid_request_error", "message" => "synthetic rejection"}}
+      response = if ctx.declared, do: Map.put(response, "model", ctx.declared), else: response
+      event = %{"type" => "response.failed", "response" => response}
+      source = if ctx.topology == :http, do: FakeUpstream.sse_stream([sse(event)]), else: FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(event)])
+      upstream = start_upstream(source)
+      setup = gateway_setup(upstream)
+      set_mode(setup, ctx.mode)
+      session_header = Ecto.UUID.generate()
+      peer = if ctx.topology == :peer, do: start_peer_session_owner!(setup, %{session_header: session_header, session_header_source: "x-session-id"})
+      conn = auth(ctx.conn, setup)
+      conn = if ctx.topology == :http, do: conn, else: put_req_header(conn, "x-session-id", session_header)
+
+      try do
+        result = post(conn, "/v1/responses", %{"model" => setup.model.exposed_model_id, "input" => "synthetic model provenance", "stream" => true})
+        assert result.status == 200
+        assert result.resp_body =~ "response.failed"
+        assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
+        assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
+        assert request.status == "failed"
+        assert request.retry_count == 0
+        assert attempt.transport == if(ctx.topology == :http, do: "http_sse", else: "websocket")
+        assert attempt.served_model == ctx.declared
+        assert attempt.model_observation["version"] == 1
+        assert attempt.model_observation["conflict"] == if(ctx.declared, do: false, else: nil)
+        assert attempt.model_observation["terminal_model"] == ctx.declared
+        assert attempt.model_observation["terminal_status"] == "failed"
+        assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "settlement"), :count) == 1
+        assert FakeUpstream.count(upstream) == 1
+        if peer, do: assert(Repo.get!(CodexSession, peer.session.id).owner_instance_id == Atom.to_string(peer.node))
+      after
+        for session <- Repo.all(from(s in CodexSession, where: s.api_key_id == ^setup.api_key.id)) do
+          case WebsocketOwnerSession.lookup(session.id) do
+            {:ok, owner} -> GenServer.stop(owner, :normal, 15_000)
+            _absent -> :ok
+          end
+        end
+      end
     end
   end
 

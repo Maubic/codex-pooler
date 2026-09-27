@@ -103,8 +103,8 @@ defmodule CodexPooler.Accounting.RequestLogs.ModelHistory do
   def query(pool_ids, from_time, until_time, filters) do
     # Keep history out of the open-attempt recovery index family. Both disjoint
     # branches state their partial-index predicates literally for generic plans.
-    closed = from(a in Attempt, where: fragment("? NOT IN ('queued', 'in_progress')", a.status) and a.started_at >= ^from_time and a.started_at < ^until_time)
-    open = from(a in Attempt, where: fragment("? IN ('queued', 'in_progress')", a.status) and a.started_at >= ^from_time and a.started_at < ^until_time)
+    closed = from(a in Attempt, where: fragment("? NOT IN ('queued', 'in_progress')", a.status) and a.started_at >= ^from_time and a.started_at < ^until_time) |> ModelObservation.provider_models()
+    open = from(a in Attempt, where: fragment("? IN ('queued', 'in_progress')", a.status) and a.started_at >= ^from_time and a.started_at < ^until_time) |> ModelObservation.provider_models()
     attempts = union_all(closed, ^open)
 
     from(a in subquery(attempts), join: r in Request, on: r.id == a.request_id, join: p in Pool, on: p.id == r.pool_id, left_join: i in UpstreamIdentity, on: i.id == a.upstream_identity_id, where: r.pool_id in ^pool_ids)

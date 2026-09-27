@@ -614,6 +614,7 @@ defmodule CodexPooler.Accounting.RequestLogs do
     Attempt
     |> where([attempt], attempt.request_id in ^request_ids)
     |> order_by([attempt], asc: attempt.request_id, asc: attempt.attempt_number)
+    |> ModelObservation.provider_models()
     |> Repo.all()
     |> Enum.group_by(& &1.request_id)
   end

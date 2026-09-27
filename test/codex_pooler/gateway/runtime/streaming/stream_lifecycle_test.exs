@@ -1085,6 +1085,48 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamLifecycleTest do
     end)
   end
 
+  for outcome <- [:retryable, :terminal], provenance <- [:current, :legacy, :absent] do
+    @tag model_provenance: true
+    test "#{outcome} first-event bridge failure keeps #{provenance} model absence authoritative" do
+      {setup, _first, _second} = stream_retry_setup(FakeUpstream.sse_stream([]), FakeUpstream.sse_stream([]))
+      {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
+      payload = payload(setup)
+      request_options = request_options(auth, payload, setup)
+      {:ok, reserved} = Accounting.reserve(auth, setup.model, payload, %{endpoint: @endpoint_path, transport: "http_sse", correlation_id: Ecto.UUID.generate(), request_metadata: %{}})
+      {:ok, attempt} = Accounting.create_attempt(reserved.request, setup.assignment)
+      observation = %{"version" => 1, "coverage" => "full", "conflict" => nil, "terminal_model" => nil, "first_conflicting_model" => nil, "terminal_status" => "failed"}
+
+      result =
+        case unquote(provenance) do
+          :current -> %{response_usage: %{status: "usage_unknown", model_observation: observation}}
+          :legacy -> %{response_usage: %{status: "usage_unknown"}}
+          :absent -> %{}
+        end
+
+      stream = WebsocketBridgeStream.start(Ecto.UUID.generate())
+      :ok = WebsocketBridgeStream.arm(stream, 1, fn -> {:ok, result} end)
+      event = CodexPooler.JSON.encode!(%{"type" => "response.failed", "response" => %{"model" => "unknown", "status" => "failed"}})
+      send(stream.relay, {:websocket_owner_frame, stream.correlation_id, 1, {:data, event}})
+      ref = stream.ref
+      assert_receive {^ref, {:preflight, :stream}}
+      assert_receive {^ref, {:data, _}}
+      assert_receive {^ref, :done}
+
+      context = %ResponseContext{context: retry_context(setup, auth, request_options, reserved.request, candidates: [{setup.assignment, setup.identity}], attempt: attempt), response: %{sse_response() | body: stream}}
+      body = "data: " <> event <> "\n\n"
+      failure = %{code: "server_error", upstream_code: nil, event_type: "response.failed"}
+
+      case unquote(outcome) do
+        :retryable -> assert {:ok, %Attempt{}} = Streaming.record_retryable_first_event_failure(body, failure, context, record_health?: false)
+        :terminal -> assert {:ok, %{}} = Streaming.finalize_first_event_failure(body, failure, context)
+      end
+
+      saved = Repo.reload!(attempt)
+      assert saved.served_model == nil
+      assert saved.model_observation == if(unquote(provenance) == :current, do: observation, else: nil)
+    end
+  end
+
   test "first-event stream outcomes emit only after terminal settlement" do
     {setup, _first_upstream, _second_upstream} =
       stream_retry_setup(FakeUpstream.sse_stream([]), FakeUpstream.sse_stream([]))
