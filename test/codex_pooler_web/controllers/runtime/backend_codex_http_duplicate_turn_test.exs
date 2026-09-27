@@ -191,6 +191,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
              :advanced_http_resume,
              :claim_by_request_kind,
              :known_gaps,
+             :mailbox_resume,
              :partial_http_tool_retry,
              :payload_independent_claims,
              :public_error
@@ -1064,6 +1065,44 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
 
     assert FakeUpstream.count(upstream) == dispatched
     assert pool_accounting_counts(setup) == before
+  end
+
+  @tag mailbox_http_source: true
+  test "an HTTP resume interrupted after reasoning accepts new mailbox input once", %{conn: conn} do
+    output = %{"type" => "reasoning", "id" => "rs_mailbox_http", "summary" => [], "encrypted_content" => "synthetic-reasoning"}
+    event = %{"type" => "response.output_item.done", "item" => output}
+
+    upstream =
+      start_upstream(
+        FakeUpstream.strict_sequence([
+          FakeUpstream.json_response(%{"id" => "resp_mailbox_http_open"}),
+          FakeUpstream.sse_stream([{"response.output_item.done", event}, {"response.reasoning_text.delta", %{"type" => "response.reasoning_text.delta", "delta" => "not delivered"}}], done: false),
+          stream_success_sse()
+        ])
+      )
+
+    setup = gateway_setup(upstream, compact?: true)
+    session = session_id()
+    assert json_response(post_turn(conn, setup, session, @turn_id, where: :body), 200)
+    metadata = turn_metadata(@turn_id) |> CodexPooler.JSON.decode!() |> Map.put("agent_name", "/root") |> CodexPooler.JSON.encode!()
+    payload = setup |> turn_payload(input: compacted_history(), stream: true) |> put_body_document(metadata)
+    {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
+    options = RequestOptions.build(%{codex_session: pool_session!(setup, session), upstream_endpoint: "/backend-api/codex/responses", transport: "http_sse"}, "/backend-api/codex/responses", payload) |> RequestOptions.capture_api_key_runtime_epoch(auth)
+    assert {:ok, %{stream: stream}} = Gateway.execute(auth, "/backend-api/codex/responses", payload, options)
+    stream_conn = build_conn() |> put_resp_content_type("text/event-stream") |> send_chunked(200)
+    {adapter, adapter_payload} = stream_conn.adapter
+    closing = %{adapter: adapter, payload: adapter_payload, close_after: "event: response.output_item.done\ndata: " <> CodexPooler.JSON.encode!(event) <> "\n\n", closed?: false}
+    assert {:ok, _closed} = stream.(%{stream_conn | adapter: {ClosingAdapter, closing}})
+
+    mailbox = %{"type" => "agent_message", "author" => "/root/worker", "recipient" => "/root", "content" => [%{"type" => "input_text", "text" => "synthetic update"}]}
+    continuation = Map.update!(payload, "input", &(&1 ++ [output, mailbox]))
+    post_continuation = fn body -> build_conn() |> put_req_header("authorization", setup.authorization) |> put_req_header(@session_header, session) |> put_req_header("content-type", "application/json") |> post("/backend-api/codex/responses", CodexPooler.JSON.encode!(body)) end
+
+    assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(post_continuation.(put_in(continuation, ["input", Elixir.Access.at(-2), "encrypted_content"], "changed")), 409)
+    assert response(post_continuation.(continuation), 200) =~ "response.completed"
+    assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(post_continuation.(continuation), 409)
+    assert [_opener, %Request{transport: "http_sse", status: "failed", last_error_code: "client_disconnected"}, %Request{transport: "http_sse", status: "succeeded"}] = pool_requests(setup)
+    assert FakeUpstream.count(upstream) == 3
   end
 
   test "a post-compaction retry advanced by delivered output is served once", %{conn: conn} do

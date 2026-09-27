@@ -56,6 +56,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           optional(:native_http_semantic_turn_key) => <<_::256>> | nil,
           optional(:native_http_transport) => String.t() | nil,
           optional(:payload) => map() | nil,
+          optional(:mailbox_successor) => Request.t(),
           optional(:anchor_present?) => boolean()
         }
 
@@ -84,6 +85,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           | :undelivered_partial_output
           | :completed_item_resend
           | :unreceived_compaction
+          | :mailbox_continuation
 
   @type resolution :: %{
           claim: String.t(),
@@ -166,7 +168,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   end
 
   defp scope_for_predecessor(scope, %Request{} = successor) do
-    scope = Map.put(scope, :successor_admitted?, true)
+    scope = scope |> Map.put(:successor_admitted?, true) |> Map.put(:mailbox_successor, successor)
 
     case successor.request_metadata["native_http_input_count"] do
       count when is_integer(count) and count >= 0 ->
@@ -203,6 +205,10 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   # naming the request keeps the fence unless it is one of the chain's own
   # edges (`chain_edges_only?/2`).
   defp validate_semantic_retry(request, :partial_http_tool_cut, _scope, chain_edges) do
+    if chain_edges_only?(request, chain_edges), do: :ok, else: {:error, :terminal_predecessor}
+  end
+
+  defp validate_semantic_retry(request, :mailbox_continuation, _scope, chain_edges) do
     if chain_edges_only?(request, chain_edges), do: :ok, else: {:error, :terminal_predecessor}
   end
 
@@ -459,6 +465,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
 
   defp predecessor_shape(%Request{} = request, :client_disconnect, scope) do
     cond do
+      mailbox_continuation?(request, scope) -> {:ok, :mailbox_continuation}
       advanced_http_resume?(request, scope) -> {:ok, :advanced_http_resume}
       previsible_websocket_disconnect?(request) -> {:ok, :previsible_disconnect}
       unreceived_compaction?(request) -> {:ok, :unreceived_compaction}
@@ -467,6 +474,16 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
       true -> {:error, :terminal_predecessor}
     end
   end
+
+  defp mailbox_continuation?(request, %{resume_claim?: true} = scope) do
+    turn = lock_turn(request.id)
+    attempt = lock_final_attempt(turn, request.id)
+
+    match?(%CodexTurn{codex_session_id: session_id} when session_id == scope.codex_session_id, turn) and
+      ClientRetry.verified_mailbox_continuation?(turn, request, attempt, Map.get(scope, :native_client_retry_witness), Map.get(scope, :mailbox_successor))
+  end
+
+  defp mailbox_continuation?(_request, _scope), do: false
 
   defp completed_item_resend?(%Request{} = request, scope) do
     turn = lock_turn(request.id)

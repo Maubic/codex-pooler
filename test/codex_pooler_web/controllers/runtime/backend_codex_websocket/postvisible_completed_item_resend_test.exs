@@ -27,8 +27,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
     only: [gateway_setup: 1, public_websocket_connect!: 3, public_websocket_receive_text!: 3, public_websocket_send_text!: 4, start_public_endpoint!: 0, start_upstream: 1]
 
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [enter_peer_owner_topology!: 0, start_peer_session_owner!: 2]
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink}
+  alias CodexPooler.CompatibilityMatrix
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Repo
@@ -48,8 +50,39 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
   @stopped_receipt_budget_ms 4_000
   # The frames up to and including the completed item, as the released client
   # received them before the cut (findings#232 row 232-232).
-  @hold_at 9
   @item_text "completed answer"
+
+  for forwarding <- [true, false, :peer] do
+    for transport <- [:websocket, :https] do
+      @tag forwarding: forwarding, transport: transport, post_compaction_mailbox: true
+      @tag slow: "a Full post-compaction reasoning cut, mailbox continuation and duplicate control through the real socket"
+      test "owner forwarding #{forwarding}: a post-compaction mailbox continuation is served once over #{transport}", %{forwarding: forwarding, transport: transport} do
+        contract = CompatibilityMatrix.by_slug!(:duplicate_turn_fence).duplicate_turn.mailbox_resume
+        %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, receipt: receipt, port: port, turn_state: turn_state, resend_payload: payload} = scenario!(forwarding, :held, :mailbox, transport)
+
+        case transport do
+          :websocket -> assert resend["type"] == "response.completed"
+          :https -> assert {200, _body} = resend
+        end
+
+        assert %{"completed_items" => 1, "highest_frame_class" => "item_done", "terminal_class" => "none"} = receipt
+        assert [%Request{id: ^request_id, status: "failed", last_error_code: "client_disconnected", correlation_id: original_claim}, %Request{status: "succeeded", correlation_id: continuation_claim}] = pool_requests(setup.pool.id)
+        assert String.starts_with?(original_claim, contract.original_prefix)
+        assert String.starts_with?(continuation_claim, contract.successor_prefix)
+        assert original_claim != continuation_claim
+        assert FakeUpstream.count(upstream) == 2
+
+        case resend!(transport, port, setup, turn_state, payload) do
+          %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} -> :ok
+          {409, body} -> assert %{"error" => %{"code" => "duplicate_turn"}} = CodexPooler.JSON.decode!(body)
+          _unexpected -> flunk("the identical mailbox continuation was not fenced")
+        end
+
+        assert length(pool_requests(setup.pool.id)) == 2
+        assert FakeUpstream.count(upstream) == 2
+      end
+    end
+  end
 
   for forwarding <- [true, false] do
     @tag forwarding: forwarding
@@ -138,44 +171,69 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
 
   defp scenario!(forwarding, provider, resend_shape, resend_transport \\ :websocket) do
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
-    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, forwarding)
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, forwarding != false)
     release_ref = make_ref()
-    served? = resend_shape == :grown
+    served? = resend_shape in [:grown, :mailbox]
+    mailbox? = resend_shape == :mailbox
+    frames = if mailbox?, do: reasoning_stream_frames(), else: stream_frames("resp_completed_item_original")
+    hold_at = length(frames) - 1
 
     upstream =
       start_upstream(
         FakeUpstream.strict_sequence(
-          [native_request(FakeUpstream.barrier_websocket_frames(stream_frames("resp_completed_item_original"), notify: self(), release_ref: release_ref))] ++
+          [native_request(FakeUpstream.barrier_websocket_frames(frames, notify: self(), release_ref: release_ref))] ++
             if(served?, do: [successor_request(resend_transport)], else: [])
         )
       )
 
-    setup = gateway_setup(upstream)
-    _revision = set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    setup = topology_setup(upstream, forwarding)
+    if not mailbox?, do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
     turn_state = Ecto.UUID.generate()
+    peer = if forwarding == :peer, do: start_peer_session_owner!(setup, %{accepted_turn_state: turn_state})
     payload = native_turn_payload(Ecto.UUID.generate(), setup.model.exposed_model_id)
+    payload = if mailbox?, do: mailbox_resume_payload(payload), else: payload
     port = start_public_endpoint!()
 
     {conn, websocket, ref} = public_websocket_connect!(port, setup, turn_state)
     {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(payload))
 
-    for ordinal <- 0..(@hold_at - 1) do
+    for ordinal <- 0..(hold_at - 1) do
       assert_receive {:fake_upstream_frame_barrier, ^ordinal, _handler, ^release_ref}, @timeout_ms
       :ok = FakeUpstream.release_frame(upstream, release_ref)
     end
 
     # The barrier notification is read before any socket frame: the socket
     # helpers consume every message they do not recognise.
-    assert_receive {:fake_upstream_frame_barrier, @hold_at, _handler, ^release_ref}, @timeout_ms
+    assert_receive {:fake_upstream_frame_barrier, ^hold_at, _handler, ^release_ref}, @timeout_ms
     conn = receive_until!(conn, websocket, ref, "response.output_item.done")
-    assert [%Request{id: request_id}] = pool_requests(setup.pool.id)
+    assert [%Request{id: request_id} = original] = pool_requests(setup.pool.id)
+    if mailbox?, do: assert(original.request_metadata["routing"]["model_serving_mode"] == "full")
+
+    assert_peer_forwarding(original, peer)
+
     receipt = close_and_await_receipt!(conn, request_id, provider, upstream, release_ref)
     _settled = await_settled!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
 
-    resend = resend!(resend_transport, port, setup, turn_state, resend_payload(payload, resend_shape))
+    resend_payload = resend_payload(payload, resend_shape)
+    resend = resend!(resend_transport, port, setup, turn_state, resend_payload)
 
     await_all_settled!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
-    %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, receipt: receipt}
+    %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, receipt: receipt, port: port, turn_state: turn_state, resend_payload: resend_payload}
+  end
+
+  defp topology_setup(upstream, :peer) do
+    enter_peer_owner_topology!()
+    gateway_setup(upstream)
+  end
+
+  defp topology_setup(upstream, _forwarding), do: gateway_setup(upstream)
+
+  defp assert_peer_forwarding(_original, nil), do: :ok
+
+  defp assert_peer_forwarding(original, peer) do
+    forwarding = original.request_metadata["websocket_owner_forwarding"]
+    assert forwarding["owner_instance_id"] == Atom.to_string(peer.node)
+    assert forwarding["owner_instance_id"] != forwarding["proxy_instance_id"]
   end
 
   # provenance: observed findings#232 row 232-232 (Codex 0.156.1 through a recording proxy: the resend appends the completed item as its own model re-serializes it, without `status` and the parts' `annotations` and `logprobs`, keeping the id; every other field unchanged except the restamped request-start metadata)
@@ -188,6 +246,30 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
   defp appended_items(:grown), do: [client_recorded_item(@item_text)]
   defp appended_items(:mismatched), do: [client_recorded_item(@item_text <> " altered")]
   defp appended_items(:extra), do: [client_recorded_item(@item_text), client_recorded_item(@item_text)]
+  defp appended_items(:mailbox), do: [reasoning_item() | Enum.map(1..5, fn n -> %{"type" => "agent_message", "author" => "/root/worker", "recipient" => "/root", "content" => [%{"type" => "input_text", "text" => "synthetic task update #{n}"}]} end)]
+
+  defp mailbox_resume_payload(payload) do
+    payload
+    |> Map.update!("client_metadata", &Map.delete(&1, @websocket_lite_marker))
+    |> update_in(["client_metadata", "x-codex-turn-metadata"], fn metadata -> metadata |> CodexPooler.JSON.decode!() |> Map.put("agent_name", "/root") |> CodexPooler.JSON.encode!() end)
+    |> Map.update!("input", &(&1 ++ [%{"type" => "compaction", "encrypted_content" => "synthetic-compaction"}]))
+  end
+
+  defp reasoning_item, do: %{"type" => "reasoning", "id" => "rs_mailbox_original", "summary" => [%{"type" => "summary_text", "text" => "synthetic reasoning"}], "encrypted_content" => "synthetic-reasoning"}
+
+  defp reasoning_stream_frames do
+    item = reasoning_item()
+
+    Enum.map(
+      [
+        %{"type" => "response.created", "response" => %{"id" => "resp_mailbox_original", "status" => "in_progress", "output" => []}},
+        %{"type" => "response.output_item.added", "output_index" => 0, "item" => Map.put(item, "summary", [])},
+        %{"type" => "response.output_item.done", "output_index" => 0, "item" => item},
+        %{"type" => "response.completed", "response" => %{"id" => "resp_mailbox_original", "status" => "completed", "output" => [item], "usage" => %{"input_tokens" => 3, "output_tokens" => 2, "total_tokens" => 5}}}
+      ],
+      &CodexPooler.JSON.encode!/1
+    )
+  end
 
   defp client_recorded_item(text),
     do: %{"id" => "msg_resp_completed_item_original", "type" => "message", "role" => "assistant", "content" => [%{"type" => "output_text", "text" => text}]}
@@ -267,12 +349,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
       build_conn()
       |> put_req_header("authorization", setup.authorization)
       |> put_req_header("x-codex-turn-state", turn_state)
-      |> put_req_header("x-openai-internal-codex-responses-lite", "true")
+      |> maybe_lite_header(payload)
       |> put_req_header("content-type", "application/json")
       |> post("/backend-api/codex/responses", CodexPooler.JSON.encode!(body))
 
     {conn.status, conn.resp_body}
   end
+
+  defp maybe_lite_header(conn, %{"client_metadata" => %{@websocket_lite_marker => "true"}}), do: put_req_header(conn, "x-openai-internal-codex-responses-lite", "true")
+  defp maybe_lite_header(conn, _payload), do: conn
 
   defp native_request(respond) do
     FakeUpstream.expect_request(method: "WEBSOCKET", path: "/backend-api/codex/responses", json: [valid: true, equals: %{"type" => "response.create"}], respond: respond)

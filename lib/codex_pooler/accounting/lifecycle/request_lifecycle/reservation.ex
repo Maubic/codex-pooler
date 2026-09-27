@@ -320,7 +320,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
 
   defp unreserved_turn_claim?(%Request{}), do: false
 
-  defp link_semantic_execution_retry!(_opts, %{predecessor_request_id: id, predecessor_shape: :partial_http_tool_cut}, request, timestamp),
+  defp link_semantic_execution_retry!(_opts, %{predecessor_request_id: id, predecessor_shape: shape}, request, timestamp) when shape in [:partial_http_tool_cut, :mailbox_continuation],
     do: ClientRetry.insert_link!(%Request{id: id}, request, timestamp)
 
   defp link_semantic_execution_retry!(opts, %{predecessor_request_id: id}, request, timestamp) do

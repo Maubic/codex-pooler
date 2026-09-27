@@ -10,6 +10,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
   alias CodexPooler.Gateway.Payloads.CompactionTrigger
   alias CodexPooler.Gateway.Payloads.InputShape
   alias CodexPooler.Gateway.Payloads.NativeCodexTurnMetadata
+  alias CodexPooler.Gateway.Payloads.NativeMailboxContinuation
   alias CodexPooler.Gateway.Payloads.NativeTurnContinuation
   alias CodexPooler.Gateway.Payloads.PayloadNormalizer
   alias CodexPooler.Gateway.Payloads.RequestOptions
@@ -1122,6 +1123,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
                grown
              ) do
           {:ok, witness} ->
+            witness = NativeMailboxContinuation.attach(witness, semantic_turn_key, payload, request_options)
             {RequestOptions.put_native_client_retry_witness(request_options, witness), witness}
 
           {:error, :invalid_witness} ->

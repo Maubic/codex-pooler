@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
   @moduledoc false
 
   alias CodexPooler.Accounting.ClientRetry
+  alias CodexPooler.Gateway.Payloads.NativeMailboxContinuation
 
   # The duplicate-turn fence was structurally websocket-only (findings#212): a
   # native Codex turn sent over `POST /backend-api/codex/responses` reserved
@@ -318,7 +319,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
 
   defp native_client_retry_witness(
          identity,
-         %{"input" => input},
+         %{"input" => input} = payload,
          request_options,
          :post_compaction_resume
        )
@@ -330,7 +331,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
              digest,
              request_options.runtime.api_key_runtime_epoch
            ) do
-      witness
+      NativeMailboxContinuation.attach(witness, identity.semantic_turn_key, payload, request_options)
     else
       _unavailable -> nil
     end

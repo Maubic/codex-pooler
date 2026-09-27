@@ -102,7 +102,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomyTest do
 
   describe "resend_predecessor_shape/1" do
     test "renders only the fixed resend predecessor shape vocabulary" do
-      for shape <- ~w(provider_terminal task_exception lifecycle_cut partial_reasoning_cut partial_http_tool_cut previsible_disconnect quota_rejection advanced_http_resume) do
+      for shape <- ~w(provider_terminal task_exception lifecycle_cut partial_reasoning_cut partial_http_tool_cut previsible_disconnect quota_rejection advanced_http_resume mailbox_continuation) do
         assert DiagnosticTaxonomy.resend_predecessor_shape(shape) == shape
         assert DiagnosticTaxonomy.resend_predecessor_shape(String.to_atom(shape)) == shape
       end

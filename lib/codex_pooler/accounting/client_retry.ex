@@ -102,7 +102,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defmodule OriginalWitness do
     @moduledoc false
     @enforce_keys [:version, :digest, :auth_epoch]
-    defstruct [:version, :digest, :auth_epoch, alternates: [], grown: []]
+    defstruct [:version, :digest, :auth_epoch, alternates: [], grown: [], mailbox: []]
 
     # `alternates` never reaches a row: they are the digests the anchored
     # original of a full-history resend may have stored as `digest`
@@ -123,7 +123,17 @@ defmodule CodexPooler.Accounting.ClientRetry do
             digest: <<_::256>>,
             auth_epoch: non_neg_integer(),
             alternates: [<<_::256>>],
-            grown: [grown_candidate()]
+            grown: [grown_candidate()],
+            mailbox: [mailbox_candidate()]
+          }
+
+    @type mailbox_witnesses :: %{websocket: [<<_::256>>], http: <<_::256>>}
+    @type mailbox_candidate :: %{
+            prefix: mailbox_witnesses(),
+            ending: mailbox_witnesses(),
+            current?: boolean(),
+            items: [String.t()],
+            http_progress: map()
           }
   end
 
@@ -2035,6 +2045,51 @@ defmodule CodexPooler.Accounting.ClientRetry do
   end
 
   def verified_completed_item_resend?(_turn, _request, _attempt, _candidates), do: false
+
+  @doc "Verifies a stopped resume followed by its delivered output and new addressed mailbox input. Candidates are transient, never persisted."
+  @spec verified_mailbox_continuation?(term(), term(), term(), term(), term()) :: boolean()
+  def verified_mailbox_continuation?(
+        %CodexTurn{status: "interrupted", error_code: "client_disconnected", final_attempt_id: attempt_id, completed_at: %DateTime{}} = turn,
+        %Request{status: "failed", last_error_code: "client_disconnected", endpoint: "/backend-api/codex/responses", completed_at: %DateTime{}} = request,
+        %Attempt{id: attempt_id, status: "failed", network_error_code: "client_disconnected", replay_generation: 0, completed_at: %DateTime{}} = attempt,
+        %OriginalWitness{version: 1, auth_epoch: epoch, mailbox: candidates},
+        successor
+      )
+      when is_list(candidates) do
+    original_witness_eligible?(request) and request.native_client_retry_auth_epoch == epoch and
+      Enum.any?(candidates, fn candidate ->
+        mailbox_witness_matches?(request, candidate.prefix) and
+          mailbox_ending_matches?(successor, candidate) and
+          mailbox_output_matches?(turn, request, attempt, candidate)
+      end)
+  end
+
+  def verified_mailbox_continuation?(_turn, _request, _attempt, _witness, _successor), do: false
+
+  defp mailbox_witness_matches?(%Request{transport: "websocket", native_client_retry_digest: digest}, %{websocket: candidates}),
+    do: Enum.any?(candidates, &secure_compare(digest, &1))
+
+  defp mailbox_witness_matches?(%Request{transport: "http_sse", native_client_retry_digest: digest, request_metadata: %{"native_http_claim_arm" => "post_compaction_resume"}}, %{http: expected}),
+    do: secure_compare(digest, expected)
+
+  defp mailbox_witness_matches?(_request, _witnesses), do: false
+
+  defp mailbox_ending_matches?(nil, %{current?: current?}), do: current?
+
+  defp mailbox_ending_matches?(%Request{} = successor, %{ending: ending}),
+    do: original_witness_eligible?(successor) and mailbox_witness_matches?(successor, ending)
+
+  defp mailbox_output_matches?(turn, %Request{transport: "websocket"} = request, attempt, candidate),
+    do: verified_completed_item_resend?(turn, request, attempt, [candidate])
+
+  defp mailbox_output_matches?(%CodexTurn{transport_kind: "http_sse"}, %Request{transport: "http_sse"}, %Attempt{transport: "http_sse", response_metadata: %{"native_http_resume_progress" => recorded}}, %{http_progress: expected}) do
+    case {recorded, expected} do
+      {%{"version" => 1, "output_item_done_count" => count, "digest" => digest}, %{"version" => 1, "output_item_done_count" => count, "digest" => expected_digest}} when count > 0 -> secure_compare(digest, expected_digest)
+      _unproved -> false
+    end
+  end
+
+  defp mailbox_output_matches?(_turn, _request, _attempt, _candidate), do: false
 
   defp latest_attempt?(%Attempt{} = attempt) do
     not Repo.exists?(

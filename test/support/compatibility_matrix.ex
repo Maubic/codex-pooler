@@ -420,6 +420,7 @@ defmodule CodexPooler.CompatibilityMatrix do
           :advanced_http_resume,
           :claim_by_request_kind,
           :known_gaps,
+          :mailbox_resume,
           :partial_http_tool_retry,
           :payload_independent_claims,
           :public_error
@@ -445,6 +446,17 @@ defmodule CodexPooler.CompatibilityMatrix do
           successor_prefix: "codex-request-retry:",
           requires_input_prefix_match: true,
           requires_delivered_output_receipt_match: true,
+          identical_retry_refused: true
+        },
+        mailbox_resume: %{
+          predecessor_transports: ["websocket", "http_sse"],
+          predecessor_error: "client_disconnected",
+          original_prefix: "codex-resume:",
+          successor_prefix: "codex-request-retry:",
+          requires_original_input_witness: true,
+          requires_exact_delivered_output: true,
+          requires_new_addressed_mailbox_input: true,
+          preserves_existing_claim_chain: true,
           identical_retry_refused: true
         },
         partial_http_tool_retry: %{
@@ -2475,10 +2487,12 @@ defmodule CodexPooler.CompatibilityMatrix do
         "full_history_resend_of_a_turn_opener_with_fewer_user_messages_after_the_same_pivot",
         "full_history_resend_of_a_turn_opener_whose_compaction_pivot_is_gone",
         "identical_post_compaction_resume",
+        "identical_served_mailbox_resume_continuation",
         "identical_prewarm_or_memory_sharing_the_turn_id"
       ],
       served: [
         "post_compaction_resume_retry_advanced_by_exact_delivered_output",
+        "post_compaction_resume_advanced_by_delivered_output_and_new_addressed_mailbox_input",
         "resend_after_a_zero_output_provider_failure",
         "retry_while_the_predecessor_is_unfinished",
         "prewarm_sharing_the_turn_id",
