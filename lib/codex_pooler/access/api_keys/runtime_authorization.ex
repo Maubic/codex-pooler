@@ -173,7 +173,7 @@ defmodule CodexPooler.Access.APIKeys.RuntimeAuthorization do
     target_status = Map.get(attrs, :status, api_key.status)
 
     cond do
-      api_key.status == @revoked_status and target_status != @revoked_status ->
+      api_key.status == @revoked_status ->
         {:error, Errors.access_error(:api_key_revoked, "revoked api keys cannot be changed")}
 
       target_status == @revoked_status and is_nil(api_key.revoked_at) ->

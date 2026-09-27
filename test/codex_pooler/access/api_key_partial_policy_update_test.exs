@@ -40,6 +40,17 @@ defmodule CodexPooler.Access.APIKeyPartialPolicyUpdateTest do
     metadata: %{"labels" => [], "operator_notes" => "Partial policy fixture"}
   }
 
+  test "revoked keys refuse status-less policy updates and Pool wizard moves" do
+    {scope, pool} = owner_scope_and_pool()
+    other_pool = pool!(scope, "revoked-target")
+    api_key = restricted_key!(scope, pool, "revoked")
+    assert {:ok, _} = Access.revoke_api_key(scope, api_key)
+    before = Repo.get!(APIKey, api_key.id)
+    assert {:error, %{code: :api_key_revoked}} = Access.update_api_key_with_policy(scope, api_key, %{display_name: "Renamed"})
+    assert {:error, %{code: :api_key_revoked}} = Access.assign_api_keys_to_pool(scope, other_pool, [api_key.id])
+    assert Repo.get!(APIKey, api_key.id) == before
+  end
+
   describe "a partial caller" do
     test "keeps every policy field it omits" do
       {scope, pool} = owner_scope_and_pool()
