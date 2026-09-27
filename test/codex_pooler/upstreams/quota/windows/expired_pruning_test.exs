@@ -96,6 +96,47 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruningTest do
       assert ExpiredPruning.batch_size() == 500
     end
 
+    test "multiple live-marker pages cannot starve later lapsed markers" do
+      now = now()
+      cutoff = DateTime.add(now, -ExpiredPruning.retention_seconds(), :second)
+      identity = upstream_identity_fixture()
+
+      live =
+        for index <- 1..1_001 do
+          insert_window!(identity, source: "codex_usage_api", window_minutes: 10_000 + index, reset_at: DateTime.add(cutoff, -2_000 + index, :second), metadata: approach_marker(DateTime.add(cutoff, @day, :second)))
+        end
+
+      expired = insert_window!(identity, source: "codex_usage_api", window_minutes: 20_000, reset_at: DateTime.add(cutoff, -1, :second), metadata: approach_marker(DateTime.add(cutoff, -1, :second)))
+      assert {:ok, %{expired_quota_windows_pruned: 1}} = Windows.prune_expired_windows(now, batch_size: 2)
+      refute Repo.get(AccountQuotaWindow, expired.id)
+      live_ids = Enum.map(live, & &1.id)
+      assert Repo.aggregate(from(w in AccountQuotaWindow, where: w.id in ^live_ids), :count) == length(live)
+    end
+
+    test "actual candidate pages use the reset index against retained evidence" do
+      now = now()
+      identity = upstream_identity_fixture()
+      cutoff = DateTime.add(now, -ExpiredPruning.retention_seconds(), :second)
+      expired = insert_window!(identity, source: "codex_usage_api", reset_at: DateTime.add(cutoff, -1, :second))
+      attrs = expired |> Map.from_struct() |> Map.drop([:__meta__])
+
+      rows =
+        for index <- 1..10_000 do
+          Map.merge(attrs, %{id: Ecto.UUID.generate(), window_minutes: 20_000 + index, reset_at: DateTime.add(now, @day, :second)})
+        end
+
+      rows |> Enum.chunk_every(1_000) |> Enum.each(&Repo.insert_all(AccountQuotaWindow, &1))
+      Repo.query!("ANALYZE account_quota_windows")
+      ref = {__MODULE__, make_ref()}
+      on_exit(fn -> :telemetry.detach(ref) end)
+      :telemetry.attach(ref, [:codex_pooler, :repo, :query], &__MODULE__.capture_candidate_query/4, self())
+      assert {:ok, %{expired_quota_windows_pruned: 1}} = Windows.prune_expired_windows(now)
+      :telemetry.detach(ref)
+      assert_receive {:candidate_query, sql, params}
+      %{rows: [[plan]]} = Repo.query!("EXPLAIN (FORMAT JSON) " <> sql, params)
+      assert inspect(plan) =~ "account_quota_windows_expired_reset_idx"
+    end
+
     test "runtime state cleanup runs the quota step and reports its count" do
       now = now()
       identity = upstream_identity_fixture()
@@ -226,6 +267,11 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruningTest do
           do: {:not_blocked, other},
           else: do_await_blocked_on(backend_pid, holder_pid, deadline)
     end
+  end
+
+  def capture_candidate_query(_event, _measurements, metadata, owner) do
+    if self() == owner and String.starts_with?(metadata.query, "SELECT") and metadata.query =~ "ORDER BY" and metadata.query =~ ~s("account_quota_windows"),
+      do: send(owner, {:candidate_query, metadata.query, metadata.params})
   end
 
   defp insert_window!(identity, attrs) do

@@ -54,19 +54,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruning do
     cutoff = Retention.cutoff(now)
     batch_size = Keyword.get(opts, :batch_size, @batch_size)
 
-    pruned =
-      cutoff
-      |> candidate_query()
-      |> order_by([window], asc: fragment("jsonb_exists(?, ?)", window.metadata, ^AutomaticConfirmation.metadata_key()), asc: window.reset_at, asc: window.id)
-      |> limit(^batch_size)
-      |> select([window], {window.upstream_identity_id, window.id, window.metadata})
-      |> Repo.all()
-      |> Enum.filter(&lapsed_marker?(&1, cutoff))
-      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-      |> Enum.sort_by(&elem(&1, 0))
-      |> Enum.reduce(0, fn {identity_id, window_ids}, total ->
-        total + prune_identity(identity_id, window_ids, cutoff)
-      end)
+    pruned = prune_candidates(cutoff, batch_size, nil, 0)
 
     if pruned > 0 do
       Logger.info("quota window cleanup deleted #{pruned} rows whose reset passed more than #{div(Retention.retention_seconds(), 86_400)} days ago")
@@ -74,6 +62,39 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruning do
 
     {:ok, %{expired_quota_windows_pruned: pruned}}
   end
+
+  defp prune_candidates(_cutoff, 0, _cursor, total), do: total
+
+  defp prune_candidates(cutoff, remaining, cursor, total) do
+    rows =
+      cutoff
+      |> candidate_query()
+      |> after_cursor(cursor)
+      |> order_by([window], asc: window.reset_at, asc: window.id)
+      |> limit(^@batch_size)
+      |> select([window], {window.upstream_identity_id, window.id, window.metadata, window.reset_at})
+      |> Repo.all()
+
+    case rows do
+      [] ->
+        total
+
+      [_ | _] ->
+        deleted =
+          rows
+          |> Enum.filter(fn {identity, id, metadata, _reset} -> lapsed_marker?({identity, id, metadata}, cutoff) end)
+          |> Enum.take(remaining)
+          |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+          |> Enum.sort_by(&elem(&1, 0))
+          |> Enum.reduce(0, fn {identity, ids}, count -> count + prune_identity(identity, ids, cutoff) end)
+
+        {_identity, id, _metadata, reset_at} = List.last(rows)
+        prune_candidates(cutoff, remaining - deleted, {reset_at, id}, total + deleted)
+    end
+  end
+
+  defp after_cursor(query, nil), do: query
+  defp after_cursor(query, {reset_at, id}), do: where(query, [window], window.reset_at > ^reset_at or (window.reset_at == ^reset_at and window.id > ^id))
 
   defp prune_identity(identity_id, window_ids, cutoff) do
     {:ok, deleted} =
@@ -101,8 +122,8 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruning do
     deleted
   end
 
-  # Unmarked rows sort first, so a marker that has not lapsed can never fill a
-  # batch ahead of rows that are deletable.
+  # Keyset pages advance past retained markers without consuming the deletion
+  # allowance, while the identity-locked recheck still protects refreshed rows.
   defp candidate_query(cutoff) do
     from(window in AccountQuotaWindow, where: window.reset_at < ^cutoff)
   end
