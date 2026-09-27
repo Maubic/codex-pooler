@@ -9,6 +9,21 @@ defmodule CodexPooler.Platform.ExecutionHTTPLifecycleTest do
 
   @detection_timeout_ms 15_000
 
+  # Send the real HTTP bytes, then hold the adapter return before the gateway
+  # helper can retire the execution. Receiving a response is not that barrier.
+  defmodule AfterSendGate do
+    def send_resp({adapter, payload, parent, execution_id}, status, headers, body) do
+      result = adapter.send_resp(payload, status, headers, body)
+      send(parent, {:response_sent, self(), execution_id})
+
+      receive do
+        {:release_response, ^execution_id} -> result
+      after
+        15_000 -> raise "response return gate was not released"
+      end
+    end
+  end
+
   test "owned publisher drains a queued proof backlog without spending each periodic interval" do
     alias CodexPooler.Platform.ExecutionRegistry
     registry = start_supervised!({ExecutionRegistry, name: nil})
@@ -191,26 +206,37 @@ defmodule CodexPooler.Platform.ExecutionHTTPLifecycleTest do
 
       send(parent, {:execution, self(), identity})
 
-      case conn.request_path do
-        "/raise" ->
-          raise DBConnection.ConnectionError, message: "synthetic database outage"
+      response =
+        case conn.request_path do
+          "/raise" ->
+            raise DBConnection.ConnectionError, message: "synthetic database outage"
 
-        "/stream" ->
-          CodexPoolerWeb.GatewayControllerHelpers.send_gateway_result(conn, %{
-            status: 200,
-            stream: fn _ ->
-              send(parent, {:stream_liveness, ExecutionIdentity.status(identity)})
-              {:error, :closed}
-            end
-          })
+          "/stream" ->
+            CodexPoolerWeb.GatewayControllerHelpers.send_gateway_result(conn, %{
+              status: 200,
+              stream: fn _ ->
+                send(parent, {:stream_liveness, ExecutionIdentity.status(identity)})
+                {:error, :closed}
+              end
+            })
 
-        "/public" ->
-          CodexPoolerWeb.PublicGatewayResult.send(
-            conn,
-            {:ok, %{status: 200, raw_body: "{}"}},
-            &Function.identity/1
-          )
-      end
+          "/public" ->
+            {adapter, payload} = conn.adapter
+            conn = %{conn | adapter: {AfterSendGate, {adapter, payload, parent, identity.owner_execution_id}}}
+
+            response =
+              CodexPoolerWeb.PublicGatewayResult.send(
+                conn,
+                {:ok, %{status: 200, raw_body: "{}"}},
+                &Function.identity/1
+              )
+
+            {AfterSendGate, payload} = response.adapter
+            %{response | adapter: {adapter, payload}}
+        end
+
+      send(parent, {:execution_finished, self(), identity.owner_execution_id})
+      response
     end
   end
 
@@ -224,13 +250,26 @@ defmodule CodexPooler.Platform.ExecutionHTTPLifecycleTest do
         response = receive_response(socket)
         assert response =~ "200 OK"
         assert_receive {:stream_liveness, :alive}
+        first_id = first.owner_execution_id
+        assert_receive {:execution_finished, ^pid, ^first_id}, @detection_timeout_ms
         assert Process.alive?(pid)
         assert ExecutionIdentity.status(first) == :dead
         CodexPooler.ExecutionProofSupport.publish_terminal!(first)
         :ok = :gen_tcp.send(socket, "GET /public HTTP/1.1\r\nHost: localhost\r\n\r\n")
         assert_receive {:execution, ^pid, second}, 15_000
-        assert receive_response(socket) =~ "200 OK"
-        assert second.owner_execution_id != first.owner_execution_id
+        second_id = second.owner_execution_id
+
+        try do
+          assert receive_response(socket) =~ "200 OK"
+          assert_receive {:response_sent, ^pid, ^second_id}, @detection_timeout_ms
+          assert second_id != first_id
+          assert ExecutionIdentity.status(second) == :alive
+        after
+          send(pid, {:release_response, second_id})
+        end
+
+        assert_receive {:execution_finished, ^pid, ^second_id}, @detection_timeout_ms
+        assert Process.alive?(pid)
         assert ExecutionIdentity.status(second) == :dead
         CodexPooler.ExecutionProofSupport.publish_terminal!(second)
       end)
