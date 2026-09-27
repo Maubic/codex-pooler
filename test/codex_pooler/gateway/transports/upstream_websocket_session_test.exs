@@ -4327,7 +4327,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     {:ok, session} = UpstreamWebsocketSession.start_link([])
     on_exit(fn -> UpstreamWebsocketSession.close(session) end)
 
-    request = %{raw_websocket_request(peer.url, self()) | timeouts: @held_timeouts}
+    request_id = Ecto.UUID.generate()
+    attempt_id = Ecto.UUID.generate()
+    request = %{raw_websocket_request(peer.url, self()) | timeouts: @held_timeouts, request_id: request_id, attempt_id: attempt_id}
 
     initial_lifecycle = lifecycle_state(session)
     request_task = Task.async(fn -> UpstreamWebsocketSession.request(session, request) end)
@@ -4335,9 +4337,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     assert_receive {:raw_upstream_websocket_connection, 1}, @message_detection_timeout_ms
     assert_receive {:raw_upstream_websocket_request, 1, 1}, @message_detection_timeout_ms
 
-    assert Task.shutdown(request_task, :brutal_kill) == nil
-    assert :closed = wait_for_raw_websocket_connection_closed(1, 200)
-    assert lifecycle_state(session) == %{initial_lifecycle | generation: 1}
+    {closed_lifecycle, log} =
+      with_info_log(fn ->
+        assert Task.shutdown(request_task, :brutal_kill) == nil
+        assert :closed = wait_for_raw_websocket_connection_closed(1, 200)
+        lifecycle_state(session)
+      end)
+
+    assert closed_lifecycle == %{initial_lifecycle | generation: 1}
+    assert log =~ "upstream websocket request connection closed reason_code=request_caller_down closed_by=pooler close_completed=true"
+    assert log =~ "request_id=#{request_id} attempt_id=#{attempt_id}"
+    assert log =~ "lifecycle_id=#{initial_lifecycle.lifecycle_id} generation=1"
+    assert log =~ "terminal_seen=false last_upstream_event_type=none last_upstream_event_class=none text_frame_count=0"
+    assert length(String.split(log, "upstream websocket request connection closed")) == 2
+    refute log =~ "synthetic-upstream-token"
 
     set_raw_websocket_peer_response_mode(peer, :terminal)
 
@@ -4347,6 +4360,26 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     generation_two = %{initial_lifecycle | generation: 2}
     assert_connection_metadata(result, generation_two, false, true)
     assert raw_websocket_peer_connection_count(peer) == 2
+  end
+
+  test "a caller that exits after the response terminal keeps the upstream reusable without a cancellation close" do
+    peer = start_raw_websocket_peer()
+    {:ok, session} = UpstreamWebsocketSession.start_link([])
+    on_exit(fn -> UpstreamWebsocketSession.close(session) end)
+    request = %{raw_websocket_request(peer.url, self()) | timeouts: @held_timeouts}
+
+    {result, log} =
+      with_info_log(fn ->
+        caller = Task.async(fn -> UpstreamWebsocketSession.request(session, request) end)
+        caller_monitor = Process.monitor(caller.pid)
+        assert {:ok, %{terminal: "response.completed"}} = Task.await(caller, @message_detection_timeout_ms)
+        assert_receive {:DOWN, ^caller_monitor, :process, _pid, :normal}, @message_detection_timeout_ms
+        UpstreamWebsocketSession.request(session, request)
+      end)
+
+    assert {:ok, %{upstream_websocket_connection: %{generation: 1, reused: true}}} = result
+    assert raw_websocket_peer_connection_count(peer) == 1
+    refute log =~ "upstream websocket request connection closed"
   end
 
   test "request caller exit during websocket upgrade closes before payload send and reconnects" do

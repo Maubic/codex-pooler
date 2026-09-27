@@ -819,6 +819,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       collected_body: new_collected_body(request),
       request_caller_pid: request_caller_pid,
       request_caller_monitor: request_caller_monitor,
+      request_id: request.request_id,
+      attempt_id: request.attempt_id,
       native_client_retry_observation: request.native_client_retry_observation,
       # Tolerant access: during a rolling deploy an owner-forwarded request may
       # have been built by a replica that predates this field. nil keeps the
@@ -906,7 +908,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
       {:error, :client_disconnected, state} ->
         result = request_caller_down_result(state, receive_state)
-        state = invalidate_state(state)
+        state = invalidate_cancelled_request(state, receive_state, :connect)
         {:ok, put_result_connection_metadata(result, state, connection_usage), state}
 
       {:error, reason, state} ->
@@ -1035,7 +1037,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
     if request_caller_down?(receive_state) do
       result = request_caller_down_result(state, receive_state)
-      state = state |> invalidate_state() |> complete_connection_request()
+      state = state |> invalidate_cancelled_request(receive_state, :before_payload) |> complete_connection_request()
       {:ok, put_result_connection_metadata(result, state, connection_usage), state}
     else
       send_authorized_request_payload(state, request, receive_state, connection_usage)
@@ -1519,7 +1521,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     receive do
       {:DOWN, ^request_caller_monitor, :process, ^request_caller_pid, _reason}
       when is_reference(request_caller_monitor) and is_pid(request_caller_pid) ->
-        {request_caller_down_result(state, receive_state), invalidate_state(state)}
+        {request_caller_down_result(state, receive_state), invalidate_cancelled_request(state, receive_state, :receive)}
 
       {:tcp, ^socket, _data} = message ->
         handle_event_message(state, receive_state, message)
@@ -2786,6 +2788,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     state
     |> close_state()
     |> Map.put(:reconnect_pending?, true)
+  end
+
+  defp invalidate_cancelled_request(state, receive_state, phase) do
+    closed = invalidate_state(state)
+    :ok = CloseDiagnostics.log_cancelled_request_close(state, receive_state, phase)
+    closed
   end
 
   defp disconnected_state(state) do

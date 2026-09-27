@@ -21,6 +21,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Clos
   require Logger
 
   alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
+  alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.EventTaxonomy
+  alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.ReceiveState
 
   @type cause ::
           :peer_close_frame
@@ -57,6 +59,32 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Clos
   end
 
   def log_close(_state, _cause, _details), do: :ok
+
+  # The cancelled request's caller cannot persist its returned diagnostics.
+  # Called only after the local transport close returns, using the old state's
+  # connection identity. This is not a provider computation-stop receipt.
+  @spec log_cancelled_request_close(map(), ReceiveState.t(), :connect | :before_payload | :receive) :: :ok
+  def log_cancelled_request_close(state, receive_state, phase \\ :receive)
+
+  def log_cancelled_request_close(%{conn: _conn, websocket: _websocket} = state, %ReceiveState{} = receive_state, phase) when phase in [:connect, :before_payload, :receive] do
+    Logger.info(fn ->
+      [
+        "upstream websocket request connection closed reason_code=request_caller_down closed_by=pooler close_completed=true",
+        field("phase", Atom.to_string(phase)),
+        field("request_id", DiagnosticTaxonomy.safe_correlator(receive_state.request_id)),
+        field("attempt_id", DiagnosticTaxonomy.safe_correlator(receive_state.attempt_id)),
+        field("lifecycle_id", DiagnosticTaxonomy.safe_correlator(Map.get(state, :lifecycle_id))),
+        field("generation", count(Map.get(state, :generation))),
+        field("terminal_seen", if(receive_state.terminal_seen?, do: "true", else: "false")),
+        field("last_upstream_event_type", if(EventTaxonomy.allowed_event_type?(receive_state.last_upstream_event_type), do: receive_state.last_upstream_event_type, else: "none")),
+        field("last_upstream_event_class", if(EventTaxonomy.allowed_event_class?(receive_state.last_upstream_event_class), do: receive_state.last_upstream_event_class, else: "none")),
+        field("text_frame_count", count(receive_state.text_frame_count))
+      ]
+      |> Enum.join(" ")
+    end)
+  end
+
+  def log_cancelled_request_close(_state, _receive_state, _phase), do: :ok
 
   @doc false
   @spec line(map(), cause(), [detail()], integer()) :: String.t()
