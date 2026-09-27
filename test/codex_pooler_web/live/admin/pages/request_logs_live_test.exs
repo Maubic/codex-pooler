@@ -1588,7 +1588,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
     assert has_element?(view, "#request-log-row-#{running.id} [data-role='status-text'].text-info", "In progress")
     refute has_element?(view, "#request-log-row-#{running.id} [data-role='latency']")
 
-    assert has_element?(view, "#request-log-token-legend", "Each bar = 100% of request tokens")
+    assert has_element?(view, "#request-log-token-legend", "Token breakdown")
     assert has_element?(view, "#request-log-token-legend", "Cached input")
     assert has_element?(view, "#request-log-token-legend", "Uncached input")
     assert has_element?(view, "#request-log-token-legend", "Output")

@@ -83,10 +83,11 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Usage do
 
   def token_composition_legend(assigns) do
     ~H"""
-    <div id="request-log-token-legend" class="hidden flex-wrap items-center justify-end gap-x-4 gap-y-1 border-b border-base-300 bg-base-200/30 px-3 py-2 text-[11px] text-base-content/65 lg:flex">
-      <span>Each bar = 100% of request tokens</span>
-      <span :for={{key, label} <- [cached_input: "Cached input", uncached_input: "Uncached input", output: "Output"]} class="inline-flex items-center gap-1.5">
-        <span aria-hidden="true" class={["size-2 rounded-xs", segment_color(key)]}></span>{label}
+    <div id="request-log-token-legend" class="hidden flex-wrap items-center justify-end gap-x-4 gap-y-1 border-b border-base-300 bg-base-200/30 px-3 py-2 text-[11px] leading-4 text-base-content/65 lg:flex">
+      <span class="admin-control-label">Token breakdown</span>
+      <span :for={{key, label} <- [cached_input: "Cached input", uncached_input: "Uncached input", output: "Output"]} class="inline-flex min-h-4 items-center gap-1.5">
+        <span aria-hidden="true" class={["size-2 rounded-xs", segment_color(key)]}></span>
+        <span class="admin-control-label">{label}</span>
       </span>
     </div>
     """
