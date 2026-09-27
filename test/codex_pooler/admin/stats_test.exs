@@ -402,6 +402,7 @@ defmodule CodexPooler.Admin.StatsTest do
 
     session = insert_active_session!(pool, api_key, now)
     insert_turn!(session, request, now, %{status: "succeeded"})
+    insert_turn!(session, failed_request, now, %{status: "succeeded", turn_sequence: 2})
     insert_daily_rollup!(pool, api_key, now)
     upsert_primary_5h!(identity, now)
 
@@ -442,7 +443,7 @@ defmodule CodexPooler.Admin.StatsTest do
     assert Decimal.equal?(dashboard.kpis.settled_cost.usd, Decimal.new("0.750000"))
     assert dashboard.kpis.average_latency_ms.value == 1000
     assert dashboard.kpis.active_sessions.value == 1
-    assert dashboard.kpis.turns.value == 1
+    assert dashboard.kpis.turns.value == 2
 
     assert dashboard.kpis.cache_rate == %{
              value: 16.7,
@@ -496,7 +497,7 @@ defmodule CodexPooler.Admin.StatsTest do
     assert Enum.any?(dashboard.charts.settled_cost, &(&1.settled_cost_micros == 750_000))
     assert [%{request_count: 1, total_tokens: 100}] = dashboard.tables.daily_rollups
 
-    assert %{requests: 2, attempts: 2, settlements: 1, daily_rollups: 1, codex_turns: 1} =
+    assert %{requests: 2, attempts: 2, settlements: 1, daily_rollups: 1, codex_turns: 2} =
              dashboard.sources
 
     assert Enum.any?(dashboard.tables.recent_activity, &(&1.type == :audit_event))

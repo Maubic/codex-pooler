@@ -221,7 +221,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         <summary
           data-role="status-filter-trigger"
           aria-label="Status"
-          class="select select-bordered flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
+          class="select flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
         >
           <.status_filter_icon option={@selected} />
           <span class="truncate">{@selected.label}</span>
@@ -404,7 +404,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
               <select
                 id="oauth_link_pool_id"
                 name={@oauth_link_form[:pool_id].name}
-                class="select select-bordered w-full"
+                class="select w-full"
               >
                 <option value="" selected={oauth_pool_selected?(@oauth_link_form, "")}>
                   Select Pool

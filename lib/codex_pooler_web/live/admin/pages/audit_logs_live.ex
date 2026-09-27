@@ -407,6 +407,12 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
       {:ok, datetime} ->
         {datetime, nil}
 
+      {:error, :gap} ->
+        {nil, %{field: field, message: "#{date_label(field)} does not exist in the selected timezone"}}
+
+      {:error, :unknown_timezone} ->
+        {nil, %{field: field, message: "#{date_label(field)} timezone is unavailable; update your timezone in Settings"}}
+
       {:error, _reason} ->
         {nil, %{field: field, message: "#{date_label(field)} must be a valid date"}}
     end
@@ -427,5 +433,6 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
   defp string_param(params, key), do: params |> Map.get(key) |> blank_to_nil()
   defp blank_to_nil(value), do: if(blank?(value), do: nil, else: String.trim(to_string(value)))
   defp blank?(nil), do: true
-  defp blank?(value), do: String.trim(to_string(value)) == ""
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blank?(_value), do: true
 end

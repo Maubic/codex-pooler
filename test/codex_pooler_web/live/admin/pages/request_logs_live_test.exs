@@ -20,6 +20,15 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
 
   setup :register_and_log_in_user
 
+  test "nested query values never crash request or audit log pages", %{conn: conn} do
+    for route <- ["/admin/request-logs", "/admin/audit-logs"],
+        field <- ~w(pool_id model status date_from date_to request_id upstream_identity_id) do
+      {:ok, view, _} = live(conn, route <> "?" <> field <> "[nested]=value")
+      render_async(view)
+      assert Process.alive?(view.pid)
+    end
+  end
+
   test "request list keeps websocket lifecycle evidence out of summary rows", %{
     conn: conn,
     scope: scope
@@ -1526,6 +1535,9 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
       request_log_fixture(pool, %{
         correlation_id: "req-no-plan",
         requested_model: "gpt-4o",
+        upstream_account_label: "Sample missing plan",
+        upstream_account_plan_label: "  ",
+        upstream_account_plan_family: "",
         status: "succeeded"
       })
 
@@ -2136,6 +2148,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
            )
 
     assert has_element?(view, "#request-log-#{ws_request.id}-user-agent", "Codex CLI 1.2.3")
+    assert has_element?(view, "#request-log-#{ws_request.id}-user-agent [data-role=user-agent-logo][data-logo=\"codex.svg\"]")
+    assert has_element?(view, "#request-log-#{desktop_request.id}-user-agent [data-role=user-agent-logo][data-logo=\"codex.svg\"]")
 
     assert has_element?(
              view,

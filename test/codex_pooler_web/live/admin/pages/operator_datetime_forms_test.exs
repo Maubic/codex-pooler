@@ -19,6 +19,33 @@ defmodule CodexPoolerWeb.Admin.OperatorDatetimeFormsTest do
     %{pool: pool, api_key: api_key, raw_key: raw_key}
   end
 
+  test "a stale stored timezone does not crash editing an existing expiry", %{conn: conn, user: user, api_key: api_key} do
+    user |> Ecto.Changeset.change(timezone: "Unknown/Zone") |> Repo.update!()
+    expiry = ~U[2099-07-15 07:54:38.123456Z]
+    api_key |> Ecto.Changeset.change(expires_at: expiry) |> Repo.update!()
+    {:ok, view, _} = live(conn, ~p"/admin/api-keys")
+    view |> element("#edit-api-key-#{api_key.id}") |> render_click()
+    assert has_element?(view, "#api_key_expires_at[value='2099-07-15T07:54']")
+    assert Process.alive?(view.pid)
+    view |> element("#api-key-form") |> render_submit(%{"api_key" => %{"expires_at" => "2099-07-15T07:54", "display_name" => "Renamed stale zone"}})
+    assert Repo.get!(APIKey, api_key.id).expires_at == expiry
+  end
+
+  test "both date-filter pages explain skipped local dates and missing zones", %{conn: conn, user: user} do
+    for {timezone, date, message} <- [
+          {"Pacific/Apia", "2011-12-30", "does not exist in the selected timezone"},
+          {"Unknown/Zone", "2026-09-27", "timezone is unavailable"}
+        ] do
+      user |> Ecto.Changeset.change(timezone: timezone) |> Repo.update!()
+
+      for path <- ["/admin/request-logs", "/admin/audit-logs"] do
+        {:ok, view, _} = live(conn, path <> "?date_from=" <> date)
+        render_async(view)
+        assert render(view) =~ message
+      end
+    end
+  end
+
   test "editing loads local time and an unchanged save preserves the exact instant", %{conn: conn, api_key: api_key} do
     expiry = ~U[2099-07-15 07:54:38.123456Z]
     api_key |> Ecto.Changeset.change(expires_at: expiry) |> Repo.update!()

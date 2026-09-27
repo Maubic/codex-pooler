@@ -126,6 +126,22 @@ defmodule CodexPoolerWeb.DateTimeDisplay do
 
   @spec timezone_options() :: [{String.t(), String.t()}]
   def timezone_options do
+    key = {__MODULE__, :timezone_options}
+
+    case :persistent_term.get(key, nil) do
+      nil ->
+        options = build_timezone_options()
+        :persistent_term.put(key, options)
+        options
+
+      options ->
+        options
+    end
+  end
+
+  # Host zoneinfo supplies names; bundled Tz rules validate and convert them.
+  # Both are fixed for the lifetime of the release VM.
+  defp build_timezone_options do
     zones =
       Zoneinfo.time_zones()
       |> Enum.uniq()

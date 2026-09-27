@@ -37,7 +37,7 @@ defmodule CodexPoolerWeb.Admin.LensFilters do
     <div class="grid min-w-0 gap-2">
       <input type="hidden" id={"filters_#{@field}"} name={"filters[#{@field}]"} value={@value} />
       <details id={@id} class="dropdown min-w-0 w-full" phx-click-away={JS.remove_attribute("open", to: "##{@id}")}>
-        <summary data-role={"#{@field}-filter-trigger"} aria-label={@label} class="select select-bordered flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal">
+        <summary data-role={"#{@field}-filter-trigger"} aria-label={@label} class="select flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal">
           <.icon name={@selected.icon} class={["size-4 shrink-0", @selected.icon_class]} />
           <span class="min-w-0 flex-1 truncate">{@selected.label}</span>
         </summary>

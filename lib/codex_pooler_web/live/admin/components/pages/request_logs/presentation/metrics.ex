@@ -35,7 +35,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Metrics do
       |> String.trim_trailing("0")
       |> String.trim_trailing(".")
 
-    "#{rate}%"
+    if cached > 0 and rate == "0", do: "<0.1%", else: "#{rate}%"
   end
 
   def cache_rate_label(_counts), do: nil

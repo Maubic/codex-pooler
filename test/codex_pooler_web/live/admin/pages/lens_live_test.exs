@@ -10,6 +10,35 @@ defmodule CodexPoolerWeb.Admin.LensLiveTest do
 
   setup :register_and_log_in_user
 
+  test "an assigned admin's unavailable Pool URL restores visible history and live updates", %{scope: scope} do
+    {visible, setup, assignment} = data_pool(scope, "lens-visible-filter")
+    {hidden, _, _} = data_pool(scope, "lens-hidden-filter")
+    attempt = request_fixture(setup) |> attempt_fixture(assignment, %{served_model: "model-other"})
+    %{user: admin} = operator_fixture(scope, %{"role" => "instance_admin", "pool_ids" => [visible.id], "password_change_required" => "false"})
+    {:ok, login} = Accounts.login_user(%{"email" => admin.email, "password" => valid_user_password()})
+    conn = log_in_user(build_conn(), admin, login.token)
+    {:ok, view, _} = live_lens(conn, ~p"/admin/lens?pool_id=#{hidden.id}")
+    assert_patch(view)
+    assigns = await_lens(view)
+    assert assigns.params["pool_id"] == ""
+    assert assigns.subscribed_pool_ids == MapSet.new([visible.id])
+    assert has_element?(view, "#model-history-attempt-#{attempt.id}")
+    send(view.pid, {Events, %{pool_id: visible.id, topics: ["request_logs"]}})
+    assert is_reference(lens_assigns(view).history_reload_timer)
+  end
+
+  test "unavailable Pool filter is patched out and visible Pool updates remain subscribed", %{conn: conn, scope: scope} do
+    {pool, setup, assignment} = data_pool(scope, "lens-unavailable-pool")
+    attempt = request_fixture(setup) |> attempt_fixture(assignment, %{served_model: "model-other"})
+    {:ok, view, _} = live_lens(conn, ~p"/admin/lens?#{%{pool_id: Ecto.UUID.generate()}}")
+    assert_patch(view)
+    assigns = await_lens(view)
+    assert assigns.params["pool_id"] == ""
+    assert MapSet.member?(assigns.subscribed_pool_ids, pool.id)
+    assert has_element?(view, "#model-history-attempt-#{attempt.id}")
+    assert has_element?(view, "#filters_pool_id[value='']")
+  end
+
   test "browser buttons select window, model and evidence despite their native empty value", %{conn: conn, scope: scope} do
     {_pool, setup, assignment} = data_pool(scope, "lens-browser-filters")
     request_fixture(setup) |> attempt_fixture(assignment, %{served_model: "model-other"})

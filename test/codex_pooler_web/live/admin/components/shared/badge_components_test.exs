@@ -7,6 +7,23 @@ defmodule CodexPoolerWeb.Admin.BadgeComponentsTest do
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard
   alias CodexPoolerWeb.Dev.ComponentShowcaseData
 
+  test "unassigned accounts without deletion capability explain permission rather than Pool removal" do
+    account = ComponentShowcaseData.account_card() |> Map.merge(%{assignments: [], can_delete?: false})
+    html = Phoenix.LiveViewTest.render_component(&AccountCard.account_card/1, account: account, account_index: 0)
+    assert LazyHTML.from_fragment(html) |> LazyHTML.query("#delete-upstream-account-#{account.identity.id}[disabled]") |> LazyHTML.attribute("title") == ["You do not have permission to permanently delete this account."]
+  end
+
+  test "plain plan text uses named palettes and neutral Free without a missing modifier" do
+    assert BadgeComponents.plan_text_class("free") == "admin-plan-text"
+    assert BadgeComponents.plan_text_class(nil) == "text-base-content/70"
+
+    for plan <- ~w(go plus pro prolite team business enterprise edu) do
+      assert BadgeComponents.plan_text_class(plan) == "admin-plan-text admin-plan-badge--#{plan}"
+    end
+
+    assert BadgeComponents.plan_text_class("promax") == BadgeComponents.plan_text_class("pro")
+  end
+
   test "upstream plan badge shares the card activity signal without marking idle cards" do
     account = ComponentShowcaseData.account_card()
 

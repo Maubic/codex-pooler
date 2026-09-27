@@ -191,6 +191,7 @@ defmodule CodexPoolerWeb.Admin.BadgeComponents do
   def plan_text_class(plan_label) do
     case plan_tone(plan_label) do
       :unknown -> "text-base-content/70"
+      :free -> "admin-plan-text"
       {:generated, key} -> Map.fetch!(@plan_text_tone_classes, generated_chip_tone(key))
       tone -> "admin-plan-text admin-plan-badge--#{tone}"
     end

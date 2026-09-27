@@ -3,11 +3,7 @@ defmodule CodexPoolerWeb.Admin.LensFilterFormTest do
 
   alias CodexPoolerWeb.Admin.LensFilterForm
 
-  test "a selector without available options preserves its value with a renderable fallback" do
-    assert %{value: "unavailable-model", label: label, icon: icon, icon_class: icon_class} = LensFilterForm.selected([], "unavailable-model")
-    assert is_binary(label) and byte_size(label) > 0
-    assert is_binary(icon) and byte_size(icon) > 0
-    assert is_binary(icon_class)
+  test "selectors fall back to their first available option and retain known choices" do
     [first | _] = options = LensFilterForm.window_options()
     assert LensFilterForm.selected(options, "unknown") == first
     assert LensFilterForm.selected(options, "7d").value == "7d"

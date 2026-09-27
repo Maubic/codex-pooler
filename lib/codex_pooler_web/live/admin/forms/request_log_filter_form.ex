@@ -79,7 +79,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogFilterForm do
 
   @spec blank?(term()) :: boolean()
   def blank?(nil), do: true
-  def blank?(value), do: String.trim(to_string(value)) == ""
+  def blank?(value) when is_binary(value), do: String.trim(value) == ""
+  def blank?(_value), do: true
 
   @spec blank_to_nil(term()) :: String.t() | nil
   def blank_to_nil(value), do: if(blank?(value), do: nil, else: String.trim(to_string(value)))
@@ -126,6 +127,12 @@ defmodule CodexPoolerWeb.Admin.RequestLogFilterForm do
     case DateTimeInput.date_boundary(value, field, timezone) do
       {:ok, datetime} ->
         {datetime, nil}
+
+      {:error, :gap} ->
+        {nil, %{field: field, message: "#{date_label(field)} does not exist in the selected timezone"}}
+
+      {:error, :unknown_timezone} ->
+        {nil, %{field: field, message: "#{date_label(field)} timezone is unavailable; update your timezone in Settings"}}
 
       {:error, _reason} ->
         {nil, %{field: field, message: "#{date_label(field)} must be a valid date"}}

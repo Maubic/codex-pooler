@@ -134,9 +134,14 @@ defmodule CodexPoolerWeb.Admin.LensLive do
   end
 
   defp apply_history(socket, {:ok, result}) do
-    socket
-    |> assign(history: result.history, history_loading?: false, history_rerun?: false, history_error?: false, pool_options: result.pool_options, model_options: result.model_options)
-    |> reconcile_subscriptions(result.pool_ids)
+    changed? = result.filters != socket.assigns.params
+
+    socket =
+      socket
+      |> assign(history: result.history, history_loading?: false, history_rerun?: false, history_error?: false, pool_options: result.pool_options, model_options: result.model_options, params: result.filters, filter_form: to_form(result.filters, as: :filters))
+      |> reconcile_subscriptions(result.pool_ids)
+
+    if changed?, do: patch_filters(socket, result.filters), else: socket
   end
 
   defp apply_history(socket, {:exit, _reason}),

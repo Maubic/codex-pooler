@@ -212,7 +212,7 @@ defmodule CodexPoolerWeb.Admin.StatsLive do
                 <summary
                   data-role="window-filter-trigger"
                   aria-label="Range"
-                  class="select select-bordered flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
+                  class="select flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
                 >
                   <.icon name="hero-clock" class="size-4 shrink-0 text-base-content/60" />
                   <span class="truncate">{selected_window_filter_label(@filter_form)}</span>

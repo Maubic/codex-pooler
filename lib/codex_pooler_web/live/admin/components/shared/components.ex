@@ -568,7 +568,7 @@ defmodule CodexPoolerWeb.Admin.Components do
         class="dropdown rounded-box border border-base-300 bg-base-100 p-3 text-base-content shadow-xl"
         style={"position-anchor: #{@anchor_name};"}
       >
-        <calendar-date class="cally" value={@value} locale="en-GB" data-role="cally-calendar">
+        <calendar-date class="cally admin-calendar" value={@value} locale="en-GB" data-role="cally-calendar">
           <svg
             aria-label="Previous"
             class="size-4 fill-current"

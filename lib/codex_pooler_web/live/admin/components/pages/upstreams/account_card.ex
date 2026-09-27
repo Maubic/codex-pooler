@@ -749,8 +749,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
 
   defp delete_unavailable_reason(%{can_delete?: true}), do: nil
 
-  defp delete_unavailable_reason(_account),
+  defp delete_unavailable_reason(%{assignments: [_ | _]}),
     do: "Remove this account from all Pools before deleting it."
+
+  defp delete_unavailable_reason(_account),
+    do: "You do not have permission to permanently delete this account."
 
   defp actions_menu_title(%{identity: %{status: "deleted"}} = account),
     do: delete_unavailable_reason(account)

@@ -363,7 +363,7 @@ utilities; never hardcode raw violet/oklch literals in `lib/`.
 
 **Display / Body Font:** Roboto Condensed (with `ui-sans-serif`, `system-ui`,
 `sans-serif`)
-**Label / Mono Font:** the Tailwind `font-mono` stack (`ui-monospace`, Menlo, …)
+**Code / Identifier Mono Font:** the Tailwind `font-mono` stack (`ui-monospace`, Menlo, …)
 
 **Character:** one condensed grotesque doing every job, narrow enough that a
 dense row of facts still reads at a glance. There is no display face and no pairing to admire; the hierarchy is
@@ -396,7 +396,7 @@ Observed hierarchy (all from live pages):
 | Surface title | `text-base font-semibold leading-5` | `admin_surface`, card headers |
 | Section heading | `text-xs font-semibold uppercase tracking-wide text-base-content/45` | drawer sections |
 | Micro label | `text-[0.62rem] font-semibold uppercase tracking-[0.08em] text-base-content/35` | metric cards, card footers |
-| Value | `font-mono font-semibold tabular-nums` (`text-xl`/`text-lg` compact) | metric cards, leaderboards |
+| Value | `font-semibold tabular-nums` (`text-xl`/`text-lg` compact) | metric cards, leaderboards |
 | Body / help | `text-sm leading-6 text-base-content/65` | wizard copy, descriptions |
 | Fine print | `text-xs` / `text-[11px] leading-4 text-base-content/55` | card details, sublabels |
 
@@ -665,7 +665,7 @@ ownership, accessibility, and a minimal real markup example.
   outlier in the strip — the split's one interesting number already lives
   in the dedicated Cache rate card, so Tokens went back to a single
   description like its siblings.
-- **Anatomy:** micro uppercase label + trailing icon, `font-mono tabular-nums`
+- **Anatomy:** micro uppercase label + trailing icon, `tabular-nums`
   value (`data-role="metric-card-value"`), optional muted description.
 - **metric_strip API:** attrs `id`, `compact_mobile`, `desktop_columns`
   (`:four | :five`), `class` (full grid override — the stats KPI strip passes
@@ -1033,7 +1033,7 @@ Three recurring list shapes, all `text-xs`-scale and truncation-guarded:
 ```heex
 <div id={@row.id} data-role="request-log-detail-field" class="grid gap-1 rounded-box bg-base-200/60 px-3 py-2">
   <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/45">{@row.label}</dt>
-  <dd class="break-words text-base-content/80 font-mono text-xs tabular-nums">{@row.value}</dd>
+  <dd class="break-words text-base-content/80 text-xs tabular-nums">{@row.value}</dd>
 </div>
 ```
 
@@ -1459,7 +1459,7 @@ The API-key Limits panel uses a compact tonal key-wide control band, a bordered 
   through `fields_class` without replacing the shared control recipe.
   Upstreams uses it for a two-column phone layout with search spanning both,
   then a `1.55fr / 1fr / 1fr` search/Pool/status row from `sm`.
-  `cally_date_filter/1` provides the anchored calendar popover.
+  `cally_date_filter/1` provides the anchored calendar popover. Its scoped `admin-calendar` uses the body font, `text-xs` tabular date numerals and weekday labels, and a `text-sm font-semibold` month heading. Navigation buttons inherit the body font; weekday headers have no selectable-day radius or hover fill. Keep Cally's seven-column geometry and native popover anchoring; month/year select elements are not part of this primitive.
 - **`empty_state/1`:** dashed-border `rounded-box` panel, icon at
   `text-base-content/40`, title + optional description + actions, all
   centered. The chart-free variant (`pool-activity-empty-state` in `app.css`)
@@ -2082,8 +2082,8 @@ and [Observatory rules in `app.css`](assets/css/app.css).
   4. *Throughput*: tok/s value + delta.
   5. *Latency*: p50 as the value with a smaller p95 beside it, detail "Mean
      Ns · slowest settled Ns".
-  Values are `font-mono tabular-nums`; labels are [Typography](#typography) micro labels; deltas are
-  small mono figures in success/error ink.
+  Values are `tabular-nums`; labels are [Typography](#typography) micro labels; deltas are
+  small tabular figures in success/error ink.
 - **Left rail, card 2 — models**: [Compact and definition lists](#compact-and-definition-lists) ranked compact rows
   (`name | bar | tokens`), bars relative to the leader, series colors in
   fixed order primary → info → success → muted ink mixes; every row is

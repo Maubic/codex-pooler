@@ -126,7 +126,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
                 <tr
                   id={"request-log-row-#{request_log.id}"}
                   data-status={request_log.status}
-                  data-tone={request_log_tone(request_log.status)}
                   phx-click="open_request_log"
                   phx-value-request-id={request_log.id}
                   class={["group/request-log cursor-pointer transition-colors hover:bg-base-200/80", (request_log.status == "in_progress" || @current_params["selected_request_id"] == request_log.id) && "bg-base-200/60"]}
@@ -282,7 +281,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
   end
 
   defp plan_label(log) do
-    case log.upstream_account_plan_label || log.upstream_account_plan_family do
+    case Enum.find([log.upstream_account_plan_label, log.upstream_account_plan_family], &(is_binary(&1) and String.trim(&1) != "")) do
       nil -> "—"
       label -> AdminBadges.plan_badge_label(label)
     end

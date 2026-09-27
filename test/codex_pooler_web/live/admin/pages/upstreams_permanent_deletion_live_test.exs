@@ -6,11 +6,68 @@ defmodule CodexPoolerWeb.Admin.UpstreamsPermanentDeletionLiveTest do
   import Phoenix.LiveViewTest
 
   alias CodexPooler.Accounts
+  alias CodexPooler.Jobs.UpstreamDeletionWorker
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Assignments.PoolAssignments
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
 
   setup :register_and_log_in_user
+
+  test "failed enqueue keeps both confirmation dialogs alive and reports retry guidance", %{conn: conn} do
+    identity = active_upstream_identity_fixture(%{account_label: "Sample delete failure"})
+    Repo.query!("CREATE FUNCTION pg_temp.reject_ui_deletion() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.worker = 'CodexPooler.Jobs.UpstreamDeletionWorker' THEN RAISE EXCEPTION 'sample insert failure' USING ERRCODE = 'object_not_in_prerequisite_state'; END IF; RETURN NEW; END $$")
+    Repo.query!("CREATE TRIGGER reject_ui_deletion BEFORE INSERT ON oban_jobs FOR EACH ROW EXECUTE FUNCTION pg_temp.reject_ui_deletion()")
+
+    for {route, trigger, form} <- [
+          {~p"/admin/upstreams", "delete-upstream-account-#{identity.id}", "delete-upstream-account-form"},
+          {~p"/admin/upstreams/#{identity.id}", "cockpit-delete-upstream-account-#{identity.id}", "cockpit-delete-upstream-account-form"}
+        ] do
+      {:ok, view, _} = live(conn, route)
+      view |> element("##{trigger}") |> render_click()
+      view |> element("##{form}") |> render_submit(%{"upstream_delete" => %{"id" => identity.id, "confirmation_label" => identity.account_label}})
+      assert Process.alive?(view.pid)
+      assert has_element?(view, "##{form}")
+      assert has_element?(view, "#flash-error", "upstream deletion could not be queued; retry Delete")
+      assert Repo.get!(UpstreamIdentity, identity.id).status == "active"
+      refute Repo.get!(UpstreamIdentity, identity.id).metadata["permanent_deletion_requested_at"]
+    end
+  end
+
+  test "failed deletion labels preserve the Delete action name in card and cockpit", %{conn: conn} do
+    %{identity: identity} = legacy_account(pool_fixture())
+    identity |> Ecto.Changeset.change(metadata: %{"permanent_deletion_requested_at" => DateTime.to_iso8601(DateTime.utc_now())}) |> Repo.update!()
+    {:ok, job} = Oban.insert(UpstreamDeletionWorker.new(%{"upstream_identity_id" => identity.id}))
+    job |> Ecto.Changeset.change(state: "discarded") |> Repo.update!()
+    {:ok, view, _} = live(conn, ~p"/admin/upstreams")
+    assert has_element?(view, "#upstream-account-#{identity.id}", "Deletion failed - retry Delete")
+    {:ok, cockpit, _} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+    assert has_element?(cockpit, "#upstream-cockpit-status", "Deletion failed - retry Delete")
+  end
+
+  test "historical accounts retain usable reset calendar downloads", %{conn: conn} do
+    %{identity: identity} = legacy_account(pool_fixture())
+    expiration = DateTime.add(DateTime.utc_now(), 3600, :second) |> DateTime.to_iso8601()
+    metadata = %{"saved_resets" => %{"status" => "reported", "available_count" => 1, "available_expires_at" => [expiration], "available_expirations" => [%{"expires_at" => expiration}], "next_expires_at" => expiration}}
+    identity |> Ecto.Changeset.change(metadata: metadata) |> Repo.update!()
+    {:ok, view, _} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+    assert has_element?(view, "#cockpit-download-reset-calendar-#{identity.id}[href='/admin/upstreams/#{identity.id}/saved-reset-expirations.ics']")
+    assert has_element?(view, "#cockpit-saved-reset-expiration-time-left-0[href='/admin/upstreams/#{identity.id}/saved-reset-expirations.ics']")
+  end
+
+  test "owner can reach and delete historical accounts retained only in inactive Pools", %{conn: conn} do
+    for status <- ["archived", "disabled"] do
+      pool = pool_fixture()
+      %{identity: identity} = legacy_account(pool)
+      pool |> Ecto.Changeset.change(status: status) |> Repo.update!()
+      {:ok, view, _} = live(conn, ~p"/admin/upstreams?status=deleted")
+      assert has_element?(view, "#delete-upstream-account-#{identity.id}:not([disabled])")
+      {:ok, cockpit, _} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+      assert has_element?(cockpit, "#cockpit-delete-upstream-account-#{identity.id}:not([disabled])")
+      view |> element("#delete-upstream-account-#{identity.id}") |> render_click()
+      submit_delete(view, identity, identity.account_label)
+      refute Repo.get(UpstreamIdentity, identity.id)
+    end
+  end
 
   test "Any status and Deleted surface historical accounts with only Delete available", %{conn: conn} do
     pool = pool_fixture()

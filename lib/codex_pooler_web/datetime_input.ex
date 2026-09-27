@@ -11,7 +11,7 @@ defmodule CodexPoolerWeb.DateTimeInput do
 
   def local_value(%DateTime{} = datetime, timezone) do
     datetime
-    |> DateTime.shift_zone!(timezone, Tz.TimeZoneDatabase)
+    |> shift_for_input(timezone)
     |> Calendar.strftime("%Y-%m-%dT%H:%M")
   end
 
@@ -29,20 +29,29 @@ defmodule CodexPoolerWeb.DateTimeInput do
 
   @spec describe(DateTime.t(), String.t()) :: String.t()
   def describe(%DateTime{} = datetime, timezone) do
-    local = DateTime.shift_zone!(datetime, timezone, Tz.TimeZoneDatabase)
+    local = shift_for_input(datetime, timezone)
     offset = Calendar.strftime(local, "%z")
     offset = String.slice(offset, 0, 3) <> ":" <> String.slice(offset, 3, 2)
-    Calendar.strftime(local, "%Y-%m-%d %H:%M") <> " #{timezone} (UTC#{offset})"
+    Calendar.strftime(local, "%Y-%m-%d %H:%M") <> " #{local.time_zone} (UTC#{offset})"
   end
 
   @spec date_boundary(String.t(), boundary(), String.t()) :: {:ok, DateTime.t()} | {:error, input_error()}
-  def date_boundary(value, boundary, timezone) do
+  def date_boundary(value, boundary, timezone) when is_binary(value) and boundary in [:date_from, :date_to] do
     with {:ok, date} <- Date.from_iso8601(value),
          {:ok, start} <- day_start(date, timezone, false) do
       finish_boundary(date, start, boundary, timezone)
     else
       {:error, reason} when reason in [:gap, :unknown_timezone] -> {:error, reason}
       {:error, _reason} -> {:error, :invalid}
+    end
+  end
+
+  def date_boundary(_value, _boundary, _timezone), do: {:error, :invalid}
+
+  defp shift_for_input(datetime, timezone) do
+    case DateTime.shift_zone(datetime, timezone, Tz.TimeZoneDatabase) do
+      {:ok, shifted} -> shifted
+      {:error, _reason} -> utc(datetime)
     end
   end
 

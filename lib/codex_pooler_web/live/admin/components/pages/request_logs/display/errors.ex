@@ -14,20 +14,16 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay.Errors do
   defp error_display_items(errors, datetime_preferences) do
     advised = advised_reset_at(errors)
 
-    cond do
-      Enum.any?(errors, &quota_exhaustion_error?/1) ->
-        ["quota exhausted"] ++
-          reset_display_items(advised || exhausted_reset_at(errors), datetime_preferences)
+    labels =
+      Enum.map(errors, fn error ->
+        cond do
+          quota_exhaustion_error?(error) -> "quota exhausted"
+          quota_evidence_unavailable?(error) -> "quota evidence unavailable"
+          true -> format_single_error(error)
+        end
+      end)
 
-      Enum.any?(errors, &quota_evidence_unavailable?/1) ->
-        ["quota evidence unavailable"]
-
-      true ->
-        errors
-        |> Enum.map(&format_single_error/1)
-        |> Enum.uniq()
-        |> Kernel.++(reset_display_items(advised, datetime_preferences))
-    end
+    Enum.uniq(labels) ++ reset_display_items(advised || exhausted_reset_at(errors), datetime_preferences)
   end
 
   @doc """

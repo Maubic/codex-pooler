@@ -41,7 +41,7 @@ defmodule CodexPoolerWeb.Admin.PoolFilterComponents do
         <summary
           data-role={"#{@role}-trigger"}
           aria-label={@label}
-          class="select select-bordered flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
+          class="select flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
         >
           <.pool_filter_icon option={@selected} />
           <span class="min-w-0 flex-1 truncate">{@selected.label}</span>

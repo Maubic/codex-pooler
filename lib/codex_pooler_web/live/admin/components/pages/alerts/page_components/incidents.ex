@@ -469,7 +469,7 @@ defmodule CodexPoolerWeb.Admin.AlertsPageComponents.Incidents do
         <summary
           data-role={"#{@role}-trigger"}
           aria-label={@label}
-          class="select select-bordered flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
+          class="select flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
         >
           <span data-role={"#{@role}-icon"} class="shrink-0">
             <.icon name={@selected.icon} class={["size-4", incident_filter_icon_class(@selected)]} />

@@ -533,30 +533,6 @@
       ]
     },
     {
-      "name": "ai-sdk",
-      "source": "ai-sdk.svg",
-      "source_url": "https://k2mkucxia43oc7fa.public.blob.vercel-storage.com/front/press/ai-sdk-assets.zip",
-      "source_member": "ai-sdk/Light/ai-sdk-logotype-light.svg",
-      "usage": "Wordmark retained for banners; the row uses the Vercel symbol.",
-      "source_sha256": "f32861eb866386cebd22ceca3a76293bc058738c151521b5ac3f5e2bf650d016",
-      "format": "svg",
-      "painted_bounds_xywh_at_1024": [
-        9,
-        375,
-        1015,
-        274
-      ],
-      "sizes": [
-        16,
-        24,
-        32,
-        48,
-        64,
-        128,
-        256
-      ]
-    },
-    {
       "name": "litellm",
       "source": "litellm.webp",
       "source_url": "https://cdn.prod.website-files.com/69eb241da3f923869c226875/6a5a06e951e6eed22a8c3395_litellm-train.webp",

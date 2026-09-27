@@ -458,7 +458,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
 
   defp status_label(%{deletion_state: :in_progress}), do: "Deletion in progress"
   defp status_label(%{deletion_state: :failed}), do: "Deletion failed - retry Delete"
-  defp status_label(account), do: String.replace(account.identity.status, "_", " ")
+  defp status_label(account), do: account.identity.status |> String.replace("_", " ") |> String.capitalize()
 
   defp assignments(%{identity: %UpstreamIdentity{} = identity, assignments: assignment_snapshots})
        when is_list(assignment_snapshots) do
@@ -816,7 +816,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
           "token refresh is unavailable"
         ),
       redeem_saved_reset: redeem_saved_reset,
-      download_reset_calendar: action(status != "deleted" and SavedResetCalendar.available?(account.identity), "no upcoming banked reset expirations are available"),
+      download_reset_calendar: action(SavedResetCalendar.available?(account.identity), "no upcoming banked reset expirations are available"),
       replace_auth_json: action(recovery_eligible?, "credential replacement is not needed"),
       oauth_relink:
         action(
@@ -837,8 +837,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
   defp deletion_unavailable_reason(%{deletion_state: :in_progress}),
     do: "account deletion is already in progress"
 
-  defp deletion_unavailable_reason(_account),
+  defp deletion_unavailable_reason(%{assignments: [_ | _]}),
     do: "Remove this account from all Pools before deleting it."
+
+  defp deletion_unavailable_reason(_account),
+    do: "You do not have permission to permanently delete this account."
 
   defp redeem_saved_reset_action(account, header) do
     cond do

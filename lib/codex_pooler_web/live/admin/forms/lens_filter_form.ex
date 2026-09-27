@@ -33,8 +33,7 @@ defmodule CodexPoolerWeb.Admin.LensFilterForm do
     [option("", "Any sent model", "hero-cpu-chip", "text-base-content/60") | Enum.map(models, &option(&1, &1, "hero-cpu-chip", "text-info"))]
   end
 
-  @spec selected([option()], String.t()) :: option()
-  def selected([], value), do: option(value, "Unavailable", "hero-minus-circle", "text-base-content/50")
+  @spec selected(nonempty_list(option()), String.t()) :: option()
   def selected(options, value), do: Enum.find(options, &(&1.value == value)) || hd(options)
 
   defp option(value, label, icon, icon_class), do: %{value: value, label: label, icon: icon, icon_class: icon_class}

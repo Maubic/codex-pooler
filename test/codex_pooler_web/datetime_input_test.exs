@@ -6,6 +6,14 @@ defmodule CodexPoolerWeb.DateTimeInputTest do
   alias CodexPoolerWeb.DateTimeDisplay
   alias CodexPoolerWeb.DateTimeInput
 
+  test "unresolvable stored zones render UTC and malformed calendar bounds fail closed" do
+    instant = ~U[2026-07-15 07:54:00Z]
+    assert DateTimeInput.local_value(instant, "Unknown/Zone") == "2026-07-15T07:54"
+    assert DateTimeInput.describe(instant, "Unknown/Zone") == "2026-07-15 07:54 Etc/UTC (UTC+00:00)"
+    assert {:error, :invalid} = DateTimeInput.date_boundary(%{}, :date_from, "Etc/UTC")
+    assert {:error, :invalid} = DateTimeInput.date_boundary("2026-07-15", :unknown, "Etc/UTC")
+  end
+
   test "local times use the offset on their date, including far-future daylight saving" do
     for {input, timezone, expected} <- [
           {"2026-07-15T09:54", "Europe/Rome", ~U[2026-07-15 07:54:00Z]},

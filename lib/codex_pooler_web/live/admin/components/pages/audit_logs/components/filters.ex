@@ -44,7 +44,7 @@ defmodule CodexPoolerWeb.Admin.AuditLogsComponents.Filters do
           <summary
             data-role="outcome-filter-trigger"
             aria-label="Outcome"
-            class="select select-bordered flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
+            class="select flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
           >
             <span
               data-role="outcome-filter-trigger-icon"
@@ -106,7 +106,7 @@ defmodule CodexPoolerWeb.Admin.AuditLogsComponents.Filters do
           <summary
             data-role="action-filter-trigger"
             aria-label="Event"
-            class="select select-bordered flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
+            class="select flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
           >
             <span
               data-role="action-filter-trigger-icon"

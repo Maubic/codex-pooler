@@ -223,7 +223,7 @@ defmodule CodexPoolerWeb.Admin.PoolListComponents do
       >
         <summary
           data-role="status-filter-trigger"
-          class="select select-bordered flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
+          class="select flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
         >
           <.icon name={@selected.icon} class={["size-4 shrink-0", @selected.icon_class]} />
           <span class="truncate">{@selected.label}</span>
@@ -315,7 +315,7 @@ defmodule CodexPoolerWeb.Admin.PoolListComponents do
       >
         <summary
           data-role="traffic-window-filter-trigger"
-          class="select select-bordered flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
+          class="select flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
         >
           <.icon name="hero-clock" class="size-4 shrink-0 text-base-content/60" />
           <span class="truncate">{@selected.label}</span>
