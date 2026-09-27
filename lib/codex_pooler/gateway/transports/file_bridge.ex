@@ -195,6 +195,7 @@ defmodule CodexPooler.Gateway.Transports.FileBridge do
     end
   end
 
+  @doc "Finalizes within one absolute retry budget; a zero budget refuses before dispatch."
   @spec finalize_file(String.t(), bridge_opts(), RoutingSelection.t()) ::
           bridge_result()
   def finalize_file(file_id, opts, %RoutingSelection{} = selection) when is_binary(file_id) do
@@ -450,6 +451,9 @@ defmodule CodexPooler.Gateway.Transports.FileBridge do
 
       {:error, exception} when transport_exception?(exception) ->
         upload_transport_error(exception, opts)
+
+      {:error, %File.Error{}} ->
+        {:error, Error.reason(400, "invalid_request", "file upload is not readable", "file")}
 
       {:error, %{code: "invalid_request"} = error} ->
         {:error, error}

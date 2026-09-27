@@ -9,10 +9,50 @@ defmodule CodexPooler.Gateway.Transports.FileBridgeTest do
 
   @request_detection_timeout_ms 15_000
 
+  defmodule RemovedUploadFile do
+    alias CodexPooler.Gateway.Transports.PinnedUpload
+
+    def run(%Req.Request{body: %File.Stream{path: path}} = request) do
+      File.rm!(path)
+      PinnedUpload.run(request)
+    end
+  end
+
   setup do
     CodexPooler.TestAppEnv.restore_on_exit(FileBridge)
     Application.put_env(:codex_pooler, FileBridge, upload_retry_interval_ms: 0)
     :ok
+  end
+
+  test "a tempfile removed before body enumeration returns invalid_request without killing the caller" do
+    path = upload_tempfile!("synthetic upload")
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+    on_exit(fn -> :gen_tcp.close(listener) end)
+    {:ok, {_, port}} = :inet.sockname(listener)
+    supervisor = start_supervised!(Task.Supervisor)
+
+    server =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, @request_detection_timeout_ms)
+
+        try do
+          await_upload_close(socket)
+        after
+          :gen_tcp.close(socket)
+        end
+      end)
+
+    Application.put_env(:codex_pooler, FileBridge, upload_req_options: [adapter: RemovedUploadFile])
+    assert {:error, %{status: 400, code: "invalid_request", param: "file"}} = upload_file("http://127.0.0.1:#{port}/upload", %{"path" => path, "content_type" => "text/plain"})
+    assert :closed = Task.await(server, @request_detection_timeout_ms)
+  end
+
+  defp await_upload_close(socket) do
+    case :gen_tcp.recv(socket, 0, @request_detection_timeout_ms) do
+      {:ok, _headers} -> await_upload_close(socket)
+      {:error, :closed} -> :closed
+      result -> flunk("upload socket did not close: #{inspect(result)}")
+    end
   end
 
   test "presigned upload replays the complete body at the same URL after a storage 503" do

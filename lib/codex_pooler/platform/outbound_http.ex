@@ -11,11 +11,12 @@ defmodule CodexPooler.Platform.OutboundHTTP do
   Instance Setting `gateway.upstream_conn_max_idle_time_ms`, read from the
   settings cache on each request, so a saved change applies without a restart.
 
-  Every outbound caller needs the bound, not only gateway traffic: the gateway
+  Every pooled outbound caller needs the bound, not only gateway traffic: the gateway
   (through `TransportEnvelope.req_timeout_options/1`), provider usage probes,
   token refresh, saved-reset redemption, model catalog discovery, the pricing
-  feed import, the OpenAI status feed, alert webhooks, and the file upload PUT
-  to presigned storage. The less often a caller runs, the longer its pooled
+  feed import, the OpenAI status feed, and alert webhooks. Presigned file
+  upload PUTs use the one-shot `PinnedUpload` adapter and close the connection
+  after each attempt. The less often a pooled caller runs, the longer its
   connection sits idle and the more likely an egress device has forgotten it.
 
   Finch checks the bound only at checkout, so it never interrupts an in-flight

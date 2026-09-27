@@ -21,6 +21,54 @@ defmodule CodexPooler.Gateway.Transports.PinnedUploadTest do
     %{supervisor: start_supervised!(Task.Supervisor)}
   end
 
+  test "body enumeration errors return to the caller and close the connected socket", context do
+    {listener, port} = listener()
+
+    server =
+      Task.Supervisor.async_nolink(context.supervisor, fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 5_000)
+
+        try do
+          receive_headers(:gen_tcp, socket)
+          :gen_tcp.recv(socket, 0, 5_000)
+        after
+          :gen_tcp.close(socket)
+        end
+      end)
+
+    body = Stream.map([:chunk], fn _ -> raise File.Error, reason: :enoent, action: "read", path: "synthetic-missing-file" end)
+    request = Req.new(method: :put, url: "http://upload.example:#{port}/object", body: body, headers: [{"content-length", "6"}])
+    caller = Task.Supervisor.async_nolink(context.supervisor, fn -> PinnedUpload.run(request, {127, 0, 0, 1}, 5_000) end)
+    assert {:ok, {^request, %File.Error{reason: :enoent}}} = Task.yield(caller, 5_000)
+    assert {:error, :closed} = Task.await(server, 5_000)
+  end
+
+  test "HTTP forward proxy reads a response in passive mode", context do
+    {listener, port} = listener()
+    parent = self()
+
+    server =
+      Task.Supervisor.async_nolink(context.supervisor, fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 5_000)
+
+        try do
+          {line, _headers, _body} = receive_headers(:gen_tcp, socket)
+          send(parent, {:forward_request, line})
+          :ok = :gen_tcp.send(socket, "HTTP/1.1 201 Created\r\ncontent-length: 0\r\n\r\n")
+          :gen_tcp.recv(socket, 0, 5_000)
+        after
+          :gen_tcp.close(socket)
+        end
+      end)
+
+    Application.put_env(:codex_pooler, OutboundHTTP, proxy_config: %{http: [proxy: {:http, "127.0.0.1", port, []}], https: [], no_proxy: []})
+    request = Req.new(method: :put, url: "http://upload.example:8080/object", body: "", headers: [{"content-length", "0"}])
+    caller = Task.Supervisor.async_nolink(context.supervisor, fn -> PinnedUpload.run(request, {93, 184, 216, 34}, 5_000) end)
+    assert {:ok, {^request, %Req.Response{status: 201}}} = Task.yield(caller, 5_000)
+    assert_receive {:forward_request, "PUT http://upload.example:8080/object HTTP/1.1"}
+    assert {:error, :closed} = Task.await(server, 5_000)
+  end
+
   test "direct TLS pins the socket, retains Host/SNI/path/query, streams bytes and discards response bytes", context do
     children = DynamicSupervisor.count_children(Req.FinchSupervisor)
 
@@ -146,25 +194,26 @@ defmodule CodexPooler.Gateway.Transports.PinnedUploadTest do
     assert :ok = Task.await(server, 5_000)
   end
 
-  test "the proxy relay accepts a peer closing after tunnel setup", context do
+  test "a CONNECT peer closing after tunnel setup returns a transport error", context do
     {listener, port} = listener()
 
     server =
       Task.Supervisor.async_nolink(context.supervisor, fn ->
         {:ok, socket} = :gen_tcp.accept(listener, 5_000)
-        :ok = :gen_tcp.close(socket)
-        :closed
+
+        try do
+          {line, _headers, _body} = receive_headers(:gen_tcp, socket)
+          assert String.starts_with?(line, "CONNECT 127.0.0.1:443 ")
+          :ok = :gen_tcp.send(socket, "HTTP/1.1 200 Connection Established\r\n\r\n")
+        after
+          :gen_tcp.close(socket)
+        end
       end)
 
-    {:ok, closed} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 5_000)
-    on_exit(fn -> :gen_tcp.close(closed) end)
-    assert :closed = Task.await(server, 5_000)
-    assert {:error, :closed} = :gen_tcp.recv(closed, 0, 5_000)
-    # The peer close is observed before the late relay write.
-    send(self(), {:tcp, :synthetic_source, "synthetic"})
-    assert :closed = relay(:synthetic_source, closed)
-    :ok = :gen_tcp.close(closed)
-    assert :closed = activate_tunnel_socket(closed)
+    configure_proxy([proxy: {:http, "127.0.0.1", port, []}], [])
+    request = upload_request(443)
+    assert {^request, %Req.TransportError{}} = PinnedUpload.run(request, {127, 0, 0, 1}, 5_000)
+    assert :ok = Task.await(server, 5_000)
   end
 
   test "absolute response deadline closes the upload socket", context do

@@ -13,7 +13,15 @@ defmodule CodexPooler.Gateway.Transports.PinnedUpload do
   @spec run(Req.Request.t(), :inet.ip_address(), pos_integer(), keyword()) :: {Req.Request.t(), Req.Response.t() | Exception.t()}
   def run(request, address, remaining_ms, conn_options \\ []) do
     deadline = System.monotonic_time(:millisecond) + remaining_ms
-    task = Task.async(fn -> run_until(request, address, deadline, conn_options) end)
+
+    task =
+      Task.async(fn ->
+        try do
+          run_until(request, address, deadline, conn_options)
+        rescue
+          exception -> {request, exception}
+        end
+      end)
 
     case Task.yield(task, remaining_ms) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> result
@@ -56,7 +64,11 @@ defmodule CodexPooler.Gateway.Transports.PinnedUpload do
       |> OutboundHTTP.proxy_options_for_url(options)
       |> Enum.map(fn
         {:proxy, {scheme, host, port, proxy_opts}} ->
-          {:proxy, {scheme, host, port, Keyword.put(proxy_opts, :tunnel_timeout, min(30_000, remaining_ms))}}
+          proxy_opts = Keyword.put(proxy_opts, :tunnel_timeout, min(30_000, remaining_ms))
+          # Forward proxies expose their own socket; CONNECT needs an active
+          # proxy handshake before the tunneled HTTPS socket becomes passive.
+          proxy_opts = if uri.scheme == "http", do: Keyword.put(proxy_opts, :mode, :passive), else: proxy_opts
+          {:proxy, {scheme, host, port, proxy_opts}}
 
         option ->
           option
