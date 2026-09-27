@@ -133,6 +133,13 @@ defmodule CodexPooler.Events.PostgresBridgeTest do
     await_bridge_listening!(bridge, replacement)
 
     assert_relays_once!(ctx, bridge, pool_id, "after_replacement", 3)
+
+    # The replacement started after the bridge, so reverse supervisor shutdown would stop it
+    # first and make the still-live bridge report another lost listener during test teardown.
+    bridge_monitor = Process.monitor(bridge)
+    :ok = stop_supervised(:bridge)
+    assert_receive {:DOWN, ^bridge_monitor, :process, ^bridge, :shutdown}, @relay_detection_timeout_ms
+    assert Process.alive?(replacement)
   end
 
   test "skips a notification whose origin node reached this node through PubSub", ctx do
