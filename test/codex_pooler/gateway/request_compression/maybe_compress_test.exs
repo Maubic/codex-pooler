@@ -1032,7 +1032,18 @@ defmodule CodexPooler.Gateway.RequestCompression.MaybeCompressTest do
     test "uses the producing command to decide whether grep-shaped output is search output" do
       original_output = Enum.map_join(1..24, "\n", &"lib/sample_#{rem(&1, 3)}.go:#{&1}:2: should omit type in synthetic declaration #{&1}")
 
-      for {command, search?} <- [{"staticcheck ./...", false}, {"rg -n 'should omit' lib", true}] do
+      # Only the executed program counts: a non-search command whose operand is
+      # named grep keeps every diagnostic.
+      commands = [
+        {"staticcheck ./...", false},
+        {"staticcheck ./grep", false},
+        {"python sample.py grep", false},
+        {"bash -lc 'staticcheck ./grep'", false},
+        {"rg -n 'should omit' lib", true},
+        {"env LC_ALL=C grep -rn 'should omit' lib", true}
+      ]
+
+      for {command, search?} <- commands do
         body = command_output_body("call_command_provenance", CodexPooler.JSON.encode!(%{"cmd" => command}), original_output)
         {context, request_options} = request_context(body)
 
@@ -1040,8 +1051,8 @@ defmodule CodexPooler.Gateway.RequestCompression.MaybeCompressTest do
                  RequestCompression.maybe_compress(body, context, request_options)
 
         strategies = Map.get(compressed_options.runtime.payload_compression, "strategies", [])
-        assert "search_results" in strategies == search?
-        unless search?, do: assert(first_output(compressed_body) == original_output)
+        assert "search_results" in strategies == search?, command
+        unless search?, do: assert(first_output(compressed_body) == original_output, command)
       end
     end
 
