@@ -19,7 +19,9 @@ defmodule CodexPooler.Access.APIKeys.Deletion do
 
   A revoked key cannot be resumed, so nothing brings it back while the job runs. The pending
   deletion job marks the key as being deleted (`states/1`). The `api_key.delete` audit event is
-  written in the transaction that deletes the key row, in both paths.
+  written in the transaction that deletes the key row, in both paths. A separate
+  `api_key.delete_requested` event commits with a newly inserted deletion job, attributing
+  partial work without claiming that deletion has already completed.
   """
 
   import Ecto.Query
@@ -27,7 +29,8 @@ defmodule CodexPooler.Access.APIKeys.Deletion do
   alias CodexPooler.Access.APIKey
   alias CodexPooler.Access.APIKeys
   alias CodexPooler.Accounts.{Scope, User}
-  alias CodexPooler.Jobs.APIKeyDeletionWorker
+  alias CodexPooler.Audit
+  alias CodexPooler.Jobs.{APIKeyDeletionWorker, DeletionDeadline}
   alias CodexPooler.Repo
 
   @status_revoked "revoked"
@@ -40,7 +43,7 @@ defmodule CodexPooler.Access.APIKeys.Deletion do
   # time and would make this context a compile-time dependent of the worker.
   @worker_name "CodexPooler.Jobs.APIKeyDeletionWorker"
   @pending_job_states ~w(available scheduled executing retryable)
-  @failed_job_states ~w(discarded cancelled)
+  @terminal_job_states ~w(discarded cancelled completed)
 
   # {:detach | :delete, table, rows per batch}; every condition is `api_key_id = $1`, which the
   # foreign key indexes serve. History is detached, as the foreign key's SET NULL would do; the
@@ -88,9 +91,31 @@ defmodule CodexPooler.Access.APIKeys.Deletion do
   """
   @spec schedule(Scope.t(), APIKey.t()) :: request_result()
   def schedule(%Scope{} = scope, %APIKey{} = api_key) do
-    with {:ok, revoked} <- ensure_revoked(scope, api_key),
-         {:ok, _job} <- Oban.insert(APIKeyDeletionWorker.new(job_args(revoked, scope))) do
-      {:deleting, revoked}
+    with {:ok, revoked} <- ensure_revoked(scope, api_key) do
+      Repo.transact(fn -> insert_deletion_job(scope, revoked) end)
+      |> case do
+        {:ok, revoked} -> {:deleting, revoked}
+        {:error, _reason} = error -> error
+      end
+    end
+  end
+
+  defp insert_deletion_job(scope, revoked) do
+    with {:ok, job} <- Oban.insert(APIKeyDeletionWorker.new(job_args(revoked, scope)), retry: false),
+         :ok <- record_requested_audit(scope, revoked, job) do
+      {:ok, revoked}
+    end
+  end
+
+  defp record_requested_audit(_scope, _api_key, %Oban.Job{conflict?: true}), do: :ok
+
+  defp record_requested_audit(scope, api_key, _job) do
+    attrs = %{pool_id: api_key.pool_id, action: "api_key.delete_requested", target_type: "api_key", target_id: api_key.id, details: %{status: api_key.status}}
+    result = if scope.user, do: Audit.record_user_event(scope.user, attrs), else: Audit.record_system_event(attrs)
+
+    case result do
+      {:ok, _event} -> :ok
+      {:error, _reason} = error -> error
     end
   end
 
@@ -110,6 +135,12 @@ defmodule CodexPooler.Access.APIKeys.Deletion do
   @spec continue(Ecto.UUID.t(), Ecto.UUID.t() | nil, integer()) ::
           :more | :deleted | :gone | {:cancel, :api_key_not_revoked} | {:error, term()}
   def continue(api_key_id, requested_by_user_id, deadline) when is_binary(api_key_id) do
+    DeletionDeadline.run(deadline, fn ->
+      do_continue(api_key_id, requested_by_user_id, deadline)
+    end)
+  end
+
+  defp do_continue(api_key_id, requested_by_user_id, deadline) do
     case Repo.get(APIKey, api_key_id) do
       nil ->
         :gone
@@ -176,21 +207,29 @@ defmodule CodexPooler.Access.APIKeys.Deletion do
 
   @doc """
   The deletion state of each key that has one: `:in_progress` while a deletion job is pending or
-  running, `:failed` when its latest deletion job was discarded or cancelled and the key exists.
+  running, `:failed` when its latest deletion job was discarded and the key exists.
   """
   @spec states([Ecto.UUID.t()]) :: %{Ecto.UUID.t() => state()}
   def states([]), do: %{}
 
   def states(api_key_ids) when is_list(api_key_ids) do
+    targets = Enum.reduce(api_key_ids, dynamic(false), fn id, targets -> dynamic([job], ^targets or fragment("? @> ?", job.args, ^%{"api_key_id" => id})) end)
+
     from(job in Oban.Job,
-      where: job.worker == ^@worker_name and fragment("?->>'api_key_id'", job.args) in ^api_key_ids,
-      where: job.state in ^(@pending_job_states ++ @failed_job_states),
+      where: job.worker == ^@worker_name,
+      where: ^targets,
+      where: job.state in ^(@pending_job_states ++ @terminal_job_states),
+      order_by: [desc: job.id],
       select: {fragment("?->>'api_key_id'", job.args), job.state}
     )
     |> Repo.all()
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-    |> Map.new(fn {api_key_id, job_states} ->
-      {api_key_id, if(Enum.any?(job_states, &(&1 in @pending_job_states)), do: :in_progress, else: :failed)}
+    |> Enum.reduce(%{}, fn {api_key_id, job_states}, states ->
+      cond do
+        Enum.any?(job_states, &(&1 in @pending_job_states)) -> Map.put(states, api_key_id, :in_progress)
+        hd(job_states) == "discarded" -> Map.put(states, api_key_id, :failed)
+        true -> states
+      end
     end)
   end
 

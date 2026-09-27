@@ -11,7 +11,6 @@ defmodule CodexPooler.Events do
   alias CodexPooler.Events.Event
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
-  alias Ecto.Adapters.SQL
   alias Phoenix.PubSub
 
   require Logger
@@ -378,7 +377,7 @@ defmodule CodexPooler.Events do
   defp broadcast_postgres_event(%Event{} = event, event_origin_id, origin_node \\ nil) do
     with {:ok, payload} <- event_to_postgres_payload(event, event_origin_id, origin_node),
          {:ok, _result} <-
-           SQL.query(Repo, "SELECT pg_notify($1, $2)", [@postgres_channel, payload]) do
+           Repo.query("SELECT pg_notify($1, $2)", [@postgres_channel, payload]) do
       :ok
     else
       {:error, reason} ->

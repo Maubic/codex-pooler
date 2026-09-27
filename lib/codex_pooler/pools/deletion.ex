@@ -18,13 +18,17 @@ defmodule CodexPooler.Pools.Deletion do
   the Pool stays archived while its history is removed; a pending deletion job marks it as being
   deleted (`states/1`) and blocks its reactivation. The `pool.delete` audit event is written in the
   transaction that deletes the Pool row, so an audit event exists exactly when the Pool is gone
-  (findings#206 row 206-551), and it names the operator who asked for the deletion.
+  (findings#206 row 206-551), and it names the operator who asked for the deletion. The separate
+  `pool.delete_requested` event commits with job insertion, attributing partial work even if a
+  later batch fails; a uniqueness conflict creates neither a new job nor another intent event.
   """
 
   import Ecto.Query
 
   alias CodexPooler.Accounts.User
+  alias CodexPooler.Alerts
   alias CodexPooler.Audit
+  alias CodexPooler.Events
   alias CodexPooler.Jobs.PoolDeletionWorker
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
@@ -36,7 +40,7 @@ defmodule CodexPooler.Pools.Deletion do
   @final_statement_timeout_ms 60_000
   @worker_name "CodexPooler.Jobs.PoolDeletionWorker"
   @pending_job_states ~w(available scheduled executing retryable)
-  @failed_job_states ~w(discarded cancelled)
+  @terminal_job_states ~w(discarded cancelled completed)
 
   # The Pool's history in deletion order, each as {table, condition on $1 = Pool id, batch rows}.
   # Requests go first: they carry attempts, ledger entries, turns and log facts by cascade on
@@ -142,7 +146,8 @@ defmodule CodexPooler.Pools.Deletion do
 
         with %Pool{status: @status_archived} = pool <- lock_pool(pool_id),
              :ok <- record_delete_audit_event(user, pool),
-             {:ok, deleted} <- Repo.delete(pool) do
+             {:ok, deleted} <- delete_with_notification_invalidation(pool),
+             {:ok, _event} <- Events.broadcast_pool_event_after_commit(pool_id, ["pools"], "pool_deleted", %{pool_id: pool_id, status: pool.status}) do
           deleted
         else
           nil -> Repo.rollback(:pool_not_found)
@@ -158,6 +163,10 @@ defmodule CodexPooler.Pools.Deletion do
         %Postgrex.Error{postgres: %{code: :query_canceled}} -> {:error, :statement_timeout}
         _other -> reraise error, __STACKTRACE__
       end
+  end
+
+  defp delete_with_notification_invalidation(pool) do
+    Alerts.invalidate_notifications_after_cascade({:pool, pool.id}, fn -> Repo.delete(pool) end)
   end
 
   defp record_delete_audit_event(user, %Pool{} = pool) do
@@ -189,7 +198,8 @@ defmodule CodexPooler.Pools.Deletion do
   def schedule(user, %Pool{id: pool_id}) do
     Repo.transaction(fn ->
       with %Pool{status: @status_archived} = pool <- lock_pool(pool_id),
-           {:ok, _job} <- Oban.insert(PoolDeletionWorker.new(job_args(pool, user))) do
+           {:ok, job} <- Oban.insert(PoolDeletionWorker.new(job_args(pool, user)), retry: false),
+           :ok <- record_requested_audit(user, pool, job) do
         pool
       else
         nil -> Repo.rollback(:pool_not_found)
@@ -203,6 +213,18 @@ defmodule CodexPooler.Pools.Deletion do
     end
   end
 
+  defp record_requested_audit(_user, _pool, %Oban.Job{conflict?: true}), do: :ok
+
+  defp record_requested_audit(user, pool, _job) do
+    attrs = %{pool_id: pool.id, action: "pool.delete_requested", target_type: "pool", target_id: pool.id, details: %{status: pool.status}}
+    result = if user, do: Audit.record_user_event(user, attrs), else: Audit.record_system_event(attrs)
+
+    case result do
+      {:ok, _event} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
   defp job_args(%Pool{id: pool_id}, %User{id: user_id}), do: %{"pool_id" => pool_id, "requested_by_user_id" => user_id}
   defp job_args(%Pool{id: pool_id}, nil), do: %{"pool_id" => pool_id}
 
@@ -212,23 +234,30 @@ defmodule CodexPooler.Pools.Deletion do
 
   @doc """
   The deletion state of each Pool that has one: `:in_progress` while a deletion job is pending or
-  running, `:failed` when its latest deletion job was discarded or cancelled and the Pool still
+  running, `:failed` when its latest deletion job was discarded and the Pool still
   exists.
   """
   @spec states([Ecto.UUID.t()]) :: %{Ecto.UUID.t() => state()}
   def states([]), do: %{}
 
   def states(pool_ids) when is_list(pool_ids) do
+    targets = Enum.reduce(pool_ids, dynamic(false), fn id, targets -> dynamic([job], ^targets or fragment("? @> ?", job.args, ^%{"pool_id" => id})) end)
+
     from(job in Oban.Job,
-      where: job.worker == ^@worker_name and fragment("?->>'pool_id'", job.args) in ^pool_ids,
-      where: job.state in ^(@pending_job_states ++ @failed_job_states),
-      order_by: [asc: job.id],
+      where: job.worker == ^@worker_name,
+      where: ^targets,
+      where: job.state in ^(@pending_job_states ++ @terminal_job_states),
+      order_by: [desc: job.id],
       select: {fragment("?->>'pool_id'", job.args), job.state}
     )
     |> Repo.all()
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-    |> Map.new(fn {pool_id, job_states} ->
-      {pool_id, if(Enum.any?(job_states, &(&1 in @pending_job_states)), do: :in_progress, else: :failed)}
+    |> Enum.reduce(%{}, fn {pool_id, job_states}, states ->
+      cond do
+        Enum.any?(job_states, &(&1 in @pending_job_states)) -> Map.put(states, pool_id, :in_progress)
+        hd(job_states) == "discarded" -> Map.put(states, pool_id, :failed)
+        true -> states
+      end
     end)
   end
 

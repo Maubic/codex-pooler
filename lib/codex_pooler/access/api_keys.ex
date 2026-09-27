@@ -535,14 +535,6 @@ defmodule CodexPooler.Access.APIKeys do
 
     api_key
     |> delete_api_key_serialized(session_ids_for_api_key(api_key.id), 3, delete_context)
-    |> tap(fn
-      {:ok, deleted_api_key} ->
-        DashboardSessions.broadcast_invalidation(deleted_api_key, "api_key_deleted")
-
-      {:error, _reason} ->
-        :ok
-    end)
-    |> Notifications.notify_api_key_change("api_key_deleted")
   end
 
   defp delete_api_key_serialized(api_key, session_ids, attempts_left, delete_context) do
@@ -586,6 +578,11 @@ defmodule CodexPooler.Access.APIKeys do
         "api_key_deleted",
         fn -> locked_api_key |> Repo.delete() |> AuditLog.audit_api_key_change(scope, "api_key.delete") end
       )
+      |> tap(fn
+        {:ok, deleted_api_key} -> DashboardSessions.broadcast_invalidation(deleted_api_key, "api_key_deleted")
+        {:error, _reason} -> :ok
+      end)
+      |> Notifications.notify_api_key_change("api_key_deleted")
     else
       nil -> {:error, Errors.access_error(:api_key_not_found, "api key was not found")}
       {:error, _reason} = error -> error

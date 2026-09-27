@@ -19,7 +19,6 @@ defmodule CodexPooler.Alerts.Incidents.NotificationEvents do
   alias CodexPooler.Events
   alias CodexPooler.Pools
   alias CodexPooler.Repo
-  alias Ecto.Adapters.SQL
   alias Phoenix.PubSub
 
   require Logger
@@ -58,12 +57,14 @@ defmodule CodexPooler.Alerts.Incidents.NotificationEvents do
     broadcast_incident_invalidation(incident_id)
   end
 
-  def broadcast_incident_invalidation(incident_id) when is_binary(incident_id) do
-    invalidation_id = Ecto.UUID.generate()
+  def broadcast_incident_invalidation(incident_id) when is_binary(incident_id),
+    do: broadcast_incident_invalidations([incident_id])
 
-    incident_id
+  @spec broadcast_incident_invalidations([Ecto.UUID.t()]) :: broadcast_result()
+  def broadcast_incident_invalidations(incident_ids) when is_list(incident_ids) do
+    incident_ids
     |> impacted_pool_ids()
-    |> broadcast_pool_invalidations(invalidation_id)
+    |> broadcast_pool_invalidations(Ecto.UUID.generate())
   end
 
   @spec broadcast_operator_invalidation(operator_ref()) :: broadcast_result()
@@ -127,15 +128,25 @@ defmodule CodexPooler.Alerts.Incidents.NotificationEvents do
   @spec postgres_payload(String.t(), Ecto.UUID.t(), invalidation_id()) :: {:ok, String.t()} | {:error, term()}
   def postgres_payload(scope, target_id, invalidation_id)
       when scope in ["pool", "operator"] and is_binary(target_id) and is_binary(invalidation_id) do
-    CodexPooler.JSON.encode(%{
+    postgres_payload(scope, target_id, invalidation_id, :immediate)
+  end
+
+  defp postgres_payload(scope, target_id, invalidation_id, delivery) do
+    origin =
+      case delivery do
+        :immediate -> %{origin_id: Events.origin_id(), origin_node: Atom.to_string(node())}
+        :after_commit -> %{origin_id: "transaction:" <> invalidation_id}
+      end
+
+    %{
       version: @payload_version,
       id: Ecto.UUID.generate(),
       invalidation_id: invalidation_id,
       scope: scope,
-      target_id: target_id,
-      origin_id: Events.origin_id(),
-      origin_node: Atom.to_string(node())
-    })
+      target_id: target_id
+    }
+    |> Map.merge(origin)
+    |> CodexPooler.JSON.encode()
   end
 
   @doc """
@@ -165,10 +176,10 @@ defmodule CodexPooler.Alerts.Incidents.NotificationEvents do
   @spec message_tag() :: module()
   def message_tag, do: @message_tag
 
-  defp impacted_pool_ids(incident_id) do
+  defp impacted_pool_ids(incident_ids) do
     Repo.all(
       from target in AlertIncidentTarget,
-        where: target.incident_id == ^incident_id,
+        where: target.incident_id in ^incident_ids,
         distinct: true,
         select: target.pool_id
     )
@@ -217,8 +228,14 @@ defmodule CodexPooler.Alerts.Incidents.NotificationEvents do
   end
 
   defp broadcast_invalidation(scope, target_id, invalidation_id) do
-    with :ok <- PubSub.broadcast(@pubsub, topic(scope, target_id), invalidation_message(invalidation_id)) do
-      notify_postgres(scope, target_id, invalidation_id)
+    if Repo.in_transaction?() do
+      # PostgreSQL delivers only after COMMIT, even when the caller is killed
+      # before it can return. No origin node is claimed: no PubSub copy ran.
+      notify_postgres(scope, target_id, invalidation_id, :after_commit)
+    else
+      with :ok <- PubSub.broadcast(@pubsub, topic(scope, target_id), invalidation_message(invalidation_id)) do
+        notify_postgres(scope, target_id, invalidation_id, :immediate)
+      end
     end
   end
 
@@ -227,9 +244,9 @@ defmodule CodexPooler.Alerts.Incidents.NotificationEvents do
 
   # A lost notification only leaves an unclustered node's pages stale until
   # their next reload, so a failed NOTIFY is logged and never fails the caller.
-  defp notify_postgres(scope, target_id, invalidation_id) do
-    with {:ok, payload} <- postgres_payload(scope, target_id, invalidation_id),
-         {:ok, _result} <- SQL.query(Repo, "SELECT pg_notify($1, $2)", [@postgres_channel, payload]) do
+  defp notify_postgres(scope, target_id, invalidation_id, delivery) do
+    with {:ok, payload} <- postgres_payload(scope, target_id, invalidation_id, delivery),
+         {:ok, _result} <- Repo.query("SELECT pg_notify($1, $2)", [@postgres_channel, payload]) do
       :ok
     else
       {:error, reason} ->

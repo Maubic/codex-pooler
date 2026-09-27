@@ -13,6 +13,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
   alias CodexPooler.Access.APIKey
   alias CodexPooler.Accounting.{Attempt, Request}
   alias CodexPooler.Accounts
+  alias CodexPooler.Accounts.Scope
   alias CodexPooler.Audit.AuditEvent
   alias CodexPooler.Catalog
   alias CodexPooler.Catalog.Model, as: CatalogModel
@@ -4765,16 +4766,20 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     _ = await_pool_traffic(view)
   end
 
-  test "a Pool with a large history shows as deleting until its deletion job removes it", %{conn: conn, scope: scope} do
+  test "a Pool with a large history shows as deleting until its deletion job removes it", context do
+    %{conn: conn, scope: scope} = committed_deletion_context!(context)
     CodexPooler.TestAppEnv.restore_on_exit(:pool_deletion_immediate_request_limit)
     Application.put_env(:codex_pooler, :pool_deletion_immediate_request_limit, 1)
 
-    pool = pool_fixture(%{slug: "large-history-pool", name: "Large History Pool"})
+    pool = pool_fixture(%{slug: "large-history-pool", name: "Large History Pool", created_by_user_id: scope.user.id})
     %{api_key: api_key} = active_api_key_fixture(pool)
     _request = request_fixture(%{pool: pool, api_key: api_key})
     pool = pool |> Ecto.Changeset.change(status: "archived") |> Repo.update!()
 
+    register_committed_pool_deletion_cleanup!(pool)
     {:ok, view, _html} = live(conn, ~p"/admin/pools")
+    register_committed_deletion_view!(view)
+    assert :ok = Events.subscribe_pool(pool.id, "pools")
     _ = await_pool_traffic(view)
 
     view |> element("#delete-pool-#{pool.id}") |> render_click()
@@ -4799,37 +4804,49 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
     refute Repo.get(Pool, pool.id)
     assert Repo.get_by(AuditEvent, action: "pool.delete", target_id: pool.id)
-    _ = await_pool_traffic(view)
-    refute has_element?(view, "#pool-row-#{pool.id}")
+    assert_pool_removed_after_commit!(view, pool.id)
   end
 
-  test "a deletion job that exhausts its attempts shows deletion failed, and deleting again resumes it", %{conn: conn} do
+  test "a deletion job that exhausts its attempts shows deletion failed, and deleting again resumes it", context do
+    %{conn: conn, scope: scope} = committed_deletion_context!(context)
     CodexPooler.TestAppEnv.restore_on_exit(:pool_deletion_immediate_request_limit)
     Application.put_env(:codex_pooler, :pool_deletion_immediate_request_limit, 1)
 
-    pool = pool_fixture(%{slug: "failing-deletion-pool", name: "Failing Deletion Pool"})
+    pool = pool_fixture(%{slug: "failing-deletion-pool", name: "Failing Deletion Pool", created_by_user_id: scope.user.id})
     %{api_key: api_key} = active_api_key_fixture(pool)
     _request = request_fixture(%{pool: pool, api_key: api_key})
     pool = pool |> Ecto.Changeset.change(status: "archived") |> Repo.update!()
 
+    register_committed_pool_deletion_cleanup!(pool)
     {:ok, view, _html} = live(conn, ~p"/admin/pools")
+    register_committed_deletion_view!(view)
+    assert :ok = Events.subscribe_pool(pool.id, "pools")
     _ = await_pool_traffic(view)
 
     delete_from_card(view, pool)
     assert has_element?(view, "#pool-row-#{pool.id}-deletion", "deleting")
 
-    # The job's last attempt fails in its request batch.
+    # A run-owned trigger fails the job's last attempt across real connections.
+    trigger = "fail_request_delete_#{System.unique_integer([:positive])}"
+
+    CodexPooler.UnboxedFixture.register_unboxed_cleanup!(fn ->
+      Repo.query!("DROP TRIGGER IF EXISTS #{trigger} ON requests")
+      Repo.query!("DROP FUNCTION IF EXISTS #{trigger}()")
+    end)
+
     Repo.query!("""
-    CREATE FUNCTION pg_temp.fail_request_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+    CREATE FUNCTION #{trigger}() RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
-      RAISE EXCEPTION 'request batch failed';
+      IF OLD.pool_id = '#{pool.id}'::uuid THEN RAISE EXCEPTION 'request batch failed'; END IF;
+      RETURN OLD;
     END $$
     """)
 
-    Repo.query!("CREATE TRIGGER fail_request_delete BEFORE DELETE ON requests FOR EACH ROW EXECUTE FUNCTION pg_temp.fail_request_delete()")
+    Repo.query!("CREATE TRIGGER #{trigger} BEFORE DELETE ON requests FOR EACH ROW EXECUTE FUNCTION #{trigger}()")
 
     Repo.update_all(from(job in Oban.Job, where: fragment("?->>'pool_id'", job.args) == ^pool.id), set: [max_attempts: 1])
-    assert %{discard: 1} = Oban.drain_queue(queue: :jobs)
+    failure_log = capture_log(fn -> assert %{discard: 1} = Oban.drain_queue(queue: :jobs) end)
+    assert failure_log =~ "oban job discarded"
 
     _ = await_pool_traffic(view)
     assert has_element?(view, "#pool-row-#{pool.id}-deletion", "deletion failed")
@@ -4837,7 +4854,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert Repo.get!(Pool, pool.id).status == "archived"
     refute Repo.get_by(AuditEvent, action: "pool.delete", target_id: pool.id)
 
-    Repo.query!("DROP TRIGGER fail_request_delete ON requests")
+    Repo.query!("DROP TRIGGER #{trigger} ON requests")
 
     delete_from_card(view, pool)
     assert has_element?(view, "#pool-row-#{pool.id}-deletion", "deleting")
@@ -4845,8 +4862,50 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
     refute Repo.get(Pool, pool.id)
     assert [_one] = Repo.all(from(event in AuditEvent, where: event.action == "pool.delete" and event.target_id == ^pool.id))
+    assert_pool_removed_after_commit!(view, pool.id)
+  end
+
+  defp committed_deletion_context!(context) do
+    CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+    Sandbox.mode(Repo, :auto)
+    on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+    %{user: owner, token: token} = committed_bootstrap_owner_fixture!()
+    %{conn: log_in_user(context.conn, owner, token), scope: Scope.for_user(owner, ["instance_owner"])}
+  end
+
+  defp register_committed_pool_deletion_cleanup!(pool) do
+    CodexPooler.UnboxedFixture.register_unboxed_cleanup!(fn ->
+      Repo.delete_all(from job in Oban.Job, where: fragment("? @> ?", job.args, ^%{"pool_id" => pool.id}))
+      Repo.delete_all(from event in AuditEvent, where: event.target_id == ^pool.id)
+    end)
+  end
+
+  defp register_committed_deletion_view!(view) do
+    on_exit(fn ->
+      if Process.alive?(view.pid) do
+        monitor = Process.monitor(view.pid)
+        GenServer.stop(view.pid, :normal)
+        assert_receive {:DOWN, ^monitor, :process, _, :normal}, @detection_timeout_ms
+      end
+    end)
+  end
+
+  defp assert_pool_removed_after_commit!(view, pool_id) do
+    assert_receive {Events, %{reason: "pool_deleted", pool_id: ^pool_id}}, @detection_timeout_ms
+    await_pool_removed!(view, pool_id, System.monotonic_time(:millisecond) + @detection_timeout_ms)
     _ = await_pool_traffic(view)
-    refute has_element?(view, "#pool-row-#{pool.id}")
+    refute has_element?(view, "#pool-row-#{pool_id}")
+  end
+
+  defp await_pool_removed!(view, pool_id, deadline) do
+    if has_element?(view, "#pool-row-#{pool_id}") do
+      assert System.monotonic_time(:millisecond) < deadline, "committed deletion notification did not remove the Pool row"
+
+      receive do
+      after
+        10 -> await_pool_removed!(view, pool_id, deadline)
+      end
+    end
   end
 
   defp delete_from_card(view, pool) do

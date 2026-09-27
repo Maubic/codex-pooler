@@ -2,8 +2,8 @@ defmodule CodexPooler.Jobs.APIKeyDeletionWorker do
   @moduledoc """
   Deletes a revoked API key whose history is too large to delete from the admin page.
 
-  Each run detaches the key's requests and ledger entries and deletes its sessions and bridge
-  rows in bounded batches for about 45 seconds, then snoozes while any are left; batches already
+  Each run gives connection acquisition, history batches, and final deletion one shared 45-second
+  deadline, then snoozes while work remains; batches already
   done stay done. When nothing is left the run deletes the key row and writes its
   `api_key.delete` audit event in one transaction (`CodexPooler.Access.continue_api_key_deletion/3`).
   """

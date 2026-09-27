@@ -73,8 +73,9 @@ defmodule CodexPooler.Alerts.Incidents.OnceOnlyIncidentLifecycle do
 
   defp record_once_or_new_grant(%AlertIncident{} = incident, match) do
     if newer_grant?(match, incident) do
-      with {:ok, _superseded} <- supersede_unresolved(incident, match.matched_at) do
-        record_once(nil, match)
+      with {:ok, _superseded} <- supersede_unresolved(incident, match.matched_at),
+           {:ok, payload} <- record_once(nil, match) do
+        {:ok, Map.put(payload, :superseded_incident_ids, [incident.id])}
       end
     else
       record_once(incident, match)
@@ -191,8 +192,10 @@ defmodule CodexPooler.Alerts.Incidents.OnceOnlyIncidentLifecycle do
   defp unwrap_transaction({:error, reason}), do: {:error, reason}
 
   defp maybe_broadcast_incident_invalidation({:ok, %{incident: %AlertIncident{} = incident}} = result) do
-    _ = NotificationEvents.broadcast_incident_invalidation(incident)
-    result
+    {:ok, payload} = result
+    {superseded_ids, payload} = Map.pop(payload, :superseded_incident_ids, [])
+    _ = NotificationEvents.broadcast_incident_invalidations([incident.id | superseded_ids])
+    {:ok, payload}
   end
 
   defp maybe_broadcast_incident_invalidation(result), do: result

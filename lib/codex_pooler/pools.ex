@@ -11,6 +11,7 @@ defmodule CodexPooler.Pools do
   alias CodexPooler.Alerts
   alias CodexPooler.Audit
   alias CodexPooler.Events
+  alias CodexPooler.Jobs.DeletionDeadline
 
   alias CodexPooler.Pools.{
     Authorization,
@@ -325,11 +326,9 @@ defmodule CodexPooler.Pools do
          %Pool{} = pool <- normalize_pool(pool_or_id),
          :ok <- ensure_archived_pool(pool),
          :ok <- ensure_confirmation_slug(pool, confirmation_slug) do
-      # The Pool's alert incident targets go with it by database cascade.
-      Alerts.invalidate_notifications_after_cascade({:pool, pool.id}, fn -> request_deletion(scope, pool) end)
+      request_deletion(scope, pool)
       |> case do
         {:ok, deleted_pool} ->
-          broadcast_pool_deleted(deleted_pool)
           {:ok, deleted_pool}
 
         {:error, {:deleting, pool}} ->
@@ -348,7 +347,7 @@ defmodule CodexPooler.Pools do
   def delete_archived_pool(_scope, _pool_or_id, _confirmation_slug),
     do: {:error, access_error(:invalid_request, "user scope is required")}
 
-  # A scheduled deletion deleted nothing yet, so it leaves the notification centers alone.
+  # Final deletion queues its invalidations in the same transaction as the row.
   defp request_deletion(scope, pool) do
     case Deletion.request(scope_user(scope), pool) do
       {:deleting, pool} -> {:error, {:deleting, pool}}
@@ -366,6 +365,12 @@ defmodule CodexPooler.Pools do
   @spec continue_pool_deletion(Ecto.UUID.t(), Ecto.UUID.t() | nil, integer()) ::
           :more | :deleted | :gone | {:cancel, :pool_not_archived} | {:error, term()}
   def continue_pool_deletion(pool_id, requested_by_user_id, deadline) when is_binary(pool_id) do
+    DeletionDeadline.run(deadline, fn ->
+      do_continue_pool_deletion(pool_id, requested_by_user_id, deadline)
+    end)
+  end
+
+  defp do_continue_pool_deletion(pool_id, requested_by_user_id, deadline) do
     case Repo.get(Pool, pool_id) do
       nil ->
         :gone
@@ -383,10 +388,8 @@ defmodule CodexPooler.Pools do
   end
 
   defp finish_pool_deletion(pool_id, requested_by_user_id) do
-    Alerts.invalidate_notifications_after_cascade({:pool, pool_id}, fn -> Deletion.finish(pool_id, requested_by_user_id) end)
-    |> case do
-      {:ok, deleted_pool} ->
-        broadcast_pool_deleted(deleted_pool)
+    case Deletion.finish(pool_id, requested_by_user_id) do
+      {:ok, _deleted_pool} ->
         :deleted
 
       {:error, :pool_not_found} ->
@@ -411,13 +414,6 @@ defmodule CodexPooler.Pools do
   """
   @spec pool_deletion_states([Ecto.UUID.t()]) :: %{Ecto.UUID.t() => Deletion.state()}
   defdelegate pool_deletion_states(pool_ids), to: Deletion, as: :states
-
-  defp broadcast_pool_deleted(%Pool{} = deleted_pool) do
-    Events.broadcast_pools(deleted_pool.id, "pool_deleted", %{
-      pool_id: deleted_pool.id,
-      status: deleted_pool.status
-    })
-  end
 
   defp scope_user(%Scope{user: %User{} = user}), do: user
   defp scope_user(%Scope{}), do: nil

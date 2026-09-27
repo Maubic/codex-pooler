@@ -41,8 +41,12 @@ defmodule CodexPooler.Access.APIKeyDashboardSessionLifecycleTest do
       assert {:ok, _principal} = Access.authenticate_dashboard_session(replacement_token)
     end
 
-    test "delete emits invalidation even though the foreign key also cascades sessions" do
-      fixture = opted_in_key_fixture("Delete dashboard key")
+    test "delete emits invalidation even though the foreign key also cascades sessions", context do
+      CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+      Sandbox.mode(Repo, :auto)
+      on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+      %{user: owner} = committed_bootstrap_owner_fixture!()
+      fixture = opted_in_key_fixture("Delete dashboard key", Scope.for_user(owner, ["instance_owner"]))
 
       assert {:ok, deleted_key} =
                assert_invalidates(fixture, "api_key_deleted", "active", fn ->
@@ -146,9 +150,8 @@ defmodule CodexPooler.Access.APIKeyDashboardSessionLifecycleTest do
     result
   end
 
-  defp opted_in_key_fixture(display_name) do
-    %{user: owner} = bootstrap_owner_fixture()
-    scope = Scope.for_user(owner, ["instance_owner"])
+  defp opted_in_key_fixture(display_name, scope \\ nil) do
+    scope = scope || Scope.for_user(bootstrap_owner_fixture().user, ["instance_owner"])
     pool = create_pool!(scope, "source")
 
     assert {:ok, %{api_key: api_key, raw_key: raw_key}} =

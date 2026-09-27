@@ -3,9 +3,11 @@ defmodule CodexPoolerWeb.Admin.NotificationCenterHooksTest do
 
   import CodexPooler.AccountsFixtures
   import CodexPooler.PoolerFixtures
+  import Ecto.Query
   import Phoenix.LiveViewTest
 
   alias CodexPooler.Accounts
+  alias CodexPooler.Accounts.Scope
   alias CodexPooler.Admin.PoolWorkflow
   alias CodexPooler.Alerts
   alias CodexPooler.Alerts.Incidents.NotificationEvents
@@ -14,6 +16,7 @@ defmodule CodexPoolerWeb.Admin.NotificationCenterHooksTest do
   alias CodexPooler.Pools
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Admin.AlertNotificationsReadModel
+  alias Ecto.Adapters.SQL.Sandbox
 
   # Named detection budget for a NOTIFY committed on another connection to come
   # back through the application's notifications process, bridge and PubSub;
@@ -209,13 +212,35 @@ defmodule CodexPoolerWeb.Admin.NotificationCenterHooksTest do
   # counts of an incident it shared with an active Pool: those pages reload
   # once. A page that sees only the archived Pool, or an unrelated one, does
   # not.
-  test "deleting a Pool reloads the notification centers of the Pools its incidents shared once", %{conn: owner_conn, scope: owner_scope} do
+  test "deleting a Pool reloads the notification centers of the Pools its incidents shared once", context do
+    CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+    Sandbox.mode(Repo, :auto)
+    on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+    %{user: owner, token: token} = committed_bootstrap_owner_fixture!()
+    owner_conn = log_in_user(context.conn, owner, token)
+    owner_scope = Scope.for_user(owner, ["instance_owner"])
     [deleted_pool, other_pool, unrelated_pool] = for label <- ["deleted", "kept", "unrelated"], do: pool!(owner_scope, label)
     {shared, _rules} = record_shared_incident_with_rules!([deleted_pool, other_pool])
+
+    CodexPooler.UnboxedFixture.register_unboxed_cleanup!(fn ->
+      Repo.delete_all(from i in CodexPooler.Alerts.Schemas.AlertIncident, where: i.id == ^shared.id)
+      Repo.delete_all(from i in CodexPooler.Upstreams.Schemas.UpstreamIdentity, where: i.id == ^shared.upstream_identity_id)
+    end)
+
     _own = record_bell_incident!(deleted_pool)
     shared_id = shared.id
     assert {:ok, archived_pool} = Pools.change_pool_status(owner_scope, deleted_pool, "archived")
     [owner_view, deleted_pool_view, other_pool_view, unrelated_view] = views = open_notification_centers!(owner_conn, owner_scope, [deleted_pool, other_pool, unrelated_pool])
+
+    on_exit(fn ->
+      for view <- views, Process.alive?(view.pid) do
+        monitor = Process.monitor(view.pid)
+        GenServer.stop(view.pid, :normal)
+        assert_receive {:DOWN, ^monitor, :process, _, :normal}, @relay_detection_timeout_ms
+      end
+    end)
+
+    assert :ok = Events.subscribe_pool(deleted_pool.id, "pools")
 
     assert %{badge_count: 1, rows: [%{id: ^shared_id, total_impacted_pool_count: 2, hidden_impacted_pool_count: 1}]} = notification_center(owner_view)
     assert %{badge_count: 0} = notification_center(deleted_pool_view)
@@ -223,6 +248,10 @@ defmodule CodexPoolerWeb.Admin.NotificationCenterHooksTest do
 
     assert {:ok, _deleted} = Pools.delete_archived_pool(owner_scope, archived_pool, archived_pool.slug)
 
+    deleted_id = deleted_pool.id
+    # This real event is queued after the alert invalidations in the same COMMIT;
+    # the common Postgres bridge has sent the earlier messages before relaying it.
+    assert_receive {Events, %Event{reason: "pool_deleted", pool_id: ^deleted_id}}, @relay_detection_timeout_ms
     assert Enum.map(views, &notification_reloads/1) == [1, 0, 1, 0]
     assert %{badge_count: 1, rows: [%{id: ^shared_id, total_impacted_pool_count: 1, hidden_impacted_pool_count: 0}]} = notification_center(owner_view)
     assert %{badge_count: 0, rows: []} = notification_center(deleted_pool_view)

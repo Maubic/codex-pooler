@@ -12,6 +12,7 @@ defmodule CodexPoolerWeb.ObservatoryLiveTest do
   alias CodexPooler.Events.{Event, PostgresBridge}
   alias CodexPooler.Repo
   alias CodexPoolerWeb.ObservatoryAuth
+  alias Ecto.Adapters.SQL.Sandbox
   alias Phoenix.LiveView.Static
 
   @login_path "/observatory/login"
@@ -183,10 +184,22 @@ defmodule CodexPoolerWeb.ObservatoryLiveTest do
     end)
   end
 
-  test "connected Observatory redirects when Access deletes the API key", %{conn: conn} do
-    assert_connected_lifecycle_redirect(conn, "api_key_deleted", "active", fn scope, api_key ->
-      Access.delete_api_key(scope, api_key)
-    end)
+  test "connected Observatory redirects when Access deletes the API key", context do
+    CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+    Sandbox.mode(Repo, :auto)
+    on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+    %{user: owner} = committed_bootstrap_owner_fixture!()
+    scope = Scope.for_user(owner, ["instance_owner"])
+
+    assert_connected_lifecycle_redirect(
+      context.conn,
+      "api_key_deleted",
+      "active",
+      fn scope, api_key ->
+        Access.delete_api_key(scope, api_key)
+      end,
+      scope
+    )
   end
 
   test "connected Observatory revalidates canonical state after a missed invalidation event", %{
@@ -221,8 +234,9 @@ defmodule CodexPoolerWeb.ObservatoryLiveTest do
     refute Enum.any?(routes, fn {_verb, path} -> String.starts_with?(path, "/dashboard/") end)
   end
 
-  defp authenticated_conn(conn) do
-    %{api_key: api_key, raw_key: raw_key} = active_api_key_fixture()
+  defp authenticated_conn(conn, scope \\ nil) do
+    fixture = if scope, do: active_api_key_fixture(pool_fixture(%{created_by_user_id: scope.user.id}), %{scope: scope}), else: active_api_key_fixture()
+    %{api_key: api_key, raw_key: raw_key} = fixture
 
     api_key = enable_dashboard_access!(api_key)
     conn = get(conn, @login_path)
@@ -242,12 +256,13 @@ defmodule CodexPoolerWeb.ObservatoryLiveTest do
     |> Repo.update!()
   end
 
-  defp assert_connected_lifecycle_redirect(conn, cause, status, mutation) do
-    %{conn: conn, api_key: api_key} = authenticated_conn(conn)
+  defp assert_connected_lifecycle_redirect(conn, cause, status, mutation, scope \\ nil) do
+    %{conn: conn, api_key: api_key} = authenticated_conn(conn, scope)
     {:ok, view, _html} = live(conn, @observatory_path)
+    view_monitor = Process.monitor(view.pid)
+    on_exit(fn -> if Process.alive?(view.pid), do: GenServer.stop(view.pid, :normal) end)
     listener = subscribe_dashboard_events_from_task(api_key.id)
-    %{user: owner} = bootstrap_owner_fixture()
-    scope = Scope.for_user(owner, ["instance_owner"])
+    scope = scope || Scope.for_user(bootstrap_owner_fixture().user, ["instance_owner"])
 
     assert {:ok, _result} = mutation.(scope, api_key)
 
@@ -269,6 +284,7 @@ defmodule CodexPoolerWeb.ObservatoryLiveTest do
            }
 
     assert_redirect(view, @login_path_text)
+    assert_receive {:DOWN, ^view_monitor, :process, _, _}, 5_000
   end
 
   defp subscribe_dashboard_events_from_task(api_key_id) do

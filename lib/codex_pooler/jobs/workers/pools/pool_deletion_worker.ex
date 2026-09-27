@@ -2,8 +2,8 @@ defmodule CodexPooler.Jobs.PoolDeletionWorker do
   @moduledoc """
   Deletes an archived Pool whose history is too large to delete from the admin page.
 
-  Each run deletes the Pool's history in bounded batches for about 45 seconds and snoozes while
-  history is left, so no run holds a transaction or the queue for long and a deploy interrupts at
+  Each run gives connection acquisition, history batches, and final deletion one shared 45-second
+  deadline and snoozes while work remains, so a deploy interrupts at
   most one short batch; batches already deleted stay deleted and the next run continues. When the
   history is gone the run deletes the Pool row and writes its `pool.delete` audit event in one
   transaction (`CodexPooler.Pools.finish_pool_deletion/2`).

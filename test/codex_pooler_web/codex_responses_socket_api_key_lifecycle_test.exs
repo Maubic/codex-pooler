@@ -122,8 +122,8 @@ defmodule CodexPoolerWeb.CodexResponsesSocketAPIKeyLifecycleTest do
   end
 
   describe "event-driven close of an idle socket" do
-    test "deleting the key closes the socket from its api_key_deleted event" do
-      setup = active_api_key_fixture()
+    test "deleting the key closes the socket from its api_key_deleted event", context do
+      setup = committed_event_key_fixture!(context)
       state = api_key_socket_state(setup.api_key.id, setup.pool.id, 0)
       relay_pool_events!(setup.pool.id)
 
@@ -203,8 +203,8 @@ defmodule CodexPoolerWeb.CodexResponsesSocketAPIKeyLifecycleTest do
                )
     end
 
-    test "archiving and deleting the Pool closes the socket from its pool_deleted event" do
-      setup = active_api_key_fixture()
+    test "archiving and deleting the Pool closes the socket from its pool_deleted event", context do
+      setup = committed_event_key_fixture!(context)
       scope = owner_scope(setup.api_key)
       state = api_key_socket_state(setup.api_key.id, setup.pool.id, 0)
       assert {:ok, archived} = Pools.change_pool_status(scope, setup.pool, "archived")
@@ -635,7 +635,12 @@ defmodule CodexPoolerWeb.CodexResponsesSocketAPIKeyLifecycleTest do
         relay_pool_event_loop(parent)
       end)
 
-    on_exit(fn -> Process.exit(relay, :kill) end)
+    on_exit(fn ->
+      monitor = Process.monitor(relay)
+      Process.exit(relay, :kill)
+      assert_receive {:DOWN, ^monitor, :process, ^relay, _}, @event_detection_budget_ms
+    end)
+
     assert_receive {:pool_event_relay_ready, ^relay}, @event_detection_budget_ms
     relay
   end
@@ -672,6 +677,13 @@ defmodule CodexPoolerWeb.CodexResponsesSocketAPIKeyLifecycleTest do
         "status" => "active"
       }
     }
+  end
+
+  defp committed_event_key_fixture!(context) do
+    CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+    Sandbox.mode(Repo, :auto)
+    on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+    committed_api_key_fixture!()
   end
 
   # The key is committed so that another backend can hold its row. The
