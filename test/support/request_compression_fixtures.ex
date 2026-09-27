@@ -192,4 +192,37 @@ defmodule CodexPooler.RequestCompressionFixtures do
 
   @spec recursive_unified_diff() :: String.t()
   def recursive_unified_diff, do: @recursive_unified_diff
+
+  # Verbatim output of Apple sort 2.3 (`sort --files0-from=paths.nul`, the list
+  # naming a synthetic file of 24 grep-shaped diagnostics); `sort` on the file
+  # itself prints the same bytes.
+  @sorted_file_contents ~S"""
+  lib/sample_0.go:12:2: should omit type in synthetic declaration 12
+  lib/sample_0.go:15:2: should omit type in synthetic declaration 15
+  lib/sample_0.go:18:2: should omit type in synthetic declaration 18
+  lib/sample_0.go:21:2: should omit type in synthetic declaration 21
+  lib/sample_0.go:24:2: should omit type in synthetic declaration 24
+  lib/sample_0.go:3:2: should omit type in synthetic declaration 3
+  lib/sample_0.go:6:2: should omit type in synthetic declaration 6
+  lib/sample_0.go:9:2: should omit type in synthetic declaration 9
+  lib/sample_1.go:10:2: should omit type in synthetic declaration 10
+  lib/sample_1.go:13:2: should omit type in synthetic declaration 13
+  lib/sample_1.go:16:2: should omit type in synthetic declaration 16
+  lib/sample_1.go:19:2: should omit type in synthetic declaration 19
+  lib/sample_1.go:1:2: should omit type in synthetic declaration 1
+  lib/sample_1.go:22:2: should omit type in synthetic declaration 22
+  lib/sample_1.go:4:2: should omit type in synthetic declaration 4
+  lib/sample_1.go:7:2: should omit type in synthetic declaration 7
+  lib/sample_2.go:11:2: should omit type in synthetic declaration 11
+  lib/sample_2.go:14:2: should omit type in synthetic declaration 14
+  lib/sample_2.go:17:2: should omit type in synthetic declaration 17
+  lib/sample_2.go:20:2: should omit type in synthetic declaration 20
+  lib/sample_2.go:23:2: should omit type in synthetic declaration 23
+  lib/sample_2.go:2:2: should omit type in synthetic declaration 2
+  lib/sample_2.go:5:2: should omit type in synthetic declaration 5
+  lib/sample_2.go:8:2: should omit type in synthetic declaration 8
+  """
+
+  @spec sorted_file_contents() :: String.t()
+  def sorted_file_contents, do: @sorted_file_contents
 end

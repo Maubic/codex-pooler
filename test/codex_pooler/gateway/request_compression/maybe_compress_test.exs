@@ -1060,6 +1060,27 @@ defmodule CodexPooler.Gateway.RequestCompression.MaybeCompressTest do
       end
     end
 
+    test "keeps file contents that a sort stage reads from a file list" do
+      # Real sort output: `sort --files0-from=paths.nul` prints the sorted lines
+      # of the listed file, whatever the stage before it searched for.
+      original_output = RequestCompressionFixtures.sorted_file_contents()
+
+      for {command, search?} <- [
+            {"rg --files -g '*.txt' | sort --files0-from=paths.nul", false},
+            {"rg -n 'should omit' lib | sort -k1,1", true}
+          ] do
+        body = command_output_body("call_sorted_contents", CodexPooler.JSON.encode!(%{"cmd" => command}), original_output)
+        {context, request_options} = request_context(body)
+
+        assert {compressed_body, compressed_options} =
+                 RequestCompression.maybe_compress(body, context, request_options)
+
+        strategies = Map.get(compressed_options.runtime.payload_compression, "strategies", [])
+        assert "search_results" in strategies == search?, command
+        unless search?, do: assert(first_output(compressed_body) == original_output, command)
+      end
+    end
+
     test "keeps the exec_command output envelope when compressing search output" do
       envelope = "Chunk ID: 5f2c1a\nWall time: 0.0412 seconds\nProcess exited with code 0\nOriginal token count: 310\nOutput:\n"
       matches = Enum.map_join(1..24, "\n", &"lib/sample_#{rem(&1, 3)}.ex:#{&1}: synthetic needle line #{&1} with filler text")

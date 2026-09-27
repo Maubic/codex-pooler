@@ -62,6 +62,11 @@ defmodule CodexPooler.Gateway.RequestCompression.CommandProvenanceTest do
           {"rg -n needle lib | sort | uniq -c", :unknown},
           {"git grep -n needle | env LC_ALL=C sort -k1,1", :search},
           {"rg -n needle lib | tee matches.txt", :search},
+          {"rg -n needle lib | sort -k1,1", :search},
+          # --files0-from makes sort read the files a list names, not its input.
+          {"rg --files -g '*.txt' | sort --files0-from=paths.nul", :other},
+          {"rg --files -g '*.txt' | sort --files0-from paths.nul", :other},
+          {"rg --files -g '*.txt' | sort -u --files0-from=-", :other},
           {"make lint | grep error", :other},
           {"cargo build | tee build.log", :other},
           {"cat notes.txt | grep -n needle", :other},

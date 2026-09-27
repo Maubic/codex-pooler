@@ -47,7 +47,10 @@ defmodule CodexPooler.Gateway.RequestCompression.CommandProvenance do
   }
 
   # Filters that print lines of their input unchanged when no file operand is
-  # given; with file operands they print those files instead.
+  # given; with file operands they print those files instead. `sources` are
+  # options that switch the input to other files the same way (sort's
+  # `--files0-from` reads the files a list names, even `--files0-from=-`,
+  # where the input only supplies their names).
   @filters %{
     "cat" => %{flags: [], valued: [], patterns: [~r/\A-[benstuvAET]+\z/, ~r/\A--(?:number|number-nonblank|squeeze-blank|show-all|show-ends|show-tabs|show-nonprinting)\z/], operands: 0},
     "head" => %{flags: ~w(-q -v -z --quiet --silent --verbose --zero-terminated), valued: ~w(-n -c --lines --bytes), patterns: [~r/\A-\d+\z/], operands: 0},
@@ -59,7 +62,8 @@ defmodule CodexPooler.Gateway.RequestCompression.CommandProvenance do
     },
     "sort" => %{
       flags: [],
-      valued: ~w(-k -t -o -T -S --key --field-separator --output --temporary-directory --buffer-size --parallel --batch-size --compress-program --files0-from --random-source --sort),
+      valued: ~w(-k -t -o -T -S --key --field-separator --output --temporary-directory --buffer-size --parallel --batch-size --compress-program --random-source --sort),
+      sources: ~w(--files0-from),
       patterns: [
         ~r/\A-[bcCdfghimMnrRsuVz]+\z/,
         ~r/\A--(?:ignore-leading-blanks|check|dictionary-order|ignore-case|general-numeric-sort|human-numeric-sort|ignore-nonprinting|merge|month-sort|numeric-sort|reverse|random-sort|stable|unique|version-sort|zero-terminated)\z/
@@ -205,6 +209,18 @@ defmodule CodexPooler.Gateway.RequestCompression.CommandProvenance do
   defp filter_program_role(program, args, :direct), do: filter_role(Map.fetch!(@filters, program), args)
 
   defp filter_role(spec, args) do
+    if reads_other_sources?(spec, args), do: {:produces, :other}, else: filter_operands_role(spec, args)
+  end
+
+  defp reads_other_sources?(spec, args) do
+    sources = Map.get(spec, :sources, [])
+
+    Enum.any?(args, fn {_quote, word} ->
+      word in sources or Enum.any?(sources, &String.starts_with?(word, &1 <> "="))
+    end)
+  end
+
+  defp filter_operands_role(spec, args) do
     case skip_options(args, spec) do
       {:ok, []} -> :filter
       {:ok, [{_quote, "-"}]} -> :filter
