@@ -37,7 +37,8 @@ defmodule CodexPooler.Dev.MCPFixture do
   @type status :: %{
           required(:status) => String.t(),
           required(:leases) => non_neg_integer(),
-          required(:receipt_path) => String.t()
+          required(:receipt_path) => String.t(),
+          optional(:other_receipts) => [String.t()]
         }
 
   @spec receipt_path() :: String.t()
@@ -66,7 +67,7 @@ defmodule CodexPooler.Dev.MCPFixture do
 
       case Receipt.read(path) do
         {:ok, setup} -> public_status(setup, path)
-        :missing -> {:ok, %{status: "absent", leases: 0, receipt_path: path}}
+        :missing -> absent_status(path)
         {:error, message} -> {:error, message}
       end
     end
@@ -173,7 +174,7 @@ defmodule CodexPooler.Dev.MCPFixture do
         {:error, "MCP fixture receipt has an invalid lease count"}
 
       :missing ->
-        {:ok, %{status: "absent", leases: 0, receipt_path: path}}
+        absent_status(path)
 
       {:error, message} ->
         {:error, message}
@@ -204,6 +205,24 @@ defmodule CodexPooler.Dev.MCPFixture do
     else
       _invalid -> {:error, "MCP fixture receipt has an invalid public status"}
     end
+  end
+
+  defp absent_status(path) do
+    root = Path.expand(@receipt_root, File.cwd!())
+
+    other_receipts =
+      [Path.join(root, "setup.json") | Path.wildcard(Path.join([root, "*", "setup.json"]))]
+      |> Enum.reject(&(&1 == path))
+      |> Enum.filter(fn candidate ->
+        case File.lstat(candidate) do
+          {:ok, %{type: :regular}} -> true
+          _other -> false
+        end
+      end)
+      |> Enum.sort()
+
+    result = %{status: "absent", leases: 0, receipt_path: path}
+    {:ok, if(other_receipts == [], do: result, else: Map.put(result, :other_receipts, other_receipts))}
   end
 
   defp resolved_receipt_path(options) do

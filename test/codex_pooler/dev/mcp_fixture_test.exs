@@ -276,9 +276,9 @@ defmodule CodexPooler.Dev.MCPFixtureTest do
     File.cd!(root, fn ->
       assert {:ok, %{status: "ready", receipt_path: scoped}} = MCPFixture.acquire(options)
       assert String.ends_with?(scoped, "/target-#{target}/setup.json")
-      assert {:ok, %{status: "absent", receipt_path: default}} = MCPFixture.status()
+      assert {:ok, %{status: "absent", receipt_path: default, other_receipts: [^scoped]}} = MCPFixture.status()
       assert default != scoped
-      assert {:ok, %{status: "absent", receipt_path: ^default}} = MCPFixture.release(environment: :dev, repo_config: [database: "codex_pooler_dev"])
+      assert {:ok, %{status: "absent", receipt_path: ^default, other_receipts: [^scoped]}} = MCPFixture.release(environment: :dev, repo_config: [database: "codex_pooler_dev"])
       assert {:ok, %{status: "ready", leases: 1, receipt_path: ^scoped}} = MCPFixture.status(options)
       assert InstanceSettings.current().mcp.enabled
       assert {:ok, %{status: "released", receipt_path: ^scoped}} = MCPFixture.release(options)

@@ -220,7 +220,10 @@ validate_owned_process() {
   recorded_cwd="$(receipt_value "$receipt_path" cwd)" || fail "refusing malformed ownership receipt"
   recorded_port="$(receipt_value "$receipt_path" port)" || fail "refusing malformed ownership receipt"
 
-  [ "$recorded_state" = "running" ] || fail "refusing ownership receipt that is not running"
+  if [ "$recorded_state" != "running" ]; then
+    printf 'dev-server: next: inspect listener ownership on port %s and receipt %s; stop only the verified process, then remove this receipt and pointer %s before make dev\n' "$port" "$receipt_path" "$active_path" >&2
+    fail "refusing ownership receipt that is not running"
+  fi
   [[ "$recorded_pid" =~ ^[1-9][0-9]*$ ]] || fail "refusing invalid owned pid"
   [ "$recorded_port" = "$port" ] || fail "refusing ownership receipt for another port"
   receipt_checkout_matches "$recorded_cwd" || fail_foreign_ownership_receipt

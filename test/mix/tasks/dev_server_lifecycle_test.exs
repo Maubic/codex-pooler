@@ -252,6 +252,22 @@ defmodule CodexPooler.MixTasks.DevServerLifecycleTest do
     assert output =~ "start or stop will clean it"
   end
 
+  test "an interrupted starting receipt gives a recovery hint without signalling an unproved process" do
+    fixture = server_fixture!(healthy?: false, cwd: File.cwd!())
+    %{receipt_path: receipt_path} = write_stale_receipt!(fixture, pid: fixture.listener_pid)
+    File.write!(receipt_path, File.read!(receipt_path) |> String.replace("state\trunning", "state\tstarting"))
+
+    for action <- ["status", "stop"] do
+      {output, code} = lifecycle(action, fixture)
+      assert code != 0
+      assert output =~ "ownership receipt that is not running"
+      assert output =~ "next:"
+      assert output =~ receipt_path
+      assert process_alive?(fixture.listener_pid)
+      assert File.exists?(receipt_path)
+    end
+  end
+
   test "stop cleans a stale dead-pid receipt without touching other processes" do
     sentinel = server_fixture!(healthy?: false, cwd: temp_dir!("stale-sentinel"))
     fixture = server_fixture!(start?: false, cwd: File.cwd!())
