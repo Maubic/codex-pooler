@@ -35,7 +35,7 @@ defmodule CodexPoolerWeb.Admin.UnassignedUpstreamsLiveTest do
 
     assert has_element?(
              list_view,
-             "#upstream-account-actions-menu-#{identity.id}[title='#{reason}']"
+             "#upstream-account-actions-menu-#{identity.id}:not([title])"
            )
 
     assert has_element?(

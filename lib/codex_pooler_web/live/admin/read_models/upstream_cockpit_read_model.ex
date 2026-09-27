@@ -433,7 +433,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
     %{
       title: account.label,
       status: account.identity.status,
-      status_label: String.replace(account.identity.status, "_", " "),
+      status_label: status_label(account),
       plan_label: account.plan_label,
       plan_reported?: account.plan_reported?,
       refresh_status: account.refresh_status,
@@ -455,6 +455,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
       identity_observability: account.identity_observability
     }
   end
+
+  defp status_label(%{deletion_state: :in_progress}), do: "Deletion in progress"
+  defp status_label(%{deletion_state: :failed}), do: "Deletion failed - retry Delete"
+  defp status_label(account), do: String.replace(account.identity.status, "_", " ")
 
   defp assignments(%{identity: %UpstreamIdentity{} = identity, assignments: assignment_snapshots})
        when is_list(assignment_snapshots) do
@@ -824,11 +828,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
           recovery_eligible? and account.assignments != [],
           "reinvite requires a Pool assignment"
         ),
-      delete: assignment_action(account, status != "deleted", "account is already deleted"),
+      delete: action(Map.get(account, :can_delete?, false), deletion_unavailable_reason(account)),
       empty?: false,
       degraded?: recovery_eligible?
     }
   end
+
+  defp deletion_unavailable_reason(%{deletion_state: :in_progress}),
+    do: "account deletion is already in progress"
+
+  defp deletion_unavailable_reason(_account),
+    do: "Remove this account from all Pools before deleting it."
 
   defp redeem_saved_reset_action(account, header) do
     cond do

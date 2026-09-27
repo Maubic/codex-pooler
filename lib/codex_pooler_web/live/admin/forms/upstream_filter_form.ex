@@ -64,7 +64,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamFilterForm do
   defp normalize_status(status), do: if(status in visible_statuses(), do: status, else: "")
 
   defp visible_statuses do
-    Enum.reject(UpstreamIdentity.statuses(), &(&1 == UpstreamIdentity.deleted_status()))
+    UpstreamIdentity.statuses()
   end
 
   defp any_status_option do
@@ -99,6 +99,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamFilterForm do
   defp status_icon("reauth_required"), do: "hero-key"
   defp status_icon("disabled"), do: "hero-no-symbol"
   defp status_icon("errored"), do: "hero-exclamation-circle"
+  defp status_icon("deleted"), do: "hero-trash"
   defp status_icon(_status), do: "hero-circle-stack"
 
   defp status_tone("active"), do: :success

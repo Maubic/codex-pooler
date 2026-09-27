@@ -29,6 +29,7 @@ defmodule CodexPooler.AuditTest do
     assert "upstream_account.pause" in actions
     assert "upstream_account.reactivate" in actions
     assert "upstream_account.delete" in actions
+    assert "upstream_account.delete_requested" in actions
     assert "api_key.create" in actions
     assert "api_key.update" in actions
     assert "api_key.pause" in actions

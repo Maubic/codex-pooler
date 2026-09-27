@@ -418,12 +418,14 @@ The current actions are:
     </tr>
     <tr>
       <td>Delete</td>
-      <td>Soft-deletes the upstream from active use. This is an immediate destructive account-lifecycle action in the current UI, so use it only when the account should leave routing.</td>
+      <td>Permanently removes the account, stored credentials, quota evidence, removed Pool assignments, and account-specific statistics. First remove the account from every Pool, including disabled assignments, then type its label to confirm. Shared request accounting remains without the account association.</td>
     </tr>
   </tbody>
 </table>
 
 Some actions are disabled or hidden depending on the account state. For example, `Reactivate` is not useful while an account is already active, and recovery actions only appear when the account is in a recovery-eligible state.
+
+Accounts deleted by older releases appear under `Any status` and `Deleted` so an operator can remove them using the same `Delete` action. They remain unavailable for routing and recovery actions. Requests already in progress finish before physical removal; large histories are cleaned up in the background. The account shows `Deletion in progress` until it disappears, or `Deletion failed - retry Delete` if cleanup needs another attempt. Permanent deletion cannot be undone.
 
 ## Rename Dialog
 

@@ -607,6 +607,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
              attempt.upstream_identity_id,
              attempt.pool_upstream_assignment_id
            ),
+         :ok <- validate_upstream_not_deleting(identity),
          :ok <-
            authorize_exact_assignment(
              api_key,
@@ -1972,6 +1973,11 @@ defmodule CodexPooler.Accounting.RequestReplay do
     }
     |> Repo.insert!()
   end
+
+  defp validate_upstream_not_deleting(%UpstreamIdentity{metadata: %{"permanent_deletion_requested_at" => _}}),
+    do: {:error, :upstream_account_deleting}
+
+  defp validate_upstream_not_deleting(%UpstreamIdentity{}), do: :ok
 
   defp lock_session!(session_id),
     do: Repo.one!(from row in CodexSession, where: row.id == ^session_id, lock: "FOR UPDATE")

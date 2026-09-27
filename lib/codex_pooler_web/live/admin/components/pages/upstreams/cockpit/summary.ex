@@ -268,7 +268,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Summary do
               id="upstream-cockpit-status"
               class={["mt-0.5 text-xs font-semibold", status_text_class(@cockpit.header.status)]}
             >
-              {Formatting.humanize_state(@cockpit.header.status)}
+              {Formatting.humanize_state(@cockpit.header.status_label)}
             </p>
           </div>
           <AdminBadges.plan_badge

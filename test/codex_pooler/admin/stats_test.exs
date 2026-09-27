@@ -24,6 +24,7 @@ defmodule CodexPooler.Admin.StatsTest do
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Quotas.Evidence
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Assignments.PoolAssignments
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
   alias Ecto.Adapters.SQL.Sandbox
@@ -79,6 +80,7 @@ defmodule CodexPooler.Admin.StatsTest do
       assignment_status: "active",
       health_status: "active",
       upstream_label: "Account A",
+      upstream_status: "active",
       state: :unknown
     }
 
@@ -125,6 +127,107 @@ defmodule CodexPooler.Admin.StatsTest do
              dashboard.quota.accounts
 
     assert id == identity.id
+  end
+
+  test "deleted upstreams and removed assignments without usage in the window are absent from stats" do
+    scope = owner_scope()
+    pool = pool_fixture()
+    %{api_key: api_key} = active_api_key_fixture(pool)
+    %{identity: current} = upstream_assignment_fixture(pool)
+    %{identity: deleted, assignment: deleted_assignment} = upstream_assignment_fixture(pool)
+    %{identity: removed, assignment: removed_assignment} = upstream_assignment_fixture(pool)
+    as_of = ~U[2026-01-10 12:00:00.000000Z]
+    before_window = DateTime.add(as_of, -2, :hour)
+
+    insert_timed_usage!(pool, api_key, deleted_assignment, deleted, before_window, 40)
+    insert_timed_usage!(pool, api_key, removed_assignment, removed, before_window, 60)
+    assert {:ok, _} = Upstreams.soft_delete_account_for_scope(scope, deleted, %{})
+    assert {:ok, _} = PoolAssignments.delete_pool_assignment(pool, removed_assignment)
+
+    assert {:ok, dashboard} = Stats.build_dashboard(scope, %{pool_id: pool.id, window: "1h", as_of: as_of})
+
+    assert [%{upstream_identity_id: current_id, requests: 0, lifecycle_state: :current}] = dashboard.tables.upstreams
+    assert current_id == current.id
+    assert [%{upstream_identity_id: ^current_id}] = dashboard.quota.accounts
+    assert dashboard.quota.summary.total == 1
+    assert dashboard.kpis.tokens.total_tokens == 0
+  end
+
+  test "deleted upstream usage stays attributed while removed membership is scoped to selected pools" do
+    scope = owner_scope()
+    pool = pool_fixture()
+    other_pool = pool_fixture()
+    %{api_key: api_key} = active_api_key_fixture(pool)
+    %{api_key: other_key} = active_api_key_fixture(other_pool)
+    %{identity: deleted, assignment: deleted_assignment} = upstream_assignment_fixture(pool)
+    %{identity: shared, assignment: removed_assignment} = upstream_assignment_fixture(pool)
+
+    assert {:ok, current_assignment} =
+             PoolAssignments.create_pool_assignment(other_pool, shared, %{
+               status: "active",
+               health_status: "active",
+               eligibility_status: "eligible"
+             })
+
+    as_of = ~U[2026-01-10 12:00:00.000000Z]
+    occurred_at = DateTime.add(as_of, -30, :minute)
+    insert_timed_usage!(pool, api_key, deleted_assignment, deleted, occurred_at, 40)
+    insert_timed_usage!(pool, api_key, removed_assignment, shared, occurred_at, 60)
+    insert_timed_usage!(other_pool, other_key, current_assignment, shared, occurred_at, 20)
+    assert {:ok, _} = Upstreams.soft_delete_account_for_scope(scope, deleted, %{})
+    assert {:ok, _} = PoolAssignments.delete_pool_assignment(pool, removed_assignment)
+
+    assert {:ok, selected} = Stats.build_dashboard(scope, %{pool_id: pool.id, window: "1h", as_of: as_of})
+    rows = Map.new(selected.tables.upstreams, &{&1.upstream_identity_id, &1})
+    assert %{lifecycle_state: :deleted, requests: 1, total_tokens: 40, settled_cost_micros: 40, traffic_share_percent: 50.0} = rows[deleted.id]
+    assert %{lifecycle_state: :removed, requests: 1, total_tokens: 60, settled_cost_micros: 60, traffic_share_percent: 50.0} = rows[shared.id]
+    assert selected.quota.accounts == []
+    assert selected.quota.summary.total == 0
+    assert selected.kpis.tokens.total_tokens == 100
+
+    assert {:ok, aggregate} = Stats.build_dashboard(scope, %{window: "1h", as_of: as_of})
+    aggregate_rows = Map.new(aggregate.tables.upstreams, &{&1.upstream_identity_id, &1})
+    assert %{lifecycle_state: :current, assignment_count: 1, status: "active", requests: 2, total_tokens: 80, traffic_share_percent: 66.7} = aggregate_rows[shared.id]
+    assert %{lifecycle_state: :deleted, requests: 1, total_tokens: 40, traffic_share_percent: 33.3} = aggregate_rows[deleted.id]
+    assert [%{pool_id: current_pool_id, upstream_identity_id: shared_id}] = aggregate.quota.accounts
+    assert current_pool_id == other_pool.id
+    assert shared_id == shared.id
+    assert aggregate.kpis.tokens.total_tokens == 120
+  end
+
+  test "deleted upstream history in hidden pools cannot retain a zero row or change visible shares" do
+    %{user: owner} = bootstrap_owner_fixture()
+    owner_scope = Scope.for_user(owner)
+    %{user: admin} = operator_fixture(owner, %{"email" => unique_user_email()})
+    pool = pool_fixture()
+    hidden_pool = pool_fixture()
+    operator_pool_assignment_fixture(admin, pool, created_by_user_id: owner.id)
+    %{api_key: api_key} = active_api_key_fixture(pool)
+    %{api_key: hidden_key} = active_api_key_fixture(hidden_pool)
+    %{identity: visible, assignment: visible_assignment} = upstream_assignment_fixture(pool)
+    %{identity: deleted} = upstream_assignment_fixture(pool)
+    %{identity: hidden, assignment: hidden_assignment} = upstream_assignment_fixture(hidden_pool)
+
+    assert {:ok, shared_hidden_assignment} =
+             PoolAssignments.create_pool_assignment(hidden_pool, deleted, %{
+               status: "active",
+               health_status: "active",
+               eligibility_status: "eligible"
+             })
+
+    as_of = ~U[2026-01-10 12:00:00.000000Z]
+    occurred_at = DateTime.add(as_of, -30, :minute)
+    insert_timed_usage!(pool, api_key, visible_assignment, visible, occurred_at, 10)
+    insert_timed_usage!(hidden_pool, hidden_key, shared_hidden_assignment, deleted, occurred_at, 100)
+    insert_timed_usage!(hidden_pool, hidden_key, hidden_assignment, hidden, occurred_at, 200)
+    assert {:ok, _} = Upstreams.soft_delete_account_for_scope(owner_scope, deleted, %{})
+    assert {:ok, _} = Upstreams.soft_delete_account_for_scope(owner_scope, hidden, %{})
+
+    assert {:ok, dashboard} = Stats.build_dashboard(Scope.for_user(admin), %{window: "1h", as_of: as_of})
+    assert [%{upstream_identity_id: visible_id, requests: 1, total_tokens: 10, traffic_share_percent: 100.0}] = dashboard.tables.upstreams
+    assert visible_id == visible.id
+    assert dashboard.quota.summary.total == 1
+    assert dashboard.kpis.tokens.total_tokens == 10
   end
 
   test "upstream_table/2 calculates shares and sorts by requests before tokens" do
@@ -2163,6 +2266,7 @@ defmodule CodexPooler.Admin.StatsTest do
       assignment_status: "active",
       health_status: "active",
       upstream_label: assignment_label,
+      upstream_status: "active",
       state: :unknown
     }
   end

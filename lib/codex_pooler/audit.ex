@@ -47,6 +47,7 @@ defmodule CodexPooler.Audit do
     {"Upstream account paused", "upstream_account.pause"},
     {"Upstream account reactivated", "upstream_account.reactivate"},
     {"Upstream account token refresh queued", "upstream_account.refresh_enqueue"},
+    {"Upstream account deletion requested", "upstream_account.delete_requested"},
     {"Upstream account deleted", "upstream_account.delete"},
     {"Upstream account saved reset policy updated", "upstream_account.saved_reset_policy_update"},
     {"Upstream account saved reset redemption queued", "upstream_account.saved_reset_redeem_enqueue"},

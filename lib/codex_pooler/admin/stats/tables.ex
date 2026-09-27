@@ -3,6 +3,7 @@ defmodule CodexPooler.Admin.Stats.Tables do
 
   alias CodexPooler.Access.Reporting, as: AccessReporting
   alias CodexPooler.Admin.Stats.Aggregates
+  alias CodexPooler.Upstreams.Quota.ReadModel, as: QuotaReadModel
 
   @failed_statuses ~w(failed rejected interrupted cancelled)
   @leaderboard_limit 10
@@ -45,29 +46,15 @@ defmodule CodexPooler.Admin.Stats.Tables do
   end
 
   @spec upstream_table([map()], [map()]) :: [map()]
-  def upstream_table(settlements, quota_accounts) do
+  def upstream_table(settlements, upstream_accounts) do
     entries_by_identity = Enum.group_by(settlements, & &1.upstream_identity_id)
 
     rows =
-      quota_accounts
+      upstream_accounts
       |> Enum.group_by(& &1.upstream_identity_id)
-      |> Enum.map(fn {upstream_identity_id, accounts} ->
+      |> Enum.flat_map(fn {upstream_identity_id, accounts} ->
         entries = Map.get(entries_by_identity, upstream_identity_id, [])
-        canonical_account = canonical_upstream_account(accounts)
-
-        %{
-          pool_upstream_assignment_id: single_assignment_id(accounts),
-          upstream_identity_id: upstream_identity_id,
-          assignment_label: shared_account_value(accounts, :assignment_label),
-          upstream_label: shared_account_value(accounts, :upstream_label) || canonical_account.upstream_label,
-          status: aggregate_account_value(accounts, :assignment_status),
-          health_status: aggregate_account_value(accounts, :health_status),
-          quota_state: aggregate_account_value(accounts, :state, :mixed),
-          assignment_count: length(accounts),
-          requests: Aggregates.sum_integer(entries, :request_count),
-          total_tokens: Aggregates.sum_integer(entries, :total_tokens),
-          settled_cost_micros: Aggregates.sum_decimal_integer(entries, :settled_cost_micros)
-        }
+        upstream_rows(upstream_identity_id, accounts, entries)
       end)
 
     total_requests = Aggregates.sum_integer(rows, :requests)
@@ -78,6 +65,38 @@ defmodule CodexPooler.Admin.Stats.Tables do
     end)
     |> Enum.sort_by(&upstream_table_sort_key/1)
   end
+
+  defp upstream_rows(upstream_identity_id, accounts, entries) do
+    current_accounts = Enum.filter(accounts, &QuotaReadModel.current_account?/1)
+
+    if current_accounts == [] and entries == [] do
+      []
+    else
+      reporting_accounts = if current_accounts == [], do: accounts, else: current_accounts
+      canonical_account = canonical_upstream_account(reporting_accounts)
+
+      [
+        %{
+          pool_upstream_assignment_id: single_assignment_id(reporting_accounts),
+          upstream_identity_id: upstream_identity_id,
+          assignment_label: shared_account_value(reporting_accounts, :assignment_label),
+          upstream_label: shared_account_value(reporting_accounts, :upstream_label) || canonical_account.upstream_label,
+          lifecycle_state: upstream_lifecycle_state(canonical_account, current_accounts),
+          status: aggregate_account_value(reporting_accounts, :assignment_status),
+          health_status: aggregate_account_value(reporting_accounts, :health_status),
+          quota_state: aggregate_account_value(reporting_accounts, :state, :mixed),
+          assignment_count: length(reporting_accounts),
+          requests: Aggregates.sum_integer(entries, :request_count),
+          total_tokens: Aggregates.sum_integer(entries, :total_tokens),
+          settled_cost_micros: Aggregates.sum_decimal_integer(entries, :settled_cost_micros)
+        }
+      ]
+    end
+  end
+
+  defp upstream_lifecycle_state(_account, [_ | _]), do: :current
+  defp upstream_lifecycle_state(%{upstream_status: "deleted"}, []), do: :deleted
+  defp upstream_lifecycle_state(_account, []), do: :removed
 
   @spec recent_failures([map()]) :: [map()]
   def recent_failures(requests) do

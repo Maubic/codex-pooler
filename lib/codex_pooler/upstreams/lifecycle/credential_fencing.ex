@@ -55,6 +55,10 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
 
   @spec prepare_replacement_metadata(UpstreamIdentity.t()) ::
           {:ok, map(), pos_integer()} | {:error, %{code: atom(), message: String.t()}}
+  def prepare_replacement_metadata(%UpstreamIdentity{metadata: %{"permanent_deletion_requested_at" => _}}) do
+    {:error, %{code: :upstream_account_deleting, message: "upstream account is being deleted"}}
+  end
+
   def prepare_replacement_metadata(%UpstreamIdentity{} = identity) do
     metadata = normalize_metadata(identity.metadata)
 

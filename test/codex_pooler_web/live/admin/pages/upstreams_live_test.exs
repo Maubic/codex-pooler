@@ -28,6 +28,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
   alias CodexPooler.Quotas.Evidence
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
+  alias CodexPooler.Upstreams.Assignments.PoolAssignments
   alias CodexPooler.Upstreams.Auth.CodexAuth
   alias CodexPooler.Upstreams.Lifecycle.{CredentialFencing, IdentitySlotLock}
   alias CodexPooler.Upstreams.OAuthFlows
@@ -2726,7 +2727,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert_patch(view, ~p"/admin/upstreams")
 
     render_click(view, "select_status_filter", %{"status" => "deleted"})
-    assert_patch(view, ~p"/admin/upstreams")
+    assert_patch(view, ~p"/admin/upstreams?status=deleted")
 
     render_change(view, "filter", %{
       "filters" => %{
@@ -3077,7 +3078,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
   end
 
   @tag :upstream_filters
-  test "invalid Pool and deleted status URL params normalize to default visible accounts", %{
+  test "invalid Pool normalizes while deleted status reveals historical accounts", %{
     conn: conn,
     scope: scope
   } do
@@ -3104,9 +3105,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
       live(conn, ~p"/admin/upstreams?pool_id=#{invalid_pool_id}&status=deleted")
 
     assert has_element?(view, "#filters_pool_id[value='']")
-    assert has_element?(view, "#filters_status[value='']")
-    assert has_element?(view, "#upstream-account-#{active_identity.id}", "Visible Filter Codex")
-    refute has_element?(view, "#upstream-account-#{deleted_identity.id}")
+    assert has_element?(view, "#filters_status[value='deleted']")
+    refute has_element?(view, "#upstream-account-#{active_identity.id}")
+    assert has_element?(view, "#upstream-account-#{deleted_identity.id}", "Deleted Filter Codex")
   end
 
   @tag :upstream_filters
@@ -4743,11 +4744,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
   } do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "delete-upstream", name: "Delete Upstream"})
 
-    %{identity: identity} =
+    %{identity: identity, assignment: assignment} =
       upstream_assignment_fixture(pool, %{
         account_label: "Delete Codex",
         account_identifier: "delete@example.com"
       })
+
+    assert {:ok, _result} = PoolAssignments.delete_pool_assignment(pool, assignment)
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
@@ -4783,7 +4786,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     })
 
     refute has_element?(view, "#delete-upstream-account-dialog")
-    assert Repo.get!(UpstreamIdentity, identity.id).status == "deleted"
+    refute Repo.get(UpstreamIdentity, identity.id)
+    refute has_element?(view, "#upstream-account-#{identity.id}")
   end
 
   test "keeps rename dialog open when the label is blank", %{
@@ -7744,7 +7748,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
       if status == "paused" do
         assert has_element?(view, "#refresh-upstream-account-#{identity.id}[disabled]")
       else
-        refute has_element?(view, "#upstream-account-#{identity.id}")
+        assert has_element?(view, "#upstream-account-#{identity.id}")
+        refute has_element?(view, "#refresh-upstream-account-#{identity.id}")
       end
     end
   end

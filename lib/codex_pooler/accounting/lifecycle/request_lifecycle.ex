@@ -1394,7 +1394,8 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
       replay_generation: Map.get(attrs, :replay_generation, 0)
     }
 
-    ReferenceLocks.lock_and_validate!(assignment.upstream_identity_id, assignment.id)
+    %{identity: identity} = ReferenceLocks.lock_and_validate!(assignment.upstream_identity_id, assignment.id)
+    ensure_upstream_not_deleting!(identity)
 
     case Repo.insert(attempt_changes,
            on_conflict: {:replace, [:id]},
@@ -1411,6 +1412,11 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
         Repo.rollback(changeset)
     end
   end
+
+  defp ensure_upstream_not_deleting!(%{metadata: %{"permanent_deletion_requested_at" => _}}),
+    do: Repo.rollback(Metadata.accounting_error(:upstream_account_deleting, "upstream account is being deleted"))
+
+  defp ensure_upstream_not_deleting!(_identity), do: :ok
 
   # The dispatching instance owns this attempt until it settles. Recording it
   # here, before any upstream byte arrives, is what lets another replica recover

@@ -43,6 +43,7 @@ defmodule CodexPooler.Upstreams.Quota.ReadModel do
         health_status: assignment.health_status,
         upstream_identity_id: assignment.upstream_identity_id,
         upstream_label: assignment.upstream_label,
+        upstream_status: assignment.upstream_status,
         plan_family: assignment.plan_family,
         state: state,
         primary_5h: quota_window_summary(primary, as_of),
@@ -51,6 +52,13 @@ defmodule CodexPooler.Upstreams.Quota.ReadModel do
         evidence_count: length(windows)
       }
     end)
+  end
+
+  @doc "Whether a projected account still belongs to the current inventory of its Pool."
+  @spec current_account?(map()) :: boolean()
+  def current_account?(account) do
+    account.upstream_status != UpstreamIdentity.deleted_status() and
+      account.assignment_status != PoolUpstreamAssignment.deleted_status()
   end
 
   @spec summary([map()]) :: map()
@@ -94,6 +102,7 @@ defmodule CodexPooler.Upstreams.Quota.ReadModel do
           health_status: assignment.health_status,
           upstream_identity_id: identity.id,
           upstream_label: identity.account_label,
+          upstream_status: identity.status,
           plan_family: identity.plan_family
         }
     )

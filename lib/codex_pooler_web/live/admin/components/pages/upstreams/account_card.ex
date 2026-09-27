@@ -177,7 +177,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
                 limit={limit}
               />
               <SavedResetMeter.saved_reset_meter
-                :if={saved_reset_panel_available?(@saved_resets, @saved_reset_confirmation)}
+                :if={@account.identity.status != "deleted" and saved_reset_panel_available?(@saved_resets, @saved_reset_confirmation)}
                 id={"upstream-account-#{@account.identity.id}-saved-reset-meter"}
                 identity_id={@account.identity.id}
                 saved_resets={@saved_resets}
@@ -346,6 +346,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
         />
 
         <UsagePollPause.usage_poll_pause
+          :if={@account.identity.status != "deleted"}
           id_prefix={"upstream-account-#{@account.identity.id}"}
           pause={Map.get(@account, :usage_poll_pause)}
         />
@@ -624,7 +625,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
         class="btn btn-ghost btn-sm btn-square"
         tabindex="0"
         aria-label={"Actions for #{@account.label}"}
-        title={@assignment_unavailable_reason}
+        title={actions_menu_title(@account)}
       >
         <.icon name="hero-ellipsis-vertical" class="size-5" />
       </button>
@@ -632,7 +633,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
         tabindex="0"
         class="menu dropdown-content z-20 mt-2 w-60 rounded-box border border-base-300 bg-base-100 p-2 text-left shadow-xl"
       >
-        <li>
+        <li :if={@account.identity.status != "deleted"}>
           <AdminComponents.dropdown_action_item
             id={"rename-upstream-account-#{@account.identity.id}"}
             icon="hero-pencil-square"
@@ -643,7 +644,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
             title={@assignment_unavailable_reason}
           />
         </li>
-        <li>
+        <li :if={@account.identity.status != "deleted"}>
           <AdminComponents.dropdown_action_item
             id={"pause-upstream-account-#{@account.identity.id}"}
             icon="hero-pause"
@@ -655,7 +656,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
             title={@assignment_unavailable_reason}
           />
         </li>
-        <li>
+        <li :if={@account.identity.status != "deleted"}>
           <AdminComponents.dropdown_action_item
             id={"reactivate-upstream-account-#{@account.identity.id}"}
             icon="hero-play"
@@ -704,7 +705,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
             title="Assign this account to a visible Pool before creating a reinvite."
           />
         </li>
-        <li>
+        <li :if={@account.identity.status != "deleted"}>
           <AdminComponents.dropdown_action_item
             id={"refresh-upstream-account-#{@account.identity.id}"}
             icon="hero-arrow-path"
@@ -715,7 +716,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
             title={@assignment_unavailable_reason}
           />
         </li>
-        <li>
+        <li :if={@account.identity.status != "deleted"}>
           <AdminComponents.dropdown_action_item
             id={"saved-reset-policy-upstream-account-#{@account.identity.id}"}
             icon="hero-building-library-micro"
@@ -734,14 +735,30 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
             variant={:danger}
             phx-click="open_delete_account"
             phx-value-id={@account.identity.id}
-            disabled={@assignment_unavailable_reason != nil or @account.identity.status == "deleted"}
-            title={@assignment_unavailable_reason}
+            disabled={!Map.get(@account, :can_delete?, false)}
+            title={delete_unavailable_reason(@account)}
           />
         </li>
       </ul>
     </div>
     """
   end
+
+  defp delete_unavailable_reason(%{deletion_state: :in_progress}),
+    do: "Account deletion is already in progress."
+
+  defp delete_unavailable_reason(%{can_delete?: true}), do: nil
+
+  defp delete_unavailable_reason(_account),
+    do: "Remove this account from all Pools before deleting it."
+
+  defp actions_menu_title(%{identity: %{status: "deleted"}} = account),
+    do: delete_unavailable_reason(account)
+
+  defp actions_menu_title(%{can_delete?: true}), do: nil
+
+  defp actions_menu_title(account),
+    do: UpstreamAccountActions.assignment_unavailable_reason(account.assignments)
 
   attr :account, :map, required: true
   attr :account_index, :integer, required: true
@@ -959,6 +976,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
     do: "Workspace reference " <> ref
 
   defp workspace_context_title(_account), do: nil
+
+  defp account_status_label(%{deletion_state: :in_progress}), do: "Deletion in progress"
+  defp account_status_label(%{deletion_state: :failed}), do: "Deletion failed - retry Delete"
 
   defp account_status_label(%{identity: %{status: status}}) when is_binary(status) do
     status

@@ -1153,9 +1153,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
 
     reason = "Assign this account to a Pool before using account actions."
 
-    for action <- [:rename, :pause, :reactivate, :refresh_token, :delete] do
+    for action <- [:rename, :pause, :reactivate, :refresh_token] do
       assert %{available?: false, reason: ^reason} = Map.fetch!(cockpit.actions, action)
     end
+
+    assert %{available?: true, reason: nil} = cockpit.actions.delete
   end
 
   test "size-one account load issues one authorized circuit query with constant reads", %{
@@ -1231,7 +1233,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
 
         assert length(assigned_accounts) == size
         assert MapSet.new(assigned_accounts, & &1.identity.id) == expected_identity_ids
-        assert source_count(query_events, "pool_upstream_assignments") == 1
+        # The second batched read checks deletion against every retained Pool assignment.
+        assert source_count(query_events, "pool_upstream_assignments") == 2
         assert source_count(query_events, "models") == 1
         assert source_count(query_events, "ledger_entries") == 2
 

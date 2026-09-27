@@ -13,11 +13,13 @@ defmodule CodexPooler.Jobs.DeletionFailureNotifier do
 
   alias CodexPooler.Access
   alias CodexPooler.Pools
+  alias CodexPooler.Upstreams
 
   @handler_id {__MODULE__, :deletion_failure}
   @events [[:oban, :job, :exception], [:oban, :job, :stop]]
   @pool_worker "CodexPooler.Jobs.PoolDeletionWorker"
   @api_key_worker "CodexPooler.Jobs.APIKeyDeletionWorker"
+  @upstream_worker "CodexPooler.Jobs.UpstreamDeletionWorker"
 
   @spec attach() :: :ok
   def attach do
@@ -39,6 +41,9 @@ defmodule CodexPooler.Jobs.DeletionFailureNotifier do
 
   defp notify(%{worker: @api_key_worker, args: %{"api_key_id" => api_key_id}}) when is_binary(api_key_id),
     do: safely(fn -> Access.broadcast_api_key_deletion_failed(api_key_id) end)
+
+  defp notify(%{worker: @upstream_worker, args: %{"upstream_identity_id" => identity_id}}) when is_binary(identity_id),
+    do: safely(fn -> Upstreams.broadcast_account_deletion_failed(identity_id) end)
 
   defp notify(_job), do: :ok
 

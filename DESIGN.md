@@ -707,7 +707,13 @@ ownership, accessibility, and a minimal real markup example.
 </AdminComponents.admin_surface>
 ```
 
+### Traffic distribution
+
+Traffic distribution keeps current assigned accounts visible at zero usage. Deleted accounts and accounts removed from the selected Pools appear only when the selected period contains their accounting history. Their existing account heading, title, and traffic-share accessibility label append `(deleted)` or `(removed from selected Pools)`; retain the same typography, truncation, rails, and density, without status badges or links to unavailable account detail pages.
+
 ### Upstream account card
+
+The existing Delete action is permanent and becomes available only after every Pool assignment has been removed, including disabled assignments. Disabled Delete explains this prerequisite without exposing hidden Pool names. Legacy deleted accounts appear in Any status and the Deleted filter; their list menu contains only Delete, and their cockpit keeps other actions unavailable. Deletion in progress and Deletion failed use the existing written status treatment. Reuse the typed-account-label confirmation dialog, explicitly naming permanent removal and retained shared request accounting; do not add a separate purge action.
 
 - **Source:** `account_card/1` in
   [`account_card.ex`](lib/codex_pooler_web/live/admin/components/pages/upstreams/account_card.ex)

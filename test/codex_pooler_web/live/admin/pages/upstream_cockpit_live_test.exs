@@ -2743,7 +2743,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert cockpit.header.disabled? == true
     assert cockpit.actions.pause.available? == false
     assert cockpit.actions.refresh_token.available? == false
-    assert cockpit.actions.delete.available? == true
+    assert cockpit.actions.delete.available? == false
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
     assert has_element?(view, "#upstream-cockpit-header", "Disabled Codex")
@@ -5629,7 +5629,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     request_body_secret = runtime_secret("cockpit-actions-request-body")
     idempotency_key = runtime_secret("cockpit-actions-idempotency")
 
-    %{identity: identity} =
+    %{identity: identity, assignment: assignment} =
       upstream_assignment_fixture(pool, %{
         account_label: "Action Target Codex",
         chatgpt_account_id: raw_stored_account_id,
@@ -5756,6 +5756,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
       refute inspect(Repo.all(Oban.Job)) =~ forbidden
     end
 
+    assert {:ok, _result} = PoolAssignments.delete_pool_assignment(pool, assignment)
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
     view |> element("#cockpit-delete-upstream-account-#{identity.id}") |> render_click()
     assert has_element?(view, "#cockpit-delete-upstream-account-dialog[open]")
     assert_admin_dialog_docs_link(view, "cockpit-delete-upstream-account-dialog-footer")
@@ -5770,7 +5772,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     })
 
     assert_redirect(view, ~p"/admin/upstreams")
-    assert Repo.get!(UpstreamIdentity, identity.id).status == "deleted"
+    refute Repo.get(UpstreamIdentity, identity.id)
   end
 
   @tag :cockpit_actions_error
@@ -5859,6 +5861,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     view |> element("#auth-json-import-cancel") |> render_click()
     refute has_element?(view, "#auth-json-import-dialog")
 
+    [assignment] = Upstreams.list_pool_assignments(pool)
+    assert {:ok, _result} = PoolAssignments.delete_pool_assignment(pool, assignment)
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
     view |> element("#cockpit-delete-upstream-account-#{identity.id}") |> render_click()
     assert has_element?(view, "#cockpit-delete-upstream-account-dialog[open]")
 

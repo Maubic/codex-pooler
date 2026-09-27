@@ -84,6 +84,27 @@ defmodule CodexPooler.Upstreams.ReadContractTest do
     assert Upstreams.list_visible_upstream_identities(scope) == [unassigned, assigned]
   end
 
+  test "deleted inventory opt-in respects historical Pool scope without restoring detached active access" do
+    %{user: owner} = bootstrap_owner_fixture(%{"email" => unique_user_email()})
+    %{user: admin} = operator_fixture(owner)
+    pool = pool_fixture()
+    hidden_pool = pool_fixture()
+    operator_pool_assignment_fixture(admin, pool)
+    %{identity: legacy} = upstream_assignment_fixture(pool, %{identity_status: "deleted", assignment_status: "deleted"})
+    %{identity: detached} = upstream_assignment_fixture(pool, %{assignment_status: "deleted"})
+    %{identity: hidden} = upstream_assignment_fixture(hidden_pool, %{identity_status: "deleted", assignment_status: "deleted"})
+    orphan = upstream_identity_fixture(%{status: "deleted"})
+    admin_scope = Scope.for_user(admin)
+    owner_scope = Scope.for_user(owner)
+
+    assert Upstreams.list_visible_upstream_identities(admin_scope) == []
+    assert [^legacy] = Upstreams.list_visible_upstream_identities(admin_scope, include_deleted: true)
+    assert [^legacy] = Upstreams.list_visible_upstream_identities(owner_scope, include_deleted: true, include_unassigned: false, pool_ids: [pool.id])
+    owner_ids = owner_scope |> Upstreams.list_visible_upstream_identities(include_deleted: true) |> MapSet.new(& &1.id)
+    assert owner_ids == MapSet.new([legacy.id, detached.id, hidden.id, orphan.id])
+    assert Upstreams.get_visible_upstream_identity(admin_scope, legacy.id) == nil
+  end
+
   test "revoked membership cannot reuse a cached owner role to list identities" do
     %{user: owner} = bootstrap_owner_fixture(%{"email" => unique_user_email()})
     scope = Scope.for_user(owner)

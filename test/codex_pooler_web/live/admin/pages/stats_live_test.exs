@@ -13,6 +13,8 @@ defmodule CodexPoolerWeb.Admin.StatsLiveTest do
   alias CodexPooler.Jobs
   alias CodexPooler.Pools
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams
+  alias CodexPooler.Upstreams.Assignments.PoolAssignments
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
   alias CodexPoolerWeb.Admin.StatsPresentation
   alias CodexPoolerWeb.Admin.StatsPresentation.Charts, as: StatsCharts
@@ -1916,6 +1918,32 @@ defmodule CodexPoolerWeb.Admin.StatsLiveTest do
       assert has_element?(view, "#stats-time-filter[value='1h']")
       assert has_element?(view, "#stats-kpi-tokens", "21")
       refute has_element?(view, "#stats-traffic-chart", "100 tokens")
+    end
+
+    test "traffic distribution identifies deleted history and omits unused deleted accounts", %{conn: conn, scope: scope} do
+      {:ok, pool} = Pools.create_pool(scope, %{slug: "stats-deleted-history", name: "History Pool"})
+      %{identity: deleted} = stats_usage_fixture(pool, %{total_tokens: 40, correlation_id: "stats-deleted-history"})
+      %{identity: removed, assignment: removed_assignment} = stats_usage_fixture(pool, %{total_tokens: 60, correlation_id: "stats-removed-history"})
+      %{identity: unused} = upstream_assignment_fixture(pool, %{account_label: "Unused deleted account"})
+      upstream_assignment_fixture(pool, %{account_label: "Current idle account"})
+
+      assert {:ok, _} = Upstreams.rename_account_for_scope(scope, deleted, %{account_label: "Deleted account"})
+      assert {:ok, _} = Upstreams.rename_account_for_scope(scope, removed, %{account_label: "Removed account"})
+      assert {:ok, _} = Upstreams.soft_delete_account_for_scope(scope, deleted, %{})
+      assert {:ok, _} = Upstreams.soft_delete_account_for_scope(scope, unused, %{})
+      assert {:ok, _} = PoolAssignments.delete_pool_assignment(pool, removed_assignment)
+
+      {:ok, view, _html} = live_stats(conn, ~p"/admin/stats?pool_id=#{pool.id}")
+
+      assert has_element?(view, "#stats-upstream-surface h3", "Deleted account (deleted)")
+      assert has_element?(view, "#stats-upstream-surface h3", "Removed account (removed from selected Pools)")
+      assert has_element?(view, "#stats-upstream-surface h3", "Current idle account")
+      refute has_element?(view, "#stats-upstream-surface", "Unused deleted account")
+      assert has_element?(view, "#stats-upstream-lane-1 [data-role='upstream-tokens']", "60")
+      assert has_element?(view, "#stats-upstream-lane-2 [data-role='upstream-tokens']", "40")
+      assert has_element?(view, "#stats-upstream-lane-1 [data-role='upstream-traffic-share']", "50.0%")
+      assert has_element?(view, "#stats-upstream-lane-2 [data-role='upstream-traffic-share']", "50.0%")
+      assert has_element?(view, "#stats-kpi-tokens", "100")
     end
 
     test "empty selected period shows operational no-data copy without fake trends", %{

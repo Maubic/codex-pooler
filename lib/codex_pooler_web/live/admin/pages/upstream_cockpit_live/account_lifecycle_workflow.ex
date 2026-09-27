@@ -127,23 +127,36 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive.AccountLifecycleWorkflow do
   def confirm_delete(socket, delete_params, success_fun) do
     case validate_delete_confirmation(socket.assigns.deleting_account, delete_params) do
       :ok ->
-        identity_id = socket.assigns.cockpit.identity.id
-
-        case Upstreams.soft_delete_account_for_scope(socket.assigns.current_scope, identity_id, %{
-               reason: @reason
-             }) do
-          {:ok, _result} ->
-            socket
-            |> put_flash(:info, "Upstream account deleted")
-            |> close_delete()
-            |> success_fun.()
-
-          {:error, reason} ->
-            put_flash(socket, :error, error_message(reason))
-        end
+        delete_account(socket, delete_params, success_fun)
 
       {:error, form} ->
         assign(socket, :delete_account_form, form)
+    end
+  end
+
+  defp delete_account(socket, delete_params, success_fun) do
+    identity_id = socket.assigns.cockpit.identity.id
+
+    case Upstreams.delete_account_for_scope(socket.assigns.current_scope, identity_id, %{
+           reason: @reason,
+           confirmation_label: delete_params["confirmation_label"]
+         }) do
+      {status, _result} when status in [:ok, :deleting] ->
+        message = if status == :ok, do: "Upstream account deleted", else: "Upstream account deletion queued"
+
+        socket
+        |> put_flash(:info, message)
+        |> close_delete()
+        |> success_fun.()
+
+      {:error, %{code: code} = reason} when code in [:not_found, :upstream_identity_not_found] ->
+        socket
+        |> put_flash(:error, error_message(reason))
+        |> close_delete()
+        |> success_fun.()
+
+      {:error, reason} ->
+        put_flash(socket, :error, error_message(reason))
     end
   end
 

@@ -21,7 +21,7 @@ defmodule CodexPooler.Upstreams do
     TokenRefreshEnqueue
   }
 
-  alias CodexPooler.Upstreams.Lifecycle.{AccountLifecycle, IdentityLifecycle}
+  alias CodexPooler.Upstreams.Lifecycle.{AccountDeletion, AccountLifecycle, IdentityLifecycle}
   alias CodexPooler.Upstreams.Reconciliation.UsagePollCooldown
 
   alias CodexPooler.Upstreams.Schemas.{
@@ -113,22 +113,29 @@ defmodule CodexPooler.Upstreams do
 
     pool_ids = Enum.filter(visible_pool_ids, &(&1 in selected_pool_ids))
     include_unassigned? = Keyword.get(opts, :include_unassigned, true) and Pools.owner?(scope)
+    include_deleted? = Keyword.get(opts, :include_deleted, false) == true
 
     from identity in UpstreamIdentity,
       left_join: assignment in PoolUpstreamAssignment,
       on:
         assignment.upstream_identity_id == identity.id and
-          assignment.status != ^@assignment_deleted,
-      where:
-        assignment.pool_id in ^pool_ids or
-          (^include_unassigned? and is_nil(assignment.id)),
-      where: identity.status != ^@deleted,
+          (assignment.status != ^@assignment_deleted or
+             (^include_deleted? and identity.status == ^@deleted)),
+      where: ^upstream_visibility_filter(pool_ids, include_unassigned?, include_deleted?),
       distinct: true,
       order_by: [
         asc: identity.account_label,
         asc: identity.chatgpt_account_id,
         asc: identity.created_at
       ]
+  end
+
+  defp upstream_visibility_filter(pool_ids, include_unassigned?, include_deleted?) do
+    dynamic(
+      [identity, assignment],
+      (assignment.pool_id in ^pool_ids or (^include_unassigned? and is_nil(assignment.id))) and
+        (identity.status != ^@deleted or ^include_deleted?)
+    )
   end
 
   @spec get_upstream_identity(term()) :: UpstreamIdentity.t() | nil
@@ -224,6 +231,24 @@ defmodule CodexPooler.Upstreams do
   @spec soft_delete_account_for_scope(Scope.t(), identity_ref(), map()) ::
           lifecycle_result()
   defdelegate soft_delete_account_for_scope(scope, identity_or_id, attrs), to: AccountLifecycle
+
+  @spec delete_account_for_scope(Scope.t(), identity_ref(), map()) :: AccountDeletion.request_result()
+  defdelegate delete_account_for_scope(scope, identity_or_id, attrs \\ %{}), to: AccountDeletion, as: :request
+
+  @spec authorize_account_deletion(Scope.t(), identity_ref()) :: identity_result()
+  defdelegate authorize_account_deletion(scope, identity_or_id), to: AccountDeletion, as: :authorize
+
+  @spec account_deletion_permissions(Scope.t(), [Ecto.UUID.t()]) :: %{Ecto.UUID.t() => boolean()}
+  defdelegate account_deletion_permissions(scope, identity_ids), to: AccountDeletion, as: :permissions
+
+  @spec account_deletion_states([Ecto.UUID.t()]) :: %{Ecto.UUID.t() => AccountDeletion.state()}
+  defdelegate account_deletion_states(identity_ids), to: AccountDeletion, as: :states
+
+  @spec continue_account_deletion(Ecto.UUID.t(), Ecto.UUID.t() | nil, integer()) :: AccountDeletion.continue_result()
+  defdelegate continue_account_deletion(identity_id, requested_by_user_id, deadline), to: AccountDeletion, as: :continue
+
+  @spec broadcast_account_deletion_failed(Ecto.UUID.t()) :: :ok
+  defdelegate broadcast_account_deletion_failed(identity_id), to: AccountDeletion, as: :broadcast_failed
 
   @doc """
   The provider-requested usage polling pauses still running for the provider

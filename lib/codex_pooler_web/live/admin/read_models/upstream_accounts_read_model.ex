@@ -100,6 +100,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
   @type account_snapshot :: %{
           required(:identity) => UpstreamIdentity.t(),
           required(:label) => String.t(),
+          required(:can_delete?) => boolean(),
+          required(:deletion_state) => :in_progress | :failed | nil,
           required(:workspace_ref) => String.t(),
           required(:workspace_label) => String.t() | nil,
           required(:subject_ref) => String.t() | nil,
@@ -184,6 +186,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       scope
       |> Upstreams.list_visible_upstream_identities(
         pool_ids: Enum.map(pools, & &1.id),
+        include_deleted: true,
         include_unassigned: Map.get(filters, "pool_id") in [nil, ""]
       )
       |> narrow_to_identity(identity_id)
@@ -201,6 +204,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       attach_assignment_circuit_readiness(assignments, circuit_readiness_by_assignment_id)
 
     token_burns = TokenBurnProjection.summaries(identities)
+    identity_ids = Enum.map(identities, & &1.id)
+    deletion_permissions = Upstreams.account_deletion_permissions(scope, identity_ids)
+    deletion_states = Upstreams.account_deletion_states(identity_ids)
 
     snapshot_at = DateTime.utc_now()
 
@@ -210,15 +216,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       |> RoutingQuotaSnapshot.load_by_identity_ids(snapshot_at)
 
     identities
-    |> Enum.map(
-      &account_snapshot(
-        &1,
-        assignments,
-        token_burns,
-        datetime_preferences,
-        Map.fetch!(quota_snapshots, &1.id)
-      )
-    )
+    |> Enum.map(fn identity ->
+      deletion_state = Map.get(deletion_states, identity.id)
+
+      identity
+      |> account_snapshot(assignments, token_burns, datetime_preferences, Map.fetch!(quota_snapshots, identity.id))
+      |> Map.put(:deletion_state, deletion_state)
+      |> Map.put(:can_delete?, Map.get(deletion_permissions, identity.id, false) and deletion_state != :in_progress)
+    end)
     |> Filter.apply(filters)
   end
 

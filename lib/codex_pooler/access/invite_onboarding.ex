@@ -121,7 +121,8 @@ defmodule CodexPooler.Access.InviteOnboarding do
   defp pending_account?(_identity, _assignment, _invite), do: false
 
   defp refresh_pending_account(identity, assignment, invite, label, method) do
-    with {:ok, %{identity: identity, assignment: assignment}} <-
+    with {:ok, identity, assignment} <- lock_refreshable_pending_account(identity, assignment, invite),
+         {:ok, %{identity: identity, assignment: assignment}} <-
            InternalLifecycle.update_pending_pool_account(
              identity,
              assignment,
@@ -135,6 +136,23 @@ defmodule CodexPooler.Access.InviteOnboarding do
              }
            ) do
       {:ok, identity, assignment}
+    end
+  end
+
+  defp lock_refreshable_pending_account(identity, assignment, invite) do
+    locked = IdentitySlotLock.lock_identity_rows!([identity.id])
+    identity = Enum.find(locked.identities, &(&1.id == identity.id))
+    assignment = Enum.find(locked.assignments, &(&1.id == assignment.id))
+
+    cond do
+      match?(%UpstreamIdentity{metadata: %{"permanent_deletion_requested_at" => _}}, identity) ->
+        {:error, %{code: :upstream_account_deleting, message: "upstream account is being deleted"}}
+
+      pending_account?(identity, assignment, invite) ->
+        {:ok, identity, assignment}
+
+      true ->
+        {:error, %{code: :upstream_identity_not_found, message: "pending upstream account was not found"}}
     end
   end
 

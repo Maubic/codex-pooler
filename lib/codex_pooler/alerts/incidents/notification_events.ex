@@ -35,7 +35,7 @@ defmodule CodexPooler.Alerts.Incidents.NotificationEvents do
   @type broadcast_result :: :ok | {:error, term()}
   @type invalidation_id :: String.t()
   @type invalidation_message :: {module(), :invalidated, invalidation_id()}
-  @type cascade_owner :: {:rule | :pool, Ecto.UUID.t()}
+  @type cascade_owner :: {:rule | :pool | :upstream_identity, Ecto.UUID.t()}
 
   @spec subscribe_pool(Ecto.UUID.t()) :: :ok | {:error, term()}
   def subscribe_pool(pool_id) when is_binary(pool_id) do
@@ -82,7 +82,7 @@ defmodule CodexPooler.Alerts.Incidents.NotificationEvents do
   """
   @spec invalidate_after_cascade(cascade_owner(), (-> {:ok, result} | {:error, reason})) :: {:ok, result} | {:error, reason}
         when result: term(), reason: term()
-  def invalidate_after_cascade({owner, owner_id} = cascade_owner, delete) when owner in [:rule, :pool] and is_binary(owner_id) do
+  def invalidate_after_cascade({owner, owner_id} = cascade_owner, delete) when owner in [:rule, :pool, :upstream_identity] and is_binary(owner_id) do
     pool_ids = cascade_impacted_pool_ids(cascade_owner)
 
     case delete.() do
@@ -202,6 +202,13 @@ defmodule CodexPooler.Alerts.Incidents.NotificationEvents do
         distinct: true,
         select: target.pool_id
     )
+  end
+
+  defp cascaded_incident_ids({:upstream_identity, identity_id}) do
+    from incident in AlertIncident,
+      where: incident.upstream_identity_id == ^identity_id,
+      where: incident.state in ^[AlertIncident.open_state(), AlertIncident.acknowledged_state()],
+      select: incident.id
   end
 
   defp cascaded_incident_ids({owner, owner_id}) do

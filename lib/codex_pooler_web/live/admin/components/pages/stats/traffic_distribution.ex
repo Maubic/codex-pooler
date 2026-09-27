@@ -115,7 +115,15 @@ defmodule CodexPoolerWeb.Admin.StatsPresentation.TrafficDistribution do
   defp description(scope_label, window_label),
     do: "Share of accounted requests across #{scope_label} in the #{String.downcase(window_label)}."
 
-  defp upstream_label(row), do: UpstreamNaming.account_name(%{account_label: row.upstream_label})
+  defp upstream_label(row) do
+    label = UpstreamNaming.account_name(%{account_label: row.upstream_label})
+
+    case row.lifecycle_state do
+      :current -> label
+      :deleted -> "#{label} (deleted)"
+      :removed -> "#{label} (removed from selected Pools)"
+    end
+  end
 
   defp format_share(value), do: "#{format_share_value(value)}%"
 
