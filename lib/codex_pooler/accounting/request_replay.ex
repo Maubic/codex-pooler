@@ -297,11 +297,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
       Enum.find(ledger, &(&1.source_event_id == "request:#{reference.request_id}:reservation")) ||
         Repo.rollback(:ineligible)
 
-    %{assignment: assignment} =
-      ReferenceLocks.lock_and_validate!(
-        attempt.upstream_identity_id,
-        attempt.pool_upstream_assignment_id
-      )
+    %{assignment: assignment} = lock_replay_references!(attempt)
 
     now = db_now()
 
@@ -483,11 +479,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
     existing = lock_entitlement(input.request_id)
     _ledger = lock_ledger!(input.request_id)
 
-    %{assignment: assignment} =
-      ReferenceLocks.lock_and_validate!(
-        attempt.upstream_identity_id,
-        attempt.pool_upstream_assignment_id
-      )
+    %{assignment: assignment} = lock_replay_references!(attempt)
 
     if existing, do: Repo.rollback(:already_armed)
 
@@ -603,10 +595,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
            assignment: %PoolUpstreamAssignment{} = assignment,
            identity: %UpstreamIdentity{} = identity
          } <-
-           ReferenceLocks.lock_and_validate!(
-             attempt.upstream_identity_id,
-             attempt.pool_upstream_assignment_id
-           ),
+           lock_replay_references!(attempt),
          :ok <- validate_upstream_not_deleting(identity),
          :ok <-
            authorize_exact_assignment(
@@ -648,6 +637,13 @@ defmodule CodexPooler.Accounting.RequestReplay do
       {:error, reason} -> Repo.rollback(reason)
       nil -> Repo.rollback(:ineligible)
       false -> Repo.rollback(:ineligible)
+    end
+  end
+
+  defp lock_replay_references!(attempt) do
+    case ReferenceLocks.lock_and_validate!(attempt.upstream_identity_id, attempt.pool_upstream_assignment_id) do
+      %{assignment: %PoolUpstreamAssignment{}, identity: %UpstreamIdentity{}} = references -> references
+      %{assignment: nil, identity: nil} -> Repo.rollback(:ineligible)
     end
   end
 

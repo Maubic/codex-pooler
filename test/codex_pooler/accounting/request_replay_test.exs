@@ -513,6 +513,44 @@ defmodule CodexPooler.Accounting.RequestReplayTest do
   end
 
   @tag :replay_lifecycle
+  test "consume refuses an eligible attempt whose upstream references were detached" do
+    fixture = replay_fixture(owner?: true, reservation?: true)
+    assert {:ok, armed} = RequestReplay.arm(arm_input(fixture))
+
+    fixture.attempt
+    |> Ecto.Changeset.change(%{upstream_identity_id: nil, pool_upstream_assignment_id: nil})
+    |> Repo.update!()
+
+    assert {:error, :ineligible} =
+             RequestReplay.consume(consume_input(fixture, armed, :crypto.strong_rand_bytes(32)))
+
+    assert Repo.aggregate(Attempt, :count) == 1
+    assert Repo.aggregate(LedgerEntry, :count) == 1
+    assert Repo.get!(RequestReplayEntitlement, armed.entitlement_id).status == "armed"
+  end
+
+  @tag :replay_lifecycle
+  test "arm refuses an attempt whose upstream references were detached" do
+    fixture = replay_fixture(owner?: true, reservation?: true)
+    fixture.attempt |> Ecto.Changeset.change(%{upstream_identity_id: nil, pool_upstream_assignment_id: nil}) |> Repo.update!()
+
+    assert {:error, :ineligible} = RequestReplay.arm(arm_input(fixture))
+    assert Repo.aggregate(RequestReplayEntitlement, :count) == 0
+    assert Repo.aggregate(Attempt, :count) == 1
+  end
+
+  @tag :replay_lifecycle
+  test "dispatch refuses a consumed attempt whose upstream references were detached" do
+    fixture = replay_fixture(owner?: true, reservation?: true)
+    assert {:ok, armed} = RequestReplay.arm(arm_input(fixture))
+    assert {:ok, consumed} = RequestReplay.consume(consume_input(fixture, armed, :crypto.strong_rand_bytes(32)))
+    consumed.attempt |> Ecto.Changeset.change(%{upstream_identity_id: nil, pool_upstream_assignment_id: nil}) |> Repo.update!()
+
+    assert {:error, :ineligible} = RequestReplay.dispatch_lifecycle(consumed.consume_binding)
+    assert Repo.aggregate(Attempt, :count) == 2
+  end
+
+  @tag :replay_lifecycle
   test "consume persists each valid owner reserve timeout unchanged" do
     for reserve_timeout_ms <- [1_000, 23_417, 60_000] do
       fixture = replay_fixture(owner?: true, reservation?: true)
