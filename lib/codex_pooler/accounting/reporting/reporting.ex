@@ -645,7 +645,7 @@ defmodule CodexPooler.Accounting.Reporting do
       FROM requested_dates AS requested
       LEFT JOIN daily_rollup_coverages AS coverage
         ON coverage.rollup_date = requested.rollup_date
-       AND coverage.contract_version = 2
+       AND coverage.contract_version = $3
        AND coverage.completed_at IS NOT NULL
     ),
     covered_rows AS (
@@ -686,7 +686,7 @@ defmodule CodexPooler.Accounting.Reporting do
 
     dumped_pool_ids = Enum.map(pool_ids, &Ecto.UUID.dump!/1)
 
-    case Repo.query(sql, [dumped_pool_ids, dates], telemetry_options: [reporting_projection: :covered_pool_daily_usage_snapshot]) do
+    case Repo.query(sql, [dumped_pool_ids, dates, DailyRollupCoverage.contract_version()], telemetry_options: [reporting_projection: :covered_pool_daily_usage_snapshot]) do
       {:ok, %{rows: [[false | _rest]]}} ->
         {:fallback, :incomplete_coverage}
 

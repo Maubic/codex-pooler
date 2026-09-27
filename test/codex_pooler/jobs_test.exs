@@ -596,8 +596,8 @@ defmodule CodexPooler.JobsTest do
       assert rollup.total_tokens == 17
     end
 
-    test "returns a tagged error for non-binary rollup dates" do
-      assert {:error, :invalid_rollup_date} =
+    test "cancels non-binary rollup dates" do
+      assert {:cancel, :invalid_rollup_date} =
                perform_job(DailyRollupRebuildWorker, %{"rollup_date" => nil})
     end
   end

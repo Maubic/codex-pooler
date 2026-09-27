@@ -630,7 +630,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
 
   defp audit_recent_event_rows(nil, identity_id) do
     nil
-    |> Audit.list_events(limit: @recent_event_prefetch_limit, filters: [target: identity_id])
+    |> Audit.list_events(limit: @recent_event_prefetch_limit, count_limit: @recent_event_prefetch_limit, filters: [target: identity_id])
     |> Map.fetch!(:items)
   end
 
@@ -638,6 +638,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
     scope
     |> Audit.list_events_for_scope(
       limit: @recent_event_prefetch_limit,
+      count_limit: @recent_event_prefetch_limit,
       filters: [target: identity_id]
     )
     |> Map.fetch!(:items)

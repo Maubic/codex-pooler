@@ -608,7 +608,7 @@ defmodule CodexPooler.Accounting.Rollups do
       flush_rebuild_projection_mutations!()
       set_rebuild_suppression!(false)
       before_coverage.()
-      publish_coverage!(date, now, captured_version)
+      publish_coverage!(date, captured_version)
 
       settlement_count
     end)
@@ -1023,7 +1023,7 @@ defmodule CodexPooler.Accounting.Rollups do
     Repo.query!("SET CONSTRAINTS daily_rollups_track_pool_daily_rollup_mutation DEFERRED")
   end
 
-  defp publish_coverage!(date, completed_at, captured_version) do
+  defp publish_coverage!(date, captured_version) do
     Repo.query!(
       """
       INSERT INTO public.daily_rollup_coverages (
@@ -1034,15 +1034,15 @@ defmodule CodexPooler.Accounting.Rollups do
         created_at,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $3, $3)
+      VALUES ($1, $2, clock_timestamp() AT TIME ZONE 'UTC', $3, clock_timestamp() AT TIME ZONE 'UTC', clock_timestamp() AT TIME ZONE 'UTC')
       ON CONFLICT (rollup_date) DO UPDATE SET
         contract_version = EXCLUDED.contract_version,
         completed_at = EXCLUDED.completed_at,
         updated_at = EXCLUDED.updated_at
-      WHERE public.daily_rollup_coverages.mutation_version = $4
+      WHERE public.daily_rollup_coverages.mutation_version = $3
       RETURNING mutation_version
       """,
-      [date, DailyRollupCoverage.contract_version(), completed_at, captured_version]
+      [date, DailyRollupCoverage.contract_version(), captured_version]
     )
 
     :ok
