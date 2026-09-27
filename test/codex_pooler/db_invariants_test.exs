@@ -290,28 +290,40 @@ defmodule CodexPooler.DBInvariantsTest do
     assert count_rows("ledger_entries", ledger_entry_id) == 0
   end
 
-  test "database cascades assignment deletion to attempts and codex sessions while nulling ledger entries" do
-    fixture = create_execution_fixture!("assignment-cascade")
+  test "database preserves execution history while nulling deleted assignment references" do
+    fixture = create_execution_fixture!("assignment-retention")
 
     attempt_id = create_attempt!(fixture)
-    create_codex_session!(fixture.pool_id, fixture.assignment_id)
+    other_session_id = create_codex_session!(fixture.pool_id, fixture.assignment_id)
 
     ledger_entry_id =
-      create_ledger_entry!(fixture, nil, %{
-        entry_kind: "reservation",
-        source_event_id: "assignment-cascade:reservation"
+      create_ledger_entry!(fixture, attempt_id, %{
+        entry_kind: "settlement",
+        source_event_id: "assignment-retention:settlement"
       })
 
     Repo.query!("DELETE FROM pool_upstream_assignments WHERE id = $1", [fixture.assignment_id])
 
-    assert count_rows("attempts", attempt_id) == 0
-    assert count_rows("codex_sessions", fixture.codex_session_id) == 0
+    assert count_rows("pool_upstream_assignments", fixture.assignment_id) == 0
+    assert count_rows("upstream_identities", fixture.upstream_identity_id) == 1
+    assert count_rows("requests", fixture.request_id) == 1
 
-    assert [[nil]] =
-             Repo.query!(
-               "SELECT pool_upstream_assignment_id FROM ledger_entries WHERE id = $1",
-               [ledger_entry_id]
-             ).rows
+    assert Repo.query!(
+             "SELECT pool_upstream_assignment_id, upstream_identity_id, request_id FROM attempts WHERE id = $1",
+             [attempt_id]
+           ).rows == [[nil, fixture.upstream_identity_id, fixture.request_id]]
+
+    for session_id <- [fixture.codex_session_id, other_session_id] do
+      assert Repo.query!(
+               "SELECT pool_upstream_assignment_id, pool_id FROM codex_sessions WHERE id = $1",
+               [session_id]
+             ).rows == [[nil, fixture.pool_id]]
+    end
+
+    assert Repo.query!(
+             "SELECT pool_upstream_assignment_id, upstream_identity_id, attempt_id, request_id, total_tokens FROM ledger_entries WHERE id = $1",
+             [ledger_entry_id]
+           ).rows == [[nil, fixture.upstream_identity_id, attempt_id, fixture.request_id, 10]]
   end
 
   test "database preserves composite final-attempt ownership for Codex turns" do

@@ -583,9 +583,11 @@ defmodule CodexPooler.SchemaContractTest do
   test "preserves final foreign key actions including cascades and set-null behavior" do
     assert fk_action("sessions_user_id_fkey") == {"c", "a"}
     assert fk_action("api_keys_pool_id_fkey") == {"c", "a"}
-    assert fk_action("attempts_pool_upstream_assignment_id_fkey") == {"c", "a"}
+    assert fk_action("attempts_pool_upstream_assignment_id_fkey") == {"n", "a"}
     assert fk_action("attempts_upstream_identity_id_fkey") == {"n", "a"}
-    assert fk_action("codex_sessions_pool_upstream_assignment_id_fkey") == {"c", "a"}
+    assert fk_action("codex_sessions_pool_upstream_assignment_id_fkey") == {"n", "a"}
+    assert table_columns("attempts")["pool_upstream_assignment_id"] == {"uuid", "YES"}
+    assert table_columns("codex_sessions")["pool_upstream_assignment_id"] == {"uuid", "YES"}
     assert fk_action("ledger_entries_pool_upstream_assignment_id_fkey") == {"n", "a"}
     assert fk_action("ledger_entries_upstream_identity_id_fkey") == {"n", "a"}
     assert fk_action("request_log_facts_request_id_fkey") == {"c", "a"}
