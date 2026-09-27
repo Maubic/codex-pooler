@@ -101,7 +101,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLive do
   end
 
   def handle_event("open_create_api_key", _params, socket) do
-    params = ApiKeyPolicyForm.empty_params(socket.assigns.pools)
+    params = ApiKeyPolicyForm.empty_params(socket.assigns.pools, operator_timezone(socket))
 
     {:noreply,
      socket
@@ -123,7 +123,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLive do
   def handle_event("edit_api_key", %{"id" => api_key_id}, socket) do
     case Access.get_api_key_with_policy(socket.assigns.current_scope, api_key_id) do
       {:ok, %{api_key: %APIKey{} = api_key, policy_bindings: policy_bindings}} ->
-        params = ApiKeyPolicyForm.params_for(api_key, policy_bindings)
+        params = ApiKeyPolicyForm.params_for(api_key, policy_bindings, operator_timezone(socket))
 
         {:noreply,
          socket
@@ -178,7 +178,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLive do
            created_secret: nil,
            api_key_wizard_step: "basics"
          )
-         |> assign_api_key_wizard_state(ApiKeyPolicyForm.empty_params(socket.assigns.pools))
+         |> assign_api_key_wizard_state(ApiKeyPolicyForm.empty_params(socket.assigns.pools, operator_timezone(socket)))
          |> assign(:delete_form, Support.api_key_delete_form(api_key))
          |> update(:delete_form_version, &(&1 + 1))}
     end
@@ -537,7 +537,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLive do
   end
 
   defp close_edit_dialog(socket) do
-    params = ApiKeyPolicyForm.empty_params(socket.assigns.pools)
+    params = ApiKeyPolicyForm.empty_params(socket.assigns.pools, operator_timezone(socket))
 
     socket
     |> cancel_api_key_budget_usage()
@@ -551,7 +551,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLive do
   end
 
   defp close_create_dialog(socket) do
-    params = ApiKeyPolicyForm.empty_params(socket.assigns.pools)
+    params = ApiKeyPolicyForm.empty_params(socket.assigns.pools, operator_timezone(socket))
 
     assign(socket,
       creating_api_key: false,
@@ -642,7 +642,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLive do
 
   defp maybe_reset_form(socket, opts, pools) do
     if Keyword.get(opts, :reset_form, false) or is_nil(socket.assigns.api_key_form) do
-      params = ApiKeyPolicyForm.empty_params(pools)
+      params = ApiKeyPolicyForm.empty_params(pools, operator_timezone(socket))
 
       assign(socket,
         api_key_params: params,
@@ -657,7 +657,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLive do
   defp assign_api_key_wizard_state(socket) do
     assign_api_key_wizard_state(
       socket,
-      socket.assigns.api_key_params || ApiKeyPolicyForm.empty_params(socket.assigns.pools)
+      socket.assigns.api_key_params || ApiKeyPolicyForm.empty_params(socket.assigns.pools, operator_timezone(socket))
     )
   end
 
@@ -677,6 +677,9 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLive do
   end
 
   defp error_message(reason), do: Support.error_message(reason)
+
+  defp operator_timezone(socket),
+    do: DateTimeDisplay.preferences_for_user(socket.assigns.current_scope.user).timezone
 
   defp assign_api_key_wizard_step(socket, "review") do
     if ApiKeyPolicyForm.expiry_errors(socket.assigns.api_key_params) == [] do

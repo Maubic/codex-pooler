@@ -14,7 +14,7 @@ defmodule CodexPoolerWeb.Dev.ComponentShowcaseAdminForms do
     <AdminComponents.admin_surface id="showcase-form-surface" title="Filters and inputs">
       <div class="grid gap-4 p-4">
         <AdminComponents.filter_form id="showcase-filter-form" for={@filter_form} advanced_open>
-          <AdminComponents.cally_date_filter field={@filter_form[:from]} label="From" />
+          <AdminComponents.cally_date_filter field={@filter_form[:from]} label="From" timezone="Etc/UTC" />
           <:advanced>
             <CoreComponents.input
               id="showcase-input-select"

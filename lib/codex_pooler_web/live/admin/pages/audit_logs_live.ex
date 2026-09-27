@@ -8,6 +8,7 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
   alias CodexPoolerWeb.Admin.NotificationCenterHooks
   alias CodexPoolerWeb.Admin.PoolFilterComponents
   alias CodexPoolerWeb.DateTimeDisplay
+  alias CodexPoolerWeb.DateTimeInput
 
   import CodexPoolerWeb.Admin.AuditLogsComponents,
     only: [audit_event_drawer: 1, audit_log_filters: 1, audit_prose_ledger: 1]
@@ -149,6 +150,7 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
               filter_values={@filter_values}
               filter_errors={@filter_errors}
               pool_filter_options={@pool_filter_options}
+              timezone={@datetime_preferences.timezone}
             />
 
             <.audit_prose_ledger
@@ -173,7 +175,7 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
   defp load_audit_logs(socket, params) do
     pools = Pools.list_log_filter_pools(socket.assigns.current_scope)
     {selected_pool, pool_error} = select_pool(pools, params["pool_id"])
-    {filters, form_values, filter_errors} = parse_filters(params, selected_pool)
+    {filters, form_values, filter_errors} = parse_filters(params, selected_pool, socket.assigns.datetime_preferences.timezone)
     filter_errors = Enum.reject([pool_error | filter_errors], &is_nil/1)
     offset = page_offset(params)
     cursor = snapshot_at(params)
@@ -308,7 +310,7 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
     end
   end
 
-  defp parse_filters(params, selected_pool) do
+  defp parse_filters(params, selected_pool, timezone) do
     form_values = %{
       "pool_id" => (selected_pool && selected_pool.id) || string_param(params, "pool_id") || "",
       "outcome" => string_param(params, "outcome"),
@@ -344,8 +346,8 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
         "Action filter is not supported"
       )
 
-    {date_from, date_from_error} = parse_date(form_values["date_from"], :date_from)
-    {date_to, date_to_error} = parse_date(form_values["date_to"], :date_to)
+    {date_from, date_from_error} = parse_date(form_values["date_from"], :date_from, timezone)
+    {date_to, date_to_error} = parse_date(form_values["date_to"], :date_to, timezone)
 
     filters =
       [
@@ -398,20 +400,17 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
     end
   end
 
-  defp parse_date(nil, _field), do: {nil, nil}
+  defp parse_date(nil, _field, _timezone), do: {nil, nil}
 
-  defp parse_date(value, field) do
-    case Date.from_iso8601(value) do
-      {:ok, date} ->
-        {date_boundary(date, field), nil}
+  defp parse_date(value, field, timezone) do
+    case DateTimeInput.date_boundary(value, field, timezone) do
+      {:ok, datetime} ->
+        {datetime, nil}
 
       {:error, _reason} ->
         {nil, %{field: field, message: "#{date_label(field)} must be a valid date"}}
     end
   end
-
-  defp date_boundary(date, :date_to), do: DateTime.new!(date, ~T[23:59:59.999999], "Etc/UTC")
-  defp date_boundary(date, _field), do: DateTime.new!(date, ~T[00:00:00], "Etc/UTC")
 
   defp form_errors(errors), do: Enum.map(errors, &{&1.field, {&1.message, []}})
 

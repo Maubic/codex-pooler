@@ -319,10 +319,12 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLive do
                 <AdminComponents.cally_date_filter
                   field={@filter_form[:date_from]}
                   label="Date from"
+                  timezone={@datetime_preferences.timezone}
                 />
                 <AdminComponents.cally_date_filter
                   field={@filter_form[:date_to]}
                   label="Date to"
+                  timezone={@datetime_preferences.timezone}
                 />
               </:advanced>
             </AdminComponents.filter_form>
@@ -429,7 +431,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLive do
       |> MapSet.new()
 
     {filters, form_values, filter_errors} =
-      RequestLogFilterForm.parse_filters(params, selected_pool, visible_upstream_identity_ids)
+      RequestLogFilterForm.parse_filters(params, selected_pool, visible_upstream_identity_ids, socket.assigns.datetime_preferences.timezone)
 
     filter_errors = Enum.reject([pool_error | filter_errors], &is_nil/1)
     visible_pool_ids = pool_ids(pools)

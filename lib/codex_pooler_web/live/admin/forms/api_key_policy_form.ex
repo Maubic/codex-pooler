@@ -7,6 +7,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
   alias CodexPooler.Access.APIKeyPolicyBinding
   alias CodexPooler.Pools.Pool
   alias CodexPooler.ServiceTier
+  alias CodexPoolerWeb.DateTimeInput
 
   @type params :: %{String.t() => term()}
   @type attrs :: %{atom() => term()}
@@ -30,17 +31,17 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
   # the key's metadata (its labels) and every model override after the one
   # the form edits. They never come from a submission (findings#206 row
   # 206-504).
-  @carried_keys ~w(stored_metadata retained_model_policies)
+  @carried_keys ~w(stored_metadata retained_model_policies stored_expires_at expiry_timezone)
 
   @spec limit_fields() :: [String.t()]
   def limit_fields, do: @limit_fields
 
-  @spec empty_params([Pool.t()]) :: params()
-  def empty_params([]), do: default_params(%{"pool_id" => ""})
-  def empty_params([pool | _pools]), do: default_params(%{"pool_id" => pool.id})
+  @spec empty_params([Pool.t()], String.t()) :: params()
+  def empty_params(pools, timezone \\ "Etc/UTC"),
+    do: default_params(%{"pool_id" => pool_id_default(pools), "expiry_timezone" => timezone})
 
-  @spec params_for(APIKey.t(), [APIKeyPolicyBinding.t()]) :: params()
-  def params_for(%APIKey{} = api_key, policy_bindings) do
+  @spec params_for(APIKey.t(), [APIKeyPolicyBinding.t()], String.t()) :: params()
+  def params_for(%APIKey{} = api_key, policy_bindings, timezone \\ "Etc/UTC") do
     default_binding = Enum.find(policy_bindings, &(&1.binding_scope == "default"))
     {model_binding, retained_model_bindings} = split_model_bindings(policy_bindings)
 
@@ -51,7 +52,9 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
       "status" => api_key.status,
       "dashboard_access" => api_key.dashboard_access,
       "max_active_requests" => api_key.max_active_requests || "",
-      "expires_at" => datetime_local_value(api_key.expires_at),
+      "expires_at" => DateTimeInput.local_value(api_key.expires_at, timezone),
+      "stored_expires_at" => api_key.expires_at,
+      "expiry_timezone" => timezone,
       "model_mode" => model_mode(api_key.allowed_model_identifiers),
       "allowed_model_identifiers" => api_key.allowed_model_identifiers || [],
       "enforced_model_identifier" => api_key.enforced_model_identifier || "",
@@ -76,10 +79,30 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
 
   @spec expiry_errors(params()) :: [form_error()]
   def expiry_errors(params) do
-    if invalid_expiry?(params["expires_at"]) do
-      [expires_at: {"must be a valid date and time", []}]
-    else
-      []
+    case parsed_expiry(params) do
+      {:ok, _datetime} -> []
+      {:error, reason} -> [expires_at: {expiry_error(reason, expiry_timezone(params)), []}]
+    end
+  end
+
+  @spec expiry_timezone(params()) :: String.t()
+  def expiry_timezone(params), do: Map.get(params, "expiry_timezone", "Etc/UTC")
+
+  @spec expiry_summary(params(), DateTime.t()) :: String.t()
+  def expiry_summary(params, now \\ DateTime.utc_now()) do
+    case parsed_expiry(params) do
+      {:ok, nil} ->
+        "Never"
+
+      {:ok, datetime} ->
+        description = DateTimeInput.describe(datetime, expiry_timezone(params))
+
+        if DateTime.compare(datetime, now) != :gt,
+          do: "Expires immediately on save (#{description})",
+          else: description <> " (in #{expiry_duration(DateTime.diff(datetime, now))})"
+
+      {:error, reason} ->
+        expiry_error(reason, expiry_timezone(params))
     end
   end
 
@@ -104,8 +127,14 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
   end
 
   @spec merge_params(params() | nil, params() | nil) :: params()
-  def merge_params(current_params, incoming_params),
-    do: Map.merge(current_params || %{}, Map.drop(incoming_params || %{}, @carried_keys))
+  def merge_params(current_params, incoming_params) do
+    # LiveView omits this marker after the operator touches the field. Keeping
+    # the old marker would hide its validation error on every later change.
+    current_params
+    |> Kernel.||(%{})
+    |> Map.delete("_unused_expires_at")
+    |> Map.merge(Map.drop(incoming_params || %{}, @carried_keys))
+  end
 
   @spec attrs(params()) :: attrs()
   def attrs(params) do
@@ -118,7 +147,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
       status: blank_to_nil(params["status"]) || "active",
       dashboard_access: dashboard_access_value(params["dashboard_access"]),
       max_active_requests: blank_to_nil(params["max_active_requests"]),
-      expires_at: expires_at_value(params["expires_at"]),
+      expires_at: expires_at_value(params),
       model_mode: params["model_mode"],
       allowed_model_identifiers: policy_model_identifiers(params),
       enforced_model_identifier: blank_to_nil(params["enforced_model_identifier"]),
@@ -155,8 +184,8 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
       "Observatory access must be enabled or disabled"
     )
     |> maybe_add_error(
-      invalid_expiry?(params["expires_at"]),
-      "Expiry must be a valid date and time"
+      expiry_errors(params) != [],
+      expiry_review_error(params)
     )
     |> maybe_add_error(
       params["model_mode"] == "selected_models" and policy_model_identifiers(params) == [],
@@ -312,32 +341,44 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
     end
   end
 
-  defp expires_at_value(nil), do: nil
-  defp expires_at_value(""), do: nil
-
-  defp expires_at_value(value) do
-    value = String.trim(to_string(value))
-
-    cond do
-      value == "" -> nil
-      String.ends_with?(value, "Z") -> value
-      String.contains?(value, "+") -> value
-      String.length(value) == 16 -> value <> ":00Z"
-      String.length(value) == 19 -> value <> "Z"
-      true -> value
+  defp expires_at_value(params) do
+    case parsed_expiry(params) do
+      {:ok, datetime} -> datetime
+      {:error, _reason} -> params["expires_at"]
     end
   end
 
-  defp invalid_expiry?(value) do
-    case expires_at_value(value) do
-      nil -> false
-      normalized_value -> not valid_rfc3339_datetime?(normalized_value)
+  defp parsed_expiry(params) do
+    value = params["expires_at"]
+    timezone = expiry_timezone(params)
+
+    case params["stored_expires_at"] do
+      %DateTime{} = stored ->
+        if value == DateTimeInput.local_value(stored, timezone),
+          do: {:ok, stored},
+          else: DateTimeInput.parse(value, timezone)
+
+      _missing ->
+        DateTimeInput.parse(value, timezone)
     end
   end
 
-  defp valid_rfc3339_datetime?(value) do
-    match?({:ok, %DateTime{}, _offset}, DateTime.from_iso8601(value))
+  defp expiry_review_error(params) do
+    case expiry_errors(params) do
+      [expires_at: {message, _opts}] -> "Expiry " <> message
+      [] -> ""
+    end
   end
+
+  defp expiry_error(:ambiguous, timezone), do: "occurs twice in #{timezone}; choose a time outside the repeated hour"
+  defp expiry_error(:gap, timezone), do: "does not exist in #{timezone} because the clocks move forward"
+  defp expiry_error(:unknown_timezone, _timezone), do: "needs a valid account timezone"
+  defp expiry_error(:invalid, _timezone), do: "must be a valid date and time"
+
+  defp expiry_duration(seconds) when seconds < 60, do: "less than a minute"
+  defp expiry_duration(seconds) when seconds < 3_600, do: "#{div(seconds, 60)} min"
+  defp expiry_duration(seconds) when seconds < 86_400, do: "#{div(seconds, 3_600)} h #{div(rem(seconds, 3_600), 60)} min"
+  defp expiry_duration(seconds), do: "#{div(seconds, 86_400)} days"
 
   defp split_allow_list_text(value) when is_binary(value) do
     value
@@ -371,6 +412,8 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
       "dashboard_access" => false,
       "max_active_requests" => "",
       "expires_at" => "",
+      "stored_expires_at" => nil,
+      "expiry_timezone" => "Etc/UTC",
       "model_mode" => "all_models",
       "allowed_model_identifiers" => [],
       "manual_model_identifiers_text" => "",
@@ -421,15 +464,6 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
   defp binding_value(binding, field) do
     value = Map.get(binding, String.to_existing_atom(field))
     if is_nil(value), do: "", else: to_string(value)
-  end
-
-  defp datetime_local_value(nil), do: ""
-
-  defp datetime_local_value(%DateTime{} = datetime) do
-    datetime
-    |> DateTime.truncate(:second)
-    |> DateTime.to_iso8601()
-    |> String.slice(0, 16)
   end
 
   defp model_mode(nil), do: "all_models"
@@ -512,7 +546,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
       {"Pool", selected_pool_name(selected_pool)},
       {"Status", form[:status].value || "active"},
       {"Observatory access", dashboard_access_label(form[:dashboard_access].value)},
-      {"Expires", blank_to_nil(form[:expires_at].value) || "Never"}
+      {"Expires", expiry_summary(form.params)}
     ]
   end
 

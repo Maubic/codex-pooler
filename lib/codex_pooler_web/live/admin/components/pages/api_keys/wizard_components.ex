@@ -6,6 +6,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeyWizardComponents do
   use CodexPoolerWeb, :html
 
   alias CodexPooler.Catalog.ModelInfo
+  alias CodexPoolerWeb.Admin.ApiKeyPolicyForm
   alias CodexPoolerWeb.Admin.BadgeComponents, as: AdminBadges
   alias CodexPoolerWeb.Admin.Components, as: AdminComponents
   alias CodexPoolerWeb.Admin.PolicyEditorComponents
@@ -40,6 +41,8 @@ defmodule CodexPoolerWeb.Admin.ApiKeyWizardComponents do
   attr :disabled, :boolean, default: false
 
   def api_key_basics_step(assigns) do
+    assigns = assign(assigns, :expiry_valid?, ApiKeyPolicyForm.expiry_errors(assigns.form.params) == [])
+
     ~H"""
     <section id="api-key-step-basics-panel" class="grid min-w-0 gap-5">
       <div class="grid gap-1">
@@ -71,12 +74,18 @@ defmodule CodexPoolerWeb.Admin.ApiKeyWizardComponents do
           options={status_options()}
           disabled={@disabled}
         />
-        <.input
-          field={@form[:expires_at]}
-          type="datetime-local"
-          label="Expires at"
-          disabled={@disabled}
-        />
+        <div class="grid min-w-0 content-start gap-1">
+          <.input
+            field={@form[:expires_at]}
+            type="datetime-local"
+            label={"Expires at - #{ApiKeyPolicyForm.expiry_timezone(@form.params)}"}
+            aria-describedby={if @expiry_valid?, do: "api-key-expiry-summary"}
+            disabled={@disabled}
+          />
+          <p :if={@expiry_valid?} id="api-key-expiry-summary" class="text-sm leading-5 text-base-content/65">
+            {ApiKeyPolicyForm.expiry_summary(@form.params)}
+          </p>
+        </div>
         <div
           id="api-key-dashboard-access-control"
           class="grid gap-1 border-t border-base-300 pt-4 md:col-span-2"
@@ -96,6 +105,9 @@ defmodule CodexPoolerWeb.Admin.ApiKeyWizardComponents do
           </p>
         </div>
       </div>
+      <p id="api-key-availability-help" class="text-sm leading-5 text-base-content/65">
+        To stop access immediately, set Status to Paused. Resume it later without changing the expiry.
+      </p>
       <.input
         field={@form[:operator_notes]}
         type="textarea"

@@ -523,6 +523,7 @@ defmodule CodexPoolerWeb.Admin.Components do
   attr :field, Phoenix.HTML.FormField, required: true
   attr :label, :string, required: true
   attr :inline_label, :boolean, default: true
+  attr :timezone, :string, required: true
 
   def cally_date_filter(assigns) do
     assigns =
@@ -546,6 +547,7 @@ defmodule CodexPoolerWeb.Admin.Components do
         type="button"
         class="input input-sm flex w-full items-center justify-between gap-2 text-left"
         aria-label={@label}
+        title={"#{@label} (#{@timezone})"}
         popovertarget={"#{@id}-popover"}
         style={"anchor-name: #{@anchor_name};"}
       >

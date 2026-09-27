@@ -129,6 +129,7 @@ defmodule CodexPoolerWeb.DateTimeDisplay do
     zones =
       Zoneinfo.time_zones()
       |> Enum.uniq()
+      |> Enum.filter(&match?({:ok, _datetime}, DateTime.shift_zone(DateTime.utc_now(), &1, Tz.TimeZoneDatabase)))
       |> Enum.reject(&(&1 == @default_timezone))
       |> Enum.sort()
 
@@ -149,7 +150,7 @@ defmodule CodexPoolerWeb.DateTimeDisplay do
   defp shift_for_display(datetime, timezone) do
     timezone = normalize_timezone_value(timezone)
 
-    case DateTime.shift_zone(datetime, timezone, Zoneinfo.TimeZoneDatabase) do
+    case DateTime.shift_zone(datetime, timezone, Tz.TimeZoneDatabase) do
       {:ok, shifted} ->
         shifted
 

@@ -83,6 +83,7 @@ defmodule CodexPooler.MixProject do
       {:telemetry_metrics_prometheus_core, "== 1.2.1"},
       {:telemetry_poller, "== 1.3.0"},
       {:zoneinfo, "== 0.1.9"},
+      {:tz, "== 0.28.4"},
       {:credo, "== 1.7.19", only: [:dev, :test], runtime: false},
       {:dialyxir, "== 1.4.8", only: [:dev, :test], runtime: false},
       {:sobelow, "== 0.15.0", only: [:dev, :test], runtime: false},
