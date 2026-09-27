@@ -24,7 +24,7 @@ cd codex-pooler
 ## Generate the local environment
 
 For every self-hosted install, choose a tagged stable release before creating
-`.env`. Find the latest tagged stable release on [GitHub Releases](https://github.com/icoretech/codex-pooler/releases). The `latest` tag follows the most recently published release, but a version tag keeps the installation reproducible.
+`.env`. Find the latest tagged stable release on [GitHub Releases](https://github.com/icoretech/codex-pooler/releases). The `latest` tag follows verified stable releases and does not move backward when an older version is published again. A version tag keeps the installation reproducible.
 
 {/* x-release-please-start-version */}
 
@@ -39,8 +39,7 @@ scripts/self-host/generate-env.sh
 The generated `.env` contains release secrets, encryption roots, database settings, and image settings such as `CODEX_POOLER_IMAGE` and `CODEX_POOLER_IMAGE_TAG`. Keep it private. Don't commit it, paste it into tickets, or reuse values between public installs.
 
 If you already generated `.env`, set `CODEX_POOLER_IMAGE_TAG` to the target
-tagged stable release before `docker compose pull`. The `latest` tag follows the
-most recently published release, but pinning a version tag makes the install
+tagged stable release before `docker compose pull`. Pinning a version tag makes the install
 reproducible. If port `4000` is already in use, set `CODEX_POOLER_HTTP_PORT`
 before generation or edit it in `.env` before starting the stack.
 

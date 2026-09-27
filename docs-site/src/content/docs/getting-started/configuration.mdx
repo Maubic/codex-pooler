@@ -14,8 +14,7 @@ The local web URL is `http://localhost:4000`.
 The generator writes `CODEX_POOLER_IMAGE_TAG=latest` unless you set a tag first.
 For self-hosted installs, set it to a tagged stable release from
 [GitHub Releases](https://github.com/icoretech/codex-pooler/releases) before
-running the generator. The `latest` tag follows the most recently published
-release, but a version tag keeps the selected installation reproducible:
+running the generator. The `latest` tag follows verified stable releases and does not move backward when an older version is published again. A version tag keeps the selected installation reproducible:
 
 ```bash
 export CODEX_POOLER_IMAGE_TAG=<release-tag>

@@ -15,6 +15,10 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: release-image-publication
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -29,20 +33,18 @@ jobs:
 
           tag="${INPUT_TAG#refs/tags/}"
 
-          if [[ -z "$tag" || "$tag" == "main" ]]; then
-            echo "Missing release tag. Provide workflow_dispatch input 'tag' or push a tag."
+          if [[ ! "$tag" =~ ^(codex-pooler-)?v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Provide a complete release version tag."
             exit 1
           fi
 
           version="${tag#codex-pooler-}"
           version="${version#v}"
-          major_minor="$(awk -F. '{print $1 "." $2}' <<<"$version")"
 
           {
             echo "release_tag=$tag"
             echo "checkout_ref=refs/tags/$tag"
             echo "version=$version"
-            echo "major_minor=$major_minor"
           } >>"$GITHUB_OUTPUT"
 
       - name: Checkout
@@ -53,6 +55,47 @@ jobs:
       - name: Resolve checked-out revision
         id: revision
         run: echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+
+      - name: Checkout publication policy
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          path: .release-policy
+          sparse-checkout: |
+            scripts/verification/release-publish-guard.mjs
+            test/scripts/release_publish_guard_test.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Verify publication policy
+        run: node --test .release-policy/test/scripts/release_publish_guard_test.mjs
+
+      - name: Require verified revision and select monotonic release aliases
+        id: publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.prepare.outputs.release_tag }}
+          REVISION: ${{ steps.revision.outputs.sha }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 900))
+          while true; do
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${REVISION}/status" > "${RUNNER_TEMP}/release-status.json"
+            ci_state=$(jq -r '[.statuses[] | select(.context == "continuous-integration/drone/push")][0].state // "pending"' "${RUNNER_TEMP}/release-status.json")
+            case "$ci_state" in
+              success) break ;;
+              pending) ;;
+              *) echo "Required revision check failed: $ci_state"; exit 1 ;;
+            esac
+            if (( SECONDS >= deadline )); then
+              echo "Timed out waiting for the required revision check"
+              exit 1
+            fi
+            sleep 15
+          done
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "${RUNNER_TEMP}/release-list.json"
+          node .release-policy/scripts/verification/release-publish-guard.mjs --registry "$RELEASE_TAG" "${RUNNER_TEMP}/registry-aliases.json"
+          node .release-policy/scripts/verification/release-publish-guard.mjs \
+            "$RELEASE_TAG" "$REVISION" "${RUNNER_TEMP}/release-status.json" "${RUNNER_TEMP}/release-list.json" "${RUNNER_TEMP}/registry-aliases.json" "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -65,6 +108,7 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/icoretech/codex-pooler
+          flavor: latest=false
           labels: |
             org.opencontainers.image.title=Codex Pooler
             org.opencontainers.image.description=Managed pools of Codex accounts with OpenAI-compatible client routes
@@ -73,10 +117,7 @@ jobs:
             org.opencontainers.image.vendor=iCoreTech, Inc.
             org.opencontainers.image.revision=${{ steps.revision.outputs.sha }}
             org.opencontainers.image.version=${{ steps.prepare.outputs.version }}
-          tags: |
-            type=raw,value=${{ steps.prepare.outputs.version }}
-            type=raw,value=${{ steps.prepare.outputs.major_minor }}
-            type=raw,value=latest
+          tags: ${{ steps.publication.outputs.docker_tags }}
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
@@ -89,6 +130,7 @@ jobs:
         id: build
         uses: docker/build-push-action@v7
         with:
+          context: .
           platforms: linux/amd64,linux/arm64
           pull: true
           push: true

@@ -4,6 +4,7 @@
 /docs-site/
 /.elixir_ls/
 /.git/
+/.release-policy/
 /cover/
 /doc/
 /tmp/
