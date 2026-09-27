@@ -10,14 +10,13 @@ defmodule CodexPooler.Jobs.AlertFanoutCompletionTest do
     rule = alert_rule_fixture(pool)
     attrs = rule |> Map.from_struct() |> Map.drop([:__meta__, :id])
 
-    ids =
+    rows =
       for index <- 1..1_101 do
-        id = Ecto.UUID.generate()
-        Repo.insert_all(AlertRule, [Map.merge(attrs, %{id: id, display_name: "Rule #{index}"})])
-        id
+        Map.merge(attrs, %{id: Ecto.UUID.generate(), display_name: "Rule #{index}"})
       end
 
-    all_ids = MapSet.new([rule.id | ids])
+    Repo.insert_all(AlertRule, rows)
+    all_ids = MapSet.new([rule.id | Enum.map(rows, & &1.id)])
     scheduled_at = DateTime.utc_now()
     assert :ok = perform_job(AlertEvaluationEnqueueWorker, %{}, scheduled_at: scheduled_at)
     drain_pages(MapSet.new())

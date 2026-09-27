@@ -208,9 +208,10 @@ defmodule CodexPooler.Dev.GatewayPerfFakeUpstreamTest do
   test "backend and v1 routes emit equivalent successful SSE streams" do
     server = start_server!("short-ok")
 
-    backend = post_stream!(server.url <> "/backend-api/codex/responses")
-    responses = post_stream!(server.url <> "/v1/responses")
-    chat = post_stream!(server.url <> "/v1/chat/completions")
+    [backend, responses, chat] =
+      ["/backend-api/codex/responses", "/v1/responses", "/v1/chat/completions"]
+      |> Task.async_stream(&post_stream!(server.url <> &1), max_concurrency: 3, timeout: @detection_timeout_ms)
+      |> Enum.map(fn {:ok, response} -> response end)
 
     assert backend.status == 200
     assert responses.status == 200
@@ -259,7 +260,10 @@ defmodule CodexPooler.Dev.GatewayPerfFakeUpstreamTest do
   end
 
   test "deterministic failure profiles expose distinct HTTP and stream behavior" do
-    server = start_server!("quota-429,partial-failure,disconnect-midstream,timeout")
+    server = start_server!("quota-429,partial-failure,disconnect-midstream")
+    timeout_server = start_server!("timeout")
+    # This profile intentionally never answers. Cancel its owned connection after
+    # proving the timeout instead of paying the listener's 15-second shutdown grace.
 
     quota = post_stream!(server.url <> "/backend-api/codex/responses?profile=quota-429")
     assert quota.status == 429
@@ -279,13 +283,14 @@ defmodule CodexPooler.Dev.GatewayPerfFakeUpstreamTest do
     refute disconnected.body =~ "data: [DONE]"
 
     assert {:error, error} =
-             Req.post(server.url <> "/backend-api/codex/responses?profile=timeout",
+             Req.post(timeout_server.url <> "/backend-api/codex/responses?profile=timeout",
                json: %{"model" => "gpt-example"},
                receive_timeout: 100,
                retry: false
              )
 
     assert transport_timeout?(error)
+    stop_timeout_connections!(timeout_server)
   end
 
   test "websocket routes convert stream events into JSON text frames" do
@@ -639,6 +644,16 @@ defmodule CodexPooler.Dev.GatewayPerfFakeUpstreamTest do
 
   defp post_stream!(url, headers \\ []) do
     Req.post!(url, headers: headers, json: %{"model" => "gpt-example"}, retry: false)
+  end
+
+  defp stop_timeout_connections!(%{server: server}) do
+    assert {:ok, connections} = ThousandIsland.connection_pids(server)
+
+    for connection <- connections do
+      monitor = Process.monitor(connection)
+      Process.exit(connection, :kill)
+      assert_receive {:DOWN, ^monitor, :process, ^connection, _reason}, @detection_timeout_ms
+    end
   end
 
   defp output_text(text) do
