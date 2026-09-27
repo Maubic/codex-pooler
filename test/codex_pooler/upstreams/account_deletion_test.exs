@@ -29,6 +29,47 @@ defmodule CodexPooler.Upstreams.AccountDeletionTest do
     %{owner: owner, scope: Scope.for_user(owner)}
   end
 
+  test "a usage response allocated before deletion cannot reactivate the account", %{scope: scope} do
+    alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
+    Application.put_env(:codex_pooler, :upstream_deletion_immediate_row_limit, 0)
+    %{identity: identity, assignment: assignment} = active_upstream_assignment_fixture(pool_fixture())
+    {:ok, _identity, fence} = CredentialFencing.allocate_usage_probe(identity)
+    remove_from_pool(assignment)
+    assert {:deleting, _receipt} = Upstreams.delete_account_for_scope(scope, identity.id)
+    assert {:ok, :superseded, current, nil} = CredentialFencing.apply_usage_success(identity, fence, fn _ -> flunk("obsolete poll must not persist evidence") end)
+    assert current.status == "deleted"
+    assert current.metadata["permanent_deletion_requested_at"]
+    assert :ok = perform_job(UpstreamDeletionWorker, %{upstream_identity_id: identity.id, requested_by_user_id: scope.user.id})
+    refute Repo.get(UpstreamIdentity, identity.id)
+  end
+
+  test "failed deletion enqueue returns a bounded error and rolls back the marker", %{scope: scope} do
+    identity = active_upstream_identity_fixture()
+    Repo.query!("CREATE FUNCTION pg_temp.reject_upstream_deletion() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.worker = 'CodexPooler.Jobs.UpstreamDeletionWorker' THEN RAISE EXCEPTION 'sample insert failure' USING ERRCODE = 'object_not_in_prerequisite_state'; END IF; RETURN NEW; END $$")
+    Repo.query!("CREATE TRIGGER reject_upstream_deletion BEFORE INSERT ON oban_jobs FOR EACH ROW EXECUTE FUNCTION pg_temp.reject_upstream_deletion()")
+    assert {:error, %{code: :upstream_deletion_unavailable}} = Upstreams.delete_account_for_scope(scope, identity.id)
+    assert Repo.get!(UpstreamIdentity, identity.id).status == identity.status
+    refute Repo.get!(UpstreamIdentity, identity.id).metadata["permanent_deletion_requested_at"]
+    assert deletion_jobs(identity.id) == []
+  end
+
+  test "deletion worker cancels an unmarked target and rejects missing target args" do
+    identity = active_upstream_identity_fixture()
+    assert {:cancel, :upstream_account_not_deleting} = perform_job(UpstreamDeletionWorker, %{upstream_identity_id: identity.id})
+    assert {:cancel, :upstream_deletion_target_invalid} = perform_job(UpstreamDeletionWorker, %{})
+    assert Repo.get!(UpstreamIdentity, identity.id) == identity
+  end
+
+  test "deletion worker reports a bounded database cancellation error", %{scope: scope} do
+    Application.put_env(:codex_pooler, :upstream_deletion_immediate_row_limit, 0)
+    identity = active_upstream_identity_fixture()
+    assert {:deleting, _} = Upstreams.delete_account_for_scope(scope, identity.id)
+    Repo.query!("CREATE FUNCTION pg_temp.cancel_upstream_detach() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'sample cancellation' USING ERRCODE = 'query_canceled'; END $$")
+    Repo.query!("CREATE TRIGGER cancel_upstream_detach BEFORE UPDATE ON ledger_entries FOR EACH STATEMENT EXECUTE FUNCTION pg_temp.cancel_upstream_detach()")
+    assert {:error, %{code: :upstream_deletion_busy}} = perform_job(UpstreamDeletionWorker, %{upstream_identity_id: identity.id})
+    assert Repo.get!(UpstreamIdentity, identity.id).status == "deleted"
+  end
+
   for status <- ["active", "deleted"] do
     @status status
     test "permanently removes an #{@status} account and its encrypted credentials", %{scope: scope} do
@@ -174,6 +215,7 @@ defmodule CodexPooler.Upstreams.AccountDeletionTest do
       refute Repo.exists?(from secret in EncryptedSecret, where: secret.upstream_identity_id == ^identity.id and secret.status == "active")
       assert Upstreams.account_deletion_states([identity.id]) == %{identity.id => :in_progress}
       assert :more = Upstreams.continue_account_deletion(identity.id, scope.user.id, deadline())
+      assert {:snooze, 1} = perform_job(UpstreamDeletionWorker, %{upstream_identity_id: identity.id})
       assert Repo.get!(Attempt, attempt.id).pool_upstream_assignment_id == assignment.id
       request |> change(status: "succeeded") |> Repo.update!()
       attempt |> change(status: "succeeded") |> Repo.update!()

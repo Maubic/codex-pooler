@@ -7,6 +7,22 @@ defmodule CodexPooler.EventsTest do
 
   import CodexPooler.PoolerFixtures
 
+  test "a PostgreSQL notification failure is returned rather than acknowledged" do
+    pool = pool_fixture()
+
+    {result, log} =
+      ExUnit.CaptureLog.with_log(fn ->
+        Repo.transaction(fn ->
+          result = Events.broadcast_upstreams_after_commit(pool.id, "upstream_account_deleted", %{sample: String.duplicate("x", 8_000)})
+          Repo.rollback(result)
+        end)
+      end)
+
+    assert match?({:error, {:error, :postgres_event_relay_failed}}, result)
+    assert log =~ "pool event postgres relay failed"
+    refute log =~ String.duplicate("x", 100)
+  end
+
   test "broadcasts exact pool event shapes for LiveView topics" do
     pool = pool_fixture()
     assert :ok = Events.subscribe_pool(pool.id)

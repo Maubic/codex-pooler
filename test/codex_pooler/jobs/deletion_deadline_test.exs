@@ -23,6 +23,21 @@ defmodule CodexPooler.Jobs.DeletionDeadlineTest do
     %{repo: name}
   end
 
+  test "remaining clamps elapsed deadlines and an expired run never starts work" do
+    now = System.monotonic_time(:millisecond)
+    assert DeletionDeadline.remaining(now - 1) == 0
+    assert DeletionDeadline.remaining(now + 10_000) in 1..10_000
+    assert :more = DeletionDeadline.run(now - 1, fn -> flunk("expired operation ran") end)
+  end
+
+  test "a caller trapping exits receives the executor's failure result" do
+    Process.flag(:trap_exit, true)
+    {result, log} = with_log(fn -> DeletionDeadline.run(System.monotonic_time(:millisecond) + 5_000, fn -> exit(:sample_deletion_exit) end) end)
+    assert {:error, :sample_deletion_exit} = result
+    assert log =~ "sample_deletion_exit"
+    assert_receive {:EXIT, _pid, :sample_deletion_exit}
+  end
+
   for target <- [:pool, :key] do
     test "#{target} cumulative finalization cannot overrun its absolute deadline" do
       {pool, key, trigger} = fixture(unquote(target))

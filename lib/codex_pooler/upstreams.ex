@@ -133,7 +133,7 @@ defmodule CodexPooler.Upstreams do
   defp upstream_visibility_filter(pool_ids, include_unassigned?, include_deleted?) do
     dynamic(
       [identity, assignment],
-      (assignment.pool_id in ^pool_ids or (^include_unassigned? and is_nil(assignment.id))) and
+      (assignment.pool_id in ^pool_ids or (^include_unassigned? and (is_nil(assignment.id) or (identity.status == ^@deleted and assignment.status == ^@assignment_deleted)))) and
         (identity.status != ^@deleted or ^include_deleted?)
     )
   end

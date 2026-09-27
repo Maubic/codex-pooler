@@ -265,7 +265,7 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
         is_nil(identity) ->
           Repo.rollback(:upstream_identity_not_found)
 
-        not current_fence?(identity, fence) ->
+        Map.has_key?(identity.metadata || %{}, "permanent_deletion_requested_at") or not current_fence?(identity, fence) ->
           {:superseded, identity, nil}
 
         true ->

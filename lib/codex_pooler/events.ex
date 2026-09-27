@@ -380,9 +380,9 @@ defmodule CodexPooler.Events do
            Repo.query("SELECT pg_notify($1, $2)", [@postgres_channel, payload]) do
       :ok
     else
-      {:error, reason} ->
-        Logger.warning("pool event postgres relay failed: #{inspect(reason)}")
-        :ok
+      {:error, _reason} ->
+        Logger.warning("pool event postgres relay failed")
+        {:error, :postgres_event_relay_failed}
     end
   end
 end

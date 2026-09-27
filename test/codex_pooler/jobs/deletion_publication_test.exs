@@ -11,6 +11,7 @@ defmodule CodexPooler.Jobs.DeletionPublicationTest do
   alias CodexPooler.Alerts.Incidents.NotificationEvents
   alias CodexPooler.Events
   alias CodexPooler.Events.PostgresBridge
+  alias CodexPooler.Jobs.DeletionFailureNotifier
   alias CodexPooler.Pools
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
@@ -30,6 +31,27 @@ defmodule CodexPooler.Jobs.DeletionPublicationTest do
     assert is_reference(bridge_state.listen_ref)
     assert is_reference(bridge_state.alert_listen_ref)
     %{repo: name, notifications: notifications, events_ref: events_ref, alerts_ref: alerts_ref}
+  end
+
+  for event <- [[:oban, :job, :exception], [:oban, :job, :stop]] do
+    test "upstream deletion failure notification survives commit for #{inspect(event)}", %{notifications: notifications, events_ref: events_ref} do
+      alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
+      {pool, _key} = fixture()
+      id = Ecto.UUID.generate()
+      UnboxedFixture.register_unboxed_cleanup!(fn -> Repo.delete_all(from identity in UpstreamIdentity, where: identity.id == ^id) end)
+      now = DateTime.utc_now()
+      Repo.insert!(%UpstreamIdentity{id: id, chatgpt_account_id: "sample-#{id}", account_label: "Sample deleted account", status: "deleted", onboarding_method: "import", created_at: now, updated_at: now, metadata: %{}})
+      # An orphan's notice fans out to active Pools visible to the owner.
+      pool |> change(status: "active") |> Repo.update!()
+      job = %{worker: "CodexPooler.Jobs.UpstreamDeletionWorker", args: %{"upstream_identity_id" => id}}
+      assert :ok = DeletionFailureNotifier.handle_event(unquote(event), %{}, %{state: :discard, job: job}, :ok)
+      assert_receive {:notification, ^notifications, ^events_ref, _, payload}, @detection_timeout_ms
+      attrs = CodexPooler.JSON.decode!(payload)
+      assert attrs["reason"] == "upstream_account_deletion_failed"
+      assert attrs["payload"]["upstream_identity_id"] == id
+      assert String.starts_with?(attrs["origin_id"], "transaction:")
+      assert :ok = CodexPooler.Upstreams.broadcast_account_deletion_failed(Ecto.UUID.generate())
+    end
   end
 
   for target <- [:pool, :key] do

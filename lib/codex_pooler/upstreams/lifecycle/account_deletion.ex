@@ -28,6 +28,8 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountDeletion do
 
   # Preserve shared request accounting and replay provenance. Assignment-owned state is left
   # for the final foreign-key cascade; no secret is copied into the job or deletion receipt.
+  # Detach BOTH identity and assignment references before deleting the identity: the
+  # cascading assignment delete must never race the sibling identity SET NULL actions.
   @detach_steps [
     {"ledger_entries", "upstream_identity_id", "upstream_identity_id = $1"},
     {"ledger_entries", "pool_upstream_assignment_id", "pool_upstream_assignment_id IN (SELECT id FROM pool_upstream_assignments WHERE upstream_identity_id = $1)"},
@@ -98,6 +100,9 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountDeletion do
 
   defp mark_requested(scope, identity_id, attrs) do
     transaction(fn -> mark_locked_request(scope, identity_id, attrs) end, @immediate_timeout_ms)
+  rescue
+    _error in [Postgrex.Error, DBConnection.ConnectionError] ->
+      {:error, error(:upstream_deletion_unavailable, "upstream deletion could not be queued; retry Delete")}
   end
 
   defp mark_locked_request(scope, identity_id, attrs) do
@@ -112,7 +117,12 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountDeletion do
       identity = identity |> Ecto.Changeset.change(status: "deleted", disabled_at: identity.disabled_at || timestamp, updated_at: timestamp, metadata: metadata) |> Repo.update!()
       Secrets.revoke_active_secrets(identity.id, timestamp)
 
-      {:ok, job} = Oban.insert(UpstreamDeletionWorker.new(%{"upstream_identity_id" => identity.id, "requested_by_user_id" => scope.user.id}), retry: false)
+      job =
+        case Oban.insert(UpstreamDeletionWorker.new(%{"upstream_identity_id" => identity.id, "requested_by_user_id" => scope.user.id}), retry: false) do
+          {:ok, job} -> job
+          {:error, _reason} -> Repo.rollback(error(:upstream_deletion_unavailable, "upstream deletion could not be queued; retry Delete"))
+        end
+
       unless job.conflict?, do: audit!(scope.user, identity, assignments, "upstream_account.delete_requested")
       broadcast!(identity, assignments, "upstream_account_deletion_requested")
       receipt(identity, assignments)
