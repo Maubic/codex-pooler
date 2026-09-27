@@ -2,11 +2,13 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay.UserAgents do
   @moduledoc false
 
   @type css_class :: String.t() | [String.t() | false | nil]
+  @type logo :: %{asset: String.t(), format: :svg | :png}
   @type classification :: %{
           kind: String.t(),
           label: String.t(),
           icon: String.t(),
-          icon_class: css_class()
+          icon_class: css_class(),
+          logo: logo() | nil
         }
 
   @patterns [
@@ -21,6 +23,14 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay.UserAgents do
     {:contains, ["cline"], "cline", "Cline", "hero-command-line", :primary},
     {:contains, ["goose"], "goose", "Goose", "hero-sparkles", :primary},
     {:prefix, "deepseek-harness/", "deepseek_harness", "DeepSeek Harness", "hero-sparkles", :primary},
+    {:prefix, "omp/", "omp", "Oh My Pi", "hero-command-line", :primary},
+    {:prefix, "pi/", "pi", "Pi", "hero-command-line", :primary},
+    {:prefix, "cursor/", "cursor", "Cursor", "hero-cursor-arrow-rays", :primary},
+    {:prefix, "kilo-code/", "kilo", "Kilo Code", "hero-code-bracket-square", :primary},
+    {:prefix, "kilocode/", "kilo", "Kilo Code", "hero-code-bracket-square", :primary},
+    {:prefix, "openhands/", "openhands", "OpenHands", "hero-command-line", :primary},
+    {:prefix, "trae/", "trae", "Trae", "hero-command-line", :primary},
+    {:prefix, "litellm/", "litellm", "LiteLLM", "hero-server-stack", :neutral},
     {:prefix, "openai/python", "openai_python", "OpenAI Python SDK", "hero-code-bracket", :success},
     {:prefix, "asyncopenai/python", "openai_python", "OpenAI Python SDK", "hero-code-bracket", :success},
     {:prefix, "openai/js", "openai_node", "OpenAI Node SDK", "hero-cube", :success},
@@ -31,6 +41,35 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay.UserAgents do
     {:custom, :elixir_http, "elixir_http", "Elixir HTTP", "hero-beaker", :neutral},
     {:prefix, "codex-pooler-", "codex_pooler", "Codex Pooler", "hero-cube-transparent", :neutral}
   ]
+
+  @logo_names %{
+    "codex_desktop" => "codex",
+    "codex" => "codex",
+    "opencode" => "opencode",
+    "openclaw" => "openclaw",
+    "hermes" => "hermesagent",
+    "windmill" => "windmill",
+    "aider" => "aider",
+    "continue" => "continue",
+    "cline" => "cline",
+    "goose" => "goose",
+    "deepseek_harness" => "deepseek-harness",
+    "omp" => "omp",
+    "pi" => "pi",
+    "cursor" => "cursor",
+    "kilo" => "kilocode",
+    "openhands" => "openhands",
+    "trae" => "trae",
+    "litellm" => "litellm",
+    "openai_python" => "openai",
+    "openai_node" => "openai",
+    "vercel_ai_sdk" => "vercel",
+    "python" => "python",
+    "node" => "nodedotjs",
+    "curl" => "curl",
+    "elixir_http" => "elixir",
+    "codex_pooler" => "codex-pooler"
+  }
 
   @spec display(map()) :: map() | nil
   def display(%{user_agent: user_agent}) when is_binary(user_agent) do
@@ -47,7 +86,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay.UserAgents do
         kind: classification.kind,
         label: classification.label,
         icon: classification.icon,
-        icon_class: classification.icon_class
+        icon_class: classification.icon_class,
+        logo: classification.logo
       }
     end
   end
@@ -86,14 +126,16 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay.UserAgents do
       kind: kind,
       label: label,
       icon: icon,
-      icon_class: ["size-3.5 shrink-0", icon_tone_class(tone)]
+      icon_class: ["size-3.5 shrink-0", icon_tone_class(tone)],
+      logo: logo_for(kind)
     }
   end
 
   defp custom_match?(:codex_cli, user_agent) do
-    String.starts_with?(user_agent, "codex cli/") or
-      String.starts_with?(user_agent, "codex-tui/") or
-      String.starts_with?(user_agent, "codex_exec/")
+    Enum.any?(
+      ["codex cli/", "codex-tui/", "codex_exec/", "codex_cli_rs/", "codex_vscode/", "codex-chrome-extension-sidepanel/"],
+      &String.starts_with?(user_agent, &1)
+    )
   end
 
   defp custom_match?(:vercel_ai_sdk, user_agent) do
@@ -111,6 +153,14 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay.UserAgents do
 
   defp custom_match?(:elixir_http, user_agent),
     do: String.starts_with?(user_agent, "mint/") or String.starts_with?(user_agent, "req/")
+
+  defp logo_for(kind) do
+    case Map.get(@logo_names, kind) do
+      nil -> nil
+      "litellm" -> %{asset: "litellm-32.png", format: :png}
+      name -> %{asset: "#{name}.svg", format: :svg}
+    end
+  end
 
   defp icon_tone_class(:info), do: "text-info"
   defp icon_tone_class(:primary), do: "text-primary"

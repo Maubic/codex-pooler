@@ -1,0 +1,599 @@
+{
+  "version": 1,
+  "retrieved_on": "2026-09-27",
+  "canvas": 24,
+  "content": 20,
+  "png_sizes": [
+    16,
+    24,
+    32,
+    48,
+    64,
+    128,
+    256
+  ],
+  "logos": [
+    {
+      "name": "opencode",
+      "source": "opencode.svg",
+      "source_url": "https://github.com/anomalyco/opencode/blob/543c686c0d0324e5e414e8a54a49283936beebd1/packages/console/app/src/asset/brand/opencode-logo-light.svg",
+      "revision": "543c686c0d0324e5e414e8a54a49283936beebd1",
+      "source_sha256": "b47a4fecc77599382e238868e74064bbe92307b0e253a32f0b1a026517a2d2a6",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        102,
+        0,
+        820,
+        1024
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "aider",
+      "source": "aider.svg",
+      "source_url": "https://github.com/Aider-AI/aider/blob/5dc9490bb35f9729ef2c95d00a19ccd30c26339c/aider/website/assets/icons/safari-pinned-tab.svg",
+      "revision": "5dc9490bb35f9729ef2c95d00a19ccd30c26339c",
+      "source_sha256": "145269573c298162e3e032de7563d39e6db234d29fbb7a7312f251e28cc374a6",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        0,
+        0,
+        1024,
+        1024
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "continue",
+      "source": "continue.svg",
+      "source_url": "https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/extensions/intellij/src/main/resources/icons/continue.svg",
+      "revision": "5522c6f44ca0ac3528b37244818fbfa39b5af470",
+      "source_sha256": "f81d0ca0355295cbc8de14cb32a95cb7abe91efa43bd4d5e16e6d1e3d7d3f362",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        0,
+        0,
+        1024,
+        952
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "cline",
+      "source": "cline.svg",
+      "source_url": "https://github.com/cline/cline/blob/20f32f47efa649edbb4fe6fa7c2d83ceb6a90b85/assets/branding/logos/cline-icon-dark.svg",
+      "revision": "20f32f47efa649edbb4fe6fa7c2d83ceb6a90b85",
+      "source_sha256": "6aab009bf089a8dc1b5452c05c471244a08595b78fd639835eacc0821b887c06",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        9,
+        48,
+        1006,
+        923
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "goose",
+      "source": "goose.svg",
+      "source_url": "https://github.com/aaif-goose/goose/blob/fc9b2a5be496ab5e5d9ee1118c77bcb59674f409/documentation/static/img/goose.svg",
+      "revision": "fc9b2a5be496ab5e5d9ee1118c77bcb59674f409",
+      "source_sha256": "27cb1fef4a85a1779394dbfd0c7d5285d8cb6b120b36446b1cdbd9aad798da0b",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        61,
+        26,
+        925,
+        925
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "windmill",
+      "source": "windmill.svg",
+      "source_url": "https://github.com/windmill-labs/windmill/blob/d3d539291716baf5807a724d60d338cd3c4fe521/frontend/static/logo.svg",
+      "revision": "d3d539291716baf5807a724d60d338cd3c4fe521",
+      "upstream_sha256": "4c114f3758666410c10976935562440eef8b0c9748426d1875556e60a731ec72",
+      "source_preparation": "Trailing whitespace removed; SVG geometry is unchanged.",
+      "source_sha256": "3f2eb8a280cbb19b9ff801e52c8f61be9fc6179b43175c0fef9160b1d630442d",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        0,
+        56,
+        1024,
+        912
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "deepseek-harness",
+      "source": "deepseek-harness.svg",
+      "source_url": "https://github.com/deepseek-ai/deepseek-harness/blob/477b4f420553e8a52c2fbccc464d7561b239c443/apps/web/public/favicon.svg",
+      "revision": "477b4f420553e8a52c2fbccc464d7561b239c443",
+      "source_sha256": "9e983b4f649c25c6ca0623a50be1a6e705fd8f49f756638b980fa13b40575ab6",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        20,
+        143,
+        991,
+        745
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "omp",
+      "source": "omp.svg",
+      "source_url": "https://github.com/can1357/oh-my-pi/blob/ba344f5e69f28535e7e9a2cf09e5af3643861b73/assets/icon.svg",
+      "revision": "ba344f5e69f28535e7e9a2cf09e5af3643861b73",
+      "source_sha256": "727019727006f26fe3d1f187d3fe9830f26213733a51721096a2044ab059cf61",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        85,
+        196,
+        854,
+        632
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "openai",
+      "source": "openai.svg",
+      "source_url": "https://github.com/lobehub/lobe-icons/blob/329f378cbd1a88f45b60cd096b9111ce16f3ea39/packages/static-svg/icons/openai.svg",
+      "revision": "329f378cbd1a88f45b60cd096b9111ce16f3ea39",
+      "attribution": "Lobe Icons, MIT; underlying product marks belong to their respective owners.",
+      "source_sha256": "a595df6b423920c67a7f8f73c063e4bfb72d415948097b6cac063a2366bb5186",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        0,
+        0,
+        1024,
+        1015
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "codex",
+      "source": "codex.svg",
+      "source_url": "https://github.com/lobehub/lobe-icons/blob/329f378cbd1a88f45b60cd096b9111ce16f3ea39/packages/static-svg/icons/codex.svg",
+      "revision": "329f378cbd1a88f45b60cd096b9111ce16f3ea39",
+      "attribution": "Lobe Icons, MIT; underlying product marks belong to their respective owners.",
+      "source_sha256": "d08b4e824cd6727e89617f59e4737273ff53e44c1da849d016dd64dfd08b33e1",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        0,
+        0,
+        1024,
+        1024
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "openclaw",
+      "source": "openclaw.svg",
+      "source_url": "https://github.com/lobehub/lobe-icons/blob/329f378cbd1a88f45b60cd096b9111ce16f3ea39/packages/static-svg/icons/openclaw.svg",
+      "revision": "329f378cbd1a88f45b60cd096b9111ce16f3ea39",
+      "attribution": "Lobe Icons, MIT; underlying product marks belong to their respective owners.",
+      "source_sha256": "8ef4de8032b06492af52a2070fc044ce7cc0c1dcef70471b386571eb1c3b2b63",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        0,
+        71,
+        1024,
+        939
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "hermesagent",
+      "source": "hermesagent.svg",
+      "source_url": "https://github.com/lobehub/lobe-icons/blob/329f378cbd1a88f45b60cd096b9111ce16f3ea39/packages/static-svg/icons/hermesagent.svg",
+      "revision": "329f378cbd1a88f45b60cd096b9111ce16f3ea39",
+      "attribution": "Lobe Icons, MIT; underlying product marks belong to their respective owners.",
+      "source_sha256": "02d43c0a91fc2ee41f2684fc39613ff6687de29a4b079665bace5303671dd63b",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        42,
+        0,
+        982,
+        1024
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "cursor",
+      "source": "cursor.svg",
+      "source_url": "https://github.com/lobehub/lobe-icons/blob/329f378cbd1a88f45b60cd096b9111ce16f3ea39/packages/static-svg/icons/cursor.svg",
+      "revision": "329f378cbd1a88f45b60cd096b9111ce16f3ea39",
+      "attribution": "Lobe Icons, MIT; underlying product marks belong to their respective owners.",
+      "source_sha256": "0cb51bddf264ae108926fd554c063ef40fc1aac3c5c921ddb39ad184e4e5d0ef",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        62,
+        0,
+        900,
+        1024
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "kilocode",
+      "source": "kilocode.svg",
+      "source_url": "https://github.com/lobehub/lobe-icons/blob/329f378cbd1a88f45b60cd096b9111ce16f3ea39/packages/static-svg/icons/kilocode.svg",
+      "revision": "329f378cbd1a88f45b60cd096b9111ce16f3ea39",
+      "attribution": "Lobe Icons, MIT; underlying product marks belong to their respective owners.",
+      "source_sha256": "a2aef0e0bb992ebe768bfb8c3a3ab6ff2c2638448b09dd88db27877de1c07a22",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        0,
+        0,
+        1024,
+        1024
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "openhands",
+      "source": "openhands.svg",
+      "source_url": "https://github.com/lobehub/lobe-icons/blob/329f378cbd1a88f45b60cd096b9111ce16f3ea39/packages/static-svg/icons/openhands.svg",
+      "revision": "329f378cbd1a88f45b60cd096b9111ce16f3ea39",
+      "attribution": "Lobe Icons, MIT; underlying product marks belong to their respective owners.",
+      "source_sha256": "246a996b64ceb4e60fee29506a5f17b14f44042b2a17844c03b69c3447aebc2d",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        0,
+        128,
+        1024,
+        698
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "trae",
+      "source": "trae.svg",
+      "source_url": "https://github.com/lobehub/lobe-icons/blob/329f378cbd1a88f45b60cd096b9111ce16f3ea39/packages/static-svg/icons/trae.svg",
+      "revision": "329f378cbd1a88f45b60cd096b9111ce16f3ea39",
+      "attribution": "Lobe Icons, MIT; underlying product marks belong to their respective owners.",
+      "source_sha256": "59ef6255dfce52d4b1e77aff4e1b4ee3cda71cda735b4fb45575e9874a1c11f6",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        0,
+        145,
+        1024,
+        732
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "python",
+      "source": "python.svg",
+      "source_url": "https://github.com/simple-icons/simple-icons/blob/d4e6ba93e48f178898707f0145ec285f28b64b38/icons/python.svg",
+      "revision": "d4e6ba93e48f178898707f0145ec285f28b64b38",
+      "attribution": "Simple Icons, CC0; underlying product marks belong to their respective owners.",
+      "source_sha256": "ad9468e1c4903f73ae7eebfbe980f0f727a10db695be3d914e7d8bd25356a862",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        0,
+        0,
+        1024,
+        1024
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "nodedotjs",
+      "source": "nodedotjs.svg",
+      "source_url": "https://github.com/simple-icons/simple-icons/blob/d4e6ba93e48f178898707f0145ec285f28b64b38/icons/nodedotjs.svg",
+      "revision": "d4e6ba93e48f178898707f0145ec285f28b64b38",
+      "attribution": "Simple Icons, CC0; underlying product marks belong to their respective owners.",
+      "source_sha256": "021851b758cde7d3e04819c3ac02047d0ff281c712e8387afa0c76a6dac6db6c",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        57,
+        0,
+        910,
+        1024
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "elixir",
+      "source": "elixir.svg",
+      "source_url": "https://github.com/simple-icons/simple-icons/blob/d4e6ba93e48f178898707f0145ec285f28b64b38/icons/elixir.svg",
+      "revision": "d4e6ba93e48f178898707f0145ec285f28b64b38",
+      "attribution": "Simple Icons, CC0; underlying product marks belong to their respective owners.",
+      "source_sha256": "d660279eaad792683d6e8cee70b225935e856f6b7aae4327d30f4a7f69e71c34",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        179,
+        0,
+        666,
+        1024
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "curl",
+      "source": "curl.svg",
+      "source_url": "https://github.com/simple-icons/simple-icons/blob/d4e6ba93e48f178898707f0145ec285f28b64b38/icons/curl.svg",
+      "revision": "d4e6ba93e48f178898707f0145ec285f28b64b38",
+      "attribution": "Simple Icons, CC0; underlying product marks belong to their respective owners.",
+      "source_sha256": "c37cfad781cc0b3df5fba385820cba9ca95488cfa5ea04af47c187fc3bd93bad",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        0,
+        84,
+        1024,
+        856
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "pi",
+      "source": "pi.svg",
+      "source_url": "https://pi.dev/logo-auto.svg",
+      "source_sha256": "abd66e7868b2d24f0f0895f9237ee8a6dcb22337583b0dc54aeb595acecb4d6b",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        211,
+        211,
+        602,
+        602
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "vercel",
+      "source": "vercel.svg",
+      "source_url": "https://k2mkucxia43oc7fa.public.blob.vercel-storage.com/front/press/vercel-assets.zip",
+      "source_member": "Vercel/icon/light/vercel-icon-light.svg",
+      "source_sha256": "178d63338a92fe0082c9a55623a62367c284aa3376112154abc37d7246a9e13d",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        0,
+        68,
+        1024,
+        888
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "ai-sdk",
+      "source": "ai-sdk.svg",
+      "source_url": "https://k2mkucxia43oc7fa.public.blob.vercel-storage.com/front/press/ai-sdk-assets.zip",
+      "source_member": "ai-sdk/Light/ai-sdk-logotype-light.svg",
+      "usage": "Wordmark retained for banners; the row uses the Vercel symbol.",
+      "source_sha256": "f32861eb866386cebd22ceca3a76293bc058738c151521b5ac3f5e2bf650d016",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        9,
+        375,
+        1015,
+        274
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    },
+    {
+      "name": "litellm",
+      "source": "litellm.webp",
+      "source_url": "https://cdn.prod.website-files.com/69eb241da3f923869c226875/6a5a06e951e6eed22a8c3395_litellm-train.webp",
+      "usage": "Official 160px raster train symbol; retain grayscale tonal detail, export up to 128px.",
+      "source_sha256": "0362ea92d59d7114078c4c24b4d21eea8c327c5fbc58900e2849a0e0c517d93c",
+      "format": "png",
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128
+      ]
+    },
+    {
+      "name": "codex-pooler",
+      "source": "codex-pooler.svg",
+      "source_url": "https://github.com/icoretech/codex-pooler/blob/main/docs-site/public/favicon.svg",
+      "preparation": "Remove the background tile; preserve the cube outline and inner bars.",
+      "source_sha256": "8ae9acea504ea7b34dd64e0cdff4423eaacb77fe38b901a358879e8034ef7008",
+      "format": "svg",
+      "painted_bounds_xywh_at_1024": [
+        256,
+        192,
+        512,
+        640
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128,
+        256
+      ]
+    }
+  ]
+}

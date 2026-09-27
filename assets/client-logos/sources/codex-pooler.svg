@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Codex Pooler">
+  <rect width="64" height="64" rx="14" fill="#0f172a"/>
+  <path d="M18 22.5 32 14l14 8.5v19L32 50l-14-8.5z" fill="none" stroke="#ff9900" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M24 29h16M24 35h16" stroke="#f8fafc" stroke-width="4" stroke-linecap="round"/>
+</svg>

@@ -523,9 +523,10 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
           id={"#{@prefix}-#{@request_log.id}-user-agent"}
           data-role="user-agent"
           data-client-kind={user_agent.kind}
-          class="min-w-0 truncate whitespace-nowrap text-base-content/55"
+          class="flex min-w-0 items-center gap-1 whitespace-nowrap text-base-content/55"
           title={user_agent.title}
         >
+          <.request_log_user_agent_icon user_agent={user_agent} />
           <span data-role="user-agent-text" class="truncate">{user_agent.text}</span>
         </span>
         <span
@@ -539,6 +540,23 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
         </span>
       </span>
     </div>
+    """
+  end
+
+  attr :user_agent, :map, required: true
+
+  def request_log_user_agent_icon(assigns) do
+    ~H"""
+    <span data-role="user-agent-icon" aria-hidden="true" class="inline-flex shrink-0">
+      <%= case @user_agent.logo do %>
+        <% %{format: :svg, asset: asset} -> %>
+          <span data-role="user-agent-logo" data-logo={asset} class="request-client-logo" style={"mask-image: url(#{~p"/images/client-logos/#{asset}"})"}></span>
+        <% %{format: :png, asset: asset} -> %>
+          <img data-role="user-agent-logo" data-logo={asset} class="request-client-logo-image" src={~p"/images/client-logos/#{asset}"} width="14" height="14" alt="" />
+        <% nil -> %>
+          <.icon name={@user_agent.icon} class={@user_agent.icon_class} />
+      <% end %>
+    </span>
     """
   end
 

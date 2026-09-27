@@ -1398,6 +1398,36 @@ body {
   line-height: 1rem;
 }
 
+.request-client-logo,
+.request-client-logo-image {
+  display: inline-block;
+  width: 0.875rem;
+  height: 0.875rem;
+  flex: none;
+}
+
+.request-client-logo {
+  background-color: currentColor;
+  mask-position: center;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-mode: alpha;
+}
+
+.request-client-logo-image {
+  object-fit: contain;
+}
+
+[data-theme="dark"] .request-client-logo-image {
+  filter: invert(1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .request-client-logo-image {
+    filter: invert(1);
+  }
+}
+
 @media (width < 64rem) {
   .admin-request-explorer.admin-ledger-table > tbody > tr {
     height: auto;

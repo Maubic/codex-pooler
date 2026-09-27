@@ -1,7 +1,10 @@
 defmodule CodexPoolerWeb.Admin.RequestLogsUserAgentsTest do
   use CodexPoolerWeb.ConnCase, async: false
 
+  import Phoenix.LiveViewTest, only: [render_component: 2]
+
   alias CodexPoolerWeb.Admin.RequestLogsDisplay.UserAgents
+  alias CodexPoolerWeb.Admin.RequestLogsPresentation
 
   describe "classify/1" do
     test "recognizes observed production and local request user agents" do
@@ -58,6 +61,63 @@ defmodule CodexPoolerWeb.Admin.RequestLogsUserAgentsTest do
 
       assert %{kind: "unknown", label: "Client"} = UserAgents.classify("unrelated-client/1.0")
     end
+
+    test "selects local logos for explicit client prefixes" do
+      for {user_agent, kind, asset} <- [
+            {"litellm/1.2.3", "litellm", "litellm-32.png"},
+            {"omp/1.2.3", "omp", "omp.svg"},
+            {"pi/1.2.3", "pi", "pi.svg"},
+            {"Cursor/1.2.3", "cursor", "cursor.svg"},
+            {"Kilo-Code/1.2.3 ai-sdk/provider-utils/1.2.3", "kilo", "kilocode.svg"},
+            {"OpenHands/1.2.3", "openhands", "openhands.svg"},
+            {"Trae/1.2.3", "trae", "trae.svg"},
+            {"codex_vscode/1.2.3", "codex", "codex.svg"},
+            {"codex_cli_rs/1.2.3", "codex", "codex.svg"},
+            {"codex-chrome-extension-sidepanel/1.2.3", "codex", "codex.svg"},
+            {"hermes-cli/1.2.3", "hermes", "hermesagent.svg"}
+          ] do
+        assert %{kind: ^kind, logo: %{asset: ^asset}} = UserAgents.classify(user_agent)
+        assert File.regular?(Application.app_dir(:codex_pooler, "priv/static/images/client-logos/#{asset}"))
+      end
+
+      assert %{kind: "openai_python", logo: %{asset: "openai.svg"}} = UserAgents.classify("OpenAI/Python 1.2.3")
+      assert %{kind: "node", logo: %{asset: "nodedotjs.svg"}} = UserAgents.classify("node")
+      assert %{kind: "unknown", logo: nil} = UserAgents.classify("my-litellm-wrapper/1.2.3")
+      assert %{kind: "unknown", logo: nil} = UserAgents.classify("cursor-probe/1.2.3")
+    end
+  end
+
+  test "renders the selected vector mask or raster asset with decorative semantics" do
+    vector =
+      render_component(&RequestLogsPresentation.request_log_user_agent_icon/1,
+        user_agent: UserAgents.display(%{user_agent: "opencode/1.2.3"})
+      )
+      |> LazyHTML.from_fragment()
+
+    assert Enum.count(LazyHTML.query(vector, "[data-role='user-agent-icon'][aria-hidden='true'] [data-role='user-agent-logo'][data-logo='opencode.svg']")) == 1
+    assert LazyHTML.query(vector, "[data-role='user-agent-logo']") |> LazyHTML.attribute("style") == ["mask-image: url(/images/client-logos/opencode.svg)"]
+
+    raster =
+      render_component(&RequestLogsPresentation.request_log_user_agent_icon/1,
+        user_agent: UserAgents.display(%{user_agent: "litellm/1.2.3"})
+      )
+      |> LazyHTML.from_fragment()
+
+    assert Enum.count(LazyHTML.query(raster, "[aria-hidden='true'] img[src='/images/client-logos/litellm-32.png'][alt=''][width='14'][height='14']")) == 1
+  end
+
+  test "unknown and absent user agents retain fallback and omission behavior" do
+    unknown = UserAgents.display(%{user_agent: "sample-client/1.2.3"})
+    assert %{logo: nil, text: "sample-client 1.2.3"} = unknown
+
+    document =
+      render_component(&RequestLogsPresentation.request_log_user_agent_icon/1, user_agent: unknown)
+      |> LazyHTML.from_fragment()
+
+    assert Enum.count(LazyHTML.query(document, "[data-role='user-agent-icon'] .hero-window")) == 1
+    assert Enum.empty?(LazyHTML.query(document, "[data-role='user-agent-logo']"))
+    assert is_nil(UserAgents.display(%{user_agent: nil}))
+    assert is_nil(UserAgents.display(%{user_agent: " "}))
   end
 
   test "display/1 keeps compact sanitized text separate from classification" do
