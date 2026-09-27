@@ -12,8 +12,13 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.Diff do
   @default_context_lines 2
   @default_model "gpt-4o"
 
-  @file_start_regex ~r/^diff --(?:git\s+\S+\s+\S+|(?:cc|combined)\s+\S+)/
+  # A file section starts at any `diff` invocation line (`diff --git`,
+  # `diff --cc`, `diff -ru a/x b/x`, `diff -u x y`) or, after a complete hunk,
+  # at a `---`/`+++` header pair. Two-way hunks end when the line counts in
+  # their `@@` header are used up; lines outside hunks stay verbatim in place.
+  @file_start_regex ~r/^diff\s+(?:--(?:cc|combined)\s+\S+|(?:-\S+\s+)*\S+\s+\S+)/
   @hunk_header_regex ~r/^@@{1,2}\s+-\d+(?:,\d+)?(?:\s+-\d+(?:,\d+)?)*\s+\+\d+(?:,\d+)?\s+@@{1,2}/
+  @two_way_hunk_counts_regex ~r/^@@\s+-\d+(?:,(\d+))?\s+\+\d+(?:,(\d+))?\s+@@/
 
   @spec compress(term(), Strategies.opts()) :: Strategies.result()
   def compress(content, opts \\ [])
@@ -74,53 +79,107 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.Diff do
 
   def compress(_content, _opts), do: :skip
 
-  defp parse_files(lines) do
-    file_start_indexes =
-      lines
-      |> Enum.with_index()
-      |> Enum.reduce([], fn {line, index}, indexes ->
-        if Regex.match?(@file_start_regex, line), do: [index | indexes], else: indexes
-      end)
-      |> Enum.reverse()
+  defp parse_files(lines), do: parse_lines(lines, %{files: [], file: new_file(false), hunk: nil})
 
-    if file_start_indexes == [] do
-      [parse_file(lines)]
-    else
-      file_start_indexes
-      |> Enum.with_index()
-      |> Enum.map(&parse_file_slice(lines, file_start_indexes, &1))
+  defp parse_lines([], state) do
+    state
+    |> close_file()
+    |> Map.fetch!(:files)
+    |> Enum.reverse()
+  end
+
+  defp parse_lines([line | rest], state) do
+    cond do
+      Regex.match?(@file_start_regex, line) -> parse_lines(rest, start_file(state, line))
+      Regex.match?(@hunk_header_regex, line) -> parse_lines(rest, state |> close_hunk() |> open_hunk(line))
+      hunk_open?(state.hunk) or no_newline_marker?(state.hunk, line) -> parse_lines(rest, add_hunk_line(state, line))
+      state.hunk == nil and state.file.hunks == [] -> parse_lines(rest, add_header_line(state, line))
+      header_pair?(line, rest) -> parse_lines(rest, start_file(state, line))
+      true -> parse_lines(rest, add_part_line(state, line))
     end
   end
 
-  defp parse_file_slice(lines, file_start_indexes, {start_index, position}) do
-    slice_start_index = if position == 0, do: 0, else: start_index
-    end_index = Enum.at(file_start_indexes, position + 1, length(lines))
+  defp new_file(started?), do: %{started?: started?, header: [], parts: [], hunks: []}
 
-    lines
-    |> Enum.slice(slice_start_index, end_index - slice_start_index)
-    |> parse_file()
+  # Lines before the first file section (a preamble) belong to its header.
+  defp start_file(%{file: %{started?: false, parts: [], hunks: []} = preamble, hunk: nil} = state, line) do
+    %{state | file: %{new_file(true) | header: [line | preamble.header]}}
   end
 
-  defp parse_file(lines) do
-    {header, hunks, current_hunk} =
-      Enum.reduce(lines, {[], [], nil}, fn line, {header, hunks, current_hunk} ->
-        if Regex.match?(@hunk_header_regex, line) do
-          hunks = append_hunk(hunks, current_hunk)
-          {header, hunks, new_hunk(line)}
-        else
-          append_line(line, header, hunks, current_hunk)
-        end
-      end)
-
-    hunks =
-      hunks
-      |> append_hunk(current_hunk)
-      |> Enum.reverse()
-
-    %{header: Enum.reverse(header), hunks: hunks}
+  defp start_file(state, line) do
+    state = close_file(state)
+    %{state | file: %{new_file(true) | header: [line]}}
   end
 
-  defp new_hunk(header), do: %{header: header, body: [], prefix_width: hunk_prefix_width(header)}
+  defp close_file(state) do
+    %{file: file} = state = close_hunk(state)
+
+    files =
+      if file.header == [] and file.parts == [] and file.hunks == [] do
+        state.files
+      else
+        [%{header: Enum.reverse(file.header), parts: Enum.reverse(file.parts), hunks: Enum.reverse(file.hunks)} | state.files]
+      end
+
+    %{state | files: files, file: new_file(false)}
+  end
+
+  defp open_hunk(state, header) do
+    prefix_width = hunk_prefix_width(header)
+    %{state | hunk: %{header: header, body: [], prefix_width: prefix_width, remaining: hunk_line_counts(header, prefix_width)}}
+  end
+
+  defp close_hunk(%{hunk: nil} = state), do: state
+
+  defp close_hunk(%{file: file, hunk: hunk} = state) do
+    hunk = %{header: hunk.header, body: Enum.reverse(hunk.body), prefix_width: hunk.prefix_width}
+    file = %{file | hunks: [hunk | file.hunks], parts: [{:hunk, length(file.hunks)} | file.parts]}
+    %{state | file: file, hunk: nil}
+  end
+
+  defp add_header_line(%{file: file} = state, line), do: %{state | file: %{file | header: [line | file.header]}}
+
+  defp add_part_line(state, line) do
+    %{file: file} = state = close_hunk(state)
+    %{state | file: %{file | parts: [{:line, line} | file.parts]}}
+  end
+
+  defp add_hunk_line(%{hunk: hunk} = state, line) do
+    %{state | hunk: %{hunk | body: [line | hunk.body], remaining: consume_hunk_line(hunk.remaining, line)}}
+  end
+
+  # Combined-diff hunks carry one line count per parent; they stay open until
+  # the next hunk or file header, as before.
+  defp hunk_line_counts(header, 1) do
+    case Regex.run(@two_way_hunk_counts_regex, header, capture: :all_but_first) do
+      nil -> :uncounted
+      counts -> {line_count(Enum.at(counts, 0)), line_count(Enum.at(counts, 1))}
+    end
+  end
+
+  defp hunk_line_counts(_header, _prefix_width), do: :uncounted
+
+  defp line_count(nil), do: 1
+  defp line_count(""), do: 1
+  defp line_count(count), do: String.to_integer(count)
+
+  defp consume_hunk_line(:uncounted, _line), do: :uncounted
+  defp consume_hunk_line(remaining, "\\" <> _marker), do: remaining
+  defp consume_hunk_line({old, new}, "+" <> _added), do: {old, new - 1}
+  defp consume_hunk_line({old, new}, "-" <> _removed), do: {old - 1, new}
+  defp consume_hunk_line({old, new}, _context), do: {old - 1, new - 1}
+
+  defp hunk_open?(nil), do: false
+  defp hunk_open?(%{remaining: :uncounted}), do: true
+  defp hunk_open?(%{remaining: {old, new}}), do: old > 0 or new > 0
+
+  # `\ No newline at end of file` annotates the hunk line just before it, even
+  # when that line used up the hunk's counts.
+  defp no_newline_marker?(nil, _line), do: false
+  defp no_newline_marker?(_hunk, line), do: String.starts_with?(line, "\\")
+
+  defp header_pair?("--- " <> _old, ["+++ " <> _new | _rest]), do: true
+  defp header_pair?(_line, _rest), do: false
 
   defp hunk_prefix_width(header) do
     header
@@ -129,18 +188,6 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.Diff do
     |> String.length()
     |> Kernel.-(1)
     |> max(1)
-  end
-
-  defp append_line(line, header, hunks, nil), do: {[line | header], hunks, nil}
-
-  defp append_line(line, header, hunks, current_hunk) do
-    {header, hunks, %{current_hunk | body: [line | current_hunk.body]}}
-  end
-
-  defp append_hunk(hunks, nil), do: hunks
-
-  defp append_hunk(hunks, hunk) do
-    [%{hunk | body: Enum.reverse(hunk.body)} | hunks]
   end
 
   defp select_files(files, opts) do
@@ -166,6 +213,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.Diff do
 
             selected_file = %{
               header: file.header,
+              parts: file.parts,
               hunks: selected_hunks,
               omitted_hunk_count: length(file.hunks) - length(selected_hunks)
             }
@@ -182,10 +230,9 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.Diff do
 
     {file_chunks, kept_context_line_count, omitted_context_line_count} =
       Enum.reduce(selected_files, {[], 0, 0}, fn file, {lines, kept_context, omitted_context} ->
-        {hunk_lines, file_kept_context, file_omitted_context} =
-          render_hunks(file.hunks, context_lines)
+        {part_lines, file_kept_context, file_omitted_context} = render_parts(file, context_lines)
 
-        file_lines = file.header ++ hunk_lines ++ omitted_hunk_marker(file.omitted_hunk_count)
+        file_lines = file.header ++ part_lines ++ omitted_hunk_marker(file.omitted_hunk_count)
 
         {[file_lines | lines], kept_context + file_kept_context, omitted_context + file_omitted_context}
       end)
@@ -201,13 +248,26 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.Diff do
     {file_lines, kept_context_line_count, omitted_context_line_count}
   end
 
-  defp render_hunks(hunks, context_lines) do
-    {chunks, kept_context, omitted_context} =
-      Enum.reduce(hunks, {[], 0, 0}, fn hunk, {chunks, kept_context, omitted_context} ->
-        {hunk_lines, hunk_kept_context, hunk_omitted_context} =
-          render_hunk(hunk, context_lines)
+  # Parts keep file order: kept hunks render compressed, omitted hunks drop
+  # out (counted by the file's omitted-hunks marker), and lines between hunks
+  # or after the last one stay verbatim.
+  defp render_parts(file, context_lines) do
+    kept_hunks = file.hunks |> Enum.with_index() |> Map.new(fn {hunk, index} -> {index, hunk} end)
 
-        {[hunk_lines | chunks], kept_context + hunk_kept_context, omitted_context + hunk_omitted_context}
+    {chunks, kept_context, omitted_context} =
+      Enum.reduce(file.parts, {[], 0, 0}, fn
+        {:line, line}, {chunks, kept_context, omitted_context} ->
+          {[[line] | chunks], kept_context, omitted_context}
+
+        {:hunk, index}, {chunks, kept_context, omitted_context} = acc ->
+          case Map.fetch(kept_hunks, index) do
+            {:ok, hunk} ->
+              {hunk_lines, hunk_kept_context, hunk_omitted_context} = render_hunk(hunk, context_lines)
+              {[hunk_lines | chunks], kept_context + hunk_kept_context, omitted_context + hunk_omitted_context}
+
+            :error ->
+              acc
+          end
       end)
 
     {chunks |> Enum.reverse() |> List.flatten(), kept_context, omitted_context}

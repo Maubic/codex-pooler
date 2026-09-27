@@ -82,4 +82,114 @@ defmodule CodexPooler.RequestCompressionFixtures do
 
   @spec clang_undeclared_identifier_diagnostics() :: String.t()
   def clang_undeclared_identifier_diagnostics, do: @clang_undeclared_identifier_diagnostics
+
+  # Verbatim output of Apple diff (`diff -ru -U 10 a b`) for synthetic trees:
+  # three changed text files (one deleting a line that starts with `--`), a
+  # binary file, and a file only in `a`.
+  @recursive_unified_diff ~S"""
+  Binary files a/logo.bin and b/logo.bin differ
+  diff -ru -U 10 a/notes.txt b/notes.txt
+  --- a/notes.txt	2026-09-27 09:00:00
+  +++ b/notes.txt	2026-09-27 10:00:00
+  @@ -20,21 +20,21 @@
+   alpha synthetic line 20
+   alpha synthetic line 21
+   alpha synthetic line 22
+   alpha synthetic line 23
+   alpha synthetic line 24
+   alpha synthetic line 25
+   alpha synthetic line 26
+   alpha synthetic line 27
+   alpha synthetic line 28
+   alpha synthetic line 29
+  -alpha synthetic line 30
+  +alpha synthetic line 30 changed
+   alpha synthetic line 31
+   alpha synthetic line 32
+   alpha synthetic line 33
+   alpha synthetic line 34
+   alpha synthetic line 35
+   alpha synthetic line 36
+   alpha synthetic line 37
+   alpha synthetic line 38
+   alpha synthetic line 39
+   alpha synthetic line 40
+  Only in a: only_old.txt
+  diff -ru -U 10 a/query.sql b/query.sql
+  --- a/query.sql	2026-09-27 09:00:00
+  +++ b/query.sql	2026-09-27 10:00:00
+  @@ -1,21 +1,20 @@
+   select 1;
+   -- synthetic comment 1
+   -- synthetic comment 2
+   -- synthetic comment 3
+   -- synthetic comment 4
+   -- synthetic comment 5
+   -- synthetic comment 6
+   -- synthetic comment 7
+   -- synthetic comment 8
+   -- synthetic comment 9
+  --- synthetic comment 10
+   -- synthetic comment 11
+   -- synthetic comment 12
+   -- synthetic comment 13
+   -- synthetic comment 14
+   -- synthetic comment 15
+   -- synthetic comment 16
+   -- synthetic comment 17
+   -- synthetic comment 18
+   -- synthetic comment 19
+   -- synthetic comment 20
+  diff -ru -U 10 a/report.txt b/report.txt
+  --- a/report.txt	2026-09-27 09:00:00
+  +++ b/report.txt	2026-09-27 10:00:00
+  @@ -1,20 +1,20 @@
+   beta synthetic line 1
+   beta synthetic line 2
+   beta synthetic line 3
+   beta synthetic line 4
+   beta synthetic line 5
+   beta synthetic line 6
+   beta synthetic line 7
+   beta synthetic line 8
+   beta synthetic line 9
+  -beta synthetic line 10
+  +beta synthetic line 10 revised
+   beta synthetic line 11
+   beta synthetic line 12
+   beta synthetic line 13
+   beta synthetic line 14
+   beta synthetic line 15
+   beta synthetic line 16
+   beta synthetic line 17
+   beta synthetic line 18
+   beta synthetic line 19
+   beta synthetic line 20
+  @@ -40,21 +40,21 @@
+   beta synthetic line 40
+   beta synthetic line 41
+   beta synthetic line 42
+   beta synthetic line 43
+   beta synthetic line 44
+   beta synthetic line 45
+   beta synthetic line 46
+   beta synthetic line 47
+   beta synthetic line 48
+   beta synthetic line 49
+  -beta synthetic line 50
+  +beta synthetic line 50 revised
+   beta synthetic line 51
+   beta synthetic line 52
+   beta synthetic line 53
+   beta synthetic line 54
+   beta synthetic line 55
+   beta synthetic line 56
+   beta synthetic line 57
+   beta synthetic line 58
+   beta synthetic line 59
+   beta synthetic line 60
+  """
+
+  @spec recursive_unified_diff() :: String.t()
+  def recursive_unified_diff, do: @recursive_unified_diff
 end

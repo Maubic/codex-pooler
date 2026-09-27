@@ -1150,7 +1150,8 @@ defmodule CodexPooler.CompatibilityMatrixTest do
                search_tool_output_envelope: "preserved_verbatim",
                search_omission_markers: "always_including_context_output",
                diff_hunkless_file_sections: "preserved_verbatim",
-               diff_hunk_headers: "kept_with_every_hunk"
+               diff_hunk_headers: "kept_with_every_hunk",
+               diff_file_sections: "split_at_diff_lines_and_header_pairs_after_counted_hunks"
              }
 
       assert Map.fetch!(fixture, :guardrails) == %{

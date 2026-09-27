@@ -3,6 +3,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.DiffTest do
 
   alias CodexPooler.Gateway.RequestCompression.Strategies.Diff
   alias CodexPooler.Gateway.RequestCompression.TokenCounter
+  alias CodexPooler.RequestCompressionFixtures
 
   @model "gpt-4o"
 
@@ -170,6 +171,62 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.DiffTest do
       end
     end
 
+    test "splits recursive unified diffs into their file sections" do
+      content = RequestCompressionFixtures.recursive_unified_diff()
+
+      assert {:ok, %{content: compressed, metadata: metadata}} = Diff.compress(content, model: @model, min_bytes: 0)
+
+      assert %{
+               original_file_count: 3,
+               compressed_file_count: 3,
+               omitted_file_count: 0,
+               original_hunk_count: 4,
+               compressed_hunk_count: 4,
+               addition_line_count: 3,
+               deletion_line_count: 4
+             } = metadata
+
+      for line <- [
+            "Binary files a/logo.bin and b/logo.bin differ",
+            "diff -ru -U 10 a/notes.txt b/notes.txt",
+            "--- a/query.sql\t2026-09-27 09:00:00",
+            "+++ b/report.txt\t2026-09-27 10:00:00",
+            "@@ -1,21 +1,20 @@",
+            "@@ -40,21 +40,21 @@",
+            "--- synthetic comment 10",
+            "+beta synthetic line 50 revised"
+          ] do
+        assert String.contains?(compressed, line), line
+      end
+
+      # A line between two file sections stays exactly where it was.
+      assert position(compressed, "alpha synthetic line 30 changed") < position(compressed, "Only in a: only_old.txt")
+      assert position(compressed, "Only in a: only_old.txt") < position(compressed, "diff -ru -U 10 a/query.sql")
+    end
+
+    test "starts a new file section at a header pair after a complete hunk" do
+      section = fn name ->
+        context = Enum.map_join(1..12, "\n", &" #{name} context line #{&1}")
+        "--- a/#{name}.txt\n+++ b/#{name}.txt\n@@ -1,25 +1,25 @@\n" <> context <> "\n-old #{name}\n+new #{name}\n" <> context
+      end
+
+      assert {:ok, %{content: compressed, metadata: metadata}} =
+               Diff.compress(section.("one") <> "\n" <> section.("two"), model: @model, min_bytes: 0)
+
+      assert %{original_file_count: 2, original_hunk_count: 2, addition_line_count: 2, deletion_line_count: 2} = metadata
+      assert String.contains?(compressed, "--- a/two.txt\n+++ b/two.txt\n@@ -1,25 +1,25 @@")
+    end
+
+    test "keeps a no-newline marker with the line it annotates" do
+      context = Enum.map_join(1..24, "\n", &" steady context line #{&1}")
+      content = "--- a/x.txt\n+++ b/x.txt\n@@ -1,25 +1,25 @@\n" <> context <> "\n-last line\n\\ No newline at end of file\n+last line changed\n\\ No newline at end of file"
+
+      assert {:ok, %{content: compressed, metadata: metadata}} = Diff.compress(content, model: @model, min_bytes: 0)
+
+      assert String.ends_with?(compressed, "-last line\n\\ No newline at end of file\n+last line changed\n\\ No newline at end of file")
+      assert %{original_file_count: 1, addition_line_count: 1, deletion_line_count: 1} = metadata
+    end
+
     test "skips diffs whose hunks carry no changes" do
       context = Enum.map_join(1..24, "\n", &" unchanged synthetic line #{&1}")
       content = "@@ -1,2 +1,2 @@\n-old\n+new\n" <> context <> "\n@@ -80,3 +80,3 @@\n context only one\n context only two\n"
@@ -317,5 +374,10 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.DiffTest do
            end)
 
     refute inspect(metadata) =~ sentinel
+  end
+
+  defp position(content, fragment) do
+    {position, _length} = :binary.match(content, fragment)
+    position
   end
 end
