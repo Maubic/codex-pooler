@@ -1671,12 +1671,17 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                  "hunk_replacement",
                  "minimal_unified_hunk",
                  "combined_unified_hunk",
-                 "long_preamble_diff"
+                 "long_preamble_diff",
+                 "recursive_unified_diff",
+                 "concatenated_unified_diffs"
                ],
                false_positive_guards: [
                  "path_like_group_heading",
                  "minimum_grouped_matches",
-                 "hunk_header_required"
+                 "hunk_header_required",
+                 "diagnostic_evidence",
+                 "non_search_command_provenance",
+                 "unrepresented_line_refusal"
                ],
                log_output: ["failure_summary_guard"]
              }
