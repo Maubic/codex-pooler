@@ -58,10 +58,10 @@ local helmVersion = 'v4.3.0';
           'mix deps.get',
           'mix compile --warnings-as-errors',
           'mix format --check-formatted',
-          'TEST_FAST_COMMAND="mix test --warnings-as-errors" make test-fast N=4',
+          'TEST_FAST_COMMAND="mix test.product --warnings-as-errors" make test-fast N=4',
           'apt-get install -y --no-install-recommends docker-cli docker-compose',
           'docker compose version',
-          'mix test --warnings-as-errors --only unix_integration',
+          'TEST_FAST_COMMAND="mix test.tooling --warnings-as-errors" make test-fast N=4',
         ],
         environment: {
           MIX_ENV: 'test',

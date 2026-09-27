@@ -25,7 +25,7 @@ DEV_DB_ENV := POSTGRES_HOST=localhost POSTGRES_PORT=$(POSTGRES_PORT) POSTGRES_DB
 DEV_SECRET_ENV := if [ -f .env ]; then while IFS= read -r line; do case "$$line" in CODEX_POOLER_UPSTREAM_SECRET_KEY=*|CODEX_POOLER_UPSTREAM_SECRET_KEY_VERSION=*|CODEX_POOLER_WEBSOCKET_OWNER_FORWARDING=*) export "$$line";; esac; done < .env; fi;
 N ?= 4
 # Test-only shell acceptance overrides. Normal runs must use the default commands.
-TEST_FAST_COMMAND ?= $(MIX) test
+TEST_FAST_COMMAND ?= $(MIX) test.product
 TEST_FAST_DROP_COMMAND ?= $(MIX) ecto.drop --quiet
 
 .PHONY: dev dev-prepare dev-db dev-compile dev-assets dev-migrate dev-pricing dev-stop dev-status dev-logs precommit smoke test-db-prune test-fast
@@ -255,6 +255,7 @@ test-fast:
 		if wait "$$pid"; then \
 			results[$$partition]=0; \
 			echo "test-fast: partition $$partition/$$partitions PASS"; \
+			awk '/^Finished in / || /^Result: / { print "test-fast: partition " partition "/" total ": " $$0 }' partition="$$partition" total="$$partitions" "$${logs[$$partition]}"; \
 		else \
 			rc=$$?; \
 			results[$$partition]=$$rc; \

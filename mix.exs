@@ -32,6 +32,9 @@ defmodule CodexPooler.MixProject do
   def cli do
     [
       preferred_envs: [
+        "test.product": :test,
+        "test.tooling": :test,
+        "test.unix": :test,
         coverage: :test,
         precommit: :test,
         quality: :test,

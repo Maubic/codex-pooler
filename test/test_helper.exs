@@ -35,6 +35,7 @@ ExUnit.start(
 )
 
 :ok = CodexPooler.TestDurationGuard.start!()
+ExUnit.after_suite(fn _stats -> CodexPooler.TestProfiles.verify_loaded_unix_files!() end)
 
 # Load immutable tokenizer dictionaries once before async tests race to use
 # them. Cold-loading regression tests still explicitly clear their own cache.
