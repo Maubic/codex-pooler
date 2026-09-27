@@ -1542,19 +1542,23 @@ body {
   width: 9.3125rem;
 }
 .admin-request-explorer .request-log-model-column {
-  width: calc(9.375rem + max(0px, 100cqw - 66rem) * 0.2);
+  width: calc(9.375rem + max(0px, 100cqw - 69rem) * 0.2);
 }
 .admin-request-explorer .request-log-attribution-column {
-  width: calc(8.75rem + max(0px, 100cqw - 66rem) * 0.25);
+  width: calc(8.75rem + max(0px, 100cqw - 69rem) * 0.25);
 }
 .admin-request-explorer .request-log-issues-column {
-  width: calc(11.375rem + max(0px, 100cqw - 66rem) * 0.25);
+  width: calc(11.375rem + max(0px, 100cqw - 69rem) * 0.25);
 }
 .admin-request-explorer .request-log-tokens-column {
   width: 11.5rem;
 }
 .admin-request-explorer .request-log-cost-column {
-  width: 5.3125rem;
+  width: clamp(
+    8.3125rem,
+    calc(8.3125rem + max(0px, 100cqw - 69rem) * 0.1),
+    11.3125rem
+  );
 }
 
 .admin-request-explorer.table > thead > tr > th {

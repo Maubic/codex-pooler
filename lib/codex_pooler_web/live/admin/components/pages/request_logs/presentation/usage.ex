@@ -140,12 +140,12 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Usage do
           data-compression-unit={compression_savings_unit(@request_log)}
           data-compression-status={compression_savings_status(@request_log)}
           data-compression-reason={compression_savings_reason(@request_log)}
-          class="flex min-w-0 items-center justify-end gap-1 whitespace-nowrap text-[11px] tabular-nums text-base-content/55"
+          class="flex min-w-0 items-center justify-end gap-1 text-[11px] tabular-nums text-base-content/55"
           title={compression_savings_title(@request_log)}
         >
           <.icon name="hero-arrows-pointing-in" class="size-3 shrink-0" />
           <span class="sr-only">compression</span>
-          <span class="truncate">{compression_line}</span>
+          <span class="min-w-0 whitespace-normal text-right">{compression_line}</span>
         </span>
       <% else %>
         <span

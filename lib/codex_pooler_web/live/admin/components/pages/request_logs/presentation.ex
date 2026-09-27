@@ -91,7 +91,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
         <div class="request-log-table-scroll lg:overflow-x-auto">
           <table
             data-ledger-dense
-            class="admin-request-explorer admin-ledger-table table table-sm admin-log-table font-sans lg:min-w-[66rem]"
+            class="admin-request-explorer admin-ledger-table table table-sm admin-log-table font-sans lg:min-w-[69rem]"
           >
             <%!-- The count is the footer's job; the caption repeats it only for
           assistive tech, which reads it before the rows. --%>
