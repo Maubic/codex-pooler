@@ -45,12 +45,12 @@ Model-name comparisons ignore letter case. A different name is evidence of what 
 
 ## Read the request-log warnings
 
-In [Request logs](/operators/request-logs/), the two signals have different presentations:
+In [Request logs](/operators/request-logs/), both signals appear in the **Errors · Warnings** column, between **Endpoint · Transport · Client** and **Tokens · Cached**. Each model warning has a warning-colored triangle and appears alongside any recorded request or attempt errors:
 
-- **A danger triangle and another model name beside the requested model:** the latest attempt's first reported name differs from the model sent upstream. Hover the marker for its meaning. The extra name stays on the same line; it has no `served` prefix.
-- **“Model name changed · attempts …”:** the provider reported different names during one or more attempts. The listed attempt numbers identify which records to inspect. This warning can appear without the triangle when the first report matched the model sent but a later report changed.
+- **“Model mismatch: model-b”:** the latest attempt's first reported name differs from the model sent upstream. The warning names the provider-reported model; hover it for the comparison's meaning.
+- **“model name changed · attempts …”:** the provider reported different names during one or more attempts. The listed attempt numbers identify which records to inspect. This warning can appear on its own when the first report matched the model sent but a later report changed, or alongside a model-mismatch warning when both signals occurred.
 
-Open the request to see each attempt's **Sent model**, **First model reported**, **First different name reported**, and **Model reported at end**. The list's inline name comes from the latest attempt; the name-change warning can also point to an earlier attempt. A successful retry does not remove that earlier evidence.
+Open the request to see each attempt's **Sent model**, **First model reported**, **First different name reported**, and **Model reported at end**. The model-mismatch warning uses the latest attempt; the name-change warning can also point to an earlier attempt. A successful retry does not remove that earlier evidence.
 
 An HTTP success status and a model-name warning can both be correct: the request succeeded, but the provider reported a different model. Likewise, a failed or interrupted attempt may already have returned enough model-name information to show a difference.
 
