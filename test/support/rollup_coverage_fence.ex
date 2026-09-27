@@ -79,12 +79,14 @@ defmodule CodexPooler.RollupCoverageFence do
   @doc """
   Opens the fence's connection for this `mix test` invocation. Call it once from
   `test/test_helper.exs`, before `CodexPooler.CommittedWriteGuard.start!/0`.
+  The application owns its lifetime: repeated ExUnit runs reuse it, and application shutdown
+  closes it before a run-scoped database is dropped.
   """
   @spec start!(keyword()) :: :ok
   def start!(opts \\ []) do
     repo_config = Keyword.get_lazy(opts, :repo_config, &CodexPooler.Repo.config/0)
 
-    {:ok, conn} =
+    connection_config =
       repo_config
       |> Keyword.take(@connection_keys)
       |> Keyword.merge(
@@ -95,7 +97,9 @@ defmodule CodexPooler.RollupCoverageFence do
           statement_timeout: @statement_timeout
         ]
       )
-      |> Postgrex.start_link()
+
+    child = Supervisor.child_spec({Postgrex, connection_config}, id: __MODULE__, restart: :temporary)
+    {:ok, conn} = Supervisor.start_child(CodexPooler.Supervisor, child)
 
     :persistent_term.put(@key, conn)
     :ok

@@ -157,6 +157,62 @@ defmodule CodexPooler.RollupCoverageFenceTest do
   defp committed_coverage(date), do: run_unboxed(fn -> Repo.get(DailyRollupCoverage, date) end)
 end
 
+defmodule CodexPooler.RollupCoverageFenceLifecycleTest do
+  use ExUnit.Case, async: false
+  use CodexPooler.CommittedWriteGuard
+
+  @probe ~S"""
+  alias CodexPooler.RollupCoverageFence
+
+  :ok = RollupCoverageFence.start!()
+  conn = :persistent_term.get({RollupCoverageFence, :conn})
+  %{rows: [[backend, application_name]]} =
+    Postgrex.query!(conn, "SELECT pg_backend_pid(), current_setting('application_name')", [])
+
+  observer_config =
+    CodexPooler.Repo.config()
+    |> Keyword.take([:hostname, :port, :username, :password, :database, :socket_dir, :ssl, :ssl_opts])
+    |> Keyword.put(:parameters, application_name: "rollup_fence_lifecycle_observer")
+
+  {:ok, observer} = Postgrex.start_link(observer_config)
+  query = "SELECT count(*) FROM pg_stat_activity WHERE pid = $1 AND application_name = $2"
+  %{rows: [[1]]} = Postgrex.query!(observer, query, [backend, application_name])
+  monitor = Process.monitor(conn)
+  :ok = Application.stop(:codex_pooler)
+  alive = Process.alive?(conn)
+  deadline = System.monotonic_time(:millisecond) + 15_000
+  await_backend = fn await ->
+    %{rows: [[remaining]]} = Postgrex.query!(observer, query, [backend, application_name])
+
+    if remaining == 0 or alive or System.monotonic_time(:millisecond) >= deadline do
+      remaining
+    else
+      Process.sleep(10)
+      await.(await)
+    end
+  end
+  remaining = await_backend.(await_backend)
+  IO.puts("fence-lifecycle application_name=#{application_name} pool_alive=#{alive} backends=#{remaining}")
+
+  # Leave no live pool behind even when this regression is red.
+  if alive, do: GenServer.stop(conn)
+  receive do
+    {:DOWN, ^monitor, :process, ^conn, _reason} -> :ok
+  after
+    15_000 -> raise "fence pool did not terminate"
+  end
+  GenServer.stop(observer)
+  unless not alive and remaining == 0, do: raise("fence connection outlived its application")
+  """
+
+  test "application shutdown closes the fence pool and its exact PostgreSQL backend" do
+    {output, exit_code} = System.cmd("mix", ["run", "--no-compile", "-e", @probe], env: [{"MIX_ENV", "test"}], stderr_to_stdout: true)
+
+    assert exit_code == 0, output
+    assert output =~ "fence-lifecycle application_name=codex_pooler_test_rollup_coverage_fence pool_alive=false backends=0"
+  end
+end
+
 defmodule CodexPooler.RollupCoverageFenceRestoreTest do
   @moduledoc """
   The fence writes back a coverage row that existed before the test, content and version

@@ -89,8 +89,10 @@ defmodule CodexPooler.MixTasks.TestDatabaseDropOnExitTest do
   """
 
   # An owner that stops answering one of the drain's calls, left running when its test finishes.
-  # It has no reply that could mark the end of the wait, so it watches the rollout drain server
-  # and reports the moment that server stops, which is when the shutdown got past the drain.
+  # It has no reply that could mark the end of the wait. An independent observer watches the
+  # rollout drain: registry shutdown can kill the owner before it handles the drain's DOWN.
+  # The exit callback joins that observer after the real runner stops the application and drops
+  # its database, so neither owner shutdown nor VM exit can discard the receipt.
   # ANSWER_STATUS picks the call it hangs: `true` answers the status poll with a turn that never
   # ends and hangs the post-deadline `:drain`, `false` hangs the first status call.
   @unresponsive_owner_test ~S"""
@@ -102,7 +104,6 @@ defmodule CodexPooler.MixTasks.TestDatabaseDropOnExitTest do
     @impl GenServer
     def init(answer_status?) do
       {:ok, _owner} = Registry.register(@registry, {__MODULE__, self()}, nil)
-      _monitor = Process.monitor(CodexPooler.Gateway.Transports.Websocket.RolloutDrain)
       {:ok, answer_status?}
     end
 
@@ -115,12 +116,6 @@ defmodule CodexPooler.MixTasks.TestDatabaseDropOnExitTest do
     @impl GenServer
     def handle_call(:owner_status, _from, true), do: {:reply, {:ok, %{active_turn?: true}}, true}
     def handle_call(_request, _from, answer_status?), do: {:noreply, answer_status?}
-
-    @impl GenServer
-    def handle_info({:DOWN, _monitor, :process, _drain, _reason}, answer_status?) do
-      IO.puts("drop-on-exit-probe drain_down_ms=#{System.monotonic_time(:millisecond)}")
-      {:noreply, answer_status?}
-    end
   end
 
   defmodule CodexPooler.DropOnExitProbe.UnresponsiveOwnerTest do
@@ -128,6 +123,42 @@ defmodule CodexPooler.MixTasks.TestDatabaseDropOnExitTest do
 
     test "leaves an unresponsive websocket owner running" do
       %{rows: [[database]]} = Repo.query!("SELECT current_database()")
+      drain = Process.whereis(CodexPooler.Gateway.Transports.Websocket.RolloutDrain)
+      assert is_pid(drain)
+      test = self()
+
+      observer = spawn(fn ->
+        monitor = Process.monitor(drain)
+        send(test, {:observing_drain, self()})
+
+        receive do
+          {:DOWN, ^monitor, :process, ^drain, _reason} ->
+            down_ms = System.monotonic_time(:millisecond)
+
+            receive do
+              {:receipt, caller, ref} -> send(caller, {ref, down_ms})
+            end
+        end
+      end)
+
+      System.at_exit(fn _exit_code ->
+        monitor = Process.monitor(observer)
+        send(observer, {:receipt, self(), monitor})
+
+        receive do
+          {^monitor, down_ms} -> IO.puts("drop-on-exit-probe drain_down_ms=#{down_ms}")
+        after
+          5_000 -> raise "rollout drain observer did not report shutdown"
+        end
+
+        receive do
+          {:DOWN, ^monitor, :process, ^observer, :normal} -> :ok
+        after
+          5_000 -> raise "rollout drain observer did not exit normally"
+        end
+      end)
+
+      assert_receive {:observing_drain, ^observer}
       {:ok, owner} = GenServer.start(CodexPooler.DropOnExitProbe.UnresponsiveOwner, ANSWER_STATUS)
       assert Process.alive?(owner)
       IO.puts("drop-on-exit-probe database=#{database}")
