@@ -46,6 +46,14 @@ defmodule CodexPooler.Gateway.Metadata.CodexModelDecodeContractTest do
   end
 
   describe "violations/1" do
+    test "diagnostics distinguish unknown enum variants from malformed values without retaining content" do
+      base = CodexCatalogShapes.synced_source("sample-diagnostic-model")
+      assert CodexModelDecodeContract.violation_classes(Map.put(base, "shell_type", "new_provider_variant")) == ["new_enum_variant"]
+      assert CodexModelDecodeContract.violation_classes(Map.put(base, "shell_type", 17)) == ["malformed_entry"]
+      assert CodexModelDecodeContract.violation_classes(base |> Map.put("shell_type", "new_provider_variant") |> Map.delete("priority")) == ["malformed_entry", "new_enum_variant"]
+      assert CodexModelDecodeContract.violation_classes(Map.put(base, "input_modalities", ["text", "future_modality"])) == ["new_enum_variant"]
+    end
+
     test "names exactly the fields the client fails to decode, before and after the JSON round trip" do
       vectors = CodexCatalogShapes.decode_vectors()
       assert Enum.count(vectors, fn {_label, _entry, expected} -> expected != [] end) == 42
@@ -91,7 +99,7 @@ defmodule CodexPooler.Gateway.Metadata.CodexModelDecodeContractTest do
 
       assert {:ok, checked} = build(sources, :decode_checked)
       assert Enum.map(checked.body["models"], & &1["slug"]) == ["gpt-decodable", "gpt-legacy"]
-      assert checked.undecodable_models == [%{slug: "gpt-undecodable", fields: ["priority"]}]
+      assert checked.undecodable_models == [%{slug: "gpt-undecodable", fields: ["priority"], classes: ["malformed_entry"]}]
       assert checked.etag == CodexCatalog.etag(checked.body)
 
       for representation <- [:instructions_template, :verbatim] do
@@ -110,7 +118,7 @@ defmodule CodexPooler.Gateway.Metadata.CodexModelDecodeContractTest do
 
       assert {:ok, checked} = build(sources, :decode_checked)
       assert checked.body == %{"models" => []}
-      assert checked.undecodable_models == [%{slug: "gpt-undecodable", fields: ["truncation_policy"]}]
+      assert checked.undecodable_models == [%{slug: "gpt-undecodable", fields: ["truncation_policy"], classes: ["malformed_entry"]}]
     end
   end
 

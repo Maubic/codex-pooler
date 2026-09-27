@@ -147,6 +147,30 @@ defmodule CodexPoolerWeb.Runtime.RuntimeDatabaseUnavailableTest do
     refute log =~ "administrator command"
   end
 
+  for code <- ~w(deadlock_detected serialization_failure lock_not_available), table <- ~w(requests codex_sessions) do
+    test "a #{code} rollback while writing #{table} returns 503 before dispatch", %{conn: conn} do
+      code = unquote(code)
+      table = unquote(table)
+      upstream = start_upstream(FakeUpstream.json_response(%{}))
+      setup = gateway_setup(upstream)
+      Repo.query!("CREATE FUNCTION pg_temp.runtime_lock_refusal() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic lock conflict' USING ERRCODE = '#{code}'; END $$")
+      Repo.query!("CREATE TRIGGER runtime_lock_refusal BEFORE INSERT ON #{table} FOR EACH ROW EXECUTE FUNCTION pg_temp.runtime_lock_refusal()")
+
+      {response, log} =
+        ExUnit.CaptureLog.with_log(fn ->
+          conn
+          |> auth(setup)
+          |> put_req_header("session-id", Ecto.UUID.generate())
+          |> post("/backend-api/codex/responses", %{"model" => setup.model.exposed_model_id, "input" => native_text_input("synthetic lock probe"), "stream" => true})
+        end)
+
+      assert_unavailable!(response, log, if(table == "requests", do: "reservation", else: "pre_dispatch"), "postgres_#{code}")
+      assert FakeUpstream.count(upstream) == 0
+      assert Repo.aggregate(from(r in Request, where: r.pool_id == ^setup.pool.id), :count) == 0
+      assert Repo.aggregate(from(l in LedgerEntry, where: l.pool_id == ^setup.pool.id), :count) == 0
+    end
+  end
+
   # All database calls the request makes in this process go to
   # `CodexPooler.UnavailableRepo`, whose queue drops them.
   defp request_on_unavailable_repo(%{unavailable: unavailable}, request),

@@ -70,8 +70,9 @@ defmodule CodexPooler.Gateway.Metadata.CatalogRepresentation do
   `<originator>/<version> ...`: a first-party Codex originator, or any
   originator (including one with a slash or longer than 64 bytes) followed by
   Codex's `(<os> <os version>; <arch>)` platform block.
-  Every other agent (`curl/8.22.0`, an SDK, a probe) keeps the verbatim entry
-  whatever version it reports, because no Codex catalog decoder reads its body.
+  Agents without either marker keep the verbatim entry whatever version they
+  report. The platform shape also deliberately accepts app-server hosts with
+  arbitrary names; it selects compatibility and is not proof of client identity.
   """
   @spec for_user_agent(term()) :: t()
   def for_user_agent(user_agent) when is_binary(user_agent) do

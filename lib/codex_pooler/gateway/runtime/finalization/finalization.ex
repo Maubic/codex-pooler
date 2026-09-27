@@ -391,7 +391,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
     do: if(partition_fallback?(response, context), do: :partition_fallback)
 
   defp partition_fallback?(%Req.Response{status: 429} = response, %SelectedCandidateContext{} = context),
-    do: not compact_endpoint?(context.endpoint) and PartitionFallback.available?(context) and ProviderUsageLimit.usage_limit_refusal?(response)
+    do: not compact_endpoint?(context.endpoint) and ProviderUsageLimit.usage_limit_refusal?(response) and PartitionFallback.available?(context)
 
   defp partition_fallback?(_response, _context), do: false
 

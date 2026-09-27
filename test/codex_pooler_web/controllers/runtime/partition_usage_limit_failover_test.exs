@@ -131,6 +131,34 @@ defmodule CodexPoolerWeb.Runtime.PartitionUsageLimitFailoverTest do
     assert row.request_metadata["canonical_partition"] == nil
   end
 
+  test "ordinary throttles do not read held-back quota or circuit snapshots while deciding fallback" do
+    pool = split_pool!(:routable, :http, refusing_mode: {:json_headers, 429, %{"error" => %{"type" => "rate_limit_error", "message" => "synthetic throttle"}}, []})
+    handler = {__MODULE__, make_ref()}
+    parent = self()
+    previous_depth = :erlang.system_flag(:backtrace_depth, 64)
+    on_exit(fn -> :erlang.system_flag(:backtrace_depth, previous_depth) end)
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:codex_pooler, :repo, :query],
+        fn _, _, _, _ ->
+          {:current_stacktrace, stack} = Process.info(self(), :current_stacktrace)
+
+          if Enum.any?(stack, fn {module, function, _, _} -> module == CodexPooler.Gateway.Routing.CandidateEligibility.PoolReturn and function == :any_routable? end),
+            do: send(parent, :fallback_query)
+        end,
+        nil
+      )
+
+    response = post_native(pool, "plain-throttle", false)
+    assert response.status == 429
+    assert model_posts(pool.other_upstream) == 0
+    :telemetry.detach(handler)
+    refute_received :fallback_query
+  end
+
   defp split_pool!(other_quota, transport \\ :http, opts \\ []) do
     resets_at = DateTime.to_unix(DateTime.utc_now()) + 3 * 86_400
 
@@ -140,7 +168,7 @@ defmodule CodexPoolerWeb.Runtime.PartitionUsageLimitFailoverTest do
         :websocket -> {FakeUpstream.websocket_text_frames([usage_limit_frame(resets_at)]), FakeUpstream.websocket_text_frames([completed_frame()])}
       end
 
-    refusing_upstream = start_upstream(refusing_mode)
+    refusing_upstream = start_upstream(Keyword.get(opts, :refusing_mode, refusing_mode))
     exhausted_upstream = start_upstream(success_mode)
     other_upstream = start_upstream(Keyword.get(opts, :other_mode, success_mode))
 

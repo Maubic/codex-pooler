@@ -62,10 +62,10 @@ defmodule CodexPooler.Gateway.Metadata do
   # would fail to decode it (and so discard every other entry). Only the model
   # slug and the field paths are named, never a value.
   defp log_undecodable_models(auth, undecodable_models) do
-    Enum.each(undecodable_models, fn %{slug: slug, fields: fields} ->
+    Enum.each(undecodable_models, fn %{slug: slug, fields: fields, classes: classes} ->
       Logger.warning(
         "codex catalog entry left out: the requesting client cannot decode it " <>
-          "pool_id=#{auth.pool.id} model=#{log_slug(slug)} fields=#{fields |> Enum.take(10) |> Enum.join(",")}"
+          "pool_id=#{auth.pool.id} model=#{log_slug(slug)} fields=#{fields |> Enum.take(10) |> Enum.join(",")} classes=#{Enum.join(classes, ",")}"
       )
     end)
   end

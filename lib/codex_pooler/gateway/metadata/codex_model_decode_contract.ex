@@ -107,6 +107,44 @@ defmodule CodexPooler.Gateway.Metadata.CodexModelDecodeContract do
 
   def violations(_entry), do: ["<entry>"]
 
+  @doc "Bounded classes of decode failures, without the rejected values."
+  @spec violation_classes(term()) :: [String.t()]
+  def violation_classes(entry) when is_map(entry) do
+    violations(entry)
+    |> Enum.map(fn path ->
+      keys = String.split(path, ~r/\.|\[|\]/, trim: true)
+      if unknown_enum_at?(entry, {:struct, @fields}, keys), do: "new_enum_variant", else: "malformed_entry"
+    end)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  def violation_classes(_entry), do: ["malformed_entry"]
+
+  defp unknown_enum_at?(value, {:enum, variants}, []) do
+    case value do
+      name when is_binary(name) -> name not in variants
+      map when is_map(map) -> match?([{name, nil}] when is_binary(name), Map.to_list(map)) and not enum_value?(map, variants)
+      _other -> false
+    end
+  end
+
+  defp unknown_enum_at?(value, {:struct, fields}, [key | rest]) when is_map(value) do
+    case Map.fetch(fields, key) do
+      {:ok, {_presence, type}} -> unknown_enum_at?(Map.get(value, key), type, rest)
+      :error -> false
+    end
+  end
+
+  defp unknown_enum_at?(values, {:list, type}, [index | rest]) when is_list(values) do
+    case Integer.parse(index) do
+      {index, ""} when index >= 0 -> unknown_enum_at?(Enum.at(values, index), type, rest)
+      _invalid -> false
+    end
+  end
+
+  defp unknown_enum_at?(_value, _type, _path), do: false
+
   # A model decodes only with a string template or a string legacy field to
   # promote into it. An array-encoded `model_messages` is decoded positionally
   # by the client and is not judged here.

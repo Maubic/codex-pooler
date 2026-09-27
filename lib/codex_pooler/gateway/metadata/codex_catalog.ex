@@ -16,7 +16,7 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalog do
 
   @type normalized_policy :: map()
   @type body :: %{required(String.t()) => [map()]}
-  @type undecodable_model :: %{required(:slug) => String.t(), required(:fields) => [String.t()]}
+  @type undecodable_model :: %{required(:slug) => String.t(), required(:fields) => [String.t()], required(:classes) => [String.t()]}
   @type result :: %{
           required(:body) => body(),
           required(:etag) => String.t(),
@@ -205,7 +205,7 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalog do
       |> Enum.map(&{&1, CodexModelDecodeContract.violations(&1)})
       |> Enum.split_with(fn {_model, fields} -> fields == [] end)
 
-    {Enum.map(decodable, &elem(&1, 0)), Enum.map(undecodable, fn {model, fields} -> %{slug: Map.fetch!(model, "slug"), fields: fields} end)}
+    {Enum.map(decodable, &elem(&1, 0)), Enum.map(undecodable, fn {model, fields} -> %{slug: Map.fetch!(model, "slug"), fields: fields, classes: CodexModelDecodeContract.violation_classes(model)} end)}
   end
 
   defp reject_undecodable(models, _representation), do: {models, []}
