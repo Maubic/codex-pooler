@@ -972,6 +972,10 @@ defmodule CodexPoolerWeb.Telemetry.RoleCoverageTest do
     end
 
     test "a promotion gate naming a test nobody wrote does not resolve" do
+      exclusions = ExUnit.configuration()[:exclude]
+      on_exit(fn -> ExUnit.configure(exclude: exclusions) end)
+      ExUnit.configure(exclude: [role_coverage_excluded_probe: true] ++ exclusions)
+
       # The shape check passes any pair of non-empty strings, so a declaration
       # could name a test that does not exist, in a file that does not exist, and
       # ship green. Resolving the name binds it to the repository: the file is
@@ -1855,7 +1859,7 @@ defmodule CodexPoolerWeb.Telemetry.RoleCoverageTest do
     body =
       Enum.map_join(names, "\n", fn {_gate, name} -> probe_test(name, "") end) <>
         probe_test("the probe skipped test #{suffix}", "@tag :skip\n    ") <>
-        probe_test("the probe excluded test #{suffix}", "@tag :unix_integration\n    ")
+        probe_test("the probe excluded test #{suffix}", "@tag :role_coverage_excluded_probe\n    ")
 
     File.write!(full, """
     defmodule RoleCoverageGateProbe#{suffix}Test do

@@ -160,6 +160,7 @@ defmodule CodexPooler.MixTasks.ReliabilityQaLifecycleTest do
           "rm lib/link.ex; ln -s missing.ex lib/link.ex"
         ] do
       fixture = wrapper_fixture!(23, 0)
+      File.chmod!(Path.join(fixture.root, "lib/fixture.ex"), 0o640)
       File.ln_s!("fixture.ex", Path.join(fixture.root, "lib/link.ex"))
 
       {output, code} =
