@@ -92,6 +92,12 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
          stale_after_ms,
          expected_credential_epoch
        ) do
+    # A cold cache loads settings in its own process. Resolve that policy before
+    # holding a database connection so its checkout cannot wait on this transaction.
+    proactive_refresh_enabled? =
+      trigger_kind != "scheduled" or
+        CodexPooler.InstanceSettings.current().gateway.upstream_token_refresh_proactive_enabled
+
     Repo.transaction(fn ->
       identity.id
       |> lock_upstream_identity_with_timestamp()
@@ -99,7 +105,8 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
         trigger_kind,
         receive_timeout_ms,
         stale_after_ms,
-        expected_credential_epoch
+        expected_credential_epoch,
+        proactive_refresh_enabled?
       )
     end)
     |> case do
@@ -122,7 +129,8 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
          _trigger_kind,
          _receive_timeout_ms,
          _stale_after_ms,
-         _expected_credential_epoch
+         _expected_credential_epoch,
+         _proactive_refresh_enabled?
        )
        when status in @token_refresh_terminal_statuses do
     token_refresh_result(:noop, locked, retryable?: false, reason: "account is #{status}")
@@ -133,7 +141,8 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
          _trigger_kind,
          _receive_timeout_ms,
          _stale_after_ms,
-         _expected_credential_epoch
+         _expected_credential_epoch,
+         _proactive_refresh_enabled?
        )
        when status not in @token_refresh_candidate_statuses do
     token_refresh_result(:noop, locked, retryable?: false, reason: "account is #{status}")
@@ -144,7 +153,8 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
          trigger_kind,
          receive_timeout_ms,
          stale_after_ms,
-         expected_credential_epoch
+         expected_credential_epoch,
+         proactive_refresh_enabled?
        ) do
     case CredentialFencing.validate_current_credential_epoch(locked) do
       {:ok, credential_epoch} ->
@@ -157,7 +167,8 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
             receive_timeout_ms,
             stale_after_ms,
             timestamp,
-            credential_epoch
+            credential_epoch,
+            proactive_refresh_enabled?
           )
         end
 
@@ -171,7 +182,8 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
          _trigger_kind,
          _receive_timeout_ms,
          _stale_after_ms,
-         _expected_credential_epoch
+         _expected_credential_epoch,
+         _proactive_refresh_enabled?
        ) do
     Repo.rollback(lifecycle_error(:upstream_identity_not_found, "upstream identity was not found"))
   end
@@ -209,10 +221,11 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
          receive_timeout_ms,
          stale_after_ms,
          timestamp,
-         credential_epoch
+         credential_epoch,
+         proactive_refresh_enabled?
        ) do
     if trigger_kind == "scheduled" and locked.status == @active and
-         not CodexPooler.InstanceSettings.current().gateway.upstream_token_refresh_proactive_enabled do
+         not proactive_refresh_enabled? do
       token_refresh_result(:noop, locked, retryable?: false, reason: "proactive refresh disabled")
     else
       begin_enabled_refresh(

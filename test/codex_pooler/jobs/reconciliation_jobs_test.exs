@@ -6048,7 +6048,6 @@ defmodule CodexPooler.Jobs.ReconciliationJobsTest do
       assert Repo.get!(PoolUpstreamAssignment, assignment.id) == disabled_before
     end
 
-    @tag slow: "performs real credential refresh failure and drains the already-queued Oban reconciliation"
     test "skips already queued account reconciliation jobs when upstream account requires reauth" do
       {pool, assignment} = active_assignment_fixture(%{})
       identity = Upstreams.get_upstream_identity(assignment.upstream_identity_id)
@@ -6067,6 +6066,26 @@ defmodule CodexPooler.Jobs.ReconciliationJobsTest do
       assignment = Repo.get!(PoolUpstreamAssignment, assignment.id)
       assert is_nil(assignment.metadata["quota_priming"])
       assert is_nil(assignment.metadata["last_reconciliation"])
+    end
+
+    test "scheduled token refresh with a cold cache respects disabled proactive refresh" do
+      {_pool, assignment} = active_assignment_fixture(%{})
+      identity = Upstreams.get_upstream_identity(assignment.upstream_identity_id)
+      settings = InstanceSettings.ensure_singleton!()
+
+      assert {:ok, _settings} =
+               InstanceSettings.update_system_settings(settings, %{
+                 "gateway" => %{"upstream_token_refresh_proactive_enabled" => false}
+               })
+
+      :ok = InstanceSettings.reset_cache_for_test()
+
+      assert {:ok, %{status: :noop, retryable?: false, reason: "proactive refresh disabled"}} =
+               TokenRefresh.refresh_access_token(identity, trigger_kind: "scheduled")
+
+      assert Repo.reload!(identity) == identity
+      assert Repo.reload!(assignment) == assignment
+      refute InstanceSettings.current().gateway.upstream_token_refresh_proactive_enabled
     end
 
     test "gateway finalization reuses an incomplete scheduled identity reconciliation" do
