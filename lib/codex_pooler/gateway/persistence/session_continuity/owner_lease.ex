@@ -66,33 +66,28 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.OwnerLease do
 
   @spec acquire!(CodexSession.t(), map(), RequestOptions.t(), owner(), DateTime.t()) ::
           BridgeOwnerLease.t()
-  def acquire!(%CodexSession{} = session, auth, %RequestOptions{} = opts, owner, now) do
-    expires_at = DateTime.add(now, bridge_owner_lease_ttl_seconds(opts), :second)
+  def acquire!(%CodexSession{} = session, auth, %RequestOptions{} = opts, owner, _now) do
+    lease = active_for_update(session.id)
+    now = db_now()
 
-    BridgeOwnerLease
-    |> where(
-      [lease],
-      lease.codex_session_id == ^session.id and lease.status == ^@lease_active and
-        lease.expires_at <= ^now
-    )
-    |> Repo.update_all(set: [status: @lease_expired, released_at: now, updated_at: now])
-
-    case active_for_update(session.id) do
+    case lease do
       %BridgeOwnerLease{} = lease ->
-        locked_now = db_now()
-
         cond do
-          validate_renewal_presence(lease, locked_now) == {:error, :owner_unavailable} ->
-            release!(lease, "owner_unavailable_takeover", nil, locked_now)
-            insert_takeover!(session, owner, opts, locked_now)
+          expired_at?(lease.expires_at, now) ->
+            lease |> Ecto.Changeset.change(status: @lease_expired, released_at: now, updated_at: now) |> Repo.update!()
+            insert_takeover!(session, owner, opts, now)
+
+          validate_renewal_presence(lease, now) == {:error, :owner_unavailable} ->
+            release!(lease, "owner_unavailable_takeover", nil, now)
+            insert_takeover!(session, owner, opts, now)
 
           own_lease?(lease, owner) ->
             lease
             |> Ecto.Changeset.change(%{
               pool_upstream_assignment_id: session.pool_upstream_assignment_id,
-              renewed_at: locked_now,
-              expires_at: DateTime.add(locked_now, bridge_owner_lease_ttl_seconds(opts), :second),
-              updated_at: locked_now
+              renewed_at: now,
+              expires_at: DateTime.add(now, bridge_owner_lease_ttl_seconds(opts), :second),
+              updated_at: now
             })
             |> Repo.update!()
 
@@ -113,7 +108,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.OwnerLease do
           status: @lease_active,
           acquired_at: now,
           renewed_at: now,
-          expires_at: expires_at,
+          expires_at: DateTime.add(now, bridge_owner_lease_ttl_seconds(opts), :second),
           metadata: %{"source" => "gateway_session"},
           created_at: now,
           updated_at: now
@@ -608,7 +603,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.OwnerLease do
 
   defp blank_to_nil(_value), do: nil
 
-  defp now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+  defp now, do: db_now()
 
   defp db_now do
     %{rows: [[now]]} = Repo.query!("SELECT clock_timestamp()", [])

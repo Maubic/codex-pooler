@@ -23,7 +23,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionReadModel do
           required(:updated_at) => DateTime.t(),
           required(:completed_at) => DateTime.t() | nil
         }
-  @type turn_status_row :: %{required(:status) => String.t()}
+  @type turn_status_row :: %{required(:status) => String.t(), required(:count) => non_neg_integer()}
 
   @spec request_turns_by_request_ids([Ecto.UUID.t() | term()]) :: %{
           optional(Ecto.UUID.t()) => request_turn_row()
@@ -97,8 +97,8 @@ defmodule CodexPooler.Gateway.Persistence.SessionReadModel do
           as: :turn,
           where: turn.started_at >= ^started_at and turn.started_at <= ^ended_at,
           where: exists(visible_request),
-          order_by: [desc: turn.started_at],
-          select: %{status: turn.status}
+          group_by: turn.status,
+          select: %{status: turn.status, count: count(turn.id)}
       )
     end
   end

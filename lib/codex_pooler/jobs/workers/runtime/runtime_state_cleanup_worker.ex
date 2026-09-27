@@ -11,6 +11,7 @@ defmodule CodexPooler.Jobs.RuntimeStateCleanupWorker do
     ]
 
   alias CodexPooler.Jobs.RuntimeStateCleanup
+  alias CodexPooler.Platform.InstancePresence
 
   @impl Oban.Worker
   def timeout(%Oban.Job{}), do: :timer.minutes(5)
@@ -31,7 +32,7 @@ defmodule CodexPooler.Jobs.RuntimeStateCleanupWorker do
   @impl Oban.Worker
   def backoff(%Oban.Job{attempt: attempt}), do: attempt * 30
 
-  defp parse_now(nil), do: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+  defp parse_now(nil), do: InstancePresence.database_now()
 
   defp parse_now(value) when is_binary(value) do
     case DateTime.from_iso8601(value) do

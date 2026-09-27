@@ -102,10 +102,12 @@ defmodule CodexPooler.Admin.Stats.Kpis do
   @spec turn_kpi([map()]) :: map()
   def turn_kpi(turns) do
     %{
-      value: length(turns),
-      succeeded: Enum.count(turns, &(&1.status == "succeeded")),
-      failed: Enum.count(turns, &(&1.status in @failed_statuses)),
-      in_progress: Enum.count(turns, &(&1.status == "in_progress"))
+      value: Enum.sum(Enum.map(turns, & &1.count)),
+      succeeded: turn_count(turns, ["succeeded"]),
+      failed: turn_count(turns, @failed_statuses),
+      in_progress: turn_count(turns, ["in_progress"])
     }
   end
+
+  defp turn_count(turns, statuses), do: turns |> Enum.filter(&(&1.status in statuses)) |> Enum.reduce(0, &(&1.count + &2))
 end

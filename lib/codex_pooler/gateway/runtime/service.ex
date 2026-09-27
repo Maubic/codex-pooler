@@ -2537,8 +2537,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
         SessionAliases.register_session_header_hash(
           request_options.continuity.codex_session,
           auth,
-          hash,
-          DateTime.utc_now() |> DateTime.truncate(:microsecond)
+          hash
         )
 
       :none ->
@@ -2559,7 +2558,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   defp register_frame_window_alias(auth, payload, %RequestOptions{continuity: %{codex_session: %CodexSession{} = session}} = request_options) do
     case ReplayPreparation.frame_window_alias_hash(request_options, payload) do
       {:ok, hash} ->
-        disposition = SessionAliases.point_frame_window_hash(session, auth, hash, DateTime.utc_now() |> DateTime.truncate(:microsecond))
+        disposition = SessionAliases.point_frame_window_hash(session, auth, hash)
         Logger.info("websocket frame window alias codex_session_id=#{session.id} alias_preview=#{hash |> Base.encode16(case: :lower) |> String.slice(0, 16)} disposition=#{disposition}")
         :ok
 

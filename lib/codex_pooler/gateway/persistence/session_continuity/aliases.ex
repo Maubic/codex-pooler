@@ -173,6 +173,17 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.Aliases do
     |> RequestOptions.put_continuity(response_id: response_id)
   end
 
+  @spec register_session_header_hash(CodexSession.t(), map(), <<_::256>>) :: :ok | {:error, :session_alias_conflict}
+  def register_session_header_hash(session, auth, hash), do: register_session_header_hash(session, auth, hash, database_now())
+
+  @spec point_frame_window_hash(CodexSession.t(), map(), <<_::256>>) :: :created | :refreshed | :moved | :kept | :busy
+  def point_frame_window_hash(session, auth, hash), do: point_frame_window_hash(session, auth, hash, database_now())
+
+  defp database_now do
+    %{rows: [[now]]} = Repo.query!("SELECT clock_timestamp()", [])
+    now
+  end
+
   @spec register_session_header_hash(CodexSession.t(), map(), <<_::256>>, DateTime.t()) ::
           :ok | {:error, :session_alias_conflict}
   def register_session_header_hash(
@@ -353,6 +364,10 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.Aliases do
 
   defp alias_upsert_query(session, now, expires_at) do
     from alias_record in BridgeSessionAlias,
+      as: :alias_record,
+      where:
+        alias_record.alias_kind != "session_header" or alias_record.codex_session_id == ^session.id or
+          not exists(from turn in CodexTurn, where: turn.codex_session_id == parent_as(:alias_record).codex_session_id and turn.status == "in_progress"),
       update: [
         set: [
           codex_session_id: ^session.id,

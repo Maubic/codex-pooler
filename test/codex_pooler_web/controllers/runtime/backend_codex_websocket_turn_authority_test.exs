@@ -277,7 +277,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketTurnAuthorityTest do
           query = metadata.query
           table = %{claim: "requests", reservation: "codex_turns", attempt: "attempts"}[phase]
 
-          if String.contains?(query, "INSERT INTO") and String.contains?(query, table) do
+          # Alias upserts can mention codex_turns in their conflict guard;
+          # only an insert into the phase's table starts this transaction fence.
+          if Regex.match?(~r/^INSERT INTO (?:"?public"?\.)?"?#{table}"?(?:\s|\()/, query) do
             Process.put(barrier, true)
           end
 

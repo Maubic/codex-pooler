@@ -58,6 +58,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
       Repo.transaction(fn ->
         session = upsert_session_for_start!(auth, opts, session_key, owner, now)
         lease = OwnerLease.acquire!(session, auth, opts, owner, now)
+        now = db_now()
         Aliases.register!(session, auth, opts, now)
         OwnerLease.persist_session!(session, lease, now)
       end)
@@ -89,6 +90,12 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
       do: Repo.rollback(:stale_owner)
 
   def validate_session_owner_witness_for_reservation(%RequestOptions{}), do: :ok
+
+  @spec previous_response_session_id(auth(), String.t()) :: Ecto.UUID.t() | nil
+  def previous_response_session_id(auth, previous_response_id), do: Aliases.previous_response_session_id(auth, previous_response_id, db_now())
+
+  @spec previous_response_resolution(auth(), String.t()) :: %{assignment_id: Ecto.UUID.t() | nil, serving_mode: String.t() | nil} | nil
+  def previous_response_resolution(auth, previous_response_id), do: Aliases.previous_response_resolution(auth, previous_response_id, db_now())
 
   @spec previous_response_session_id(auth(), String.t(), DateTime.t()) :: Ecto.UUID.t() | nil
   defdelegate previous_response_session_id(auth, previous_response_id, now), to: Aliases
@@ -182,6 +189,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
   defp start_previous_response_session!(%CodexSession{} = session, auth, opts, owner, now) do
     session = update_existing_session!(session, auth, opts, owner, now)
     lease = OwnerLease.acquire!(session, auth, opts, owner, now)
+    now = db_now()
     Aliases.register!(session, auth, opts, now)
     OwnerLease.persist_session!(session, lease, now)
   end
@@ -739,7 +747,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
 
   defp blank_to_nil(_value), do: nil
 
-  defp now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+  defp now, do: db_now()
 
   defp unwrap_ok_transaction({:ok, :ok}), do: :ok
   defp unwrap_ok_transaction({:error, reason}), do: {:error, reason}

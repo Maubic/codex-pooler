@@ -264,25 +264,34 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
     reconnectable = SessionStatus.reconnectable_statuses()
     in_progress = CodexTurn.in_progress_status()
 
-    from(session in CodexSession, as: :session)
-    |> where(
-      [session],
-      session.status in ^reconnectable and
-        coalesce(session.owner_lease_expires_at, session.updated_at) <= ^cutoff and
-        not exists(
-          from alias_record in BridgeSessionAlias,
-            where: alias_record.codex_session_id == parent_as(:session).id and alias_record.status == ^active_alias_status
-        ) and
-        not exists(
-          from lease in BridgeOwnerLease,
-            where: lease.codex_session_id == parent_as(:session).id and lease.status == ^active_lease_status
-        ) and
-        not exists(
-          from turn in CodexTurn,
-            where: turn.codex_session_id == parent_as(:session).id and turn.status == ^in_progress
-        )
-    )
-    |> Repo.update_all(set: [status: SessionStatus.closed_status(), closed_at: now, updated_at: now])
+    candidates =
+      from(session in CodexSession, as: :session)
+      |> where(
+        [session],
+        session.status in ^reconnectable and
+          coalesce(session.owner_lease_expires_at, session.updated_at) <= ^cutoff and
+          not exists(
+            from alias_record in BridgeSessionAlias,
+              where: alias_record.codex_session_id == parent_as(:session).id and alias_record.status == ^active_alias_status
+          ) and
+          not exists(
+            from lease in BridgeOwnerLease,
+              where: lease.codex_session_id == parent_as(:session).id and lease.status == ^active_lease_status
+          ) and
+          not exists(
+            from turn in CodexTurn,
+              where: turn.codex_session_id == parent_as(:session).id and turn.status == ^in_progress
+          )
+      )
+      |> order_by([session], asc: coalesce(session.owner_lease_expires_at, session.updated_at), asc: session.id)
+      |> limit(500)
+      |> lock("FOR UPDATE SKIP LOCKED")
+      |> select([session], session.id)
+      |> Repo.all(timeout: 15_000)
+
+    CodexSession
+    |> where([session], session.id in ^candidates)
+    |> Repo.update_all([set: [status: SessionStatus.closed_status(), closed_at: now, updated_at: now]], timeout: 15_000)
   end
 
   defp recover_expired_owner_runtime_state(%DateTime{} = now) do
@@ -409,5 +418,5 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
     )
   end
 
-  defp now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+  defp now, do: InstancePresence.database_now()
 end

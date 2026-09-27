@@ -109,9 +109,7 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
          previous_response_id when is_binary(previous_response_id) <-
            clean_string(request_options.continuity.previous_response_id),
          %{pool: %{id: _pool_id}, api_key: %{id: _api_key_id}} <- auth do
-      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-
-      case ContinuityStore.previous_response_resolution(auth, previous_response_id, now) do
+      case ContinuityStore.previous_response_resolution(auth, previous_response_id) do
         %{assignment_id: assignment_id, serving_mode: serving_mode} ->
           RequestOptions.put_continuity(request_options,
             resolved_previous_response_assignment_id: assignment_id,

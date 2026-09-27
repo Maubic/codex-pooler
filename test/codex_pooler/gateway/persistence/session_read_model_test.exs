@@ -57,7 +57,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionReadModelTest do
       assert SessionReadModel.active_session_count_for_pool_ids([pool.id, "not-a-uuid"]) == 1
       assert SessionReadModel.active_session_count_for_pool_ids(:invalid) == 0
 
-      assert [%{status: "failed"}] =
+      assert [%{status: "failed", count: 1}] =
                SessionReadModel.turn_statuses_for_pool_ids(
                  [pool.id, "not-a-uuid"],
                  DateTime.add(now, -60, :second),
@@ -84,7 +84,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionReadModelTest do
         {rows, queries} =
           capture_queries(fn -> SessionReadModel.turn_statuses_for_pool_ids([pool.id, other_pool.id], DateTime.add(now, -7, :day), now) end)
 
-        assert length(rows) == count
+        assert rows == [%{status: "succeeded", count: count}]
         assert [{query, params}] = Enum.filter(queries, fn {query, _params} -> String.contains?(query, "\"codex_turns\"") end)
 
         %{rows: [[[explain]]]} = Repo.query!("EXPLAIN (ANALYZE, FORMAT JSON) " <> query, params)

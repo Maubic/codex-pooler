@@ -2237,8 +2237,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         do:
           SessionContinuity.previous_response_session_id(
             state.auth,
-            anchor,
-            DateTime.utc_now()
+            anchor
           )
 
     valid =

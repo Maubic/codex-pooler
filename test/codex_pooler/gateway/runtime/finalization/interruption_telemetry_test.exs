@@ -314,7 +314,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.InterruptionTelemetryTest do
     # `{:interrupt_accounting_failed, _}` — reports a different shape here.
     assert log =~ "runtime state cleanup step gateway_runtime failed"
     assert log =~ "{:raised, :gateway_runtime,"
-    assert log =~ "expected at least one result but got none"
+    assert log =~ "Ecto.NoResultsError"
+    refute log =~ "expected at least one result but got none"
     refute log =~ "interrupt_accounting_failed"
 
     # The transaction rolled back: no release row exists for either request and
@@ -362,8 +363,9 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.InterruptionTelemetryTest do
 
       assert log =~ "runtime state cleanup step gateway_runtime failed"
       assert log =~ "{:raised, :gateway_runtime,"
-      assert log =~ "expected at least one result but got none"
-      assert log =~ "CodexPooler.Accounting.LedgerEntry"
+      assert log =~ "Ecto.NoResultsError"
+      refute log =~ "expected at least one result but got none"
+      refute log =~ "CodexPooler.Accounting.LedgerEntry"
       refute log =~ "interrupt_accounting_failed"
 
       refute_received {:stream_outcome, _}

@@ -26,7 +26,7 @@ defmodule CodexPooler.Jobs.RuntimeStateCleanup do
   # Every step still runs, the summaries of those that succeeded are merged, and
   # a pass with any failure reports one so the job is retried as before.
   @spec run(DateTime.t()) :: orchestration_result()
-  def run(now \\ DateTime.utc_now()) do
+  def run(now \\ InstancePresence.database_now()) do
     steps(now)
     |> Enum.map(fn {name, step} -> {name, run_step(name, step)} end)
     |> summarize()
@@ -57,7 +57,7 @@ defmodule CodexPooler.Jobs.RuntimeStateCleanup do
   defp run_step(name, step) do
     step.()
   rescue
-    exception -> {:error, {:raised, name, Exception.message(exception)}}
+    exception -> {:error, {:raised, name, exception.__struct__}}
   end
 
   defp summarize(results) do

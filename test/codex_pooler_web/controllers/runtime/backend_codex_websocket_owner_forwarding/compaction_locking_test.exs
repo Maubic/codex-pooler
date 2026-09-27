@@ -120,8 +120,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Compaction
         handler,
         [:codex_pooler, :repo, :query],
         fn _, _, event, _ ->
-          if String.starts_with?(event.query, "INSERT INTO") and
-               String.contains?(event.query, "codex_turns") and self() != parent do
+          # The alias conflict guard also reads codex_turns before accounting
+          # starts; park only the actual turn insert inside the reservation.
+          if Regex.match?(~r/^INSERT INTO (?:"?public"?\.)?"?codex_turns"?(?:\s|\()/, event.query) and self() != parent do
             [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
             send(parent, {:reservation_locked, barrier, self(), backend})
 

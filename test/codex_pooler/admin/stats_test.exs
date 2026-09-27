@@ -32,6 +32,11 @@ defmodule CodexPooler.Admin.StatsTest do
   # soon as the message arrives, so only a missing one spends it.
   @detection_timeout_ms 15_000
 
+  test "turn KPI sums SQL status buckets rather than counting buckets" do
+    buckets = [%{status: "succeeded", count: 12}, %{status: "failed", count: 3}, %{status: "interrupted", count: 2}, %{status: "in_progress", count: 4}]
+    assert Kpis.turn_kpi(buckets) == %{value: 21, succeeded: 12, failed: 5, in_progress: 4}
+  end
+
   test "top_api_keys/2 retains the ten highest-ranked API keys" do
     # Given
     pool = pool_fixture(%{name: "Leaderboard pool"})

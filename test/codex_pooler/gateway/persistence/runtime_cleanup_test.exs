@@ -343,6 +343,21 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanupTest do
     assert Repo.reload!(with_turn).status == "active"
   end
 
+  test "each cleanup retires at most one bounded batch of sessions" do
+    pool = pool_fixture()
+    %{api_key: api_key} = active_api_key_fixture(pool)
+    %{assignment: assignment} = upstream_assignment_fixture(pool)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    retired_at = DateTime.add(now, -(OperationalSettings.current().expired_alias_ttl_seconds + 60), :second)
+    seed = retired_session_fixture(pool, api_key, assignment, retired_at)
+    attrs = Map.take(seed, CodexSession.__schema__(:fields))
+    rows = for n <- 1..504, do: Map.merge(attrs, %{id: Ecto.UUID.generate(), owner_lease_token: Ecto.UUID.generate(), session_key: "batch-#{n}"})
+    Repo.insert_all(CodexSession, rows)
+    assert {:ok, %{closed_retired_sessions: 500}} = RuntimeCleanup.cleanup_expired(now)
+    assert {:ok, %{closed_retired_sessions: 5}} = RuntimeCleanup.cleanup_expired(now)
+    assert {:ok, %{closed_retired_sessions: 0}} = RuntimeCleanup.cleanup_expired(now)
+  end
+
   defp retired_session_fixture(pool, api_key, assignment, lease_expired_at, attrs \\ []) do
     %CodexSession{
       pool_id: pool.id,
