@@ -10,7 +10,7 @@ defmodule CodexPooler.Gateway.Transports.ConnectionLimitMultinodeTest do
   alias Ecto.Adapters.SQL.Sandbox
 
   @budget 30_000
-  setup do
+  setup_all do
     unless Node.alive?() do
       {_, 0} = System.cmd("epmd", ["-daemon"])
       PeerRegistry.assert_epmd_ready!()
@@ -28,8 +28,12 @@ defmodule CodexPooler.Gateway.Transports.ConnectionLimitMultinodeTest do
     {:ok, peers: peers}
   end
 
+  setup %{peers: peers} do
+    Enum.each(peers, &assert(:ok == call(&1, :assert_idle!, [])))
+    :ok
+  end
+
   for {owner_index, proxy_index} <- [{0, 1}, {1, 0}] do
-    @tag slow: "boots two real BEAM peers with independent PostgreSQL connections for owner handoff and cleanup"
     test "two real BEAM nodes preserve the replacement lease when owner/proxy roles are #{owner_index}->#{proxy_index}",
          %{peers: peers} do
       owner_node = Enum.at(peers, unquote(owner_index))
@@ -49,7 +53,7 @@ defmodule CodexPooler.Gateway.Transports.ConnectionLimitMultinodeTest do
           "proxy_peers=#{inspect(:erpc.call(proxy_node, Node, :list, [:connected]))}"
       )
 
-      {setup, session} = fixture(owner_node)
+      {setup, session} = fixture(owner_node, peers)
       old = call(owner_node, :start_request, [setup, session, self()])
       await_accepted(old, owner_node)
 
@@ -92,13 +96,12 @@ defmodule CodexPooler.Gateway.Transports.ConnectionLimitMultinodeTest do
     end
   end
 
-  @tag slow: "boots two real BEAM peers with independent PostgreSQL connections for owner handoff and cleanup"
   test "current owner cancellation settles only the current request across a real proxy hop", %{
-    peers: [owner_node, proxy_node]
+    peers: [owner_node, proxy_node] = peers
   } do
     assert owner_node != proxy_node
     assert proxy_node in Node.list(:connected)
-    {setup, session} = fixture(proxy_node)
+    {setup, session} = fixture(proxy_node, peers)
     current = call(proxy_node, :start_request, [setup, session, self()])
     await_accepted(current, proxy_node)
 
@@ -116,12 +119,12 @@ defmodule CodexPooler.Gateway.Transports.ConnectionLimitMultinodeTest do
     assert facts.settlements == 1
     assert Enum.count(facts.ledger, &(&1.entry_kind == "settlement")) == 1
     assert Enum.count(facts.ledger, &(&1.entry_kind == "release")) == 1
+    finish(proxy_node, current)
   end
 
-  @tag slow: "boots two real BEAM peers with independent PostgreSQL connections for owner handoff and cleanup"
   test "a delayed original cleanup cannot mutate a request after its generation changes on the peer",
-       %{peers: [owner_node, proxy_node]} do
-    {setup, session} = fixture(owner_node)
+       %{peers: [owner_node, proxy_node] = peers} do
+    {setup, session} = fixture(owner_node, peers)
     current = call(owner_node, :start_request, [setup, session, self()])
     await_accepted(current, owner_node)
 
@@ -149,7 +152,7 @@ defmodule CodexPooler.Gateway.Transports.ConnectionLimitMultinodeTest do
     finish(owner_node, current)
   end
 
-  defp fixture(owner_node) do
+  defp fixture(owner_node, peers) do
     Sandbox.unboxed_run(Repo, fn ->
       setup = AccountingTestSupport.accounting_setup()
 
@@ -163,11 +166,15 @@ defmodule CodexPooler.Gateway.Transports.ConnectionLimitMultinodeTest do
         )
 
       on_exit(fn ->
+        logs = Enum.map(peers, &call(&1, :stop_case!, []))
+
         Sandbox.unboxed_run(Repo, fn ->
           CodexPooler.PoolerFixtures.delete_committed_pools!([setup.pool.id])
           Repo.delete!(setup.identity)
           Repo.delete!(setup.pricing)
         end)
+
+        Enum.each(logs, &Peer.assert_teardown_log!/1)
       end)
 
       {Map.take(setup, [:auth, :model, :assignment]), session}
@@ -184,7 +191,11 @@ defmodule CodexPooler.Gateway.Transports.ConnectionLimitMultinodeTest do
       })
 
     Process.unlink(pid)
-    on_exit(fn -> if Process.alive?(pid), do: :peer.stop(pid) end)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: :peer.stop(pid)
+      PeerRegistry.assert_peer_absent!(name, peer_node: peer_node)
+    end)
 
     assert {:ok, false} =
              :erpc.call(peer_node, :application, :get_env, [

@@ -12,7 +12,7 @@ defmodule CodexPooler.Gateway.Websocket.OwnerCleanupPostgresTest do
   @budget 30_000
   @moduletag capture_log: true
 
-  setup do
+  setup_all do
     unless Node.alive?() do
       {_, 0} = System.cmd("epmd", ["-daemon"])
       PeerRegistry.assert_epmd_ready!()
@@ -27,16 +27,20 @@ defmodule CodexPooler.Gateway.Websocket.OwnerCleanupPostgresTest do
     {:ok, peers: peers}
   end
 
+  setup %{peers: peers} do
+    Enum.each(peers, &assert(:ok == call(&1, :assert_idle!, [])))
+    :ok
+  end
+
   for {source, target} <- [{0, 1}, {1, 0}],
       mode <- [:stale_token, :same_token, :absent_witness] do
-    @tag slow: "boots two real BEAM peers with independent PostgreSQL connections for owner handoff and cleanup"
     test "delayed #{mode} cleanup #{source} to #{target} preserves accepted live replacement", %{
       peers: peers
     } do
       source = Enum.at(peers, unquote(source))
       target = Enum.at(peers, unquote(target))
       mode = unquote(mode)
-      {setup, session} = fixture(source)
+      {setup, session} = fixture(source, peers)
       old = call(source, :start_request, [setup, session, self()])
       await_accepted(old, source)
       delayed = call(source, :delay_cleanup, [old.owner, self(), mode])
@@ -66,9 +70,8 @@ defmodule CodexPooler.Gateway.Websocket.OwnerCleanupPostgresTest do
   end
 
   for mode <- [:expired_lease, :generation_changed] do
-    @tag slow: "boots two real BEAM peers with independent PostgreSQL connections for owner handoff and cleanup"
-    test "accepted owner snapshot rejects #{mode}", %{peers: [source, target]} do
-      {setup, session} = fixture(source)
+    test "accepted owner snapshot rejects #{mode}", %{peers: [source, target] = peers} do
+      {setup, session} = fixture(source, peers)
       current = call(source, :start_request, [setup, session, self()])
       await_accepted(current, source)
       delayed = call(source, :delay_cleanup, [current.owner, self(), :current])
@@ -88,9 +91,8 @@ defmodule CodexPooler.Gateway.Websocket.OwnerCleanupPostgresTest do
     end
   end
 
-  @tag slow: "boots two real BEAM peers with independent PostgreSQL connections for owner handoff and cleanup"
-  test "current accepted owner witness interrupts exactly its request", %{peers: [source, _]} do
-    {setup, session} = fixture(source)
+  test "current accepted owner witness interrupts exactly its request", %{peers: [source, _] = peers} do
+    {setup, session} = fixture(source, peers)
     current = call(source, :start_request, [setup, session, self()])
     await_accepted(current, source)
     delayed = call(source, :delay_cleanup, [current.owner, self(), :current])
@@ -116,10 +118,9 @@ defmodule CodexPooler.Gateway.Websocket.OwnerCleanupPostgresTest do
     finish(source, current)
   end
 
-  @tag slow: "boots two real BEAM peers with independent PostgreSQL connections for owner handoff and cleanup"
   test "same owner token cleanup of a completed request preserves the next accepted request",
-       %{peers: [source, _]} do
-    {setup, session} = fixture(source)
+       %{peers: [source, _] = peers} do
+    {setup, session} = fixture(source, peers)
     old = call(source, :start_request, [setup, session, self()])
     await_accepted(old, source)
     delayed = call(source, :delay_cleanup, [old.owner, self(), :current])
@@ -155,10 +156,9 @@ defmodule CodexPooler.Gateway.Websocket.OwnerCleanupPostgresTest do
     finish(source, current)
   end
 
-  @tag slow: "boots two real BEAM peers with independent PostgreSQL connections for owner handoff and cleanup"
   test "draining the actual owner retains its accepted witness through termination",
-       %{peers: [source, _]} do
-    {setup, session} = fixture(source)
+       %{peers: [source, _] = peers} do
+    {setup, session} = fixture(source, peers)
     current = call(source, :start_request, [setup, session, self()])
     await_accepted(current, source)
     facts = call(source, :facts, [current])
@@ -198,7 +198,7 @@ defmodule CodexPooler.Gateway.Websocket.OwnerCleanupPostgresTest do
     end
   end
 
-  defp fixture(owner_node) do
+  defp fixture(owner_node, peers) do
     Sandbox.unboxed_run(Repo, fn ->
       setup = AccountingTestSupport.accounting_setup()
 
@@ -212,11 +212,15 @@ defmodule CodexPooler.Gateway.Websocket.OwnerCleanupPostgresTest do
         )
 
       on_exit(fn ->
+        logs = Enum.map(peers, &call(&1, :stop_case!, []))
+
         Sandbox.unboxed_run(Repo, fn ->
           CodexPooler.PoolerFixtures.delete_committed_pools!([setup.pool.id])
           Repo.delete!(setup.identity)
           Repo.delete!(setup.pricing)
         end)
+
+        Enum.each(logs, &Peer.assert_teardown_log!/1)
       end)
 
       {Map.take(setup, [:auth, :model, :assignment]), session}
@@ -266,7 +270,11 @@ defmodule CodexPooler.Gateway.Websocket.OwnerCleanupPostgresTest do
       })
 
     Process.unlink(pid)
-    on_exit(fn -> if Process.alive?(pid), do: :peer.stop(pid) end)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: :peer.stop(pid)
+      PeerRegistry.assert_peer_absent!(name, peer_node: peer_node)
+    end)
 
     assert {:ok, false} =
              :erpc.call(peer_node, :application, :get_env, [
