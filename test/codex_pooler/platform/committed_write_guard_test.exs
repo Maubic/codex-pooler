@@ -42,6 +42,7 @@ defmodule CodexPooler.CommittedWriteGuardTest do
              "test updates the committed instance settings singleton and never restores it" => {"failed", "during", ["instance_settings"]},
              "test completes the committed bootstrap singleton and never restores it" => {"failed", "during", ["platform_bootstrap_state"]},
              "test bumps only the committed instance settings updated_at" => {"passed", "none", []},
+             "test runs a command without changing committed rows before a module fixture" => {"passed", "none", []},
              "test runs with the identity its setup_all committed" => {"passed", "none", []},
              "test writes nothing of its own" => {"passed", "none", []},
              "test passes while the row its setup_all committed is still there" => {"passed", "none", []},
@@ -53,6 +54,8 @@ defmodule CodexPooler.CommittedWriteGuardTest do
              "test commits an identity without the guard" => {"passed", "none", []},
              "test starts after rows an unguarded test committed" => {"failed", "before", ["upstream_identities"]},
              "test starts after that failure has been reported" => {"passed", "none", []},
+             "test updates committed content without the guard and without changing a row count" => {"passed", "none", []},
+             "test does not absorb an earlier committed update at the module boundary" => {"failed", "before", ["instance_settings"]},
              "test commits a row through a connection opened before the guard started" => {"failed", "during", ["instance_presences"]},
              "test writes nothing after that untraced leak" => {"passed", "none", []},
              "test updates a committed row through that connection, as the last test" => {"passed", "none", []}
@@ -61,11 +64,12 @@ defmodule CodexPooler.CommittedWriteGuardTest do
 
     # A module the guard fails invalidates its tests, so ExUnit counts one failure for the test
     # `SetupAllLeakTest` passed as well.
-    assert probe.summary == %{"stage" => "probe", "total" => 22, "failures" => 11}, probe.output
+    assert probe.summary == %{"stage" => "probe", "total" => 25, "failures" => 12}, probe.output
 
     assert probe.modules == %{
              "CodexPooler.CommittedWriteGuardProbe.SandboxedCaseTest" => {"passed", "none", []},
              "CodexPooler.CommittedWriteGuardProbe.TimestampChangeTest" => {"passed", "none", []},
+             "CodexPooler.CommittedWriteGuardProbe.UnguardedCommandTest" => {"passed", "none", []},
              "CodexPooler.CommittedWriteGuardProbe.SetupAllFixtureTest" => {"passed", "none", []},
              "CodexPooler.CommittedWriteGuardProbe.SetupAllLeakTest" => {"failed", "module", ["upstream_identities"]},
              "CodexPooler.CommittedWriteGuardProbe.AfterSetupAllLeakTest" => {"passed", "none", []},
@@ -73,6 +77,8 @@ defmodule CodexPooler.CommittedWriteGuardTest do
              "CodexPooler.CommittedWriteGuardProbe.AutoModeSetupAllTest" => {"passed", "none", []},
              "CodexPooler.CommittedWriteGuardProbe.UnguardedTest" => {"passed", "none", []},
              "CodexPooler.CommittedWriteGuardProbe.AfterUnguardedTest" => {"passed", "none", []},
+             "CodexPooler.CommittedWriteGuardProbe.UnguardedUpdateTest" => {"passed", "none", []},
+             "CodexPooler.CommittedWriteGuardProbe.AfterUnguardedUpdateTest" => {"passed", "none", []},
              "CodexPooler.CommittedWriteGuardProbe.UntracedRowLeakTest" => {"passed", "none", []},
              "CodexPooler.CommittedWriteGuardProbe.LastUntracedTest" => {"passed", "none", []}
            },

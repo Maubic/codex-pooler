@@ -218,7 +218,7 @@ defmodule CodexPooler.CommittedWriteGuard do
     if running?() and tags[:async] != true do
       module = Map.fetch!(tags, :module)
       start = @table |> :ets.lookup_element(:session, 2) |> read_counts()
-      :ok = GenServer.call(@server, {:begin_module, module, start}, @verify_timeout_ms)
+      verify_or_raise!({:begin_module, module, start})
 
       # Registered before any callback the module's own `setup_all` registers, and callbacks run in
       # reverse registration order, so this one runs after the module has removed its fixture.
@@ -277,9 +277,9 @@ defmodule CodexPooler.CommittedWriteGuard do
 
   # Counters that moved between this module's window opening and its first test moved inside a
   # `setup_all`: what it committed belongs to the module, which owns it until it ends. The window
-  # has to have opened on verified counters for that to hold; a module that opens its window after
-  # an unguarded module already moved them inherits nothing, and its first test reports the rows
-  # as committed outside every guarded test, as before.
+  # has to have opened on verified counters for that to hold. If the boundary check found a real
+  # earlier change, its counters remain unverified and the first test reports the rows as committed
+  # outside every guarded test.
   defp moved_where(module, verified) do
     case :ets.lookup(@table, :module) do
       [{:module, %{name: ^module, verified: ^verified, start: ^verified}}] -> :setup_all
@@ -371,8 +371,15 @@ defmodule CodexPooler.CommittedWriteGuard do
   @impl GenServer
   def handle_call({:begin_module, module, start}, _from, state) do
     verified = :ets.lookup_element(@table, :verified, 2)
-    true = :ets.insert(@table, {:module, %{name: module, verified: verified, start: start}})
-    {:reply, :ok, %{state | module: open_window(state, module)}}
+
+    case verify_module_boundary(state, verified, start) do
+      {:ok, state, verified} ->
+        true = :ets.insert(@table, [{:verified, verified}, {:module, %{name: module, verified: verified, start: start}}])
+        {:reply, :ok, %{state | module: open_window(state, module)}}
+
+      {:error, error, state} ->
+        {:reply, {:leak, query_failed_message(error)}, state}
+    end
   end
 
   def handle_call({:end_module, module, now}, _from, state) do
@@ -497,6 +504,25 @@ defmodule CodexPooler.CommittedWriteGuard do
   end
 
   defp row_counts(snapshot), do: Map.new(snapshot, fn {table, {n, _content}} -> {table, n} end)
+
+  # Unguarded tooling can call System.cmd without writing anything. Verify those calls before
+  # setup_all adds its fixture; otherwise the first test mistakes that fixture for an outside
+  # write. Only absorb the calls when all committed content is unchanged. A real earlier change
+  # stays unverified, so the first test still reports it against the original snapshot.
+  defp verify_module_boundary(state, verified, start) when verified == start, do: {:ok, state, verified}
+
+  defp verify_module_boundary(state, verified, start) do
+    {state, read} = state |> ensure_connected() |> read_row_content()
+
+    case read do
+      {:ok, current} ->
+        verified = if current == state.snapshot, do: start, else: verified
+        {:ok, %{state | content_checks: state.content_checks + 1}, verified}
+
+      {:error, error} ->
+        {:error, error, state}
+    end
+  end
 
   # Sync modules run one at a time, so one window is enough. Opening it twice, for a module that
   # both uses a case template and `use CodexPooler.CommittedWriteGuard`, keeps the first.

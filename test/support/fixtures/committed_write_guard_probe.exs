@@ -219,6 +219,14 @@ defmodule CodexPooler.CommittedWriteGuardProbe.TimestampChangeTest do
   end
 end
 
+defmodule CodexPooler.CommittedWriteGuardProbe.UnguardedCommandTest do
+  use ExUnit.Case, async: false
+
+  test "runs a command without changing committed rows before a module fixture" do
+    assert {"", 0} = System.cmd("true", [])
+  end
+end
+
 defmodule CodexPooler.CommittedWriteGuardProbe.SetupAllFixtureTest do
   use CodexPooler.DataCase, async: false
 
@@ -385,6 +393,30 @@ defmodule CodexPooler.CommittedWriteGuardProbe.AfterUnguardedTest do
   end
 
   test "starts after that failure has been reported" do
+    assert true
+  end
+end
+
+defmodule CodexPooler.CommittedWriteGuardProbe.UnguardedUpdateTest do
+  use ExUnit.Case, async: false
+
+  alias CodexPooler.Repo
+  alias Ecto.Adapters.SQL.Sandbox
+
+  test "updates committed content without the guard and without changing a row count" do
+    Sandbox.unboxed_run(Repo, fn ->
+      Repo.query!(
+        ~s[UPDATE instance_settings ] <>
+          ~s[SET metadata = metadata || '{"committed_write_guard_probe": false}'::jsonb]
+      )
+    end)
+  end
+end
+
+defmodule CodexPooler.CommittedWriteGuardProbe.AfterUnguardedUpdateTest do
+  use CodexPooler.DataCase, async: false
+
+  test "does not absorb an earlier committed update at the module boundary" do
     assert true
   end
 end
