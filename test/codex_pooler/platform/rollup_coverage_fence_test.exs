@@ -59,6 +59,31 @@ defmodule CodexPooler.RollupCoverageFenceTest do
     assert CodexPooler.RollupCoverageFence.restore!(conn, found) == %{deleted: [], restored: []}
   end
 
+  test "coverage-only restoration reports the exact test and restored dates without claiming provenance" do
+    conn = :persistent_term.get({CodexPooler.RollupCoverageFence, :conn})
+    found = CodexPooler.RollupCoverageFence.snapshot!(conn)
+    date = ~D[1901-01-01]
+    previous = System.get_env("CODEX_POOLER_TEST_DIAGNOSTICS")
+
+    on_exit(fn ->
+      if previous, do: System.put_env("CODEX_POOLER_TEST_DIAGNOSTICS", previous), else: System.delete_env("CODEX_POOLER_TEST_DIAGNOSTICS")
+    end)
+
+    System.put_env("CODEX_POOLER_TEST_DIAGNOSTICS", "1")
+    register_unboxed_cleanup!(fn -> Repo.delete_all(from c in DailyRollupCoverage, where: c.rollup_date == ^date) end)
+    run_unboxed(fn -> Repo.insert!(%DailyRollupCoverage{rollup_date: date, contract_version: DailyRollupCoverage.contract_version(), mutation_version: 0, created_at: DateTime.utc_now(), updated_at: DateTime.utc_now()}) end)
+
+    log =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert CodexPooler.RollupCoverageFence.restore!(conn, found, %{test: "sample coverage owner", file: "sample_test.exs", line: 7}) == %{deleted: [date], restored: []}
+      end)
+
+    assert log =~ "sample coverage owner"
+    assert log =~ "sample_test.exs"
+    assert log =~ "1901-01-01"
+    assert CodexPooler.RollupCoverageFence.snapshot!(conn) == found
+  end
+
   # `accounting_setup/0` derives its unique keys while it commits, so the cleanup is registered
   # straight after the commit, as the other committed accounting tests do.
   defp committed_graph! do

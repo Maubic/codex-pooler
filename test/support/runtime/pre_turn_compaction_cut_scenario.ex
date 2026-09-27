@@ -320,8 +320,8 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
   # settlement decides that, and on a starved machine it can come later: the
   # first retry is then refused with the take-over logged
   # `inherited_turn_unsettled`, and the next one is served, which is the bound
-  # the product sets and `:observed_cut_settlement_held` pins as a refusal
-  # followed by a served retry, not as an elapsed-time assertion. First-send
+  # the product sets. `:observed_cut_settlement_held` pins the refusal followed
+  # by a served retry and separately asserts the first retry waited the full budget. First-send
   # success after take-over is covered by InheritedTurnTakeOverTest; shortening
   # the wait can fail that contract while preserving this allowed outcome.
   # The settlement is held (findings#206 row 206-580: once in about 120 runs at a load
@@ -349,11 +349,13 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
     config = %{hold: hold, test: self(), socket: closing_socket, claimed: :atomics.new(1, [])}
     :ok = :telemetry.attach(handler_id, [:codex_pooler, :repo, :query], &__MODULE__.hold_settlement_query/4, config)
 
-    Map.put(ctx, :after_first_retry, fn ->
+    Map.put(ctx, :after_first_retry, fn retry_finished_at ->
       :telemetry.detach(handler_id)
-      assert_received {^hold, :held, settler}, "the cut request's settlement never started while the first retry waited"
+      assert_received {^hold, :held, settler, settlement_started_at}, "the cut request's settlement never started while the first retry waited"
       send(settler, {hold, :release})
       await_cut_compaction_settled!(ctx.setup.pool.id)
+      elapsed_ms = retry_finished_at - settlement_started_at
+      assert elapsed_ms >= 1_950, "held settlement must receive the 2s take-over budget (50ms query-origin allowance), observed #{elapsed_ms}ms"
     end)
   end
 
@@ -385,7 +387,7 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
   def hold_settlement_query(_event, _measurements, _metadata, %{hold: hold, test: test, socket: socket, claimed: claimed}) do
     if socket in Process.get(:"$callers", []) and not match?({CodexPoolerWeb.WebsocketControlPath, _function, _arity}, Process.get(:"$initial_call")) and
          :atomics.add_get(claimed, 1, 1) == 1 do
-      send(test, {hold, :held, self()})
+      send(test, {hold, :held, self(), System.monotonic_time(:millisecond)})
 
       receive do
         {^hold, :release} -> :ok
@@ -418,6 +420,7 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
 
   defp websocket_retries!(ctx, port, remaining, outcomes) do
     outcome = full_history_resend!(ctx, port)
+    retry_finished_at = System.monotonic_time(:millisecond)
 
     ctx =
       case Map.pop(ctx, :after_first_retry) do
@@ -425,7 +428,7 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
           ctx
 
         {after_first_retry, ctx} ->
-          after_first_retry.()
+          after_first_retry.(retry_finished_at)
           ctx
       end
 

@@ -120,7 +120,7 @@ defmodule CodexPooler.RollupCoverageFence do
       {_async, conn} ->
         found = snapshot!(conn)
         counters = CommittedWriteGuard.counters()
-        ExUnit.Callbacks.on_exit(@callback_ref, fn -> close!(conn, found, counters) end)
+        ExUnit.Callbacks.on_exit(@callback_ref, fn -> close!(conn, found, counters, tags) end)
     end
   end
 
@@ -132,15 +132,15 @@ defmodule CodexPooler.RollupCoverageFence do
   Writes `found` back when the committed rows differ from it. Returns the dates it deleted and
   the dates it wrote back.
   """
-  @spec restore!(pid(), snapshot()) :: %{deleted: [Date.t()], restored: [Date.t()]}
-  def restore!(conn, found) do
+  @spec restore!(pid(), snapshot(), map()) :: %{deleted: [Date.t()], restored: [Date.t()]}
+  def restore!(conn, found, tags \\ %{}) do
     case snapshot!(conn) do
       ^found -> %{deleted: [], restored: []}
-      current -> write_back!(conn, found, current)
+      current -> write_back!(conn, found, current, tags)
     end
   end
 
-  defp write_back!(conn, found, current) do
+  defp write_back!(conn, found, current, tags) do
     found_dates = Enum.map(found, &hd/1)
     deleted = current |> Enum.map(&hd/1) |> Enum.reject(&(&1 in found_dates))
     restored = Enum.reject(found, &(&1 in current))
@@ -154,7 +154,7 @@ defmodule CodexPooler.RollupCoverageFence do
     result = %{deleted: deleted, restored: Enum.map(restored, &hd/1)}
 
     CodexPooler.TestDiagnostics.puts(fn ->
-      "rollup coverage fence: deleted=#{inspect(result.deleted)} restored=#{inspect(result.restored)}"
+      "rollup coverage fence: test=#{inspect(tags[:test])} file=#{inspect(tags[:file])} line=#{inspect(tags[:line])} deleted=#{inspect(result.deleted)} restored=#{inspect(result.restored)}"
     end)
 
     result
@@ -163,8 +163,8 @@ defmodule CodexPooler.RollupCoverageFence do
   # A test that made no call the guard counts and had no node connected cannot have committed
   # through a channel the guard sees, so its closing read is skipped. A commit through a channel
   # it cannot see is not fenced; the guard reports that one as it reports any other.
-  defp close!(conn, found, counters) do
-    unless quiet?(counters), do: restore!(conn, found)
+  defp close!(conn, found, counters, tags) do
+    unless quiet?(counters), do: restore!(conn, found, tags)
     :ok
   end
 

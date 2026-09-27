@@ -47,9 +47,13 @@ defmodule CodexPooler.UnboxedFixture do
   """
   @spec register_unboxed_cleanup!((-> term()), timeout()) :: :ok
   def register_unboxed_cleanup!(fun, timeout \\ @default_timeout) when is_function(fun, 0) do
-    ExUnit.Callbacks.on_exit(fn ->
-      :ok = WebsocketCleanupFence.await_session_cleanups!()
-      run_unboxed(fun, timeout)
-    end)
+    ExUnit.Callbacks.on_exit(fn -> cleanup_unboxed!(fun, timeout) end)
+  end
+
+  @doc false
+  @spec cleanup_unboxed!((-> term()), timeout(), keyword()) :: term()
+  def cleanup_unboxed!(fun, timeout \\ @default_timeout, opts \\ []) when is_function(fun, 0) do
+    :ok = WebsocketCleanupFence.await_session_cleanups!(Keyword.get(opts, :cleanup_wait, @default_timeout))
+    run_unboxed(fun, timeout)
   end
 end

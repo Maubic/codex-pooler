@@ -412,20 +412,20 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFence do
   teardown capture: the `cleanup_deferred` warning and info lines are
   dropped, every other line is written through.
   """
-  @spec await_session_cleanups!() :: :ok
-  def await_session_cleanups! do
+  @spec await_session_cleanups!(non_neg_integer()) :: :ok
+  def await_session_cleanups!(timeout \\ @budget_ms) when is_integer(timeout) and timeout >= 0 do
     case session_cleanup_tasks() do
       [] ->
         :ok
 
       tasks ->
-        deadline = System.monotonic_time(:millisecond) + @budget_ms
+        deadline = System.monotonic_time(:millisecond) + timeout
         {result, log} = ExUnit.CaptureLog.with_log([level: :info], fn -> await_session_cleanups(tasks, deadline) end)
         pass_through_unexpected(log)
 
         case result do
           :ok -> :ok
-          {:unfinished, count} -> flunk("#{count} websocket session cleanup(s) still running #{@budget_ms} ms before the sandbox owner stops")
+          {:unfinished, count} -> flunk("#{count} websocket session cleanup(s) still running #{timeout} ms before the sandbox owner stops")
         end
     end
   end

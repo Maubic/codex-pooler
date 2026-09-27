@@ -147,6 +147,17 @@ defmodule CodexPooler.InstancePresencePeerCleanupTest do
              )
   end
 
+  test "an inspection-denied environment cannot certify the owned process identity" do
+    assert_raise ExUnit.AssertionError, ~r/owned peer OS process identity unavailable/, fn ->
+      InstancePresencePeer.capture_os_process_identity!("owned-pid", probe: fn _ -> {:error, :ps_process_unknown} end)
+    end
+
+    assert %{pid: pid, source: source, start_signature: signature} = InstancePresencePeer.capture_os_process_identity!(System.pid())
+    assert pid == System.pid()
+    assert source in [:ps, :proc]
+    assert byte_size(signature) > 0
+  end
+
   test "owned process stop accepts absence, PID reuse, and a same-identity zombie" do
     identity = %{pid: "owned-pid", source: :proc, start_signature: "123456"}
 
