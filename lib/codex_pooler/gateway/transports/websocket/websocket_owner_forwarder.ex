@@ -834,8 +834,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   def remote_submit_request_v6(codex_session_id, downstream, owner_request)
       when is_binary(codex_session_id) and is_map(downstream) do
     with :ok <- validate_owner_request_v6(owner_request),
+         :ok <- refuse_abandoned_submission(codex_session_id, downstream),
          {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id),
-         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil) do
+         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil),
+         :ok <- refuse_abandoned_submission(codex_session_id, downstream) do
       submit_collect_owner_request(
         owner_pid,
         downstream,
@@ -857,10 +859,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   def remote_submit_request_v7(codex_session_id, downstream, owner_request)
       when is_binary(codex_session_id) and is_map(downstream) do
     with :ok <- validate_owner_request_v7(owner_request),
+         :ok <- refuse_abandoned_submission(codex_session_id, downstream),
          {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id),
          %CompactionRetrySubmitHold{owner: ^owner_pid} = hold <-
            Map.get(owner_request, :compaction_retry_submit_hold),
-         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil) do
+         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil),
+         :ok <- refuse_abandoned_submission(codex_session_id, downstream) do
       WebsocketOwnerSession.submit_compaction_retry(
         owner_pid,
         downstream,
@@ -887,8 +891,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   def remote_submit_request_v2(codex_session_id, downstream, owner_request)
       when is_binary(codex_session_id) and is_map(downstream) do
     with :ok <- validate_owner_request_v2(owner_request),
+         :ok <- refuse_abandoned_submission(codex_session_id, downstream),
          {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id),
-         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil) do
+         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil),
+         :ok <- refuse_abandoned_submission(codex_session_id, downstream) do
       submit_collect_owner_request(
         owner_pid,
         downstream,
@@ -911,8 +917,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   def remote_submit_request_v3(codex_session_id, downstream, owner_request)
       when is_binary(codex_session_id) and is_map(downstream) do
     with :ok <- validate_owner_request_v3(owner_request),
+         :ok <- refuse_abandoned_submission(codex_session_id, downstream),
          {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id),
-         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil) do
+         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil),
+         :ok <- refuse_abandoned_submission(codex_session_id, downstream) do
       submit_collect_owner_request(
         owner_pid,
         downstream,
@@ -935,8 +943,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   def remote_submit_request_v4(codex_session_id, downstream, owner_request)
       when is_binary(codex_session_id) and is_map(downstream) do
     with :ok <- validate_owner_request_v4(owner_request),
+         :ok <- refuse_abandoned_submission(codex_session_id, downstream),
          {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id),
-         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil) do
+         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil),
+         :ok <- refuse_abandoned_submission(codex_session_id, downstream) do
       submit_collect_owner_request(
         owner_pid,
         downstream,
@@ -1939,6 +1949,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   # (findings#206 row 206-316).
   defp remote_submission_opts(owner_request, codex_session_id, downstream),
     do: Keyword.put(request_recovery_opts(owner_request), :abandoned_submission_key, AbandonedSubmissions.key(codex_session_id, downstream))
+
+  defp refuse_abandoned_submission(codex_session_id, downstream),
+    do: refuse_abandoned_submission(abandoned_submission_key: AbandonedSubmissions.key(codex_session_id, downstream))
 
   defp refuse_abandoned_submission(opts) do
     if AbandonedSubmissions.consume(Keyword.get(opts, :abandoned_submission_key)),

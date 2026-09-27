@@ -210,7 +210,7 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
   defp native_usage_limit_frame(canonical, canonical_decoded) do
     case ProviderUsageLimit.frame_projection(canonical_decoded) do
       {:terminal, error} -> error |> websocket_error() |> CodexPooler.JSON.encode!()
-      {:relay, provider_error} -> relay_usage_limit_frame(provider_error)
+      {:relay, provider_error} -> relay_usage_limit_frame(provider_error, canonical_decoded)
       :canonical -> canonical
     end
   end
@@ -218,10 +218,19 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
   # The canonical frame carries the error type again as its code when the
   # provider sent none; that derived code is not the provider's and is dropped,
   # so the relay reads the same tokens native HTTP does.
-  defp relay_usage_limit_frame(provider_error) do
+  defp relay_usage_limit_frame(provider_error, frame) do
     provider_error = if provider_error["code"] == provider_error["type"], do: Map.delete(provider_error, "code"), else: provider_error
     error = NativeRateLimitRelay.error(%Req.Response{status: 429, body: CodexPooler.JSON.encode!(%{"error" => provider_error})})
-    CodexPooler.JSON.encode!(%{"type" => "error", "status" => 429, "error" => error})
+
+    retry_after =
+      case ProviderUsageLimit.withheld(frame) do
+        {:withheld, seconds} when is_integer(seconds) -> seconds
+        _other -> NativeRateLimitRelay.retry_after_seconds(error)
+      end
+
+    event = %{"type" => "error", "status" => 429, "error" => error}
+    event = if is_integer(retry_after), do: Map.put(event, "headers", %{"retry-after" => Integer.to_string(retry_after)}), else: event
+    CodexPooler.JSON.encode!(event)
   end
 
   defp native_400_refusal_frame(canonical, status, error) do

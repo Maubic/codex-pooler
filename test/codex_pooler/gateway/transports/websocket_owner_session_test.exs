@@ -84,6 +84,35 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     {:ok, codex_session_id: codex_session_id, owner_lease_token: "owner-token-#{System.unique_integer([:positive])}", owner_instance_id: Atom.to_string(node())}
   end
 
+  test "a busy owner consumes an exact abandoned submission before answering busy", context do
+    parent = self()
+    gate = make_ref()
+
+    upstream = %{
+      start: fn -> Agent.start_link(fn -> :ready end) end,
+      send: fn _upstream, _request, _writer ->
+        send(parent, {:busy_turn_started, self()})
+        receive do: ({:release_busy_turn, ^gate} -> :ok)
+        {:ok, %{status: 200, headers: [], terminal: "response.completed", body: ""}}
+      end,
+      close: fn pid -> Agent.stop(pid) end
+    }
+
+    assert {:ok, owner} = start_owner(context, upstream: upstream)
+    assert {:ok, downstream} = WebsocketOwnerSession.attach_downstream(owner, downstream_target("abandon-busy"))
+    task = Task.async(fn -> WebsocketOwnerSession.submit_request(owner, Map.put(downstream, :owner_turn_id, self()), %UpstreamWebsocketSession.Request{url: "https://example.com", payload: "{}", headers: [], timeouts: %{}, websocket_delivery_mode: :collect_compaction, effective_serving_mode: "full"}, false) end)
+    assert_receive {:busy_turn_started, executor}, @detection_timeout_ms
+    on_exit(fn -> send(executor, {:release_busy_turn, gate}) end)
+    abandoned = Map.put(downstream, :owner_turn_id, self())
+    assert {:error, _} = WebsocketOwnerSession.abandon_turn(owner, abandoned)
+    assert length(:sys.get_state(owner).abandoned_submissions) == 1
+    assert {:error, :stale_downstream} = GenServer.call(owner, {:submit_upstream, abandoned, "{}", false})
+    assert :sys.get_state(owner).abandoned_submissions == []
+    assert {:error, :owner_busy} = GenServer.call(owner, {:submit_upstream, abandoned, "{}", false})
+    send(executor, {:release_busy_turn, gate})
+    assert {:ok, _} = Task.await(task, @detection_timeout_ms)
+  end
+
   test "starts one local registered owner per codex_session_id", context do
     upstream = WebsocketOwnerNodeHarness.fake_upstream_boundary(self())
 

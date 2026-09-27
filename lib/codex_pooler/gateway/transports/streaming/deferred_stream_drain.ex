@@ -68,13 +68,18 @@ defmodule CodexPooler.Gateway.Transports.Streaming.DeferredStreamDrain do
   @spec drain_all(integer(), policy(), GenServer.server()) :: [
           DeferredStreamRegistry.drain_entry()
         ]
-  def drain_all(deadline_ms, policy, registry) do
-    await_cohort(deadline_ms, nil, policy, registry)
+  def drain_all(deadline_ms, policy, registry), do: drain_all(deadline_ms, policy, registry, fn _entries -> :ok end)
+
+  @doc "Reports each observed cohort before waiting, so a failed worker retains its actual membership."
+  @spec drain_all(integer(), policy(), GenServer.server(), ([DeferredStreamRegistry.drain_entry()] -> term())) :: [DeferredStreamRegistry.drain_entry()]
+  def drain_all(deadline_ms, policy, registry, observe) when is_function(observe, 1) do
+    await_cohort(deadline_ms, nil, policy, registry, observe)
   end
 
-  defp await_cohort(deadline_ms, settlement_deadline, policy, registry) do
+  defp await_cohort(deadline_ms, settlement_deadline, policy, registry, observe) do
     entries = DeferredStreamRegistry.drain_entries(name: registry)
     active = Enum.filter(entries, &(&1.status == :active))
+    observe.(entries)
     now_ms = policy.now_ms.()
 
     cond do
@@ -97,7 +102,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.DeferredStreamDrain do
           deadline_ms,
           deadline_ms + @settlement_margin_ms,
           policy,
-          registry
+          registry,
+          observe
         )
 
       true ->
@@ -108,7 +114,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.DeferredStreamDrain do
 
         receive do
           {:rollout_drain_wait_elapsed, ^wait_token} ->
-            await_cohort(deadline_ms, settlement_deadline, policy, registry)
+            await_cohort(deadline_ms, settlement_deadline, policy, registry, observe)
         end
     end
   end

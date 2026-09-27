@@ -101,7 +101,8 @@ defmodule CodexPoolerWeb.Runtime.WebsocketUsageLimitFrameTest do
 
     assert %{"type" => "error", "status" => 429, "error" => error} = event = native_turn!(port, setup)
     assert %{"type" => "usage_limit_reached", "message" => "upstream usage limit reached", "resets_at" => ^resets_at} = error
-    refute Map.has_key?(event, "headers")
+    assert %{"retry-after" => retry_after} = event["headers"]
+    assert String.to_integer(retry_after) in 1..60
     refute CodexPooler.JSON.encode!(event) =~ @provider_message
   end
 
@@ -148,7 +149,9 @@ defmodule CodexPoolerWeb.Runtime.WebsocketUsageLimitFrameTest do
 
     # The line is logged after the frame went out: the capture waits for the
     # settled row.
-    {rows, log} = with_log([level: :info], fn -> native_turn!(port, setup) && settled_requests!(setup) end)
+    {{event, rows}, log} = with_log([level: :info], fn -> {native_turn!(port, setup), settled_requests!(setup)} end)
+    assert %{"retry-after" => retry_after} = event["headers"]
+    assert String.to_integer(retry_after) in 1..60
 
     assert [request] = rows
     assert request.response_status_code == 429

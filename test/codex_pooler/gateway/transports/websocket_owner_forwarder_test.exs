@@ -15,6 +15,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   alias CodexPooler.Gateway.Runtime.Finalization.Metadata
   alias CodexPooler.Gateway.Transports.Streaming.RuntimeAdmissionProof
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
+  alias CodexPooler.Gateway.Transports.Websocket.AbandonedSubmissions
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.NativeReplayAdmission
   alias CodexPooler.Gateway.Transports.Websocket.RemoteReconnectControlV2
@@ -25,6 +26,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequest
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV2
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV3
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV4
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
@@ -288,6 +290,44 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
 
   @tag :replay_protocol_v2
   @tag :replay_topology
+  test "an abandon recorded before owner registration refuses the late collected turn without upstream dispatch" do
+    %{session: session} = owner_session_fixture(auth_fixture(), Atom.to_string(node()))
+    target = %{pid: self(), epoch: 1, correlation_id: "late-collect", owner_turn_id: self()}
+    key = AbandonedSubmissions.key(session.id, target)
+    on_exit(fn -> AbandonedSubmissions.consume(key) end)
+    assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.remote_abandon_turn_v1(session.id, target)
+    assert AbandonedSubmissions.recorded?(key)
+    upstream = WebsocketOwnerNodeHarness.fake_upstream_boundary(self(), return_request_result?: true)
+    assert {:ok, owner} = start_owner(session, upstream)
+    assert_receive {:websocket_owner_harness_upstream_started, upstream_pid}
+    assert {:ok, attached} = WebsocketOwnerSession.attach_downstream(owner, target)
+    assert attached.epoch == target.epoch
+    envelope = owner_request_v2(request("late-collect"))
+    assert {:error, :stale_downstream} = WebsocketOwnerForwarder.remote_submit_request_v2(session.id, target, envelope)
+    assert WebsocketOwnerNodeHarness.fake_upstream_frames(upstream_pid) == []
+    refute AbandonedSubmissions.recorded?(key)
+    assert :sys.get_state(owner).active_turn == nil
+    assert :ok = WebsocketOwnerSession.drain_owner(owner)
+  end
+
+  test "collected and replay submissions consume a node-level abandon before owner lookup" do
+    for {function, envelope} <- [
+          {:remote_submit_request_v2, owner_request_v2(request("abandoned-collect"))},
+          {:remote_submit_request_v3, abandoned_v3_request()},
+          {:remote_submit_request_v4, owner_request_v4(replay_binding(1))}
+        ] do
+      session_id = Ecto.UUID.generate()
+      target = %{pid: self(), epoch: 1, correlation_id: "abandoned", owner_turn_id: self()}
+      key = AbandonedSubmissions.key(session_id, target)
+      on_exit(fn -> AbandonedSubmissions.consume(key) end)
+      assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.remote_abandon_turn_v1(session_id, target)
+      assert AbandonedSubmissions.recorded?(key)
+      assert {:error, :stale_downstream} = apply(WebsocketOwnerForwarder, function, [session_id, target, envelope])
+      refute AbandonedSubmissions.recorded?(key)
+      assert {:error, :owner_unavailable} = WebsocketOwnerSession.lookup(session_id)
+    end
+  end
+
   test "dedicated V2 control has local and simulated remote parity", %{auth: auth} do
     %{session: session, token: token} =
       owner_session_fixture(auth, Atom.to_string(node()), "v2-local")
@@ -3832,6 +3872,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       )
 
     owner_request
+  end
+
+  defp abandoned_v3_request do
+    attrs = owner_request_v2(request("abandoned-collect")) |> Map.from_struct()
+    # The admission object is opaque to this boundary; no owner exists or
+    # materialization runs once the exact submission was abandoned.
+    capability = struct(NativeCompactionAdmission.Capability, %{})
+    {:ok, envelope} = WebsocketOwnerRequestV3.new(Map.merge(attrs, %{version: 3, owner_admission_capability: capability, first_compact_collection: nil}))
+    envelope
   end
 
   defp owner_request_v4(%NativeReplayAdmission.Binding{} = binding, token \\ <<9::256>>) do

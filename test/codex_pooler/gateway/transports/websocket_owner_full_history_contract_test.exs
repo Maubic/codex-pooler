@@ -9,6 +9,7 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.RequestOptions.TimeoutConfig
   alias CodexPooler.Gateway.Transports.UpstreamDispatch
+  alias CodexPooler.Gateway.Transports.Websocket.AbandonedSubmissions
   alias CodexPooler.Gateway.Transports.Websocket.CompactionRetrySubmitHold
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV2
@@ -45,6 +46,8 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
   test "v6 full-history collection is a distinct closed envelope and preserves wire bytes" do
     attrs = attrs()
     assert {:ok, request} = WebsocketOwnerRequestV6.new(attrs)
+    assert_abandoned_envelope(:remote_submit_request_v6, request)
+
     assert request.version == 6
     assert request.payload == attrs.payload
     assert inspect(request) == "#WebsocketOwnerRequestV6<version: 6>"
@@ -220,6 +223,8 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
       |> put_in([:observation, :attempt_id], attempt.id)
 
     assert {:ok, envelope} = WebsocketOwnerRequestV7.new(input)
+    assert_abandoned_envelope(:remote_submit_request_v7, envelope)
+
     assert {:ok, full_history} = WebsocketOwnerRequestV7.full_history_request(envelope)
 
     assert Map.from_struct(full_history) ==
@@ -420,6 +425,17 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
              })
 
     session
+  end
+
+  defp assert_abandoned_envelope(function, envelope) do
+    session_id = Ecto.UUID.generate()
+    downstream = %{pid: self(), epoch: 1, correlation_id: "abandoned-full-history", owner_turn_id: self()}
+    key = AbandonedSubmissions.key(session_id, downstream)
+    on_exit(fn -> AbandonedSubmissions.consume(key) end)
+    assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.remote_abandon_turn_v1(session_id, downstream)
+    assert AbandonedSubmissions.recorded?(key)
+    assert {:error, :stale_downstream} = apply(WebsocketOwnerForwarder, function, [session_id, downstream, envelope])
+    refute AbandonedSubmissions.recorded?(key)
   end
 
   defp attrs(identity_id \\ Ecto.UUID.generate()) do

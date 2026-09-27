@@ -52,6 +52,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
   @raw_websocket_peer_terminal_then_control_modes [
     :terminal_then_coalesced_close,
     :terminal_then_coalesced_ping,
+    :terminal_then_invalid_text,
+    :terminal_then_invalid_text_then_close,
     :terminal_then_delayed_close
   ]
 
@@ -3733,6 +3735,30 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     end
   end
 
+  for mode <- [:terminal_then_invalid_text, :terminal_then_invalid_text_then_close] do
+    @tag trailing_mode: mode
+    test "a trailing malformed text frame logs the actual close cause for #{mode}", %{trailing_mode: mode} do
+      peer = start_raw_websocket_peer(response_mode: mode)
+      {:ok, session} = UpstreamWebsocketSession.start_link([])
+      on_exit(fn -> UpstreamWebsocketSession.close(session) end)
+      request = raw_websocket_request(peer.url, self())
+
+      {result, log} =
+        with_info_log(fn ->
+          result = UpstreamWebsocketSession.request(session, request)
+          assert_disconnected_lifecycle(session, %{lifecycle_state(session) | generation: 1})
+          result
+        end)
+
+      assert {:ok, %{terminal: "response.completed"}} = result
+      assert log =~ "reason_code=frame_error"
+      refute log =~ "reason_code=peer_close_frame"
+      set_raw_websocket_peer_response_mode(peer, :terminal)
+      assert {:ok, %{terminal: "response.completed"}} = UpstreamWebsocketSession.request(session, request)
+      assert raw_websocket_peer_connection_count(peer) == 2
+    end
+  end
+
   test "pongs an upstream ping coalesced behind a retryable first frame and keeps the connection" do
     peer = start_raw_websocket_peer(response_mode: :retryable_first_then_coalesced_ping)
     {:ok, session} = UpstreamWebsocketSession.start_link([])
@@ -4001,7 +4027,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
   # decides when it arrives.
   for {reason_label, close_reason, expected_reason} <- [
         {"an allowlisted identifier", "idle-timeout", "idle-timeout"},
-        {"free text", "going away now", :fingerprint}
+        {"free text", "going away now", :fingerprint},
+        {"provider id", "resp_" <> String.duplicate("a", 40), :fingerprint},
+        {"credential-like content", "sk-proj-synthetic-peer-content", :fingerprint},
+        {"unknown peer content", "arbitrary_private_identifier", :fingerprint}
       ] do
     @close_reason close_reason
     @expected_reason expected_reason
@@ -5476,7 +5505,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
             }} = result
 
     assert transport_failure ==
-             TransportFailureReason.continuation_generation_guard_metadata(connection_use)
+             TransportFailureReason.continuation_generation_guard_metadata(if(connection_use == :reused, do: :previous_response_serving_mode_mismatch, else: :previous_response_generation_mismatch), connection_use)
 
     assert connection.reused == false
     assert connection.reconnected == (connection_use == :reconnected)
@@ -5516,7 +5545,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
             }} = result
 
     assert transport_failure ==
-             TransportFailureReason.continuation_generation_guard_metadata(connection_use)
+             TransportFailureReason.continuation_generation_guard_metadata(if(connection_use == :reused, do: :previous_response_serving_mode_mismatch, else: :previous_response_generation_mismatch), connection_use)
 
     assert connection.reused == (connection_use == :reused)
     assert connection.reconnected == (connection_use == :reconnected)
@@ -6569,6 +6598,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
   # The three arms of the coalesced-frame probe: what the peer writes after the
   # terminal, and whether it shares the terminal's TCP segment
   # (icoretech/codex-pooler-findings#251).
+  defp send_raw_websocket_peer_terminal_then_control(mode, socket, terminal) when mode in [:terminal_then_invalid_text, :terminal_then_invalid_text_then_close] do
+    trailing = if mode == :terminal_then_invalid_text_then_close, do: raw_websocket_server_close_frame(1000), else: <<>>
+    :ok = :gen_tcp.send(socket, [raw_websocket_server_text_frame(terminal), <<0x81, 1, 0xFF>>, trailing])
+  end
+
   defp send_raw_websocket_peer_terminal_then_control(
          :terminal_then_coalesced_close,
          socket,

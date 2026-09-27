@@ -860,7 +860,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
        ) do
     if collect_compaction?(request) and
          not collect_connection_eligible?(state, key, request, connection_usage) do
-      guard_connection_bound_continuation(state, receive_state, connection_usage)
+      reason = if connection_use(connection_usage) == :reused and Map.get(state, :last_successful_effective_serving_mode) != request.effective_serving_mode, do: :previous_response_serving_mode_mismatch, else: :previous_response_generation_mismatch
+      guard_connection_bound_continuation(state, receive_state, connection_usage, reason)
     else
       connect_and_send_eligible_request(
         state,
@@ -1807,22 +1808,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp drain_trailing_frames(state, [], _halt), do: state
 
   defp drain_trailing_frames(state, trailing_frames, halt) when halt in [:terminal, :retryable_first_frame] do
-    lifecycle = connection_lifecycle_state(state)
-    drained = handle_async_frames(state, trailing_frames, :trailing)
-
-    case Enum.find(trailing_frames, &match?({:close, _code, _reason}, &1)) do
-      {:close, code, _reason} ->
-        Logger.info(
-          "upstream websocket coalesced close drained reason_code=peer_close_frame " <>
-            "halt=#{halt} close_code=#{coalesced_close_code(code)} " <>
-            "lifecycle_id=#{lifecycle.lifecycle_id} generation=#{lifecycle.generation}"
-        )
-
-      nil ->
-        :ok
-    end
-
-    drained
+    handle_async_frames(state, trailing_frames, {:trailing, halt})
   end
 
   defp coalesced_close_code(code) when is_integer(code) and code in 1000..4999, do: code
@@ -1908,8 +1894,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   # `context` is `:idle` for a read the session takes between requests and
-  # `:trailing` for frames decoded behind a halting frame of a request, whose
-  # peer Close `drain_trailing_frames/3` already reports.
+  # `{:trailing, halt}` for frames decoded behind a halting frame of a request.
+  # Only the frame that actually retires the connection supplies the close cause.
   defp handle_async_frames(state, frames, context) do
     Enum.reduce_while(frames, state, fn
       {:ping, payload}, state ->
@@ -1936,7 +1922,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   defp close_async(state, :idle, cause, details), do: close_between_requests(state, cause, details)
-  defp close_async(state, :trailing, _cause, _details), do: close_state(state)
+
+  defp close_async(state, {:trailing, halt}, :peer_close_frame, details) do
+    lifecycle = connection_lifecycle_state(state)
+    Logger.info("upstream websocket coalesced close drained reason_code=peer_close_frame halt=#{halt} close_code=#{coalesced_close_code(Keyword.get(details, :close_code))} lifecycle_id=#{lifecycle.lifecycle_id} generation=#{lifecycle.generation}")
+    close_state(state)
+  end
+
+  defp close_async(state, {:trailing, _halt}, cause, details), do: close_between_requests(state, cause, details)
 
   # Every close of a live connection outside a request leaves one bounded
   # diagnostic line before the connection state is dropped (findings#206 row

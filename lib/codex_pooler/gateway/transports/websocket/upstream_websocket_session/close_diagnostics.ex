@@ -12,9 +12,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Clos
   # fresh connection carries the same lifecycle at `generation + 1`.
   #
   # Metadata only: fixed cause vocabulary, a bounded close code, the close
-  # reason and transport reason through the websocket diagnostics taxonomy
-  # (allowlisted ASCII identifiers in cleartext, anything else a 12-character
-  # SHA-256 fingerprint), monotonic ages in milliseconds, the connection's
+  # peer reason through a fixed benign vocabulary or a 12-character SHA-256
+  # fingerprint, and transport reason through the websocket diagnostics taxonomy, monotonic ages in milliseconds, the connection's
   # request count, and for a reuse-key change only which part changed and the
   # changed header names (the credential header as `credential`), never a
   # header value.
@@ -93,7 +92,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Clos
   defp close_code(_code), do: "invalid"
 
   defp close_reason(reason) when reason in [nil, ""], do: "none"
-  defp close_reason(reason) when is_binary(reason), do: DiagnosticTaxonomy.identifier(reason)
+  # Peer prose has no error-code authority. Keep only the known benign reason;
+  # every other peer value is arbitrary content, even if it looks like a code.
+  defp close_reason("idle-timeout"), do: "idle-timeout"
+  defp close_reason(reason) when is_binary(reason), do: "sha256_" <> (:crypto.hash(:sha256, reason) |> Base.encode16(case: :lower) |> binary_part(0, 12))
   defp close_reason(_reason), do: "invalid"
 
   # Mint wraps a transport reason in `Mint.TransportError`/`Mint.HTTPError`;

@@ -1841,24 +1841,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     {:reply, {:error, :owner_drained}, state}
   end
 
-  def handle_call(
-        {:submit_upstream, downstream, _payload},
-        _from,
-        %{active_turn: active_turn} = state
-      )
-      when not is_nil(active_turn) do
-    {:reply, DownstreamState.stale_or_busy(state.downstream, downstream), state}
-  end
-
-  def handle_call(
-        {:submit_upstream, downstream, _payload, _submission_notification?},
-        _from,
-        %{active_turn: active_turn} = state
-      )
-      when not is_nil(active_turn) do
-    {:reply, DownstreamState.stale_or_busy(state.downstream, downstream), state}
-  end
-
   def handle_call({:submit_upstream, downstream, upstream_payload}, from, state) do
     accept_or_consume_upstream_submission(state, from, downstream, upstream_payload, false)
   end
@@ -2129,6 +2111,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       accept_or_consume_live_submission(state, from, downstream, upstream_payload, submission_notification?)
     end
   end
+
+  defp accept_or_consume_live_submission(%{active_turn: active_turn} = state, _from, downstream, _payload, _notification?) when not is_nil(active_turn),
+    do: {:reply, DownstreamState.stale_or_busy(state.downstream, downstream), state}
 
   defp accept_or_consume_live_submission(
          %{pending_handoff: %{status: :ready} = pending} = state,

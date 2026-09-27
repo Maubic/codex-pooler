@@ -7,6 +7,17 @@ defmodule CodexPooler.Gateway.Websocket.AdapterTest do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
   alias CodexPooler.Gateway.Websocket.Adapter
 
+  test "withheld native usage-limit frames carry the bounded retry advice" do
+    for seconds <- [nil, 17, 61] do
+      error = %{"type" => "usage_limit_reached", "pooler_advice" => "withheld", "pooler_retry_after" => seconds}
+      frame = %{"type" => "error", "status" => 429, "error" => error}
+      decoded = frame |> CodexPooler.JSON.encode!() |> Adapter.downstream_response_chunk() |> CodexPooler.JSON.decode!()
+      assert decoded["status"] == 429
+      if seconds == 17, do: assert(decoded["headers"] == %{"retry-after" => "17"}), else: refute(Map.has_key?(decoded, "headers"))
+      refute Map.has_key?(decoded["error"], "pooler_retry_after")
+    end
+  end
+
   test "normalized init and terminate metadata prefer the current socket ownership" do
     opts =
       RequestOptions.build(
