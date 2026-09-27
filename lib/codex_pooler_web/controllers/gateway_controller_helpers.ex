@@ -117,6 +117,8 @@ defmodule CodexPoolerWeb.GatewayControllerHelpers do
   end
 
   @spec read_multipart_body(conn()) :: body_read_result()
+  def read_multipart_body(%Plug.Conn{private: %{runtime_json_parse_error: true}} = conn), do: read_json_body(conn)
+
   def read_multipart_body(conn) do
     case conn.body_params do
       %Plug.Conn.Unfetched{} ->

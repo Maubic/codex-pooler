@@ -69,7 +69,6 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
         |> reject_pruned_runtime_helper()
         |> authenticate_v1_request()
         |> reject_unsupported_v1_request()
-        |> authenticate_multipart_transcribe_request()
         |> authenticate_protected_backend_json_request()
         |> enforce_image_generation_permission()
         |> maybe_decode_compressed_body(settings)
@@ -306,10 +305,6 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
     end
   end
 
-  defp authenticate_multipart_transcribe_request(conn) do
-    authenticate_when(conn, &multipart_transcribe_request?/1)
-  end
-
   defp authenticate_protected_backend_json_request(conn) do
     authenticate_when(conn, &protected_backend_json_request?/1)
   end
@@ -382,26 +377,8 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
 
   defp image_generation_request?(_conn), do: false
 
-  defp multipart_transcribe_request?(conn) do
-    conn.method == "POST" and Path.decoded_segments(conn) == ["backend-api", "transcribe"] and
-      multipart_content_type?(conn)
-  end
-
-  defp multipart_content_type?(conn) do
-    conn
-    |> get_req_header("content-type")
-    |> List.first()
-    |> case do
-      nil ->
-        false
-
-      content_type ->
-        content_type |> String.downcase() |> String.starts_with?("multipart/form-data")
-    end
-  end
-
   @spec protected_backend_json_request?(Plug.Conn.t() | term()) :: boolean()
-  def protected_backend_json_request?(%Plug.Conn{method: "POST"} = conn) do
+  def protected_backend_json_request?(%Plug.Conn{method: method} = conn) when method in ["POST", "PUT", "PATCH", "DELETE"] do
     path_info = Path.decoded_segments(conn)
 
     path_info in [

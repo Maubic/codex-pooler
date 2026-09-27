@@ -60,6 +60,40 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
   end
 
   describe "unencoded ingress characterization" do
+    test "all body-parsed methods authenticate backend routes before multipart parsing" do
+      setup_runtime_ingress(%OperationalSettings{})
+
+      for method <- [:post, :put, :patch, :delete],
+          path <- ["/backend-api/transcribe", "/backend-api/files", "/backend-api/codex/responses"],
+          content_type <- ["application/json", "multipart/form-data; boundary=example"] do
+        conn =
+          build_conn()
+          |> put_req_header("content-type", content_type)
+          |> dispatch(@endpoint, method, path, "invalid body")
+
+        assert json_response(conn, 401)["error"]["code"] == "api_key_missing"
+        assert %Plug.Conn.Unfetched{} = conn.body_params
+      end
+
+      assert Repo.aggregate(Request, :count) == 0
+      assert Repo.aggregate(Attempt, :count) == 0
+    end
+
+    test "authenticated transcription reports malformed JSON before file validation" do
+      setup_runtime_ingress(%OperationalSettings{})
+      setup = active_api_key_fixture()
+
+      conn =
+        build_conn()
+        |> auth(setup)
+        |> put_req_header("content-type", "application/json")
+        |> post("/backend-api/transcribe", ~s({"model":))
+
+      assert json_response(conn, 400)["error"]["message"] == "request body must be valid JSON"
+      assert Repo.aggregate(Request, :count) == 0
+      assert Repo.aggregate(Attempt, :count) == 0
+    end
+
     test "transcription authenticates JSON requests before parsing for canonical and encoded paths" do
       setup_runtime_ingress(%OperationalSettings{})
 

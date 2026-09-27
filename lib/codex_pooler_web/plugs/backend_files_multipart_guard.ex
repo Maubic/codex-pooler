@@ -13,7 +13,7 @@ defmodule CodexPoolerWeb.Plugs.BackendFilesMultipartGuard do
   def call(%Plug.Conn{halted: true} = conn, _opts), do: conn
 
   def call(conn, _opts) do
-    if conn.method == "POST" and Path.decoded_segments(conn) == @files_path and
+    if conn.method in ["POST", "PUT", "PATCH", "DELETE"] and Path.decoded_segments(conn) == @files_path and
          multipart_content_type?(conn) do
       case GatewayHelpers.authenticate(conn) do
         {:ok, _auth} ->
