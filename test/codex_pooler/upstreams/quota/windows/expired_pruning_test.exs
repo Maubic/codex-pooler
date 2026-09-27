@@ -4,6 +4,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruningTest do
   import CodexPooler.PoolerFixtures
   import CodexPooler.UnboxedFixture, only: [register_unboxed_cleanup!: 1]
 
+  alias CodexPooler.Jobs.HealthPolicy
   alias CodexPooler.Jobs.RuntimeStateCleanup
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
   alias CodexPooler.Upstreams.Quota.Windows
@@ -96,7 +97,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruningTest do
       assert ExpiredPruning.batch_size() == 500
     end
 
-    test "multiple live-marker pages cannot starve later lapsed markers" do
+    test "bounded scans durably continue past retained marker pages" do
       now = now()
       cutoff = DateTime.add(now, -ExpiredPruning.retention_seconds(), :second)
       identity = upstream_identity_fixture()
@@ -107,10 +108,37 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruningTest do
         end
 
       expired = insert_window!(identity, source: "codex_usage_api", window_minutes: 20_000, reset_at: DateTime.add(cutoff, -1, :second), metadata: approach_marker(DateTime.add(cutoff, -1, :second)))
-      assert {:ok, %{expired_quota_windows_pruned: 1}} = Windows.prune_expired_windows(now, batch_size: 2)
+      assert {:ok, %{expired_quota_windows_pruned: 0}} = Windows.prune_expired_windows(now)
+      assert Repo.get(AccountQuotaWindow, expired.id)
+      [first] = all_enqueued(worker: CodexPooler.Jobs.ExpiredQuotaPruningWorker)
+      assert first.args["cursor_id"] in Enum.map(live, & &1.id)
+      assert :ok = perform_job(CodexPooler.Jobs.ExpiredQuotaPruningWorker, first.args)
+      second = Enum.find(all_enqueued(worker: CodexPooler.Jobs.ExpiredQuotaPruningWorker), &(&1.id != first.id))
+      assert second
+      assert :ok = perform_job(CodexPooler.Jobs.ExpiredQuotaPruningWorker, second.args)
       refute Repo.get(AccountQuotaWindow, expired.id)
       live_ids = Enum.map(live, & &1.id)
       assert Repo.aggregate(from(w in AccountQuotaWindow, where: w.id in ^live_ids), :count) == length(live)
+    end
+
+    test "continuation jobs reject malformed cursor arguments and retain bounded timeouts" do
+      alias CodexPooler.Jobs.ExpiredQuotaPruningWorker
+      assert {:cancel, :invalid_quota_pruning_args} = perform_job(ExpiredQuotaPruningWorker, %{})
+      assert {:cancel, :invalid_quota_pruning_args} = perform_job(ExpiredQuotaPruningWorker, %{now: "invalid", cursor_reset_at: "invalid", cursor_id: "invalid", batch_size: 1})
+      assert ExpiredQuotaPruningWorker.timeout(%Oban.Job{}) == 30_000
+      assert HealthPolicy.known_worker_timeout_ms("CodexPooler.Jobs.ExpiredQuotaPruningWorker") == 30_000
+    end
+
+    test "continuation insertion failure rolls back page deletion" do
+      identity = upstream_identity_fixture()
+      now = now()
+      old = DateTime.add(now, -ExpiredPruning.retention_seconds() - 1, :second)
+      row = insert_window!(identity, source: "codex_usage_api", reset_at: old)
+      Repo.query!("CREATE FUNCTION pg_temp.reject_pruning_page() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.worker = 'CodexPooler.Jobs.ExpiredQuotaPruningWorker' THEN RAISE EXCEPTION 'sample continuation failure' USING ERRCODE = 'check_violation'; END IF; RETURN NEW; END $$")
+      Repo.query!("CREATE TRIGGER reject_pruning_page BEFORE INSERT ON oban_jobs FOR EACH ROW EXECUTE FUNCTION pg_temp.reject_pruning_page()")
+      assert_raise Postgrex.Error, fn -> Windows.prune_expired_windows(now, batch_size: 1) end
+      assert Repo.get(AccountQuotaWindow, row.id)
+      assert all_enqueued(worker: CodexPooler.Jobs.ExpiredQuotaPruningWorker) == []
     end
 
     test "actual candidate pages use the reset index against retained evidence" do

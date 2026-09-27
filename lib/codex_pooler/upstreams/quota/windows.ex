@@ -159,7 +159,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows do
   saved-reset confirmation marker or locked by another transaction. Runs from
   runtime state cleanup.
   """
-  @spec prune_expired_windows(DateTime.t(), keyword()) :: {:ok, ExpiredPruning.summary()}
+  @spec prune_expired_windows(DateTime.t(), keyword()) :: {:ok, ExpiredPruning.summary()} | {:error, term()}
   def prune_expired_windows(%DateTime{} = now, opts \\ []) do
     ExpiredPruning.prune(now, opts)
   end

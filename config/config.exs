@@ -112,7 +112,7 @@ jobs_schedule = [
     title: "Runtime cleanup",
     description: "Expired state cleanup",
     icon: "hero-sparkles",
-    workers: [CodexPooler.Jobs.RuntimeStateCleanupWorker],
+    workers: [CodexPooler.Jobs.RuntimeStateCleanupWorker, CodexPooler.Jobs.ExpiredQuotaPruningWorker],
     scheduled_worker: CodexPooler.Jobs.RuntimeStateCleanupWorker,
     cadence: %{label: "Every 15 min", cron: "*/15 * * * *"}
   },

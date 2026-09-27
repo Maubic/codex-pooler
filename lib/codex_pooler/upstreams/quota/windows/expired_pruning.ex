@@ -23,7 +23,8 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruning do
   evidence writers (`EvidenceStore.lock_evidence_identity!/1`), and the
   candidate conditions are re-evaluated under those locks, so a row a
   concurrent observation refreshed is kept. A pass handles at most
-  `batch_size/0` rows; the rest wait for the next cleanup run. Read surfaces
+  `batch_size/0` candidate rows (or the caller's smaller batch). A durable Oban
+  continuation resumes beyond that page, so retained markers cannot starve later rows. Read surfaces
   already ignore rows past retention, so the pass reclaims space and keeps SQL
   forensics honest without changing any decision.
   """
@@ -32,6 +33,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruning do
 
   require Logger
 
+  alias CodexPooler.Jobs.ExpiredQuotaPruningWorker
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
   alias CodexPooler.Upstreams.Quota.Windows
@@ -49,49 +51,50 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruning do
   @spec batch_size() :: pos_integer()
   def batch_size, do: @batch_size
 
-  @spec prune(DateTime.t(), keyword()) :: {:ok, summary()}
+  @spec prune(DateTime.t(), keyword()) :: {:ok, summary()} | {:error, term()}
   def prune(%DateTime{} = now, opts \\ []) do
     cutoff = Retention.cutoff(now)
-    batch_size = Keyword.get(opts, :batch_size, @batch_size)
+    batch_size = min(Keyword.get(opts, :batch_size, @batch_size), @batch_size)
+    cursor = Keyword.get(opts, :after)
 
-    pruned = prune_candidates(cutoff, batch_size, nil, 0)
+    Repo.transact(fn ->
+      rows =
+        cutoff
+        |> candidate_query()
+        |> after_cursor(cursor)
+        |> order_by([window], asc: window.reset_at, asc: window.id)
+        |> limit(^batch_size)
+        |> select([window], {window.upstream_identity_id, window.id, window.metadata, window.reset_at})
+        |> Repo.all()
 
-    if pruned > 0 do
-      Logger.info("quota window cleanup deleted #{pruned} rows whose reset passed more than #{div(Retention.retention_seconds(), 86_400)} days ago")
-    end
+      pruned =
+        rows
+        |> Enum.filter(fn {identity, id, metadata, _reset} -> lapsed_marker?({identity, id, metadata}, cutoff) end)
+        |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+        |> Enum.sort_by(&elem(&1, 0))
+        |> Enum.reduce(0, fn {identity, ids}, count -> count + prune_identity(identity, ids, cutoff) end)
 
-    {:ok, %{expired_quota_windows_pruned: pruned}}
+      with :ok <- enqueue_continuation(rows, batch_size, now) do
+        log_pruned(pruned)
+        {:ok, %{expired_quota_windows_pruned: pruned}}
+      end
+    end)
   end
 
-  defp prune_candidates(_cutoff, 0, _cursor, total), do: total
+  defp log_pruned(0), do: :ok
+  defp log_pruned(pruned), do: Logger.info("quota window cleanup deleted #{pruned} rows whose reset passed more than #{div(Retention.retention_seconds(), 86_400)} days ago")
 
-  defp prune_candidates(cutoff, remaining, cursor, total) do
-    rows =
-      cutoff
-      |> candidate_query()
-      |> after_cursor(cursor)
-      |> order_by([window], asc: window.reset_at, asc: window.id)
-      |> limit(^@batch_size)
-      |> select([window], {window.upstream_identity_id, window.id, window.metadata, window.reset_at})
-      |> Repo.all()
+  defp enqueue_continuation(rows, batch_size, now) when length(rows) == batch_size and batch_size > 0 do
+    {_identity, id, _metadata, reset_at} = List.last(rows)
+    args = %{"now" => DateTime.to_iso8601(now), "cursor_reset_at" => DateTime.to_iso8601(reset_at), "cursor_id" => id, "batch_size" => batch_size}
 
-    case rows do
-      [] ->
-        total
-
-      [_ | _] ->
-        deleted =
-          rows
-          |> Enum.filter(fn {identity, id, metadata, _reset} -> lapsed_marker?({identity, id, metadata}, cutoff) end)
-          |> Enum.take(remaining)
-          |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-          |> Enum.sort_by(&elem(&1, 0))
-          |> Enum.reduce(0, fn {identity, ids}, count -> count + prune_identity(identity, ids, cutoff) end)
-
-        {_identity, id, _metadata, reset_at} = List.last(rows)
-        prune_candidates(cutoff, remaining - deleted, {reset_at, id}, total + deleted)
+    case Oban.insert(ExpiredQuotaPruningWorker.new(args), retry: false) do
+      {:ok, _job} -> :ok
+      {:error, _reason} -> {:error, :quota_pruning_enqueue_failed}
     end
   end
+
+  defp enqueue_continuation(_rows, _batch_size, _now), do: :ok
 
   defp after_cursor(query, nil), do: query
   defp after_cursor(query, {reset_at, id}), do: where(query, [window], window.reset_at > ^reset_at or (window.reset_at == ^reset_at and window.id > ^id))
@@ -122,8 +125,8 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruning do
     deleted
   end
 
-  # Keyset pages advance past retained markers without consuming the deletion
-  # allowance, while the identity-locked recheck still protects refreshed rows.
+  # Durable keyset pages advance past retained markers while the identity-locked
+  # recheck still protects refreshed rows.
   defp candidate_query(cutoff) do
     from(window in AccountQuotaWindow, where: window.reset_at < ^cutoff)
   end
