@@ -10,6 +10,7 @@ defmodule CodexPooler.Jobs do
   alias CodexPooler.Jobs.{
     AccountReconciliationWorker,
     AlertDeliveryWorker,
+    AlertEvaluationEnqueueWorker,
     AlertEvaluationWorker,
     CatalogSyncWorker,
     DailyRollupRebuildWorker,
@@ -24,6 +25,7 @@ defmodule CodexPooler.Jobs do
 
   alias CodexPooler.Pools
   alias CodexPooler.Pools.Pool
+  alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Assignments.PoolAssignments
   alias CodexPooler.Upstreams.Reconciliation.AccountReconciliation
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
@@ -301,7 +303,7 @@ defmodule CodexPooler.Jobs do
         "trigger_kind" => trigger_kind(opts)
       }
       |> AlertEvaluationWorker.new(Options.job_options(opts, unique_keys: [:alert_rule_id, :evaluation_window_started_at]))
-      |> Oban.insert()
+      |> Oban.insert(Keyword.take(opts, [:retry]))
     end
   end
 
@@ -318,6 +320,45 @@ defmodule CodexPooler.Jobs do
     |> Alerts.list_active_rules_for_evaluation()
     |> Enum.map(&enqueue_alert_evaluation(&1, opts))
     |> split_insert_results()
+  end
+
+  @doc false
+  @spec enqueue_alert_evaluation_page(DateTime.t(), DateTime.t(), {DateTime.t(), Ecto.UUID.t()} | nil) :: {:ok, map()} | {:error, term()}
+  def enqueue_alert_evaluation_page(window, cutoff, cursor) do
+    Repo.transact(fn ->
+      window_key = "alert_evaluation_fanout:" <> DateTime.to_iso8601(evaluation_window_started_at(window))
+      Repo.query!("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [window_key])
+      rules = Alerts.list_active_rules_for_evaluation(limit: @default_alert_evaluation_fanout_limit + 1, after: cursor, created_before: cutoff)
+      {page, remaining} = Enum.split(rules, @default_alert_evaluation_fanout_limit)
+      opts = [trigger_kind: "scheduled", now: window, retry: false, unique: [fields: [:args, :queue, :worker], keys: [:alert_rule_id, :evaluation_window_started_at], states: [:available, :scheduled, :executing, :retryable, :completed], period: {7, :days}]]
+      {:ok, result} = page |> Enum.map(&enqueue_alert_evaluation(&1, opts)) |> split_insert_results()
+
+      with [] <- result.errors,
+           :ok <- enqueue_alert_continuation(page, remaining, window, cutoff) do
+        {:ok, result}
+      else
+        [_ | _] = errors -> {:error, {:enqueue_failed, length(errors)}}
+        {:error, _reason} = error -> error
+      end
+    end)
+  end
+
+  defp enqueue_alert_continuation(_page, [], _window, _cutoff), do: :ok
+
+  defp enqueue_alert_continuation(page, [_ | _], window, cutoff) do
+    last = List.last(page)
+
+    args = %{
+      "evaluation_window_started_at" => DateTime.to_iso8601(window),
+      "fanout_started_at" => DateTime.to_iso8601(cutoff),
+      "cursor_created_at" => DateTime.to_iso8601(last.created_at),
+      "cursor_id" => last.id
+    }
+
+    case Oban.insert(AlertEvaluationEnqueueWorker.new(args), retry: false) do
+      {:ok, _job} -> :ok
+      {:error, _reason} = error -> error
+    end
   end
 
   @spec enqueue_alert_delivery(alert_incident_ref(), alert_channel_ref(), keyword()) ::

@@ -13,13 +13,22 @@ defmodule CodexPooler.Alerts.Rules.RuleEvaluation do
   def list_active_rules_for_evaluation(opts \\ []) when is_list(opts) do
     limit = opts |> Keyword.get(:limit, 500) |> normalize_evaluation_limit()
 
-    Repo.all(
+    query =
       from rule in AlertRule,
         where: rule.state == "active",
         order_by: [asc: rule.created_at, asc: rule.id],
         limit: ^limit
-    )
+
+    query
+    |> after_cursor(Keyword.get(opts, :after))
+    |> before_cutoff(Keyword.get(opts, :created_before))
+    |> Repo.all()
   end
+
+  defp after_cursor(query, nil), do: query
+  defp after_cursor(query, {created_at, id}), do: where(query, [rule], rule.created_at > ^created_at or (rule.created_at == ^created_at and rule.id > ^id))
+  defp before_cutoff(query, nil), do: query
+  defp before_cutoff(query, cutoff), do: where(query, [rule], rule.created_at <= ^cutoff)
 
   @spec fetch_rule_for_evaluation(Ecto.UUID.t()) :: evaluation_rule_result()
   def fetch_rule_for_evaluation(rule_id) when is_binary(rule_id) do

@@ -103,8 +103,8 @@ defmodule CodexPooler.Jobs.AlertEvaluatorJobTest do
 
   test "scheduled enqueue worker fans out through the central jobs facade" do
     pool = pool_fixture()
-    rule = alert_rule_fixture(pool)
     scheduled_at = timestamp(~U[2026-05-30 10:05:00Z])
+    rule = alert_rule_fixture(pool, created_at: scheduled_at)
 
     assert :ok = perform_job(AlertEvaluationEnqueueWorker, %{}, scheduled_at: scheduled_at)
 
@@ -252,7 +252,8 @@ defmodule CodexPooler.Jobs.AlertEvaluatorJobTest do
       alert_rule_fixture(pool,
         rule_kind: "pool_no_usable_assignments",
         model: model.exposed_model_id,
-        cooldown_minutes: 30
+        cooldown_minutes: 30,
+        created_at: window_started_at
       )
 
     channel = alert_channel_fixture(%{display_name: "Circuit blackout operations email"})
