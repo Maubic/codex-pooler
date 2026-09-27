@@ -405,6 +405,38 @@ defmodule CodexPooler.Gateway.RequestCompression.PerformanceTest do
       assert %{"status" => "compressed", "compressed_count" => 1} = compressed_options.runtime.payload_compression
     end
 
+    test "skips bodies with more JSON values than the planning limit before decoding them" do
+      body = tiny_messages_request(70_000)
+      {context, request_options} = request_context()
+
+      {reductions, result} =
+        with_reductions(fn ->
+          run_with_heap_cap(1_048_576, fn -> RequestCompression.maybe_compress(body, context, request_options) end)
+        end)
+
+      assert {:ok, {^body, compressed_options}} = result
+      assert %{"status" => "skipped", "reason" => "over_structure_limit", "candidate_count" => 0} = compressed_options.runtime.payload_compression
+      # Measured about 12 million reductions to reach the limit, without a decode.
+      assert reductions < 25_000_000
+    end
+
+    test "plans many small JSON objects under the limit within bounded work" do
+      body = tiny_messages_request(64_000)
+      {context, request_options} = request_context()
+
+      {reductions, result} =
+        with_reductions(fn ->
+          run_with_heap_cap(12_582_912, fn -> RequestCompression.maybe_compress(body, context, request_options) end)
+        end)
+
+      assert {:ok, {^body, compressed_options}} = result
+      assert %{"status" => "no_change", "reason" => "no_candidates"} = compressed_options.runtime.payload_compression
+      # Measured about 19 million reductions and a 30 MB peak heap after
+      # collection; recording every small string range cost about 43 million
+      # and 75 MB.
+      assert reductions < 30_000_000
+    end
+
     test "handles a sanitized one MiB fixture within the local dispatch budget" do
       body = fixed_size_request(@large_body_bytes, @max_candidate_count)
       {context, request_options} = request_context()
@@ -493,6 +525,10 @@ defmodule CodexPooler.Gateway.RequestCompression.PerformanceTest do
     |> CodexPooler.JSON.decode!()
     |> Map.fetch!("input")
     |> Enum.map(&Map.fetch!(&1, "output"))
+  end
+
+  defp tiny_messages_request(count) do
+    encode_request(Enum.map(1..count, &%{"type" => "message", "role" => "user", "content" => "m#{&1}"}))
   end
 
   defp deep_schema_request(depth) do

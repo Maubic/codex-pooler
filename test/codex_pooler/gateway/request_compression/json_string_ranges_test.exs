@@ -148,6 +148,19 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRangesTest do
       assert later - before < 200_000
     end
 
+    test "returns only the ranges a predicate accepts and decodes escaped keys" do
+      json = ~S({"a\"b":{"output":"kept"},"plain":"dropped","caf\u00e9":"escaped key"})
+
+      assert {:ok, [%{path: ["a\"b", "output"]}]} = JsonStringRanges.scan(json, record?: &match?(["output" | _rest], &1))
+      assert {:ok, [_first, %{path: ["plain"]}, %{path: ["caf\u00e9"]}]} = JsonStringRanges.scan(json)
+    end
+
+    test "stops at the value limit" do
+      assert {:ok, []} = JsonStringRanges.scan("[1,2,3]", max_values: 4)
+      assert {:error, :structure_limit} = JsonStringRanges.scan("[1,2,3]", max_values: 3)
+      assert {:error, :structure_limit} = JsonStringRanges.scan(~S({"a":{"b":"c"}}), max_values: 2)
+    end
+
     test "builds paths only for the ranges it returns" do
       json = nested_schema(500)
 

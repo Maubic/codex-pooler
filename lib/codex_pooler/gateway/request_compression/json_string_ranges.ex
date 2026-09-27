@@ -26,12 +26,16 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
       `{:error, :depth_limit}` (default #{@default_max_depth}).
     * `:max_path_length` - only string values whose path has at most this many
       segments are returned (default: all).
+    * `:record?` - a predicate on a string value's path, newest segment
+      first; only values it accepts are returned (default: all).
+    * `:max_values` - JSON values scanned before the scan gives up with
+      `{:error, :structure_limit}` (default: no limit).
 
   Paths are built newest segment first and shared between siblings, so the scan
   allocates per value rather than per value and nesting level; only the paths
   of returned ranges are materialized.
   """
-  @spec scan(binary(), keyword()) :: {:ok, [range()]} | {:error, :invalid_json | :depth_limit}
+  @spec scan(binary(), keyword()) :: {:ok, [range()]} | {:error, :invalid_json | :depth_limit | :structure_limit}
   def scan(json, opts \\ [])
 
   def scan(json, opts) when is_binary(json) do
@@ -39,16 +43,18 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
       size: byte_size(json),
       max_depth: Keyword.get(opts, :max_depth, @default_max_depth),
       max_path_length: Keyword.get(opts, :max_path_length, :infinity),
+      record?: Keyword.get(opts, :record?, fn _segments -> true end),
+      max_values: Keyword.get(opts, :max_values, :infinity),
       string_stops: :binary.compile_pattern([<<?">>, <<?\\>> | for(byte <- 0..31, do: <<byte>>)])
     }
 
     with true <- valid_utf8?(json),
          offset = skip_whitespace(json, 0, limits.size),
-         {:ok, offset, ranges} <- parse_value(json, offset, {[], 0}, [], limits),
+         {:ok, offset, {ranges, _values}} <- parse_value(json, offset, {[], 0}, {[], 0}, limits),
          true <- skip_whitespace(json, offset, limits.size) == limits.size do
       {:ok, Enum.reverse(ranges)}
     else
-      {:error, :depth_limit} -> {:error, :depth_limit}
+      {:error, reason} when reason in [:depth_limit, :structure_limit] -> {:error, reason}
       _error -> {:error, :invalid_json}
     end
   end
@@ -81,10 +87,14 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
   def replace_ranges(_json, _replacements), do: {:error, :invalid_range}
 
   # `path` is `{reversed_segments, segment_count}`; a value at segment count
-  # `n` sits inside `n` containers.
-  defp parse_value(json, offset, path, ranges, limits) do
+  # `n` sits inside `n` containers. `acc` is `{ranges, values_scanned}`.
+  defp parse_value(_json, _offset, _path, {_ranges, values}, %{max_values: max_values})
+       when values >= max_values,
+       do: {:error, :structure_limit}
+
+  defp parse_value(json, offset, path, {ranges, values}, limits) do
     offset = skip_whitespace(json, offset, limits.size)
-    parse_value_at(byte_at(json, offset, limits.size), json, offset, path, ranges, limits)
+    parse_value_at(byte_at(json, offset, limits.size), json, offset, path, {ranges, values + 1}, limits)
   end
 
   defp parse_value_at(opener, _json, _offset, {_segments, depth}, _ranges, %{max_depth: max_depth})
@@ -115,9 +125,9 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
 
   defp parse_value_at(_byte, _json, _offset, _path, _ranges, _limits), do: :error
 
-  defp parse_string_value(json, offset, {segments, depth}, ranges, limits) do
+  defp parse_string_value(json, offset, {segments, depth}, {ranges, values}, limits) do
     with {:ok, byte_start, byte_end} <- parse_string(json, offset, limits) do
-      if depth <= limits.max_path_length do
+      if depth <= limits.max_path_length and limits.record?.(segments) do
         range = %{
           path: Enum.reverse(segments),
           byte_start: byte_start,
@@ -125,9 +135,9 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
           encoded_byte_size: byte_end - byte_start
         }
 
-        {:ok, byte_end, [range | ranges]}
+        {:ok, byte_end, {[range | ranges], values}}
       else
-        {:ok, byte_end, ranges}
+        {:ok, byte_end, {ranges, values}}
       end
     end
   end
@@ -144,14 +154,25 @@ defmodule CodexPooler.Gateway.RequestCompression.JsonStringRanges do
 
   defp parse_object_members(json, offset, {segments, depth} = path, ranges, limits) do
     with {:ok, key_start, key_end} <- parse_string(json, offset, limits),
-         {:ok, key} <- decode_string_range(json, key_start, key_end),
+         {:ok, key} <- object_key(json, key_start, key_end),
          after_key = skip_whitespace(json, key_end, limits.size),
          ?: <- byte_at(json, after_key, limits.size),
          {:ok, offset, ranges} <- parse_value(json, after_key + 1, {[key | segments], depth + 1}, ranges, limits) do
       parse_object_separator(json, offset, path, ranges, limits)
     else
-      {:error, :depth_limit} -> {:error, :depth_limit}
+      {:error, reason} when reason in [:depth_limit, :structure_limit] -> {:error, reason}
       _error -> :error
+    end
+  end
+
+  # A key without escapes is its own bytes (the document is already valid
+  # UTF-8); only an escaped key needs decoding.
+  defp object_key(json, key_start, key_end) do
+    raw = binary_part(json, key_start + 1, key_end - key_start - 2)
+
+    case :binary.match(raw, "\\") do
+      :nomatch -> {:ok, raw}
+      _escape -> decode_string_range(json, key_start, key_end)
     end
   end
 

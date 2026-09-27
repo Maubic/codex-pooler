@@ -25,6 +25,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Metadata do
     over_body_limit
     over_candidate_limit
     over_depth_limit
+    over_structure_limit
     work_budget_exhausted
     compression_error
     native_load_failed

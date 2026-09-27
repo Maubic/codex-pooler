@@ -87,7 +87,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
           required(:min_bytes) => non_neg_integer()
         }
 
-  @spec plan(binary(), opts()) :: {:ok, plan()} | {:error, :invalid_json | :depth_limit}
+  @spec plan(binary(), opts()) :: {:ok, plan()} | {:error, :invalid_json | :depth_limit | :structure_limit}
   def plan(json, opts \\ []) do
     with {:ok, details} <- plan_details(json, opts) do
       {:ok,
@@ -100,7 +100,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
     end
   end
 
-  @spec plan_candidates(binary(), opts()) :: {:ok, [Candidate.t()]} | {:error, :invalid_json | :depth_limit}
+  @spec plan_candidates(binary(), opts()) :: {:ok, [Candidate.t()]} | {:error, :invalid_json | :depth_limit | :structure_limit}
   def plan_candidates(json, opts \\ [])
 
   def plan_candidates(json, opts) when is_binary(json) do
@@ -115,13 +115,24 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
     min_bytes = min_bytes(opts)
     excluded_function_tool_names = excluded_function_tool_names(opts)
 
-    with {:ok, ranges} <- JsonStringRanges.scan(json, max_path_length: @max_output_path_length),
+    scan_opts = [max_path_length: @max_output_path_length, record?: &output_segments?/1, max_values: max_json_values(opts)]
+
+    with {:ok, ranges} <- JsonStringRanges.scan(json, scan_opts),
          {:ok, payload} <- decode_json(json) do
       {:ok, collect_candidates(json, payload, ranges, min_bytes, excluded_function_tool_names, max_candidates(opts))}
     end
   end
 
   defp plan_details(_json, _opts), do: {:error, :invalid_json}
+
+  # Only candidate output strings, at `["input", index..., "output"]`, are ever
+  # looked up; the scanner hands paths newest segment first.
+  defp output_segments?(["output", index | rest]) when is_integer(index), do: input_item_indexes?(rest)
+  defp output_segments?(_segments), do: false
+
+  defp input_item_indexes?(["input"]), do: true
+  defp input_item_indexes?([index | rest]) when is_integer(index), do: input_item_indexes?(rest)
+  defp input_item_indexes?(_segments), do: false
 
   defp decode_json(json) do
     case CodexPooler.JSON.decode(json) do
@@ -537,6 +548,10 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
 
   defp normalize_max_candidates(value) when is_integer(value) and value > 0, do: value
   defp normalize_max_candidates(_value), do: :infinity
+
+  defp max_json_values(opts) when is_list(opts), do: opts |> Keyword.get(:max_json_values) |> normalize_max_candidates()
+  defp max_json_values(opts) when is_map(opts), do: opts |> Map.get(:max_json_values) |> normalize_max_candidates()
+  defp max_json_values(_opts), do: :infinity
 
   defp normalize_min_bytes(value) when is_integer(value) and value >= 0, do: value
   defp normalize_min_bytes(_value), do: @default_min_bytes

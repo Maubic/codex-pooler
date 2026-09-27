@@ -29,6 +29,10 @@ defmodule CodexPooler.Gateway.RequestCompression do
   # The first 50 candidates in body order are processed; later ones are sent
   # unchanged, so crossing the cap never reverts earlier rewrites.
   @max_candidate_count 50
+  # Planning decodes the whole body, so its cost follows the number of JSON
+  # values, not bytes: many small objects cost far more per MiB than a few
+  # long strings. Bodies with more values skip before the decode.
+  @max_json_values 262_144
   # Deterministic cap on the strategy and tokenizer work of one dispatch, in
   # bytes read (see WorkBudget). Ordinary outputs stay far below it; it bounds
   # inputs that pass every size limit yet are expensive to tokenize.
@@ -97,7 +101,7 @@ defmodule CodexPooler.Gateway.RequestCompression do
   defp compress_payload(upstream_payload, context, request_options, metadata, started)
        when is_binary(upstream_payload) do
     with {:ok, opts} <- strategy_opts(context, request_options),
-         {:ok, plan} <- ResponsesLiveZone.plan(upstream_payload, Keyword.put(opts, :max_candidates, @max_candidate_count)) do
+         {:ok, plan} <- ResponsesLiveZone.plan(upstream_payload, opts ++ [max_candidates: @max_candidate_count, max_json_values: @max_json_values]) do
       metadata =
         metadata
         |> put_protected_tool_output_skips(plan)
@@ -118,6 +122,9 @@ defmodule CodexPooler.Gateway.RequestCompression do
 
       {:error, :depth_limit} ->
         skip_over_limit(upstream_payload, request_options, metadata, :over_depth_limit, 0, 0, started)
+
+      {:error, :structure_limit} ->
+        skip_over_limit(upstream_payload, request_options, metadata, :over_structure_limit, 0, 0, started)
 
       {:error, :invalid_json} ->
         fail_open(
