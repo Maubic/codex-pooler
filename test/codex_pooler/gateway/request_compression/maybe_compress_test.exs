@@ -1039,8 +1039,12 @@ defmodule CodexPooler.Gateway.RequestCompression.MaybeCompressTest do
         {"staticcheck ./grep", false},
         {"python sample.py grep", false},
         {"bash -lc 'staticcheck ./grep'", false},
+        {"git --git-dir grep show HEAD:diagnostics.txt", false},
+        {"rg --files -g diagnostics.txt | xargs cat", false},
+        {"rg --files -g '*.go' | xargs staticcheck", false},
         {"rg -n 'should omit' lib", true},
-        {"env LC_ALL=C grep -rn 'should omit' lib", true}
+        {"env LC_ALL=C grep -rn 'should omit' lib", true},
+        {"rg -n 'should omit' lib | head -n 40", true}
       ]
 
       for {command, search?} <- commands do

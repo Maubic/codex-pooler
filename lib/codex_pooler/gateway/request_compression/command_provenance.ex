@@ -2,16 +2,22 @@ defmodule CodexPooler.Gateway.RequestCompression.CommandProvenance do
   @moduledoc false
 
   # Classifies the command that produced a tool output, when the call carries
-  # one the bounded shell reader understands. Only executed program positions
-  # count: the first word of each pipeline stage after leading `NAME=value`
+  # one the bounded shell reader understands. What matters is the program that
+  # produces the final output: the last pipeline stage, unless that stage is a
+  # filter that only passes upstream lines through (`head`, `tail`, `sort`,
+  # `uniq`, `cat` without file operands, `tee`, or a search engine reading its
+  # input), in which case the stage before it decides. Within a stage only
+  # executed program positions count: the first word after `NAME=value`
   # assignments, the program behind a supported wrapper, the script of a shell
-  # `-c` invocation, and the `git grep` subcommand. Operands never count:
-  # `staticcheck ./grep` runs staticcheck. `:search` means some stage runs a
-  # search engine; `:other` means every stage runs a program that is not one;
-  # `:unknown` covers calls without a readable command, a stage with no program
-  # and wrapper options this grammar cannot place. Content detection uses
-  # `:other` to refuse the lossy search strategy for grep-shaped output of
-  # compilers, linters, and any other non-search command.
+  # `-c` invocation, and a git subcommand read after git's own options.
+  # Operands never count (`staticcheck ./grep` runs staticcheck), and a program
+  # started by `xargs` prints its own output for the files it is given (`rg
+  # --files | xargs cat` prints file contents, not search results).
+  #
+  # `:search` means the final output comes from a search engine; `:other` means
+  # it comes from a readable program that is not one; `:unknown` covers calls
+  # without a readable command, empty stages, and options outside the grammar
+  # below. Content detection uses `:other` to refuse the lossy search strategy.
 
   alias CodexPooler.Gateway.RequestCompression.ShellCommand
 
@@ -19,12 +25,12 @@ defmodule CodexPooler.Gateway.RequestCompression.CommandProvenance do
   @shells MapSet.new(~w(sh bash zsh dash))
   @assignment ~r/\A[A-Za-z_][A-Za-z0-9_]*=/
 
-  # Wrappers that run the rest of their words as a command. `flags` take no
-  # value, `valued` options take the next word or an attached value (`-n1`,
-  # `--signal=KILL`), `patterns` are whole-word option forms, and `operands`
-  # counts the positional words (timeout's duration) before the command.
+  # Option grammars. `flags` take no value, `valued` options take the next word
+  # or an attached value (`-n1`, `--signal=KILL`), `patterns` are whole-word
+  # option forms, and `operands` counts positional words (timeout's duration)
+  # before the wrapped command.
   @wrappers %{
-    "command" => %{flags: ~w(-p -v -V), valued: [], patterns: [], operands: 0},
+    "command" => %{flags: ~w(-p), valued: [], patterns: [], operands: 0},
     "env" => %{flags: ~w(-i -0 --ignore-environment --null), valued: ~w(-u -C --unset --chdir), patterns: [], operands: 0},
     "exec" => %{flags: ~w(-c -l -cl -lc), valued: ~w(-a), patterns: [], operands: 0},
     "nice" => %{flags: [], valued: ~w(-n --adjustment), patterns: [~r/\A-\d+\z/], operands: 0},
@@ -38,6 +44,43 @@ defmodule CodexPooler.Gateway.RequestCompression.CommandProvenance do
       patterns: [~r/\A-[ile].*\z/, ~r/\A--(?:replace|max-lines|eof)(?:=.*)?\z/],
       operands: 0
     }
+  }
+
+  # Filters that print lines of their input unchanged when no file operand is
+  # given; with file operands they print those files instead.
+  @filters %{
+    "cat" => %{flags: [], valued: [], patterns: [~r/\A-[benstuvAET]+\z/, ~r/\A--(?:number|number-nonblank|squeeze-blank|show-all|show-ends|show-tabs|show-nonprinting)\z/], operands: 0},
+    "head" => %{flags: ~w(-q -v -z --quiet --silent --verbose --zero-terminated), valued: ~w(-n -c --lines --bytes), patterns: [~r/\A-\d+\z/], operands: 0},
+    "tail" => %{
+      flags: ~w(-f -F -q -r -v -z --follow --retry --quiet --silent --verbose --zero-terminated),
+      valued: ~w(-n -c -b -s --lines --bytes --sleep-interval --pid --max-unchanged-stats),
+      patterns: [~r/\A[-+]\d+[bcl]?\z/],
+      operands: 0
+    },
+    "sort" => %{
+      flags: [],
+      valued: ~w(-k -t -o -T -S --key --field-separator --output --temporary-directory --buffer-size --parallel --batch-size --compress-program --files0-from --random-source --sort),
+      patterns: [
+        ~r/\A-[bcCdfghimMnrRsuVz]+\z/,
+        ~r/\A--(?:ignore-leading-blanks|check|dictionary-order|ignore-case|general-numeric-sort|human-numeric-sort|ignore-nonprinting|merge|month-sort|numeric-sort|reverse|random-sort|stable|unique|version-sort|zero-terminated)\z/
+      ],
+      operands: 0
+    },
+    "uniq" => %{
+      flags: [],
+      valued: ~w(-f -s -w --skip-fields --skip-chars --check-chars),
+      patterns: [~r/\A-[cdDiuz]+\z/, ~r/\A--(?:count|repeated|ignore-case|unique|zero-terminated)\z/, ~r/\A--(?:all-repeated|group)(?:=.*)?\z/],
+      operands: 0
+    }
+  }
+
+  # Git's global options before the subcommand. The value-taking ones accept
+  # a separate word as well as `=value`, so `git --git-dir grep show` runs show.
+  @git_options %{
+    flags: ~w(-p -P -v -h --paginate --no-pager --no-replace-objects --no-lazy-fetch --no-optional-locks --no-advice --bare --literal-pathspecs --glob-pathspecs --noglob-pathspecs --icase-pathspecs --html-path --man-path --info-path --exec-path --version --help),
+    valued: ~w(-C -c --git-dir --work-tree --namespace --config-env --super-prefix --attr-source),
+    patterns: [~r/\A--(?:exec-path|list-cmds)=/],
+    operands: 0
   }
 
   @type t :: :search | :other | :unknown
@@ -69,51 +112,131 @@ defmodule CodexPooler.Gateway.RequestCompression.CommandProvenance do
 
   defp classify_argv(argv) do
     case ShellCommand.native_argv(argv) do
-      {:ok, words} -> classify_stages([words])
+      {:ok, words} -> classify_producer([words])
       :error -> :unknown
     end
   end
 
   defp classify_script(script) do
     case ShellCommand.lex(script) do
-      {:ok, tokens} -> tokens |> Enum.chunk_by(&(&1 == :pipe)) |> Enum.reject(&(&1 == [:pipe])) |> classify_stages()
+      {:ok, tokens} -> tokens |> pipeline_stages() |> Enum.reverse() |> classify_producer()
       :error -> :unknown
     end
   end
 
-  defp classify_stages(stages) do
-    classes = Enum.map(stages, &classify_stage/1)
+  # Split on pipes, keeping the empty stage a dangling pipe leaves behind.
+  defp pipeline_stages(tokens) do
+    Enum.chunk_while(
+      tokens,
+      [],
+      fn
+        :pipe, stage -> {:cont, Enum.reverse(stage), []}
+        word, stage -> {:cont, [word | stage]}
+      end,
+      fn stage -> {:cont, Enum.reverse(stage), []} end
+    )
+  end
+
+  # Stages last first: the last stage produces the output unless it filters
+  # the output of the stage before it.
+  defp classify_producer([stage | upstream]) do
+    case stage_role(stage) do
+      {:produces, class} -> class
+      :search_filter when upstream == [] -> :search
+      _filter when upstream == [] -> :unknown
+      _filter -> classify_producer(upstream)
+    end
+  end
+
+  defp stage_role([]), do: {:produces, :unknown}
+
+  defp stage_role(words) do
+    case executed_program(words, :direct) do
+      {:ok, program, args, started_by} -> program_role(Path.basename(program), args, started_by)
+      :describes -> {:produces, :other}
+      :error -> {:produces, :unknown}
+    end
+  end
+
+  defp executed_program([{_quote, word} | rest], started_by) do
+    name = Path.basename(word)
 
     cond do
-      :search in classes -> :search
-      :unknown in classes -> :unknown
-      true -> :other
+      Regex.match?(@assignment, word) -> executed_program(rest, started_by)
+      name == "command" and describes_program?(rest) -> :describes
+      Map.has_key?(@wrappers, name) -> unwrap(Map.fetch!(@wrappers, name), rest, if(name == "xargs", do: :xargs, else: started_by))
+      true -> {:ok, word, rest, started_by}
     end
   end
 
-  defp classify_stage(words) do
-    case executed_program(words) do
-      {:ok, program, args} -> classify_program(Path.basename(program), args)
-      :error -> :unknown
-    end
-  end
+  defp executed_program([], _started_by), do: :error
 
-  defp executed_program([{_quote, word} | rest]) do
-    cond do
-      Regex.match?(@assignment, word) -> executed_program(rest)
-      Map.has_key?(@wrappers, Path.basename(word)) -> unwrap(Map.fetch!(@wrappers, Path.basename(word)), rest)
-      true -> {:ok, word, rest}
-    end
-  end
-
-  defp executed_program([]), do: :error
-
-  defp unwrap(spec, words) do
+  defp unwrap(spec, words, started_by) do
     with {:ok, rest} <- skip_options(words, spec),
          {:ok, rest} <- skip_operands(rest, spec.operands) do
-      executed_program(rest)
+      executed_program(rest, started_by)
     end
   end
+
+  # `command -v NAME` and `command -V NAME` print what NAME is; they run nothing.
+  defp describes_program?(words) do
+    words
+    |> Enum.take_while(fn {_quote, word} -> String.starts_with?(word, "-") and word != "--" end)
+    |> Enum.any?(fn {_quote, word} -> String.contains?(word, ["v", "V"]) end)
+  end
+
+  defp program_role(program, args, started_by) do
+    cond do
+      MapSet.member?(@search_programs, program) -> search_role(started_by)
+      program == "tee" or Map.has_key?(@filters, program) -> filter_program_role(program, args, started_by)
+      program == "git" -> {:produces, classify_git(args)}
+      MapSet.member?(@shells, program) -> {:produces, classify_shell(args, false)}
+      true -> {:produces, :other}
+    end
+  end
+
+  # Started by xargs, a search engine searches the files it is given;
+  # otherwise, after another stage, it filters that stage's lines.
+  defp search_role(:xargs), do: {:produces, :search}
+  defp search_role(:direct), do: :search_filter
+
+  defp filter_program_role(_program, _args, :xargs), do: {:produces, :other}
+  defp filter_program_role("tee", _args, :direct), do: :filter
+  defp filter_program_role(program, args, :direct), do: filter_role(Map.fetch!(@filters, program), args)
+
+  defp filter_role(spec, args) do
+    case skip_options(args, spec) do
+      {:ok, []} -> :filter
+      {:ok, [{_quote, "-"}]} -> :filter
+      {:ok, _files} -> {:produces, :other}
+      :error -> {:produces, :unknown}
+    end
+  end
+
+  defp classify_git(args) do
+    case skip_options(args, @git_options) do
+      {:ok, [{_quote, "grep"} | _args]} -> :search
+      {:ok, _subcommand} -> :other
+      :error -> :unknown
+    end
+  end
+
+  # `sh -c 'script'` (with any other shell options around `-c`) runs its
+  # script, so classify the script; without `-c` the shell runs a script file.
+  defp classify_shell([{_quote, <<sign, flags::binary>>}, _option_name | rest], command?)
+       when sign in [?-, ?+] and flags != "" and binary_part(flags, byte_size(flags) - 1, 1) in ["o", "O"] do
+    classify_shell(rest, command? or String.contains?(flags, "c"))
+  end
+
+  defp classify_shell([{_quote, "--" <> _long} | rest], command?), do: classify_shell(rest, command?)
+
+  defp classify_shell([{_quote, <<sign, flags::binary>>} | rest], command?) when sign in [?-, ?+] and flags != "" do
+    classify_shell(rest, command? or String.contains?(flags, "c"))
+  end
+
+  defp classify_shell([{_quote, script} | _positional], true), do: classify_script(script)
+  defp classify_shell([], true), do: :unknown
+  defp classify_shell(_args, false), do: :other
 
   defp skip_options([{_quote, "--"} | rest], _spec), do: {:ok, rest}
 
@@ -145,37 +268,4 @@ defmodule CodexPooler.Gateway.RequestCompression.CommandProvenance do
   defp skip_operands(words, 0), do: {:ok, words}
   defp skip_operands([_operand | rest], count), do: skip_operands(rest, count - 1)
   defp skip_operands([], _count), do: :error
-
-  defp classify_program(program, args) do
-    cond do
-      MapSet.member?(@search_programs, program) -> :search
-      program == "git" -> classify_git(args)
-      MapSet.member?(@shells, program) -> classify_shell(args, false)
-      true -> :other
-    end
-  end
-
-  # Git's global options come before the subcommand; only `-C` and `-c` take a
-  # separate value, every long option carries its value after `=`.
-  defp classify_git([{_quote, option}, _value | rest]) when option in ["-C", "-c"], do: classify_git(rest)
-  defp classify_git([{_quote, "-" <> _option} | rest]), do: classify_git(rest)
-  defp classify_git([{_quote, "grep"} | _rest]), do: :search
-  defp classify_git(_args), do: :other
-
-  # `sh -c 'script'` (with any other shell options around `-c`) runs its
-  # script, so classify the script; without `-c` the shell runs a script file.
-  defp classify_shell([{_quote, <<sign, flags::binary>>}, _option_name | rest], command?)
-       when sign in [?-, ?+] and flags != "" and binary_part(flags, byte_size(flags) - 1, 1) in ["o", "O"] do
-    classify_shell(rest, command? or String.contains?(flags, "c"))
-  end
-
-  defp classify_shell([{_quote, "--" <> _long} | rest], command?), do: classify_shell(rest, command?)
-
-  defp classify_shell([{_quote, <<sign, flags::binary>>} | rest], command?) when sign in [?-, ?+] and flags != "" do
-    classify_shell(rest, command? or String.contains?(flags, "c"))
-  end
-
-  defp classify_shell([{_quote, script} | _positional], true), do: classify_script(script)
-  defp classify_shell([], true), do: :unknown
-  defp classify_shell(_args, false), do: :other
 end

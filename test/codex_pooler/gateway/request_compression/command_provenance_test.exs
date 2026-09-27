@@ -13,8 +13,7 @@ defmodule CodexPooler.Gateway.RequestCompression.CommandProvenanceTest do
           {"stdbuf -oL rg needle lib | head -n 20", :search},
           {"make lint", :other},
           {"staticcheck ./...", :other},
-          {"git log --grep needle", :other},
-          {"cargo build | tee build.log", :other}
+          {"git log --grep needle", :other}
         ] do
       assert CommandProvenance.classify(CodexPooler.JSON.encode!(%{"cmd" => command})) == expected, command
     end
@@ -37,6 +36,51 @@ defmodule CodexPooler.Gateway.RequestCompression.CommandProvenanceTest do
 
     assert CommandProvenance.classify(%{"command" => ["staticcheck", "./grep"]}) == :other
     assert CommandProvenance.classify(%{"command" => ["bash", "-lc", "python sample.py grep"]}) == :other
+  end
+
+  test "reads git global options with their values before the subcommand" do
+    for {command, expected} <- [
+          {"git --git-dir grep show HEAD:diagnostics.txt", :other},
+          {"git --git-dir=grep show HEAD:diagnostics.txt", :other},
+          {"git -C grep log", :other},
+          {"git --work-tree lib --no-pager grep -n needle", :search},
+          {"git --namespace grep --config-env color.ui=GIT_COLOR grep -n needle", :search},
+          {"git --frobnicate grep -n needle", :unknown},
+          {"git --version", :other}
+        ] do
+      assert CommandProvenance.classify(CodexPooler.JSON.encode!(%{"cmd" => command})) == expected, command
+    end
+  end
+
+  test "classifies the stage producing the final output of a pipeline" do
+    for {command, expected} <- [
+          {"rg --files -g diagnostics.txt | xargs cat", :other},
+          {"rg --files -g '*.go' | xargs staticcheck", :other},
+          {"rg -n needle lib | head -n 20", :search},
+          {"rg -n needle lib | uniq -c", :search},
+          # The bounded lexer reads one pipe; longer pipelines stay unknown.
+          {"rg -n needle lib | sort | uniq -c", :unknown},
+          {"git grep -n needle | env LC_ALL=C sort -k1,1", :search},
+          {"rg -n needle lib | tee matches.txt", :search},
+          {"make lint | grep error", :other},
+          {"cargo build | tee build.log", :other},
+          {"cat notes.txt | grep -n needle", :other},
+          {"rg -n needle lib | head notes.txt", :other},
+          {"rg -n needle lib | timeout --bogus 5 cat", :unknown},
+          {"rg -n needle lib |", :unknown},
+          {"rg -n needle lib | ", :unknown},
+          {"head -n 5", :unknown}
+        ] do
+      assert CommandProvenance.classify(CodexPooler.JSON.encode!(%{"cmd" => command})) == expected, command
+    end
+  end
+
+  test "treats command lookups as describing, not running, the program" do
+    for command <- ["command -v grep", "command -V rg", "command -pv rg"] do
+      assert CommandProvenance.classify(CodexPooler.JSON.encode!(%{"cmd" => command})) == :other, command
+    end
+
+    assert CommandProvenance.classify(CodexPooler.JSON.encode!(%{"cmd" => "command rg needle lib"})) == :search
   end
 
   test "looks through assignments and supported wrappers to the executed program" do
