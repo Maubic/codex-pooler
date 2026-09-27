@@ -115,6 +115,27 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
     assert MapSet.new(dropped) == rename_receipts(started, "run-", "drop-")
   end
 
+  for summary <- ["", "Result: 0 tests", "Result: 1/2 passed", "Result: 0 tests, 2 excluded", "Result: 2 passed, 1 invalid"] do
+    test "a successful child with invalid completion #{inspect(summary)} fails its partition" do
+      fixture = start_fixture!()
+
+      assert {output, exit_code} =
+               run_make(fixture, 2,
+                 TEST_FAST_RELEASE: "1",
+                 TEST_FAST_SUMMARY_PARTITION: "2",
+                 TEST_FAST_SUMMARY: unquote(summary)
+               )
+
+      assert exit_code != 0
+      assert output =~ "partition 2/2 FAIL (no successful nonempty test result)"
+      refute output =~ "test-fast: PASS"
+
+      started = await_receipts!(fixture.directory, "run-", 2)
+      dropped = await_receipts!(fixture.directory, "drop-", 2)
+      assert MapSet.new(dropped) == rename_receipts(started, "run-", "drop-")
+    end
+  end
+
   test "a candidate that exceeds its limits in every run on its own fails the invocation" do
     fixture = start_fixture!()
 
@@ -279,6 +300,12 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
           [ "${TEST_FAST_RELEASE:-}" != "1" ]; do
       sleep 0.02
     done
+
+    if [ "${TEST_FAST_SUMMARY_PARTITION:-}" = "$partition" ]; then
+      printf '%s\\n' "${TEST_FAST_SUMMARY:-}"
+    else
+      echo "Result: 1 passed"
+    fi
     """)
 
     File.chmod!(helper_path, 0o700)

@@ -253,9 +253,15 @@ test-fast:
 		pid=$${pids[$$partition]}; \
 		while child_running "$$pid"; do sleep 0.1; done; \
 		if wait "$$pid"; then \
-			results[$$partition]=0; \
-			echo "test-fast: partition $$partition/$$partitions PASS"; \
-			awk '/^Finished in / || /^Result: / { print "test-fast: partition " partition "/" total ": " $$0 }' partition="$$partition" total="$$partitions" "$${logs[$$partition]}"; \
+			if awk '/^Result: / { result=$$0 } END { exit !(result ~ /^Result: [1-9][0-9]* passed( \([^)]*\))?(, [0-9]+ (skipped|excluded))*$$/) }' "$${logs[$$partition]}"; then \
+				results[$$partition]=0; \
+				echo "test-fast: partition $$partition/$$partitions PASS"; \
+				awk '/^Finished in / || /^Result: / { print "test-fast: partition " partition "/" total ": " $$0 }' partition="$$partition" total="$$partitions" "$${logs[$$partition]}"; \
+			else \
+				results[$$partition]=1; \
+				failures=$$((failures + 1)); \
+				echo "test-fast: partition $$partition/$$partitions FAIL (no successful nonempty test result)"; \
+			fi; \
 		else \
 			rc=$$?; \
 			results[$$partition]=$$rc; \

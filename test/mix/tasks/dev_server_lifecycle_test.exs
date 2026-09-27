@@ -19,6 +19,7 @@ defmodule CodexPooler.MixTasks.DevServerLifecycleTest do
         ],
         cd: fixture.root,
         env: [
+          {"CODEX_POOLER_WEBSOCKET_OWNER_FORWARDING", nil},
           {"PATH", "#{fixture.bin_dir}:#{System.fetch_env!("PATH")}"},
           {"DEV_SERVER_STATE_DIR", fixture.state_dir},
           {"DEV_SERVER_LOG", fixture.log_path},

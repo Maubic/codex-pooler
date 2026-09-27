@@ -9,6 +9,10 @@ defmodule CodexPooler.TestProfilesTest do
     tooling = MapSet.new(TestProfiles.tooling_files())
     assert MapSet.union(product, tooling) == all
     assert MapSet.disjoint?(product, tooling)
+    assert MapSet.member?(product, "test/codex_pooler/accounting/request_replay_test.exs")
+    assert MapSet.member?(tooling, "test/codex_pooler/platform/committed_write_guard_test.exs")
+    assert MapSet.member?(tooling, "test/mix/tasks/test_fast_make_test.exs")
+    assert "test/codex_pooler_web/live/admin/pages/upstreams_live_test.exs" in TestProfiles.files(:tooling)
     assert Enum.all?(TestProfiles.files(:tooling), &File.regular?/1)
     refute Enum.any?(product, &String.starts_with?(&1, "test/codex_pooler/dev/"))
     refute Enum.any?(product, &String.starts_with?(&1, "test/mix/"))
