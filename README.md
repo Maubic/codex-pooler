@@ -3,25 +3,25 @@
 <p align="center">
   <strong>The full featured self-hosted Codex gateway, for teams, agents and you. Works with:</strong><br>
   <br>
-  <a href="https://docs.codex-pooler.com/clients/codex-cli-desktop/" title="Codex CLI and Codex Desktop"><img src=".github/assets/codex-cli-favicon.png" alt="Codex CLI and Codex Desktop" width="24" height="24"></a>
+  <a href="#codex-setup" title="Codex CLI and Codex Desktop"><img src=".github/assets/codex-cli-favicon.png" alt="Codex CLI and Codex Desktop" width="24" height="24"></a>
   <a href="#opencode-setup" title="OpenCode"><img src=".github/assets/opencode-v2-favicon.png" alt="OpenCode" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/openclaw/" title="OpenClaw"><img src=".github/assets/openclaw-favicon.png" alt="OpenClaw" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/hermes/" title="Hermes Agent"><img src=".github/assets/hermes-favicon.png" alt="Hermes Agent" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/pi/" title="Pi"><img src=".github/assets/pi-favicon.png" alt="Pi" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/omp/" title="OMP"><img src=".github/assets/omp-favicon.png" alt="OMP" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/cursor/" title="Cursor"><img src=".github/assets/cursor-favicon.png" alt="Cursor" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/kilo-code/" title="Kilo Code"><img src=".github/assets/kilo-favicon.png" alt="Kilo Code" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/trae/" title="Trae"><img src=".github/assets/trae-favicon.png" alt="Trae" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/aider/" title="Aider"><img src=".github/assets/aider-favicon.png" alt="Aider" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/continue/" title="Continue"><img src=".github/assets/continue-favicon.png" alt="Continue" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/cline/" title="Cline"><img src=".github/assets/cline-favicon.png" alt="Cline" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/goose/" title="Goose"><img src=".github/assets/goose-favicon.png" alt="Goose" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/deepseek-harness/" title="DeepSeek Harness"><img src=".github/assets/deepseek-harness-favicon.png" alt="DeepSeek Harness" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/windmill/" title="Windmill AI"><img src=".github/assets/windmill-favicon.png" alt="Windmill AI" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/openhands/" title="OpenHands"><img src=".github/assets/openhands-favicon.png" alt="OpenHands" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/openai-compatible/" title="OpenAI-compatible SDKs"><img src=".github/assets/python-favicon.png" alt="OpenAI-compatible SDKs" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/openai-compatible/" title="OpenAI-compatible SDKs"><img src=".github/assets/nodejs-favicon.png" alt="OpenAI-compatible SDKs" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/openai-compatible/" title="Vercel AI SDK"><img src=".github/assets/vercel-favicon.png" alt="Vercel AI SDK" width="24" height="24"></a>
+  <a href="#openclaw-setup" title="OpenClaw"><img src=".github/assets/openclaw-favicon.png" alt="OpenClaw" width="24" height="24"></a>
+  <a href="#hermes-setup" title="Hermes Agent"><img src=".github/assets/hermes-favicon.png" alt="Hermes Agent" width="24" height="24"></a>
+  <a href="#pi-setup" title="Pi"><img src=".github/assets/pi-favicon.png" alt="Pi" width="24" height="24"></a>
+  <a href="#omp-setup" title="OMP"><img src=".github/assets/omp-favicon.png" alt="OMP" width="24" height="24"></a>
+  <a href="#cursor-setup" title="Cursor"><img src=".github/assets/cursor-favicon.png" alt="Cursor" width="24" height="24"></a>
+  <a href="#kilo-code-setup" title="Kilo Code"><img src=".github/assets/kilo-favicon.png" alt="Kilo Code" width="24" height="24"></a>
+  <a href="#trae-setup" title="Trae"><img src=".github/assets/trae-favicon.png" alt="Trae" width="24" height="24"></a>
+  <a href="#aider-setup" title="Aider"><img src=".github/assets/aider-favicon.png" alt="Aider" width="24" height="24"></a>
+  <a href="#continue-setup" title="Continue"><img src=".github/assets/continue-favicon.png" alt="Continue" width="24" height="24"></a>
+  <a href="#cline-setup" title="Cline"><img src=".github/assets/cline-favicon.png" alt="Cline" width="24" height="24"></a>
+  <a href="#goose-setup" title="Goose"><img src=".github/assets/goose-favicon.png" alt="Goose" width="24" height="24"></a>
+  <a href="#deepseek-harness-setup" title="DeepSeek Harness"><img src=".github/assets/deepseek-harness-favicon.png" alt="DeepSeek Harness" width="24" height="24"></a>
+  <a href="#windmill-setup" title="Windmill AI"><img src=".github/assets/windmill-favicon.png" alt="Windmill AI" width="24" height="24"></a>
+  <a href="#openhands-setup" title="OpenHands"><img src=".github/assets/openhands-favicon.png" alt="OpenHands" width="24" height="24"></a>
+  <a href="#openai-python-sdk-setup" title="OpenAI-compatible SDKs"><img src=".github/assets/python-favicon.png" alt="OpenAI-compatible SDKs" width="24" height="24"></a>
+  <a href="#openai-node-sdk-setup" title="OpenAI-compatible SDKs"><img src=".github/assets/nodejs-favicon.png" alt="OpenAI-compatible SDKs" width="24" height="24"></a>
+  <a href="#vercel-ai-sdk-setup" title="Vercel AI SDK"><img src=".github/assets/vercel-favicon.png" alt="Vercel AI SDK" width="24" height="24"></a>
 </p>
 
 <p align="center">
@@ -174,6 +174,8 @@ Codex CLI and Desktop read the available context size automatically from your Po
 Each entry covers the basic connection. Its **full setup & extras** link covers
 installation, advanced options and troubleshooting. Operator MCP is optional
 and uses a separate token; see [Operator MCP Service](#operator-mcp-service).
+
+<a id="codex-setup"></a>
 
 <details>
 <summary><img src=".github/assets/codex-cli-favicon.png" alt="Codex logo" width="16" height="16"> Codex CLI and Codex Desktop <code>config.toml</code></summary>
@@ -382,6 +384,8 @@ for your OpenCode version below.
 
 </details>
 
+<a id="openclaw-setup"></a>
+
 <details>
 <summary><img src=".github/assets/openclaw-favicon.png" alt="OpenClaw logo" width="16" height="16"> OpenClaw <code>openclaw.json</code></summary>
 
@@ -455,6 +459,8 @@ Restart OpenClaw and start a new conversation.
 
 </details>
 
+<a id="hermes-setup"></a>
+
 <details>
 <summary><img src=".github/assets/hermes-favicon.png" alt="Hermes Agent logo" width="16" height="16"> Hermes Agent <code>config.yaml</code></summary>
 
@@ -516,6 +522,8 @@ also offer the image and transcription models to use those features.
 **[Full setup & extras](https://docs.codex-pooler.com/clients/hermes/)** — images, speech-to-text, priority processing and troubleshooting.
 
 </details>
+
+<a id="pi-setup"></a>
 
 <details>
 <summary><img src=".github/assets/pi-favicon.png" alt="Pi logo" width="16" height="16"> Pi <code>models.json</code></summary>
@@ -596,6 +604,8 @@ pi
 **[Full setup & extras](https://docs.codex-pooler.com/clients/pi/)** — installation, default models and extra options.
 
 </details>
+
+<a id="omp-setup"></a>
 
 <details>
 <summary><img src=".github/assets/omp-favicon.png" alt="OMP logo" width="16" height="16"> OMP <code>models.yml</code></summary>
@@ -690,6 +700,8 @@ omp
 
 </details>
 
+<a id="cursor-setup"></a>
+
 <details>
 <summary><img src=".github/assets/cursor-favicon.png" alt="Cursor logo" width="16" height="16"> Cursor <code>Settings → Models → API Keys</code></summary>
 
@@ -707,6 +719,8 @@ instead of Auto mode.
 **[Full setup & extras](https://docs.codex-pooler.com/clients/cursor/)** — prerequisites, model selection and connection checks.
 
 </details>
+
+<a id="kilo-code-setup"></a>
 
 <details>
 <summary><img src=".github/assets/kilo-favicon.png" alt="Kilo Code logo" width="16" height="16"> Kilo Code <code>kilo.jsonc</code></summary>
@@ -780,6 +794,8 @@ Restart Kilo and select the Codex Pooler model.
 
 </details>
 
+<a id="trae-setup"></a>
+
 <details>
 <summary><img src=".github/assets/trae-favicon.png" alt="Trae logo" width="16" height="16"> Trae <code>Settings -> Models</code></summary>
 
@@ -802,6 +818,8 @@ off in the agent model picker, and select it under **Custom Models**.
 **[Full setup & extras](https://docs.codex-pooler.com/clients/trae/)** — Trae CN, extra settings and connection checks.
 
 </details>
+
+<a id="aider-setup"></a>
 
 <details>
 <summary><img src=".github/assets/aider-favicon.png" alt="Aider logo" width="16" height="16"> Aider <code>.aider.conf.yml</code></summary>
@@ -845,6 +863,8 @@ To switch models, set `model` to a model available to your Pool, keeping the
 **[Full setup & extras](https://docs.codex-pooler.com/clients/aider/)** — additional model setup and editing files.
 
 </details>
+
+<a id="continue-setup"></a>
 
 <details>
 <summary><img src=".github/assets/continue-favicon.png" alt="Continue logo" width="16" height="16"> Continue <code>config.yaml</code></summary>
@@ -904,6 +924,8 @@ Select this configuration and the Codex Pooler model in Continue.
 
 </details>
 
+<a id="cline-setup"></a>
+
 <details>
 <summary><img src=".github/assets/cline-favicon.png" alt="Cline logo" width="16" height="16"> Cline</summary>
 
@@ -935,6 +957,8 @@ Set `--modelid` to a model available to your Pool.
 **[Full setup & extras](https://docs.codex-pooler.com/clients/cline/)** — IDE setup, extra settings and connection checks.
 
 </details>
+
+<a id="goose-setup"></a>
 
 <details>
 <summary><img src=".github/assets/goose-favicon.png" alt="Goose logo" width="16" height="16"> Goose <code>config.yaml</code></summary>
@@ -976,6 +1000,8 @@ To switch models, set `GOOSE_MODEL` to a model available to your Pool.
 **[Full setup & extras](https://docs.codex-pooler.com/clients/goose/)** — tools, extra settings and Windows setup.
 
 </details>
+
+<a id="deepseek-harness-setup"></a>
 
 <details>
 <summary><img src=".github/assets/deepseek-harness-favicon.png" alt="DeepSeek Harness logo" width="16" height="16"> DeepSeek Harness (<code>dsh</code>) <code>cordis.patch.yml</code></summary>
@@ -1021,6 +1047,8 @@ Start DeepSeek Harness with `dsh --profile headless`.
 
 </details>
 
+<a id="windmill-setup"></a>
+
 <details>
 <summary><img src=".github/assets/windmill-favicon.png" alt="Windmill logo" width="16" height="16"> Windmill AI <code>customai</code> workspace provider</summary>
 
@@ -1064,6 +1092,8 @@ Use a URL reachable from the Windmill server; private addresses require
 
 </details>
 
+<a id="openhands-setup"></a>
+
 <details>
 <summary><img src=".github/assets/openhands-favicon.png" alt="OpenHands logo" width="16" height="16"> OpenHands</summary>
 
@@ -1080,6 +1110,8 @@ Link this LLM profile under **Settings → Agent** and use Full serving mode for
 **[Full setup & extras](https://docs.codex-pooler.com/clients/openhands/)** — Docker setup, screenshots and model profiles.
 
 </details>
+
+<a id="openai-python-sdk-setup"></a>
 
 <details>
 <summary><img src=".github/assets/python-favicon.png" alt="Python logo" width="16" height="16"> OpenAI Python SDK</summary>
@@ -1111,6 +1143,8 @@ Use a model available to your Pool.
 
 </details>
 
+<a id="openai-node-sdk-setup"></a>
+
 <details>
 <summary><img src=".github/assets/nodejs-favicon.png" alt="Node.js logo" width="16" height="16"> OpenAI Node SDK</summary>
 
@@ -1138,6 +1172,8 @@ Use a model available to your Pool.
 **[Full setup & extras](https://docs.codex-pooler.com/clients/openai-compatible/)** — streaming, tools, media and API compatibility.
 
 </details>
+
+<a id="vercel-ai-sdk-setup"></a>
 
 <details>
 <summary><img src=".github/assets/vercel-favicon.png" alt="Vercel logo" width="16" height="16"> Vercel AI SDK</summary>

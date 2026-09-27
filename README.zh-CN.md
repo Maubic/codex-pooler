@@ -3,25 +3,25 @@
 <p align="center">
   <strong>面向团队、Agent 和个人的完整自托管 Codex 网关。支持：</strong><br>
   <br>
-  <a href="https://docs.codex-pooler.com/clients/codex-cli-desktop/" title="Codex CLI and Codex Desktop"><img src=".github/assets/codex-cli-favicon.png" alt="Codex CLI and Codex Desktop" width="24" height="24"></a>
+  <a href="#codex-setup" title="Codex CLI and Codex Desktop"><img src=".github/assets/codex-cli-favicon.png" alt="Codex CLI and Codex Desktop" width="24" height="24"></a>
   <a href="#opencode-setup" title="OpenCode"><img src=".github/assets/opencode-v2-favicon.png" alt="OpenCode" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/openclaw/" title="OpenClaw"><img src=".github/assets/openclaw-favicon.png" alt="OpenClaw" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/hermes/" title="Hermes Agent"><img src=".github/assets/hermes-favicon.png" alt="Hermes Agent" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/pi/" title="Pi"><img src=".github/assets/pi-favicon.png" alt="Pi" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/omp/" title="OMP"><img src=".github/assets/omp-favicon.png" alt="OMP" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/cursor/" title="Cursor"><img src=".github/assets/cursor-favicon.png" alt="Cursor" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/kilo-code/" title="Kilo Code"><img src=".github/assets/kilo-favicon.png" alt="Kilo Code" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/trae/" title="Trae"><img src=".github/assets/trae-favicon.png" alt="Trae" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/aider/" title="Aider"><img src=".github/assets/aider-favicon.png" alt="Aider" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/continue/" title="Continue"><img src=".github/assets/continue-favicon.png" alt="Continue" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/cline/" title="Cline"><img src=".github/assets/cline-favicon.png" alt="Cline" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/goose/" title="Goose"><img src=".github/assets/goose-favicon.png" alt="Goose" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/deepseek-harness/" title="DeepSeek Harness"><img src=".github/assets/deepseek-harness-favicon.png" alt="DeepSeek Harness" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/windmill/" title="Windmill AI"><img src=".github/assets/windmill-favicon.png" alt="Windmill AI" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/openhands/" title="OpenHands"><img src=".github/assets/openhands-favicon.png" alt="OpenHands" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/openai-compatible/" title="OpenAI-compatible SDKs"><img src=".github/assets/python-favicon.png" alt="OpenAI-compatible SDKs" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/openai-compatible/" title="OpenAI-compatible SDKs"><img src=".github/assets/nodejs-favicon.png" alt="OpenAI-compatible SDKs" width="24" height="24"></a>
-  <a href="https://docs.codex-pooler.com/clients/openai-compatible/" title="Vercel AI SDK"><img src=".github/assets/vercel-favicon.png" alt="Vercel AI SDK" width="24" height="24"></a>
+  <a href="#openclaw-setup" title="OpenClaw"><img src=".github/assets/openclaw-favicon.png" alt="OpenClaw" width="24" height="24"></a>
+  <a href="#hermes-setup" title="Hermes Agent"><img src=".github/assets/hermes-favicon.png" alt="Hermes Agent" width="24" height="24"></a>
+  <a href="#pi-setup" title="Pi"><img src=".github/assets/pi-favicon.png" alt="Pi" width="24" height="24"></a>
+  <a href="#omp-setup" title="OMP"><img src=".github/assets/omp-favicon.png" alt="OMP" width="24" height="24"></a>
+  <a href="#cursor-setup" title="Cursor"><img src=".github/assets/cursor-favicon.png" alt="Cursor" width="24" height="24"></a>
+  <a href="#kilo-code-setup" title="Kilo Code"><img src=".github/assets/kilo-favicon.png" alt="Kilo Code" width="24" height="24"></a>
+  <a href="#trae-setup" title="Trae"><img src=".github/assets/trae-favicon.png" alt="Trae" width="24" height="24"></a>
+  <a href="#aider-setup" title="Aider"><img src=".github/assets/aider-favicon.png" alt="Aider" width="24" height="24"></a>
+  <a href="#continue-setup" title="Continue"><img src=".github/assets/continue-favicon.png" alt="Continue" width="24" height="24"></a>
+  <a href="#cline-setup" title="Cline"><img src=".github/assets/cline-favicon.png" alt="Cline" width="24" height="24"></a>
+  <a href="#goose-setup" title="Goose"><img src=".github/assets/goose-favicon.png" alt="Goose" width="24" height="24"></a>
+  <a href="#deepseek-harness-setup" title="DeepSeek Harness"><img src=".github/assets/deepseek-harness-favicon.png" alt="DeepSeek Harness" width="24" height="24"></a>
+  <a href="#windmill-setup" title="Windmill AI"><img src=".github/assets/windmill-favicon.png" alt="Windmill AI" width="24" height="24"></a>
+  <a href="#openhands-setup" title="OpenHands"><img src=".github/assets/openhands-favicon.png" alt="OpenHands" width="24" height="24"></a>
+  <a href="#openai-python-sdk-setup" title="OpenAI-compatible SDKs"><img src=".github/assets/python-favicon.png" alt="OpenAI-compatible SDKs" width="24" height="24"></a>
+  <a href="#openai-node-sdk-setup" title="OpenAI-compatible SDKs"><img src=".github/assets/nodejs-favicon.png" alt="OpenAI-compatible SDKs" width="24" height="24"></a>
+  <a href="#vercel-ai-sdk-setup" title="Vercel AI SDK"><img src=".github/assets/vercel-favicon.png" alt="Vercel AI SDK" width="24" height="24"></a>
 </p>
 
 <p align="center">
@@ -166,6 +166,8 @@ Codex CLI 和 Desktop 会自动读取 Pool 提供的上下文大小。
 
 每节只说明基本连接配置。**完整配置与扩展选项**链接提供安装、进阶选项和故障排查说明。
 运营者 MCP 为可选功能，使用独立令牌；参见[运营者 MCP 服务](#运营者-mcp-服务)。
+
+<a id="codex-setup"></a>
 
 <details>
 <summary><img src=".github/assets/codex-cli-favicon.png" alt="Codex logo" width="16" height="16"> Codex CLI and Codex Desktop <code>config.toml</code></summary>
@@ -372,6 +374,8 @@ api_key_model_discovery = true
 
 </details>
 
+<a id="openclaw-setup"></a>
+
 <details>
 <summary><img src=".github/assets/openclaw-favicon.png" alt="OpenClaw logo" width="16" height="16"> OpenClaw <code>openclaw.json</code></summary>
 
@@ -445,6 +449,8 @@ api_key_model_discovery = true
 
 </details>
 
+<a id="hermes-setup"></a>
+
 <details>
 <summary><img src=".github/assets/hermes-favicon.png" alt="Hermes Agent logo" width="16" height="16"> Hermes Agent <code>config.yaml</code></summary>
 
@@ -505,6 +511,8 @@ auxiliary:
 **[完整配置与扩展选项](https://docs.codex-pooler.com/clients/hermes/)** — 图像、语音转文字、优先处理和故障排查。
 
 </details>
+
+<a id="pi-setup"></a>
 
 <details>
 <summary><img src=".github/assets/pi-favicon.png" alt="Pi logo" width="16" height="16"> Pi <code>models.json</code></summary>
@@ -585,6 +593,8 @@ pi
 **[完整配置与扩展选项](https://docs.codex-pooler.com/clients/pi/)** — 安装、默认模型和扩展选项。
 
 </details>
+
+<a id="omp-setup"></a>
 
 <details>
 <summary><img src=".github/assets/omp-favicon.png" alt="OMP logo" width="16" height="16"> OMP <code>models.yml</code></summary>
@@ -679,6 +689,8 @@ omp
 
 </details>
 
+<a id="cursor-setup"></a>
+
 <details>
 <summary><img src=".github/assets/cursor-favicon.png" alt="Cursor logo" width="16" height="16"> Cursor <code>Settings → Models → API Keys</code></summary>
 
@@ -694,6 +706,8 @@ Cursor BYOK 需要 **Pro 或更高订阅**。请求经过 Cursor 服务器，
 **[完整配置与扩展选项](https://docs.codex-pooler.com/clients/cursor/)** — 前置条件、模型选择和连接检查。
 
 </details>
+
+<a id="kilo-code-setup"></a>
 
 <details>
 <summary><img src=".github/assets/kilo-favicon.png" alt="Kilo Code logo" width="16" height="16"> Kilo Code <code>kilo.jsonc</code></summary>
@@ -767,6 +781,8 @@ Cursor BYOK 需要 **Pro 或更高订阅**。请求经过 Cursor 服务器，
 
 </details>
 
+<a id="trae-setup"></a>
+
 <details>
 <summary><img src=".github/assets/trae-favicon.png" alt="Trae logo" width="16" height="16"> Trae <code>Settings -> Models</code></summary>
 
@@ -789,6 +805,8 @@ URL 末尾不要加斜杠。保存模型后，在 agent 模型选择器中关闭
 **[完整配置与扩展选项](https://docs.codex-pooler.com/clients/trae/)** — Trae CN、额外设置和连接检查。
 
 </details>
+
+<a id="aider-setup"></a>
 
 <details>
 <summary><img src=".github/assets/aider-favicon.png" alt="Aider logo" width="16" height="16"> Aider <code>.aider.conf.yml</code></summary>
@@ -830,6 +848,8 @@ aider
 **[完整配置与扩展选项](https://docs.codex-pooler.com/clients/aider/)** — 额外模型配置和文件编辑。
 
 </details>
+
+<a id="continue-setup"></a>
 
 <details>
 <summary><img src=".github/assets/continue-favicon.png" alt="Continue logo" width="16" height="16"> Continue <code>config.yaml</code></summary>
@@ -889,6 +909,8 @@ models:
 
 </details>
 
+<a id="cline-setup"></a>
+
 <details>
 <summary><img src=".github/assets/cline-favicon.png" alt="Cline logo" width="16" height="16"> Cline</summary>
 
@@ -920,6 +942,8 @@ cline auth --provider openai --apikey "$env:CODEX_POOLER_API_KEY" --baseurl http
 **[完整配置与扩展选项](https://docs.codex-pooler.com/clients/cline/)** — IDE 配置、额外设置和连接检查。
 
 </details>
+
+<a id="goose-setup"></a>
 
 <details>
 <summary><img src=".github/assets/goose-favicon.png" alt="Goose logo" width="16" height="16"> Goose <code>config.yaml</code></summary>
@@ -961,6 +985,8 @@ $env:OPENAI_API_KEY = $env:CODEX_POOLER_API_KEY
 **[完整配置与扩展选项](https://docs.codex-pooler.com/clients/goose/)** — 工具、额外设置和 Windows 配置。
 
 </details>
+
+<a id="deepseek-harness-setup"></a>
 
 <details>
 <summary><img src=".github/assets/deepseek-harness-favicon.png" alt="DeepSeek Harness logo" width="16" height="16"> DeepSeek Harness (<code>dsh</code>) <code>cordis.patch.yml</code></summary>
@@ -1006,6 +1032,8 @@ $env:OPENAI_API_KEY = $env:CODEX_POOLER_API_KEY
 
 </details>
 
+<a id="windmill-setup"></a>
+
 <details>
 <summary><img src=".github/assets/windmill-favicon.png" alt="Windmill logo" width="16" height="16"> Windmill AI <code>customai</code> workspace provider</summary>
 
@@ -1048,6 +1076,8 @@ metadata_model:
 
 </details>
 
+<a id="openhands-setup"></a>
+
 <details>
 <summary><img src=".github/assets/openhands-favicon.png" alt="OpenHands logo" width="16" height="16"> OpenHands</summary>
 
@@ -1064,6 +1094,8 @@ metadata_model:
 **[完整配置与扩展选项](https://docs.codex-pooler.com/clients/openhands/)** — Docker 配置、截图和模型配置。
 
 </details>
+
+<a id="openai-python-sdk-setup"></a>
 
 <details>
 <summary><img src=".github/assets/python-favicon.png" alt="Python logo" width="16" height="16"> OpenAI Python SDK</summary>
@@ -1095,6 +1127,8 @@ print(response.output_text)
 
 </details>
 
+<a id="openai-node-sdk-setup"></a>
+
 <details>
 <summary><img src=".github/assets/nodejs-favicon.png" alt="Node.js logo" width="16" height="16"> OpenAI Node SDK</summary>
 
@@ -1122,6 +1156,8 @@ console.log(response.output_text);
 **[完整配置与扩展选项](https://docs.codex-pooler.com/clients/openai-compatible/)** — 流式响应、工具、媒体和 API 兼容性。
 
 </details>
+
+<a id="vercel-ai-sdk-setup"></a>
 
 <details>
 <summary><img src=".github/assets/vercel-favicon.png" alt="Vercel logo" width="16" height="16"> Vercel AI SDK</summary>
