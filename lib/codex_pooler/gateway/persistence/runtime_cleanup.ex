@@ -25,6 +25,8 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
   alias CodexPooler.Repo
 
   @owner_lease_active OwnerLeaseStatus.active_status()
+  # Generic prepared plans must see the fixed predicate of the retirement partial index.
+  @reconnectable_statuses SessionStatus.reconnectable_statuses()
 
   @type request_ref :: Ecto.UUID.t() | %{required(:id) => Ecto.UUID.t()}
   @type attempt_ref :: Ecto.UUID.t() | %{required(:id) => Ecto.UUID.t()} | nil
@@ -261,14 +263,13 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
   # recreates without a preference, exactly as after any other close.
   defp close_retired_sessions!(now, active_alias_status, active_lease_status) do
     cutoff = DateTime.add(now, -OperationalSettings.current().expired_alias_ttl_seconds, :second)
-    reconnectable = SessionStatus.reconnectable_statuses()
     in_progress = CodexTurn.in_progress_status()
 
     candidates =
       from(session in CodexSession, as: :session)
       |> where(
         [session],
-        session.status in ^reconnectable and
+        session.status in @reconnectable_statuses and
           coalesce(session.owner_lease_expires_at, session.updated_at) <= ^cutoff and
           not exists(
             from alias_record in BridgeSessionAlias,
