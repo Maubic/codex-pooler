@@ -50,11 +50,17 @@ test("formats the compact quota countdown", () => {
 	const now = Date.parse("2026-07-23T12:00:00Z");
 
 	assert.equal(
-		formatRelativeCountdown(new Date(now + 6 * DAY + 23 * HOUR).toISOString(), now),
+		formatRelativeCountdown(
+			new Date(now + 6 * DAY + 23 * HOUR).toISOString(),
+			now,
+		),
 		"6d 23h",
 	);
 	assert.equal(
-		formatRelativeCountdown(new Date(now + HOUR + 30 * MINUTE).toISOString(), now),
+		formatRelativeCountdown(
+			new Date(now + HOUR + 30 * MINUTE).toISOString(),
+			now,
+		),
 		"1h 30m",
 	);
 	assert.equal(
@@ -65,7 +71,10 @@ test("formats the compact quota countdown", () => {
 		formatRelativeCountdown(new Date(now + 30_000).toISOString(), now),
 		"<1m",
 	);
-	assert.equal(formatRelativeCountdown(new Date(now).toISOString(), now), "due");
+	assert.equal(
+		formatRelativeCountdown(new Date(now).toISOString(), now),
+		"due",
+	);
 	assert.equal(formatRelativeCountdown("not-a-date", now), null);
 });
 
@@ -102,4 +111,22 @@ test("repaints until the reset is due and then stops", () => {
 	clock.advanceBy(30_000);
 	assert.equal(labels.at(-1), "due");
 	assert.equal(clock.timers.size, 0);
+});
+
+test("start is idempotent and destroy prevents later repaints", () => {
+	const clock = new FakeClock(Date.parse("2026-07-23T12:00:00Z"));
+	const labels = [];
+	const controller = createRelativeCountdownController({
+		clock,
+		onLabel: (label) => labels.push(label),
+		resetAt: new Date(clock.nowMs + HOUR).toISOString(),
+	});
+	controller.start();
+	controller.start();
+	assert.equal(clock.timers.size, 1);
+	controller.destroy();
+	assert.equal(clock.timers.size, 0);
+	const count = labels.length;
+	clock.advanceBy(HOUR);
+	assert.equal(labels.length, count);
 });

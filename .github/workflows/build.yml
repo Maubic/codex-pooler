@@ -64,6 +64,7 @@ jobs:
           sparse-checkout: |
             scripts/verification/release-publish-guard.mjs
             test/scripts/release_publish_guard_test.mjs
+            test/scripts/support/registry_fetch_route.mjs
           sparse-checkout-cone-mode: false
 
       - name: Verify publication policy

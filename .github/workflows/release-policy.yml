@@ -7,12 +7,16 @@ on:
       - '.github/workflows/release-policy.yml'
       - 'scripts/verification/release-publish-guard.mjs'
       - 'test/scripts/release_publish_guard_test.mjs'
+      - 'test/scripts/support/**'
+      - 'assets/js/*.mjs'
   pull_request:
     paths:
       - '.github/workflows/build.yml'
       - '.github/workflows/release-policy.yml'
       - 'scripts/verification/release-publish-guard.mjs'
       - 'test/scripts/release_publish_guard_test.mjs'
+      - 'test/scripts/support/**'
+      - 'assets/js/*.mjs'
 
 permissions:
   contents: read
@@ -22,4 +26,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: node --test test/scripts/release_publish_guard_test.mjs
+      - run: node --test test/scripts/release_publish_guard_test.mjs assets/js/*_test.mjs
