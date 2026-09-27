@@ -4,6 +4,39 @@ defmodule CodexPooler.Jobs.AlertFanoutCompletionTest do
   alias CodexPooler.Alerts.Schemas.AlertRule
   alias CodexPooler.Jobs.{AlertEvaluationEnqueueWorker, AlertEvaluationWorker}
 
+  test "an orphaned cron root cannot block the next five-minute window" do
+    {:ok, root} = Oban.insert(AlertEvaluationEnqueueWorker.new(%{}))
+    Repo.update_all(from(job in Oban.Job, where: job.id == ^root.id), set: [state: "executing", inserted_at: DateTime.add(DateTime.utc_now(), -301, :second)])
+    assert {:ok, next} = Oban.insert(AlertEvaluationEnqueueWorker.new(%{}))
+    refute next.conflict?
+    refute next.id == root.id
+    assert {:ok, duplicate} = Oban.insert(AlertEvaluationEnqueueWorker.new(%{}))
+    assert duplicate.conflict?
+  end
+
+  test "a stale executing continuation remains unique without blocking a fresh root" do
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+    args = %{evaluation_window_started_at: now, fanout_started_at: now, cursor_created_at: now, cursor_id: Ecto.UUID.generate()}
+    assert {:ok, page} = Oban.insert(AlertEvaluationEnqueueWorker.new(args))
+    Repo.update_all(from(job in Oban.Job, where: job.id == ^page.id), set: [state: "executing", inserted_at: DateTime.add(DateTime.utc_now(), -301, :second)])
+    assert {:ok, duplicate} = Oban.insert(AlertEvaluationEnqueueWorker.new(args))
+    assert duplicate.conflict?
+    assert duplicate.id == page.id
+    assert {:ok, root} = Oban.insert(AlertEvaluationEnqueueWorker.new(%{}))
+    refute root.conflict?
+  end
+
+  test "manual fanout persists a continuation for rules beyond its first page" do
+    rule = alert_rule_fixture(pool_fixture())
+    attrs = rule |> Map.from_struct() |> Map.drop([:__meta__, :id])
+    Repo.insert_all(AlertRule, for(index <- 1..500, do: Map.merge(attrs, %{id: Ecto.UUID.generate(), display_name: "Manual rule #{index}"})))
+    assert {:ok, %{errors: []}} = CodexPooler.Jobs.enqueue_worker_group_now(:alert_evaluation)
+    drain_pages(MapSet.new())
+    jobs = all_enqueued(worker: AlertEvaluationWorker)
+    assert length(jobs) == 501
+    assert Enum.all?(jobs, &(&1.args["trigger_kind"] == "manual"))
+  end
+
   @tag slow: "inserts and pages 1,102 real Oban evaluations twice to prove replay deduplication"
   test "durable continuation pages reach every rule beyond 500 exactly once per window" do
     pool = pool_fixture()
