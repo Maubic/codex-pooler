@@ -38,7 +38,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Assignments.PoolAssignments
   alias CodexPooler.Upstreams.Lifecycle.IdentityLifecycle
-  alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
+  alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
@@ -982,6 +982,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
   def gateway_upstream(pool, upstream, token, opts) do
     compact? = Keyword.get(opts, :compact?, false)
     metadata = %{"base_url" => FakeUpstream.url(upstream)}
+    now = DateTime.utc_now()
 
     metadata =
       if compact?, do: Map.put(metadata, "supports_compact_responses", true), else: metadata
@@ -991,11 +992,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
                chatgpt_account_id: "acct_#{System.unique_integer([:positive])}",
                account_label: "Gateway upstream",
                onboarding_method: "import",
+               status: UpstreamIdentity.active_status(),
+               auth_verified_at: now,
+               auth_fresh_at: now,
+               created_at: now,
+               updated_at: now,
                metadata: metadata
              })
-
-    assert {:ok, identity} =
-             IdentityLifecycle.activate_upstream_identity(identity)
 
     identity =
       identity
@@ -1012,11 +1015,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
     assert {:ok, assignment} =
              PoolAssignments.create_pool_assignment(pool, identity, %{
                assignment_label: "Gateway assignment",
+               status: PoolUpstreamAssignment.active_status(),
+               health_status: PoolUpstreamAssignment.active_health_status(),
+               eligibility_status: PoolUpstreamAssignment.eligible_status(),
                metadata: metadata
              })
-
-    assert {:ok, assignment} =
-             PoolAssignments.activate_pool_assignment(assignment)
 
     %{identity: identity, assignment: assignment}
   end

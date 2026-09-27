@@ -626,14 +626,14 @@ defmodule CodexPooler.PoolerFixtures do
           })
           |> Repo.insert!()
 
-        ensure_fixture_owner!(user.id)
+        ensure_fixture_owner!(user)
         Scope.for_user(user, ["instance_owner"])
     end
   end
 
-  defp ensure_fixture_owner!(user_id) do
-    user = Repo.get!(User, user_id)
+  defp ensure_fixture_owner!(user_id) when is_binary(user_id), do: ensure_fixture_owner!(Repo.get!(User, user_id))
 
+  defp ensure_fixture_owner!(%User{} = user) do
     case Repo.get_by(Membership, user_id: user.id, role: "instance_owner", status: "active") do
       nil ->
         %Membership{}
