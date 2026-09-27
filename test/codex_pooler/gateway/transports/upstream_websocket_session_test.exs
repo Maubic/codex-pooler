@@ -11,7 +11,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
   alias CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl.TurnSnapshot
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
-  alias CodexPooler.Gateway.Transports.TransportFailureReason
   alias CodexPooler.Gateway.Transports.UpstreamDispatch
   alias CodexPooler.Gateway.Transports.Websocket.ForwardedOwnerRequestHandoff
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
@@ -5538,7 +5537,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
             }} = result
 
     assert transport_failure ==
-             TransportFailureReason.continuation_generation_guard_metadata(if(connection_use == :reused, do: :previous_response_serving_mode_mismatch, else: :previous_response_generation_mismatch), connection_use)
+             expected_guard_metadata(connection_use)
 
     assert connection.reused == false
     assert connection.reconnected == (connection_use == :reconnected)
@@ -5549,6 +5548,22 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
 
     assert_receive {:guard_frame, ^label, ^terminal}, @message_detection_timeout_ms
     refute_received {:guard_frame, ^label, _extra_terminal}
+  end
+
+  for {connection_use, reason} <- [fresh: "previous_response_generation_mismatch", reconnected: "previous_response_generation_mismatch", reused: "previous_response_serving_mode_mismatch"] do
+    defp expected_guard_metadata(unquote(connection_use)) do
+      %{
+        "connection_use" => unquote(Atom.to_string(connection_use)),
+        "phase" => "send_payload",
+        "pre_visible_output" => true,
+        "reason" => unquote(reason),
+        "reason_class" => unquote(reason),
+        "termination_source" => "continuation_generation_guard",
+        "terminal_seen" => false,
+        "text_frame_count" => 0,
+        "upstream_committed" => false
+      }
+    end
   end
 
   defp native_retry_terminal do
@@ -5578,7 +5593,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
             }} = result
 
     assert transport_failure ==
-             TransportFailureReason.continuation_generation_guard_metadata(if(connection_use == :reused, do: :previous_response_serving_mode_mismatch, else: :previous_response_generation_mismatch), connection_use)
+             expected_guard_metadata(connection_use)
 
     assert connection.reused == (connection_use == :reused)
     assert connection.reconnected == (connection_use == :reconnected)

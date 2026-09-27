@@ -200,13 +200,30 @@ defmodule CodexPooler.SchemaContractTest do
           "openai_status_dismissals_operator_incident_revision_uq",
           "openai_status_dismissals_operator_idx",
           "ledger_entries_api_key_known_settlement_occurred_idx",
-          "attempts_open_started_idx"
+          "attempts_open_started_idx",
+          "attempts_model_history_started_idx",
+          "codex_sessions_retirement_idx",
+          "codex_turns_started_idx",
+          "account_quota_windows_expired_reset_idx"
         ] do
       assert Map.has_key?(indexes, name)
     end
 
     refute Map.has_key?(indexes, "memberships_single_instance_owner_active_uq")
     refute Map.has_key?(indexes, "requests_api_key_idempotency_uq")
+
+    assert indexes["attempts_model_history_started_idx"] ==
+             "CREATE INDEX attempts_model_history_started_idx ON public.attempts USING btree (started_at, id) WHERE (status <> ALL (ARRAY['queued'::text, 'in_progress'::text]))"
+
+    assert indexes["codex_sessions_retirement_idx"] ==
+             "CREATE INDEX codex_sessions_retirement_idx ON public.codex_sessions USING btree (COALESCE(owner_lease_expires_at, updated_at), id) WHERE (status = ANY (ARRAY['active'::text, 'interrupted'::text]))"
+
+    assert indexes["codex_turns_started_idx"] ==
+             "CREATE INDEX codex_turns_started_idx ON public.codex_turns USING btree (started_at)"
+
+    assert indexes["account_quota_windows_expired_reset_idx"] ==
+             "CREATE INDEX account_quota_windows_expired_reset_idx ON public.account_quota_windows USING btree (reset_at, id) WHERE (reset_at IS NOT NULL)"
+
     # Nothing sets `conversation_key`, and its Pool-wide uniqueness would have
     # collided across API keys the moment anything did (findings#255).
     refute Map.has_key?(indexes, "codex_sessions_pool_conversation_key_uq")

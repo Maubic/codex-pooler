@@ -211,7 +211,10 @@ defmodule CodexPooler.Dev.GatewayPerfFakeUpstreamTest do
     [backend, responses, chat] =
       ["/backend-api/codex/responses", "/v1/responses", "/v1/chat/completions"]
       |> Task.async_stream(&post_stream!(server.url <> &1), max_concurrency: 3, timeout: @detection_timeout_ms)
-      |> Enum.map(fn {:ok, response} -> response end)
+      |> Enum.map(fn result ->
+        assert {:ok, response} = result
+        response
+      end)
 
     assert backend.status == 200
     assert responses.status == 200

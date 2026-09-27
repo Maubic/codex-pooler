@@ -18,6 +18,7 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanupBatchTest do
       register_unboxed_cleanup!(fn ->
         ids = Repo.all(from pool in CodexPooler.Pools.Pool, where: pool.slug == ^slug, select: pool.id)
         delete_committed_pools!(ids)
+        Repo.query!("ANALYZE codex_sessions, bridge_session_aliases, bridge_owner_leases, codex_turns")
       end)
 
       now = InstancePresence.database_now()

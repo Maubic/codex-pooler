@@ -10,6 +10,32 @@ defmodule CodexPooler.Accounting.ModelHistoryTest do
   alias CodexPooler.Accounts.Scope
   alias CodexPooler.Repo
 
+  test "partial evidence selects only version-one partial rows without changing coverage totals" do
+    scope = Scope.for_user(bootstrap_owner_fixture().user)
+    setup = active_api_key_fixture()
+    %{assignment: assignment} = upstream_assignment_fixture(setup.pool)
+    request = request_fixture(setup)
+    now = DateTime.utc_now()
+    partial = Map.put(evidence(false, "completed"), "coverage", "partial")
+
+    [expected | _] =
+      for {observation, number} <- Enum.with_index([partial, evidence(false, "completed"), nil, Map.put(partial, "version", 2)], 1) do
+        attempt_fixture(request, assignment, %{attempt_number: number, upstream_model_id: "model-a", served_model: "model-a", model_observation: observation})
+        |> Ecto.Changeset.change(started_at: DateTime.add(now, -1, :second))
+        |> Repo.update!()
+      end
+
+    all = ModelHistory.for_scope(scope, %{"evidence" => "all"}, now: now)
+    filtered = ModelHistory.for_scope(scope, %{"evidence" => "partial"}, now: now)
+    assert [%{id: id, model_observation: %{"version" => 1, "coverage" => "partial"}}] = filtered.attempts
+    assert id == expected.id
+    assert filtered.filters["evidence"] == "partial"
+    assert filtered.counts == all.counts
+    assert filtered.counts.partial == 1
+    assert filtered.counts.total == 4
+    assert filtered.timeline == all.timeline
+  end
+
   test "attempt denominators, retries, overlapping measures, unknown coverage and retention" do
     owner = bootstrap_owner_fixture()
     scope = Scope.for_user(owner.user)

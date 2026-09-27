@@ -59,7 +59,7 @@ defmodule CodexPoolerWeb.V1.ResponsesSSETerminalPrefixTest do
       assert List.last(events).event == type
       assert Enum.count(events, &(&1.event == "response.created")) == 1
       assert sequence_numbers(events) == Enum.to_list(0..(length(events) - 1))
-      grammar = assert_responses_grammar!(events)
+      grammar = assert_responses_grammar!(events, type)
 
       if status == "incomplete" do
         assert grammar.text == %{{0, 0} => @marker}
@@ -296,9 +296,9 @@ defmodule CodexPoolerWeb.V1.ResponsesSSETerminalPrefixTest do
   # Replays the accumulation rules the SDK stream helpers enforce and returns
   # what a client would have accumulated: the announced items in order and
   # the streamed text per {output_index, content_index}.
-  defp assert_responses_grammar!(events) do
+  defp assert_responses_grammar!(events, expected_terminal \\ "response.completed") do
     assert [%{event: "response.created", data: %{"response" => %{"output" => []}}} | _rest] = events
-    assert List.last(events).event in ["response.completed", "response.failed", "response.incomplete"]
+    assert List.last(events).event == expected_terminal
 
     sequence = sequence_numbers(events)
     assert sequence == Enum.sort(Enum.uniq(sequence)), "sequence numbers must strictly increase"

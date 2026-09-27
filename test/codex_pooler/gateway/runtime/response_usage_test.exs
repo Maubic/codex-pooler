@@ -3,9 +3,14 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
 
   alias CodexPooler.Gateway.Runtime.Finalization.ResponseUsage
 
-  # Usage equality remains exact; declaration evidence has its own boundary tests.
-  defp usage_fields(nil), do: nil
-  defp usage_fields(usage), do: Map.delete(usage, :model_observation)
+  @no_model %{"version" => 1, "coverage" => "full", "terminal_status" => nil, "terminal_model" => nil, "first_conflicting_model" => nil, "conflict" => nil}
+  @completed_no_model %{@no_model | "terminal_status" => "completed"}
+  @partial_no_model %{@no_model | "coverage" => "partial"}
+
+  defp assert_observation(usage, expected) do
+    assert Map.fetch!(usage, :model_observation) == expected
+    Map.delete(usage, :model_observation)
+  end
 
   describe "from_json/1" do
     test "extracts flat usage from JSON responses" do
@@ -21,7 +26,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
           }
         })
 
-      assert usage_fields(ResponseUsage.from_json(body)) == %{
+      assert assert_observation(ResponseUsage.from_json(body), %{@no_model | "terminal_status" => "json"}) == %{
                status: "usage_known",
                source: "upstream_usage",
                input_tokens: 10,
@@ -69,7 +74,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
           }
         }
 
-        assert usage_fields(ResponseUsage.from_decoded(decoded)) == %{
+        assert assert_observation(ResponseUsage.from_decoded(decoded), %{@no_model | "terminal_status" => "json"}) == %{
                  status: "usage_unknown",
                  source: "invalid_usage_tokens"
                }
@@ -180,14 +185,14 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
     end
 
     test "marks malformed JSON and invalid usage token values as unknown" do
-      assert usage_fields(ResponseUsage.from_json("{")) == %{
+      assert assert_observation(ResponseUsage.from_json("{"), @partial_no_model) == %{
                status: "usage_unknown",
                source: "json_decode_failed"
              }
 
       body = CodexPooler.JSON.encode!(%{"usage" => %{"input_tokens" => 1.2}})
 
-      assert usage_fields(ResponseUsage.from_json(body)) == %{
+      assert assert_observation(ResponseUsage.from_json(body), %{@no_model | "terminal_status" => "json"}) == %{
                status: "usage_unknown",
                source: "invalid_usage_tokens"
              }
@@ -206,7 +211,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
             }
           })
 
-        assert usage_fields(ResponseUsage.from_json(body)) == %{
+        assert assert_observation(ResponseUsage.from_json(body), %{@no_model | "terminal_status" => "json"}) == %{
                  status: "usage_unknown",
                  source: "invalid_usage_tokens"
                }
@@ -266,7 +271,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
           }
         })
 
-      assert usage_fields(ResponseUsage.from_sse(body)) == %{
+      assert assert_observation(ResponseUsage.from_sse(body), %{@no_model | "terminal_status" => "failed"}) == %{
                status: "usage_known",
                source: "upstream_usage",
                input_tokens: 10,
@@ -313,7 +318,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
 
       """
 
-      assert usage_fields(ResponseUsage.from_sse(body)) ==
+      assert assert_observation(ResponseUsage.from_sse(body), @partial_no_model) ==
                %{status: "usage_unknown", source: "sse_usage_missing"}
     end
 
@@ -324,7 +329,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
           "response" => %{"usage" => %{}}
         })
 
-      assert usage_fields(ResponseUsage.from_sse(body)) ==
+      assert assert_observation(ResponseUsage.from_sse(body), @completed_no_model) ==
                %{status: "usage_unknown", source: "invalid_usage_tokens"}
     end
 
@@ -343,7 +348,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
           }
         })
 
-      assert usage_fields(ResponseUsage.from_sse(body)) == %{
+      assert assert_observation(ResponseUsage.from_sse(body), @completed_no_model) == %{
                status: "usage_known",
                source: "upstream_usage",
                input_tokens: 0,
@@ -498,7 +503,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
 
       """
 
-      assert usage_fields(ResponseUsage.from_websocket_body(body)) == %{
+      assert assert_observation(ResponseUsage.from_websocket_body(body), @completed_no_model) == %{
                status: "usage_known",
                source: "upstream_usage",
                input_tokens: 11,
@@ -530,7 +535,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
         ]
         |> Enum.join("\n")
 
-      assert usage_fields(ResponseUsage.from_websocket_body(body)) == %{
+      assert assert_observation(ResponseUsage.from_websocket_body(body), @completed_no_model) == %{
                status: "usage_known",
                source: "upstream_usage",
                input_tokens: 17,
@@ -559,7 +564,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
         ]
         |> Enum.join("\n")
 
-      assert usage_fields(ResponseUsage.from_websocket_body(body)) == %{
+      assert assert_observation(ResponseUsage.from_websocket_body(body), @no_model) == %{
                status: "usage_known",
                source: "upstream_usage",
                input_tokens: 23,
@@ -583,7 +588,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
           }
         })
 
-      assert usage_fields(ResponseUsage.from_websocket_body(body)) == %{
+      assert assert_observation(ResponseUsage.from_websocket_body(body), @no_model) == %{
                status: "usage_known",
                source: "upstream_usage",
                input_tokens: 31,
@@ -634,7 +639,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
         ]
         |> Enum.join("\n")
 
-      assert usage_fields(ResponseUsage.from_websocket_body(body)) ==
+      assert assert_observation(ResponseUsage.from_websocket_body(body), @no_model) ==
                %{status: "usage_unknown", source: "websocket_usage_missing"}
     end
 
@@ -645,7 +650,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
           "response" => %{"id" => "resp_empty"}
         })
 
-      assert usage_fields(ResponseUsage.from_websocket_body(body)) ==
+      assert assert_observation(ResponseUsage.from_websocket_body(body), @completed_no_model) ==
                %{status: "usage_unknown", source: "websocket_usage_missing"}
     end
   end

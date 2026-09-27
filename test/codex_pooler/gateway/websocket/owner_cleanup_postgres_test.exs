@@ -66,6 +66,7 @@ defmodule CodexPooler.Gateway.Websocket.OwnerCleanupPostgresTest do
       assert before_cleanup.ledger == after_cleanup.ledger
       finish(source, old)
       finish(target, current)
+      assert :ok = source |> call(:stop_case!, []) |> Peer.assert_teardown_log!()
     end
   end
 
@@ -220,7 +221,7 @@ defmodule CodexPooler.Gateway.Websocket.OwnerCleanupPostgresTest do
           Repo.delete!(setup.pricing)
         end)
 
-        Enum.each(logs, &Peer.assert_teardown_log!/1)
+        Enum.each(logs, &Peer.assert_teardown_log!(&1, required?: false))
       end)
 
       {Map.take(setup, [:auth, :model, :assignment]), session}

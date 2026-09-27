@@ -2333,6 +2333,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
   # client's anchored delta and is cut before any output, and the retry on a
   # new socket is the full-history form of turn B (or, as the control, that
   # form with its own trailing item changed).
+  defp settle_incremental_predecessor!(state, :immediate, _pool_id), do: state
+
+  defp settle_incremental_predecessor!(state, :after_settlement, pool_id) do
+    state = drain_incremental_socket_tasks!(state)
+    assert [%Request{id: settled_id, status: "succeeded"}] = request_logs(pool_id)
+    assert Repo.aggregate(from(entry in LedgerEntry, where: entry.request_id == ^settled_id and entry.entry_kind == "settlement" and entry.amount_status == "recorded"), :count) == 1
+    state
+  end
+
   defp incremental_previsible_scenario(resend_shape, turn_gap \\ :after_settlement)
        when resend_shape in [:full_history, :altered_tail] and turn_gap in [:after_settlement, :immediate] do
     release_ref = make_ref()
@@ -2396,7 +2405,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
         # Drive the actual socket callbacks. Keeping completion messages pending
         # makes the immediate arm deterministically queue; draining them makes
         # the after-settlement arm dispatch with no tracked task.
-        state = if turn_gap == :after_settlement, do: drain_incremental_socket_tasks!(state), else: state
+        state = settle_incremental_predecessor!(state, turn_gap, setup.pool.id)
+
         Process.put(:incremental_replay_socket_state, state)
         assert MapSet.size(state.tasks) == if(turn_gap == :after_settlement, do: 0, else: 1)
         assert :queue.is_empty(state.queued_response_payloads)

@@ -79,7 +79,7 @@ defmodule CodexPooler.RollupCoverageFence do
   @doc """
   Opens the fence's connection for this `mix test` invocation. Call it once from
   `test/test_helper.exs`, before `CodexPooler.CommittedWriteGuard.start!/0`.
-  The application owns its lifetime: repeated ExUnit runs reuse it, and application shutdown
+  The application owns its lifetime: all cases in the invocation reuse it, and application shutdown
   closes it before a run-scoped database is dropped.
   """
   @spec start!(keyword()) :: :ok

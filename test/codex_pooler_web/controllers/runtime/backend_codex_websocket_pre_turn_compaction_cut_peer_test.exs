@@ -33,6 +33,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionCutPeerTe
   # its two-second wait (the settlement is held): refused once, then served
   # (findings#206 row 206-580, seen on this mid-turn arm under load).
   for shape <- [:pre_turn, :mid_turn] do
+    @tag slow: "holds settlement through the real two-second takeover budget before serving the retry"
     @tag mode: "full", shape: shape, topology: :peer, cut: :observed_cut_settlement_held
     test "full #{shape} peer admitted compaction whose settlement outlasts the take-over wait: the first retry is refused and the next is served",
          %{mode: mode, shape: shape, topology: topology, cut: cut, peer_node: peer_node} do

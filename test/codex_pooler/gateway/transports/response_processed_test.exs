@@ -5,8 +5,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ResponseProcessedTest do
 
   alias CodexPooler.Access
   alias CodexPooler.Access.APIKey
-  alias CodexPooler.Accounting.Request
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
   alias CodexPooler.Accounts.{Scope, User}
+  alias CodexPooler.Admin.GatewayReadModel
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.CodexSession
@@ -150,6 +151,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ResponseProcessedTest do
     assert length(Enum.uniq(ids)) == 3
     assert "shared-socket-request" in ids
     assert Enum.all?(requests, &(&1.status == "succeeded" and &1.response_status_code == 200))
+    assert Enum.all?(requests, &(&1.usage_status == "not_applicable"))
+    request_ids = Enum.map(requests, & &1.id)
+    refute Repo.exists?(from attempt in Attempt, where: attempt.request_id in ^request_ids)
+    refute Repo.exists?(from entry in LedgerEntry, where: entry.request_id in ^request_ids)
+    now = DateTime.utc_now()
+    buckets = GatewayReadModel.stats_request_status_buckets_for_pool_ids([auth.pool.id], DateTime.add(now, -60, :second), now, :hour)
+    assert Enum.sum(Enum.map(buckets, & &1.requests)) == 3
+    assert Enum.sum(Enum.map(buckets, & &1.succeeded)) == 3
+
     assert :ok = FakeUpstream.verify!(upstream)
   end
 

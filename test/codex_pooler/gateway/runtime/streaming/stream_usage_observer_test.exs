@@ -3,11 +3,16 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
 
   alias CodexPooler.Gateway.Runtime.Finalization.ResponseUsage
 
-  # Usage equality remains exact; declaration evidence has its own boundary tests.
-  defp usage_fields(nil), do: nil
-  defp usage_fields(usage), do: Map.delete(usage, :model_observation)
   alias CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserver
   alias CodexPooler.Gateway.Transports.Streaming.RetainedBody
+
+  @no_model %{"version" => 1, "coverage" => "full", "terminal_status" => nil, "terminal_model" => nil, "first_conflicting_model" => nil, "conflict" => nil}
+  @completed_no_model %{@no_model | "terminal_status" => "completed"}
+
+  defp assert_observation(usage, expected) do
+    assert Map.fetch!(usage, :model_observation) == expected
+    Map.delete(usage, :model_observation)
+  end
 
   @known_usage %{
     status: "usage_known",
@@ -44,7 +49,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
 
       stream = String.replace(stream, "\n", newline)
       expected = StreamUsageObserver.observe(StreamUsageObserver.new(), stream)
-      assert usage_fields(StreamUsageObserver.usage(expected)) == @known_usage
+      assert assert_observation(StreamUsageObserver.usage(expected), @completed_no_model) == @known_usage
       assert expected.previous_terminal?
       assert StreamUsageObserver.diagnostics(expected).candidate_count == 1
 
@@ -84,7 +89,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
       state = Enum.reduce(chunks, initial, &StreamUsageObserver.observe(&2, &1))
       {:reductions, after_count} = Process.info(self(), :reductions)
 
-      assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+      assert assert_observation(StreamUsageObserver.usage(state), @completed_no_model) == @known_usage
 
       assert after_count - before_count < 200_000,
              "#{prefix} at #{chunk_size} bytes used #{after_count - before_count} reductions"
@@ -113,7 +118,12 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
         state = StreamUsageObserver.observe(StreamUsageObserver.new(), first)
         assert StreamUsageObserver.candidate_bytes(state) <= 16_384
         state = StreamUsageObserver.observe(state, second)
-        assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage == size <= 16_384
+
+        if size <= 16_384 do
+          assert assert_observation(StreamUsageObserver.usage(state), @completed_no_model) == @known_usage
+        else
+          assert StreamUsageObserver.usage(state) == nil
+        end
       end
     end
   end
@@ -148,7 +158,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
   end
 
   test "data-only SSE boundaries reset tier and recover incomplete usage at every split" do
-    for newline <- ["\n", "\r\n", "\r"], prior_usage <- ["null}", ~s({"input_tokens":)] do
+    for newline <- ["\n", "\r\n", "\r"], {prior_usage, coverage} <- [{"null}", "full"}, {~s({"input_tokens":), "partial"}] do
       prior =
         ~s(data: {"type":"response.created","service_tier":"flex","usage":) <>
           prior_usage <> "\n\n"
@@ -167,7 +177,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
           |> StreamUsageObserver.observe(first)
           |> StreamUsageObserver.observe(second)
 
-        assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+        assert assert_observation(StreamUsageObserver.usage(state), %{@completed_no_model | "coverage" => coverage}) == @known_usage
       end
     end
   end
@@ -183,7 +193,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
       |> StreamUsageObserver.observe(first)
       |> StreamUsageObserver.observe(completion <> later)
 
-    assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+    assert assert_observation(StreamUsageObserver.usage(state), @completed_no_model) == @known_usage
     assert :binary.referenced_byte_size(state.marker_suffix) <= 64
   end
 
@@ -193,7 +203,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
     for invalid <- [nil, false, 3, "absent", []] do
       prior = usage_event("response.created", invalid, "flex")
       state = StreamUsageObserver.observe(StreamUsageObserver.new(), prior <> terminal)
-      assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+      assert assert_observation(StreamUsageObserver.usage(state), @completed_no_model) == @known_usage
     end
   end
 
@@ -212,7 +222,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
           |> StreamUsageObserver.observe(first)
           |> StreamUsageObserver.observe(second)
 
-        assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage,
+        assert assert_observation(StreamUsageObserver.usage(state), @completed_no_model) == @known_usage,
                "usage lost for split #{split_at}, newline bytes #{byte_size(newline)}"
 
         assert StreamUsageObserver.diagnostics(state).candidate_count == 3
@@ -248,7 +258,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
         |> StreamUsageObserver.observe(first)
         |> StreamUsageObserver.observe(second)
 
-      assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+      assert assert_observation(StreamUsageObserver.usage(state), @completed_no_model) == @known_usage
     end
   end
 
@@ -301,7 +311,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
           |> StreamUsageObserver.observe(first)
           |> StreamUsageObserver.observe(second)
 
-        assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+        assert assert_observation(StreamUsageObserver.usage(state), %{@completed_no_model | "coverage" => "partial"}) == @known_usage
         assert StreamUsageObserver.diagnostics(state).classification == "known"
       end
     end
@@ -326,7 +336,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
             usage_event("response.in_progress", usage(1, 1, 2), "flex")
           )
 
-        assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+        assert assert_observation(StreamUsageObserver.usage(state), @completed_no_model) == @known_usage
       end
     end
   end
@@ -347,7 +357,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
         usage_event("response.completed", measured, "priority")
       )
 
-    assert usage_fields(StreamUsageObserver.usage(state)) == %{
+    assert assert_observation(StreamUsageObserver.usage(state), @completed_no_model) == %{
              @known_usage
              | cached_input_tokens: 4,
                reasoning_tokens: 2
@@ -377,12 +387,12 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
     retained = RetainedBody.read(retained)
     assert byte_size(retained) == RetainedBody.max_bytes()
 
-    assert usage_fields(ResponseUsage.from_sse(retained)) == %{
+    assert assert_observation(ResponseUsage.from_sse(retained), @no_model) == %{
              status: "usage_unknown",
              source: "sse_usage_missing"
            }
 
-    assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+    assert assert_observation(StreamUsageObserver.usage(state), @completed_no_model) == @known_usage
   end
 
   test "recovers usage and service tier markers split at every byte boundary" do
@@ -405,7 +415,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
         |> StreamUsageObserver.observe(first)
         |> StreamUsageObserver.observe(second)
 
-      assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+      assert assert_observation(StreamUsageObserver.usage(state), @completed_no_model) == @known_usage
     end
   end
 
@@ -421,7 +431,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
         |> StreamUsageObserver.observe(first)
         |> StreamUsageObserver.observe(second)
 
-      assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+      assert assert_observation(StreamUsageObserver.usage(state), @completed_no_model) == @known_usage
     end
   end
 
@@ -436,7 +446,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
         })
       )
 
-    assert usage_fields(StreamUsageObserver.usage(state)) == %{@known_usage | service_tier: nil}
+    assert assert_observation(StreamUsageObserver.usage(state), @completed_no_model) == %{@known_usage | service_tier: nil}
   end
 
   test "keeps candidate context bounded and abandons oversized usage objects" do
@@ -478,7 +488,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
         "\n\n" <> usage_event("response.completed", usage(16, 5, 21), "priority")
       )
 
-    assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+    assert assert_observation(StreamUsageObserver.usage(state), %{@completed_no_model | "coverage" => "partial"}) == @known_usage
     assert StreamUsageObserver.candidate_bytes(state) == 0
   end
 
@@ -498,7 +508,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
         |> StreamUsageObserver.observe(first)
         |> StreamUsageObserver.observe(second)
 
-      assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+      assert assert_observation(StreamUsageObserver.usage(state), %{@completed_no_model | "coverage" => "partial"}) == @known_usage
       assert StreamUsageObserver.candidate_bytes(state) == 0
     end
   end
@@ -514,7 +524,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
       |> StreamUsageObserver.observe(terminal)
       |> StreamUsageObserver.observe(later)
 
-    assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+    assert assert_observation(StreamUsageObserver.usage(state), %{@no_model | "terminal_status" => "incomplete"}) == @known_usage
   end
 
   test "latest valid nonterminal wins while malformed and missing usage cannot erase it" do
@@ -537,7 +547,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
       |> StreamUsageObserver.observe(malformed)
       |> StreamUsageObserver.observe(missing)
 
-    assert usage_fields(StreamUsageObserver.usage(state)) == @known_usage
+    assert assert_observation(StreamUsageObserver.usage(state), @no_model) == @known_usage
   end
 
   test "preserves all response usage precedence paths" do
@@ -554,8 +564,8 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
     assert StreamUsageObserver.resolve(empty, fallback).status == "usage_unknown"
     assert StreamUsageObserver.resolve(nil, fallback) == fallback
     assert StreamUsageObserver.resolve(progress_state, fallback).total_tokens == 5
-    assert usage_fields(StreamUsageObserver.resolve(terminal_state, fallback)) == @known_usage
-    assert usage_fields(StreamUsageObserver.resolve(later_state, fallback)) == @known_usage
+    assert assert_observation(StreamUsageObserver.resolve(terminal_state, fallback), @completed_no_model) == @known_usage
+    assert assert_observation(StreamUsageObserver.resolve(later_state, fallback), @completed_no_model) == @known_usage
   end
 
   test "reset clears failed-candidate usage and parser context" do
@@ -666,7 +676,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
 
       expected = StreamUsageObserver.observe(StreamUsageObserver.new(), stream)
       assert StreamUsageObserver.served_model(expected) == "gpt-6-luna"
-      assert usage_fields(StreamUsageObserver.usage(expected)) == Map.put(@known_usage, :served_model, "gpt-6-luna")
+      assert assert_observation(StreamUsageObserver.usage(expected), %{@completed_no_model | "conflict" => true, "first_conflicting_model" => "gpt-6-astra", "terminal_model" => "gpt-6-astra"}) == Map.put(@known_usage, :served_model, "gpt-6-luna")
       assert StreamUsageObserver.result(expected).served_model == "gpt-6-luna"
 
       for split_at <- 0..byte_size(stream) do

@@ -51,9 +51,12 @@ defmodule CodexPooler.Gateway.Transports.OwnerCleanupPeer do
     log
   end
 
-  @spec assert_teardown_log!(String.t()) :: :ok
-  def assert_teardown_log!(log) do
-    Enum.each(String.split(log, "\n", trim: true), fn line ->
+  @spec assert_teardown_log!(String.t(), keyword()) :: :ok
+  def assert_teardown_log!(log, opts \\ []) do
+    lines = String.split(log, "\n", trim: true)
+    if Keyword.get(opts, :required?, true), do: ExUnit.Assertions.assert(lines != [], "expected owner cleanup peer teardown diagnostic")
+
+    Enum.each(lines, fn line ->
       ExUnit.Assertions.assert(
         String.contains?(line, "websocket owner exit persistence failed") and
           String.contains?(line, "reason_class=stale_owner_cleanup"),

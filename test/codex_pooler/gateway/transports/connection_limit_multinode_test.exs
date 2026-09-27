@@ -174,7 +174,7 @@ defmodule CodexPooler.Gateway.Transports.ConnectionLimitMultinodeTest do
           Repo.delete!(setup.pricing)
         end)
 
-        Enum.each(logs, &Peer.assert_teardown_log!/1)
+        Enum.each(logs, &Peer.assert_teardown_log!(&1, required?: false))
       end)
 
       {Map.take(setup, [:auth, :model, :assignment]), session}
