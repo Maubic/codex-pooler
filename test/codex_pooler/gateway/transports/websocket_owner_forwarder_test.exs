@@ -28,6 +28,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV2
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV3
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV4
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV5
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
   alias CodexPooler.Gateway.Transports.WebsocketOwnerPreviousReleaseCaller
@@ -314,7 +315,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     for {function, envelope} <- [
           {:remote_submit_request_v2, owner_request_v2(request("abandoned-collect"))},
           {:remote_submit_request_v3, abandoned_v3_request()},
-          {:remote_submit_request_v4, owner_request_v4(replay_binding(1))}
+          {:remote_submit_request_v4, owner_request_v4(replay_binding(1))},
+          {:remote_submit_request_v5, abandoned_v5_request()}
         ] do
       session_id = Ecto.UUID.generate()
       target = %{pid: self(), epoch: 1, correlation_id: "abandoned", owner_turn_id: self()}
@@ -326,6 +328,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       refute AbandonedSubmissions.recorded?(key)
       assert {:error, :owner_unavailable} = WebsocketOwnerSession.lookup(session_id)
     end
+  end
+
+  test "a client retry submission without a recoverable owner refuses instead of raising" do
+    downstream = %{pid: self(), epoch: 1, correlation_id: "missing-retry-owner", owner_turn_id: self()}
+    assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.remote_submit_request_v5(Ecto.UUID.generate(), downstream, abandoned_v5_request())
   end
 
   test "dedicated V2 control has local and simulated remote parity", %{auth: auth} do
@@ -3872,6 +3879,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       )
 
     owner_request
+  end
+
+  defp abandoned_v5_request do
+    authority = %CodexPooler.Accounting.ClientRetry.DispatchAuthority{
+      version: 1,
+      predecessor_request_id: Ecto.UUID.generate(),
+      successor_request_id: Ecto.UUID.generate(),
+      link_id: Ecto.UUID.generate(),
+      successor_claim: "client-retry-v1:synthetic"
+    }
+
+    attrs = owner_request(request("abandoned-retry")) |> Map.from_struct()
+    {:ok, envelope} = WebsocketOwnerRequestV5.new(Map.merge(attrs, %{version: 5, client_retry_dispatch_authority: authority}))
+    envelope
   end
 
   defp abandoned_v3_request do

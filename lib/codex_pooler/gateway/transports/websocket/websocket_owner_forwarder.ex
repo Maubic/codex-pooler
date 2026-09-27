@@ -969,9 +969,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   def remote_submit_request_v5(codex_session_id, downstream, owner_request)
       when is_binary(codex_session_id) and is_map(downstream) do
     with :ok <- validate_owner_request_v5(owner_request),
+         :ok <- refuse_abandoned_submission(codex_session_id, downstream),
          opts = remote_submission_opts(owner_request, codex_session_id, downstream),
          {:ok, {owner_pid, downstream}} <- ensure_remote_owner(codex_session_id, downstream, owner_request, opts),
-         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil) do
+         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil),
+         :ok <- refuse_abandoned_submission(codex_session_id, downstream) do
       submit_remote_owner_request(
         owner_pid,
         codex_session_id,
@@ -1856,6 +1858,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
     do: ResetProbe.bound?(probe)
 
   defp bound_reset_probe?(%WebsocketOwnerRequest{}), do: false
+
+  defp bound_reset_probe?(%WebsocketOwnerRequestV5{reset_probe: %ResetProbe{} = probe}),
+    do: ResetProbe.bound?(probe)
+
+  defp bound_reset_probe?(%WebsocketOwnerRequestV5{}), do: false
 
   defp submission_notification?(%UpstreamWebsocketSession.Request{submission_observer: observer}),
     do: is_function(observer, 0)

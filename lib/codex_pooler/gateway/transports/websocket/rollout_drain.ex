@@ -250,13 +250,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
             {:owner, drain_owner_after_turn(owner, deadline_ms, drain_policy)}
 
           {:starting_owner, {_key, owner}} ->
-            :ok = WebsocketOwnerSession.begin_drain(owner)
-
-            {:owner,
-             case drain_owner(owner) do
-               :ok -> {:ok, :idle}
-               error -> error
-             end}
+            {:owner, drain_starting_owner_after_turn(owner, deadline_ms, drain_policy)}
 
           {:activity, activity} ->
             {:activity, activity.kind, ActivityDrain.drain(activity, deadline_ms, drain_policy, activity_registry)}
@@ -317,6 +311,24 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
     WebsocketOwnerSession.drain_owner(owner)
   catch
     :exit, _reason -> {:error, :owner_unavailable}
+  end
+
+  defp drain_starting_owner_after_turn(owner, deadline_ms, drain_policy) do
+    :ok = WebsocketOwnerSession.begin_drain(owner)
+    remaining_ms = max(1, deadline_ms - drain_policy.now_ms.())
+
+    try do
+      case GenServer.call(owner, :owner_status, remaining_ms) do
+        {:ok, %{active_turn?: true}} -> drain_owner_after_turn(owner, deadline_ms, drain_policy)
+        {:ok, %{active_turn?: false}} -> drain_settled_owner(:idle, owner)
+      end
+    catch
+      :exit, _reason ->
+        # Queue the final drain even if initialization outlasts the budget.
+        # The coordinator may stop this worker, but the owner must still stop
+        # and release its lease when initialization eventually returns.
+        drain_owner(owner)
+    end
   end
 
   defp drain_owner_after_turn(owner, deadline_ms, drain_policy) do

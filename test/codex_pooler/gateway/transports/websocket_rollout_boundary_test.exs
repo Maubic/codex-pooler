@@ -131,6 +131,87 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutBoundaryTest do
     send(starter, :stop)
   end
 
+  test "a turn queued during owner initialization receives the remaining drain budget" do
+    auth = CodexPooler.PoolerFixtures.active_api_key_fixture()
+    {:ok, session} = Gateway.start_codex_session(auth, %{owner_instance_id: Atom.to_string(node()), accepted_turn_state: Ecto.UUID.generate()})
+    owners = unique(:owners)
+    start_supervised!({Registry, keys: :unique, name: owners})
+    streams = unique(:streams)
+    start_supervised!({DeferredStreamRegistry, name: streams})
+    drain = drain_server(streams, owners)
+    parent = self()
+    gate = make_ref()
+
+    upstream = %{
+      start: fn ->
+        send(parent, {:initializing, self()})
+        receive do: ({:release_init, ^gate} -> :ok)
+        Agent.start_link(fn -> :ready end)
+      end,
+      send: fn _, _, _ ->
+        send(parent, {:accepted_turn, self()})
+        receive do: ({:finish_turn, ^gate} -> :ok)
+        {:ok, %{status: 200, headers: [], terminal: "response.completed", body: ""}}
+      end,
+      close: fn pid -> Agent.stop(pid) end
+    }
+
+    starter =
+      spawn(fn ->
+        Process.flag(:trap_exit, true)
+        result = WebsocketOwnerSession.start_link(codex_session_id: session.id, owner_lease_token: session.owner_lease_token, owner_instance_id: session.owner_instance_id, registry: owners, upstream: upstream, owner_renewal_ms: 60_000)
+        send(parent, {:started, result})
+        receive do: (:stop -> :ok)
+      end)
+
+    assert_receive {:initializing, owner}, @budget
+
+    on_exit(fn ->
+      send(owner, {:release_init, gate})
+      send(starter, :stop)
+      if Process.alive?(owner), do: GenServer.stop(owner, :normal)
+    end)
+
+    attach_ref = make_ref()
+    submit_ref = make_ref()
+    downstream = %{pid: self(), epoch: 1, correlation_id: "initializing-drain", owner_turn_id: self(), active_turn_reconnect?: false}
+    request = %CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request{url: "https://example.com", payload: "{}", headers: [], timeouts: %{}, websocket_delivery_mode: :collect_compaction, effective_serving_mode: "full"}
+    send(owner, {:"$gen_call", {self(), attach_ref}, {:attach_downstream, self(), downstream.correlation_id, []}})
+    send(owner, {:"$gen_call", {self(), submit_ref}, {:submit_upstream, downstream, request, false}})
+    task = Task.async(fn -> RolloutDrain.start_drain(name: drain, timeout_ms: 5_000, deadline_margin_ms: 0) end)
+    await_drain_queued(owner, System.monotonic_time(:millisecond) + @budget)
+    send(owner, {:release_init, gate})
+    assert_receive {:started, {:ok, ^owner}}, @budget
+    assert_receive {^attach_ref, {:ok, _}}, @budget
+
+    executor =
+      receive do
+        {:accepted_turn, executor} -> executor
+        {^submit_ref, result} -> flunk("queued turn refused: #{inspect(result)}")
+      after
+        @budget -> flunk("queued turn never reached its upstream task")
+      end
+
+    on_exit(fn -> send(executor, {:finish_turn, gate}) end)
+    assert {:ok, %{active_turn?: true, draining?: true}} = WebsocketOwnerSession.owner_status(owner)
+    send(executor, {:finish_turn, gate})
+    assert_receive {^submit_ref, {:ok, %{terminal: "response.completed"}}}, @budget
+    assert %{result: :ok, turns_completed: 1, turns_aborted: 0} = Task.await(task, @budget)
+    send(starter, :stop)
+  end
+
+  defp await_drain_queued(owner, deadline) do
+    # Owner processes are sensitive, so their message bodies are intentionally
+    # hidden. The two queued calls precede the drain cast and its status/drain call.
+    {:message_queue_len, count} = Process.info(owner, :message_queue_len)
+
+    unless count >= 4 do
+      assert System.monotonic_time(:millisecond) < deadline
+      Process.sleep(5)
+      await_drain_queued(owner, deadline)
+    end
+  end
+
   defp drain_server(streams, owners \\ nil) do
     owners = owners || unique(:owners)
     if is_nil(Process.whereis(owners)), do: start_supervised!({Registry, keys: :unique, name: owners})
