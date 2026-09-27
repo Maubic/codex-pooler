@@ -244,7 +244,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
       <%!-- A rejected request never reached an upstream, so on a phone this line
       would be two dashes taking a whole row. It keeps its place from md up,
       where the column has to line up with its neighbours. --%>
-      <span class={["flex min-w-0 items-center gap-1.5", !@account_named? && "max-lg:hidden"]}>
+      <span data-role="upstream-plan-line" class={["flex min-w-0 items-baseline gap-1 font-sans text-xs font-normal leading-4", !@account_named? && "max-lg:hidden"]}>
         <span
           data-role="upstream-account"
           class="min-w-0 truncate text-base-content"
@@ -255,10 +255,10 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
         <span
           id={@plan_badge_id}
           data-role="plan-badge"
-          class="max-w-20 shrink-0 truncate text-[11px] text-base-content/50"
+          class="max-w-20 shrink-0 truncate whitespace-nowrap text-base-content/50"
           title={"Upstream account plan: #{@plan_label}"}
         >
-          {@plan_label}
+          <span :if={@account_named? && @plan_label != "—"} data-role="upstream-plan-separator" aria-hidden="true">·</span>{" "}<span data-role="plan-name" class={AdminBadges.plan_text_class(@request_log.upstream_account_plan_label || @request_log.upstream_account_plan_family)}>{@plan_label}</span>
           <span :if={@request_log.upstream_account_plan_family} class="sr-only">{@request_log.upstream_account_plan_family}</span>
         </span>
       </span>
@@ -406,7 +406,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
       class="request-log-lines grid min-w-0 gap-1"
       title={format_model_details_title(@request_log)}
     >
-      <span data-role="model-identity-line" class="inline-flex min-w-0 max-w-full items-baseline gap-1.5 align-middle font-sans text-xs font-normal leading-4 text-base-content lg:flex">
+      <span data-role="model-identity-line" class="inline-flex min-w-0 max-w-full items-baseline gap-1 align-middle font-sans text-xs font-normal leading-4 text-base-content lg:flex">
         <span :if={@model_known?} data-role="model-swatch" aria-hidden="true" class="size-2 shrink-0 self-center rounded-xs" style={"background-color: #{Metrics.model_color(format_model_name(@request_log))}"}></span>
         <span
           data-role="model-name"

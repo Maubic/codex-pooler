@@ -20,8 +20,8 @@ defmodule CodexPoolerWeb.Admin.BadgeComponents do
     "education" => "Education",
     "ent26" => "Enterprise",
     "enterprise" => "Enterprise",
-    "enterprise-cbp-automation" => "Enterprise (Automation)",
-    "enterprise_cbp_automation" => "Enterprise (Automation)",
+    "enterprise-cbp-automation" => "Enterprise Automation",
+    "enterprise_cbp_automation" => "Enterprise Automation",
     "enterprise-cbp-usage-based" => "Enterprise CBP Usage Based",
     "enterprise_cbp_usage_based" => "Enterprise CBP Usage Based",
     "free" => "Free",
@@ -29,9 +29,9 @@ defmodule CodexPoolerWeb.Admin.BadgeComponents do
     "go" => "Go",
     "hc" => "Enterprise",
     "plus" => "Plus",
-    "pro" => "Pro (More)",
+    "pro" => "Pro More",
     "prolite" => "Pro",
-    "promax" => "Pro (Max)",
+    "promax" => "Pro Max",
     "self-serve-business-prolite" => "Self Serve Business ProLite",
     "self_serve_business_prolite" => "Self Serve Business ProLite",
     "self-serve-business-usage-based" => "Self Serve Business Usage Based",
@@ -67,6 +67,14 @@ defmodule CodexPoolerWeb.Admin.BadgeComponents do
     "chatgpt pro" => :pro,
     "prolite" => :prolite,
     "pro lite" => :prolite
+  }
+
+  @plan_text_tone_classes %{
+    primary: "text-primary",
+    success: "text-success",
+    warning: "text-warning",
+    error: "text-error",
+    info: "text-info"
   }
 
   def status_chip_class(status) when is_atom(status),
@@ -177,6 +185,15 @@ defmodule CodexPoolerWeb.Admin.BadgeComponents do
     plan_label
     |> plan_tone()
     |> plan_badge_class_for_tone()
+  end
+
+  @spec plan_text_class(String.t() | nil) :: String.t()
+  def plan_text_class(plan_label) do
+    case plan_tone(plan_label) do
+      :unknown -> "text-base-content/70"
+      {:generated, key} -> Map.fetch!(@plan_text_tone_classes, generated_chip_tone(key))
+      tone -> "admin-plan-text admin-plan-badge--#{tone}"
+    end
   end
 
   defp chip_class(:primary),

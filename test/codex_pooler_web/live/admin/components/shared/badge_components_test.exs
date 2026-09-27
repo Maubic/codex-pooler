@@ -39,15 +39,15 @@ defmodule CodexPoolerWeb.Admin.BadgeComponentsTest do
     assert BadgeComponents.plan_badge_label("go") == "Go"
     assert BadgeComponents.plan_badge_label("GO") == "Go"
     assert BadgeComponents.plan_badge_label("prolite") == "Pro"
-    assert BadgeComponents.plan_badge_label("pro") == "Pro (More)"
-    assert BadgeComponents.plan_badge_label("promax") == "Pro (Max)"
+    assert BadgeComponents.plan_badge_label("pro") == "Pro More"
+    assert BadgeComponents.plan_badge_label("promax") == "Pro Max"
     assert BadgeComponents.plan_badge_label("ent26") == "Enterprise"
     assert BadgeComponents.plan_badge_label("hc") == "Enterprise"
     assert BadgeComponents.plan_badge_label("edu_plus") == "Edu Plus"
     assert BadgeComponents.plan_badge_label("edu-pro") == "Edu Pro"
 
     assert BadgeComponents.plan_badge_label("enterprise_cbp_automation") ==
-             "Enterprise (Automation)"
+             "Enterprise Automation"
 
     assert BadgeComponents.plan_badge_label("self_serve_business_prolite") ==
              "Self Serve Business ProLite"
@@ -67,14 +67,14 @@ defmodule CodexPoolerWeb.Admin.BadgeComponentsTest do
       {"free", "Free"},
       {"go", "Go"},
       {"plus", "Plus"},
-      {"pro", "Pro (More)"},
+      {"pro", "Pro More"},
       {"prolite", "Pro"},
-      {"promax", "Pro (Max)"},
+      {"promax", "Pro Max"},
       {"team", "Team"},
       {"business", "Business"},
       {"ent26", "Enterprise"},
       {"enterprise", "Enterprise"},
-      {"enterprise_cbp_automation", "Enterprise (Automation)"},
+      {"enterprise_cbp_automation", "Enterprise Automation"},
       {"enterprise_cbp_usage_based", "Enterprise CBP Usage Based"},
       {"self_serve_business_prolite", "Self Serve Business ProLite"},
       {"self_serve_business_usage_based", "Self Serve Business Usage Based"},

@@ -9,9 +9,14 @@
 @source "../../dev_support/codex_pooler_web";
 
 /* Selected satin plan material. Semantic status chips keep their own styling. */
-.admin-plan-badge {
+.admin-plan-badge,
+.admin-plan-text {
   --plan-hue: 220;
   --plan-sat: 10%;
+  color: hsl(var(--plan-hue) var(--plan-sat) 24%);
+}
+
+.admin-plan-badge {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -26,7 +31,6 @@
   text-transform: none;
   border: 1px solid hsl(var(--plan-hue) var(--plan-sat) 69%);
   border-radius: 999px;
-  color: hsl(var(--plan-hue) var(--plan-sat) 24%);
   background: linear-gradient(165deg, hsl(var(--plan-hue) var(--plan-sat) 96%), hsl(var(--plan-hue) var(--plan-sat) 80%) 50%, hsl(var(--plan-hue) var(--plan-sat) 89%));
   box-shadow: inset 0 1px 0 #ffffffa0, 0 1px 2px #00000012;
 }
@@ -38,8 +42,12 @@
 .admin-plan-badge--business { --plan-hue: 163; --plan-sat: 48%; }
 .admin-plan-badge--enterprise { --plan-hue: 300; --plan-sat: 22%; }
 .admin-plan-badge--edu { --plan-hue: 275; --plan-sat: 62%; }
-[data-theme="dark"] .admin-plan-badge {
+[data-theme="dark"] .admin-plan-badge,
+[data-theme="dark"] .admin-plan-text {
   color: hsl(var(--plan-hue) var(--plan-sat) 82%);
+}
+
+[data-theme="dark"] .admin-plan-badge {
   border-color: hsl(var(--plan-hue) calc(var(--plan-sat) * .65) 39%);
   background: linear-gradient(165deg, hsl(var(--plan-hue) 35% 31%), hsl(var(--plan-hue) 38% 19%) 55%, hsl(var(--plan-hue) 32% 25%));
   box-shadow: inset 0 1px 0 #ffffff20, 0 1px 2px #00000040;
