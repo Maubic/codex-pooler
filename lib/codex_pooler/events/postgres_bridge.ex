@@ -170,12 +170,20 @@ defmodule CodexPooler.Events.PostgresBridge do
   # them. Anything unexpected reads as no node, so the notification is
   # delivered rather than lost.
   defp pubsub_peer_nodes do
-    Phoenix.PubSub
-    |> :pg.get_members(Module.concat(@pubsub, "Adapter"))
-    |> Enum.map(&node/1)
-    |> Enum.reject(&(&1 == node()))
+    members = :pg.get_members(Phoenix.PubSub, Module.concat(@pubsub, "Adapter"))
+    if members == [] and Node.list() != [], do: warn_peer_lookup_once()
+    members |> Enum.map(&node/1) |> Enum.reject(&(&1 == node()))
   catch
-    _kind, _reason -> []
+    _kind, _reason ->
+      warn_peer_lookup_once()
+      []
+  end
+
+  defp warn_peer_lookup_once do
+    unless Process.get({__MODULE__, :peer_lookup_warned}, false) do
+      Process.put({__MODULE__, :peer_lookup_warned}, true)
+      Logger.warning("postgres event relay PubSub peer lookup unavailable; duplicate delivery is possible")
+    end
   end
 
   defp origin(payload) do

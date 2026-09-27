@@ -136,9 +136,22 @@ defmodule CodexPooler.Release do
     repo_config = Keyword.put(repo_config, :parameters, parameters)
 
     if task in [:migrate, :rollback] do
-      Keyword.put(repo_config, :timeout, :infinity)
+      repo_config
+      |> Keyword.put(:timeout, :infinity)
+      |> Keyword.put(:migration_advisory_lock_retry_interval_ms, 1_000)
+      |> Keyword.put(:migration_advisory_lock_max_tries, migration_advisory_lock_wait_seconds())
     else
       repo_config
+    end
+  end
+
+  # This finite contention budget is per migration, not a bound on a whole
+  # release: multiple concurrent index statements can each wait for snapshots.
+  # The deployment's migration Job deadline remains the cumulative bound.
+  defp migration_advisory_lock_wait_seconds do
+    case System.get_env("MIGRATION_ADVISORY_LOCK_WAIT_SECONDS", "600") |> Integer.parse() do
+      {seconds, ""} when seconds > 0 -> seconds
+      _invalid -> raise ArgumentError, "MIGRATION_ADVISORY_LOCK_WAIT_SECONDS must be a positive integer"
     end
   end
 

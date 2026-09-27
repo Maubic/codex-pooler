@@ -43,7 +43,6 @@ defmodule CodexPooler.Release.MigrationLockBudget do
   @watch_stop_timeout_ms 5_000
   @watch_application_name "codex_pooler_migrate_watch"
   @max_listed_blockers 10
-  @connect_keys [:hostname, :port, :username, :password, :database, :socket_dir, :socket, :ssl, :socket_options, :connect_timeout, :handshake_timeout, :endpoints]
 
   defmodule Error do
     @moduledoc "A migration statement exhausted its lock budget; the message names the blocking sessions."
@@ -297,13 +296,15 @@ defmodule CodexPooler.Release.MigrationLockBudget do
   defp watch_failure(_reason), do: "exit"
 
   defp watch_connect_options(repo) do
-    repo.config()
-    |> Keyword.take(@connect_keys)
-    |> Keyword.merge(
-      pool_size: 1,
-      backoff_type: :stop,
-      parameters: [application_name: @watch_application_name]
-    )
+    # Ecto passes its parsed Repo config through to Postgrex. Preserve that
+    # connection contract (TLS, endpoints, parameters, types, after_connect)
+    # while replacing only pool ownership and the watcher identity.
+    config = repo.config()
+    parameters = config |> Keyword.get(:parameters, []) |> Keyword.put(:application_name, @watch_application_name)
+
+    config
+    |> Keyword.drop([:name, :pool, :pool_size, :pool_count])
+    |> Keyword.merge(pool: DBConnection.ConnectionPool, pool_size: 1, backoff_type: :stop, parameters: parameters)
   end
 
   # Idempotent: the error path stops the watcher to read its report and the `after` block stops

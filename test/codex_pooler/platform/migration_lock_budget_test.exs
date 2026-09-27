@@ -49,6 +49,31 @@ defmodule CodexPooler.Release.MigrationLockBudgetTest do
     end
   end
 
+  defmodule ConfiguredRepo do
+    use Ecto.Repo, otp_app: :codex_pooler, adapter: Ecto.Adapters.Postgres
+
+    @impl true
+    def init(_type, config) do
+      connection = CodexPooler.Repo.config() |> Keyword.drop([:name, :pool, :pool_size])
+      {:ok, Keyword.merge(connection, config) |> Keyword.put(:pool_size, 2)}
+    end
+  end
+
+  test "watcher uses configured connection parameters and after_connect callback" do
+    parent = self()
+
+    after_connect = fn conn ->
+      %{rows: [[name, zone]]} = Postgrex.query!(conn, "SELECT current_setting('application_name'), current_setting('TimeZone')", [])
+      send(parent, {:configured_connection, name, zone})
+    end
+
+    CodexPooler.TestAppEnv.restore_on_exit(ConfiguredRepo)
+    Application.put_env(:codex_pooler, ConfiguredRepo, after_connect: after_connect, parameters: [TimeZone: "Europe/Rome", application_name: "configured_migration"])
+    start_supervised!(ConfiguredRepo)
+    assert :ok = MigrationLockBudget.run(ConfiguredRepo, fn -> :ok end)
+    assert_receive {:configured_connection, "codex_pooler_migrate_watch", "Europe/Rome"}, 1_000
+  end
+
   setup do
     suffix = Base.encode16(:crypto.strong_rand_bytes(6), case: :lower)
     table = "migration_lock_budget_probe_#{suffix}"

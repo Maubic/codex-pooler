@@ -28,6 +28,74 @@ defmodule CodexPooler.Events.PostgresBridgeTest do
     %{notifications: notifications, bridge_name: bridge, sender: sender}
   end
 
+  @tag slow: "starts a real BEAM PubSub peer and observes default bridge de-duplication"
+  test "default peer lookup follows the real Phoenix PubSub adapter group", ctx do
+    if node() == :nonode@nohost do
+      previous = Application.fetch_env(:kernel, :prevent_overlapping_partitions)
+
+      on_exit(fn ->
+        :net_kernel.stop()
+
+        case previous do
+          {:ok, value} -> Application.put_env(:kernel, :prevent_overlapping_partitions, value)
+          :error -> Application.delete_env(:kernel, :prevent_overlapping_partitions)
+        end
+      end)
+
+      {_, 0} = System.cmd("epmd", ["-daemon"])
+      CodexPooler.PeerRegistry.assert_epmd_ready!()
+      Application.put_env(:kernel, :prevent_overlapping_partitions, false)
+      {:ok, _} = :net_kernel.start([:"bridge_local_#{System.unique_integer([:positive])}", :shortnames])
+    end
+
+    peer_name = :"bridge_peer_#{System.unique_integer([:positive])}"
+    on_exit(fn -> CodexPooler.PeerRegistry.assert_peer_absent!(peer_name) end)
+    parent = self()
+
+    owner =
+      start_supervised!(
+        {Task,
+         fn ->
+           {:ok, peer, remote} = :peer.start_link(%{name: peer_name, connection: :standard_io, args: [~c"+S", ~c"2:2", ~c"-kernel", ~c"prevent_overlapping_partitions", ~c"false"]})
+           send(parent, {:bridge_peer, peer, remote})
+
+           receive do
+             :stop -> :peer.stop(peer)
+           end
+         end}
+      )
+
+    assert_receive {:bridge_peer, peer, remote}, 15_000
+    :ok = :peer.call(peer, :code, :add_paths, [:code.get_path()])
+    {:ok, _} = :peer.call(peer, Application, :ensure_all_started, [:phoenix_pubsub])
+    {_pid, _} = :peer.call(peer, Code, :eval_string, ["spawn(fn -> {:ok, _} = Phoenix.PubSub.Supervisor.start_link(name: CodexPooler.PubSub); send(parent, :remote_pubsub_ready); receive do :stop -> :ok end end)", [parent: parent]])
+    assert_receive :remote_pubsub_ready, 10_000
+    notifications = start_notifications!(ctx, :permanent)
+    bridge = start_supervised!(%{id: :bridge, start: {PostgresBridge, :start_link, [[name: ctx.bridge_name, notifications: ctx.notifications]]}})
+    await_bridge_listening!(bridge, notifications)
+    lookup = :sys.get_state(bridge).pubsub_nodes
+    await_pubsub_peer!(lookup, remote, System.monotonic_time(:millisecond) + 10_000)
+    pool_id = subscribe!()
+    {event, payload} = remote_pool_event(pool_id, "real_pubsub_peer", Atom.to_string(remote))
+    {marker, marker_payload} = remote_pool_event(pool_id, "unclustered_marker", "sample-unclustered@127.0.0.1")
+    notify!(ctx.sender, Events.postgres_channel(), payload)
+    notify!(ctx.sender, Events.postgres_channel(), marker_payload)
+    assert_receive {Events, ^marker}, @relay_detection_timeout_ms
+    refute_received {Events, ^event}
+    monitor = Process.monitor(peer)
+    send(owner, :stop)
+    assert_receive {:DOWN, ^monitor, :process, ^peer, _}, 15_000
+    CodexPooler.PeerRegistry.assert_peer_absent!(peer_name, peer_node: remote)
+  end
+
+  defp await_pubsub_peer!(lookup, remote, deadline) do
+    unless remote in lookup.() do
+      assert System.monotonic_time(:millisecond) < deadline, "default PubSub lookup never observed the peer"
+      Process.sleep(10)
+      await_pubsub_peer!(lookup, remote, deadline)
+    end
+  end
+
   test "listens again after its notifications process is restarted under the same name", ctx do
     first = start_notifications!(ctx, :permanent)
     bridge = start_bridge!(ctx)
