@@ -334,6 +334,52 @@ defmodule CodexPoolerWeb.Admin.LensLiveTest do
     refute has_element?(view, "#lens-pool-filter [data-pool-id='#{revoked.id}']")
   end
 
+  @tag capture_log: true
+  test "a failed visibility load retains authorized Pool events and recovers on the next event", %{scope: scope} do
+    {kept, setup, assignment} = data_pool(scope, "lens-failed-visibility-kept")
+    {revoked, other_setup, other_assignment} = data_pool(scope, "lens-failed-visibility-revoked")
+    add_attempt(setup, assignment)
+    add_attempt(other_setup, other_assignment)
+    %{user: admin} = operator_fixture(scope, %{"role" => "instance_admin", "pool_ids" => [kept.id, revoked.id], "password_change_required" => "false"})
+    {:ok, login} = Accounts.login_user(%{"email" => admin.email, "password" => valid_user_password()})
+    conn = log_in_user(build_conn(), admin, login.token)
+    {:ok, view, _} = live_lens(conn, ~p"/admin/lens?evidence=all")
+    handler = block_loads(view)
+
+    assert {:ok, _} = Accounts.update_operator(scope, admin, %{"pool_ids" => [kept.id]})
+    assert_receive {^handler, task}, 5_000
+    on_exit(fn -> send(task, {handler, :release}) end)
+    :telemetry.detach(handler)
+    send(task, {handler, :fail})
+    failed = await_lens(view)
+    assert failed.history_error?
+    assert failed.subscribed_pool_ids == MapSet.new([kept.id])
+    refute has_element?(view, "#model-history-attempts")
+
+    added = add_attempt(setup, assignment)
+    assert {:ok, _} = Events.broadcast_request_logs(kept.id, "request_finalized", %{})
+    await_condition(fn -> is_reference(lens_assigns(view).history_reload_timer) end)
+    fire_reload(view)
+    recovered = await_lens(view)
+    refute recovered.history_error?
+    assert recovered.subscribed_pool_ids == MapSet.new([kept.id])
+    assert has_element?(view, "#model-history-attempt-#{added.id}")
+  end
+
+  test "changing the Pool selection clears an upstream filter belonging to the previous Pool", %{conn: conn, scope: scope} do
+    {first, first_setup, first_assignment} = data_pool(scope, "lens-filter-first")
+    {second, second_setup, second_assignment} = data_pool(scope, "lens-filter-second")
+    add_attempt(first_setup, first_assignment)
+    second_attempt = add_attempt(second_setup, second_assignment)
+    {:ok, view, _} = live_lens(conn, ~p"/admin/lens?#{%{pool_id: first.id, upstream_identity_id: first_assignment.upstream_identity_id, evidence: "all"}}")
+
+    view |> element("#lens-pool-filter [data-pool-id='#{second.id}']") |> render_click()
+    selected = await_lens(view)
+    assert selected.params["pool_id"] == second.id
+    assert selected.params["upstream_identity_id"] == ""
+    assert has_element?(view, "#model-history-attempt-#{second_attempt.id}")
+  end
+
   defp data_pool(scope, slug) do
     {:ok, pool} = Pools.create_pool(scope, %{name: slug, slug: slug})
     setup = active_api_key_fixture(pool)

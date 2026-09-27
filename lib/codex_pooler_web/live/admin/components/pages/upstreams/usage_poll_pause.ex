@@ -21,8 +21,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.UsagePollPause do
         <h3 id={"#{@id_prefix}-usage-poll-pause-title"} class="min-w-0 flex-1 truncate font-semibold text-base-content">
           Usage polling paused until {@pause.paused_until_label}
         </h3>
-        <span id={"#{@id_prefix}-usage-poll-pause-remaining"} class="shrink-0 text-xs text-base-content/55">
-          {@pause.remaining_label}
+        <span id={"#{@id_prefix}-usage-poll-pause-remaining"} phx-hook="RelativeCountdown" data-countdown-at={DateTime.to_iso8601(@pause.paused_until)} class="shrink-0 text-xs text-base-content/55">
+          <span data-role="relative-countdown-value">{@pause.remaining_label}</span>
         </span>
       </div>
       <p id={"#{@id_prefix}-usage-poll-pause-origin"} class="text-xs text-base-content/70">

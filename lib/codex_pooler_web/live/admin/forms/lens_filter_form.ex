@@ -34,6 +34,7 @@ defmodule CodexPoolerWeb.Admin.LensFilterForm do
   end
 
   @spec selected([option()], String.t()) :: option()
+  def selected([], value), do: option(value, "Unavailable", "hero-minus-circle", "text-base-content/50")
   def selected(options, value), do: Enum.find(options, &(&1.value == value)) || hd(options)
 
   defp option(value, label, icon, icon_class), do: %{value: value, label: label, icon: icon, icon_class: icon_class}

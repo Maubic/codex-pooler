@@ -54,12 +54,22 @@ defmodule CodexPoolerWeb.Admin.RequestLogsBoundedCountLiveTest do
     assert html =~ ~s(href="/next")
   end
 
+  test "an unpinned high page is repaired before any deep count", %{conn: conn} do
+    %{pool: pool, api_key: api_key} = active_api_key_fixture()
+    aged_request!(pool, api_key, 1)
+    {view, counts} = with_request_counts(fn -> open_request_logs!(conn, ~p"/admin/request-logs?page=100000") end)
+    assert has_element?(view, "[data-role='pagination-range']", "1-1 of 1")
+    assert counts != []
+    assert Enum.all?(counts, fn {sql, params} -> bounded?(sql) and Enum.filter(params, &is_integer/1) |> Enum.all?(&(&1 <= 10_001)) end)
+  end
+
   defp aged_request!(pool, api_key, minutes_ago) do
     request = request_fixture(%{pool: pool, api_key: api_key})
     admitted_at = DateTime.add(request.admitted_at, -minutes_ago, :minute)
     request |> Ecto.Changeset.change(admitted_at: admitted_at) |> Repo.update!()
   end
 
+  defp bounded?({sql, _params}), do: bounded?(sql)
   defp bounded?(sql), do: sql =~ ~r/LIMIT \$\d+/
 
   # Every `count(...)` over `requests` issued by the page process or a task it
@@ -75,7 +85,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsBoundedCountLiveTest do
         [:codex_pooler, :repo, :query],
         fn _event, _measurements, metadata, _config ->
           if metadata.query =~ ~r/count\(/ and metadata.query =~ ~s(FROM "requests"),
-            do: send(test_pid, {:request_count, [self() | Process.get(:"$callers", [])], metadata.query})
+            do: send(test_pid, {:request_count, [self() | Process.get(:"$callers", [])], {metadata.query, metadata.params}})
         end,
         nil
       )

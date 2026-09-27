@@ -3,7 +3,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Metrics do
 
   alias CodexPoolerWeb.Admin.Format
 
-  @model_colors ~w(--color-info --color-success --color-secondary --color-warning --color-reset-bank --admin-chart-other-models)
+  @model_colors ~w(--color-info --color-success --color-secondary --color-warning --color-neutral --color-base-content)
 
   @spec model_color(String.t()) :: String.t()
   def model_color(model), do: "var(#{Enum.at(@model_colors, :erlang.phash2(model, length(@model_colors)))})"

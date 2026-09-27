@@ -440,7 +440,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLive do
       filters: filters,
       visible_pool_ids: visible_pool_ids,
       snapshot_at: snapshot_at,
-      offset: page_offset(params),
+      offset: if(is_nil(snapshot_at), do: 0, else: page_offset(params)),
       params: params,
       stage: stage,
       current_request_logs: socket.assigns.request_logs,
@@ -637,7 +637,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLive do
       # that arrives unpinned — a bookmark, a hand-edited URL — goes to the live
       # first page. Paging from page one always carries its pin, so this is the
       # stale-address case, not the ordinary one.
-      page > 1 and is_nil(snapshot_at) ->
+      page_number(params) > 1 and is_nil(snapshot_at) ->
         patch_request_log_window(socket, params, 1, nil)
 
       page > last_page ->

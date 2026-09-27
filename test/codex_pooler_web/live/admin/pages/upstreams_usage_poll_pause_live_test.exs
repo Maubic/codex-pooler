@@ -37,6 +37,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsUsagePollPauseLiveTest do
 
     assert has_element?(view, "##{prefix}-usage-poll-pause-title", "Usage polling paused until")
     assert has_element?(view, "##{prefix}-usage-poll-pause-remaining", "in 2d 23h")
+    assert has_element?(view, "##{prefix}-usage-poll-pause-remaining[phx-hook='RelativeCountdown'][data-countdown-at='#{DateTime.to_iso8601(not_before)}'] [data-role='relative-countdown-value']")
     assert has_element?(view, "##{prefix}-usage-poll-pause-origin", "HTTP 429 with Retry-After")
     refute has_element?(view, "##{prefix}-usage-poll-pause-origin-count")
 
@@ -72,6 +73,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsUsagePollPauseLiveTest do
 
     assert has_element?(view, "#upstream-cockpit-usage-poll-pause-title", "Usage polling paused until")
     assert has_element?(view, "#upstream-cockpit-usage-poll-pause-remaining", "in 2d 23h")
+    assert has_element?(view, "#upstream-cockpit-usage-poll-pause-remaining[phx-hook='RelativeCountdown'][data-countdown-at='#{DateTime.to_iso8601(not_before)}'] [data-role='relative-countdown-value']")
     assert has_element?(view, "#upstream-cockpit-usage-poll-pause-origin", "HTTP 429 with Retry-After")
     refute has_element?(view, "#upstream-cockpit-usage-poll-pause button")
     refute has_element?(view, "#upstream-cockpit-usage-poll-pause [phx-click]")

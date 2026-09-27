@@ -71,11 +71,12 @@ defmodule CodexPoolerWeb.Admin.LensLive do
     pool_id = socket.assigns.params["pool_id"]
     was_visible = Enum.any?(socket.assigns.pool_options, &(&1.value == pool_id))
     lost_pool = pool_id != "" and was_visible and not Pools.owner?(socket.assigns.current_scope) and pool_id not in socket.assigns.current_scope.assigned_pool_ids
+    allowed_pool_ids = if Pools.owner?(socket.assigns.current_scope), do: socket.assigns.subscribed_pool_ids, else: MapSet.new(socket.assigns.current_scope.assigned_pool_ids)
 
     socket =
       socket
       |> assign(history: nil, pool_options: PoolFilterComponents.all_pool_filter_options(), model_options: LensFilterForm.model_options([], ""))
-      |> reconcile_subscriptions(MapSet.new())
+      |> reconcile_subscriptions(allowed_pool_ids)
 
     if lost_pool do
       filters = Map.merge(socket.assigns.params, %{"pool_id" => "", "upstream_identity_id" => ""})
@@ -101,7 +102,10 @@ defmodule CodexPoolerWeb.Admin.LensLive do
     end
   end
 
-  defp patch_filters(socket, params), do: push_patch(socket, to: ~p"/admin/lens?#{LensFilterForm.values(params)}")
+  defp patch_filters(socket, params) do
+    params = if params["pool_id"] != socket.assigns.params["pool_id"], do: Map.put(params, "upstream_identity_id", ""), else: params
+    push_patch(socket, to: ~p"/admin/lens?#{LensFilterForm.values(params)}")
+  end
 
   defp request_history(socket, reason) do
     socket
