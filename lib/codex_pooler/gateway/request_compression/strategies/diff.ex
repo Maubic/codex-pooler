@@ -309,8 +309,23 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.Diff do
         indexes
       end
     end)
+    |> keep_selected_line_annotations(lines)
     |> MapSet.to_list()
     |> Enum.sort()
+  end
+
+  # An annotation belongs to the preceding line, not to the context window.
+  # Keep it even when that line is the window's final one or context is zero.
+  defp keep_selected_line_annotations(indexes, lines) do
+    lines
+    |> Enum.with_index()
+    |> Enum.reduce(indexes, fn
+      {"\\" <> _annotation, index}, selected ->
+        if MapSet.member?(selected, index - 1), do: MapSet.put(selected, index), else: MapSet.delete(selected, index)
+
+      {_line, _index}, selected ->
+        selected
+    end)
   end
 
   defp omitted_hunk_marker(0), do: []

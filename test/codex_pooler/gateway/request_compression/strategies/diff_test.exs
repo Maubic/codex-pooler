@@ -227,6 +227,25 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.DiffTest do
       assert %{original_file_count: 1, addition_line_count: 1, deletion_line_count: 1} = metadata
     end
 
+    test "keeps a no-newline marker after the last retained context line" do
+      context = Enum.map_join(1..10, "\n", &" steady synthetic context line #{&1} with enough text to omit")
+      content = "--- a/x.txt\n+++ b/x.txt\n@@ -1,13 +1,13 @@\n" <> context <> "\n-old value\n+new value\n next unchanged line\n last unchanged line\n\\ No newline at end of file"
+
+      assert {:ok, %{content: compressed}} = Diff.compress(content, model: @model, min_bytes: 0)
+
+      assert String.ends_with?(compressed, " next unchanged line\n last unchanged line\n\\ No newline at end of file")
+      assert compressed =~ "[compressed diff output: omitted"
+    end
+
+    test "keeps changed-line annotations when no context is requested" do
+      context = Enum.map_join(1..24, "\n", &" steady context line #{&1}")
+      content = "--- a/x.txt\n+++ b/x.txt\n@@ -1,25 +1,25 @@\n" <> context <> "\n-old last line\n\\ No newline at end of file\n+new last line\n\\ No newline at end of file"
+
+      assert {:ok, %{content: compressed}} = Diff.compress(content, model: @model, context_lines: 0, min_bytes: 0)
+
+      assert String.ends_with?(compressed, "-old last line\n\\ No newline at end of file\n+new last line\n\\ No newline at end of file")
+    end
+
     test "skips diffs whose hunks carry no changes" do
       context = Enum.map_join(1..24, "\n", &" unchanged synthetic line #{&1}")
       content = "@@ -1,2 +1,2 @@\n-old\n+new\n" <> context <> "\n@@ -80,3 +80,3 @@\n context only one\n context only two\n"
