@@ -406,20 +406,12 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
         end
 
       {:websocket_owner_frame, ^correlation_id, ^epoch, :complete} ->
-        if quota_rejection?(state) do
-          report_quota_rejection(state)
-        else
-          report_stream_error(parent, ref, :upstream_websocket_error)
-          metadata_loop(state)
-        end
+        report_stream_error(parent, ref, :upstream_websocket_error)
+        metadata_loop(state)
 
       {:websocket_owner_frame, ^correlation_id, ^epoch, {:error, error, _payload}} ->
-        if quota_rejection?(state) do
-          report_quota_rejection(state)
-        else
-          report_stream_error(parent, ref, owner_error_reason(error))
-          metadata_loop(state)
-        end
+        report_stream_error(parent, ref, owner_error_reason(error))
+        metadata_loop(state)
 
       {:websocket_owner_frame, _correlation_id, _epoch, _payload} ->
         preflight_after_result(state)
@@ -917,6 +909,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
         |> Enum.join("\n")
 
       case CodexPooler.JSON.decode(data) do
+        {:ok, %{"response" => %{"error" => %{} = error}}} -> error
         {:ok, %{"error" => %{} = error}} -> error
         _other -> nil
       end

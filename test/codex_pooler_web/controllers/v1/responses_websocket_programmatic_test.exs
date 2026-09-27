@@ -727,6 +727,34 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketProgrammaticTest do
     end
   end
 
+  test "GET /v1/responses websocket returns a typed anchor miss from a reused upstream connection" do
+    refusal = CodexPooler.JSON.encode!(%{"type" => "error", "status" => 400, "error" => %{"type" => "invalid_request_error", "message" => "Invalid `previous_response_id`."}})
+
+    upstream =
+      start_upstream(
+        FakeUpstream.strict_sequence([
+          strict_native_turn(1, completed_websocket_frames("resp_actual_opener"), forbidden: ["previous_response_id"]),
+          strict_native_turn(1, FakeUpstream.websocket_text_frames([refusal]), equals: %{"previous_response_id" => "resp_other_anchor"})
+        ])
+      )
+
+    setup = gateway_setup(upstream)
+    port = start_public_endpoint!()
+    {conn, websocket, ref} = public_v1_websocket_connect!(port, setup, "anchor-miss-#{System.unique_integer([:positive])}")
+
+    try do
+      {conn, websocket} = send_response_create!(conn, websocket, ref, setup, %{"input" => "synthetic opener"})
+      {conn, websocket, _frames} = receive_websocket_until_terminal!(conn, websocket, ref, [])
+      {conn, websocket} = send_response_create!(conn, websocket, ref, setup, %{"previous_response_id" => "resp_other_anchor", "input" => [%{"type" => "function_call_output", "call_id" => "call_synthetic", "output" => "synthetic"}]})
+      {_conn, _websocket, frames} = receive_websocket_until_terminal_or_error!(conn, websocket, ref, [])
+      assert [%{"type" => "error", "status" => 400, "error" => %{"code" => "previous_response_not_found", "param" => "previous_response_id"}}] = frames
+      assert FakeUpstream.count(upstream) == 2
+      assert :ok = FakeUpstream.verify!(upstream)
+    after
+      Mint.HTTP.close(conn)
+    end
+  end
+
   test "GET /v1/responses websocket keeps the socket reusable after a misalignment policy terminal" do
     provider_wording = "Provider policy wording must not persist."
 

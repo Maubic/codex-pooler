@@ -253,9 +253,11 @@ annotation shapes are rejected before dispatch rather than filtered.
 
 ### Continuing with `previous_response_id`
 
+A nonblank `previous_response_id` is accepted only for a tool-output continuation. If the input has no tool-result shape, Codex Pooler returns `400 invalid_request` with `param: previous_response_id` before checking the upstream connection. This validation rule applies to HTTP and the Responses websocket.
+
 Codex Pooler forces `store: false` upstream, and the upstream provider resolves `previous_response_id` only on the websocket connection that produced the response. Over HTTP it rejects the parameter, and on any other websocket connection, a new one included, it rejects the anchor. On `/v1/responses` an anchored request therefore reaches the earlier context in two cases: on the Responses websocket route, or as a `stream: true` HTTP request on a deployment with websocket owner forwarding (see the [websocket replica caveat](/deployment/helm/#websocket-replica-caveat)) when every request of the chain, the first one included, sends the same session header, such as `session-id`. Codex Pooler then sends those requests over its session's upstream websocket.
 
-Every other anchored request is answered with a `400` before it reaches the provider:
+After input validation, an unavailable producing connection returns `400 previous_response_not_found`. Codex Pooler rejects locally detectable failures before dispatch and maps the provider’s matching stale-anchor refusal to the same error:
 
 ```json
 {

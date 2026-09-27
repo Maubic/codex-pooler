@@ -172,7 +172,7 @@ defmodule CodexPooler.Gateway.Transports.FileBridgeTest do
   test "a tempfile removed after the first attempt is rejected before a second PUT" do
     path = upload_tempfile!("synthetic upload")
     %{url: url, served_ref: ref} = start_upload_capture_server!([{:remove_file, path}, 201])
-    assert {:error, %{code: "invalid_request"}} = upload_file(url, %{"path" => path, "content_type" => "text/plain"})
+    assert {:error, %{status: 502, code: "upstream_file_upload_failed"}} = upload_file(url, %{"path" => path, "content_type" => "text/plain"})
     assert_receive {^ref, _request}, @request_detection_timeout_ms
     refute_received {^ref, _request}
   end

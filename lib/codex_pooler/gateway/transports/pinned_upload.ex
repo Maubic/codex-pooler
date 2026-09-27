@@ -13,6 +13,16 @@ defmodule CodexPooler.Gateway.Transports.PinnedUpload do
   @spec run(Req.Request.t(), :inet.ip_address(), pos_integer(), keyword()) :: {Req.Request.t(), Req.Response.t() | Exception.t()}
   def run(request, address, remaining_ms, conn_options \\ []) do
     deadline = System.monotonic_time(:millisecond) + remaining_ms
+    task = Task.async(fn -> run_until(request, address, deadline, conn_options) end)
+
+    case Task.yield(task, remaining_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      _expired -> {request, %Req.TransportError{reason: :timeout}}
+    end
+  end
+
+  defp run_until(request, address, deadline, conn_options) do
+    remaining_ms = remaining(deadline)
     options = connection_options(request.url, remaining_ms, conn_options)
 
     result =
@@ -39,7 +49,7 @@ defmodule CodexPooler.Gateway.Transports.PinnedUpload do
   defp connection_options(uri, remaining_ms, options) do
     transport_options = Keyword.get(options, :transport_opts, [])
     timeout = min(Keyword.get(transport_options, :timeout, 15_000), remaining_ms)
-    options = Keyword.put(options, :transport_opts, Keyword.put(transport_options, :timeout, timeout))
+    options = Keyword.put(options, :transport_opts, Keyword.merge(transport_options, timeout: timeout, send_timeout: remaining_ms, send_timeout_close: true))
 
     proxy_options =
       uri

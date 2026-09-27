@@ -32,6 +32,14 @@ defmodule CodexPoolerWeb.V1.ResponsesPreviousResponseConnectionTest do
     :ok
   end
 
+  test "an anchor without a tool result is rejected as invalid input before availability checks", %{conn: conn} do
+    upstream = start_upstream(completed_sse("resp_unexpected"))
+    setup = gateway_setup(upstream)
+    response = post_v1(conn, setup, turn_body(setup, %{"input" => "synthetic", "previous_response_id" => @anchor, "stream" => true}), session: session_id("invalid-input"))
+    assert %{"error" => %{"code" => "invalid_request", "param" => "previous_response_id", "message" => "previous_response_id requires a tool-output continuation"}} = json_response(response, 400)
+    assert FakeUpstream.requests(upstream) == []
+  end
+
   describe "an anchored /v1/responses request that cannot reach its producing connection" do
     test "is answered before dispatch when it is not streaming", %{conn: conn} do
       upstream = start_upstream(completed_sse("resp_v1_unexpected"))

@@ -6,7 +6,6 @@ defmodule CodexPooler.Gateway.Transports.FileBridge do
   alias CodexPooler.Files.UploadUrlPolicy
   alias CodexPooler.Files.UploadUrlPolicy.Target
   alias CodexPooler.Gateway.OpenAICompatibility.Error
-  alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Gateway.Payloads.{RequestOptions, TransportEnvelope}
   alias CodexPooler.Gateway.Routing.RoutingSelection
   alias CodexPooler.Gateway.Transports.PinnedUpload
@@ -101,7 +100,7 @@ defmodule CodexPooler.Gateway.Transports.FileBridge do
     if remaining <= 0 do
       {:error, :upload_timeout}
     else
-      result = upload_once(url, path, content_type, remaining)
+      result = upload_once(url, path, content_type, remaining) |> classify_upload_attempt(attempt)
       delay = upload_retry_delay(result, attempt)
 
       if attempt < @upload_max_attempts and retryable_upload?(result) and
@@ -114,10 +113,15 @@ defmodule CodexPooler.Gateway.Transports.FileBridge do
     end
   end
 
+  defp classify_upload_attempt({:error, %{code: "invalid_request"}}, attempt) when attempt > 1,
+    do: {:error, :upload_file_unavailable}
+
+  defp classify_upload_attempt(result, _attempt), do: result
+
   defp upload_once(%Target{url: url, address: address}, path, content_type, remaining) do
     with {:ok, body, byte_size} <- readable_file_stream(path) do
       options =
-        upload_req_options(url, body, content_type, byte_size)
+        upload_req_options(body, content_type, byte_size)
         |> Keyword.put_new(:adapter, PinnedUpload)
 
       url |> upload_request(address, remaining) |> OutboundHTTP.put(options)
@@ -213,19 +217,31 @@ defmodule CodexPooler.Gateway.Transports.FileBridge do
   end
 
   defp poll_finalize(url, identity, token, %{deadline: deadline} = retry_opts, last_retry) do
-    if retry_budget_exhausted?(deadline, last_retry) do
-      {:retry_timeout, last_retry}
-    else
-      dispatch_finalize_poll(url, identity, token, retry_opts)
+    remaining = deadline - System.monotonic_time(:millisecond)
+    if remaining <= 0, do: finalize_deadline_result(last_retry), else: dispatch_finalize_poll(url, identity, token, retry_opts, last_retry, remaining)
+  end
+
+  defp dispatch_finalize_poll(url, identity, token, retry_opts, last_retry, remaining) do
+    timeouts = TransportEnvelope.timeout_config(retry_opts.opts, @timeout_defaults)
+    bounded = %{timeouts | connect_timeout_ms: min(timeouts.connect_timeout_ms, remaining), pool_timeout_ms: min(timeouts.pool_timeout_ms, remaining), receive_timeout_ms: min(timeouts.receive_timeout_ms, remaining)}
+    opts = %{retry_opts.opts | timeout_config: bounded}
+    task = Task.async(fn -> post_json(url, identity, token, %{}, opts) end)
+    result = Task.yield(task, remaining) || Task.shutdown(task, :brutal_kill)
+
+    case result do
+      {:ok, {:ok, response}} ->
+        with {:ok, body} <- json_success(response, :finalize), do: handle_finalize_body(body, url, identity, token, retry_opts)
+
+      {:ok, {:error, _error} = error} ->
+        if System.monotonic_time(:millisecond) >= retry_opts.deadline, do: finalize_deadline_result(last_retry), else: error
+
+      _expired ->
+        finalize_deadline_result(last_retry)
     end
   end
 
-  defp dispatch_finalize_poll(url, identity, token, retry_opts) do
-    with {:ok, response} <- post_json(url, identity, token, %{}, retry_opts.opts),
-         {:ok, body} <- json_success(response, :finalize) do
-      handle_finalize_body(body, url, identity, token, retry_opts)
-    end
-  end
+  defp finalize_deadline_result(nil), do: {:error, safe_error(502, :upstream_request_failed, "upstream file bridge request failed")}
+  defp finalize_deadline_result(last_retry), do: {:retry_timeout, last_retry}
 
   defp handle_finalize_body(body, url, identity, token, retry_opts) do
     if retry_status?(body) do
@@ -354,7 +370,7 @@ defmodule CodexPooler.Gateway.Transports.FileBridge do
     path == root or String.starts_with?(path, root <> "/")
   end
 
-  defp upload_req_options(upload_url, body, content_type, byte_size) do
+  defp upload_req_options(body, content_type, byte_size) do
     configured_upload_req_options()
     |> Keyword.merge(
       body: body,
@@ -365,8 +381,7 @@ defmodule CodexPooler.Gateway.Transports.FileBridge do
       ],
       redirect: false,
       retry: false,
-      raw: true,
-      finch: OperationalSettings.upstream_http_pool_options(upload_url, [])
+      raw: true
     )
   end
 
@@ -581,11 +596,6 @@ defmodule CodexPooler.Gateway.Transports.FileBridge do
       opts: opts
     }
   end
-
-  defp retry_budget_exhausted?(_deadline, nil), do: false
-
-  defp retry_budget_exhausted?(deadline, _last_retry),
-    do: System.monotonic_time(:millisecond) >= deadline
 
   defp sleep_until_next_retry(%{interval_ms: 0}), do: :ok
 

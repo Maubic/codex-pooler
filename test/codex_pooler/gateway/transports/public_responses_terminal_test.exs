@@ -15,6 +15,27 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesTerminalTest do
   ]
 
   @tag :public_terminal_pin
+  test "SSE terminal labels supply a missing JSON type and latch the complete response" do
+    for type <- ["response.completed", "response.incomplete", "response.failed"], separator <- ["", "\n\n"] do
+      status = String.replace_prefix(type, "response.", "")
+      source = "event: " <> type <> "\ndata: " <> CodexPooler.JSON.encode!(%{"response" => %{"id" => "resp_label_only", "status" => status, "output" => []}}) <> separator
+      {wire, state} = normalize_sse(source)
+      assert List.last(public_events(wire)).event == type
+      assert state.sequence.terminal_latched?
+      assert {"", _} = StreamProtocol.normalize_public_openai_responses_sse_data(IO.iodata_to_binary(sse_event("response.completed", completed("resp_late"))), state)
+    end
+  end
+
+  test "public websocket provider anchor miss uses the same typed refusal as HTTP" do
+    frame = %{"type" => "error", "status" => 400, "error" => %{"type" => "invalid_request_error", "message" => "Invalid `previous_response_id`."}}
+    assert {:push, wire, state} = StreamProtocol.normalize_public_openai_responses_websocket_data(CodexPooler.JSON.encode!(frame), StreamProtocol.public_openai_responses_websocket_state())
+    event = CodexPooler.JSON.decode!(wire)
+    assert event["error"]["code"] == "previous_response_not_found"
+    assert event["error"]["param"] == "previous_response_id"
+    assert event["status"] == 400
+    assert state.terminal_latched?
+  end
+
   test "PIN-P01 response.completed remains a completed terminal" do
     frame =
       CodexPooler.JSON.encode!(%{

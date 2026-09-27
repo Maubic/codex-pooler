@@ -54,6 +54,18 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeUsageLimitTest do
     assert [%Attempt{status: "failed", upstream_status_code: 429, transport: "websocket"}] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
   end
 
+  test "the accepted nested usage-limit schema remains an HTTP 429 through the owner bridge", %{conn: conn} do
+    error = %{"type" => "usage_limit_reached", "code" => "usage_limit_reached", "resets_at" => DateTime.to_unix(DateTime.utc_now()) + @reset_seconds, "resets_in_seconds" => @reset_seconds}
+    frame = CodexPooler.JSON.encode!(%{"type" => "response.failed", "response" => %{"status" => "failed", "error" => error}})
+    upstream = start_upstream(FakeUpstream.websocket_text_frames([frame]))
+    setup = gateway_setup(upstream)
+    response = post_bridged(conn, setup)
+    assert response.status == 429
+    refute response.resp_body =~ "stream interrupted"
+    assert FakeUpstream.websocket_connection_count(upstream) == 1
+    assert FakeUpstream.http_request_count(upstream) == 0
+  end
+
   test "an exhausted sibling that resets sooner sets the advice", %{conn: conn} do
     resets_at = DateTime.to_unix(DateTime.utc_now()) + @reset_seconds
     refusing_upstream = start_upstream(FakeUpstream.websocket_text_frames([usage_limit_frame(resets_at)]))

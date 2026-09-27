@@ -1,8 +1,10 @@
 defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesWebsocket do
   @moduledoc false
 
+  alias CodexPooler.Gateway.OpenAICompatibility.Error
   alias CodexPooler.Gateway.OpenAICompatibility.PublicResponse
   alias CodexPooler.Gateway.OpenAICompatibility.Responses
+  alias CodexPooler.Gateway.Runtime.Finalization.Metadata
   alias CodexPooler.Gateway.Runtime.Finalization.ProviderUsageLimit
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponses
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesSequence
@@ -81,7 +83,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
   # (`PublicResponses.normalize_owner_json_message/2`).
   defp provider_rejection(%{"error" => error} = source_decoded, state, stream_id) do
     status = Map.get(source_decoded, "status", Map.get(source_decoded, "status_code"))
-    event = PublicResponse.provider_rejection_websocket_event(status, error)
+    response = %Req.Response{status: status, body: CodexPooler.JSON.encode!(%{"error" => error})}
+    event = if status == 400 and Metadata.previous_response_miss?(response), do: Adapter.websocket_error(Error.previous_response_not_found()), else: PublicResponse.provider_rejection_websocket_event(status, error)
 
     case PublicResponsesSequence.assign("error", event, state, :websocket) do
       {:emit, _type, event, state} -> {:push, CodexPooler.JSON.encode!(maybe_put_stream_id(event, stream_id)), state}

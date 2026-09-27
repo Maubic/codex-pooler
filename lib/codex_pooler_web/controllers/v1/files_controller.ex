@@ -58,20 +58,13 @@ defmodule CodexPoolerWeb.V1.FilesController do
 
   def content(conn, %{"file_id" => file_id}) do
     with_authenticated_file_admission(conn, "/v1/files/content", fn auth ->
-      with {:ok, _result} <-
-             Files.retrieve_file(
-               auth,
-               file_id,
-               conn |> request_options("/v1/files/content") |> file_request_metadata()
-             ),
-           {:ok, _request} <-
+      with {:ok, _request} <-
              Files.record_unsupported_operation(
                auth,
                file_id,
                "content",
                conn
                |> request_options("/v1/files/content")
-               |> fresh_request_options()
                |> file_request_metadata()
              ) do
         {:error, @unsupported_content}
@@ -81,20 +74,13 @@ defmodule CodexPoolerWeb.V1.FilesController do
 
   def delete(conn, %{"file_id" => file_id}) do
     with_authenticated_file_admission(conn, "/v1/files/delete", fn auth ->
-      with {:ok, _result} <-
-             Files.retrieve_file(
-               auth,
-               file_id,
-               conn |> request_options("/v1/files/delete") |> file_request_metadata()
-             ),
-           {:ok, _request} <-
+      with {:ok, _request} <-
              Files.record_unsupported_operation(
                auth,
                file_id,
                "delete",
                conn
                |> request_options("/v1/files/delete")
-               |> fresh_request_options()
                |> file_request_metadata()
              ) do
         {:error, @unsupported_content}
@@ -104,10 +90,6 @@ defmodule CodexPoolerWeb.V1.FilesController do
 
   defp with_authenticated_file_admission(conn, endpoint, fun) when is_function(fun, 1) do
     PublicGatewayDispatch.authenticated(conn, RouteClass.file_upload(), endpoint, fun)
-  end
-
-  defp fresh_request_options(%RequestOptions{} = request_options) do
-    RequestOptions.put_request_metadata(request_options, request_id: Ecto.UUID.generate())
   end
 
   defp file_request_metadata(%RequestOptions{} = request_options),

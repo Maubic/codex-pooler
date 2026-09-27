@@ -277,7 +277,7 @@ defmodule CodexPooler.Files do
   def record_unsupported_operation(auth, file_id, operation, opts \\ %{})
 
   def record_unsupported_operation(
-        %{pool: _pool, api_key: _api_key} = auth,
+        %{pool: pool, api_key: api_key} = auth,
         file_id,
         operation,
         opts
@@ -285,11 +285,24 @@ defmodule CodexPooler.Files do
       when is_binary(file_id) and is_binary(operation) do
     request_opts = RequestMetadata.build(opts, "/v1/files")
 
-    RequestLog.record_file_request(auth, "failed", 404, request_opts, %{
-      "file" => %{"id" => file_id},
-      "operation" => operation,
-      "error_code" => "unsupported_endpoint"
-    })
+    timestamp = now(opts)
+
+    Repo.transaction(fn ->
+      file = locked_owned_file(file_id, pool.id, api_key.id)
+
+      case FileState.classify(file, timestamp) do
+        state when state in [:uploaded, :local_pending, :upstream_pending] ->
+          record_file_request_or_rollback(auth, "failed", 404, request_opts, %{"file" => %{"id" => file_id}, "operation" => operation, "error_code" => "unsupported_endpoint"})
+
+        :expired ->
+          FileState.expire!(file, timestamp)
+          retrieve_file_not_found(auth, file_id, request_opts)
+
+        _missing ->
+          retrieve_file_not_found(auth, file_id, request_opts)
+      end
+    end)
+    |> unwrap_nested_transaction()
   end
 
   def record_unsupported_operation(_auth, _file_id, _operation, _opts),

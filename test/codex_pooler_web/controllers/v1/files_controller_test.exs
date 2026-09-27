@@ -111,8 +111,10 @@ defmodule CodexPoolerWeb.V1.FilesControllerTest do
     assert %{"object" => "list", "data" => [listed]} = json_response(list_conn, 200)
     assert listed["id"] == file_id
 
+    before_content = Repo.aggregate(Request, :count)
     content_conn = build_conn() |> auth(setup) |> get("/v1/files/#{file_id}/content")
     assert json_response(content_conn, 404)["error"]["code"] == "unsupported_endpoint"
+    assert Repo.aggregate(Request, :count) == before_content + 1
 
     binary_content_conn =
       build_conn()
@@ -122,8 +124,10 @@ defmodule CodexPoolerWeb.V1.FilesControllerTest do
 
     assert json_response(binary_content_conn, 404)["error"]["code"] == "unsupported_endpoint"
 
+    before_delete = Repo.aggregate(Request, :count)
     delete_conn = build_conn() |> auth(setup) |> delete("/v1/files/#{file_id}")
     assert json_response(delete_conn, 404)["error"]["code"] == "unsupported_endpoint"
+    assert Repo.aggregate(Request, :count) == before_delete + 1
 
     assert [create_request, finalize_request] = FakeUpstream.requests(upstream)
     assert create_request.path == "/backend-api/files"

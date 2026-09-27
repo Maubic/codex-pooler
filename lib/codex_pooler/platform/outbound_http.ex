@@ -200,6 +200,10 @@ defmodule CodexPooler.Platform.OutboundHTTP do
     Req.request(%{request | method: method})
   end
 
+  # This one-shot adapter owns its pinned Mint connection and proxy selection;
+  # Finch options and pool selection have no consumer on this path.
+  defp attach_proxy_selection(%Req.Request{adapter: CodexPooler.Gateway.Transports.PinnedUpload} = request), do: request
+
   defp attach_proxy_selection(%Req.Request{} = request) do
     finch_options =
       Req.Request.get_option(request, :finch) || pool_options_for_url(request.url)

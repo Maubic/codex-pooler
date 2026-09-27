@@ -123,6 +123,50 @@ defmodule CodexPooler.Gateway.Transports.PinnedUploadTest do
     refute_received {:upload_received, _, _, _, _}
   end
 
+  test "the adapter deadline interrupts a socket blocked sending the body", context do
+    {listener, port} = listener()
+    parent = self()
+
+    server =
+      Task.Supervisor.async_nolink(context.supervisor, fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 5_000)
+        :ok = :inet.setopts(socket, recbuf: 1024)
+        send(parent, {:blocked_send_peer, self()})
+        receive do: (:release_peer -> :ok)
+        :gen_tcp.close(socket)
+      end)
+
+    on_exit(fn -> if Process.alive?(server.pid), do: Process.exit(server.pid, :kill) end)
+    request = Req.new(method: :put, url: "http://upload.example:#{port}/object", body: String.duplicate("x", 8 * 1024 * 1024), headers: [{"content-length", Integer.to_string(8 * 1024 * 1024)}])
+    upload = Task.Supervisor.async_nolink(context.supervisor, fn -> PinnedUpload.run(request, {127, 0, 0, 1}, 200, transport_opts: [sndbuf: 1024]) end)
+    on_exit(fn -> if Process.alive?(upload.pid), do: Process.exit(upload.pid, :kill) end)
+    assert_receive {:blocked_send_peer, server_pid}, 5_000
+    assert {:ok, {_, %Req.TransportError{reason: :timeout}}} = Task.yield(upload, 1_500)
+    send(server_pid, :release_peer)
+    assert :ok = Task.await(server, 5_000)
+  end
+
+  test "the proxy relay accepts a peer closing after tunnel setup", context do
+    {listener, port} = listener()
+
+    server =
+      Task.Supervisor.async_nolink(context.supervisor, fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 5_000)
+        :ok = :gen_tcp.close(socket)
+        :closed
+      end)
+
+    {:ok, closed} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 5_000)
+    on_exit(fn -> :gen_tcp.close(closed) end)
+    assert :closed = Task.await(server, 5_000)
+    assert {:error, :closed} = :gen_tcp.recv(closed, 0, 5_000)
+    # The peer close is observed before the late relay write.
+    send(self(), {:tcp, :synthetic_source, "synthetic"})
+    assert :closed = relay(:synthetic_source, closed)
+    :ok = :gen_tcp.close(closed)
+    assert :closed = activate_tunnel_socket(closed)
+  end
+
   test "absolute response deadline closes the upload socket", context do
     {port, server} = start_tls_server(context, :hold)
     request = upload_request(port)
@@ -161,7 +205,18 @@ defmodule CodexPooler.Gateway.Transports.PinnedUploadTest do
       Req.new(method: :put, url: "http://upload.example:#{port}/object", body: "", headers: [{"content-length", "0"}], retry: false, redirect: false, raw: true, adapter: PinnedUpload)
       |> Req.Request.put_private(:codex_pooler_pinned_upload, {{127, 0, 0, 1}, 5_000})
 
-    assert ExUnit.CaptureIO.capture_io(:stderr, fn -> assert {:ok, %Req.Response{status: 204}} = Req.request(request) end) == ""
+    parent = self()
+
+    request =
+      Req.Request.append_response_steps(request,
+        pinned_options: fn {req, response} ->
+          send(parent, {:pinned_options, Req.Request.get_option(req, :finch), Req.Request.get_private(req, :codex_pooler_proxy_selection)})
+          {req, response}
+        end
+      )
+
+    assert ExUnit.CaptureIO.capture_io(:stderr, fn -> assert {:ok, %Req.Response{status: 204}} = OutboundHTTP.put(request, []) end) == ""
+    assert_receive {:pinned_options, nil, nil}
     assert {:error, :closed} = Task.await(server, 5_000)
   end
 
@@ -246,10 +301,14 @@ defmodule CodexPooler.Gateway.Transports.PinnedUploadTest do
             {:ok, upstream} = :gen_tcp.connect({127, 0, 0, 1}, upstream_port, [:binary, active: false], 5_000)
 
             try do
-              :ok = :gen_tcp.send(downstream, "HTTP/1.1 200 Connection Established\r\n\r\n")
-              :ok = :inet.setopts(downstream, active: true)
-              :ok = :inet.setopts(upstream, active: true)
-              relay(downstream, upstream)
+              with :ok <- :gen_tcp.send(downstream, "HTTP/1.1 200 Connection Established\r\n\r\n"),
+                   :ok <- activate_tunnel_socket(downstream),
+                   :ok <- activate_tunnel_socket(upstream) do
+                relay(downstream, upstream)
+              else
+                {:error, reason} when reason in [:closed, :einval] -> :closed
+                :closed -> :closed
+              end
             after
               :gen_tcp.close(upstream)
             end
@@ -263,15 +322,26 @@ defmodule CodexPooler.Gateway.Transports.PinnedUploadTest do
     {port, task}
   end
 
+  defp activate_tunnel_socket(socket) do
+    case :inet.setopts(socket, active: true) do
+      :ok -> :ok
+      {:error, reason} when reason in [:closed, :einval] -> :closed
+    end
+  end
+
   defp relay(downstream, upstream) do
     receive do
       {:tcp, ^downstream, data} ->
-        :ok = :gen_tcp.send(upstream, data)
-        relay(downstream, upstream)
+        case :gen_tcp.send(upstream, data) do
+          :ok -> relay(downstream, upstream)
+          {:error, reason} when reason in [:closed, :einval] -> :closed
+        end
 
       {:tcp, ^upstream, data} ->
-        :ok = :gen_tcp.send(downstream, data)
-        relay(downstream, upstream)
+        case :gen_tcp.send(downstream, data) do
+          :ok -> relay(downstream, upstream)
+          {:error, reason} when reason in [:closed, :einval] -> :closed
+        end
 
       {:tcp_closed, socket} when socket in [downstream, upstream] ->
         :closed

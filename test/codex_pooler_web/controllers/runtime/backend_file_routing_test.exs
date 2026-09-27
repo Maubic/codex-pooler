@@ -834,8 +834,8 @@ defmodule CodexPoolerWeb.Runtime.BackendFileRoutingTest do
       :codex_pooler,
       FileBridge,
       Keyword.merge(old_bridge_config,
-        finalize_retry_timeout_ms: 0,
-        finalize_retry_interval_ms: 0
+        finalize_retry_timeout_ms: 500,
+        finalize_retry_interval_ms: 1_000
       )
     )
 

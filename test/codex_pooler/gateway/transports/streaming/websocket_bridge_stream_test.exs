@@ -102,6 +102,16 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStreamTest do
     on_exit(fn -> :telemetry.detach(handler_id) end)
   end
 
+  test "nested accepted quota errors become a preflight 429 rejection" do
+    error = %{"code" => "usage_limit_reached", "type" => "usage_limit_reached", "resets_in_seconds" => 60}
+    body = "data: " <> CodexPooler.JSON.encode!(%{"type" => "response.failed", "response" => %{"status" => "failed", "error" => error}, "error" => %{"code" => "other"}}) <> "\n\n"
+    stream = start_armed(fn -> {:error, %{reason: {:quota_exhausted_first_event, %{code: "usage_limit_reached"}}, body: body, websocket_frame_headers: %{}}} end)
+    ref = stream.ref
+    assert_receive {^ref, {:preflight, decision}}, @detection_timeout_ms
+    assert {:rejected, 429, response, _headers} = decision
+    assert CodexPooler.JSON.decode!(response)["error"]["code"] == "usage_limit_reached"
+  end
+
   test "an abnormally exiting submit task fails closed with a scrubbed reason and no log" do
     logs =
       capture_log(fn ->
