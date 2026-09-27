@@ -1,4 +1,4 @@
-defmodule CodexPooler.Gateway.RequestCompression.AstraFailOpenLifecycleTest do
+defmodule CodexPooler.Gateway.RequestCompression.TokenizerLifecycleTest do
   use CodexPoolerWeb.ConnCase, async: false
 
   import Ecto.Query
@@ -21,7 +21,8 @@ defmodule CodexPooler.Gateway.RequestCompression.AstraFailOpenLifecycleTest do
   alias CodexPooler.Repo
 
   @endpoint "/backend-api/codex/responses"
-  @model "gpt-6-astra"
+  @unsupported_model "unmapped-tokenizer-model"
+  @models ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", @unsupported_model]
   @usage %{
     "input_tokens" => 17,
     "input_tokens_details" => %{"cached_tokens" => 5},
@@ -30,12 +31,9 @@ defmodule CodexPooler.Gateway.RequestCompression.AstraFailOpenLifecycleTest do
   }
   @websocket_frame_timeout 15_000
 
-  test "unsupported Astra tokenizer preserves bytes and RequestOptions in all runtime modes" do
-    assert {:error, :unsupported_model} = TokenCounter.encoding_for_model(@model)
-    assert {:error, :unsupported_model} = TokenCounter.count(@model, "synthetic sample")
-
-    for mode <- ["full", "lite"], transport <- ["http_sse", "websocket"] do
-      payload = payload("boundary-#{mode}-#{transport}")
+  test "verified and unavailable tokenizers preserve the compression contract in all runtime modes" do
+    for model_id <- @models, mode <- ["full", "lite"], transport <- ["http_sse", "websocket"] do
+      payload = payload("boundary-#{mode}-#{transport}", model_id)
       body = CodexPooler.JSON.encode!(payload)
       route_class = if transport == "websocket", do: "proxy_websocket", else: "proxy_stream"
 
@@ -49,7 +47,7 @@ defmodule CodexPooler.Gateway.RequestCompression.AstraFailOpenLifecycleTest do
           source: "override"
         })
 
-      model = %Model{exposed_model_id: @model, upstream_model_id: @model}
+      model = %Model{exposed_model_id: model_id, upstream_model_id: model_id}
 
       context = %Context{
         endpoint: @endpoint,
@@ -64,48 +62,45 @@ defmodule CodexPooler.Gateway.RequestCompression.AstraFailOpenLifecycleTest do
         }
       }
 
-      assert {^body, compressed_options} =
+      assert {compressed_body, compressed_options} =
                RequestCompression.maybe_compress(body, context, options)
+
+      assert_output!(CodexPooler.JSON.decode!(compressed_body), model_id)
 
       assert %{
                "enabled" => true,
                "attempted" => true,
-               "status" => "skipped",
-               "reason" => "tokenizer_unavailable",
                "route_class" => ^route_class,
                "transport" => ^transport,
-               "candidate_count" => 0,
-               "compressed_count" => 0,
-               "skipped_count" => 0,
-               "original_bytes" => bytes,
-               "compressed_bytes" => bytes
+               "original_bytes" => original_bytes,
+               "compressed_bytes" => compressed_bytes
              } = metadata = compressed_options.runtime.payload_compression
 
-      assert bytes == byte_size(body)
+      assert original_bytes == byte_size(body)
+      assert compressed_bytes == byte_size(compressed_body)
+      assert_compression!(metadata, model_id)
+
+      if model_id == @unsupported_model, do: assert(compressed_body == body)
 
       assert compressed_options ==
                RequestOptions.put_runtime_context(options, payload_compression: metadata)
-
-      refute Map.has_key?(metadata, "original_tokens")
-      refute Map.has_key?(metadata, "compressed_tokens")
-      refute Map.has_key?(metadata, "saved_tokens")
     end
   end
 
-  test "unsupported Astra tokenizer remains fail-open through Full and Lite HTTP SSE lifecycle" do
-    for mode <- ["full", "lite"] do
-      response_id = "resp_astra_http_#{mode}"
+  test "GPT-6 compression and unsupported-model passthrough settle Full and Lite HTTP SSE" do
+    for model <- @models, mode <- ["full", "lite"] do
+      response_id = "resp_tokenizer_http_#{mode}"
       completed = completed_event(response_id)
       upstream = start_upstream(FakeUpstream.sse_stream([completed]))
-      setup = astra_setup(upstream, mode)
+      setup = tokenizer_setup(upstream, mode, model)
       {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
-      request_payload = payload("http-#{mode}") |> Map.put("stream", true)
+      request_payload = payload("http-#{mode}", model) |> Map.put("stream", true)
 
       request_options =
         RequestOptions.build(
           %{
-            request_id: "astra-http-#{mode}-#{System.unique_integer([:positive])}",
-            accepted_turn_state: "astra-http-turn-#{mode}-#{System.unique_integer([:positive])}",
+            request_id: "tokenizer-http-#{mode}-#{System.unique_integer([:positive])}",
+            accepted_turn_state: "tokenizer-http-turn-#{mode}-#{System.unique_integer([:positive])}",
             client_ip: "127.0.0.1"
           },
           @endpoint,
@@ -123,9 +118,9 @@ defmodule CodexPooler.Gateway.RequestCompression.AstraFailOpenLifecycleTest do
     end
   end
 
-  test "unsupported Astra tokenizer remains fail-open through Full and Lite native websocket lifecycle" do
-    for mode <- ["full", "lite"] do
-      response_id = "resp_astra_websocket_#{mode}"
+  test "GPT-6 compression and unsupported-model passthrough settle Full and Lite native websocket" do
+    for model <- @models, mode <- ["full", "lite"] do
+      response_id = "resp_tokenizer_websocket_#{mode}"
 
       upstream =
         start_upstream(
@@ -138,25 +133,25 @@ defmodule CodexPooler.Gateway.RequestCompression.AstraFailOpenLifecycleTest do
           })
         )
 
-      setup = astra_setup(upstream, mode)
+      setup = tokenizer_setup(upstream, mode, model)
       {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
 
       {:ok, session} =
         Websocket.start_codex_session(
           auth,
-          accepted_turn_state: "astra-websocket-turn-#{mode}-#{System.unique_integer([:positive])}"
+          accepted_turn_state: "tokenizer-websocket-turn-#{mode}-#{System.unique_integer([:positive])}"
         )
 
       request_options =
         %{
-          request_id: "astra-websocket-#{mode}-#{System.unique_integer([:positive])}",
+          request_id: "tokenizer-websocket-#{mode}-#{System.unique_integer([:positive])}",
           client_ip: "127.0.0.1",
           codex_session: session
         }
         |> RequestOptions.for_websocket()
 
       raw_payload =
-        payload("websocket-#{mode}")
+        payload("websocket-#{mode}", model)
         |> Map.merge(%{"type" => "response.create", "stream" => true, "generate" => true})
         |> CodexPooler.JSON.encode!()
 
@@ -172,13 +167,13 @@ defmodule CodexPooler.Gateway.RequestCompression.AstraFailOpenLifecycleTest do
     end
   end
 
-  defp astra_setup(upstream, mode) do
+  defp tokenizer_setup(upstream, mode, model) do
     setup =
       gateway_setup(upstream,
-        exposed_model_id: @model,
-        upstream_model_id: @model,
-        pricing_ref: @model,
-        display_name: "GPT-6 Astra"
+        exposed_model_id: model,
+        upstream_model_id: model,
+        pricing_ref: model,
+        display_name: "Tokenizer test model"
       )
 
     setup.pool
@@ -190,7 +185,7 @@ defmodule CodexPooler.Gateway.RequestCompression.AstraFailOpenLifecycleTest do
 
     Repo.insert!(%ModelServingOverride{
       pool_id: setup.pool.id,
-      exposed_model_id: @model,
+      exposed_model_id: model,
       mode: mode,
       created_at: timestamp,
       updated_at: timestamp
@@ -200,13 +195,11 @@ defmodule CodexPooler.Gateway.RequestCompression.AstraFailOpenLifecycleTest do
   end
 
   defp assert_lifecycle!(setup, upstream, mode, transport, route_class, response_id) do
+    model = setup.model.upstream_model_id
     assert [captured] = FakeUpstream.requests(upstream)
     assert captured.path == @endpoint
-    assert captured.json["model"] == @model
-    assert captured.json["input"] |> List.last() |> Map.fetch!("output") == output_fixture()
-
-    forwarded_fingerprint = sha256(captured.json["input"] |> List.last() |> Map.fetch!("output"))
-    assert forwarded_fingerprint == sha256(output_fixture())
+    assert captured.json["model"] == model
+    assert_output!(captured.json, model)
 
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
     assert request.status == "succeeded"
@@ -219,27 +212,18 @@ defmodule CodexPooler.Gateway.RequestCompression.AstraFailOpenLifecycleTest do
     assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
     assert attempt.status == "succeeded"
     assert attempt.usage_status == "usage_known"
-    assert attempt.upstream_model_id == @model
+    assert attempt.upstream_model_id == model
 
     assert %{
              "enabled" => true,
              "attempted" => true,
-             "status" => "skipped",
-             "reason" => "tokenizer_unavailable",
              "route_class" => ^route_class,
              "transport" => ^transport,
-             "candidate_count" => 0,
-             "compressed_count" => 0,
-             "skipped_count" => 0,
-             "original_bytes" => original_bytes,
              "compressed_bytes" => compressed_bytes
            } = metadata = attempt.response_metadata["payload_compression"]
 
-    assert original_bytes == compressed_bytes
-    assert original_bytes == byte_size(captured.body)
-    refute Map.has_key?(metadata, "original_tokens")
-    refute Map.has_key?(metadata, "compressed_tokens")
-    refute Map.has_key?(metadata, "saved_tokens")
+    assert compressed_bytes == byte_size(captured.body)
+    assert_compression!(metadata, model)
     refute inspect(metadata) =~ output_fixture()
 
     assert [turn] = Repo.all(from(t in CodexTurn, where: t.request_id == ^request.id))
@@ -265,9 +249,9 @@ defmodule CodexPooler.Gateway.RequestCompression.AstraFailOpenLifecycleTest do
            ]
   end
 
-  defp payload(label) do
+  defp payload(label, model) do
     %{
-      "model" => @model,
+      "model" => model,
       "input" => [
         %{
           "type" => "function_call",
@@ -323,5 +307,31 @@ defmodule CodexPooler.Gateway.RequestCompression.AstraFailOpenLifecycleTest do
     end
   end
 
-  defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+  defp assert_output!(payload, @unsupported_model) do
+    assert payload["input"] |> List.last() |> Map.fetch!("output") == output_fixture()
+  end
+
+  defp assert_output!(payload, model) do
+    output = payload["input"] |> List.last() |> Map.fetch!("output")
+    assert CodexPooler.JSON.decode!(output) == CodexPooler.JSON.decode!(output_fixture())
+    assert byte_size(output) < byte_size(output_fixture())
+    assert {:ok, original_tokens, _} = TokenCounter.count(model, output_fixture())
+    assert {:ok, compressed_tokens, _} = TokenCounter.count(model, output)
+    assert compressed_tokens < original_tokens
+  end
+
+  defp assert_compression!(metadata, @unsupported_model) do
+    assert %{"status" => "skipped", "reason" => "tokenizer_unavailable", "candidate_count" => 0, "compressed_count" => 0, "skipped_count" => 0} = metadata
+    assert metadata["original_bytes"] == metadata["compressed_bytes"]
+    refute Map.has_key?(metadata, "original_tokens")
+    refute Map.has_key?(metadata, "compressed_tokens")
+    refute Map.has_key?(metadata, "saved_tokens")
+  end
+
+  defp assert_compression!(metadata, _model) do
+    assert %{"status" => "compressed", "candidate_count" => 1, "compressed_count" => 1, "skipped_count" => 0, "token_count_mode" => "exact", "strategies" => ["json_document_lossless"]} = metadata
+    assert metadata["original_bytes"] > metadata["compressed_bytes"]
+    assert metadata["original_tokens"] > metadata["compressed_tokens"]
+    assert metadata["saved_tokens"] == metadata["original_tokens"] - metadata["compressed_tokens"]
+  end
 end

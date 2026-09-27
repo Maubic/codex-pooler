@@ -72,7 +72,7 @@ defmodule CodexPooler.Gateway.RequestCompression.TokenCounter do
     normalized = model |> String.trim() |> String.downcase()
 
     cond do
-      normalized in ["o200k_base", "gpt-4o", "gpt-4o-mini"] ->
+      normalized in ["o200k_base", "gpt-4o", "gpt-4o-mini", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] ->
         {:ok, :o200k_base}
 
       String.starts_with?(normalized, [

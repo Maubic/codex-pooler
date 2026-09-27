@@ -3,7 +3,18 @@ defmodule CodexPooler.Gateway.RequestCompression.TokenCounterTest do
 
   alias CodexPooler.Gateway.RequestCompression.TokenCounter
 
+  @gpt6_models ~w(gpt-6-astra gpt-6-sol gpt-6-luna)
+
   describe "count/2" do
+    for model <- @gpt6_models do
+      test "counts #{model} text with the provider-verified o200k encoding" do
+        for {text, expected} <- [{"Hello, world!", 4}, {"مرحبا بالعالم", 4}, {"こんにちは世界。文字列のトークン数を正確に数えます。", 18}] do
+          assert {:ok, ^expected, %{tokenizer: "codex_pooler:tiktoken", encoding: "o200k_base"}} = TokenCounter.count(unquote(model), text)
+          assert {:ok, ^expected, %{encoding: "o200k_base"}} = TokenCounter.count_lower_bound(unquote(model), text)
+        end
+      end
+    end
+
     test "counts o200k models with local rank data" do
       assert {:ok, 4, %{tokenizer: "codex_pooler:tiktoken", encoding: "o200k_base"}} =
                TokenCounter.count("gpt-4o", "Hello, world!")
@@ -97,12 +108,18 @@ defmodule CodexPooler.Gateway.RequestCompression.TokenCounterTest do
         {"gpt-5", {:ok, :o200k_base}},
         {"gpt-5-mini", {:ok, :o200k_base}},
         {"gpt-5-nano", {:ok, :o200k_base}},
+        {"gpt-6-astra", {:ok, :o200k_base}},
+        {"gpt-6-sol", {:ok, :o200k_base}},
+        {"gpt-6-luna", {:ok, :o200k_base}},
+        {" GPT-6-ASTRA ", {:ok, :o200k_base}},
         {"GPT-5", {:ok, :o200k_base}},
         {" GpT-5-mini ", {:ok, :o200k_base}},
         {"GPT-4", {:ok, :cl100k_base}},
         {"GPT-4-Turbo", {:ok, :cl100k_base}},
         {"gpt5", {:error, :unsupported_model}},
-        {"gpt-6", {:error, :unsupported_model}}
+        {"gpt-6", {:error, :unsupported_model}},
+        {"gpt-6-future", {:error, :unsupported_model}},
+        {"gpt-6-astra-unverified", {:error, :unsupported_model}}
       ]
 
       for {model, expected} <- cases do
