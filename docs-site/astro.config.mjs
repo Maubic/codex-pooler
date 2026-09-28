@@ -130,6 +130,7 @@ export default defineConfig({
       disable404Route: true,
       components: {
         PageTitle: "./src/components/PageTitle.astro",
+        Sidebar: "./src/components/Sidebar.astro",
       },
       plugins: [
         starlightPageActions({

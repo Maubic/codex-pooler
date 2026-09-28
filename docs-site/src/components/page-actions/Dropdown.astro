@@ -38,11 +38,12 @@ const dropdownId = id ? `dropdown-${id}` : "dropdown-0";
     position: relative;
   }
 
+  /* Opens leftwards from the toggle's right edge, which keeps it on screen beside Copy Markdown. */
   #dropdown-menu {
     position: absolute;
     top: calc(100% + 0.5rem);
-    left: 0;
-    right: auto;
+    right: 0;
+    left: auto;
     background-color: var(--sl-color-gray-6);
     border: 1px solid var(--sl-color-gray-5);
     border-radius: 0.25rem;
@@ -82,13 +83,6 @@ const dropdownId = id ? `dropdown-${id}` : "dropdown-0";
 
   .dropdown-item .external-icon {
     margin-left: auto;
-  }
-
-  @media (min-width: 425px) {
-    #dropdown-menu {
-      right: 0;
-      left: auto;
-    }
   }
 </style>
 

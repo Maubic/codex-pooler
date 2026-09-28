@@ -1,0 +1,28 @@
+---
+// Starlight's sidebar, plus one step: bring the current page's entry into view. Starlight restores the
+// sidebar scroll position within a session, but a fresh visit starts at the top, where long groups can
+// push the current entry below the fold. On phones the sidebar is a menu, so this runs when it opens.
+import Default from "@astrojs/starlight/components/Sidebar.astro";
+---
+
+<Default><slot /></Default>
+
+<script is:inline>
+  (() => {
+    try {
+      const pane = document.getElementById("starlight__sidebar");
+      const current = pane?.querySelector('a[aria-current="page"]');
+      if (!current) return;
+      const reveal = () => {
+        // Leave a group the reader collapsed in this session closed, as Starlight does.
+        if (current.closest("details:not([open])")) return;
+        const view = pane.getBoundingClientRect();
+        const entry = current.getBoundingClientRect();
+        if (entry.top >= view.top && entry.bottom <= view.bottom) return;
+        pane.scrollTop += entry.top - view.top - (view.height - entry.height) / 2;
+      };
+      if (matchMedia("(min-width: 50em)").matches) reveal();
+      pane.addEventListener("toggle", (event) => event.newState === "open" && reveal());
+    } catch {}
+  })();
+</script>

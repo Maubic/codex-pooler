@@ -154,7 +154,7 @@ const shareOptions = [
 {
   pageActions || typeof pageActions === "undefined" ? (
     <DefaultPageTitle />
-    <div class="actions-container">
+    <div class="actions-container" data-pagefind-ignore>
       <Button id="copy-markdown" dataPath={currentMarkdownPath}>
         <Icon name="mdx" size="1rem" class="icon-default" />
         <Icon name="approve-check" size="1rem" class="icon-success" />
@@ -181,8 +181,9 @@ const shareOptions = [
     gap: 0.5rem;
   }
 
+  /* One row whenever the buttons fit, even on phones; wrap only when they do not. */
   .actions-container {
-    flex-direction: column;
+    flex-wrap: wrap;
   }
 
   #copy-markdown:disabled {
@@ -205,12 +206,6 @@ const shareOptions = [
 
   :global(#copy-markdown.error .icon-error) {
     display: block;
-  }
-
-  @media (min-width: 425px) {
-    .actions-container {
-      flex-direction: row;
-    }
   }
 </style>
 

@@ -30,23 +30,36 @@
   src: url("/fonts/roboto-condensed/roboto-condensed-700.ttf") format("truetype");
 }
 
+/*
+  Accent palette. Starlight reads the accent variables with fixed roles: `text-accent` colours links,
+  the current table-of-contents entry and the header icons; `accent-low` sits behind text (focused
+  search results, default badges); `text-invert` is the text on accent fills. Brand orange is too
+  light for text on white (2.4:1), so light mode writes text with the landing page's orange ink.
+*/
 :root {
   --cp-font-sans: "Roboto Condensed", ui-sans-serif, system-ui, sans-serif;
+  /* Brand orange: fills, borders, and accent text on the dark theme (7.3:1 on its page background). */
   --cp-color-primary: #fe8618;
+  /* Orange ink for text on light backgrounds (5.5:1 on white). */
+  --cp-color-primary-ink: #a65200;
+  /* Text on brand-orange fills (7.6:1). */
+  --cp-color-on-primary: #111318;
 
   --sl-font: var(--cp-font-sans);
-  --sl-color-accent-low: var(--cp-color-primary);
+  --sl-color-accent-low: #4f3217;
   --sl-color-accent: var(--cp-color-primary);
   --sl-color-accent-high: var(--cp-color-primary);
   --sl-color-text-accent: var(--cp-color-primary);
+  --sl-color-text-invert: var(--cp-color-on-primary);
   --sl-color-bg-accent: var(--cp-color-primary);
 }
 
 :root[data-theme="light"] {
-  --sl-color-accent-low: var(--cp-color-primary);
+  --sl-color-accent-low: #fce5cf;
   --sl-color-accent: var(--cp-color-primary);
-  --sl-color-accent-high: var(--cp-color-primary);
-  --sl-color-text-accent: var(--cp-color-primary);
+  --sl-color-accent-high: var(--cp-color-primary-ink);
+  --sl-color-text-accent: var(--cp-color-primary-ink);
+  --sl-color-text-invert: var(--sl-color-black);
   --sl-color-bg-accent: var(--cp-color-primary);
 }
 
@@ -60,13 +73,58 @@ header a[href="/"] {
   text-transform: uppercase;
 }
 
+/* The wordmark keeps the brand orange in both themes, like the landing page; a logotype is exempt from contrast minimums. */
 .site-title,
 .site-title:visited {
   color: var(--cp-color-primary);
 }
 
+/* Orange fills carry dark ink in both themes, like the landing page's primary buttons. */
 .sidebar-content a[aria-current="page"],
 .sidebar-content a[aria-current="page"]:visited {
   border-color: var(--cp-color-primary);
-  color: #111318;
+  background-color: var(--cp-color-primary);
+  color: var(--cp-color-on-primary);
+}
+
+.sl-link-button.primary,
+.sl-link-button.primary:hover {
+  border-color: var(--cp-color-primary);
+  background: var(--cp-color-primary);
+  color: var(--cp-color-on-primary);
+}
+
+/* A hero without an image (the 404 page) stays centred on wide screens too, as it is on phones. */
+@media (min-width: 50rem) {
+  .hero:not(:has(> img, > .hero-html)) {
+    grid-template-columns: 100%;
+  }
+
+  .hero:not(:has(> img, > .hero-html)) .stack {
+    text-align: center;
+  }
+
+  .hero:not(:has(> img, > .hero-html)) .copy {
+    align-items: center;
+  }
+
+  .hero:not(:has(> img, > .hero-html)) .actions {
+    justify-content: center;
+  }
+}
+
+/*
+  Short landscape screens: a slimmer header, and the mobile "On this page" bar scrolls away with the
+  page instead of staying fixed under the header. Anchor jumps then only clear the header.
+*/
+@media (max-height: 500px) {
+  :root {
+    --sl-nav-height: 3rem;
+    --sl-nav-pad-y: 0.25rem;
+    scroll-padding-top: calc(1.5rem + var(--sl-nav-height));
+  }
+
+  mobile-starlight-toc > nav {
+    position: absolute;
+  }
 }
