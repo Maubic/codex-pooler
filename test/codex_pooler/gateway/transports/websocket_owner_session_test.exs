@@ -8041,19 +8041,24 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     }
   end
 
-  defp await_lost_owner_state(owner, attempts \\ 1_000)
-  defp await_lost_owner_state(_owner, 0), do: flunk("owner did not record monitored loss")
-
-  defp await_lost_owner_state(owner, attempts) do
+  # The owner records the loss when its monitor of the killed downstream
+  # fires, and nothing tells the test when it has: its state is polled on the
+  # monotonic detection deadline, not a count of scheduler yields (findings#270
+  # row 270-162).
+  defp await_lost_owner_state(owner, deadline \\ detection_deadline()) do
     case :sys.get_state(owner) do
       %{active_turn: %{descriptor: %{downstream_status: :lost}}} = state ->
         state
 
-      _state ->
-        :erlang.yield()
-        await_lost_owner_state(owner, attempts - 1)
+      state ->
+        if poll_again?(deadline),
+          do: await_lost_owner_state(owner, deadline),
+          else: flunk("owner did not record the monitored downstream loss within #{@detection_timeout_ms} ms (downstream_status #{inspect(observed_downstream_status(state))})")
     end
   end
+
+  defp observed_downstream_status(%{active_turn: %{descriptor: %{downstream_status: status}}}), do: status
+  defp observed_downstream_status(_state), do: nil
 
   defp replay_owner_context(context, label) do
     context = %{

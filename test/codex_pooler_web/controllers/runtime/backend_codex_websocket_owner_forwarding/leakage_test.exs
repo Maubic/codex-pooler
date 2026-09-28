@@ -21,6 +21,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.LeakageTes
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport.TurnBudgetNodeClient
 
   @sentinel "SECRET_SENTINEL_DO_NOT_STORE_123"
+  # Detection budget for a process to mark itself sensitive; the check returns
+  # as soon as its mailbox reads empty.
+  @mailbox_detection_timeout_ms 15_000
 
   setup do
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
@@ -388,10 +391,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.LeakageTes
   defp assert_sensitive_process_hides_mailbox!(pid) when is_pid(pid) do
     marker = {:sensitive_probe, make_ref(), @sentinel}
     send(pid, marker)
-    assert_process_messages_hidden!(pid, 100)
+    assert_process_messages_hidden!(pid, System.monotonic_time(:millisecond) + @mailbox_detection_timeout_ms)
   end
 
-  defp assert_process_messages_hidden!(pid, attempts) when attempts > 0 do
+  # A process marks itself sensitive as it starts its work, and nothing tells
+  # the test when it has: its mailbox is read against one monotonic deadline,
+  # not a count of scheduler yields (findings#270 row 270-162).
+  defp assert_process_messages_hidden!(pid, deadline) do
     case :erlang.process_info(pid, :messages) do
       {:messages, []} ->
         :ok
@@ -400,12 +406,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.LeakageTes
         flunk("sensitive process exited before introspection check")
 
       _messages ->
-        yield_once({:assert_process_messages_hidden, pid, attempts})
-        assert_process_messages_hidden!(pid, attempts - 1)
+        if System.monotonic_time(:millisecond) >= deadline,
+          do: flunk("sensitive process exposed its mailbox for #{@mailbox_detection_timeout_ms} ms")
+
+        receive do
+        after
+          1 -> assert_process_messages_hidden!(pid, deadline)
+        end
     end
   end
-
-  defp assert_process_messages_hidden!(_pid, 0), do: flunk("sensitive process exposed mailbox")
 
   defp crashing_owner_upstream_boundary(test_pid) do
     %{
