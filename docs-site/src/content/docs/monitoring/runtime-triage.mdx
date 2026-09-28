@@ -58,9 +58,11 @@ If the signal is sustained or concentrated on one replica, compare node clocks a
 
 | Label combination | Interpretation |
 | --- | --- |
-| `reason="connection_closed", stage="armed"` | A connection ended while a possible compaction was armed |
-| `reason="final_success", stage="finalizing"` | An in-band compaction completed |
+| `reason="connection_closed", stage="armed"` | With `topology="direct"`, a connection ended while a possible compaction was armed; with `topology="forwarded"`, the provider closed the upstream connection (a closing socket there ends the admission as `downstream_detached`) |
+| `reason="connection_closed"` while `compacting` or `finalizing` | The upstream connection closed under the admission: a compaction already collected is still delivered and its final runs as an ordinary turn |
 | Other clears while `compacting` or `finalizing` | Investigate an incomplete compaction using its reason and logs |
+
+A completed in-band compaction ends no admission: the final request's own success arms the next one, so no clear counts completed compactions. `final_success` belongs to the reason vocabulary, but no serving path clears with it.
 
 `topology` distinguishes `direct` from `forwarded`. Reasons such as `compact_failure` and `final_failure` identify unsuccessful exchanges; owner lifecycle, client departure and explicit request rejection have their own reasons.
 
