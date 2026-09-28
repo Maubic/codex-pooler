@@ -1,6 +1,8 @@
-# Codex Pooler Public Docs For Agents
+# Codex Pooler
 
-Last reviewed: 2026-09-28
+> Codex Pooler is a self-hosted gateway for OpenAI Codex: Pools of Codex accounts behind stable Pool API keys, the Codex backend routes, a narrow OpenAI-compatible /v1 surface, and metadata-only operations. This file indexes its public docs for agents and answer engines.
+
+Last reviewed: 2026-09-29
 
 Inventory scope: curated primary and discovery pages listed below; this index intentionally excludes other rendered pages.
 
@@ -9,79 +11,79 @@ Canonical llms index: https://www.codex-pooler.com/llms.txt
 Short answer reference: https://www.codex-pooler.com/answers.md
 Pricing and availability: https://www.codex-pooler.com/pricing.md
 
-Primary public docs:
-- https://www.codex-pooler.com/docs/getting-started/quick-start/
-- https://www.codex-pooler.com/docs/getting-started/configuration/
-- https://www.codex-pooler.com/docs/clients/codex-cli-desktop/
-- https://www.codex-pooler.com/docs/clients/openai-compatible/
-- https://www.codex-pooler.com/docs/clients/aider/
-- https://www.codex-pooler.com/docs/clients/continue/
-- https://www.codex-pooler.com/docs/clients/cline/
-- https://www.codex-pooler.com/docs/clients/deepseek-harness/
-- https://www.codex-pooler.com/docs/clients/goose/
-- https://www.codex-pooler.com/docs/clients/kilo-code/
-- https://www.codex-pooler.com/docs/clients/opencode/
-- https://www.codex-pooler.com/docs/clients/opencode-v2/
-- https://www.codex-pooler.com/docs/clients/openclaw/
-- https://www.codex-pooler.com/docs/clients/openhands/
-- https://www.codex-pooler.com/docs/clients/omp/
-- https://www.codex-pooler.com/docs/clients/pi/
-- https://www.codex-pooler.com/docs/clients/trae/
-- https://www.codex-pooler.com/docs/clients/hermes/
-- https://www.codex-pooler.com/docs/clients/windmill/
-- https://www.codex-pooler.com/docs/reference/runtime-routes/
-- https://www.codex-pooler.com/docs/reference/routing-strategies/
-- https://www.codex-pooler.com/docs/reference/responses-lite-vs-full/
-- https://www.codex-pooler.com/docs/operators/admin-ui/
-- https://www.codex-pooler.com/docs/operators/alerts/
-- https://www.codex-pooler.com/docs/deployment/docker-compose/
-- https://www.codex-pooler.com/docs/deployment/helm/
-- https://www.codex-pooler.com/docs/monitoring/overview/
-- https://www.codex-pooler.com/docs/monitoring/metrics/
-- https://www.codex-pooler.com/docs/monitoring/grafana/
-- https://www.codex-pooler.com/docs/monitoring/runtime-triage/
-- https://www.codex-pooler.com/docs/monitoring/promql/
-- https://www.codex-pooler.com/docs/monitoring/logs/
+## Primary public docs
+- [Start Codex Pooler Locally](https://www.codex-pooler.com/docs/getting-started/quick-start/): Start Codex Pooler locally with Docker Compose, create the first owner, add upstream capacity, issue a Pool API key, and test runtime URLs.
+- [Configuration](https://www.codex-pooler.com/docs/getting-started/configuration/): Configure release environment variables, runtime URLs, and public-safe operation boundaries.
+- [Codex CLI / Desktop on Codex Pooler](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/): Point Codex CLI and Codex Desktop at Codex Pooler: one shared config.toml provider, a Pool API key, HTTP/SSE fallback and optional operator MCP access.
+- [OpenAI-Compatible SDKs](https://www.codex-pooler.com/docs/clients/openai-compatible/): Configure selected OpenAI SDK-compatible clients through Codex Pooler's narrow /v1 surface, Pool API keys, supported routes, and unsupported boundaries.
+- [Aider on Codex Pooler](https://www.codex-pooler.com/docs/clients/aider/): Configure Aider with Codex Pooler's narrow OpenAI-compatible /v1 surface and a Pool API key.
+- [Continue on Codex Pooler](https://www.codex-pooler.com/docs/clients/continue/): Set up Continue with Codex Pooler's OpenAI-compatible /v1 endpoint: where config.yaml lives, model capabilities and optional operator MCP access.
+- [Cline on Codex Pooler](https://www.codex-pooler.com/docs/clients/cline/): Configure Cline with Codex Pooler's narrow OpenAI-compatible /v1 surface and optional operator MCP metadata access.
+- [DeepSeek Harness on Codex Pooler](https://www.codex-pooler.com/docs/clients/deepseek-harness/): Connect DeepSeek Harness (dsh) to Codex Pooler with a custom OpenAI Responses provider on the /v1 endpoint, a Pool API key and a headless check run.
+- [Goose on Codex Pooler](https://www.codex-pooler.com/docs/clients/goose/): Configure Goose with Codex Pooler's narrow OpenAI-compatible /v1 Responses path, config.yaml file locations, and optional operator MCP metadata access.
+- [Kilo Code on Codex Pooler](https://www.codex-pooler.com/docs/clients/kilo-code/): Configure Kilo Code CLI with Codex Pooler's narrow OpenAI-compatible /v1 chat-completions surface and a Pool API key.
+- [OpenCode v1 on Codex Pooler](https://www.codex-pooler.com/docs/clients/opencode/): Configure OpenCode and optional OMO model routing with Codex Pooler's narrow OpenAI-compatible /v1 surface.
+- [OpenCode v2 on Codex Pooler](https://www.codex-pooler.com/docs/clients/opencode-v2/): Connect OpenCode v2 through the native Responses provider, with explicit models, context budgets, tools and session settings.
+- [OpenClaw on Codex Pooler](https://www.codex-pooler.com/docs/clients/openclaw/): Configure OpenClaw with Codex Pooler's narrow OpenAI-compatible /v1 surface, current runtime id, model metadata, and optional operator MCP endpoint.
+- [OpenHands on Codex Pooler](https://www.codex-pooler.com/docs/clients/openhands/): Connect OpenHands Agent Canvas and its Docker backend to Codex Pooler with an OpenAI-compatible LLM profile, a Pool API key, and a backend-reachable /v1 URL.
+- [OMP on Codex Pooler](https://www.codex-pooler.com/docs/clients/omp/): Configure Oh My Pi (OMP) with Codex Pooler's narrow OpenAI-compatible /v1 Responses surface and a Pool API key.
+- [Pi on Codex Pooler](https://www.codex-pooler.com/docs/clients/pi/): Configure Pi coding agent with Codex Pooler's narrow OpenAI-compatible /v1 Responses surface, Pi models/settings file locations, and a Pool API key.
+- [Trae on Codex Pooler](https://www.codex-pooler.com/docs/clients/trae/): Configure Trae or Trae CN with Codex Pooler's narrow OpenAI-compatible /v1 chat-completions surface and a Pool API key.
+- [Hermes Agent on Codex Pooler](https://www.codex-pooler.com/docs/clients/hermes/): Configure Hermes Agent with Codex Pooler's narrow OpenAI-compatible /v1 surface, image generation, speech-to-text, and operator MCP endpoint.
+- [Windmill AI on Codex Pooler](https://www.codex-pooler.com/docs/clients/windmill/): Configure Windmill AI with Codex Pooler's narrow OpenAI-compatible /v1 chat completions surface and a dedicated Pool API key.
+- [Runtime Routes](https://www.codex-pooler.com/docs/reference/runtime-routes/): Codex Pooler runtime route map for /backend-api/codex, backend bridges, narrow /v1 SDK compatibility, usage routes, MCP metadata, and unsupported boundaries.
+- [Routing Strategies](https://www.codex-pooler.com/docs/reference/routing-strategies/): How Codex Pooler authenticates Pool API keys, applies eligibility checks, preserves continuity, uses quota evidence, and chooses upstream accounts.
+- [Responses Lite And Full](https://www.codex-pooler.com/docs/reference/responses-lite-vs-full/): What the Codex Responses Lite request dialect changes on the wire, how Codex Pooler picks Lite or Full per Pool and model, and what it means for clients.
+- [Operator admin UI](https://www.codex-pooler.com/docs/operators/admin-ui/): Manage Pools, upstream accounts, Pool API keys, request metadata, audit metadata, jobs, and system settings from Codex Pooler.
+- [Alerts and incident signals](https://www.codex-pooler.com/docs/operators/alerts/): Read public-safe Codex Pooler alerts, health states, request metadata, audit metadata, jobs, and system settings signals without exposing content bodies.
+- [Run Codex Pooler with Docker Compose](https://www.codex-pooler.com/docs/deployment/docker-compose/): Run Codex Pooler with Docker Compose for a small self-hosted install.
+- [Deploy Codex Pooler on Kubernetes with Helm](https://www.codex-pooler.com/docs/deployment/helm/): Deploy Codex Pooler to Kubernetes from the iCoreTech Helm repository.
+- [Monitoring](https://www.codex-pooler.com/docs/monitoring/overview/): Set up metrics, import the Grafana dashboard, and choose the right evidence when investigating Codex Pooler.
+- [Metrics setup](https://www.codex-pooler.com/docs/monitoring/metrics/): Secure and collect Codex Pooler Prometheus metrics, including Helm ServiceMonitor settings and coverage across release roles.
+- [Grafana dashboards](https://www.codex-pooler.com/docs/monitoring/grafana/): Import and use the Codex Pooler runtime triage dashboard, with collector requirements and guidance for reading empty or partial panels.
+- [Runtime triage](https://www.codex-pooler.com/docs/monitoring/runtime-triage/): Interpret Codex Pooler refusal, connection, routing and saved-reset signals without confusing missing telemetry with absent events.
+- [PromQL recipes](https://www.codex-pooler.com/docs/monitoring/promql/): Focused Prometheus queries for Codex Pooler traffic, gateway pressure, PostgreSQL timings, memory and telemetry relay health.
+- [Logs and memory](https://www.codex-pooler.com/docs/monitoring/logs/): Correlate Codex Pooler application and ingress logs, and use the memory sampler to investigate pressure on web, worker and scheduler roles.
 
-AI search discovery pages:
-- https://www.codex-pooler.com/docs/discovery/ai-coding-agent-gateway/
-- https://www.codex-pooler.com/docs/discovery/self-hosted-codex-gateway/
-- https://www.codex-pooler.com/docs/discovery/codex-account-pooling/
-- https://www.codex-pooler.com/docs/discovery/openai-compatible-codex-gateway/
-- https://www.codex-pooler.com/docs/discovery/codex-pooler-vs-direct-credentials/
+## AI search discovery pages
+- [AI Coding Agent Gateway](https://www.codex-pooler.com/docs/discovery/ai-coding-agent-gateway/): Codex Pooler as a self-hosted gateway for AI coding agents: Codex backend clients and selected /v1 SDK clients on Pool API keys, with MCP metadata.
+- [Self-Hosted Codex Gateway](https://www.codex-pooler.com/docs/discovery/self-hosted-codex-gateway/): Codex Pooler is a self-hosted gateway for Codex clients: stable Pool API keys, shared account capacity and metadata-only logs, on Compose or Kubernetes.
+- [Codex Account Pooling](https://www.codex-pooler.com/docs/discovery/codex-account-pooling/): How Codex account pooling works in Codex Pooler: Pools, account assignments, routing eligibility, session continuity and metadata-only request logs.
+- [OpenAI-Compatible Codex Gateway](https://www.codex-pooler.com/docs/discovery/openai-compatible-codex-gateway/): Use Codex accounts from OpenAI SDK clients through Codex Pooler's /v1 endpoint: selected routes such as Responses and Chat Completions, not full parity.
+- [Codex Pooler Vs Direct Credentials](https://www.codex-pooler.com/docs/discovery/codex-pooler-vs-direct-credentials/): Pool API keys versus copying Codex logins: how Codex Pooler keeps account credentials on one server and manages keys, routing and request evidence.
 
-What Codex Pooler is:
+## What Codex Pooler is
 Codex Pooler is a self-hosted gateway for sharing Codex account capacity across trusted agents, tools, and teams. Clients use stable Pool API keys, and operators manage Pools, upstream accounts, routing, request logs, audit logs, and metadata-only MCP access.
 
-AI coding agent gateway summary:
+## AI coding agent gateway summary
 Codex Pooler can serve as a self-hosted gateway for trusted AI coding agents. Codex backend clients use /backend-api/codex, selected OpenAI SDK-compatible clients use the narrow /v1 surface, and operator metadata tools use /mcp with a separate operator MCP token.
 
-Who Codex Pooler is for:
+## Who Codex Pooler is for
 Codex Pooler is for operators and client integrators who already manage trusted Codex accounts and want shared capacity, stable client credentials, route policy, account readiness checks, and metadata-only operational evidence. It is not a hosted provider, a general OpenAI API clone, or a way to bypass account terms and limits.
 
-Client base URLs:
+## Client base URLs
 - Codex backend-compatible clients use https://codex-pooler.example.com/backend-api/codex.
 - Selected OpenAI SDK-compatible clients use https://codex-pooler.example.com/v1.
 - Operator metadata tools use https://codex-pooler.example.com/mcp.
 - Local setup uses http://localhost:4000 with the same paths.
 
-Service-tier compatibility:
+## Service-tier compatibility
 - Use priority as the canonical service_tier spelling for new client configuration. fast is an accepted equivalent request spelling.
 - /backend-api/codex relays provider bytes, frames, and service-tier vocabulary unchanged.
 - /v1 translates supported OpenAI request and response shapes while preserving any projected provider service_tier value in its literal provider vocabulary.
 - Direct /v1/responses accepts literal ultrafast only for HTTP JSON, HTTP SSE, and the Responses WebSocket. The selected provider must advertise ultrafast in service_tiers or additional_speed_tiers; /v1/chat/completions rejects it as invalid_request at service_tier.
 
-Hosted shell history replay:
+## Hosted shell history replay
 - /v1/responses and its narrow Responses WebSocket accept completed shell_call and shell_call_output history as closed-key replay data.
 - This forwards history and relays the five hosted-shell command/output event types; it does not execute commands, accept shell tool declarations, local-shell history, or remote MCP tool definitions.
 - Command and output content remain transient and metadata-only. This is not broad hosted-tool or OpenAI parity.
 
-Supported route families:
+## Supported route families
 - /backend-api: Codex backend compatibility route for authenticated Codex clients. Important paths include /backend-api/codex/models, /backend-api/codex/responses, /backend-api/codex/responses/compact, /backend-api/codex/v1/* aliases, /backend-api/files, /backend-api/transcribe, and usage routes such as /backend-api/wham/usage.
 - /v1: narrow OpenAI-compatible /v1 surface for selected SDK routes. Supported or translated examples include /v1/models, /v1/responses, GET /v1/responses for narrow Responses websocket compatibility, /v1/chat/completions, /v1/usage, /v1/files metadata and create routes, /v1/audio/transcriptions, /v1/images/generations, and /v1/images/edits.
 - /mcp: root operator MCP endpoint. POST /mcp is metadata-only, read-only Streamable HTTP JSON-RPC. It uses operator-owned MCP bearer tokens, not Pool API keys or browser sessions.
 
-Unsupported boundaries:
+## Unsupported boundaries
 - Codex Pooler does not provide full OpenAI API parity.
 - Unsupported /v1 routes may return deterministic OpenAI-shaped unsupported endpoint errors when explicitly routed.
 - Unsupported /v1 examples include /v1/responses/compact, /v1/files/:file_id/content, DELETE /v1/files/:file_id, POST /v1/content_provenance_checks, /v1/embeddings, /v1/batches, /v1/moderations, /v1/fine_tuning/jobs, /v1/images/variations, response retrieve, response cancel, and response delete routes.
@@ -90,18 +92,18 @@ Unsupported boundaries:
 - Codex Pooler supports Codex model-provider traffic only; it does not proxy Codex app-server helper routes.
 - GET /mcp stateless SSE is unavailable today.
 
-Credential boundaries:
+## Credential boundaries
 - Use Pool API keys for /backend-api and /v1 runtime requests.
 - Use operator-owned MCP tokens for /mcp.
 - Do not use Pool API keys for /mcp.
 - Do not use MCP tokens for /backend-api or /v1.
 - Do not put raw keys, tokens, cookies, auth.json, access tokens, refresh tokens, invite tokens, or upstream secrets in docs, tickets, logs, screenshots, examples, or prompts.
 
-Privacy boundaries:
+## Privacy boundaries
 - Codex Pooler observability is metadata-only. Safe examples can mention route family, endpoint path, method, status class, Pool label, upstream label, model name, synthetic request-log id, error code, retry count, duration, token count, and timestamp.
 - Do not include raw prompts, completions, request bodies, response bodies, multipart bodies, websocket frames, file bytes, audio bytes, image bytes, data URLs, transcripts, bearer tokens, cookies, Pool API keys, MCP tokens, auth.json, access tokens, refresh tokens, raw upload URLs, raw idempotency keys, private hostnames, real account ids, raw emails, or private IP addresses.
 
-Agent guidance:
+## Agent guidance
 - Use https://www.codex-pooler.com/docs/discovery/ai-coding-agent-gateway/ for short answers about Codex Pooler as a self-hosted AI coding agent gateway.
 - Start with https://www.codex-pooler.com/docs/clients/codex-cli-desktop/ when configuring Codex CLI or Codex Desktop with CODEX_HOME/config.toml, model_provider=codex-pooler-ws, and the /backend-api/codex route.
 - Start with https://www.codex-pooler.com/docs/clients/openai-compatible/ when configuring selected OpenAI SDK-compatible clients.

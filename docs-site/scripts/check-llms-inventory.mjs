@@ -69,15 +69,21 @@ const canonicalUrl = (path) => `${canonicalDocs}${path}`;
 
 const read = (path) => readFile(path, "utf8");
 
+// llms.txt follows llmstxt.org: an H1, a blockquote summary, then "## " sections whose
+// inventory entries are Markdown links, "- [Title](url): description".
 const parseSection = (text, heading) => {
-  const headingIndex = text.indexOf(`${heading}:`);
-  if (headingIndex === -1) fail(`missing section ${heading}`);
+  const marker = `\n## ${heading}\n`;
+  const headingIndex = text.indexOf(marker);
+  if (headingIndex === -1) fail(`missing section ## ${heading}`);
 
-  const sectionStart = headingIndex + heading.length + 1;
-  const nextHeading = text.indexOf("\n\n", sectionStart);
+  const sectionStart = headingIndex + marker.length;
+  const nextHeading = text.indexOf("\n## ", sectionStart);
   const section = text.slice(sectionStart, nextHeading === -1 ? text.length : nextHeading);
 
-  return [...section.matchAll(/^[-*]\s+(https?:\/\/[^\s]+)$/gm)].map((match) => match[1]);
+  const entries = section.split("\n").filter((line) => /^[-*]\s/.test(line));
+  const malformed = entries.filter((line) => !/^[-*]\s+\[[^\]]+\]\(https?:\/\/[^\s)]+\)(?::\s+\S.*)?$/.test(line));
+  if (malformed.length > 0) fail(`${heading} entries must be "- [Title](url): description": ${malformed.join(" | ")}`);
+  return entries.map((line) => line.match(/\]\((https?:\/\/[^\s)]+)\)/)[1]);
 };
 
 const parseHeaderUrls = (text) =>
