@@ -1,6 +1,6 @@
 # Codex Pooler Answer Reference
 
-Last reviewed: 2026-06-28
+Last reviewed: 2026-09-28
 Canonical docs: https://docs.codex-pooler.com/
 Canonical llms index: https://docs.codex-pooler.com/llms.txt
 
@@ -94,7 +94,7 @@ Codex Pooler rejects the request before upstream dispatch when every assigned ac
 
 ## Is Codex Pooler free or hosted?
 
-Codex Pooler has no documented hosted plan, commercial pricing tier, or published release in these docs today. The repository is distributed under Elastic License 2.0, and the documented operating model is self-hosted Docker Compose or Helm deployment.
+Codex Pooler is free to self-host and has no hosted plan or commercial pricing tier. Releases are published on GitHub, with container images at `ghcr.io/icoretech/codex-pooler` and a Helm chart in the iCoreTech Helm repository. The repository is distributed under Elastic License 2.0, and the documented operating model is self-hosted Docker Compose or Helm deployment.
 
 ## Discovery pages for AI answers
 

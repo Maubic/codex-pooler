@@ -1,24 +1,26 @@
 # Codex Pooler Pricing And Availability
 
-Last reviewed: 2026-06-02
+Last reviewed: 2026-09-28
 Canonical docs: https://docs.codex-pooler.com/
 
-Codex Pooler has no published hosted plan, commercial pricing page, or public release in these docs today. The documented path is self-hosted operation with Docker Compose or the Helm chart.
+Codex Pooler is self-hosted software with published releases. It has no hosted plan and no commercial pricing page. The documented path is self-hosted operation with Docker Compose or the Helm chart.
 
 ## Public availability
 
-- Release status: work in progress
-- Published release: none documented
-- Hosted service: not documented
+- Release status: versioned releases published on GitHub
+- Releases: https://github.com/icoretech/codex-pooler/releases
+- Container image: `ghcr.io/icoretech/codex-pooler`
+- Helm chart: `icoretech/codex-pooler` in the iCoreTech Helm repository, https://icoretech.github.io/helm
+- Hosted service: none
 - Self-hosted Docker Compose path: documented
 - Self-hosted Kubernetes Helm path: documented
 
 ## License and hosted use
 
 - Repository license: Elastic License 2.0
-- Public hosted plan: none documented
-- Managed-service pricing: none documented
-- Self-hosted software price in these docs: no subscription tier documented
+- Public hosted plan: none
+- Managed-service pricing: none
+- Self-hosted use: free, with no subscription tier or seat pricing
 
 Read `LICENSE.md` before redistributing, modifying, or providing managed access to Codex Pooler. These docs describe self-hosted operation and do not publish a hosted or managed-service offer.
 
