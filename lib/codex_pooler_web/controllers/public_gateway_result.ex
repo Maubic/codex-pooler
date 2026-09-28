@@ -2,14 +2,14 @@ defmodule CodexPoolerWeb.PublicGatewayResult do
   @moduledoc false
 
   import Phoenix.Controller, only: [json: 2]
-  import Plug.Conn, only: [put_status: 2]
+  import Plug.Conn, only: [put_status: 2, put_resp_content_type: 2, send_resp: 3]
 
   alias CodexPooler.Gateway.Contracts
   alias CodexPooler.Gateway.OpenAICompatibility.PublicResponse
   alias CodexPooler.Platform.ExecutionIdentity
   alias CodexPoolerWeb.GatewayControllerHelpers, as: GatewayHelpers
 
-  @type success_normalizer :: (map() -> map())
+  @type success_normalizer :: PublicResponse.success_normalizer()
   @type gateway_call_result ::
           {:ok, Contracts.gateway_result()} | {:error, Contracts.gateway_error()}
 
@@ -58,6 +58,11 @@ defmodule CodexPoolerWeb.PublicGatewayResult do
            input_file_upstream_404?: Map.get(result, :public_input_file_upstream_404?) === true,
            source_code: Map.get(result, :public_stream_startup_error_code)
          ) do
+      {:ok, {:text, text}} ->
+        conn
+        |> put_resp_content_type("text/plain")
+        |> send_resp(status, text)
+
       {:ok, normalized} ->
         conn
         |> put_status(public_error_status(status, result))

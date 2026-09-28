@@ -3021,7 +3021,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                path: "/v1/audio/transcriptions",
                caller_models: ["gpt-4o-transcribe", "gpt-transcribe"],
                caller_aliases: %{"gpt-transcribe" => "gpt-4o-transcribe"},
-               response_formats: ["json"],
+               response_formats: ["json", "text"],
                rejected_fields: ["language", "temperature"],
                alias_scope: "caller_input_only",
                canonical_model: "gpt-4o-transcribe",

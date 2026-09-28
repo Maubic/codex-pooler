@@ -171,6 +171,43 @@ defmodule CodexPoolerWeb.V1.AudioControllerTest do
     refute inspect(request.request_metadata) =~ audio_bytes
   end
 
+  for caller_model <- ["gpt-4o-transcribe", "gpt-transcribe"],
+      {kind, transcript} <- [
+        {"nonempty", "  synthetic \"quoted\" transcript\nsecond line\tcaf\u00E9  "},
+        {"silence", ""}
+      ] do
+    @caller_model caller_model
+    @transcript transcript
+    @tag :transcription_plain_text
+    test "transcription returns exact #{kind} plain text for #{caller_model}", %{conn: conn} do
+      upstream = start_upstream(FakeUpstream.json_response(%{"text" => @transcript, "languages" => ["synthetic-language"]}))
+      setup = upstream |> gateway_setup() |> use_transcription_model!()
+
+      response =
+        conn
+        |> auth(setup)
+        |> post("/v1/audio/transcriptions", %{
+          "model" => @caller_model,
+          "file" => upload_fixture("audio.wav", "audio/wav", "synthetic bytes"),
+          "response_format" => "text"
+        })
+
+      assert response(response, 200) == @transcript
+      assert get_resp_header(response, "content-type") == ["text/plain; charset=utf-8"]
+      assert [captured] = FakeUpstream.requests(upstream)
+      assert multipart_parts(captured) == [{:file, "file", "audio.wav"}]
+
+      assert [request] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id)
+      assert request.status == "succeeded"
+      assert request.requested_model == Gateway.backend_transcription_model()
+      assert [attempt] = Repo.all(from a in Attempt, where: a.request_id == ^request.id)
+      assert attempt.status == "succeeded"
+      assert Repo.aggregate(from(entry in LedgerEntry, where: entry.request_id == ^request.id and entry.entry_kind == "settlement"), :count) == 1
+      if @transcript != "", do: refute(inspect(request.request_metadata) =~ @transcript)
+      refute inspect(attempt.response_metadata) =~ "synthetic-language"
+    end
+  end
+
   test "POST /v1/audio/transcriptions routes when the public audio model is not listed", %{
     conn: conn
   } do
@@ -215,7 +252,6 @@ defmodule CodexPoolerWeb.V1.AudioControllerTest do
         {"language", nil},
         {"temperature", 0},
         {"temperature", nil},
-        {"response_format", "text"},
         {"response_format", "srt"},
         {"response_format", "verbose_json"},
         {"response_format", "vtt"},
@@ -370,7 +406,11 @@ defmodule CodexPoolerWeb.V1.AudioControllerTest do
     end
   end
 
-  for endpoint <- ["/v1/audio/transcriptions", "/backend-api/transcribe"],
+  for {endpoint, response_format} <- [
+        {"/v1/audio/transcriptions", "json"},
+        {"/v1/audio/transcriptions", "text"},
+        {"/backend-api/transcribe", "json"}
+      ],
       malformed <- [
         nil,
         [],
@@ -380,8 +420,9 @@ defmodule CodexPoolerWeb.V1.AudioControllerTest do
         %{"text" => "", "error" => %{}}
       ] do
     @endpoint_path endpoint
+    @response_format response_format
     @malformed malformed
-    test "#{endpoint} rejects malformed successful body #{inspect(malformed)} before settlement",
+    test "#{endpoint} #{response_format} rejects malformed successful body #{inspect(malformed)} before settlement",
          %{conn: conn} do
       upstream = start_upstream(FakeUpstream.json_response(@malformed))
       setup = upstream |> gateway_setup() |> use_transcription_model!()
@@ -391,6 +432,7 @@ defmodule CodexPoolerWeb.V1.AudioControllerTest do
         |> auth(setup)
         |> post(@endpoint_path, %{
           "model" => "gpt-transcribe",
+          "response_format" => @response_format,
           "file" => upload_fixture("audio.wav", "audio/wav", "synthetic bytes")
         })
 

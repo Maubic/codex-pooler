@@ -377,7 +377,7 @@ Supported work is translated into Codex-compatible requests and then routed thro
       <td><code>/backend-api/transcribe</code></td>
       <td>Yes</td>
       <td>Translated</td>
-      <td>OpenAI-style multipart transcription request dispatched through the backend transcription path. <code>gpt-transcribe</code> is a caller alias for canonical <code>gpt-4o-transcribe</code>. Nonempty <code>keywords</code> and <code>languages</code> lists retain order and duplicates, while empty lists are omitted. Responses omit language-detection fields. Audio support is speech-to-text only: speech synthesis, audio translation and Realtime voice sessions are unsupported. This is request-shape compatibility, not a transcription-quality, model-discovery, or general Audio API coverage claim.</td>
+      <td>OpenAI-style multipart transcription request dispatched through the backend transcription path. <code>gpt-transcribe</code> is a caller alias for canonical <code>gpt-4o-transcribe</code>. Output is JSON by default, or plain UTF-8 text with <code>response_format: "text"</code>. SRT, VTT and timestamped or diarized JSON are unsupported. Nonempty <code>keywords</code> and <code>languages</code> lists retain order and duplicates, while empty lists are omitted. Responses omit language-detection fields. Audio support is speech-to-text only: speech synthesis, audio translation and Realtime voice sessions are unsupported. This is request-shape compatibility, not a transcription-quality, model-discovery, or general Audio API coverage claim.</td>
     </tr>
     <tr>
       <td><code>POST /v1/images/generations</code></td>

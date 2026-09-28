@@ -4,6 +4,7 @@ defmodule CodexPoolerWeb.PublicGatewayDispatch do
   alias CodexPooler.Gateway
   alias CodexPooler.Gateway.Contracts
   alias CodexPooler.Gateway.OpenAICompatibility.Chat
+  alias CodexPooler.Gateway.OpenAICompatibility.PublicResponse
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPoolerWeb.GatewayControllerHelpers, as: GatewayHelpers
   alias CodexPoolerWeb.PublicGatewayResult
@@ -24,7 +25,7 @@ defmodule CodexPoolerWeb.PublicGatewayDispatch do
                                gateway_call_result())
   @type dispatcher :: (auth(), coerced_request() -> gateway_call_result())
   @type result_adapter :: (gateway_call_result() -> gateway_call_result())
-  @type success_normalizer :: (map(), coerced_request() -> map())
+  @type success_normalizer :: (map(), coerced_request() -> PublicResponse.normalized_body())
   @type auth_opts :: [
           authenticator: authenticator()
         ]

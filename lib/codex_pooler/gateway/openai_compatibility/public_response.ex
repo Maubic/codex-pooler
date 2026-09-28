@@ -5,7 +5,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.PublicResponse do
   alias CodexPooler.Gateway.Runtime.Finalization.ValidationRejection
   alias CodexPooler.Gateway.Transports.MisalignmentPolicyViolation
 
-  @type success_normalizer :: (map() -> map())
+  @type normalized_body :: map() | {:text, String.t()}
+  @type success_normalizer :: (map() -> normalized_body())
   @type error_status :: integer() | String.t() | nil
   @type terminal_error_status :: 400 | 404 | 502
   @type error_origin :: :local_validation
@@ -32,7 +33,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.PublicResponse do
   end
 
   @spec normalize_raw_body(pos_integer(), term(), success_normalizer(), error_opts()) ::
-          {:ok, map()} | :passthrough
+          {:ok, normalized_body()} | :passthrough
   def normalize_raw_body(status, body, normalize_success, opts \\ [])
 
   def normalize_raw_body(status, body, normalize_success, opts) when is_binary(body) do

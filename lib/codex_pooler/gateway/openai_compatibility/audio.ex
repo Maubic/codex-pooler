@@ -2,7 +2,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Audio do
   @moduledoc false
 
   alias CodexPooler.Gateway
-  alias CodexPooler.Gateway.OpenAICompatibility.{Error, Validation}
+  alias CodexPooler.Gateway.OpenAICompatibility.{Error, PublicResponse, Validation}
   alias CodexPooler.Gateway.Payloads.RequestOptions
 
   @backend_transcription_endpoint "/backend-api/transcribe"
@@ -48,8 +48,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Audio do
     end
   end
 
-  @spec normalize_response(map()) :: map()
-  def normalize_response(response) when is_map(response), do: Map.delete(response, "languages")
+  @spec normalize_response(map(), String.t()) :: PublicResponse.normalized_body()
+  def normalize_response(response, format \\ "json")
+  def normalize_response(%{"text" => text}, "text") when is_binary(text), do: {:text, text}
+  def normalize_response(response, "json") when is_map(response), do: Map.delete(response, "languages")
 
   defp prepare_transcription(payload) do
     with {:ok, payload} <- Validation.normalize_payload(payload),
@@ -73,11 +75,11 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Audio do
       :error ->
         :ok
 
-      {:ok, "json"} ->
+      {:ok, format} when format in ["json", "text"] ->
         :ok
 
       {:ok, _value} ->
-        {:error, Error.invalid_request("response_format must be json", "response_format")}
+        {:error, Error.invalid_request("response_format must be json or text", "response_format")}
     end
   end
 

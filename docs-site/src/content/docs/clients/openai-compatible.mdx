@@ -435,7 +435,9 @@ endpoints when a client needs spoken output or live voice conversations.
 gateway uses the fixed canonical backend identity `gpt-4o-transcribe`. The alias
 is not a model-list entry or a model-discovery guarantee.
 
-The transcription adapter accepts `file`, `model`, an optional string `prompt`, decoded `keywords` and `languages` arrays, and `response_format: "json"`. The response format may also be omitted. Other response formats, scalar `language`, and `temperature` are rejected because the backend adapter does not implement their semantics. Use the explicitly supported `languages` array only when its backend language hints fit your client; it is not an automatic translation of the OpenAI `language` parameter.
+The transcription adapter accepts `file`, `model`, an optional string `prompt`, decoded `keywords` and `languages` arrays, and `response_format: "json"` or `"text"`. Omitting the format returns JSON. With `"text"`, Pooler returns the backend transcript as an unquoted UTF-8 string with `Content-Type: text/plain; charset=utf-8`; whitespace and line breaks are preserved, and errors still use the JSON error envelope.
+
+Subtitle formats `srt` and `vtt`, `verbose_json`, and `diarized_json` are unsupported. The Codex transcription backend returns text without timed segments or speaker annotations, so Pooler does not generate subtitle timestamps or infer them from the audio length. A model or format accepted by the OpenAI SDK is not automatically available through this backend. Scalar `language` and `temperature` are also rejected. Use the explicitly supported `languages` array only when its backend language hints fit your client; it is not an automatic translation of the OpenAI `language` parameter.
 
 ```js
 import fs from "node:fs";
@@ -482,7 +484,7 @@ omitted. Nonempty lists retain caller order and duplicate entries. Responses omi
 language-detection fields. This documents the accepted request shape only, not
 transcription quality, model discovery, or general Audio API coverage.
 
-A successful transcription response must contain a string `text` field. An empty string is valid for silence; missing or invalid text and error objects are reported as upstream failures rather than successful transcriptions.
+A successful upstream transcription response must contain a string `text` field. Pooler validates this JSON before returning the requested JSON or plain-text format. An empty string is valid for silence; missing or invalid text and error objects are reported as upstream failures rather than successful transcriptions.
 
 `POST /v1/responses` lifts system and developer input-message text into top-level `instructions` before dispatching to Codex-compatible work. When the provider supplies only a failed, incomplete, or error terminal, the public SSE adapter adds a `response.created` lifecycle prefix so SDK accumulators can initialize; this prefix does not imply success. Chat Completions streams still return early upstream errors without a synthetic assistant prefix. Non-streaming failures remain OpenAI-shaped JSON errors.
 

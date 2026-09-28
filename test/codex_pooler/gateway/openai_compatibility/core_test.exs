@@ -1226,14 +1226,14 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
 
   @tag :responses_coercion
   test "Audio transcription canonicalizes accepted caller models in the dispatch envelope" do
-    for caller_model <- ["gpt-4o-transcribe", "gpt-transcribe"] do
+    for caller_model <- ["gpt-4o-transcribe", "gpt-transcribe"], response_format <- ["json", "text"] do
       upload = audio_upload_fixture("synthetic audio bytes")
 
       payload = %{
         "model" => caller_model,
         "file" => upload,
         "prompt" => "synthetic glossary",
-        "response_format" => "json"
+        "response_format" => response_format
       }
 
       assert {:ok, result} =
@@ -1340,6 +1340,13 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
              "text" => "synthetic transcript",
              "metadata" => %{"languages" => ["nested-value"]}
            }
+  end
+
+  test "Audio text response normalization returns only the exact transcript" do
+    response = %{"text" => "  synthetic transcript\n", "languages" => ["en"], "asset_pointer" => "synthetic-asset"}
+
+    assert Audio.normalize_response(response, "text") == {:text, "  synthetic transcript\n"}
+    assert Audio.normalize_response(%{"text" => ""}, "text") == {:text, ""}
   end
 
   @tag :responses_validation
