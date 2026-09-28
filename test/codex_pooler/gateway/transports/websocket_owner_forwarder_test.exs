@@ -4104,28 +4104,28 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     end
   end
 
-  defp await_owner_cancellation!(owner_pid, attempts \\ 100)
+  # The owner ends the turn when the submitter's exit reaches it, but drops the
+  # downstream only when the forwarding side's cancellation watcher, a process
+  # of its own that saw the same exit, detaches it, and nothing tells the test
+  # when it has. So the owner's state is polled against one monotonic deadline
+  # under the peer detection budget, not a count of scheduler yields, which a
+  # watcher delayed on a loaded host outlasted (findings#270 row 270-148).
+  defp await_owner_cancellation!(owner_pid),
+    do: await_owner_cancellation!(owner_pid, System.monotonic_time(:millisecond) + @peer_detection_timeout_ms)
 
-  defp await_owner_cancellation!(owner_pid, attempts) when attempts > 0 do
+  defp await_owner_cancellation!(owner_pid, deadline) do
     case :sys.get_state(owner_pid) do
       %{active_turn: nil, downstream: nil} ->
         :ok
 
-      _state ->
-        yield_once({:await_owner_cancellation, owner_pid, attempts})
-        await_owner_cancellation!(owner_pid, attempts - 1)
-    end
-  end
+      %{active_turn: active_turn, downstream: downstream} ->
+        if System.monotonic_time(:millisecond) >= deadline,
+          do: flunk("the owner still held turn? #{active_turn != nil} downstream #{inspect(downstream)} #{@peer_detection_timeout_ms}ms after the forwarding proxy died")
 
-  defp await_owner_cancellation!(owner_pid, 0) do
-    assert %{active_turn: nil, downstream: nil} = :sys.get_state(owner_pid)
-  end
-
-  defp yield_once(message) do
-    send(self(), message)
-
-    receive do
-      ^message -> :ok
+        receive do
+        after
+          1 -> await_owner_cancellation!(owner_pid, deadline)
+        end
     end
   end
 
