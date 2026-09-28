@@ -754,11 +754,24 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
     with :ok <- validate_admission_control(control),
          {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id) do
       owner_pid
-      |> WebsocketOwnerSession.admission_control(control)
+      |> call_admission_control(control)
       |> owner_admission_answer(control)
     else
       {:error, _reason} -> {:error, :owner_unavailable}
     end
+  end
+
+  # An owner that exits while a caller's admission control waits on it (its
+  # upstream connection process died and it retired, or it drained) answers as
+  # an owner already gone. The caller is a response task confirming a
+  # compaction it collected, or a socket reserving one; the exit crashed a
+  # local owner's caller, which logged a task failure for a compaction already
+  # settled (findings#270 row 270-170). A remote owner's caller already read
+  # such an exit as `owner_unavailable` through its erpc.
+  defp call_admission_control(owner_pid, control) do
+    WebsocketOwnerSession.admission_control(owner_pid, control)
+  catch
+    :exit, _reason -> {:error, :owner_unavailable}
   end
 
   # Every admission control answer leaves the owner's node through this

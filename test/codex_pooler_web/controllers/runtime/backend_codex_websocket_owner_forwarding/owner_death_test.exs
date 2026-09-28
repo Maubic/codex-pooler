@@ -28,6 +28,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
   alias CodexPooler.Gateway.Websocket, as: Gateway
   alias CodexPooler.Gateway.Websocket.Adapter
+  alias CodexPooler.Pools.ModelServingOverride
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
   alias CodexPoolerWeb.CodexResponsesSocket
@@ -1187,6 +1188,191 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
         assert Enum.all?(error_lines(log), &(&1 =~ "WebsocketOwnerSession.Registry" and &1 =~ "terminating"))
       end
     end
+  end
+
+  # findings#270 row 270-170: the owner's upstream connection process dies
+  # during a native compaction (owner forwarding on, native, Pool forced Full,
+  # one node, the real public listener, FakeUpstream). While the owner collects
+  # the compaction, before any of its frames or after its output item, the
+  # owner settles the compaction as an owner crash and retires. While the
+  # compaction's task confirms the collected result, the owner retires under
+  # that confirmation, which answers the task as an owner already gone instead
+  # of crashing it. Either way the socket closes 1011 with nothing before the
+  # Close, each request settles once, and the owner's own exit report is the
+  # only error line. The sandbox runs in auto mode: the killed process may be
+  # inside a query, which must not take another process's connection down.
+  describe "the owner's upstream connection process exits during a native compaction" do
+    for moment <- [:collecting_before_any_frame, :collecting_after_its_item, :confirming_the_result] do
+      @tag moment: moment
+      test "#{moment}: the socket closes 1011, each request settles once, no task crash", ctx do
+        enter_peer_owner_topology!()
+        release_ref = make_ref()
+        compact_item = %{"type" => "compaction", "encrypted_content" => "synthetic-owner-death-#{ctx.moment}"}
+        compaction = Enum.map(compaction_events(compact_item), &CodexPooler.JSON.encode!/1)
+
+        compaction_respond =
+          if ctx.moment == :confirming_the_result,
+            do: FakeUpstream.websocket_text_frames(compaction),
+            else: FakeUpstream.barrier_websocket_frames(compaction, notify: self(), release_ref: release_ref)
+
+        upstream =
+          start_upstream(
+            # provenance: synthetic_adversarial (compaction v2-shaped mid-turn frames; the owner's upstream session process dies while the owner collects or confirms the compaction)
+            FakeUpstream.strict_sequence([
+              compaction_turn_request([forbidden: ["previous_response_id"]], FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(compaction_anchor_event())])),
+              compaction_turn_request([equals: %{"previous_response_id" => "resp_owner_death_anchor"}], compaction_respond)
+            ])
+          )
+
+        setup = gateway_setup(upstream, compact?: true)
+        register_unboxed_pool_cleanup!(setup)
+        Repo.insert!(%ModelServingOverride{pool_id: setup.pool.id, exposed_model_id: setup.model.exposed_model_id, mode: "full"})
+        assert :ok = CodexPooler.Events.subscribe_pool(setup.pool)
+        {_server, port} = start_public_endpoint_with_server!()
+        before = WebsocketCleanupFence.listener_sockets()
+        turn_id = "owner-death-compaction-#{ctx.moment}"
+        {conn, websocket, ref} = public_websocket_connect!(port, setup, turn_id)
+        socket = WebsocketCleanupFence.await_new_listener_socket!(before)
+
+        {result, log} =
+          with_info_log(fn ->
+            anchor_input = [%{"type" => "message", "role" => "user", "content" => "synthetic compaction anchor"}]
+            {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, compaction_turn_frame(setup, turn_id, "turn", anchor_input, nil))
+            {conn, websocket, anchor} = receive_native_terminal!(conn, websocket, ref)
+            assert %{"type" => "response.completed", "response" => %{"id" => "resp_owner_death_anchor"}} = anchor
+            assert_receive {CodexPooler.Events, %{reason: "request_finalized", payload: %{"status" => "succeeded"}}}, @detection_timeout_ms
+            _idle = await_socket_connection_state!(socket, &(MapSet.size(&1.tasks) == 0))
+            owner = socket_connection_state!(socket).websocket_owner_pid
+            owner_ref = Process.monitor(owner)
+            hold = if ctx.moment == :confirming_the_result, do: hold_settled_websocket_turn!()
+            trigger = [%{"type" => "custom_tool_call_output", "call_id" => "call_#{turn_id}", "output" => "synthetic tool output"}, %{"type" => "compaction_trigger"}]
+            {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, compaction_turn_frame(setup, turn_id, "compaction", trigger, "resp_owner_death_anchor"))
+            killed = kill_owner_upstream_during!(ctx.moment, owner, upstream, release_ref, hold)
+
+            assert_receive {:DOWN, ^owner_ref, :process, ^owner, owner_reason}, @detection_timeout_ms
+            {conn, _websocket, frames} = receive_frames_until_close!(conn, websocket, ref)
+            assert_receive {CodexPooler.Events, %{reason: "request_finalized"}}, @detection_timeout_ms
+            Mint.HTTP.close(conn)
+            :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(socket)
+            %{frames: frames, owner_reason: owner_reason, killed: killed}
+          end)
+
+        # One terminal: the 1011 close, which the owner crash error the socket
+        # authors for a turn that showed nothing may precede.
+        assert result.owner_reason == :owner_crashed
+        assert List.last(result.frames) == {:close, 1011, "websocket owner crashed"}
+        texts = for {:text, text} <- result.frames, do: CodexPooler.JSON.decode!(text)
+        assert texts in [[], [%{"type" => "error", "status" => 502, "error" => %{"code" => "owner_crashed", "message" => "websocket owner stopped unexpectedly", "param" => nil, "type" => "server_error"}}]]
+        assert length(result.frames) == length(texts) + 1
+
+        assert [anchor, compaction] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id, order_by: r.admitted_at))
+        assert {anchor.endpoint, anchor.status} == {"/backend-api/codex/responses", "succeeded"}
+        assert compaction.endpoint == "/backend-api/codex/responses/compact"
+
+        # A compaction collected in full was settled before its confirmation.
+        if ctx.moment == :confirming_the_result do
+          assert {compaction.status, compaction.response_status_code} == {"succeeded", 200}
+        else
+          assert {compaction.status, compaction.last_error_code} == {"failed", "owner_crashed"}
+          assert compaction.response_status_code in [499, 502]
+        end
+
+        for request <- [anchor, compaction] do
+          assert [_attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
+          assert ledger_entry_kinds(request) == ["release", "reservation", "settlement"]
+        end
+
+        # No crash and no aborted settlement: the only error lines are the
+        # owner's own exit report and, when the kill landed inside a query of
+        # the killed upstream connection process, that process's connection.
+        refute log =~ "MatchError"
+        refute log =~ "websocket response task failed"
+        killed_client = "client #{inspect(result.killed)} exited"
+        assert Enum.all?(error_lines(log), &((&1 =~ "WebsocketOwnerSession.Registry" and &1 =~ "terminating") or (&1 =~ "Postgrex.Protocol" and &1 =~ killed_client)))
+        assert FakeUpstream.count(upstream) == 2
+      end
+    end
+  end
+
+  defp kill_owner_upstream_during!(:collecting_before_any_frame, owner, _upstream, release_ref, _hold) do
+    assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^release_ref}, @detection_timeout_ms
+    kill_owner_upstream!(owner)
+  end
+
+  defp kill_owner_upstream_during!(:collecting_after_its_item, owner, upstream, release_ref, _hold) do
+    assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^release_ref}, @detection_timeout_ms
+    assert :ok = FakeUpstream.release_frame(upstream, release_ref)
+    assert_receive {:fake_upstream_frame_barrier, 1, _handler, ^release_ref}, @detection_timeout_ms
+    kill_owner_upstream!(owner)
+  end
+
+  # The compaction's task is held between its settlement and its confirmation;
+  # the owner is suspended while its upstream connection process is killed and
+  # the task is let go, so the owner takes the upstream's exit before the
+  # task's confirmation reaches it and retires with that call pending.
+  defp kill_owner_upstream_during!(:confirming_the_result, owner, _upstream, _release_ref, hold) do
+    assert_receive {^hold, :held, task}, @detection_timeout_ms
+    upstream_pid = :sys.get_state(owner).upstream_pid
+    :ok = :sys.suspend(owner)
+    ^upstream_pid = kill_owner_upstream!(owner, upstream_pid)
+    :ok = release_settled_websocket_turn(hold, task)
+    await_owner_mailbox!(owner, 2, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+    :ok = :sys.resume(owner)
+    upstream_pid
+  end
+
+  # Returns the killed upstream connection process.
+  defp kill_owner_upstream!(owner, upstream_pid \\ nil) do
+    upstream_pid = upstream_pid || :sys.get_state(owner).upstream_pid
+    upstream_ref = Process.monitor(upstream_pid)
+    Process.exit(upstream_pid, :kill)
+    assert_receive {:DOWN, ^upstream_ref, :process, ^upstream_pid, :killed}, @detection_timeout_ms
+    upstream_pid
+  end
+
+  defp await_owner_mailbox!(owner, count, deadline) do
+    {:message_queue_len, queued} = Process.info(owner, :message_queue_len)
+
+    cond do
+      queued >= count ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("the owner never got the upstream's exit and the task's confirmation (#{queued} queued)")
+
+      true ->
+        receive do
+        after
+          1 -> await_owner_mailbox!(owner, count, deadline)
+        end
+    end
+  end
+
+  defp compaction_turn_request(json, respond) do
+    json = Keyword.update(Keyword.merge([valid: true], json), :equals, %{"type" => "response.create"}, &Map.put(&1, "type", "response.create"))
+    FakeUpstream.expect_request(method: "WEBSOCKET", websocket_connection_ordinal: 1, json: Keyword.put_new(json, :equals, %{"type" => "response.create"}), respond: respond)
+  end
+
+  defp compaction_anchor_event,
+    do: %{"type" => "response.completed", "response" => %{"id" => "resp_owner_death_anchor", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 1_200, "output_tokens" => 9, "total_tokens" => 1_209}}}
+
+  defp compaction_events(item) do
+    [
+      %{"type" => "response.output_item.done", "item" => item},
+      %{"type" => "response.completed", "response" => %{"id" => "resp_owner_death_compact", "status" => "completed", "output" => [item], "usage" => %{"input_tokens" => 3_000, "output_tokens" => 40, "total_tokens" => 3_040}}}
+    ]
+  end
+
+  # The released client's mid-turn frames: turn metadata naming the turn, its
+  # window and the request kind; a compaction's also names its compaction.
+  defp compaction_turn_frame(setup, turn_id, request_kind, input, anchor) do
+    metadata =
+      %{"turn_id" => turn_id, "window_id" => "owner-death-window-1", "context_window_id" => "00000000-0000-4000-8000-000000000170", "window_number" => 1, "request_kind" => request_kind}
+      |> then(&if(request_kind == "compaction", do: Map.put(&1, "compaction", %{"trigger" => "auto", "reason" => "context_limit", "implementation" => "responses_compaction_v2", "phase" => "mid_turn", "strategy" => "memento"}), else: &1))
+
+    %{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => input, "stream" => true, "generate" => true, "client_metadata" => %{"turn_id" => turn_id, "x-codex-turn-metadata" => CodexPooler.JSON.encode!(metadata)}}
+    |> then(&if(anchor, do: Map.put(&1, "previous_response_id", anchor), else: &1))
+    |> CodexPooler.JSON.encode!()
   end
 
   defp upstream_exit_frames do
