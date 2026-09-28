@@ -16,8 +16,8 @@ defmodule CodexPooler.Access.APIKeys.ReasoningEffortPolicy do
     @type t :: %__MODULE__{
             mode: mode(),
             configured_effort: String.t() | nil,
-            requested_effort: String.t() | nil,
-            applied_effort: String.t() | nil
+            requested_effort: String.t() | non_neg_integer() | nil,
+            applied_effort: String.t() | non_neg_integer() | nil
           }
   end
 
@@ -38,7 +38,7 @@ defmodule CodexPooler.Access.APIKeys.ReasoningEffortPolicy do
   @type denial_metadata :: %{
           required(:policy_mode) => String.t(),
           required(:configured_effort) => String.t() | nil,
-          required(:requested_effort) => String.t() | nil,
+          required(:requested_effort) => String.t() | non_neg_integer() | nil,
           required(:applied_effort) => nil
         }
   @type resolution :: {:ok, Decision.t()} | {:error, :reasoning_effort_not_allowed}
@@ -48,7 +48,7 @@ defmodule CodexPooler.Access.APIKeys.ReasoningEffortPolicy do
           required(:maximum_reasoning_effort) => String.t() | nil
         }
 
-  @spec resolve(APIKey.t(), String.t() | nil, [String.t()] | nil, String.t() | nil) ::
+  @spec resolve(APIKey.t(), String.t() | non_neg_integer() | nil, [String.t()] | nil, String.t() | nil) ::
           resolution()
   def resolve(%APIKey{} = api_key, requested_effort, model_efforts, model_default) do
     case policy(api_key) do
@@ -89,7 +89,7 @@ defmodule CodexPooler.Access.APIKeys.ReasoningEffortPolicy do
     end
   end
 
-  @spec project_denial_metadata(APIKey.t(), String.t() | nil) :: denial_metadata()
+  @spec project_denial_metadata(APIKey.t(), String.t() | non_neg_integer() | nil) :: denial_metadata()
   def project_denial_metadata(%APIKey{} = api_key, requested_effort) do
     {mode, configured_effort} = policy(api_key)
 

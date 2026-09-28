@@ -1215,7 +1215,7 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
 
   defp reasoning_effort(payload) do
     case payload do
-      %{"reasoning" => %{"effort" => effort}} -> clean_string(effort)
+      %{"reasoning" => %{"effort" => effort}} -> ReasoningEffort.normalize_native(effort)
       _payload -> nil
     end
   end
@@ -1266,7 +1266,7 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
     end
   end
 
-  defp reasoning_effort_client_source(effort) when is_binary(effort), do: "client"
+  defp reasoning_effort_client_source(effort) when is_binary(effort) or is_integer(effort), do: "client"
   defp reasoning_effort_client_source(_effort), do: nil
 
   defp decision_mode(%Decision{mode: mode}), do: Atom.to_string(mode)

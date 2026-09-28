@@ -639,6 +639,7 @@ defmodule CodexPooler.Accounting.RequestLogs do
   defp reasoning_metadata_field(metadata, key) do
     case Map.get(metadata, key) do
       value when is_binary(value) -> value |> String.trim() |> blank_to_nil()
+      value when is_integer(value) and value >= 0 and value <= 18_446_744_073_709_551_615 -> Integer.to_string(value)
       _value -> nil
     end
   end

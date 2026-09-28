@@ -15,6 +15,19 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizerTest do
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
   describe "upstream_payload/4" do
+    test "preserves numeric reasoning budgets through Full and Lite HTTP and websocket serialization" do
+      endpoint = "/backend-api/codex/responses"
+      model = %Model{upstream_model_id: "provider-model"}
+
+      for mode <- ["full", "lite"], transport <- ["http", "websocket"], effort <- [64, 0, 18_446_744_073_709_551_615, "64", "high", "custom-effort"] do
+        payload = %{"model" => "sample-model", "input" => native_text_input("synthetic"), "reasoning" => %{"effort" => effort}}
+        options = RequestOptions.build(serving_mode_opts(mode), endpoint, payload)
+        options = if transport == "websocket", do: RequestOptions.for_websocket(options, payload), else: options
+        assert {:ok, encoded} = PayloadNormalizer.upstream_payload(payload, model, endpoint, options)
+        assert get_in(CodexPooler.JSON.decode!(encoded), ["reasoning", "effort"]) === effort
+      end
+    end
+
     test "consecutive full-history turns keep a stable upstream prefix in both serving modes" do
       # A client on the HTTP SSE path resends the whole history every turn, so
       # the provider can only reuse its prompt cache when the projected turn N+1
@@ -418,11 +431,11 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizerTest do
 
     test "materializes present malformed reasoning aliases without lower-priority fallthrough" do
       cases = [
-        %{"reasoning" => %{"effort" => 42}, "reasoning_effort" => "high"},
+        %{"reasoning" => %{"effort" => -1}, "reasoning_effort" => "high"},
         %{"reasoning" => %{"effort" => "  "}, "reasoning_effort" => "high"},
         %{"reasoning_effort" => %{"invalid" => true}, "reasoningEffort" => "high"},
         %{"reasoning_effort" => "  ", "reasoningEffort" => "high"},
-        %{"reasoningEffort" => 42, "thinking" => "high"},
+        %{"reasoningEffort" => -1, "thinking" => "high"},
         %{"reasoningEffort" => " ", "thinking" => "high"},
         %{"thinking" => 42, "enable_thinking" => true},
         %{"thinking" => " ", "enable_thinking" => true}
