@@ -26,7 +26,7 @@ defmodule CodexPooler.Gateway.Runtime.FinalizationMetadataTest do
   alias CodexPooler.Gateway.Websocket, as: Gateway
   alias CodexPooler.Repo
 
-  import CodexPooler.AccountingTestSupport, only: [accounting_setup: 0]
+  import CodexPooler.AccountingTestSupport, only: [accounting_setup: 0, key_usage_events: 1]
 
   test "HTTP and websocket finalization ignore retired metadata while preserving prompt cache state" do
     options =
@@ -376,6 +376,11 @@ defmodule CodexPooler.Gateway.Runtime.FinalizationMetadataTest do
              :count
            ) == 1
 
+    # The guard refused before anything was sent, so no usage applies: the
+    # reservation's estimate is neither the settlement's tokens and cost nor
+    # the key's provisional tokens, which it was as unknown usage.
+    assert_undispatched_settlement!(request, attempt)
+
     assert Repo.all(from(demotion in BridgeDemotion)) == []
 
     updated_circuit = Repo.get!(RoutingCircuitState, circuit.id)
@@ -474,6 +479,11 @@ defmodule CodexPooler.Gateway.Runtime.FinalizationMetadataTest do
              :count
            ) == 1
 
+    # Guard-shaped metadata that is not the guard's exact pre-send shape proves
+    # nothing about dispatch: the miss keeps the unknown usage of a request the
+    # provider may have received.
+    assert_unknown_usage_settlement!(request, attempt)
+
     assert Repo.all(from(demotion in BridgeDemotion)) == []
     refute inspect({request.request_metadata, attempt.response_metadata}) =~ raw_sentinel
   end
@@ -544,6 +554,49 @@ defmodule CodexPooler.Gateway.Runtime.FinalizationMetadataTest do
     attempt = Repo.get!(Attempt, attempt.id)
     refute Map.has_key?(attempt.response_metadata, "transport_failure")
     assert attempt.response_metadata["upstream_error_param"] == "reasoning.summary"
+    assert_unknown_usage_settlement!(Repo.get!(Request, attempt.request_id), attempt)
+  end
+
+  defp assert_undispatched_settlement!(request, attempt) do
+    %{reservation: reservation, settlement: settlement, release: release} = ledger(request)
+    assert reservation.total_tokens > 0
+
+    assert request.usage_status == "not_applicable"
+    assert attempt.usage_status == "not_applicable"
+    assert settlement.attempt_id == attempt.id
+    assert settlement.usage_status == "not_applicable"
+    assert release.usage_status == "not_applicable"
+
+    assert {settlement.input_tokens, settlement.output_tokens, settlement.total_tokens} ==
+             {nil, nil, nil}
+
+    assert Decimal.equal?(settlement.estimated_cost_micros, 0)
+    assert Decimal.equal?(settlement.settled_cost_micros, 0)
+    assert settlement.details["estimated_from_reserve"] == false
+    assert settlement.details["usage_source"] == "undispatched_refusal"
+    assert key_usage_events(request.id) == %{known: 0, provisional: 0, admissions: 1}
+  end
+
+  defp assert_unknown_usage_settlement!(request, attempt) do
+    %{reservation: reservation, settlement: settlement} = ledger(request)
+    assert reservation.total_tokens > 0
+
+    assert request.usage_status == "usage_unknown"
+    assert attempt.usage_status == "usage_unknown"
+    assert settlement.usage_status == "usage_unknown"
+    assert settlement.total_tokens == reservation.total_tokens
+    assert settlement.details["estimated_from_reserve"] == true
+    assert key_usage_events(request.id) == %{known: 0, provisional: reservation.total_tokens, admissions: 1}
+  end
+
+  defp ledger(request) do
+    entries = Repo.all(from(entry in LedgerEntry, where: entry.request_id == ^request.id))
+    assert Enum.all?(entries, &(&1.amount_status == "recorded"))
+
+    assert [reservation] = Enum.filter(entries, &(&1.entry_kind == "reservation"))
+    assert [settlement] = Enum.filter(entries, &(&1.entry_kind == "settlement"))
+    assert [release] = Enum.filter(entries, &(&1.entry_kind == "release"))
+    %{reservation: reservation, settlement: settlement, release: release}
   end
 
   defp request_options do

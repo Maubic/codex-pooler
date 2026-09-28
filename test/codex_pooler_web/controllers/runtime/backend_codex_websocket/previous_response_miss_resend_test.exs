@@ -6,16 +6,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PreviousResponseMissResen
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport
   import CodexPooler.PoolerFixtures, only: [model_fixture: 2]
+  import CodexPooler.AccountingTestSupport, only: [key_usage_events: 1]
 
-  alias CodexPooler.Accounting.{Attempt, Request, RequestClientRetryLink}
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink}
+  alias CodexPooler.Accounting.RequestLifecycle.WindowUsage
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.{BridgeDemotion, RoutingCircuitState}
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams
 
   # Detection budget for a settlement the test only observes.
   @settlement_detection_timeout_ms 15_000
 
   @answer %{"type" => "message", "role" => "assistant", "content" => [%{"type" => "output_text", "text" => "synthetic answer"}]}
+  @tool_call %{"type" => "function_call", "call_id" => "call_refresh_sample", "name" => "sample_lookup", "arguments" => "{}"}
 
   # The Codex backend's websocket refusal of an anchor the connection cannot
   # resolve (a connection that did not produce the response): a codeless 400
@@ -120,6 +124,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PreviousResponseMissResen
                } = refused_attempt.response_metadata
 
         refute Map.has_key?(refused_attempt.response_metadata, "rejection_error_code")
+        # The provider received the anchored request, so its usage stays
+        # unknown and the reservation estimate stays provisional.
+        assert_unknown_usage!(refused, refused_attempt)
         assert Repo.all(from(demotion in BridgeDemotion)) == []
         assert Repo.all(from(circuit in RoutingCircuitState)) == []
         refute inspect({refused.request_metadata, refused_attempt.response_metadata}) =~ "resp_ws_invalid_anchor_opener"
@@ -200,6 +207,110 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PreviousResponseMissResen
         assert [_opener_row, refused, resend] = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: [asc: request.admitted_at]))
         assert {refused.status, resend.status} == {"failed", "succeeded"}
         assert linked_successor?(refused, resend)
+        assert [refused_attempt] = Repo.all(from(attempt in Attempt, where: attempt.request_id == ^refused.id))
+        assert_no_provider_work!(refused, refused_attempt)
+        assert :ok = FakeUpstream.verify!(upstream)
+        conn
+      after
+        Mint.HTTP.close(conn)
+      end
+    end
+  end
+
+  # An automatic refresh of the account's access token between two requests
+  # of a turn changes the upstream connection's reuse key
+  # (`request_key_changed`, `changed_headers=credential`), so the next request
+  # gets a fresh upstream connection, where the released client's anchored
+  # tool-output continuation is refused before it is sent. The client resends
+  # the whole turn without the anchor on a new socket, and it completes. The
+  # refusal did no provider work and settles with no usage; as unknown usage
+  # its reservation estimate counted toward the key's effective tokens.
+  for forwarding? <- [false, true] do
+    test "an anchored continuation after an access token refresh is refused before it is sent, with no usage, and the full resend completes (owner forwarding #{forwarding?})" do
+      CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
+      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, unquote(forwarding?))
+
+      refreshed_token = "upstream-token-refreshed-#{System.unique_integer([:positive])}"
+      first_input = native_text_input("refresh anchor")
+      tool_output = %{"type" => "function_call_output", "call_id" => "call_refresh_sample", "output" => "sample output"}
+
+      upstream =
+        start_upstream(
+          # Only the opener, under the original credential, and the full
+          # resend, under the refreshed one, reach the upstream.
+          # provenance: synthetic_adversarial
+          FakeUpstream.strict_sequence([
+            FakeUpstream.expect_request(
+              method: "WEBSOCKET",
+              path: "/backend-api/codex/responses",
+              websocket_connection_ordinal: 1,
+              headers: [required: %{"authorization" => "Bearer upstream-token"}],
+              json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]],
+              respond: completed_response_frames("resp_ws_refresh_anchor_opener", [@tool_call], 2, 1)
+            ),
+            FakeUpstream.expect_request(
+              method: "WEBSOCKET",
+              path: "/backend-api/codex/responses",
+              headers: [required: %{"authorization" => "Bearer #{refreshed_token}"}],
+              json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]],
+              respond: completed_response_frames("resp_ws_refresh_anchor_resend", [], 4, 3)
+            )
+          ])
+        )
+
+      setup = gateway_setup(upstream)
+      window_start = DateTime.add(DateTime.utc_now(), -60, :second)
+      assert :ok = CodexPooler.Events.subscribe_pool(setup.pool)
+      port = start_public_endpoint!()
+      thread = "ws-refresh-anchor-#{System.unique_integer([:positive])}"
+      {conn, websocket, ref} = public_websocket_connect!(port, setup, thread)
+      frame = released_client_frame(setup, thread)
+      turn_id = Ecto.UUID.generate()
+
+      try do
+        {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, frame.(first_input, turn_id, %{}))
+        {conn, websocket, opener_terminal} = receive_until_terminal(conn, websocket, ref)
+        assert %{"type" => "response.completed", "response" => %{"id" => "resp_ws_refresh_anchor_opener"}} = opener_terminal
+        assert_receive {CodexPooler.Events, %{reason: "request_finalized", payload: %{"status" => "succeeded"}}}, @settlement_detection_timeout_ms
+
+        assert {:ok, _secret} = Upstreams.store_encrypted_secret(setup.identity, %{secret_kind: "access_token", plaintext: refreshed_token})
+
+        {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, frame.([tool_output], turn_id, %{"previous_response_id" => "resp_ws_refresh_anchor_opener"}))
+        {conn, _websocket, refusal_frame} = public_websocket_receive_text!(conn, websocket, ref)
+        assert CodexPooler.JSON.decode!(refusal_frame) == native_previous_response_retry_event()
+        assert_receive {CodexPooler.Events, %{reason: "request_finalized", payload: %{"status" => "failed"}}}, @settlement_detection_timeout_ms
+        assert [_opener] = FakeUpstream.requests(upstream)
+
+        Mint.HTTP.close(conn)
+        {conn, websocket, ref} = public_websocket_connect!(port, setup, thread)
+        {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, frame.(first_input ++ [@tool_call, tool_output], turn_id, %{}))
+        {conn, _websocket, resend_terminal} = receive_until_terminal(conn, websocket, ref)
+        assert %{"type" => "response.completed", "response" => %{"id" => "resp_ws_refresh_anchor_resend"}} = resend_terminal
+        assert_receive {CodexPooler.Events, %{reason: "request_finalized", payload: %{"status" => "succeeded"}}}, @settlement_detection_timeout_ms
+
+        assert [opener_request, resend_request] = FakeUpstream.requests(upstream)
+        refute opener_request.websocket_connection_id == resend_request.websocket_connection_id
+        assert resend_request.json["input"] == first_input ++ [@tool_call, tool_output]
+
+        assert [_opener_row, refused, resend] = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: [asc: request.admitted_at]))
+        # A tool-result continuation's claim is scoped to its payload, so the
+        # full resend of the turn is admitted under its own claim.
+        assert {refused.status, refused.last_error_code, resend.status} == {"failed", "stream_incomplete", "succeeded"}
+        assert [refused_attempt] = Repo.all(from(attempt in Attempt, where: attempt.request_id == ^refused.id))
+
+        assert %{"reason" => "previous_response_generation_mismatch", "connection_use" => "fresh", "termination_source" => "continuation_generation_guard", "upstream_committed" => false} =
+                 refused_attempt.response_metadata["transport_failure"]
+
+        assert_no_provider_work!(refused, refused_attempt)
+
+        # The key's token windows hold the two served requests and nothing of
+        # the refusal but its admission.
+        assert %{window: %{known_total_tokens: 10, provisional_total_tokens: 0, pending_total_tokens: 0, effective_total_tokens: 10, effective_request_count: 3}} =
+                 WindowUsage.window_usages(setup.api_key.id, [window: window_start], DateTime.add(DateTime.utc_now(), 60, :second))
+
+        assert Repo.all(from(demotion in BridgeDemotion)) == []
+        assert Repo.all(from(circuit in RoutingCircuitState)) == []
+        refute inspect({refused.request_metadata, refused_attempt.response_metadata}) =~ refreshed_token
         assert :ok = FakeUpstream.verify!(upstream)
         conn
       after
@@ -306,6 +417,22 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PreviousResponseMissResen
   defp linked_successor?(%Request{id: refused_id}, %Request{id: resend_id} = resend) do
     resend.request_metadata["client_resend"]["predecessor_request_id"] == refused_id or
       Repo.exists?(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^refused_id and link.successor_request_id == ^resend_id))
+  end
+
+  # A refusal answered before anything was sent did no provider work: no usage
+  # applies to it, and it adds only its admission to its key's usage buckets.
+  defp assert_no_provider_work!(%Request{} = request, %Attempt{} = attempt) do
+    assert {request.usage_status, attempt.usage_status} == {"not_applicable", "not_applicable"}
+    assert [settlement] = Repo.all(from(entry in LedgerEntry, where: entry.request_id == ^request.id and entry.entry_kind == "settlement"))
+    assert {settlement.usage_status, settlement.total_tokens, settlement.details["estimated_from_reserve"]} == {"not_applicable", nil, false}
+    assert key_usage_events(request.id) == %{known: 0, provisional: 0, admissions: 1}
+  end
+
+  defp assert_unknown_usage!(%Request{} = request, %Attempt{} = attempt) do
+    assert [reservation] = Repo.all(from(entry in LedgerEntry, where: entry.request_id == ^request.id and entry.entry_kind == "reservation"))
+    assert reservation.total_tokens > 0
+    assert {request.usage_status, attempt.usage_status} == {"usage_unknown", "usage_unknown"}
+    assert key_usage_events(request.id) == %{known: 0, provisional: reservation.total_tokens, admissions: 1}
   end
 
   # The Codex backend's websocket refusal of a model the ChatGPT account

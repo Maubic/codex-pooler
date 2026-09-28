@@ -225,6 +225,24 @@ defmodule CodexPooler.AccountingTestSupport do
     :ok
   end
 
+  # What one request adds to its API key's usage buckets: its ledger entries
+  # read through the production projection `public.api_key_usage_events/1`,
+  # whose provisional tokens count toward the key's effective token windows.
+  def key_usage_events(request_id) when is_binary(request_id) do
+    %{rows: [[known, provisional, admissions]]} =
+      Repo.query!(
+        """
+        SELECT COALESCE(sum(v.known_total_tokens), 0)::bigint, COALESCE(sum(v.provisional_total_tokens), 0)::bigint,
+          COALESCE(sum(v.admission_count), 0)::bigint
+        FROM (SELECT array_agg(e) AS entries FROM public.ledger_entries e WHERE e.request_id = $1) h
+        CROSS JOIN LATERAL public.api_key_usage_events(h.entries) v
+        """,
+        [Ecto.UUID.dump!(request_id)]
+      )
+
+    %{known: known, provisional: provisional, admissions: admissions}
+  end
+
   def update_default_policy!(api_key, attrs) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 

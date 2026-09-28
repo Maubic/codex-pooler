@@ -5,6 +5,7 @@ defmodule CodexPooler.Gateway.Runtime.AccountingReservationTest do
   import Ecto.Query
   import CodexPooler.AccountsFixtures
   import CodexPooler.RequestReplayFixtures, only: [replay_preparation_metadata: 0]
+  import CodexPooler.AccountingTestSupport, only: [key_usage_events: 1]
 
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
     only: [gateway_setup: 1, start_upstream: 1]
@@ -1700,12 +1701,20 @@ defmodule CodexPooler.Gateway.Runtime.AccountingReservationTest do
 
     request_id = request.id
 
-    assert Repo.aggregate(
-             from(entry in LedgerEntry,
-               where: entry.request_id == ^request_id and entry.entry_kind == "settlement"
-             ),
-             :count
-           ) == 1
+    assert [settlement] =
+             Repo.all(
+               from(entry in LedgerEntry,
+                 where: entry.request_id == ^request_id and entry.entry_kind == "settlement"
+               )
+             )
+
+    # Never dispatched, so no usage applies and the reservation estimate is
+    # not counted toward the key's tokens.
+    assert {request.usage_status, attempt.usage_status, settlement.usage_status} ==
+             {"not_applicable", "not_applicable", "not_applicable"}
+
+    assert settlement.total_tokens == nil
+    assert key_usage_events(request_id) == %{known: 0, provisional: 0, admissions: 1}
 
     assert Repo.aggregate(BridgeDemotion, :count) == 0
 

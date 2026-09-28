@@ -15,6 +15,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.LedgerEntries do
   @amount_recorded "recorded"
   @amount_voided "voided"
   @usage_pending "usage_pending"
+  @usage_not_applicable "not_applicable"
   @source_event_conflict_target {:unsafe_fragment, "(source_event_id) WHERE source_event_id IS NOT NULL"}
 
   @type cost :: Decimal.t() | nil
@@ -207,7 +208,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.LedgerEntries do
       reasoning_tokens: positive_or_nil(state.usage.reasoning_tokens),
       total_tokens: positive_or_nil(state.usage.total_tokens),
       request_count: 1,
-      estimated_cost_micros: reservation.estimated_cost_micros,
+      estimated_cost_micros: settlement_estimated_cost(state.usage, reservation),
       settled_cost_micros: ledger_cost_value(settled_cost),
       source_event_id: settlement_source_event_id(request.id),
       occurred_at: state.usage.recorded_at,
@@ -318,7 +319,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.LedgerEntries do
       "attempt_status" => attempt.status,
       "response_status_code" => Map.fetch!(context, :response_status_code),
       "retry_count" => Map.fetch!(context, :retry_count),
-      "estimated_from_reserve" => usage.status != "usage_known",
+      "estimated_from_reserve" => usage.status not in ["usage_known", @usage_not_applicable],
       "settled_cost_micros" => context |> Map.fetch!(:settled_cost) |> decimal_string_or_nil(),
       "cached_input_cost_micros" => cached_input_cost_micros(usage, pricing),
       "cache_write_rate_status" => cache_write_rate_status(usage, pricing),
@@ -361,6 +362,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle.LedgerEntries do
       "request_status" => request.status
     }
   end
+
+  # A settlement whose usage does not apply did no provider work, so it
+  # carries no estimate either: the reservation's estimated cost would read as
+  # the request's cost wherever usage is not known and priced.
+  defp settlement_estimated_cost(%{status: @usage_not_applicable}, _reservation), do: Decimal.new(0)
+  defp settlement_estimated_cost(_usage, reservation), do: reservation.estimated_cost_micros
 
   defp positive_or_nil(value), do: if(value && value > 0, do: value, else: nil)
   defp nonnegative_or_nil(value) when is_integer(value) and value >= 0, do: value

@@ -162,6 +162,34 @@ defmodule CodexPooler.Accounting.ObservatoryAccountingTest do
              projection.models
   end
 
+  # A refusal the Pooler answered before anything reached the provider settles
+  # with no usage (`not_applicable`), no tokens and no estimate. It is a
+  # recorded settlement, not a request whose usage went unreported.
+  test "a settlement without applicable usage is recorded without counting as unknown usage" do
+    pool = pool_fixture()
+    api_key = dashboard_api_key_fixture(pool)
+    %{identity: identity, assignment: assignment} = upstream_assignment_fixture(pool)
+    model = model_fixture(pool, %{exposed_model_id: "gpt-refused-before-dispatch"})
+    upper_bound = ~U[2026-07-17 12:00:00Z]
+
+    refused = timed_request(pool, api_key, ~U[2026-07-17 11:30:00Z], %{model_id: model.id, status: "failed", usage_status: "not_applicable"})
+    refused_attempt = timed_attempt(refused, assignment, ~U[2026-07-17 11:30:00Z], 5)
+    timed_settlement(refused, refused_attempt, assignment, identity, ~U[2026-07-17 11:30:01Z], %{usage_status: "not_applicable", input_tokens: nil, output_tokens: nil, total_tokens: nil})
+
+    unreported = timed_request(pool, api_key, ~U[2026-07-17 11:31:00Z], %{model_id: model.id, status: "failed", usage_status: "usage_unknown"})
+    unreported_attempt = timed_attempt(unreported, assignment, ~U[2026-07-17 11:31:00Z], 5)
+    timed_settlement(unreported, unreported_attempt, assignment, identity, ~U[2026-07-17 11:31:01Z], %{usage_status: "usage_unknown", total_tokens: 700, estimated_cost_micros: 250})
+
+    assert {:ok, projection} = Observatory.read(principal(pool, api_key), "1h", as_of: upper_bound)
+
+    assert projection.totals.requests == %{total: 2, succeeded: 0, failed: 2, in_progress: 0}
+    assert projection.totals.tokens.total == 0
+    assert projection.totals.cost.estimated == %{status: "estimated", micros: 250}
+
+    assert %{status: "partial", recorded_settlements: 2, missing_settlements: 0, unknown_usage: 1} =
+             projection.accounting
+  end
+
   defp principal(pool, api_key) do
     DashboardPrincipal.new(%{
       api_key_id: api_key.id,

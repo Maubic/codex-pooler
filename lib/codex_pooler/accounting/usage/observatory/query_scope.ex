@@ -7,6 +7,7 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
   alias CodexPooler.Catalog.Model
 
   @usage_known "usage_known"
+  @usage_not_applicable "not_applicable"
   @safe_model_pattern "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$"
 
   defmacrop known_usage(status, value) do
@@ -197,12 +198,15 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
             request.status
           ),
         has_settlement: fragment("CASE WHEN ? IS NULL THEN 0 ELSE 1 END", fact.latest_settlement_entry_id),
+        # A settlement whose usage does not apply (a refusal answered before
+        # anything reached the provider) has no usage to miss.
         unknown_usage:
           fragment(
-            "CASE WHEN ? IS NOT NULL AND ? <> ? THEN 1 ELSE 0 END",
+            "CASE WHEN ? IS NOT NULL AND ? NOT IN (?, ?) THEN 1 ELSE 0 END",
             fact.latest_settlement_entry_id,
             fact.latest_settlement_usage_status,
-            ^@usage_known
+            ^@usage_known,
+            ^@usage_not_applicable
           ),
         input_tokens: known_usage(fact.latest_settlement_usage_status, fact.latest_input_tokens),
         cached_input_tokens: known_usage(fact.latest_settlement_usage_status, fact.latest_cached_input_tokens),

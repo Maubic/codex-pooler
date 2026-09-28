@@ -750,6 +750,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
     code = StreamProtocol.client_visible_error_code(upstream_code)
     websocket_frame_headers = Map.get(finalization, :websocket_frame_headers, %{})
     metadata_headers = headers ++ Map.to_list(websocket_frame_headers)
+    continuation_guard = continuation_guard_metadata(upstream_code, Map.get(finalization, :transport_failure))
 
     attempt_metadata =
       terminal_failure_metadata(
@@ -760,7 +761,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
         code,
         upstream_code,
         Map.get(finalization, :upstream_error_param),
-        Map.get(finalization, :transport_failure)
+        continuation_guard
       )
       |> collected_compaction_diagnostics(finalization)
       |> Map.merge(provider_rejection_metadata(body, context.request_options))
@@ -768,13 +769,28 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
     settle_terminal_failure(
       context,
       finalization,
-      body,
+      terminal_failure_usage(finalization, body, continuation_guard),
       code,
       attempt_metadata,
       health_code,
       metadata_headers
     )
   end
+
+  # The connection-bound guard refuses an anchor before anything is sent on
+  # the connection (`UpstreamWebsocketSession`'s
+  # `guard_connection_bound_continuation`), and only its exact metadata
+  # survives `TransportFailureReason.sanitize_continuation_generation_guard_metadata/1`,
+  # so that metadata proves the provider never received the request: it
+  # settles with no usage. As unknown usage it kept the reservation estimate,
+  # which the key's window usage counts as provisional tokens. The provider's
+  # own `Invalid previous_response_id` refusal, canonicalized to the same code,
+  # carries no guard metadata and keeps the unknown usage of a request the
+  # provider received.
+  defp terminal_failure_usage(_finalization, _body, continuation_guard) when map_size(continuation_guard) > 0,
+    do: undispatched_usage()
+
+  defp terminal_failure_usage(finalization, body, _continuation_guard), do: response_usage(finalization, body)
 
   # A provider refusal the upstream websocket sent as its wrapped error frame
   # (`{"type": "error", "status": 4xx, "error": {...}}`) records the rejection
@@ -867,10 +883,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
          code,
          upstream_code,
          upstream_error_param,
-         transport_failure
+         continuation_guard
        ) do
-    continuation_guard = continuation_guard_metadata(upstream_code, transport_failure)
-
     upstream_error_param =
       if upstream_code == "previous_response_not_found",
         do: "previous_response_id",
@@ -924,7 +938,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
   defp settle_terminal_failure(
          context,
          finalization,
-         body,
+         usage,
          code,
          attempt_metadata,
          upstream_code,
@@ -936,7 +950,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
     case AttemptSettlement.finalize_partial_stream_failure(
            reserved.request,
            attempt,
-           response_usage(finalization, body),
+           usage,
            SettlementAttrs.partial_stream_failure(
              context,
              finalization.status,
@@ -1130,8 +1144,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
 
   # A websocket turn with no websocket upstream path, and a public `/v1` request
   # anchored on `previous_response_id` that cannot reach the connection that
-  # produced it, never dispatched: settle it once with the fixed Pooler error,
-  # without retry or route-health evidence.
+  # produced it, never dispatched: settle it once with the fixed Pooler error
+  # and no usage, without retry or route-health evidence.
   def finalize_failed(
         context,
         %{reason: reason, error: %{status: status, code: code} = failure} = finalization
@@ -1149,7 +1163,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
     case AttemptSettlement.finalize_partial_stream_failure(
            reserved.request,
            attempt,
-           response_usage(finalization, ""),
+           undispatched_usage(),
            SettlementAttrs.partial_stream_failure(context, status, code, code, metadata, started: started),
            request_options.runtime.session_owner_witness
          ) do
@@ -1363,6 +1377,10 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
   # A retained body from an older owner may have lost intermediate events.
   # It can still supply legacy usage/first-model facts, never collection provenance.
   defp response_usage(_finalization, body), do: Map.delete(ResponseUsage.from_websocket_body(body), :model_observation)
+
+  # A refusal the Pooler answered before sending anything upstream did no
+  # provider work, so no usage applies to its settlement.
+  defp undispatched_usage, do: %{status: "not_applicable", source: "undispatched_refusal"}
 
   defp disconnected_model_usage(finalization) do
     %{status: "usage_unknown", source: "websocket_usage_missing"}

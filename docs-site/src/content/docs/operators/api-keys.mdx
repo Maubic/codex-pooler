@@ -248,7 +248,7 @@ The upstream may refuse `max_output_tokens`. Neither these fields nor the concur
 Daily and weekly admission use three distinct components:
 
 - **Known:** measured terminal usage, including a measured zero.
-- **Provisional:** the original reservation estimate for attempted work that ended without trustworthy usage, until a known correction replaces it or its original terminal time leaves the window. Proven pre-attempt failures add no provisional consumption.
+- **Provisional:** the original reservation estimate for attempted work that ended without trustworthy usage, until a known correction replaces it or its original terminal time leaves the window. Proven pre-attempt failures, and requests the Pooler refuses before anything is sent upstream, add no provisional consumption.
 - **Pending:** every outstanding reservation, including work admitted before the current window began.
 
 Effective token pressure is their sum. Daily usage starts at midnight UTC; weekly usage covers the trailing seven days. A late correction keeps the original terminal attribution time and replaces provisional pressure once. Releasing a reservation cannot subtract another request's consumption. The remaining budget reflects effective pressure; measured token and cost reports exclude pending and provisional estimates. Costs calculated from measured usage and a pricing snapshot are reporting estimates, not provider invoices or proof of subscription quota charges.

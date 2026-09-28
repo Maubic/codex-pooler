@@ -15,6 +15,8 @@ defmodule CodexPoolerWeb.V1.ResponsesPreviousResponseConnectionTest do
 
   import Ecto.Query
 
+  import CodexPooler.AccountingTestSupport, only: [key_usage_events: 1]
+
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
     only: [auth: 2, gateway_setup: 1, start_upstream: 1]
 
@@ -160,8 +162,11 @@ defmodule CodexPoolerWeb.V1.ResponsesPreviousResponseConnectionTest do
     assert [%Attempt{} = attempt] = attempts(request)
     refute Map.has_key?(attempt.response_metadata, "upstream_transport")
     refute Map.has_key?(attempt.response_metadata, "upstream_websocket_connection")
-    # Settled once, and no route-health evidence against the assignment.
-    assert Repo.aggregate(from(entry in LedgerEntry, where: entry.request_id == ^request.id and entry.entry_kind == "settlement"), :count) == 1
+    # Settled once with no usage, since nothing was dispatched, and no
+    # route-health evidence against the assignment.
+    assert [settlement] = Repo.all(from(entry in LedgerEntry, where: entry.request_id == ^request.id and entry.entry_kind == "settlement"))
+    assert {request.usage_status, attempt.usage_status, settlement.usage_status, settlement.total_tokens} == {"not_applicable", "not_applicable", "not_applicable", nil}
+    assert key_usage_events(request.id) == %{known: 0, provisional: 0, admissions: 1}
     assert Repo.aggregate(BridgeDemotion, :count) == 0
     assert Repo.aggregate(RoutingCircuitState, :count) == 0
   end

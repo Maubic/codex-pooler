@@ -244,7 +244,7 @@ For downstream idle closes on backend Codex websockets and narrow public `/v1/re
 
 Usage lines summarize request accounting, including request count context, token totals, cached input tokens, and estimated cost when pricing is available. Treat these as operational attribution and capacity evidence. They are not a replacement for provider billing records or the key-local Observatory projection.
 
-If usage is blank, check the request status first. A request can be admitted without final usage if it failed before settlement, if pricing was not matched, or if accounting metadata was not available for that route. A delivered incomplete response with missing upstream usage remains `usage_unknown` and does not get an invented settled cost from the reservation estimate.
+If usage is blank, check the request status first. A request can be admitted without final usage if it failed before settlement, if pricing was not matched, or if accounting metadata was not available for that route. A delivered incomplete response with missing upstream usage remains `usage_unknown` and does not get an invented settled cost from the reservation estimate. A request the Pooler refused before anything reached the upstream, such as a `previous_response_id` the current upstream connection cannot resolve, settles with usage `not_applicable`: no tokens, no estimated cost and no provisional token-budget pressure.
 
 ### Service tiers
 

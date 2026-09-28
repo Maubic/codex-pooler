@@ -628,7 +628,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ContinuationTest do
                )
 
       assert failed_settlement.attempt_id == failed_attempt.id
-      assert failed_settlement.usage_status == "usage_unknown"
+      # Refused before it was sent: no usage applies, and the reservation
+      # estimate is not kept as the settlement's tokens.
+      assert failed_settlement.usage_status == "not_applicable"
+      assert failed_settlement.total_tokens == nil
+      assert failed_settlement.details["estimated_from_reserve"] == false
 
       assert Repo.aggregate(
                from(attempt in Attempt, where: attempt.request_id == ^failed_request.id),

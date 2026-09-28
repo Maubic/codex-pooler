@@ -1342,11 +1342,15 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   defp optional_counter_for_sum(:unreported), do: {:ok, 0}
   defp optional_counter_for_sum({:ok, value}), do: {:ok, value}
 
+  # A settlement whose usage does not apply belongs to a refusal the Pooler
+  # answered before anything was sent upstream: there is no provider work to
+  # estimate, so it keeps no tokens instead of the reservation's.
   defp fill_unknown_usage_from_reservation(
-         %{status: @usage_known} = usage,
+         %{status: status} = usage,
          _reservation,
          _timestamp
-       ),
+       )
+       when status in [@usage_known, @usage_not_applicable],
        do: usage
 
   defp fill_unknown_usage_from_reservation(usage, reservation, _timestamp) do
