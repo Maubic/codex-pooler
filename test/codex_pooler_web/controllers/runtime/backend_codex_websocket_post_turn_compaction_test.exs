@@ -6,7 +6,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
   import Ecto.Query
   import ExUnit.CaptureLog
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
-  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [receive_frames_until_close!: 3]
+
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport,
+    only: [receive_frames_until_close!: 3, hold_settled_websocket_turn!: 0, release_settled_websocket_turn: 2, set_model_serving_mode!: 3, model_serving_scope: 0]
+
   import CodexPooler.AccountingTestSupport, only: [key_usage_events: 1]
 
   alias CodexPooler.Access
@@ -41,6 +44,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
   @compact_usage %{"input_tokens" => 3_000, "output_tokens" => 40, "total_tokens" => 3_040}
   @resumed_usage %{"input_tokens" => 500, "output_tokens" => 3, "total_tokens" => 503}
   @lifecycle_event [:codex_pooler, :gateway, :native_compaction, :lifecycle]
+  @anchor_usage %{"input_tokens" => 1_200, "output_tokens" => 9, "total_tokens" => 1_209}
   @socket_messages [
     :codex_response_chunk,
     :websocket_owner_frame,
@@ -49,7 +53,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
     :websocket_response_activity,
     :codex_response_done,
     :websocket_response_delivery_complete,
-    :direct_request_cleanup
+    :direct_request_cleanup,
+    :upstream_websocket_connection_closed,
+    :websocket_owner_upstream_closed
   ]
 
   for topology <- [:direct, :owner_forwarded] do
@@ -593,6 +599,148 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
     end
   end
 
+  # The provider closes the connection a native compaction ran on after its
+  # result was collected and before it was confirmed (findings#275). The
+  # confirmation used to fail on the closed connection: with owner forwarding
+  # off the client got `502 invalid_compaction_response` for a compaction it
+  # had already been billed for, with it on the compaction was delivered but
+  # its final reserved an admission bound to the closed connection and failed
+  # `502 upstream_request_failed` without reaching the provider. The
+  # confirmation now ends the admission as `connection_closed` and succeeds, so
+  # the client gets its compaction and the final runs as an ordinary turn on
+  # the next connection, each request billed once. `held_confirmation` holds
+  # the compaction's response task between its settlement and its
+  # confirmation while the connection closes (deterministic);
+  # `close_behind_terminal` has the provider send its Close right behind the
+  # compaction's terminal, with nothing held. Driven through the socket
+  # callbacks (this process is the socket).
+  for topology <- [:direct, :owner_forwarded], mode <- ["full", "lite"] do
+    @tag topology: topology, serving_mode: mode
+    test "#{topology} #{mode} provider close between a compaction's collection and its confirmation delivers the compaction and serves its final", ctx do
+      assert_compaction_window_close!(ctx.topology, ctx.serving_mode, :held_confirmation)
+    end
+  end
+
+  for topology <- [:direct, :owner_forwarded] do
+    @tag topology: topology
+    test "#{topology} provider Close right behind a compaction's terminal delivers the compaction and serves its final", ctx do
+      assert_compaction_window_close!(ctx.topology, "full", :close_behind_terminal)
+    end
+  end
+
+  # With owner forwarding on, the client's final can reach the owner before
+  # the owner hears that its session closed the connection the admission names
+  # (findings#270 row 270-182). The owner checks the session's open connection
+  # when it reserves, so the final still runs as an ordinary turn. The order is
+  # made deterministic by taking the session's close signal away from the
+  # owner and handing it over only after the final was served; the socket,
+  # idle by then, closes 1001 on the late signal as it does on a timely one.
+  test "owner_forwarded final reaching the owner before its session's close signal runs as an ordinary turn" do
+    put_owner_forwarding!(true)
+    attach_admission_lifecycle!()
+    turn_id = "late-signal-turn"
+    compact_item = %{"type" => "compaction", "encrypted_content" => "synthetic-late-signal"}
+
+    upstream =
+      start_upstream(
+        # provenance: synthetic_adversarial (compaction v2-shaped mid-turn frames; the provider's close of the idle connection as attributed in findings#270)
+        FakeUpstream.strict_sequence([
+          window_request(1, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_late_signal_anchor", @anchor_usage)])),
+          window_request(1, [equals: %{"previous_response_id" => "resp_late_signal_anchor"}], event_frames(compaction_events(compact_item, "resp_late_signal_compact"))),
+          window_request(2, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_late_signal_final", @resumed_usage)]))
+        ])
+      )
+
+    setup = gateway_setup(upstream, compact?: true)
+    state = callback_socket!(setup, "late-signal")
+
+    try do
+      state = run_turn!(state, mid_turn_payload(setup, [window_message("synthetic late-signal anchor")], turn_id, "turn", 1))
+      state = run_turn!(state, window_compaction_frame(setup, turn_id, "resp_late_signal_anchor"))
+      assert_receive {:admission_lifecycle, %{from: :collected_unconfirmed, to: :pending_final} = pending_final}, 15_000
+
+      [owner] = live_owners(setup)
+      session = :sys.get_state(owner).upstream_pid
+      test_pid = self()
+      :sys.replace_state(session, &Map.put(&1, :connection_close_subscriber, test_pid))
+      close_ref = make_ref()
+      assert :ok = FakeUpstream.close_websocket_connection(upstream, 1, close_ref: close_ref, notify: self(), code: 1000, reason: "synthetic age limit")
+      assert_receive {:fake_upstream_websocket_peer_closed, 1, ^close_ref}, 15_000
+      assert_receive {:upstream_websocket_connection_closed, ^session, signal}, 15_000
+
+      {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+      assert [%{"type" => "response.completed", "response" => %{"id" => "resp_late_signal_final"}}] = frames
+
+      # Reserved nowhere: the owner ended the admission when the final asked
+      # for it, before the signal arrived.
+      assert_receive {:admission_lifecycle, %{operation: :clear, from: :pending_final, to: :cleared} = clear}, 15_000
+      assert {clear.reason, clear.lifecycle_id, clear.generation} == {:connection_closed, pending_final.lifecycle_id, pending_final.generation}
+      refute Enum.any?(drain_lifecycle([]), &(&1.to == :reserved_final))
+
+      send(owner, {:upstream_websocket_connection_closed, session, signal})
+      assert {:websocket_owner_upstream_closed, _correlation_id, _epoch, _signal} = word = receive_owner_word!()
+      assert {:stop, :normal, {1001, "upstream connection closed"}, stopped} = CodexResponsesSocket.handle_info(word, state)
+      Process.put(:crossing_socket_state, stopped)
+
+      assert_window_accounting!(setup, [@anchor_usage, @compact_usage, @resumed_usage])
+      assert [final_request] = Enum.drop(FakeUpstream.requests(upstream), 2)
+      assert compact_item in final_request.json["input"]
+      assert :ok = FakeUpstream.verify!(upstream)
+    after
+      CodexResponsesSocket.terminate(:closed, Process.delete(:crossing_socket_state))
+    end
+  end
+
+  # The same race for a compaction: a post-turn compaction that reaches the
+  # owner before the owner hears its connection closed finds the admission
+  # bound to that connection refused when it is reserved, and is answered the
+  # retryable 503 before anything is claimed, billed or sent, as when the
+  # signal comes first (the admission is then already gone) and as with owner
+  # forwarding off. The released client retries with its full history.
+  test "owner_forwarded post-turn compaction reaching the owner before its session's close signal is refused before dispatch" do
+    put_owner_forwarding!(true)
+    attach_admission_lifecycle!()
+
+    upstream =
+      start_upstream(
+        # provenance: observed released-binary frame shape; reply frames synthetic; the provider's close of the idle connection as attributed in findings#270
+        FakeUpstream.strict_sequence([
+          FakeUpstream.expect_request(method: "WEBSOCKET", websocket_connection_ordinal: 1, json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]], respond: completed_frames(@anchor_response_id))
+        ])
+      )
+
+    setup = gateway_setup(upstream, compact?: true)
+    state = callback_socket!(setup, "late-signal-compaction")
+
+    try do
+      state = run_turn!(state, turn_frame(setup))
+      [owner] = live_owners(setup)
+      assert %{native_compaction_admission: %NativeCompactionAdmission{phase: :pending_compact, binding: armed}, upstream_pid: session} = :sys.get_state(owner)
+
+      test_pid = self()
+      :sys.replace_state(session, &Map.put(&1, :connection_close_subscriber, test_pid))
+      close_ref = make_ref()
+      assert :ok = FakeUpstream.close_websocket_connection(upstream, 1, close_ref: close_ref, notify: self(), code: 1000, reason: "synthetic age limit")
+      assert_receive {:fake_upstream_websocket_peer_closed, 1, ^close_ref}, 15_000
+      assert_receive {:upstream_websocket_connection_closed, ^session, signal}, 15_000
+
+      assert {:push, {:text, refusal}, state} = CodexResponsesSocket.handle_in({post_turn_frame(setup), [opcode: :text]}, state)
+      Process.put(:crossing_socket_state, state)
+      assert %{"type" => "error", "status" => 503, "error" => %{"code" => "owner_unavailable"}} = CodexPooler.JSON.decode!(refusal)
+
+      assert_receive {:admission_lifecycle, %{operation: :clear, from: :pending_compact, to: :cleared} = clear}, 15_000
+      assert {clear.reason, clear.lifecycle_id, clear.generation} == {:connection_closed, armed.lifecycle_id, armed.generation}
+      assert await_settled_rows!(setup) == [{"/backend-api/codex/responses", "websocket", "succeeded"}]
+
+      send(owner, {:upstream_websocket_connection_closed, session, signal})
+      assert {:stop, :normal, {1001, "upstream connection closed"}, stopped} = CodexResponsesSocket.handle_info(receive_owner_word!(), state)
+      Process.put(:crossing_socket_state, stopped)
+      assert :ok = FakeUpstream.verify!(upstream)
+    after
+      CodexResponsesSocket.terminate(:closed, Process.delete(:crossing_socket_state))
+    end
+  end
+
   # Drives the socket callbacks until no response task is tracked and nothing
   # is queued, returning every client-visible frame in push order. Every
   # producer of a frame for a task has fired before the task reports its
@@ -671,6 +819,183 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
         Process.sleep(10)
         {:cont, nil}
     end)
+  end
+
+  defp assert_compaction_window_close!(topology, mode, variant) do
+    put_owner_forwarding!(topology == :owner_forwarded)
+    attach_admission_lifecycle!()
+    label = "window-close-#{topology}-#{mode}-#{variant}"
+    turn_id = "#{label}-turn"
+    compact_item = %{"type" => "compaction", "encrypted_content" => "synthetic-#{label}"}
+    compaction_response = window_compaction_response(variant, compaction_events(compact_item, "resp_window_close_compact"))
+
+    upstream =
+      start_upstream(
+        # provenance: synthetic_adversarial (compaction v2-shaped mid-turn frames; the provider's close of the connection between a compaction's collection and its confirmation, findings#275)
+        FakeUpstream.strict_sequence([
+          window_request(1, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_window_close_anchor", @anchor_usage)])),
+          window_request(1, [equals: %{"previous_response_id" => "resp_window_close_anchor"}], compaction_response),
+          window_request(2, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_window_close_final", @resumed_usage)]))
+        ])
+      )
+
+    setup = gateway_setup(upstream, compact?: true)
+    if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    state = callback_socket!(setup, label)
+
+    try do
+      state = run_turn!(state, mid_turn_payload(setup, [window_message("synthetic window anchor")], turn_id, "turn", 1))
+      hold = if variant == :held_confirmation, do: hold_settled_websocket_turn!()
+      assert {:ok, state} = CodexResponsesSocket.handle_in({window_compaction_frame(setup, turn_id, "resp_window_close_anchor"), [opcode: :text]}, state)
+      Process.put(:crossing_socket_state, state)
+      if variant == :held_confirmation, do: close_held_compaction_connection!(upstream, hold, setup, state)
+
+      {state, frames} = collect_until_idle!(state, [])
+      Process.put(:crossing_socket_state, state)
+      assert [%{"type" => "response.output_item.done", "item" => ^compact_item}, %{"type" => "response.completed", "response" => %{"output" => [^compact_item]}}] = frames
+
+      {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+      assert [%{"type" => "response.completed", "response" => %{"id" => "resp_window_close_final"}}] = frames
+      _state = state
+
+      assert_window_accounting!(setup, [@anchor_usage, @compact_usage, @resumed_usage])
+      # Lite opens each provider context with its tool manifest; the final
+      # carries the compaction item to the provider in both modes.
+      assert [first, _compaction_request, final_request] = FakeUpstream.requests(upstream)
+      assert lite_context?(first) == (mode == "lite")
+      assert compact_item in final_request.json["input"]
+
+      assert_window_admission_ended!(variant, topology)
+      assert :ok = FakeUpstream.verify!(upstream)
+    after
+      CodexResponsesSocket.terminate(:closed, Process.delete(:crossing_socket_state))
+    end
+  end
+
+  defp window_compaction_response(:held_confirmation, events), do: event_frames(events)
+
+  defp window_compaction_response(:close_behind_terminal, events),
+    do: FakeUpstream.websocket_sse_then_close(events, code: 1000, reason: "synthetic age limit")
+
+  # The admission ended with the connection it named, as `connection_closed`;
+  # no final was ever armed or reserved on it. Every lifecycle event names the
+  # arm's topology.
+  defp assert_window_admission_ended!(variant, topology) do
+    events = drain_lifecycle([])
+    assert %{lifecycle_id: lifecycle_id, generation: 1} = Enum.find(events, &(&1.to == :reserved_compact))
+    assert [clear] = Enum.filter(events, &(&1.operation == :clear and &1.from not in [:cleared, :pending_compact]))
+    assert {clear.reason, clear.lifecycle_id, clear.generation} == {:connection_closed, lifecycle_id, 1}
+    if variant == :held_confirmation, do: assert(clear.from == :collected_unconfirmed and not Enum.any?(events, &(&1.to in [:pending_final, :reserved_final])))
+    assert MapSet.new(events, & &1.topology) == MapSet.new([lifecycle_topology(topology)])
+  end
+
+  # Closes the compaction's connection while its response task is held after
+  # its settlement, waits until the session holding the connection has closed
+  # it (and, with owner forwarding on, the owner has handled the session's
+  # signal), then lets the task confirm the compaction.
+  defp close_held_compaction_connection!(upstream, hold, setup, state) do
+    assert_receive {^hold, :held, task_pid}, 15_000
+    close_ref = make_ref()
+    assert :ok = FakeUpstream.close_websocket_connection(upstream, 1, close_ref: close_ref, notify: self(), code: 1000, reason: "synthetic age limit")
+    assert_receive {:fake_upstream_websocket_peer_closed, 1, ^close_ref}, 15_000
+
+    sessions =
+      case Map.get(state, :upstream_websocket_session) do
+        session when is_pid(session) -> [session]
+        _owned -> Enum.map(live_owners(setup), &:sys.get_state(&1).upstream_pid)
+      end
+
+    Enum.each(sessions, &await_connection_closed!(&1, System.monotonic_time(:millisecond) + 15_000))
+    # The session sent its signal before this read of each owner's state.
+    Enum.each(live_owners(setup), &:sys.get_state/1)
+    release_settled_websocket_turn(hold, task_pid)
+  end
+
+  # The session holds no connection once its close handler ran: no message
+  # marks it, so its state is polled on a monotonic deadline.
+  defp await_connection_closed!(session, deadline) do
+    cond do
+      not Map.has_key?(:sys.get_state(session), :conn) ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("the upstream session never closed the compaction's connection")
+
+      true ->
+        receive do
+        after
+          1 -> await_connection_closed!(session, deadline)
+        end
+    end
+  end
+
+  defp run_turn_frames!(state, frame) do
+    assert {:ok, state} = CodexResponsesSocket.handle_in({frame, [opcode: :text]}, state)
+    Process.put(:crossing_socket_state, state)
+    {state, frames} = collect_until_idle!(state, [])
+    Process.put(:crossing_socket_state, state)
+    {state, frames}
+  end
+
+  defp receive_owner_word! do
+    receive do
+      {:websocket_owner_upstream_closed, _correlation_id, _epoch, _signal} = word -> word
+    after
+      15_000 -> flunk("the owner never passed the late close signal on")
+    end
+  end
+
+  # Every request of the turn settled once for its own usage: one succeeded
+  # attempt, its reservation released by one settlement, nothing provisional
+  # and no second compaction.
+  defp assert_window_accounting!(setup, usages) do
+    assert await_settled_rows!(setup) == [
+             {"/backend-api/codex/responses", "websocket", "succeeded"},
+             {"/backend-api/codex/responses/compact", "websocket", "succeeded"},
+             {"/backend-api/codex/responses", "websocket", "succeeded"}
+           ]
+
+    requests = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: request.admitted_at))
+
+    for {request, usage} <- Enum.zip(requests, usages) do
+      assert [%Attempt{status: "succeeded"}] = Repo.all(from(attempt in Attempt, where: attempt.request_id == ^request.id))
+      assert ledger_entry_kinds(request) == ["release", "reservation", "settlement"]
+      assert key_usage_events(request.id) == %{known: usage["total_tokens"], provisional: 0, admissions: 1}
+    end
+  end
+
+  defp live_owners(setup) do
+    for session <- Repo.all(from(session in CodexSession, where: session.pool_id == ^setup.pool.id)),
+        {:ok, owner} <- [WebsocketOwnerSession.lookup(session.id)],
+        do: owner
+  end
+
+  defp window_request(connection_ordinal, json, respond) do
+    json = Keyword.update(Keyword.merge([valid: true], json), :equals, %{"type" => "response.create"}, &Map.put(&1, "type", "response.create"))
+    FakeUpstream.expect_request(method: "WEBSOCKET", websocket_connection_ordinal: connection_ordinal, json: Keyword.put_new(json, :equals, %{"type" => "response.create"}), respond: respond)
+  end
+
+  defp window_message(content), do: %{"type" => "message", "role" => "user", "content" => content}
+
+  defp lite_context?(%{json: %{"input" => [%{"type" => "additional_tools"} | _input]}}), do: true
+  defp lite_context?(_request), do: false
+
+  defp window_compaction_frame(setup, turn_id, anchor) do
+    setup
+    |> mid_turn_payload([%{"type" => "custom_tool_call_output", "call_id" => "call_#{turn_id}", "output" => "synthetic tool output"}, %{"type" => "compaction_trigger"}], turn_id, "compaction", 1)
+    |> CodexPooler.JSON.decode!()
+    |> Map.put("previous_response_id", anchor)
+    |> CodexPooler.JSON.encode!()
+  end
+
+  defp completed_event(response_id, usage),
+    do: %{"type" => "response.completed", "response" => %{"id" => response_id, "status" => "completed", "output" => [], "usage" => usage}}
+
+  defp compaction_events(item, response_id) do
+    [
+      %{"type" => "response.output_item.done", "item" => item},
+      %{"type" => "response.completed", "response" => %{"id" => response_id, "status" => "completed", "output" => [item], "usage" => @compact_usage}}
+    ]
   end
 
   # A native socket driven through its callbacks: this process is the socket.

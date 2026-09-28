@@ -434,6 +434,49 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
              |> Map.drop([:compact_runtime_proof_redeemed, :final_runtime_proof_redeemed])
   end
 
+  # The provider's Close coalesced with a compaction's terminal closes the
+  # connection between the compaction's collection and its confirmation
+  # (findings#275). The close clears the admission but keeps the collection
+  # as the one confirmation it can still accept: that confirmation succeeds
+  # once and arms nothing, so the client gets its compaction and the final
+  # runs as an ordinary turn; any other confirmation is refused as before.
+  test "direct compaction whose connection closed behind its terminal is confirmed once without arming a final" do
+    peer = start_raw_websocket_peer(response_mode: :terminal)
+    {:ok, session} = UpstreamWebsocketSession.start_link([])
+    on_exit(fn -> UpstreamWebsocketSession.close(session) end)
+
+    assert {:ok, %{terminal: "response.completed", ordinary_success_result: ordinary_receipt}} =
+             UpstreamWebsocketSession.request(session, ordinary_request(raw_websocket_request(peer.url, self())))
+
+    assert_receive {:upstream_websocket_frame, _warmup_frame}, @detection_timeout_ms
+    lifecycle = UpstreamWebsocketSession.connection_lifecycle_snapshot(session)
+    assert UpstreamWebsocketSession.live_connection(session) == {:ok, lifecycle}
+    binding = direct_admission_binding(lifecycle, ordinary_receipt)
+    expires_at_ms = System.system_time(:millisecond) + 30_000
+    assert :ok = UpstreamWebsocketSession.arm_compact(session, binding, expires_at_ms, ordinary_receipt)
+    control_ref = make_ref()
+    assert {:ok, capability} = UpstreamWebsocketSession.reserve_compaction(session, :compact, binding, control_ref, System.system_time(:millisecond))
+    assert :ok = UpstreamWebsocketSession.mark_compaction_accounting_started(session, capability, System.system_time(:millisecond))
+
+    set_raw_websocket_peer_response_mode(peer, :terminal_then_coalesced_close)
+    request = %{raw_websocket_request(peer.url, self()) | native_compaction_capability: capability, expected_connection_lifecycle: lifecycle}
+    assert {:ok, %{terminal: "response.completed"}} = UpstreamWebsocketSession.request(session, request)
+
+    # The Close came in the terminal's read: the connection and its admission
+    # are gone before anything confirmed the compaction.
+    assert :cleared = UpstreamWebsocketSession.compaction_admission_phase(session)
+    assert UpstreamWebsocketSession.live_connection(session) == {:ok, %{lifecycle | generation: nil}}
+
+    digest = :crypto.hash(:sha256, "synthetic-compaction-item")
+    confirmation = %Confirmation{source_phase: :compact, source_control_ref: control_ref, binding: %{binding | compaction_item_digest: digest}}
+    finalization = &UpstreamWebsocketSession.acknowledge_compact_finalization(session, {:success, digest, &1, expires_at_ms})
+
+    assert {:error, :invalid_transition} = finalization.(%{confirmation | source_control_ref: make_ref()})
+    assert :ok = finalization.(confirmation)
+    assert :cleared = UpstreamWebsocketSession.compaction_admission_phase(session)
+    assert {:error, :invalid_transition} = finalization.(confirmation)
+  end
+
   describe "direct native compaction admission clear reasons" do
     @short_receive_timeouts %{connect_timeout_ms: 1_000, receive_timeout_ms: 150}
 

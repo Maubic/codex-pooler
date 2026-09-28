@@ -178,6 +178,21 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   def connection_lifecycle_snapshot(_pid), do: {:error, :invalid_input}
 
+  # The connection a native compaction admission names is usable only while
+  # it is this session's open connection: a compaction's final, or the next
+  # compaction, sent after the provider closed it cannot reach the provider
+  # (findings#275). `generation` is the open connection's, nil between two
+  # connections.
+  @spec live_connection(pid()) ::
+          {:ok, %{lifecycle_id: Ecto.UUID.t(), generation: pos_integer() | nil}} | {:error, :unavailable | :invalid_input}
+  def live_connection(pid) when is_pid(pid) do
+    GenServer.call(pid, :live_connection, 1_000)
+  catch
+    :exit, _reason -> {:error, :unavailable}
+  end
+
+  def live_connection(_pid), do: {:error, :invalid_input}
+
   @spec compaction_reservation_snapshot(pid()) ::
           {:ok, %{lifecycle_id: Ecto.UUID.t(), generation: pos_integer(), serving_mode: :full | :lite}}
           | {:error, atom()}
@@ -423,6 +438,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     {:reply, connection_lifecycle_state(state), state}
   end
 
+  def handle_call(:live_connection, _from, state) do
+    generation = if Map.has_key?(state, :conn) and state.generation > 0, do: state.generation
+    {:reply, {:ok, %{lifecycle_id: state.lifecycle_id, generation: generation}}, state}
+  end
+
   def handle_call(:compaction_reservation_snapshot, _from, state) do
     result =
       with %{phase: phase, binding: %Binding{} = binding, expires_at_ms: expires}
@@ -618,7 +638,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
         {:reply, :ok, put_admission(state, admission)}
 
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        confirm_closed_connection_collection(state, reason, digest, confirmation, expires_at_ms)
 
       {:error, reason, admission} ->
         {:reply, {:error, reason},
@@ -1271,10 +1291,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp normalized_forwarded_serving_mode(:lite), do: {:ok, :lite}
   defp normalized_forwarded_serving_mode(_mode), do: {:error, :invalid_serving_mode}
 
-  defp finalize_consumed_request(state, {:ok, _result}, :compact, _request) do
+  defp finalize_consumed_request(state, {:ok, _result}, :compact, request) do
     case NativeCompactionAdmission.record_compact_collected(admission_state(state)) do
       {:ok, admission} -> put_admission(state, admission)
-      {:error, reason} -> clear_admission(state, reason)
+      {:error, reason} -> state |> clear_admission(reason) |> collect_closed_connection_compaction(request)
     end
   end
 
@@ -2877,20 +2897,27 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   defp close_state(%{conn: conn} = state) do
     {:ok, _conn} = Mint.HTTP.close(conn)
-
-    state
-    |> cancel_keepalive()
-    |> cancel_pong_deadline()
-    |> clear_admission(:connection_closed)
-    |> disconnected_state()
+    close_connection_state(state)
   end
 
-  defp close_state(state) do
+  defp close_state(state), do: close_connection_state(state)
+
+  # A compaction collected on the closing connection and not confirmed yet
+  # keeps its admission as the one confirmation it can still accept
+  # (`confirm_closed_connection_collection/5`, findings#275). A Close that
+  # arrives in the compaction's own terminal read closes the connection
+  # before the collection is recorded, so a consumed compaction is kept too
+  # and recorded as collected once its request succeeded
+  # (`collect_closed_connection_compaction/2`).
+  defp close_connection_state(state) do
+    collection = admission_state(state)
+
     state
     |> cancel_keepalive()
     |> cancel_pong_deadline()
     |> clear_admission(:connection_closed)
     |> disconnected_state()
+    |> then(&if(collection.phase in [:consumed_compact, :collected_unconfirmed], do: Map.put(&1, :closed_connection_collection, collection), else: &1))
   end
 
   defp invalidate_state(state) do
@@ -2912,6 +2939,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       |> preserve_trace_sensitivity(state)
       |> preserve_connection_close_subscriber(state)
       |> preserve_admission_topology(state)
+      |> preserve_closed_connection_collection(state)
 
     if Map.get(state, :reconnect_pending?, false) do
       Map.put(lifecycle, :reconnect_pending?, true)
@@ -2957,6 +2985,36 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       do: Map.put(next, :native_compaction_last_clear, observation),
       else: next
   end
+
+  # The provider closed the connection a compaction ran on between its
+  # collection and its confirmation (findings#275). The close cleared the
+  # admission, which kept only the collection it waited to confirm; a
+  # confirmation that collection accepts is answered `:ok` with nothing armed,
+  # so the client gets the compaction it was billed for and its final runs as
+  # an ordinary turn on the next connection. Any other confirmation is refused
+  # as before.
+  defp confirm_closed_connection_collection(state, reason, digest, confirmation, expires_at_ms) do
+    with %NativeCompactionAdmission{phase: :cleared} <- admission_state(state),
+         %NativeCompactionAdmission{phase: :collected_unconfirmed} = collection <- Map.get(state, :closed_connection_collection),
+         {:ok, _unarmed} <- NativeCompactionAdmission.confirm_compact(collection, digest, confirmation, expires_at_ms) do
+      :ok = emit_compact_acknowledged(collection.capability)
+      {:reply, :ok, Map.delete(state, :closed_connection_collection)}
+    else
+      _refused -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp collect_closed_connection_compaction(state, %Request{native_compaction_capability: %Capability{} = capability}) do
+    with %NativeCompactionAdmission{phase: :consumed_compact} = consumed <- Map.get(state, :closed_connection_collection),
+         true <- NativeCompactionAdmission.owns_capability?(consumed, capability),
+         {:ok, collected} <- NativeCompactionAdmission.record_compact_collected(consumed) do
+      Map.put(state, :closed_connection_collection, collected)
+    else
+      _other -> state
+    end
+  end
+
+  defp collect_closed_connection_compaction(state, _request), do: state
 
   defp clear_rejected_capability(state, capability, reason) do
     if NativeCompactionAdmission.owns_capability?(admission_state(state), capability) do
@@ -3041,6 +3099,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     end
   end
 
+  defp preserve_closed_connection_collection(lifecycle, state) do
+    case Map.fetch(state, :closed_connection_collection) do
+      {:ok, collection} -> Map.put(lifecycle, :closed_connection_collection, collection)
+      :error -> lifecycle
+    end
+  end
+
   defp emit_reservation_observations(%Capability{} = capability) do
     # One successful owner reserve operation proves both issuance and the
     # immediately stored reserved state. Neither fact is emitted on failure.
@@ -3077,6 +3142,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp status_message_class({:send_text, _payload}), do: :send_text
   defp status_message_class(:invalidate_connection), do: :invalidate_connection
   defp status_message_class(:connection_lifecycle_snapshot), do: :lifecycle_snapshot
+  defp status_message_class(:live_connection), do: :live_connection
   defp status_message_class(:compaction_admission_phase), do: :admission_phase
   defp status_message_class(:clear_compaction_admission), do: :admission_clear
 

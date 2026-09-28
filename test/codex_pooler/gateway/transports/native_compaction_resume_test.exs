@@ -78,6 +78,60 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionResumeTest do
     end
   end
 
+  # The cases above fence stale downstream epochs, so their connections stay
+  # open. An admission whose own connection the provider closed is refused
+  # when it is reserved (findings#275): the owner asks its session which
+  # connection is open, ends the admission as `connection_closed`, and the
+  # socket then answers a compaction with the retryable 503 before anything
+  # is claimed or sent, and runs a final as an ordinary turn.
+  test "forwarded reservation on an admission whose connection closed is refused and ends the admission" do
+    instance = Atom.to_string(node())
+    lease = Ecto.UUID.generate()
+
+    {:ok, owner} =
+      WebsocketOwnerSession.start_owner(
+        codex_session_id: "native-resume-#{System.unique_integer([:positive, :monotonic])}",
+        owner_instance_id: instance,
+        owner_lease_token: lease
+      )
+
+    downstream_pid = spawn(fn -> receive(do: (:stop -> :ok)) end)
+
+    try do
+      {:ok, downstream} = WebsocketOwnerSession.attach_downstream(owner, %{pid: downstream_pid, correlation_id: Ecto.UUID.generate()})
+      {binding, upstream} = record_forwarded_success(owner, downstream, instance, lease)
+      assert owner_phase(owner) == :pending_compact
+
+      FakeUpstream.stop(upstream)
+      await_connection_closed!(:sys.get_state(owner).upstream_pid, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+
+      assert {:error, :invalid_transition} =
+               WebsocketOwnerSession.admission_control(owner, control(:reserve, downstream, binding: binding, phase: :compact, control_ref: make_ref(), now_ms: now_ms()))
+
+      assert %{native_compaction_admission: nil} = :sys.get_state(owner)
+    after
+      stop_process(owner)
+      stop_downstream(downstream_pid)
+    end
+  end
+
+  # The session holds no open connection once it handled the close; no
+  # message marks it, so it is polled on a monotonic deadline.
+  defp await_connection_closed!(session, deadline) do
+    case UpstreamWebsocketSession.live_connection(session) do
+      {:ok, %{generation: nil}} ->
+        :ok
+
+      live ->
+        if System.monotonic_time(:millisecond) >= deadline, do: flunk("the session still reported #{inspect(live)}")
+
+        receive do
+        after
+          1 -> await_connection_closed!(session, deadline)
+        end
+    end
+  end
+
   defp assert_current_forwarded(owner, downstream, binding, capability) do
     current = :sys.get_state(owner).native_compaction_admission
     phase = owner_phase(owner)
@@ -233,6 +287,25 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionResumeTest do
   end
 
   defp reserve_forwarded(owner, downstream, instance, lease) do
+    {binding, _upstream} = record_forwarded_success(owner, downstream, instance, lease)
+
+    assert {:ok, capability} =
+             WebsocketOwnerSession.admission_control(
+               owner,
+               control(:reserve, downstream,
+                 binding: binding,
+                 phase: :compact,
+                 control_ref: make_ref(),
+                 now_ms: now_ms()
+               )
+             )
+
+    {binding, capability}
+  end
+
+  # An ordinary success through the owner on a connection that stays open
+  # until the test ends, recorded as the owner's armed admission.
+  defp record_forwarded_success(owner, downstream, instance, lease) do
     frame =
       CodexPooler.JSON.encode!(%{
         "type" => "response.completed",
@@ -240,6 +313,7 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionResumeTest do
       })
 
     {:ok, upstream} = FakeUpstream.start_link(FakeUpstream.websocket_text_frames([frame]))
+    ExUnit.Callbacks.on_exit(fn -> FakeUpstream.stop(upstream) end)
 
     request = %Request{
       url: FakeUpstream.url(upstream) <> "/backend-api/codex/responses",
@@ -252,14 +326,7 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionResumeTest do
       message_mapper: &StreamProtocol.canonicalize_native_codex_responses_json_message/1
     }
 
-    result =
-      try do
-        {:ok, result} = WebsocketOwnerSession.submit_request(owner, downstream, request)
-        result
-      after
-        FakeUpstream.stop(upstream)
-      end
-
+    {:ok, result} = WebsocketOwnerSession.submit_request(owner, downstream, request)
     receipt = result.ordinary_success_result
     topology = Control.forwarded_topology(instance, lease, downstream.epoch)
 
@@ -278,18 +345,7 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionResumeTest do
                )
              )
 
-    assert {:ok, capability} =
-             WebsocketOwnerSession.admission_control(
-               owner,
-               control(:reserve, downstream,
-                 binding: binding,
-                 phase: :compact,
-                 control_ref: make_ref(),
-                 now_ms: now_ms()
-               )
-             )
-
-    {binding, capability}
+    {binding, upstream}
   end
 
   defp stale_control(:snapshot, downstream, _old), do: control(:snapshot, downstream)

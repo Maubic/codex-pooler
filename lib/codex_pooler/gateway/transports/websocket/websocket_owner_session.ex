@@ -665,6 +665,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
          %{action: :reserve} = control
        ) do
     with :ok <- require_forwarded_binding(state, control.downstream, control.binding),
+         :ok <- require_live_admission_connection(state, admission),
          {:ok, next, capability} <-
            NativeCompactionAdmission.reserve(
              admission,
@@ -676,6 +677,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       :ok = emit_reservation_observations(capability)
       {:ok, capability, put_admission(state, next)}
     else
+      {:error, :connection_closed} -> {:error, :invalid_transition, clear_native_compaction_admission(state, :connection_closed)}
       {:error, reason} -> {:error, reason, state}
     end
   end
@@ -833,8 +835,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
          ) do
       {:ok, next} ->
         :ok = emit_compact_acknowledged(compact_capability)
-
-        {:ok, next, put_admission(state, next)}
+        confirmed_admission(state, next)
 
       {:error, reason, next} ->
         {:error, reason,
@@ -875,6 +876,36 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
   defp execute_admission_control(state, _control),
     do: {:error, :invalid_transition, clear_native_compaction_admission(state, :invalid_transition)}
+
+  # The confirmation names the connection the compaction ran on. When the
+  # provider closed it between the collection and this confirmation, the
+  # confirmation ends the admission (`connection_closed`) instead of arming
+  # a final that could never reach the provider: the client gets its
+  # compaction and the final runs as an ordinary turn on the next connection,
+  # as with owner forwarding off (findings#275).
+  defp confirmed_admission(state, %NativeCompactionAdmission{phase: :pending_final} = next) do
+    case require_live_admission_connection(state, next) do
+      :ok -> {:ok, next, put_admission(state, next)}
+      {:error, :connection_closed} -> {:ok, NativeCompactionAdmission.clear(next), clear_native_compaction_admission(state, :connection_closed)}
+    end
+  end
+
+  defp confirmed_admission(state, next), do: {:ok, next, put_admission(state, next)}
+
+  # An admission is used (reserved, or confirmed into its final) only on the
+  # connection it names. The session answers which connection is open now,
+  # so a close the owner has not heard of yet counts too (findings#275). A
+  # session that cannot answer, or names another lifecycle, keeps today's
+  # checks.
+  defp require_live_admission_connection(state, %NativeCompactionAdmission{binding: %NativeCompactionAdmission.Binding{lifecycle_id: lifecycle_id, generation: generation}}) do
+    case UpstreamWebsocketSession.live_connection(state.upstream_pid) do
+      {:ok, %{lifecycle_id: ^lifecycle_id, generation: ^generation}} -> :ok
+      {:ok, %{lifecycle_id: ^lifecycle_id}} -> {:error, :connection_closed}
+      _unknown -> :ok
+    end
+  end
+
+  defp require_live_admission_connection(_state, _admission), do: :ok
 
   defp validate_admission_control(control) do
     case WebsocketOwnerAdmissionControlV1.validate(control) do
