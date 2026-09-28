@@ -245,6 +245,10 @@ have a saved value. When disabled, the runtime returns `403` with code
 body decompression, parsing, coercion, admission, or upstream dispatch. This
 keeps a disabled Pool from accepting image payloads at the parser boundary.
 
+`Allow Audio Transcription` controls `POST /backend-api/transcribe` and `POST /v1/audio/transcriptions`. It is on by default for new and existing Pools. Turning it off returns `403 audio_transcription_disabled` after authentication and before the audio upload is parsed, work is reserved, or an upstream is called. It applies to both JSON and plain-text transcription output. The setting is independent of image generation and does not enable speech synthesis, audio translation, or Realtime audio.
+
+Change either media permission in the Pool wizard or editor under Compatibility, or use its icon beside the Pool name for a quick toggle. Saved changes apply to subsequent requests across the deployment.
+
 ## Upstreams Step
 
 The Upstreams step selects which active upstream accounts are available to the Pool. A checked upstream becomes a Pool assignment. Runtime routing still applies eligibility checks before using it.

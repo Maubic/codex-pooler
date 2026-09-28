@@ -1519,6 +1519,16 @@ defmodule CodexPooler.CompatibilityMatrixTest do
     end
   end
 
+  test "audio permission contract covers both transcription routes and the persisted default" do
+    feature = CompatibilityMatrix.by_slug!(:audio_transcription_permission)
+    fixture = CompatibilityMatrix.fixture!(:audio_transcription_permission)
+    assert feature.status == :supported
+    assert feature.routes == [%{method: :post, path: "/backend-api/transcribe"}, %{method: :post, path: "/v1/audio/transcriptions"}]
+    assert :allow_audio_transcription in RoutingSettings.__schema__(:fields)
+    assert %RoutingSettings{}.allow_audio_transcription == true
+    assert fixture.pool_gate == %{setting: "allow_audio_transcription", default_enabled: true, disabled_behavior: "403_audio_transcription_disabled"}
+  end
+
   describe "pruned runtime compatibility contract" do
     test "does not carry removed control-plane or reset-credit feature rows" do
       refute :control_plane_surface in CompatibilityMatrix.feature_slugs()

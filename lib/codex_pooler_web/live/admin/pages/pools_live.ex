@@ -1207,7 +1207,8 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
 
   @compat_flag_labels %{
     "v1_compatibility_enabled" => "/v1 compatibility",
-    "allow_image_generation" => "Allow Image Generation"
+    "allow_image_generation" => "Allow Image Generation",
+    "allow_audio_transcription" => "Allow Audio Transcription"
   }
 
   defp compat_flag_label(flag) do

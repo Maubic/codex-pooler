@@ -883,6 +883,19 @@ defmodule CodexPooler.CompatibilityMatrix do
       contract: "image generation and edits are Pool-gated by allow_image_generation (default on) after runtime authentication and before request parsing or upstream dispatch; disabled Pools receive a deterministic 403 image_generation_disabled error"
     },
     %{
+      slug: :audio_transcription_permission,
+      status: :supported,
+      current: :pool_gated_audio_transcription_permission,
+      categories: [:route, :auth, :error],
+      routes: [
+        %{method: :post, path: "/backend-api/transcribe"},
+        %{method: :post, path: "/v1/audio/transcriptions"}
+      ],
+      future_routes: [],
+      fixture: :audio_transcription_permission,
+      contract: "audio transcription is Pool-gated by allow_audio_transcription (default on) after runtime authentication and before decompression, multipart parsing, admission, accounting or upstream dispatch; the gateway rechecks the shared database setting, and disabled Pools receive 403 audio_transcription_disabled"
+    },
+    %{
       slug: :responses_access_programs,
       status: :supported,
       current: :validated_forwarding,
@@ -3588,6 +3601,7 @@ defmodule CodexPooler.CompatibilityMatrix do
           "api_key_policy_malformed",
           "model_not_allowed",
           "image_generation_disabled",
+          "audio_transcription_disabled",
           "api_key_concurrency_limit_exceeded",
           "api_key_policy_limit_exceeded"
         ],
@@ -4026,6 +4040,19 @@ defmodule CodexPooler.CompatibilityMatrix do
         message: "upstream request failed",
         type: "server_error",
         unchanged: true
+      }
+    },
+    audio_transcription_permission: %{
+      pool_gate: %{
+        setting: "allow_audio_transcription",
+        default_enabled: true,
+        disabled_behavior: "403_audio_transcription_disabled"
+      },
+      authoritative_gateway: :runtime_ingress,
+      gateway_recheck: :execute_multipart_and_execute,
+      enforcement: %{
+        after: :runtime_authentication,
+        before: [:request_parsing, :upstream_dispatch, :body_decompression]
       }
     },
     image_generation_permission: %{

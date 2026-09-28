@@ -13,6 +13,30 @@ defmodule CodexPoolerWeb.V1.AudioControllerTest do
   alias CodexPooler.Gateway
   alias CodexPooler.Repo
 
+  for endpoint <- ["/backend-api/transcribe", "/v1/audio/transcriptions"] do
+    @transcription_endpoint endpoint
+    test "#{endpoint} stops dispatch while audio is disabled and resumes when reenabled", %{conn: conn} do
+      upstream = start_upstream(FakeUpstream.json_response(%{"text" => "synthetic transcript"}))
+      setup = upstream |> gateway_setup() |> use_transcription_model!()
+      settings = setup.pool |> CodexPooler.Pools.ensure_routing_settings() |> Ecto.Changeset.change(allow_audio_transcription: false) |> Repo.update!()
+      payload = %{"model" => "gpt-transcribe", "file" => upload_fixture("audio.wav", "audio/wav", "synthetic bytes")}
+
+      rejected = conn |> auth(setup) |> post(@transcription_endpoint, payload)
+      assert json_response(rejected, 403)["error"]["code"] == "audio_transcription_disabled"
+      assert FakeUpstream.requests(upstream) == []
+      assert Repo.aggregate(Request, :count) == 0
+      assert Repo.aggregate(Attempt, :count) == 0
+      assert Repo.aggregate(LedgerEntry, :count) == 0
+
+      settings |> Ecto.Changeset.change(allow_audio_transcription: true) |> Repo.update!()
+      accepted = conn |> recycle() |> auth(setup) |> post(@transcription_endpoint, payload)
+      assert json_response(accepted, 200)["text"] == "synthetic transcript"
+      assert FakeUpstream.count(upstream) == 1
+      assert Repo.aggregate(Attempt, :count) == 1
+      assert Repo.aggregate(from(e in LedgerEntry, where: e.entry_kind == "settlement"), :count) == 1
+    end
+  end
+
   @tag :transcription_success
   test "POST /v1/audio/transcriptions canonicalizes gpt-transcribe across multipart and accounting",
        %{conn: conn} do

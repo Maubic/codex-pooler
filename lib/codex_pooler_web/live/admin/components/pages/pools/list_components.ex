@@ -775,6 +775,14 @@ defmodule CodexPoolerWeb.Admin.PoolListComponents do
       label: "Allow Image Generation",
       docs_url: "https://docs.codex-pooler.com/operators/pools/#compatibility",
       description: "Permits image generation and edits for requests using this Pool."
+    },
+    %{
+      key: :allow_audio_transcription,
+      id_suffix: "audio-transcription",
+      icon: "hero-microphone",
+      label: "Allow Audio Transcription",
+      docs_url: "https://docs.codex-pooler.com/operators/pools/#compatibility",
+      description: "Permits speech-to-text transcription for requests using this Pool."
     }
   ]
 

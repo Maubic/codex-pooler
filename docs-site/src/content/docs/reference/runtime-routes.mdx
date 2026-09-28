@@ -411,6 +411,10 @@ the Pool API key, then returns `403` with code `image_generation_disabled`
 before decompression, request parsing, compatibility coercion, admission, or
 upstream dispatch.
 
+### Pool audio permission
+
+The Pool setting `allow_audio_transcription` controls `POST /backend-api/transcribe` and `POST /v1/audio/transcriptions`. It defaults to `true`, including for existing Pools. A disabled Pool returns `403 audio_transcription_disabled` after Pool API-key authentication and before decompression, multipart parsing, admission, accounting reservation, or upstream dispatch. The gateway also reads the current shared setting before transcription execution. Image permission and unsupported audio routes retain their separate behavior.
+
 `POST /v1/responses` accepts `reasoning.context` only for `auto`,
 `current_turn`, and `all_turns` after trimming and lowercasing. Unknown, empty,
 or non-string context values fail before dispatch with

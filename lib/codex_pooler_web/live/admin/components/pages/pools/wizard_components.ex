@@ -314,6 +314,11 @@ defmodule CodexPoolerWeb.Admin.PoolWizardComponents do
                         label="Allow Image Generation"
                         help="Permits image generation and edits for requests using this Pool."
                       />
+                      <.routing_toggle_row
+                        field={@form[:allow_audio_transcription]}
+                        label="Allow Audio Transcription"
+                        help="Permits speech-to-text transcription for requests using this Pool."
+                      />
                     </div>
                   </div>
                 </div>

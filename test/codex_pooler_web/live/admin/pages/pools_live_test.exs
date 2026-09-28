@@ -842,6 +842,17 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
     view |> element("#pool-row-#{pool.id}-compat-image-generation") |> render_click()
     refute has_element?(view, "#pool-row-#{pool.id}-compat-panel")
+
+    assert has_element?(view, "#pool-row-#{pool.id}-compat-image-generation + #pool-row-#{pool.id}-compat-audio-transcription")
+    view |> element("#pool-row-#{pool.id}-compat-audio-transcription") |> render_click()
+    assert has_element?(view, "#pool-row-#{pool.id}-compat-audio-transcription-toggle[checked]")
+    view |> element("#pool-row-#{pool.id}-compat-audio-transcription-toggle") |> render_click()
+    refute PoolRouting.get_routing_settings(pool.id).allow_audio_transcription
+    refute has_element?(view, "#pool-row-#{pool.id}-compat-audio-transcription-toggle[checked]")
+    view |> element("#pool-row-#{pool.id}-compat-audio-transcription-toggle") |> render_click()
+    assert PoolRouting.get_routing_settings(pool.id).allow_audio_transcription
+    assert has_element?(view, "#pool-row-#{pool.id}-compat-audio-transcription-toggle[checked]")
+    refute PoolRouting.get_routing_settings(pool.id).allow_image_generation
     _ = await_pool_traffic(view)
   end
 
@@ -2404,7 +2415,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     _ = await_pool_traffic(view)
   end
 
-  test "creates pools with routing strategy, compatibility, image generation, and upstream identities",
+  test "creates pools with routing strategy, compatibility, media permissions, and upstream identities",
        %{conn: conn} do
     first_identity =
       active_identity_fixture(account_label: "First create account", plan_label: "pro")
@@ -2443,6 +2454,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
         "v1_compatibility_enabled" => "false",
         "request_compression_enabled" => "true",
         "allow_image_generation" => "false",
+        "allow_audio_transcription" => "false",
         "upstream_identity_ids" => [first_identity.id, second_identity.id]
       }
     })
@@ -2457,6 +2469,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert settings.v1_compatibility_enabled == false
     refute Map.has_key?(settings, :request_compression_enabled)
     assert settings.allow_image_generation == false
+    assert settings.allow_audio_transcription == false
 
     assert Enum.map(assignments, & &1.upstream_identity_id) |> Enum.sort() ==
              [first_identity.id, second_identity.id] |> Enum.sort()
@@ -3880,6 +3893,8 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
              "#pool-edit-routing-controls #pool_edit_allow_image_generation"
            )
 
+    assert has_element?(view, "#pool-edit-routing-controls #pool_edit_allow_audio_transcription")
+
     assert has_element?(view, "#pool_edit_routing_strategy")
     assert has_element?(view, "#pool_edit_bridge_ring_size")
     assert has_element?(view, "#pool_edit_sticky_websocket_sessions")
@@ -4528,7 +4543,8 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
         "sticky_http_sessions" => true,
         "prompt_cache_affinity_enabled" => false,
         "request_compression_enabled" => true,
-        "allow_image_generation" => false
+        "allow_image_generation" => false,
+        "allow_audio_transcription" => false
       })
 
     Repo.query!("UPDATE pool_routing_settings SET request_compression_enabled = true WHERE pool_id = $1", [Ecto.UUID.dump!(pool.id)])
@@ -4541,6 +4557,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     refute has_element?(view, "#pool_edit_prompt_cache_affinity_enabled[checked]")
     refute has_element?(view, "#pool_edit_request_compression_enabled")
     refute has_element?(view, "#pool_edit_allow_image_generation[checked]")
+    refute has_element?(view, "#pool_edit_allow_audio_transcription[checked]")
 
     view
     |> element("#pool-edit-form")
@@ -4554,6 +4571,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
         "v1_compatibility_enabled" => "false",
         "request_compression_enabled" => "false",
         "allow_image_generation" => "true",
+        "allow_audio_transcription" => "true",
         "upstream_identity_ids" => []
       }
     })
@@ -4569,6 +4587,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     refute Map.has_key?(settings, :request_compression_enabled)
     assert [[true]] = Repo.query!("SELECT request_compression_enabled FROM pool_routing_settings WHERE pool_id = $1", [Ecto.UUID.dump!(pool.id)]).rows
     assert settings.allow_image_generation == true
+    assert settings.allow_audio_transcription == true
     assert Repo.get!(Pool, pool.id).name == "Preserved Routing"
     assert has_element?(view, "#pool-edit-dialog[open]")
     _ = await_pool_traffic(view)

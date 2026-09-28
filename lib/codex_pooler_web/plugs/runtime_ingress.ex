@@ -71,6 +71,7 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
         |> reject_unsupported_v1_request()
         |> authenticate_protected_backend_json_request()
         |> enforce_image_generation_permission()
+        |> enforce_audio_transcription_permission()
         |> maybe_decode_compressed_body(settings)
 
       json_request?(conn) ->
@@ -376,6 +377,22 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
   end
 
   defp image_generation_request?(_conn), do: false
+
+  defp enforce_audio_transcription_permission(%Plug.Conn{halted: true} = conn), do: conn
+
+  defp enforce_audio_transcription_permission(%Plug.Conn{method: "POST", private: %{runtime_api_auth: %{pool: pool}}} = conn) do
+    if Path.decoded_segments(conn) in [["backend-api", "transcribe"], ["v1", "audio", "transcriptions"]] and not PoolRouting.allow_audio_transcription?(pool) do
+      send_runtime_error(conn, %{
+        status: 403,
+        code: "audio_transcription_disabled",
+        message: "Audio transcription is disabled for this pool"
+      })
+    else
+      conn
+    end
+  end
+
+  defp enforce_audio_transcription_permission(conn), do: conn
 
   @spec protected_backend_json_request?(Plug.Conn.t() | term()) :: boolean()
   def protected_backend_json_request?(%Plug.Conn{method: method} = conn) when method in ["POST", "PUT", "PATCH", "DELETE"] do

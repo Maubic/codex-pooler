@@ -161,6 +161,7 @@ defmodule CodexPooler.Dev.OpenAIV1Fixture.Provisioner do
       v1_compatibility_enabled: true,
       prompt_cache_affinity_enabled: settings.prompt_cache_affinity_enabled,
       allow_image_generation: true,
+      allow_audio_transcription: true,
       metadata: settings.metadata || %{},
       created_at: settings.created_at,
       updated_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)

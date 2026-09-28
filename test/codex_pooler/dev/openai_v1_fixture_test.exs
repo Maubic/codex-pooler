@@ -368,6 +368,7 @@ defmodule CodexPooler.Dev.OpenAIV1FixtureTest do
       prompt_cache_affinity_enabled: false,
       v1_compatibility_enabled: false,
       allow_image_generation: false,
+      allow_audio_transcription: false,
       metadata: %{"baseline" => true},
       created_at: ~U[2026-08-01 12:00:00.000000Z],
       updated_at: baseline_updated_at
@@ -377,6 +378,8 @@ defmodule CodexPooler.Dev.OpenAIV1FixtureTest do
     options = context.options
 
     assert {:ok, %{status: "ready"}} = OpenAIV1Fixture.acquire(options)
+
+    assert Repo.get!(RoutingSettings, pool.id).allow_audio_transcription
 
     refute Map.has_key?(Repo.get!(RoutingSettings, pool.id), :request_compression_enabled)
     setup = context.receipt_path |> File.read!() |> CodexPooler.JSON.decode!()
@@ -392,6 +395,7 @@ defmodule CodexPooler.Dev.OpenAIV1FixtureTest do
              prompt_cache_affinity_enabled: false,
              v1_compatibility_enabled: false,
              allow_image_generation: false,
+             allow_audio_transcription: false,
              metadata: %{"baseline" => true},
              updated_at: ^baseline_updated_at
            } = Repo.get!(RoutingSettings, pool.id)

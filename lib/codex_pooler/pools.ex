@@ -186,6 +186,9 @@ defmodule CodexPooler.Pools do
   @spec allow_image_generation?(pool_ref()) :: boolean()
   defdelegate allow_image_generation?(pool_or_id), to: Routing
 
+  @spec allow_audio_transcription?(pool_ref()) :: boolean()
+  defdelegate allow_audio_transcription?(pool_or_id), to: Routing
+
   @spec ensure_routing_settings(pool_ref()) :: RoutingSettings.t() | nil
   defdelegate ensure_routing_settings(pool_or_id), to: Routing
 

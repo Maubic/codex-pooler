@@ -220,7 +220,8 @@ defmodule CodexPooler.Admin.PoolWorkflow do
       "sticky_http_sessions" => Map.get(attrs, "sticky_http_sessions", false),
       "prompt_cache_affinity_enabled" => Map.get(attrs, "prompt_cache_affinity_enabled", true),
       "v1_compatibility_enabled" => Map.get(attrs, "v1_compatibility_enabled", true),
-      "allow_image_generation" => Map.get(attrs, "allow_image_generation", true)
+      "allow_image_generation" => Map.get(attrs, "allow_image_generation", true),
+      "allow_audio_transcription" => Map.get(attrs, "allow_audio_transcription", true)
     }
   end
 

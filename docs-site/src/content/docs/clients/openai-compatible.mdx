@@ -427,6 +427,8 @@ Image responses contain base64 image data. `response_format` may be omitted or s
 
 ### Audio transcriptions
 
+The Pool's `Allow Audio Transcription` setting must be enabled (the default). Disabling it rejects transcription requests with `403 audio_transcription_disabled` before the upload is parsed or sent upstream.
+
 Audio support covers speech-to-text transcription. Text-to-speech (`POST /v1/audio/speech`), audio translation (`POST /v1/audio/translations`), and
 Realtime voice sessions are not supported. Use a provider that supports those
 endpoints when a client needs spoken output or live voice conversations.

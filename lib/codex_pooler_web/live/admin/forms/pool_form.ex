@@ -163,6 +163,7 @@ defmodule CodexPoolerWeb.Admin.PoolForm do
       "prompt_cache_affinity_enabled" => settings.prompt_cache_affinity_enabled,
       "v1_compatibility_enabled" => settings.v1_compatibility_enabled,
       "allow_image_generation" => settings.allow_image_generation,
+      "allow_audio_transcription" => settings.allow_audio_transcription,
       "upstream_identity_ids" => active_upstream_identity_ids(pool),
       "api_key_ids" => active_api_key_ids(pool)
     }
@@ -315,6 +316,7 @@ defmodule CodexPoolerWeb.Admin.PoolForm do
       "prompt_cache_affinity_enabled" => true,
       "v1_compatibility_enabled" => true,
       "allow_image_generation" => true,
+      "allow_audio_transcription" => true,
       "upstream_identity_ids" => [],
       "api_key_ids" => []
     }

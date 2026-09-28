@@ -4,7 +4,7 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
   import CodexPooler.PoolerFixtures
   import ExUnit.CaptureLog, only: [capture_log: 2]
 
-  alias CodexPooler.Accounting.{Attempt, Request}
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
   alias CodexPooler.Catalog.PricingSnapshot
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.OperationalSettings
@@ -1156,6 +1156,56 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
         |> post("/v1/images/variations", "{}")
 
       assert json_response(conn, 404)["error"]["code"] == "unsupported_endpoint"
+    end
+  end
+
+  describe "audio transcription permission order" do
+    for path <- ["/backend-api/transcribe", "/v1/audio/transcriptions", "/v1/audio/%74ranscriptions"],
+        {content_type, body, encoding} <- [
+          {"application/json", ~s({"model":), nil},
+          {"multipart/form-data; boundary=synthetic", "malformed multipart", nil},
+          {"application/json", "invalid gzip bytes", "gzip"}
+        ] do
+      @audio_path path
+      @audio_content_type content_type
+      @audio_body body
+      @audio_encoding encoding
+      test "#{path} denies disabled #{content_type} #{encoding} before reading the body", %{conn: conn} do
+        setup_runtime_ingress(%OperationalSettings{})
+        setup = active_api_key_fixture()
+        setup.pool |> Pools.ensure_routing_settings() |> Ecto.Changeset.change(allow_audio_transcription: false) |> Repo.update!()
+
+        conn = conn |> auth(setup) |> put_req_header("content-type", @audio_content_type)
+        conn = if @audio_encoding, do: put_req_header(conn, "content-encoding", @audio_encoding), else: conn
+        response = post(conn, @audio_path, @audio_body)
+
+        assert %{"error" => %{"code" => "audio_transcription_disabled", "type" => "invalid_request_error"}} = json_response(response, 403)
+        assert Repo.aggregate(Request, :count) == 0
+        assert Repo.aggregate(Attempt, :count) == 0
+        assert Repo.aggregate(LedgerEntry, :count) == 0
+      end
+    end
+
+    test "authentication remains first and unsupported audio routes keep their own contract", %{conn: conn} do
+      setup_runtime_ingress(%OperationalSettings{})
+      setup = active_api_key_fixture()
+      setup.pool |> Pools.ensure_routing_settings() |> Ecto.Changeset.change(allow_audio_transcription: false) |> Repo.update!()
+
+      for path <- ["/backend-api/transcribe", "/v1/audio/transcriptions"] do
+        response = conn |> recycle() |> put_req_header("content-type", "multipart/form-data; boundary=synthetic") |> post(path, "malformed multipart")
+        assert json_response(response, 401)["error"]["code"] == "api_key_missing"
+      end
+
+      for path <- ["/v1/audio/speech", "/v1/audio/translations"] do
+        response = conn |> recycle() |> auth(setup) |> post(path, %{})
+        assert response.status == 404
+        refute response.resp_body =~ "audio_transcription_disabled"
+      end
+
+      settings = Pools.get_routing_settings(setup.pool)
+      settings |> Ecto.Changeset.change(allow_audio_transcription: true) |> Repo.update!()
+      response = conn |> recycle() |> auth(setup) |> post("/v1/audio/transcriptions", %{"model" => "gpt-transcribe"})
+      assert json_response(response, 400)["error"]["param"] == "file"
     end
   end
 

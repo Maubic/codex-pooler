@@ -1178,6 +1178,13 @@ defmodule CodexPooler.SchemaContractTest do
              """).rows
   end
 
+  test "audio transcription permission is a required default-on routing column" do
+    assert table_columns("pool_routing_settings")["allow_audio_transcription"] == {"boolean", "NO"}
+    assert :allow_audio_transcription in RoutingSettings.__schema__(:fields)
+    assert %RoutingSettings{}.allow_audio_transcription == true
+    assert [["true"]] = Repo.query!("SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'pool_routing_settings' AND column_name = 'allow_audio_transcription'").rows
+  end
+
   test "pool routing settings omit removed analytics forwarding storage" do
     columns = table_columns("pool_routing_settings")
     removed_column = "control_plane" <> "_analytics_forwarding_enabled"

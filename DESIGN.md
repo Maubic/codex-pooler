@@ -1376,6 +1376,8 @@ control.
 
 ### Dialog shell (every admin modal)
 
+The Pool wizard and editor reuse the same Compatibility toggle rows for `/v1`, image generation, and audio transcription, in that order. Pool cards expose the same three settings through the existing compact icon disclosure: code brackets, photo, and microphone. Audio uses the shared checked, disabled, focus and help-text treatments; it adds no separate palette, card style, or dialog layout. Keep the quick toggle and both forms synchronized through the canonical persisted Pool settings.
+
 The API-key Limits panel uses a compact tonal key-wide control band, a bordered default-policy group, and a subordinate single-model group separated by a hairline. Both policy groups share a three-column grid from `sm`, one column below it, `gap-3`, and standard inputs with fieldset outer margin/padding removed; input height and label typography remain unchanged. The active-request cap stays separate from model policy fields. Configured overrides and validation remain visible. A compact known/provisional/pending/effective budget breakdown explains reservations without changing measured burn. The existing policy dialog body owns scrolling and the footer remains reachable.
 
 - **Presentation:** `<dialog class="modal modal-bottom overflow-x-hidden sm:modal-middle">`.

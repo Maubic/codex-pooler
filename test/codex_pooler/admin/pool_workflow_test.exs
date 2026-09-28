@@ -397,6 +397,8 @@ defmodule CodexPooler.Admin.PoolWorkflowTest do
 
       assert Pools.get_routing_settings(pool).allow_image_generation == true
       assert Pools.allow_image_generation?(pool)
+      assert Pools.get_routing_settings(pool).allow_audio_transcription == true
+      assert Pools.allow_audio_transcription?(pool)
     end
 
     test "update toggles image generation permission both ways" do

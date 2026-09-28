@@ -193,6 +193,9 @@ defmodule CodexPooler.PoolsTest do
       assert Pools.allow_image_generation?(pool)
       assert Pools.allow_image_generation?(Ecto.UUID.generate())
       assert Pools.allow_image_generation?(nil)
+      assert Pools.allow_audio_transcription?(pool)
+      assert Pools.allow_audio_transcription?(Ecto.UUID.generate())
+      assert Pools.allow_audio_transcription?(nil)
 
       assert {:ok, routed_pool} =
                Pools.create_pool(scope, %{slug: "routing-custom", name: "Routing Custom"})
@@ -364,6 +367,33 @@ defmodule CodexPooler.PoolsTest do
                })
 
       assert Repo.get!(RoutingSettings, pool.id).allow_image_generation == false
+    end
+
+    test "routing settings persist audio permission, audit changes and reject unauthorized or null updates" do
+      %{user: owner} = bootstrap_owner_fixture(%{"email" => "owner@example.com"})
+      scope = Scope.for_user(owner, ["instance_owner"])
+      pool = pool_fixture(%{slug: "audio-permission", name: "Audio Permission"})
+
+      assert {:ok, %RoutingSettings{allow_audio_transcription: false}} =
+               Pools.update_routing_settings(scope, pool, %{"allow_audio_transcription" => "false"})
+
+      refute Pools.allow_audio_transcription?(pool)
+      assert Pools.allow_image_generation?(pool)
+      assert Pools.routing_settings_by_pool_ids([pool.id])[pool.id].allow_audio_transcription == false
+      assert Repo.get_by!(AuditEvent, action: "pool.routing_update", target_id: pool.id).details["allow_audio_transcription"] == false
+
+      assert {:error, changeset} = Pools.update_routing_settings(scope, pool, %{"allow_audio_transcription" => nil})
+      assert %{allow_audio_transcription: ["can't be blank"]} = errors_on(changeset)
+
+      admin = user_fixture(%{"email" => "admin@example.com"})
+      assert {:ok, _membership} = Pools.create_membership(scope, %{user_id: admin.id, role: "instance_admin"})
+      assert {:error, %{code: :capability_denied}} = Pools.update_routing_settings(Scope.for_user(admin), pool, %{"allow_audio_transcription" => true})
+      refute Pools.allow_audio_transcription?(pool)
+
+      assert {:ok, %RoutingSettings{allow_audio_transcription: true}} =
+               Pools.update_routing_settings(scope, pool, %{"allow_audio_transcription" => "true"})
+
+      assert Pools.allow_audio_transcription?(pool)
     end
 
     test "routing settings ignore retired attributes and preserve inert legacy values" do

@@ -214,30 +214,23 @@ defmodule CodexPooler.Gateway.Runtime.Service do
       |> RequestOptions.capture_api_key_runtime_epoch(auth)
       |> RequestOptions.capture_tenant_scope(auth)
 
-    if image_generation_permission_denied?(auth, opts) do
-      {:error,
-       Denials.policy_error(
-         403,
-         "image_generation_disabled",
-         "Image generation is disabled for this pool"
-       )}
-    else
-      case requested_model(payload) do
-        {:ok, model_name} ->
-          request_options = execute_request_options(opts, endpoint, payload, model_name)
+    cond do
+      audio_transcription_permission_denied?(auth, endpoint) ->
+        {:error, audio_transcription_disabled()}
 
-          execute_requested_model(
-            auth,
-            endpoint,
-            payload,
-            request_options,
-            model_name,
-            validation
-          )
+      image_generation_permission_denied?(auth, opts) ->
+        {:error, Denials.policy_error(403, "image_generation_disabled", "Image generation is disabled for this pool")}
 
-        {:error, %{code: _code} = reason} ->
-          {:error, reason}
-      end
+      true ->
+        case requested_model(payload) do
+          {:ok, model_name} ->
+            request_options = execute_request_options(opts, endpoint, payload, model_name)
+
+            execute_requested_model(auth, endpoint, payload, request_options, model_name, validation)
+
+          {:error, %{code: _code} = reason} ->
+            {:error, reason}
+        end
     end
   end
 
@@ -251,6 +244,14 @@ defmodule CodexPooler.Gateway.Runtime.Service do
        do: not PoolRouting.allow_image_generation?(pool)
 
   defp image_generation_permission_denied?(_auth, %RequestOptions{}), do: false
+
+  defp audio_transcription_permission_denied?(%{pool: pool}, "/backend-api/transcribe"),
+    do: not PoolRouting.allow_audio_transcription?(pool)
+
+  defp audio_transcription_permission_denied?(_auth, _endpoint), do: false
+
+  defp audio_transcription_disabled,
+    do: Denials.policy_error(403, "audio_transcription_disabled", "Audio transcription is disabled for this pool")
 
   defp execute_requested_model(
          auth,
@@ -758,9 +759,13 @@ defmodule CodexPooler.Gateway.Runtime.Service do
       |> request_options(endpoint, payload)
       |> RequestOptions.put_payload_context(forced_transcription_model: @backend_transcription_model)
 
-    case TranscriptionPayload.normalize(payload, request_options) do
-      {:ok, safe_payload, media_opts} -> execute(auth, endpoint, safe_payload, media_opts)
-      {:error, reason} -> {:error, reason}
+    if audio_transcription_permission_denied?(auth, endpoint) do
+      {:error, audio_transcription_disabled()}
+    else
+      case TranscriptionPayload.normalize(payload, request_options) do
+        {:ok, safe_payload, media_opts} -> execute(auth, endpoint, safe_payload, media_opts)
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 

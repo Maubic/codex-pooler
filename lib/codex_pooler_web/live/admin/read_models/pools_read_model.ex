@@ -38,7 +38,8 @@ defmodule CodexPoolerWeb.Admin.PoolsReadModel do
         }
   @type compat_flags :: %{
           required(:v1_compatibility_enabled) => boolean(),
-          required(:allow_image_generation) => boolean()
+          required(:allow_image_generation) => boolean(),
+          required(:allow_audio_transcription) => boolean()
         }
   @type pool_row :: %{
           required(:pool) => Pool.t(),
@@ -255,7 +256,8 @@ defmodule CodexPoolerWeb.Admin.PoolsReadModel do
         routing_strategy: settings.routing_strategy,
         compat_flags: %{
           v1_compatibility_enabled: settings.v1_compatibility_enabled,
-          allow_image_generation: settings.allow_image_generation
+          allow_image_generation: settings.allow_image_generation,
+          allow_audio_transcription: settings.allow_audio_transcription
         },
         deletion: Map.get(deletion_states, pool.id)
       }
