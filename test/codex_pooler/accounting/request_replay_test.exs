@@ -23,6 +23,8 @@ defmodule CodexPooler.Accounting.RequestReplayTest do
   alias CodexPooler.Gateway.Transports.Websocket.RemoteReconnectControlV2
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Jobs.RequestReplayCleanupWorker
+  alias CodexPooler.Platform.InstancePresence
+  alias CodexPooler.Platform.InstancePresence.Identity
   alias CodexPooler.Repo
   alias Ecto.Adapters.SQL.Sandbox
 
@@ -218,6 +220,31 @@ defmodule CodexPooler.Accounting.RequestReplayTest do
     assert :none = RequestReplay.preflight_snapshot(fixture.preflight)
     assert terminal_ledger_count(fixture.request.id, "settlement") == 1
     assert terminal_ledger_count(fixture.request.id, "release") == 1
+  end
+
+  test "preflight defers a proven ended visible execution to the claim transaction without settling it" do
+    fixture = replay_fixture(reservation?: true)
+    now = InstancePresence.database_now()
+    owner = Identity.new("replaced-#{System.unique_integer([:positive])}@example", "old-boot")
+    successor = Identity.new(owner.node_name, "new-boot")
+    {:ok, _} = InstancePresence.record_heartbeat(owner, DateTime.add(now, -180, :second))
+    {:ok, _} = InstancePresence.record_heartbeat()
+
+    fixture.attempt
+    |> Ecto.Changeset.change(owner_instance_id: owner.node_name, owner_instance_boot_id: owner.boot_id, owner_execution_id: Ecto.UUID.generate(), owner_process_id: "<0.123.0>")
+    |> Repo.update!()
+
+    fixture.turn |> Ecto.Changeset.change(first_visible_output_at: now) |> Repo.update!()
+    input = fixture.preflight |> Map.put(:codex_session_id, Ecto.UUID.generate()) |> Map.put(:allow_execution_recovery?, true)
+
+    assert {:error, :lifecycle_conflict} = RequestReplay.preflight_snapshot(input)
+    {:ok, _} = InstancePresence.record_heartbeat(successor, now)
+    assert :recoverable_generation_zero = RequestReplay.preflight_snapshot(input)
+    assert_untouched(fixture)
+    assert terminal_ledger_count(fixture.request.id, "settlement") == 0
+    assert terminal_ledger_count(fixture.request.id, "release") == 0
+    assert {:error, :lifecycle_conflict} = RequestReplay.preflight_snapshot(Map.delete(input, :allow_execution_recovery?))
+    assert {:error, :authorization_binding_mismatch} = RequestReplay.preflight_snapshot(%{input | api_key_runtime_epoch: input.api_key_runtime_epoch + 1})
   end
 
   test "preflight keeps live, retryable, pre-attempt, and visible lifecycles as conflicts" do

@@ -542,6 +542,18 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
     recover_execution(request, candidate, timestamp, :absent, opts)
   end
 
+  @doc false
+  @spec execution_recovery_authority(Attempt.t()) :: :terminal | :absent | nil
+  def execution_recovery_authority(%Attempt{replay_generation: 0} = attempt) do
+    cond do
+      ExecutionTerminalProofs.terminal?(attempt) -> :terminal
+      ExecutionTerminalProofs.valid_identity?(attempt) and execution_recovery_authorized?(attempt, :absent, []) -> :absent
+      true -> nil
+    end
+  end
+
+  def execution_recovery_authority(%Attempt{}), do: nil
+
   defp recover_execution(request, candidate, timestamp, authority, opts) do
     Repo.transaction(fn ->
       {request, attempt, _reservation, settlement, entitlement} =
@@ -590,7 +602,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   # with failing heartbeat writes (findings#214). Exact death comes from a
   # reachable owner node reporting the execution gone, or, without BEAM
   # connectivity to the owner (the production worker topology, findings#207),
-  # from a successor incarnation publishing presence under the same node name.
+  # from a successor publishing under the same node name or exclusive slot.
   # A reachable owner reporting the execution alive vetoes both.
   defp absent_execution_dead?(attempt, owner) do
     case ExecutionIdentity.status(attempt) do

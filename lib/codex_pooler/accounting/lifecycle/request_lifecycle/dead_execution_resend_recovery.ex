@@ -5,7 +5,6 @@ defmodule CodexPooler.Accounting.RequestLifecycle.DeadExecutionResendRecovery do
 
   alias CodexPooler.Accounting.{Attempt, Request, RequestLifecycle}
   alias CodexPooler.Gateway.Runtime.Finalization.InterruptionOutcome
-  alias CodexPooler.Platform.ExecutionTerminalProofs
   alias CodexPooler.Repo
 
   @live_request_statuses ["accepted", "in_progress"]
@@ -23,8 +22,16 @@ defmodule CodexPooler.Accounting.RequestLifecycle.DeadExecutionResendRecovery do
       when status in @live_request_statuses do
     attempt = lock_latest_attempt(request.id)
 
-    if attempt && ExecutionTerminalProofs.terminal?(attempt) do
-      case RequestLifecycle.recover_dead_execution(request, attempt, now) do
+    authority = attempt && RequestLifecycle.execution_recovery_authority(attempt)
+
+    if authority do
+      result =
+        case authority do
+          :terminal -> RequestLifecycle.recover_dead_execution(request, attempt, now)
+          :absent -> RequestLifecycle.recover_absent_execution(request, attempt, now, [])
+        end
+
+      case result do
         {:ok, :recovered} ->
           {:ok, Repo.reload!(request), recovery_marker(request, attempt)}
 

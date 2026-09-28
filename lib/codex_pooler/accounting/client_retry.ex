@@ -1604,7 +1604,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
   def verified_dead_execution?(
         %CodexTurn{
           status: "interrupted",
-          error_code: "dead_execution_recovered",
+          error_code: recovery_code,
           final_attempt_id: attempt_id,
           transport_kind: "websocket",
           completed_at: %DateTime{}
@@ -1612,14 +1612,14 @@ defmodule CodexPooler.Accounting.ClientRetry do
         %Request{
           status: "failed",
           response_status_code: 499,
-          last_error_code: "dead_execution_recovered",
+          last_error_code: recovery_code,
           usage_status: "usage_unknown",
           completed_at: %DateTime{}
         },
         %Attempt{
           id: attempt_id,
           status: "failed",
-          network_error_code: "dead_execution_recovered",
+          network_error_code: recovery_code,
           transport: "websocket",
           replay_generation: 0,
           usage_status: "usage_unknown",
@@ -1630,7 +1630,8 @@ defmodule CodexPooler.Accounting.ClientRetry do
           completed_at: %DateTime{}
         }
       )
-      when is_binary(attempt_id) and is_binary(owner) and is_binary(boot) and is_binary(pid) and
+      when recovery_code in ["dead_execution_recovered", "absent_instance_recovered"] and
+             is_binary(attempt_id) and is_binary(owner) and is_binary(boot) and is_binary(pid) and
              is_binary(execution),
       do: true
 

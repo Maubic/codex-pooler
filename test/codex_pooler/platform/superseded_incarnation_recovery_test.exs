@@ -26,7 +26,7 @@ defmodule CodexPooler.Platform.SupersededIncarnationRecoveryTest do
   @cleanup_timeout_ms InstancePresencePeer.cleanup_timeout_ms(@peer_timeout_ms)
 
   @tag slow: "boots two BEAM incarnations and verifies OS identity and database-only recovery"
-  test "a hard-killed named owner is recovered once its in-place successor publishes presence" do
+  test "a hard-killed owner is recovered after its container slot restarts at a different node name" do
     %{user: owner} = CodexPooler.AccountsFixtures.committed_bootstrap_owner_fixture!()
     slug = "superseded-incarnation-#{Ecto.UUID.generate()}"
 
@@ -59,13 +59,13 @@ defmodule CodexPooler.Platform.SupersededIncarnationRecoveryTest do
         %{pool: pool, auth: %{pool: pool, api_key: key}, model: model, assignment: assignment}
       end)
 
-    # Both incarnations carry the same node name (an in-place restart keeps
-    # the pod's address and hostname); neither is connected to this VM.
+    # The exclusive container slot survives a changed node address.
     name = :"superseded_#{System.unique_integer([:positive])}"
     {_, 0} = System.cmd("epmd", ["-daemon"])
     CodexPooler.PeerRegistry.assert_epmd_ready!()
 
-    {first_peer, first_os_identity, first_identity} = start_named_peer!(name, setup)
+    slot_id = Ecto.UUID.generate() <> "/app"
+    {first_peer, first_os_identity, first_identity} = start_named_peer!(name, slot_id)
     refute first_identity.node_name == "nonode@nohost"
     assert [] == :peer.call(first_peer, Node, :list, [], @peer_timeout_ms)
 
@@ -127,9 +127,10 @@ defmodule CodexPooler.Platform.SupersededIncarnationRecoveryTest do
 
     assert UnboxedFixture.run_unboxed(fn -> Repo.reload!(attempt).status end) == "in_progress"
 
-    # The container restarts in place under the same name with a new boot id.
-    {second_peer, second_os_identity, second_identity} = start_named_peer!(name, setup)
-    assert second_identity.node_name == first_identity.node_name
+    # A restarted container can have a new pod IP and BEAM node name.
+    second_name = :"superseded_successor_#{System.unique_integer([:positive])}"
+    {second_peer, second_os_identity, second_identity} = start_named_peer!(second_name, slot_id)
+    refute second_identity.node_name == first_identity.node_name
     refute second_identity.boot_id == first_identity.boot_id
     assert [] == :peer.call(second_peer, Node, :list, [], @peer_timeout_ms)
     assert InstancePresence.superseded?(first_identity)
@@ -171,10 +172,10 @@ defmodule CodexPooler.Platform.SupersededIncarnationRecoveryTest do
              "queued"
            ]
 
-    kill_peer!(second_peer, second_os_identity, name)
+    kill_peer!(second_peer, second_os_identity, second_name)
   end
 
-  defp start_named_peer!(name, _setup) do
+  defp start_named_peer!(name, slot_id) do
     parent = self()
 
     peer_owner =
@@ -202,7 +203,7 @@ defmodule CodexPooler.Platform.SupersededIncarnationRecoveryTest do
     :ok = :peer.call(peer, :code, :add_paths, [:code.get_path()], @peer_timeout_ms)
 
     :ok =
-      :peer.call(peer, CodexPooler.DisconnectedExecutionPeer, :bootstrap, [Application.get_all_env(:codex_pooler), Repo.config()], @peer_timeout_ms)
+      :peer.call(peer, CodexPooler.DisconnectedExecutionPeer, :bootstrap, [Keyword.put(Application.get_all_env(:codex_pooler), :instance_slot_id, slot_id), Repo.config()], @peer_timeout_ms)
 
     # The peer is identified by PID plus kernel start signature so a reused
     # PID never reads as the peer, and so a hard-killed peer that lingers as a
@@ -225,6 +226,9 @@ defmodule CodexPooler.Platform.SupersededIncarnationRecoveryTest do
             InstancePresencePeer.assert_os_process_stopped!(os_identity,
               budget_ms: @peer_timeout_ms
             )
+
+            Repo.delete_all(from instance in InstancePresence.Instance, where: instance.instance_id == ^identity.instance_id)
+            Repo.delete_all(from proof in CodexPooler.Platform.ExecutionTerminalProof, where: proof.owner_instance_id == ^identity.node_name)
           end,
           budget_ms: @peer_timeout_ms
         )
@@ -241,19 +245,10 @@ defmodule CodexPooler.Platform.SupersededIncarnationRecoveryTest do
   defp kill_peer!(peer, os_identity, name) do
     {_, 0} = System.cmd("kill", ["-9", os_identity.pid])
     InstancePresencePeer.assert_os_process_stopped!(os_identity, budget_ms: @peer_timeout_ms)
-    await_controller_down!(peer, System.monotonic_time(:millisecond) + @peer_timeout_ms)
+    monitor = Process.monitor(peer)
+    assert_receive {:DOWN, ^monitor, :process, ^peer, _}, @peer_timeout_ms
     CodexPooler.PeerRegistry.assert_peer_absent!(name, budget_ms: @peer_timeout_ms)
     :ok
-  end
-
-  defp await_controller_down!(peer, deadline) do
-    if Process.alive?(peer) do
-      assert System.monotonic_time(:millisecond) < deadline, "peer controller survived the kill"
-      Process.sleep(10)
-      await_controller_down!(peer, deadline)
-    else
-      :ok
-    end
   end
 
   defp refresh_local_observer! do

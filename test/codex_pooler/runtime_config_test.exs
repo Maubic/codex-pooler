@@ -10,6 +10,23 @@ defmodule CodexPooler.RuntimeConfigTest do
     "CODEX_POOLER_UPSTREAM_SECRET_KEY" => String.duplicate("r", 32)
   }
 
+  test "instance slot is explicit, bounded and never inferred from hostname" do
+    for value <- [nil, "", "00000000-0000-0000-0000-000000000001/app"] do
+      with_env(Map.merge(@required_env, %{"CODEX_POOLER_INSTANCE_SLOT_ID" => value, "HOSTNAME" => "reused-pod-name"}), fn ->
+        config = Config.Reader.read!("config/runtime.exs", env: :prod)
+        assert config[:codex_pooler][:instance_slot_id] == if(value == "", do: nil, else: value)
+      end)
+    end
+
+    for value <- ["space invalid", "line\nbreak", String.duplicate("a", 201)] do
+      with_env(Map.put(@required_env, "CODEX_POOLER_INSTANCE_SLOT_ID", value), fn ->
+        assert_raise RuntimeError, ~r/CODEX_POOLER_INSTANCE_SLOT_ID must be/, fn ->
+          Config.Reader.read!("config/runtime.exs", env: :prod)
+        end
+      end)
+    end
+  end
+
   test "prod endpoint http config keeps the configured port and binds IPv4" do
     with_env(@required_env, fn ->
       config = Config.Reader.read!("config/runtime.exs", env: :prod)
@@ -181,7 +198,11 @@ defmodule CodexPooler.RuntimeConfigTest do
     on_exit(restore)
 
     Enum.each(proxy_names, &System.delete_env/1)
-    Enum.each(env, fn {key, value} -> System.put_env(key, value) end)
+
+    Enum.each(env, fn
+      {key, nil} -> System.delete_env(key)
+      {key, value} -> System.put_env(key, value)
+    end)
 
     try do
       fun.()

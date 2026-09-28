@@ -13,14 +13,84 @@ defmodule CodexPooler.Accounting.DeadExecutionResendRecoveryTest do
     RequestClientRetryLink
   }
 
+  alias CodexPooler.Accounting.RequestLifecycle
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn}
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
+  alias CodexPooler.Platform.InstancePresence
+  alias CodexPooler.Platform.InstancePresence.Identity
   alias CodexPooler.Repo
 
   @endpoint "/backend-api/codex/responses"
   @retry_prefix "codex-request-retry:"
   @detection_timeout_ms 15_000
+
+  test "a recovered successor can die and be retried once again after session rotation" do
+    fixture = active_dead_execution_fixture!()
+    %{setup: setup, request: request, attempt: attempt, turn: turn} = fixture
+    CodexPooler.ExecutionProofSupport.publish_terminal!(attempt)
+    witness = ClientRetry.original_witness!(fixture.replay_claim_digest, setup.api_key.runtime_revocation_epoch)
+    opts = %{endpoint: @endpoint, correlation_id: request.correlation_id, codex_session: insert_session!(setup), semantic_turn_digest: turn.semantic_turn_digest, native_client_retry_witness: witness}
+    assert {:ok, %{request: first_successor}} = Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
+    assert {:ok, %{request: first_successor}} = Accounting.reserve(setup.auth, setup.model, %{"model" => setup.model.exposed_model_id, "input" => []}, %{endpoint: @endpoint, transport: "websocket", correlation_id: first_successor.correlation_id, turn_claim: first_successor})
+    successor_attempt = create_dead_attempt!(setup, first_successor)
+    successor_turn = insert_turn!(opts.codex_session, first_successor, successor_attempt)
+    successor_turn |> Ecto.Changeset.change(semantic_turn_digest: turn.semantic_turn_digest) |> Repo.update!()
+    CodexPooler.ExecutionProofSupport.publish_terminal!(successor_attempt)
+    opts = %{opts | codex_session: insert_session!(setup)}
+
+    assert {:ok, %{request: second_successor}} = Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
+    assert second_successor.id != first_successor.id
+    assert %Request{status: "failed", last_error_code: "dead_execution_recovered"} = Repo.reload!(first_successor)
+    assert ledger_kinds(first_successor.id) == ["release", "reservation", "settlement"]
+    assert Repo.get_by!(RequestClientRetryLink, predecessor_request_id: first_successor.id).successor_request_id == second_successor.id
+    assert {:error, %{code: :duplicate_request}} = Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
+  end
+
+  for recovered_before_resend <- [false, true] do
+    @tag recovered_before_resend: recovered_before_resend
+    test "a proven replaced instance permits one exact resend in a new session, cleanup first=#{recovered_before_resend}", %{recovered_before_resend: recovered_before_resend} do
+      fixture = active_dead_execution_fixture!()
+      %{setup: setup, request: request, attempt: attempt, turn: turn} = fixture
+      now = db_now()
+      old = Identity.new("replaced-#{System.unique_integer([:positive])}@example", "old-boot")
+      newer = Identity.new(old.node_name, "new-boot")
+      stale = DateTime.add(now, -180, :second)
+      {:ok, _} = InstancePresence.record_heartbeat(old, stale)
+      {:ok, _} = InstancePresence.record_heartbeat(newer, now)
+      {:ok, _} = InstancePresence.record_heartbeat()
+
+      attempt = attempt |> Ecto.Changeset.change(owner_instance_id: old.node_name, owner_instance_boot_id: old.boot_id) |> Repo.update!()
+      turn = turn |> Ecto.Changeset.change(first_visible_output_at: now) |> Repo.update!()
+      new_session = insert_session!(setup)
+
+      if recovered_before_resend do
+        assert {:ok, :recovered} = RequestLifecycle.recover_absent_execution(request, attempt, now, [])
+      end
+
+      witness = ClientRetry.original_witness!(fixture.replay_claim_digest, setup.api_key.runtime_revocation_epoch)
+      opts = %{endpoint: @endpoint, correlation_id: request.correlation_id, codex_session: new_session, native_client_retry_witness: witness}
+
+      wrong_witness = ClientRetry.original_witness!(:crypto.strong_rand_bytes(32), setup.api_key.runtime_revocation_epoch)
+      assert {:error, %{code: :duplicate_request}} = Accounting.claim_websocket_turn(setup.auth, setup.model, %{opts | native_client_retry_witness: wrong_witness})
+
+      unless recovered_before_resend do
+        assert Repo.reload!(request).status == "in_progress"
+        assert Repo.reload!(attempt).status == "in_progress"
+        assert Repo.reload!(turn).status == "in_progress"
+        assert ledger_kinds(request.id) == ["reservation"]
+      end
+
+      assert {:ok, %{request: successor}} = Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
+      assert successor.id != request.id
+      assert %Request{status: "failed", last_error_code: "absent_instance_recovered"} = Repo.reload!(request)
+      assert %Attempt{status: "failed", network_error_code: "absent_instance_recovered"} = Repo.reload!(attempt)
+      assert %CodexTurn{status: "interrupted", error_code: "absent_instance_recovered"} = Repo.reload!(turn)
+      assert ledger_kinds(request.id) == ["release", "reservation", "settlement"]
+      assert {:error, %{code: :duplicate_request}} = Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
+      assert Repo.aggregate(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^request.id), :count) == 1
+    end
+  end
 
   test "an exact terminal proof recovers the live predecessor inside the released-client resend" do
     setup = accounting_setup()

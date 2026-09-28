@@ -1005,7 +1005,8 @@ defmodule CodexPooler.Gateway.Runtime.Service do
       model_identifier: authorization_binding.model_identifier,
       semantic_turn_digest: context.semantic_turn_digest,
       replay_claim_digest: context.replay_claim_digest,
-      replay_claim_alternates: context.replay_claim_alternates
+      replay_claim_alternates: context.replay_claim_alternates,
+      allow_execution_recovery?: context.endpoint == "/backend-api/codex/responses" and is_nil(context.request_options.continuity.previous_response_id)
     }
 
     if final_native_compaction_admission?(context.request_options) do
@@ -1031,6 +1032,9 @@ defmodule CodexPooler.Gateway.Runtime.Service do
          authorization_binding
        ) do
     case Accounting.replay_preflight_snapshot(preflight) do
+      :recoverable_generation_zero ->
+        replay_intent_result(:fresh, authorization_binding, nil)
+
       :none ->
         classify_client_retry_intent(
           locked_session,

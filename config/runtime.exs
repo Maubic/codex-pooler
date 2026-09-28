@@ -1,5 +1,22 @@
 import Config
 
+# An explicit exclusive container slot survives pod IP changes. Never infer it
+# from HOSTNAME: pod names can be reused, while metadata.uid cannot.
+instance_slot_id =
+  case System.get_env("CODEX_POOLER_INSTANCE_SLOT_ID") do
+    value when value in [nil, ""] ->
+      nil
+
+    value ->
+      if byte_size(value) <= 200 and Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9_.:\/-]*\z/, value) do
+        value
+      else
+        raise "CODEX_POOLER_INSTANCE_SLOT_ID must be an ASCII slot identifier of at most 200 bytes"
+      end
+  end
+
+config :codex_pooler, :instance_slot_id, instance_slot_id
+
 native_compaction_trace_mode =
   if config_env() in [:dev, :test] do
     CodexPooler.Gateway.Transports.Websocket.NativeCompactionTrace.runtime_mode(

@@ -44,11 +44,11 @@ defmodule CodexPooler.Accounting.RequestLifecycle.AbsentInstanceRecovery do
   Stale presence alone settles only attempts that predate execution identity.
   An attempt that records its executor is settled only with exact proof that
   the execution is gone: a reachable owner node reporting it dead, or a
-  successor incarnation publishing presence under the same node name, which
-  is what an in-place restart after `SIGKILL` or an OOM kill produces and
-  needs no BEAM connectivity from the cleanup role. A pod that is replaced
-  under a new name without publishing terminal proofs (see dead-execution
-  recovery) remains unknown and waits for the six-hour sweep; a reachable
+  successor incarnation publishing presence under the same node name or the
+  same exclusive container slot. The latter survives a same-pod restart that
+  changes its address and needs no BEAM connectivity from the cleanup role.
+  A replacement with a different or missing slot and node name, without a
+  terminal proof, remains unknown and waits for the six-hour sweep; a reachable
   owner reporting the execution alive vetoes settlement (findings#207,
   findings#214).
 

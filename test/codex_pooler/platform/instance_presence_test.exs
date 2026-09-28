@@ -12,6 +12,55 @@ defmodule CodexPooler.Platform.InstancePresenceTest do
     :ok
   end
 
+  test "slot proof requires equal explicit slots, a different boot and a later publication" do
+    now = InstancePresence.database_now()
+    first = Identity.new("slot-first@example.invalid", unique_boot_id())
+    second = Identity.new("slot-second@example.invalid", unique_boot_id())
+    {:ok, _} = InstancePresence.record_heartbeat(first, DateTime.add(now, -600, :second))
+    {:ok, _} = InstancePresence.record_heartbeat(second, now)
+    refute InstancePresence.superseded?(first)
+    slot = Ecto.UUID.generate() <> "/app"
+    Repo.update_all(from(i in Instance, where: i.instance_id == ^first.instance_id), set: [slot_id: slot])
+    refute InstancePresence.superseded?(first)
+    Repo.update_all(from(i in Instance, where: i.instance_id == ^second.instance_id), set: [slot_id: slot <> "-other"])
+    refute InstancePresence.superseded?(first)
+    Repo.update_all(from(i in Instance, where: i.instance_id == ^second.instance_id), set: [slot_id: slot])
+    assert InstancePresence.superseded?(first)
+    refute InstancePresence.superseded?(second)
+    Repo.update_all(from(i in Instance, where: i.instance_id == ^second.instance_id), set: [boot_id: first.boot_id])
+    refute InstancePresence.superseded?(first)
+    Repo.update_all(from(i in Instance, where: i.instance_id == ^second.instance_id), set: [boot_id: second.boot_id])
+    Repo.update_all(from(i in Instance, where: i.instance_id == ^second.instance_id), set: [started_at: DateTime.add(now, -600, :second)])
+    refute InstancePresence.superseded?(first)
+  end
+
+  test "anonymous node names require an exclusive slot before they prove supersession" do
+    now = InstancePresence.database_now()
+    first = Identity.new("nonode@nohost", unique_boot_id())
+    second = Identity.new("nonode@nohost", unique_boot_id())
+    {:ok, _} = InstancePresence.record_heartbeat(first, DateTime.add(now, -600, :second))
+    {:ok, _} = InstancePresence.record_heartbeat(second, now)
+    refute InstancePresence.superseded?(first)
+    ids = [first.instance_id, second.instance_id]
+    Repo.update_all(from(i in Instance, where: i.instance_id in ^ids), set: [slot_id: Ecto.UUID.generate() <> "/worker"])
+    assert InstancePresence.superseded?(first)
+    refute InstancePresence.superseded?(second)
+  end
+
+  test "local heartbeat stores the configured slot once without changing owner equality" do
+    CodexPooler.TestAppEnv.restore_on_exit(:instance_slot_id)
+    slot = Ecto.UUID.generate() <> "/app"
+    Application.put_env(:codex_pooler, :instance_slot_id, slot)
+    identity = Identity.local()
+    Repo.delete_all(from(i in Instance, where: i.instance_id == ^identity.instance_id))
+    {:ok, _} = InstancePresence.record_heartbeat()
+    assert Repo.get!(Instance, identity.instance_id).slot_id == slot
+    assert Identity.owner(identity.node_name, identity.boot_id) == identity
+    Application.put_env(:codex_pooler, :instance_slot_id, slot <> "-other")
+    {:ok, _} = InstancePresence.record_heartbeat()
+    assert Repo.get!(Instance, identity.instance_id).slot_id == slot
+  end
+
   test "the local live incarnation remains present when its published heartbeat is stale" do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
     local = Identity.local()

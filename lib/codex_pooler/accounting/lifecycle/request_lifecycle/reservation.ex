@@ -47,9 +47,14 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
           map()
         ) :: {:ok, map()} | {:error, Metadata.accounting_error()}
   def claim_websocket_turn(%{pool: pool, api_key: api_key}, %Model{} = model, opts) do
+    recovery = execution_recovery_predecessor(pool, api_key, opts)
+
     cond do
       ClientRetry.reserved_successor_claim?(attr(opts, :correlation_id)) ->
         {:error, duplicate_request_error(nil)}
+
+      recovery ->
+        claim_failed_predecessor_resend(pool, api_key, model, Map.put(opts, :execution_recovery_request_id, recovery.id))
 
       await_live_semantic_predecessor(opts) == :live ->
         {:error, duplicate_request_error(:active_predecessor)}
@@ -64,6 +69,16 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
           result ->
             result
         end
+    end
+  end
+
+  defp execution_recovery_predecessor(pool, api_key, opts) do
+    if attr(opts, :endpoint) == "/backend-api/codex/responses" do
+      FailedPredecessorResend.recoverable_predecessor(%{
+        pool_id: pool.id,
+        api_key_id: api_key.id,
+        semantic_turn_digest: attr(opts, :semantic_turn_digest)
+      })
     end
   end
 
@@ -236,6 +251,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
     maybe_test_runtime_authorization_barrier(:claim, :before)
 
     Repo.transaction(fn ->
+      lock_execution_recovery_sessions(resend_session, attr(opts, :execution_recovery_request_id))
       :ok = lock_resend_session(resend_session)
       api_key = authorize_runtime_turn_for_read!(api_key, captured_epoch)
       maybe_test_runtime_authorization_barrier(:claim, :after)
@@ -323,6 +339,9 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   defp link_semantic_execution_retry!(_opts, %{predecessor_request_id: id, predecessor_shape: shape}, request, timestamp) when shape in [:partial_http_tool_cut, :mailbox_continuation],
     do: ClientRetry.insert_link!(%Request{id: id}, request, timestamp)
 
+  defp link_semantic_execution_retry!(_opts, %{predecessor_request_id: id, execution_recovery?: true}, request, timestamp),
+    do: ClientRetry.insert_link!(%Request{id: id}, request, timestamp)
+
   defp link_semantic_execution_retry!(opts, %{predecessor_request_id: id}, request, timestamp) do
     case attr(opts, :correlation_id) do
       "codex-turn:" <> _digest ->
@@ -350,6 +369,19 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
     :ok
   end
 
+  defp lock_execution_recovery_sessions(%CodexSession{id: session_id}, request_id) when is_binary(request_id) do
+    original_session_id = Repo.one(from turn in CodexTurn, where: turn.request_id == ^request_id, select: turn.codex_session_id)
+    session_ids = Enum.uniq([session_id, original_session_id])
+
+    # Acquire every session before the key, turn, request and attempt prefix.
+    # The original finalizer owns the old session; a rotated reconnect must
+    # never hold its request while waiting for that session to be released.
+    Repo.all(from session in CodexSession, where: session.id in ^session_ids, order_by: session.id, lock: "FOR UPDATE")
+    :ok
+  end
+
+  defp lock_execution_recovery_sessions(_session, _request_id), do: :ok
+
   defp resend_claim!(nil, _pool, _api_key, _model, opts), do: {attr(opts, :correlation_id), nil}
 
   defp resend_claim!(%CodexSession{} = session, pool, api_key, model, opts) do
@@ -361,24 +393,32 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
       model_id: model.id,
       endpoint: attr(opts, :endpoint),
       codex_session_id: session.id,
+      semantic_turn_digest: attr(opts, :semantic_turn_digest),
       native_client_retry_witness: attr(opts, :native_client_retry_witness),
       anchor_present?: attr(opts, :anchor_present?) == true
     }
 
-    case FailedPredecessorResend.resolve(attr(opts, :correlation_id), scope) do
+    resolution =
+      case attr(opts, :execution_recovery_request_id) do
+        nil -> FailedPredecessorResend.resolve(attr(opts, :correlation_id), scope)
+        request_id -> FailedPredecessorResend.resolve_execution(attr(opts, :correlation_id), scope, request_id)
+      end
+
+    case resolution do
       {:ok,
        %{
          claim: claim,
          predecessor: predecessor,
          predecessor_shape: shape,
          recovery_markers: recovery_markers
-       }} ->
+       } = resolved} ->
         {claim,
          %{
            predecessor_request_id: predecessor.id,
            reason: :failed_predecessor,
            predecessor_shape: shape,
-           recovery_markers: recovery_markers
+           recovery_markers: recovery_markers,
+           execution_recovery?: Map.get(resolved, :execution_recovery?, false)
          }}
 
       {:error, disposition} ->
@@ -596,7 +636,8 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
     "upstream_stream_error",
     "stream_idle_timeout",
     "owner_task_exception",
-    "dead_execution_recovered"
+    "dead_execution_recovered",
+    "absent_instance_recovered"
   ]
 
   # The fence exists to stop the provider being paid twice for one turn, so it

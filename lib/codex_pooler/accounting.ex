@@ -87,6 +87,7 @@ defmodule CodexPooler.Accounting do
 
   @spec replay_preflight_snapshot(RequestReplay.preflight_input()) ::
           :none
+          | :recoverable_generation_zero
           | {:active_generation_zero, map()}
           | {:armed_generation_one, map()}
           | {:error, atom()}

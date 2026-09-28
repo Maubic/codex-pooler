@@ -335,7 +335,8 @@ defmodule CodexPooler.Accounting.RequestReplay do
           required(:model_identifier) => String.t(),
           required(:semantic_turn_digest) => <<_::256>>,
           required(:replay_claim_digest) => <<_::256>>,
-          optional(:replay_claim_alternates) => [<<_::256>>]
+          optional(:replay_claim_alternates) => [<<_::256>>],
+          optional(:allow_execution_recovery?) => boolean()
         }
 
   @type provisional_reference :: %{
@@ -350,6 +351,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
 
   @spec preflight_snapshot(preflight_input()) ::
           :none
+          | :recoverable_generation_zero
           | {:active_generation_zero, map()}
           | {:armed_generation_one, map()}
           | {:error,
@@ -1222,15 +1224,26 @@ defmodule CodexPooler.Accounting.RequestReplay do
          %{turn: turn, request: request, api_key: api_key, entitlement: nil} = lifecycle,
          input
        ) do
-    with :ok <- compare_active_authorization(turn, request, api_key, input),
-         true <- open_turn?(turn),
-         true <- open_request?(request),
-         %Attempt{} = attempt <- latest_attempt(request.id),
-         true <- live_generation_zero_attempt?(attempt) do
-      {:active_generation_zero, active_snapshot(turn, request, attempt)}
-    else
-      {:error, _reason} = error -> error
-      _closed_or_absent -> close_orphaned_lifecycle_or_conflict(lifecycle)
+    case compare_active_authorization(turn, request, api_key, input) do
+      :ok ->
+        attempt = latest_attempt(request.id)
+
+        cond do
+          recoverable_execution?(input, request, attempt) ->
+            # Advisory only: the ordinary claim rechecks death authority, exact
+            # witness, epoch and successor fences in its recovery transaction.
+            # No settlement or replay capability is minted by this preflight.
+            :recoverable_generation_zero
+
+          open_turn?(turn) and open_request?(request) and live_generation_zero_attempt?(attempt) ->
+            {:active_generation_zero, active_snapshot(turn, request, attempt)}
+
+          true ->
+            close_orphaned_lifecycle_or_conflict(lifecycle)
+        end
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -1254,6 +1267,11 @@ defmodule CodexPooler.Accounting.RequestReplay do
   end
 
   @orphaned_turn_closed_code "orphaned_turn_closed"
+
+  defp recoverable_execution?(%{allow_execution_recovery?: true}, request, %Attempt{} = attempt),
+    do: open_request?(request) and live_generation_zero_attempt?(attempt) and not is_nil(RequestLifecycle.execution_recovery_authority(attempt))
+
+  defp recoverable_execution?(_input, _request, _attempt), do: false
 
   # Defense in depth for a generation-zero finalization gap: an `in_progress`
   # turn whose request is already terminal, or whose latest attempt finished
@@ -1484,6 +1502,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
        do: true
 
   defp live_generation_zero_attempt?(%Attempt{}), do: false
+  defp live_generation_zero_attempt?(nil), do: false
 
   defp coherent_armed_attempt?(
          %Attempt{
@@ -2158,7 +2177,8 @@ defmodule CodexPooler.Accounting.RequestReplay do
       :replay_claim_digest
     ]
 
-    if (Map.keys(input) -- [:replay_claim_alternates]) |> Enum.sort() == Enum.sort(required) and
+    if (Map.keys(input) -- [:replay_claim_alternates, :allow_execution_recovery?]) |> Enum.sort() == Enum.sort(required) and
+         is_boolean(Map.get(input, :allow_execution_recovery?, false)) and
          Enum.all?([:codex_session_id, :api_key_id, :pool_id, :model_id], &uuid?(input[&1])) and
          is_integer(input.api_key_runtime_epoch) and input.api_key_runtime_epoch >= 0 and
          is_binary(input.model_identifier) and byte_size(input.model_identifier) in 1..255 and

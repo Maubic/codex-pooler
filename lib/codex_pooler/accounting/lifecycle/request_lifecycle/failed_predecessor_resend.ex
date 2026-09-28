@@ -33,6 +33,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   }
 
   alias CodexPooler.Accounting.NativeHttpToolObservation
+  alias CodexPooler.Accounting.RequestLifecycle
   alias CodexPooler.Accounting.RequestLifecycle.DeadExecutionResendRecovery
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
   alias CodexPooler.Gateway.Persistence.CodexTurn
@@ -51,6 +52,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           required(:model_id) => Ecto.UUID.t(),
           required(:endpoint) => String.t() | nil,
           optional(:codex_session_id) => Ecto.UUID.t(),
+          optional(:semantic_turn_digest) => <<_::256>> | nil,
           optional(:native_client_retry_witness) => ClientRetry.OriginalWitness.t() | nil,
           optional(:native_http_input_count) => non_neg_integer() | nil,
           optional(:native_http_semantic_turn_key) => <<_::256>> | nil,
@@ -88,10 +90,11 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           | :mailbox_continuation
 
   @type resolution :: %{
-          claim: String.t(),
-          predecessor: Request.t(),
-          predecessor_shape: predecessor_shape(),
-          recovery_markers: [map()]
+          required(:claim) => String.t(),
+          required(:predecessor) => Request.t(),
+          required(:predecessor_shape) => predecessor_shape(),
+          required(:recovery_markers) => [map()],
+          optional(:execution_recovery?) => boolean()
         }
 
   @doc false
@@ -121,6 +124,98 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   end
 
   def resolve(_claim, _scope), do: {:error, :unsupported_claim}
+
+  @doc false
+  @spec recoverable_predecessor(map()) :: Request.t() | nil
+  def recoverable_predecessor(%{pool_id: pool_id, api_key_id: key_id, semantic_turn_digest: <<_::256>> = digest}) do
+    lifecycle =
+      Repo.one(
+        from turn in CodexTurn,
+          join: request in Request,
+          on: request.id == turn.request_id,
+          where: request.pool_id == ^pool_id and request.api_key_id == ^key_id and turn.semantic_turn_digest == ^digest,
+          order_by: [desc: request.admitted_at, desc: turn.turn_sequence],
+          limit: 1,
+          select: {turn, request}
+      )
+
+    with {turn, request} <- lifecycle,
+         false <- entitlement?(request.id),
+         %Attempt{} = attempt <- latest_attempt(request.id),
+         true <-
+           ClientRetry.verified_dead_execution?(turn, request, attempt) or
+             (request.status in @live_request_statuses and attempt.status in @live_attempt_statuses and
+                not is_nil(RequestLifecycle.execution_recovery_authority(attempt))) do
+      request
+    else
+      _not_recoverable -> nil
+    end
+  end
+
+  def recoverable_predecessor(_scope), do: nil
+
+  @doc false
+  @spec resolve_execution(String.t(), map(), Ecto.UUID.t()) :: {:ok, resolution()} | {:error, disposition()}
+  def resolve_execution(claim, scope, request_id) do
+    turn = lock_turn(request_id)
+    request = Repo.one(from request in Request, where: request.id == ^request_id, lock: "FOR UPDATE")
+
+    with false <- Map.get(scope, :anchor_present?) == true,
+         %Request{} <- request,
+         true <- scoped?(request, scope),
+         %CodexTurn{semantic_turn_digest: digest} <- turn,
+         true <- digest == Map.get(scope, :semantic_turn_digest),
+         false <- entitlement?(request.id),
+         {:ok, request, marker} <- DeadExecutionResendRecovery.recover(request, true, db_now()),
+         turn <- Repo.reload!(turn),
+         attempt <- lock_final_attempt(turn, request.id),
+         true <- ClientRetry.verified_dead_execution?(turn, request, attempt),
+         {:ok, previous} <- execution_predecessor(request, turn, scope),
+         :ok <- validate_semantic_retry(request, :task_exception, Map.put(scope, :semantic_claim?, true), {previous, nil}),
+         :ok <- validate_retry_window(request, attempt, db_now(), scope),
+         {:ok, resolved_claim} <- execution_successor_claim(claim, request) do
+      {:ok, %{claim: resolved_claim, predecessor: request, predecessor_shape: :task_exception, recovery_markers: if(marker, do: [marker], else: []), execution_recovery?: true}}
+    else
+      {:error, _reason} = error -> error
+      _invalid -> {:error, :terminal_predecessor}
+    end
+  end
+
+  defp execution_predecessor(request, turn, scope) do
+    previous =
+      Repo.one(
+        from link in RequestClientRetryLink,
+          join: predecessor in Request,
+          on: predecessor.id == link.predecessor_request_id,
+          join: predecessor_turn in CodexTurn,
+          on: predecessor_turn.request_id == predecessor.id,
+          where: link.successor_request_id == ^request.id,
+          select: {predecessor, predecessor_turn.semantic_turn_digest}
+      )
+
+    case previous do
+      nil ->
+        {:ok, nil}
+
+      {%Request{} = predecessor, digest} when digest == turn.semantic_turn_digest ->
+        if scoped?(predecessor, scope) and request.request_metadata["client_resend"]["predecessor_request_id"] == predecessor.id,
+          do: {:ok, predecessor},
+          else: {:error, :terminal_predecessor}
+
+      _invalid ->
+        {:error, :terminal_predecessor}
+    end
+  end
+
+  defp execution_successor_claim(claim, request) do
+    if Repo.exists?(from existing in Request, where: existing.correlation_id == ^claim),
+      do: ClientRetry.deterministic_failed_predecessor_claim(request.correlation_id, request.id),
+      else: {:ok, claim}
+  end
+
+  defp latest_attempt(request_id) do
+    Repo.one(from attempt in Attempt, where: attempt.request_id == ^request_id, order_by: [desc: attempt.attempt_number], limit: 1)
+  end
 
   defp semantic_claim?("codex-turn:" <> _digest), do: true
   defp semantic_claim?(_claim), do: false
@@ -222,7 +317,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
          true <- ClientRetry.witness_matches?(request.native_client_retry_digest, digest, witness.alternates) or shape == :completed_item_resend,
          true <- request.native_client_retry_auth_epoch == epoch,
          true <- chain_edges_only?(request, chain_edges),
-         true <- not is_nil(turn) and turn.codex_session_id == Map.get(scope, :codex_session_id),
+         true <- semantic_retry_session_matches?(turn, request, attempt, scope),
          true <-
            ClientRetry.verified_dead_execution?(turn, request, attempt) or
              ClientRetry.verified_quota_rejection?(turn, request, attempt) or
@@ -236,6 +331,14 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   end
 
   defp validate_semantic_retry(_request, _shape, _scope, _chain_edges), do: :ok
+
+  # The thread-scoped claim and sealed witness stay identical across a window
+  # or session replacement. Only proven execution death can relax the session
+  # fence; every other retry shape keeps its original session binding.
+  defp semantic_retry_session_matches?(%CodexTurn{} = turn, request, attempt, scope),
+    do: turn.codex_session_id == Map.get(scope, :codex_session_id) or ClientRetry.verified_dead_execution?(turn, request, attempt)
+
+  defp semantic_retry_session_matches?(_turn, _request, _attempt, _scope), do: false
 
   # A turn-claim resend links its successor to the predecessor it chained onto,
   # so every node of a chain longer than one carries the chain's own edges: the
@@ -408,6 +511,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   # byte-identically through this path.
   defp failure_family(@task_exception_code), do: :task_exception
   defp failure_family("dead_execution_recovered"), do: :dead_execution
+  defp failure_family("absent_instance_recovered"), do: :dead_execution
   defp failure_family(@stream_error_code), do: :stream_cut
   defp failure_family("client_disconnected"), do: :client_disconnect
 

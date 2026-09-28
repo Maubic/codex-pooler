@@ -22,9 +22,10 @@ defmodule CodexPooler.Platform.InstancePresence do
   published (an older release, a failed first write) keeps its work and falls
   back to the six-hour stale-reservation sweep. A stale row alone is never
   proof that its owner ended (a live owner's heartbeat writes can fail); a
-  *later-started* incarnation publishing under the same node name is, because
-  a node name is held by one VM at a time, and `nonode@nohost`, the name every
-  undistributed VM shares, is excluded (`superseded?/1`). Presence is
+  *later-started* incarnation publishing under the same exclusive container
+  slot or node name is, because
+  an exclusive slot or named node is held by one VM at a time. The shared
+  `nonode@nohost` name proves nothing without a slot (`superseded?/1`). Presence is
   therefore safe to miss and never safe to invent.
 
   The candidate window is eight heartbeat intervals and exceeds the rollout
@@ -86,6 +87,7 @@ defmodule CodexPooler.Platform.InstancePresence do
         instance_id: identity.instance_id,
         node_name: identity.node_name,
         boot_id: identity.boot_id,
+        slot_id: if(identity == local_identity(), do: Application.get_env(:codex_pooler, :instance_slot_id)),
         started_at: now,
         last_seen_at: now,
         updated_at: now
@@ -132,7 +134,13 @@ defmodule CodexPooler.Platform.InstancePresence do
   def absent?(_identity, %DateTime{}, _opts), do: false
 
   @doc """
-  Whether a newer incarnation of the same node name has published presence.
+  Whether a newer incarnation of the same node name or exclusive container slot has published presence.
+
+  A configured slot identifies one container within one immutable pod UID. Only
+  one VM can occupy it at a time, even when a restart changes its IP and node
+  name. Both rows must have the same nonempty slot; missing metadata proves
+  nothing. Slot metadata is recorded only by the local VM and never updated
+  on heartbeat conflict. It is not part of execution identity equality.
 
   A node name is held by one VM at a time (the pod address when clustered, the
   pod hostname otherwise), so a successor incarnation publishing under it is
@@ -147,15 +155,15 @@ defmodule CodexPooler.Platform.InstancePresence do
   epmd inside a shared network namespace).
   """
   @spec superseded?(Identity.t() | nil) :: boolean()
-  def superseded?(%Identity{node_name: "nonode@nohost"}), do: false
-
   def superseded?(%Identity{node_name: node_name, boot_id: boot_id, instance_id: instance_id}) do
     Repo.exists?(
       from newer in Instance,
         join: older in Instance,
-        on: older.node_name == newer.node_name,
+        on:
+          (older.node_name == newer.node_name and older.node_name != "nonode@nohost") or
+            (not is_nil(older.slot_id) and older.slot_id != "" and older.slot_id == newer.slot_id),
         where:
-          older.instance_id == ^instance_id and newer.node_name == ^node_name and
+          older.instance_id == ^instance_id and older.node_name == ^node_name and
             newer.boot_id != ^boot_id and newer.started_at > older.started_at
     )
   end

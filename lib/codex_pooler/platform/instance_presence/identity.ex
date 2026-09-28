@@ -24,7 +24,8 @@ defmodule CodexPooler.Platform.InstancePresence.Identity do
   incarnations coexist and each ages on its own schedule. Absence stays what
   it was, one row that stopped being refreshed; exact death of a VM that
   published no terminal proof is inferred only from a later-started successor
-  incarnation under the same node name (`InstancePresence.superseded?/1`),
+  incarnation under the same node name or configured exclusive container slot
+  (`InstancePresence.superseded?/1`),
   never from the stale row alone. Keeping the key in a
   single column also keeps a previous release's heartbeat upsert (`ON CONFLICT
   (instance_id)`) working through a rollout, while the `node_name` and
