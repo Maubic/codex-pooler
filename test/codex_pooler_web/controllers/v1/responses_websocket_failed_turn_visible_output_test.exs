@@ -1,13 +1,15 @@
 defmodule CodexPoolerWeb.V1.ResponsesWebsocketFailedTurnVisibleOutputTest do
-  # A public `/v1/responses` websocket turn that fails after the client was
-  # shown output is logged `visible_output=after_visible_output`, read from
-  # what the socket pushed, as a native turn is. With owner forwarding off the
-  # response task's writer runs in the upstream websocket session's process,
-  # so a flag the task keeps for itself never sees the output (findings#271).
+  # A websocket turn that fails after the client was shown output is logged
+  # `visible_output=after_visible_output` on the public `/v1/responses` socket
+  # and on the native one, with owner forwarding off and on: the socket
+  # answers from what it pushed. With owner forwarding off the response task's
+  # writer runs in the upstream websocket session's process, so a flag the
+  # task keeps for itself never sees the output; with forwarding on the
+  # owner's `:complete` clears the native pushed-output marker before the
+  # task's error arrives (findings#271).
   #
-  # One node; the public `/v1/responses` websocket with owner forwarding off
-  # and on, the native `/backend-api/codex/responses` websocket with
-  # forwarding off as the control; the Pool's default serving mode,
+  # One node; public `/v1/responses` and native `/backend-api/codex/responses`
+  # websockets, owner forwarding off and on; the Pool's default serving mode,
   # FakeUpstream closing its connection after visible output without a
   # terminal, synthetic text.
   use CodexPoolerWeb.ConnCase, async: false
@@ -23,7 +25,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketFailedTurnVisibleOutputTest do
     :ok
   end
 
-  for {forwarding, route, turn_state} <- [{:off, "/v1/responses", ""}, {:on, "/v1/responses", ""}, {:off, "/backend-api/codex/responses", "ws-visible-output-native"}] do
+  for forwarding <- [:off, :on], {route, turn_state} <- [{"/v1/responses", ""}, {"/backend-api/codex/responses", "ws-visible-output-native"}] do
     @tag forwarding: forwarding, route: route, turn_state: turn_state
     test "a #{route} turn that fails after visible output logs after_visible_output with owner forwarding #{forwarding}", ctx do
       Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, ctx.forwarding == :on)

@@ -5736,6 +5736,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp run_prepared_response(parent, task_pid, auth, prepared) do
     Websocket.run_prepared_websocket_response_for_socket(auth, prepared, fn data ->
       unless StreamProtocol.internal_control_event?(data) do
+        # Not read (findings#271): the failed-turn log reads what the socket pushed.
         Process.put(:response_task_visible_output?, true)
       end
 
@@ -5803,14 +5804,16 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # owner-forwarded public turn reports too) and a native turn's pushed
   # output. The flag a caller reports is not consulted: with owner forwarding
   # off the response task's writer runs in its upstream websocket session's
-  # process, so the flag the task carries stays false (findings#271).
+  # process, so the flag the task carries stays false (findings#271). With
+  # forwarding on the owner's `:complete` clears the native marker, which the
+  # output-commit probe answers from, before the task's error arrives, so a
+  # native turn also counts the frames its delivery evidence recorded.
   defp direct_turn_visible_output?(state, pid, _reported_visible_output?) do
     if active_public_turn?(state, pid) do
       Map.get(state, :public_turn_output_committed?, false)
     else
-      state
-      |> Map.get(:native_turn_output_task_pids, MapSet.new())
-      |> MapSet.member?(pid)
+      MapSet.member?(Map.get(state, :native_turn_output_task_pids, MapSet.new()), pid) or
+        downstream_delivery_evidence(state, pid).frames > 0
     end
   end
 
