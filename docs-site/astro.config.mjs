@@ -119,6 +119,8 @@ export default defineConfig({
           label: "GitHub",
           href: "https://github.com/icoretech/codex-pooler",
         },
+        { icon: "x.com", label: "X", href: "https://x.com/icoretech_inc" },
+        { icon: "reddit", label: "Reddit", href: "https://reddit.com/r/CodexPooler" },
       ],
       editLink: {
         baseUrl: "https://github.com/icoretech/codex-pooler/edit/main/docs-site/",

@@ -2,7 +2,7 @@
 import "@fontsource-variable/roboto-condensed";
 import fontLatin from "@fontsource-variable/roboto-condensed/files/roboto-condensed-latin-wght-normal.woff2?url";
 import "../styles/global.css";
-import { LICENSE_URL, REPO_URL, SITE_URL } from "../data/site";
+import { LICENSE_URL, REDDIT_URL, REPO_URL, SITE_URL, X_URL } from "../data/site";
 
 interface Props {
   title?: string;
@@ -29,7 +29,8 @@ const structuredData = {
   license: LICENSE_URL,
   codeRepository: REPO_URL,
   offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
-  publisher: { "@type": "Organization", name: "iCoreTech" },
+  sameAs: [REPO_URL, REDDIT_URL],
+  publisher: { "@type": "Organization", name: "iCoreTech", sameAs: [X_URL] },
 };
 ---
 

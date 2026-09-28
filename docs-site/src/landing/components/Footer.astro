@@ -1,5 +1,6 @@
 ---
-import { DOCS_URL, HELM_URL, LICENSE_URL, QUICKSTART_URL, RELEASES_URL, REPO_URL, docs } from "../data/site";
+import { Icon } from "@astrojs/starlight/components";
+import { DOCS_URL, HELM_URL, LICENSE_URL, QUICKSTART_URL, REDDIT_URL, RELEASES_URL, REPO_URL, X_URL, docs } from "../data/site";
 
 const columns = [
   {
@@ -43,6 +44,14 @@ const columns = [
           <span>Codex Pooler</span>
         </a>
         <p>The self-hosted gateway for your Codex accounts, pooled your way.</p>
+        <ul class="social">
+          <li>
+            <a href={X_URL}><Icon name="x.com" /><span>@icoretech_inc</span></a>
+          </li>
+          <li>
+            <a href={REDDIT_URL}><Icon name="reddit" /><span>r/CodexPooler</span></a>
+          </li>
+        </ul>
       </div>
       {
         columns.map((column) => (
@@ -92,6 +101,35 @@ const columns = [
     max-width: 22em;
     margin-top: 14px;
     font-size: 16px;
+  }
+
+  .social {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    margin-top: 18px;
+    padding: 0;
+    list-style: none;
+  }
+
+  .social a {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--night-ink);
+    transition: color 0.15s;
+  }
+
+  .social a:hover {
+    color: var(--orange-2);
+  }
+
+  .social :global(svg) {
+    width: 17px;
+    height: 17px;
+    flex: none;
   }
 
   .foot-col {

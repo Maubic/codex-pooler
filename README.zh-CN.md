@@ -31,6 +31,10 @@
 </p>
 
 <p align="center">
+  <a href="https://www.codex-pooler.com">官网</a>
+  ·
+  <a href="https://www.codex-pooler.com/docs/">文档</a>
+  ·
   <a href="#quick-start-with-docker-compose">快速开始</a>
   ·
   <a href="#harness-configuration">客户端配置</a>

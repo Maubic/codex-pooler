@@ -3,6 +3,8 @@ export const REPO_URL = "https://github.com/icoretech/codex-pooler";
 export const RELEASES_URL = `${REPO_URL}/releases`;
 export const LICENSE_URL = `${REPO_URL}/blob/main/LICENSE.md`;
 export const HELM_URL = "https://github.com/icoretech/helm/tree/main/charts/codex-pooler";
+export const X_URL = "https://x.com/icoretech_inc";
+export const REDDIT_URL = "https://reddit.com/r/CodexPooler";
 
 // The docs are served under /docs on this host. Keep every docs link behind this helper.
 export const docs = (path = "/") => `/docs${path}`;

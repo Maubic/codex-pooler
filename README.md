@@ -31,6 +31,10 @@
 </p>
 
 <p align="center">
+  <a href="https://www.codex-pooler.com">Website</a>
+  ·
+  <a href="https://www.codex-pooler.com/docs/">Docs</a>
+  ·
   <a href="#quick-start-with-docker-compose">Quick start</a>
   ·
   <a href="#harness-configuration">Harness</a>
