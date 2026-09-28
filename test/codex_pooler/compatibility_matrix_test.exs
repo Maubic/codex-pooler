@@ -1529,6 +1529,17 @@ defmodule CodexPooler.CompatibilityMatrixTest do
     assert fixture.pool_gate == %{setting: "allow_audio_transcription", default_enabled: true, disabled_behavior: "403_audio_transcription_disabled"}
   end
 
+  describe "runtime ingress firewall compatibility contract" do
+    test "states the forwarded client IP, cold settings, revocation and denial telemetry policy the docs describe" do
+      firewall = CompatibilityMatrix.fixture!(:firewall)
+
+      assert %{default_source: :x_forwarded_for, default_proxy_depth: 0, positional_depth: %{range: 1..16, selected_entry: :nth_from_right}} = firewall.forwarded_client_ip
+      assert %{status: 503} = firewall.cold_settings
+      assert %{close_code: 1008} = firewall.revoked_websocket
+      assert %{metric: "codex_pooler_ingress_firewall_denied_count"} = firewall.denial_telemetry
+    end
+  end
+
   describe "pruned runtime compatibility contract" do
     test "does not carry removed control-plane or reset-credit feature rows" do
       refute :control_plane_surface in CompatibilityMatrix.feature_slugs()

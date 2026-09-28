@@ -119,14 +119,14 @@ const verifyStalePolicyIsRejected = () => {
   }
 };
 
+// The compatibility matrix states the same policy as data; test/codex_pooler/compatibility_matrix_test.exs checks it there.
 const files = {
   configuration: "docs-site/src/content/docs/getting-started/configuration.mdx",
   contract: "docs-site/src/content/_docs-contract.md",
-  matrix: "test/support/compatibility_matrix.ex",
   dashboard: "docs-site/public/operators/monitoring/codex-pooler-runtime-triage.json"
 };
 
-const [configuration, contract, matrix, dashboardText] = await Promise.all(Object.values(files).map(read));
+const [configuration, contract, dashboardText] = await Promise.all(Object.values(files).map(read));
 const dashboard = JSON.parse(dashboardText);
 
 verifyStalePolicyIsRejected();
@@ -155,17 +155,6 @@ for (const marker of [
   "websocket_revoked"
 ]) {
   required(contract, marker, files.contract);
-}
-
-for (const marker of [
-  "default_source: :x_forwarded_for",
-  "default_proxy_depth: 0",
-  "positional_depth: %{ range: 1..16, selected_entry: :nth_from_right",
-  "cold_settings: %{status: 503",
-  "revoked_websocket: %{ close_code: 1008",
-  "metric: \"codex_pooler_ingress_firewall_denied_count\""
-]) {
-  required(matrix, marker, files.matrix);
 }
 
 for (const [file, text] of [
