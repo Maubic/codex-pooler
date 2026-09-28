@@ -8,6 +8,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
   alias CodexPooler.Gateway.Transports.BoundedResponseBody
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl
   alias CodexPooler.Gateway.Transports.RejectionBody
+  alias CodexPooler.Gateway.Transports.RetryAfter
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.UpstreamErrorParam
@@ -540,6 +541,12 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
         if(streaming?, do: "text/event-stream", else: "application/json")
 
     headers = [{"content-type", content_type}]
+
+    headers =
+      case RetryAfter.header(response) do
+        nil -> headers
+        value -> [{"retry-after", value} | headers]
+      end
 
     headers =
       headers

@@ -120,6 +120,12 @@ defmodule CodexPoolerWeb.PublicGatewayResult do
       # The redacted body keeps the retry advice a retryable `503` carries
       # (findings#206 row 206-532): a number, never upstream detail.
       conn
+      |> put_retry_headers(
+        case Map.get(reason, :upstream_retry_after) do
+          value when is_binary(value) -> [{"retry-after", value}]
+          _other -> []
+        end
+      )
       |> put_retry_headers(Contracts.circuit_retry_response_headers(reason))
       |> put_status(status)
       |> json(%{"error" => PublicResponse.normalize_error(reason, status: status)})

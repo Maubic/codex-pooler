@@ -36,6 +36,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
   alias CodexPooler.Gateway.Transports.{
     MisalignmentPolicyViolation,
     ModelUnavailability,
+    RetryAfter,
     TransportFailureReason
   }
 
@@ -870,7 +871,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
 
   defp unanswered_failure_result(response, context, body, error_code, validation_rejection, opts) do
     if public_rate_limit_relay?(response, context.request_options),
-      do: {:error, public_rate_limit_error(context)},
+      do: {:error, public_rate_limit_error(context, response)},
       else: relayed_failure_result(response, context, body, error_code, validation_rejection, opts)
   end
 
@@ -884,13 +885,13 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
 
   defp public_rate_limit_relay?(_response, _request_options), do: false
 
-  defp public_rate_limit_error(%SelectedCandidateContext{} = context) do
+  defp public_rate_limit_error(%SelectedCandidateContext{} = context, response) do
     others =
       context.route_state
       |> RouteState.route_filter_candidates()
       |> Enum.reject(fn {assignment, _identity} -> assignment.id == context.assignment.id end)
 
-    error = %{status: 429, code: "upstream_rate_limited", message: "upstream request failed", param: nil}
+    error = %{status: 429, code: "upstream_rate_limited", message: "upstream request failed", param: nil, upstream_retry_after: RetryAfter.header(response)}
 
     case CircuitRetryAfter.current_seconds(context.auth, context.model, others, context.route_class) do
       seconds when is_integer(seconds) -> Map.put(error, :circuit_retry_after_seconds, seconds)
@@ -924,10 +925,9 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
 
   defp put_retry_advice(headers, nil), do: headers
 
-  # The provider's own `Retry-After` never reaches this point
-  # (`Metadata.response_headers/3` drops it), so the advice is appended.
+  # Pool reset advice takes precedence over the provider's generic retry hint.
   defp put_retry_advice(headers, seconds),
-    do: headers ++ Contracts.usage_limit_response_headers(%{status: 429, usage_limit: %{resets_in_seconds: seconds}})
+    do: Enum.reject(headers, fn {name, _value} -> name == "retry-after" end) ++ Contracts.usage_limit_response_headers(%{status: 429, usage_limit: %{resets_in_seconds: seconds}})
 
   defp json_content_type(headers) do
     headers
