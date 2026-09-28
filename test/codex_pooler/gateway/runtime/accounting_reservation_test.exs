@@ -4,6 +4,7 @@ defmodule CodexPooler.Gateway.Runtime.AccountingReservationTest do
   import ExUnit.CaptureLog
   import Ecto.Query
   import CodexPooler.AccountsFixtures
+  import CodexPooler.RequestReplayFixtures, only: [replay_preparation_metadata: 0]
 
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
     only: [gateway_setup: 1, start_upstream: 1]
@@ -309,7 +310,8 @@ defmodule CodexPooler.Gateway.Runtime.AccountingReservationTest do
         status: "in_progress",
         completed_at: nil,
         upstream_status_code: nil,
-        usage_status: "usage_pending"
+        usage_status: "usage_pending",
+        response_metadata: replay_preparation_metadata()
       })
 
     assert {:ok, %{intent: :active_reattach, lifecycle: active}} =
