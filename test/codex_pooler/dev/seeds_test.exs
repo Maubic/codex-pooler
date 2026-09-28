@@ -650,6 +650,10 @@ defmodule CodexPooler.Dev.SeedsTest do
 
     assert logs |> Enum.map(& &1.requested_model) |> Enum.uniq() |> length() >= 3
     assert Enum.all?(logs, &(&1.token_counts.cached_input_tokens / &1.token_counts.input_tokens >= 0.95))
+    assert Enum.any?(logs, &(&1.transport == "websocket"))
+    translated = Enum.filter(logs, &get_in(&1.metadata, ["openai_compatibility", "source_endpoint"]))
+    assert translated != []
+    assert Enum.all?(translated, &(get_in(&1.metadata, ["openai_compatibility", "translated_endpoint"]) == &1.endpoint))
 
     metrics = Stats.pool_usage_metrics_by_pool_ids(Enum.map(result.pools, & &1.id), traffic_window: "24h")
 

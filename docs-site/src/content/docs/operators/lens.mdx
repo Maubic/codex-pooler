@@ -52,6 +52,8 @@ In [Request logs](/operators/request-logs/), both signals appear in the **Errors
 
 Open the request to see each attempt's **Sent model**, **First model reported**, **First different name reported**, and **Model reported at end**. The model-mismatch warning uses the latest attempt; the name-change warning can also point to an earlier attempt. A successful retry does not remove that earlier evidence.
 
+The Errors · Warnings column is omitted when no request on the current page has an error or model-name warning.
+
 An HTTP success status and a model-name warning can both be correct: the request succeeded, but the provider reported a different model. Likewise, a failed or interrupted attempt may already have returned enough model-name information to show a difference.
 
 ## Investigate a difference

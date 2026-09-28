@@ -6,7 +6,14 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestLogFact, RequestLogFacts}
   alias CodexPooler.Repo
 
-  @clients ["codex_cli_rs/0.1.0", "opencode/2.0.0", "hermes-cli/1.0.0", "omp/1.0.0", "OpenAI/Python 1.0.0", "goose/1.0.0"]
+  @clients [
+    {"codex_cli_rs/0.1.0", "websocket", nil},
+    {"opencode/2.0.0", "http_sse", "/v1/responses"},
+    {"hermes-cli/1.0.0", "http_sse", "/v1/chat/completions"},
+    {"omp/1.0.0", "http_sse", "/v1/responses"},
+    {"OpenAI/Python 1.0.0", "http_sse", "/v1/responses"},
+    {"goose/1.0.0", "http_sse", "/v1/chat/completions"}
+  ]
   @cache_hit_rates [9580, 9730, 9860, 9920, 9670, 9810, 9950]
   @demand_profiles [
     {4, [{8.0, 3.4, 13}, {18.0, 3.1, 8}]},
@@ -71,6 +78,14 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
     latency = 4500 + div(output * 1000, 65 + index * 5)
     started_at = DateTime.add(occurred_at, -latency, :millisecond)
     metadata = %{"dev_seed" => "codex_pooler_dev_seed", "docs_screenshot" => true}
+    {user_agent, transport, source_endpoint} = Enum.at(@clients, rem(index + sequence, length(@clients)))
+
+    request_metadata =
+      if source_endpoint do
+        Map.put(metadata, "openai_compatibility", %{"surface" => "openai_v1", "source_endpoint" => source_endpoint, "translated_endpoint" => "/backend-api/codex/responses"})
+      else
+        metadata
+      end
 
     request = %{
       id: request_id,
@@ -79,12 +94,12 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
       model_id: model.id,
       requested_model: model.exposed_model_id,
       endpoint: "/backend-api/codex/responses",
-      transport: "http_sse",
+      transport: transport,
       status: "succeeded",
       usage_status: "usage_known",
       correlation_id: "docs-#{pool.slug}-#{hour}-#{sequence}",
-      user_agent: Enum.at(@clients, rem(index + sequence, length(@clients))),
-      request_metadata: metadata,
+      user_agent: user_agent,
+      request_metadata: request_metadata,
       admitted_at: started_at,
       completed_at: occurred_at,
       response_status_code: 200,
@@ -105,7 +120,7 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
       upstream_identity_id: identity.id,
       model_id: model.id,
       upstream_model_id: model.upstream_model_id,
-      transport: "http_sse",
+      transport: transport,
       status: "succeeded",
       started_at: started_at,
       completed_at: occurred_at,
@@ -128,7 +143,7 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
       entry_kind: "settlement",
       amount_status: "recorded",
       usage_status: "usage_known",
-      transport: "http_sse",
+      transport: transport,
       currency_code: "USD",
       input_tokens: input,
       cached_input_tokens: cached,
