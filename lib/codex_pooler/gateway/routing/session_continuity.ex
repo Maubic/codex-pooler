@@ -156,8 +156,8 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
 
   @spec attach_file_affinity(auth(), String.t(), payload(), RequestOptions.t()) ::
           {:ok, RequestOptions.t()} | {:error, gateway_error()}
-  def attach_file_affinity(auth, "/backend-api/codex/responses", payload, request_options) do
-    case response_file_ids(auth, payload) do
+  def attach_file_affinity(auth, endpoint, payload, request_options) when endpoint in ["/backend-api/codex/responses", "/backend-api/codex/images/edits"] do
+    case file_affinity_ids(auth, endpoint, payload) do
       [] ->
         {:ok, request_options}
 
@@ -727,6 +727,15 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
     |> RequestOptions.put_continuity(codex_session: session)
     |> attach_http_owner_witness(session)
   end
+
+  defp file_affinity_ids(auth, "/backend-api/codex/responses", payload), do: response_file_ids(auth, payload)
+
+  defp file_affinity_ids(auth, "/backend-api/codex/images/edits", %{"images" => images}) when is_list(images) do
+    ids = for %{"file_id" => file_id} <- images, is_binary(file_id), do: file_id
+    Files.bridged_file_ids(auth, ids)
+  end
+
+  defp file_affinity_ids(_auth, "/backend-api/codex/images/edits", _payload), do: []
 
   # Every `input_file` id must be a file this Pool bridged. An `input_image` id
   # joins the affinity only when the Pool bridged it: the released app-server
