@@ -46,6 +46,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Status 
 
   defp message_class({:websocket_owner_upstream_frame, _ref, _payload}), do: :upstream_frame
   defp message_class({:websocket_owner_upstream_frame, _ref, _payload, _discriminator}), do: :upstream_frame
+  defp message_class({:upstream_websocket_connection_closed, _upstream_pid, _signal}), do: :upstream_connection_closed
   defp message_class({ref, _result}) when is_reference(ref), do: :task_result
   defp message_class({:DOWN, _ref, :process, _pid, _reason}), do: :process_down
   defp message_class({:EXIT, _pid, _reason}), do: :process_exit

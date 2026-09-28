@@ -4,6 +4,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger 
   require Logger
 
   alias CodexPooler.Gateway.Runtime.Finalization.Metadata
+  alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
 
   @spec owner_started(pid(), keyword()) :: :ok
   def owner_started(pid, opts) do
@@ -135,6 +136,47 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger 
       downstream_epoch: downstream_epoch
     )
   end
+
+  # Why the owner did not tell its downstream that its upstream connection
+  # closed between requests (findings#270), in the order it checks them.
+  @upstream_close_skip_reasons [
+    :owner_invalidation,
+    :draining,
+    :no_downstream,
+    :downstream_replaced,
+    :downstream_closing,
+    :handoff,
+    :replay_armed,
+    :compaction,
+    :public_turn,
+    :turn_active
+  ]
+
+  @doc false
+  @spec upstream_close_skip_reasons() :: [String.t()]
+  def upstream_close_skip_reasons, do: Enum.map(@upstream_close_skip_reasons, &Atom.to_string/1)
+
+  # The owner's upstream connection closed between requests and the owner
+  # did not tell its downstream. The same line and fields as the socket's
+  # (`CodexPoolerWeb.WebsocketConnectionLogger`), with `forwarding=on`, so a
+  # guard refusal that follows can be attributed through the closed
+  # connection's `lifecycle_id` and `generation`. A skip reason outside the
+  # owner's fixed vocabulary logs nothing.
+  @spec upstream_close_kept_open(%{cause: atom(), lifecycle_id: binary(), generation: pos_integer()}, atom(), binary() | nil) :: :ok
+  def upstream_close_kept_open(%{cause: cause, lifecycle_id: lifecycle_id, generation: generation}, skip_reason, codex_session_id)
+      when is_atom(cause) and skip_reason in @upstream_close_skip_reasons and is_integer(generation) do
+    Logger.info(
+      "websocket downstream kept open after upstream connection close " <>
+        "reason_code=#{cause} skip_reason=#{skip_reason} " <>
+        "lifecycle_id=#{DiagnosticTaxonomy.safe_correlator(lifecycle_id)} " <>
+        "generation=#{generation} forwarding=on " <>
+        "codex_session_id=#{DiagnosticTaxonomy.safe_correlator(codex_session_id)}"
+    )
+
+    :ok
+  end
+
+  def upstream_close_kept_open(_signal, _skip_reason, _codex_session_id), do: :ok
 
   @spec owner_exit_persistence_failure(atom(), map(), atom(), term()) :: :ok
   # A later turn of the session (an HTTP fallback the owner never held) was

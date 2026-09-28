@@ -157,6 +157,123 @@ defmodule CodexPoolerWeb.CodexResponsesSocketUpstreamCloseTest do
     assert {:stop, :normal, {1008, "api key is no longer active"}, _stopped} = CodexResponsesSocket.handle_info({:DOWN, monitor, :process, ctx.task, :normal}, revoked)
   end
 
+  # With owner forwarding on the websocket owner holds the upstream session
+  # and relays the same facts to its attached downstream as
+  # `{:websocket_owner_upstream_closed, correlation_id, epoch, signal}`; the
+  # socket takes it only for its own owner binding and decides on its own
+  # state exactly as with forwarding off.
+  describe "the owner's word with owner forwarding on" do
+    test "a socket still settling its completed turn latches it for its own binding", ctx do
+      state = owner_settling_state(ctx)
+
+      assert {{:ok, latched}, log} = with_info_log(fn -> CodexResponsesSocket.handle_info(owner_word(ctx, state), state) end)
+
+      assert latched == Map.put(state, :upstream_close_pending, %{cause: :peer_close_frame, lifecycle_id: ctx.lifecycle_id, generation: 3, forwarding: :on})
+      assert upstream_close_lines(log) == []
+    end
+
+    test "an idle socket closes 1001 at once", ctx do
+      state = owner_state(ctx)
+
+      assert {{:stop, :normal, @upstream_close_detail, stopped}, log} = with_info_log(fn -> CodexResponsesSocket.handle_info(owner_word(ctx, state), state) end)
+
+      assert stopped == Map.put(state, :socket_stopped?, true)
+      assert [line] = upstream_close_lines(log)
+      assert line =~ "websocket downstream closed after upstream connection close reason_code=peer_close_frame lifecycle_id=#{ctx.lifecycle_id} generation=3 forwarding=on codex_session_id=#{@codex_session_id}"
+    end
+
+    test "the latched socket closes 1001 once its last task is gone", ctx do
+      state = owner_settling_state(ctx)
+      {:ok, latched} = CodexResponsesSocket.handle_info(owner_word(ctx, state), state)
+      monitor = latched.task_monitors[ctx.task]
+
+      assert {{:stop, :normal, @upstream_close_detail, stopped}, log} = with_info_log(fn -> CodexResponsesSocket.handle_info({:DOWN, monitor, :process, ctx.task, :normal}, latched) end)
+
+      refute Map.has_key?(stopped, :upstream_close_pending)
+      assert [line] = upstream_close_lines(log)
+      assert line =~ "websocket downstream closed after upstream connection close reason_code=peer_close_frame lifecycle_id=#{ctx.lifecycle_id} generation=3 forwarding=on"
+    end
+
+    for {skip_reason, change} <- [
+          busy: :unaccepted_task,
+          queued: :queued_frame,
+          public_route: :public_route,
+          handoff: :pending_handoff,
+          reconnect: :active_turn_reconnect,
+          no_completed_response: :no_completed_response,
+          revoked: :revoked
+        ] do
+      @skip_reason skip_reason
+      @change change
+
+      test "a socket keeps its connection open with skip_reason=#{skip_reason}", ctx do
+        state = ctx |> owner_settling_state() |> change_state(@change, ctx)
+
+        assert {{:ok, unchanged}, log} = with_info_log(fn -> CodexResponsesSocket.handle_info(owner_word(ctx, state), state) end)
+
+        assert unchanged == state
+        assert [line] = upstream_close_lines(log)
+        assert line =~ "websocket downstream kept open after upstream connection close reason_code=peer_close_frame skip_reason=#{@skip_reason} lifecycle_id=#{ctx.lifecycle_id} generation=3 forwarding=on codex_session_id=#{@codex_session_id}"
+      end
+    end
+
+    # The owner decided for the binding it held; a socket bound to the owner
+    # anew since (another epoch or correlation id) keeps its connection and
+    # names why.
+    test "the word for another binding keeps the socket open with skip_reason=stale_downstream", ctx do
+      state = owner_state(ctx)
+      %{correlation_id: correlation_id, epoch: epoch} = state.websocket_owner_downstream
+
+      {results, log} =
+        with_info_log(fn ->
+          for {word_correlation_id, word_epoch} <- [{correlation_id, epoch - 1}, {correlation_id, epoch + 1}, {"corr-another-socket", epoch}] do
+            CodexResponsesSocket.handle_info(owner_word(ctx, word_correlation_id, word_epoch), state)
+          end
+        end)
+
+      assert results == [{:ok, state}, {:ok, state}, {:ok, state}]
+      lines = upstream_close_lines(log)
+      assert length(lines) == 3
+
+      for line <- lines,
+          do: assert(line =~ "websocket downstream kept open after upstream connection close reason_code=peer_close_frame skip_reason=stale_downstream lifecycle_id=#{ctx.lifecycle_id} generation=3 forwarding=on codex_session_id=#{@codex_session_id}")
+    end
+
+    test "a malformed word, or one reaching a socket without an owner, changes nothing", ctx do
+      state = owner_state(ctx)
+      %{correlation_id: correlation_id, epoch: epoch} = state.websocket_owner_downstream
+      signal = %{cause: :peer_close_frame, lifecycle_id: ctx.lifecycle_id, generation: 3}
+      forwarding_off = native_state(ctx)
+
+      {results, log} =
+        with_info_log(fn ->
+          [
+            CodexResponsesSocket.handle_info({:websocket_owner_upstream_closed, correlation_id, epoch, %{signal | cause: :request_key_changed}}, state),
+            CodexResponsesSocket.handle_info({:websocket_owner_upstream_closed, correlation_id, epoch, Map.put(signal, :connection_requests, 2)}, state),
+            CodexResponsesSocket.handle_info({:websocket_owner_upstream_closed, correlation_id, epoch, %{signal | lifecycle_id: "not-a-lifecycle"}}, state),
+            CodexResponsesSocket.handle_info({:websocket_owner_upstream_closed, correlation_id, epoch, signal}, forwarding_off)
+          ]
+        end)
+
+      assert results == [{:ok, state}, {:ok, state}, {:ok, state}, {:ok, forwarding_off}]
+      assert upstream_close_lines(log) == []
+    end
+
+    # A socket of the earlier release has no clause for the word: this socket
+    # without it (the published socket differs from it by the forwarding-off
+    # latch and this clause, and routes every unknown message to the same
+    # catch-all) drops the word and stays as it was, with no line and no stop.
+    test "a socket of an earlier release drops the word", ctx do
+      earlier_release_socket = earlier_release_socket!()
+      state = owner_state(ctx)
+
+      assert {result, log} = with_info_log(fn -> earlier_release_socket.handle_info(owner_word(ctx, state), state) end)
+
+      assert result == {:ok, state}
+      assert upstream_close_lines(log) == []
+    end
+  end
+
   # A native socket whose last pushed terminal completed a native response,
   # with no task, queue or owner work under way.
   defp native_state(ctx) do
@@ -188,6 +305,70 @@ defmodule CodexPoolerWeb.CodexResponsesSocketUpstreamCloseTest do
       response_task_terminals_accepted: MapSet.new([ctx.task])
     })
   end
+
+  # The same idle socket with owner forwarding on: the owner holds the
+  # upstream session, so the socket has none, and its owner binding names
+  # this downstream.
+  defp owner_state(ctx) do
+    ctx
+    |> native_state()
+    |> Map.delete(:upstream_websocket_session)
+    |> Map.merge(%{
+      websocket_owner_lease_token: Ecto.UUID.generate(),
+      websocket_owner_downstream: %{pid: self(), epoch: 2, correlation_id: "corr-upstream-close", active_turn_reconnect?: false}
+    })
+  end
+
+  defp owner_settling_state(ctx) do
+    ctx
+    |> owner_state()
+    |> Map.merge(%{
+      tasks: MapSet.new([ctx.task]),
+      task_monitors: %{ctx.task => make_ref()},
+      response_task_terminals_accepted: MapSet.new([ctx.task])
+    })
+  end
+
+  defp owner_word(ctx, %{websocket_owner_downstream: %{correlation_id: correlation_id, epoch: epoch}}), do: owner_word(ctx, correlation_id, epoch)
+
+  defp owner_word(ctx, correlation_id, epoch),
+    do: {:websocket_owner_upstream_closed, correlation_id, epoch, %{cause: :peer_close_frame, lifecycle_id: ctx.lifecycle_id, generation: 3}}
+
+  # This socket compiled without its clause for the owner's word, under
+  # another module name so the running module is never replaced.
+  @earlier_release_socket CodexPoolerWeb.CodexResponsesSocketWithoutUpstreamClosedWord
+
+  # Returns the module the load answered: the test calls it through that
+  # value, since a module the test compiles at run time is unknown to the
+  # compiler.
+  defp earlier_release_socket! do
+    {:ok, {CodexResponsesSocket, [abstract_code: {:raw_abstract_v1, forms}]}} =
+      CodexResponsesSocket |> :code.which() |> :beam_lib.chunks([:abstract_code])
+
+    {forms, dropped} = Enum.map_reduce(forms, 0, &without_upstream_closed_word/2)
+    assert dropped == 1
+    {:ok, module, binary} = :compile.forms(forms, [:binary, :return_errors])
+    # A rerun in the same VM replaces the copy an earlier run loaded.
+    _purged = :code.purge(module)
+    {:module, loaded} = :code.load_binary(module, ~c"earlier_release_socket", binary)
+    loaded
+  end
+
+  defp without_upstream_closed_word({:attribute, line, :module, CodexResponsesSocket}, dropped),
+    do: {{:attribute, line, :module, @earlier_release_socket}, dropped}
+
+  defp without_upstream_closed_word({:function, line, :handle_socket_info, 2, clauses}, dropped) do
+    kept = Enum.reject(clauses, &upstream_closed_word_clause?/1)
+    {{:function, line, :handle_socket_info, 2, kept}, dropped + length(clauses) - length(kept)}
+  end
+
+  defp without_upstream_closed_word(form, dropped), do: {form, dropped}
+
+  defp upstream_closed_word_clause?({:clause, _line, [pattern, _state], _guards, _body}), do: upstream_closed_word_pattern?(pattern)
+
+  defp upstream_closed_word_pattern?({:match, _line, left, right}), do: upstream_closed_word_pattern?(left) or upstream_closed_word_pattern?(right)
+  defp upstream_closed_word_pattern?({:tuple, _line, [{:atom, _, :websocket_owner_upstream_closed} | _rest]}), do: true
+  defp upstream_closed_word_pattern?(_pattern), do: false
 
   defp change_state(state, :unaccepted_task, _ctx) do
     newer = spawn_quiet_process()

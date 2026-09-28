@@ -550,76 +550,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.UpstreamCloseDownstreamTe
     %{conn: conn, websocket: websocket, ref: ref, socket: socket, lifecycle_id: lifecycle_id}
   end
 
-  defp anchorless_request(connection_ordinal, respond) do
-    [method: "WEBSOCKET", path: @turn_path, json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]], respond: respond]
-    |> then(&if(connection_ordinal, do: Keyword.put(&1, :websocket_connection_ordinal, connection_ordinal), else: &1))
-    |> FakeUpstream.expect_request()
-  end
-
   # Lite prefixes the request that opens a context with its tool manifest.
   defp client_input(%{"input" => [%{"type" => "additional_tools"} | input]}, "lite"), do: input
   defp client_input(%{"input" => input}, "full"), do: input
 
   defp closing_turn(response_id, close_code) do
     FakeUpstream.websocket_sse_then_close(completed_response_events(response_id, [@tool_call], 2, 1), code: close_code, reason: "synthetic upstream close")
-  end
-
-  # The upstream session drops its connection before it signals, so once it
-  # has no connection the signal is in the socket's mailbox or handled.
-  defp await_session_disconnected!(session, deadline \\ nil) do
-    deadline = deadline || System.monotonic_time(:millisecond) + @detection_timeout_ms
-
-    cond do
-      not Map.has_key?(:sys.get_state(session), :conn) ->
-        :ok
-
-      System.monotonic_time(:millisecond) < deadline ->
-        receive do
-        after
-          5 -> await_session_disconnected!(session, deadline)
-        end
-
-      true ->
-        flunk("the upstream session kept its connection")
-    end
-  end
-
-  # Traces every `handle_in/2` call of one listener connection with its return,
-  # until the test ends (the pattern goes on exit; the flag goes with the
-  # process).
-  defp trace_socket_frames!(socket) do
-    handle_in = {CodexResponsesSocket, :handle_in, 2}
-    on_exit(fn -> :erlang.trace_pattern(handle_in, false, []) end)
-    1 = :erlang.trace_pattern(handle_in, [{:_, [], [{:return_trace}]}], [])
-    1 = :erlang.trace(socket, true, [:call, {:tracer, self()}])
-    :ok
-  end
-
-  defp split_turn_frames(frames) do
-    {texts, rest} = Enum.split_while(frames, &match?({:text, _text}, &1))
-    {Enum.map(texts, fn {:text, text} -> CodexPooler.JSON.decode!(text) end) |> Enum.filter(&(&1["type"] in ["response.completed", "response.failed", "error"])), rest}
-  end
-
-  defp downstream_closed_line(cause, lifecycle_id, generation),
-    do: "websocket downstream closed after upstream connection close reason_code=#{cause} lifecycle_id=#{lifecycle_id} generation=#{generation} forwarding=off codex_session_id="
-
-  defp kept_open_line(cause, skip_reason, lifecycle_id, generation),
-    do: "websocket downstream kept open after upstream connection close reason_code=#{cause} skip_reason=#{skip_reason} lifecycle_id=#{lifecycle_id} generation=#{generation} forwarding=off codex_session_id="
-
-  # The socket logs one line per decision: exactly the expected upstream-close
-  # lines, in order.
-  defp assert_upstream_close_lines!(log, expected) do
-    lines = log |> String.split("\n") |> Enum.filter(&(&1 =~ "after upstream connection close"))
-    assert length(lines) == length(expected), "upstream close lines: #{inspect(lines)}"
-    Enum.zip_with(lines, expected, fn line, text -> assert line =~ text end)
-  end
-
-  # Closing the socket and the client's dropped connection leave no warning
-  # or error line (the `cleanup_deferred` warning depends only on scheduling).
-  defp assert_quiet_close!(log) do
-    quiet = WebsocketCleanupFence.without_deferred_cleanup(log)
-    refute quiet =~ "[warning]"
-    refute quiet =~ "[error]"
   end
 
   defp pool_requests(setup),

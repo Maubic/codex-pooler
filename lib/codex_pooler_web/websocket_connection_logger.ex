@@ -46,10 +46,13 @@ defmodule CodexPoolerWeb.WebsocketConnectionLogger do
   # `previous_response_not_found` refusal that still follows such a close can
   # be attributed (findings#270). `reason_code` is the upstream close cause and
   # the line joins the upstream close line on `lifecycle_id` and `generation`.
+  # With owner forwarding on the owner logs the same kept-open line, with its
+  # own skip reasons, for a close it does not pass on; `stale_downstream` is an
+  # owner's word that reached a socket bound to the owner anew since.
   @downstream_closed_after_upstream_close_message "websocket downstream closed after upstream connection close"
   @downstream_kept_open_after_upstream_close_message "websocket downstream kept open after upstream connection close"
   @upstream_close_metadata_keys [:reason_code, :skip_reason, :lifecycle_id, :generation, :forwarding, :codex_session_id]
-  @upstream_close_skip_reasons ~w(client_frame busy queued public_route revoked handoff reconnect no_completed_response)
+  @upstream_close_skip_reasons ~w(client_frame busy queued public_route revoked handoff reconnect no_completed_response stale_downstream)
   @upstream_close_forwarding ~w(off on)
 
   @type event_metadata :: keyword() | map()

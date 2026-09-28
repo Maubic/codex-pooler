@@ -16,6 +16,8 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
   alias CodexPooler.Gateway.Payloads.TransportEnvelope
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.CloseDiagnostics
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger, as: WebsocketOwnerLogger
   alias CodexPooler.Gateway.Websocket, as: GatewayWebsocket
   alias CodexPooler.Gateway.Websocket.Adapter, as: WebsocketAdapter
   alias CodexPooler.Repo
@@ -580,11 +582,14 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                %{method: :get, path: "/backend-api/codex/v1/responses", transport: :websocket}
              ]
 
-      assert fixture.topologies == [:owner_forwarding_off]
+      assert fixture.topologies == [:owner_forwarding_off, :owner_forwarding_on]
       assert {fixture.close.code, fixture.close.reason} == WebsocketAdapter.close_detail(:upstream_connection_closed)
       assert fixture.causes == CloseDiagnostics.anchor_invalidating_causes()
       assert Enum.all?(fixture.excluded_causes, &(not CloseDiagnostics.anchor_invalidating_cause?(&1)))
       assert fixture.latch.skip_reasons == WebsocketConnectionLogger.upstream_close_skip_reasons()
+      assert fixture.owner.skip_reasons == WebsocketOwnerLogger.upstream_close_skip_reasons()
+
+      assert WebsocketOwnerContract.upstream_closed_message?({fixture.owner.message, "corr-compat", 1, %{cause: hd(fixture.causes), lifecycle_id: Ecto.UUID.generate(), generation: 1}})
       assert fixture.observability.closed == WebsocketConnectionLogger.downstream_closed_after_upstream_close_message()
       assert fixture.observability.kept_open == WebsocketConnectionLogger.downstream_kept_open_after_upstream_close_message()
       assert fixture.observability.metric == :none

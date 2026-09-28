@@ -68,6 +68,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerStatusTest do
     for {message, expected} <- [
           {{:websocket_owner_upstream_frame, make_ref(), marker}, :upstream_frame},
           {{:websocket_owner_upstream_frame, make_ref(), marker, %{terminal: marker}}, :upstream_frame},
+          {{:upstream_websocket_connection_closed, self(), %{cause: :peer_close_frame, lifecycle_id: marker, generation: 1, connection_requests: 1}}, :upstream_connection_closed},
           {{make_ref(), {:ok, %{body: marker}}}, :task_result},
           {{:"$gen_call", {self(), make_ref()}, {:submit_request, marker}}, :call},
           {{:"$gen_cast", {:send, marker}}, :cast},

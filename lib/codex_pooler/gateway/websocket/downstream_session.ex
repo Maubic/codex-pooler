@@ -345,6 +345,26 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
 
   def accept_handoff_message(_message, _state), do: :drop
 
+  # The owner's word that the upstream connection behind this downstream
+  # closed between two requests (findings#270). Like every owner message it
+  # counts only for the downstream binding it names: this socket's current
+  # correlation id and epoch. A well-formed one for another binding is
+  # `:stale` (the socket's binding changed after the owner decided, e.g. a
+  # recovered owner), anything else is dropped.
+  @spec accept_upstream_closed_message(term(), socket_state()) ::
+          {:ok, WebsocketOwnerContract.upstream_closed_signal()}
+          | {:stale, WebsocketOwnerContract.upstream_closed_signal()}
+          | :drop
+  def accept_upstream_closed_message(message, %{websocket_owner_downstream: downstream}) when is_map(downstream) do
+    case WebsocketOwnerContract.accept_upstream_closed_message(message, Map.get(downstream, :epoch), Map.get(downstream, :correlation_id)) do
+      {:ok, signal} -> {:ok, signal}
+      :drop -> {:stale, elem(message, 3)}
+      {:error, _invalid} -> :drop
+    end
+  end
+
+  def accept_upstream_closed_message(_message, _state), do: :drop
+
   @spec preflight_reconnect(socket_state(), <<_::256>>, reference()) ::
           WebsocketOwnerSession.reconnect_preflight_result()
   def preflight_reconnect(state, semantic_turn_key, control_ref)

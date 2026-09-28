@@ -1471,7 +1471,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
   def handle_call(:drain, _from, state) do
     state =
-      state |> clear_compaction_retry_submit_hold() |> cancel_pending_admissions("owner_drained")
+      state
+      |> clear_compaction_retry_submit_hold()
+      |> cancel_pending_admissions("owner_drained")
+      |> drop_deferred_upstream_close(:draining)
 
     state = %{
       state
@@ -2271,6 +2274,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
      state
      |> clear_native_compaction_admission(:owner_drained)
      |> fail_pending_handoff(:owner_drained)
+     |> drop_deferred_upstream_close(:draining)
      |> Map.put(:draining?, true)}
   end
 
@@ -2657,10 +2661,22 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     end
   end
 
+  # The owner's own upstream session closed a connection that carried a
+  # request, between requests and for a cause that ends every anchor it
+  # produced (findings#270). A signal from any other session falls through to
+  # the catch-all below.
+  def handle_info({:upstream_websocket_connection_closed, upstream_pid, signal}, %{upstream_pid: upstream_pid} = state) do
+    case WebsocketOwnerContract.upstream_closed_signal(signal) do
+      {:ok, signal} -> {:noreply, note_upstream_connection_closed(state, signal)}
+      :error -> {:noreply, state}
+    end
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl GenServer
   def terminate(reason, state) do
+    :ok = log_abandoned_upstream_close(state, :draining)
     state = cancel_owner_renewal(state)
     state = cancel_pending_admissions(state, Atom.to_string(owner_exit_reason(reason, state)))
     terminate_predecessor_task(state.active_turn)
@@ -2987,6 +3003,165 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     :ok
   end
 
+  # A `previous_response_id` resolves only on the upstream connection that
+  # produced it. When the provider ends an idle connection (its 60-minute
+  # limit, a restart), the client's socket to the Pooler stays open, so its
+  # next request carries an anchor the fresh connection must refuse
+  # (`previous_response_not_found`) before the client resends the full
+  # history. Told of the close, the attached downstream closes its idle client
+  # socket instead, and the client resends the full history on its own, as it
+  # does when it talks to the provider directly (findings#270).
+  #
+  # The owner tells only the downstream attached to it, and only while nothing
+  # it holds could be cut by that close; every signal it does not pass on
+  # leaves one line with a fixed skip reason. A relayed turn whose terminal
+  # already reached that downstream is waiting only for its task's result, and
+  # the client already holds its response as an anchor: the instruction then
+  # waits on the turn and goes out once the turn ended, after its `:complete`,
+  # so the downstream always sees the turn end first. It lives on the active
+  # turn, so it can never outlive the turn it waits for.
+  defp note_upstream_connection_closed(state, signal) do
+    case upstream_close_gate(state, signal) do
+      :forward ->
+        forward_upstream_close(state, signal)
+
+      :defer ->
+        deferred = %{downstream: Map.take(state.downstream, @restore_downstream_keys), signal: signal}
+        %{state | active_turn: Map.put(state.active_turn, :upstream_close, deferred)}
+
+      {:skip, reason} ->
+        :ok = Logger.upstream_close_kept_open(signal, reason, state.codex_session_id)
+        state
+    end
+  end
+
+  defp upstream_close_gate(state, signal) do
+    case upstream_close_skip_reason(state, signal, nil) do
+      nil -> active_turn_upstream_close_gate(state.active_turn, state.downstream)
+      reason -> {:skip, reason}
+    end
+  end
+
+  # `deferred_for` is the downstream a deferred instruction was meant for: the
+  # one its turn's terminal reached.
+  defp upstream_close_skip_reason(state, signal, deferred_for) do
+    owner_upstream_close_skip(state, signal) || downstream_upstream_close_skip(state, deferred_for) ||
+      held_work_upstream_close_skip(state)
+  end
+
+  # Only the owner invalidates its upstream session: a handoff soft timeout
+  # or a terminal delivery timeout, failures it has already answered on its
+  # own terms, so its own invalidation never closes a downstream.
+  defp owner_upstream_close_skip(state, signal) do
+    cond do
+      signal.cause == :invalidated -> :owner_invalidation
+      # A retiring owner (its upstream exited) is draining too.
+      state.draining? -> :draining
+      true -> nil
+    end
+  end
+
+  defp downstream_upstream_close_skip(%{downstream: nil}, _deferred_for), do: :no_downstream
+
+  defp downstream_upstream_close_skip(state, deferred_for) do
+    cond do
+      is_map(deferred_for) and DownstreamState.downstream_status(state.downstream, deferred_for) != :active -> :downstream_replaced
+      DownstreamState.downstream_status(state.closing_downstream, state.downstream) == :active -> :downstream_closing
+      true -> nil
+    end
+  end
+
+  defp held_work_upstream_close_skip(state) do
+    cond do
+      is_map(state.pending_handoff) -> :handoff
+      is_map(state.suspended_replay) -> :replay_armed
+      native_compaction_in_progress?(state) -> :compaction
+      true -> nil
+    end
+  end
+
+  # Every successful native turn arms `pending_compact` for 60 s, and
+  # `ordinary_success`, `consumed_final` and `cleared` hold nothing in flight,
+  # so those phases are idle. So is `pending_final`: the compaction it follows
+  # is over, and its binding names the closed connection, so its final request
+  # can no longer be admitted on this socket (it failed
+  # `native_compaction_capability_rejected` on the fresh connection); on the
+  # client's new socket that admission is gone and the final runs as an
+  # ordinary turn. Any other phase is a compaction the close would cut. So is
+  # a collected turn, a first full-history compaction the socket has not
+  # authorized yet, a held compaction retry, and a send witness not redeemed
+  # yet. A redeemed witness stays after its final until the admission is
+  # cleared, so it proves nothing about the present.
+  @upstream_close_idle_admission_phases [:ordinary_success, :pending_compact, :pending_final, :consumed_final, :cleared]
+
+  defp native_compaction_in_progress?(state) do
+    admission_in_progress?(state.native_compaction_admission) or not is_nil(state.compaction_retry_submit_hold) or
+      not is_nil(state.first_compact_result) or match?(%ForwardedSendWitnessState{status: :issued}, state.forwarded_send_witness) or
+      match?(%{collect?: true}, state.active_turn)
+  end
+
+  defp admission_in_progress?(nil), do: false
+  defp admission_in_progress?(%NativeCompactionAdmission{phase: phase}), do: phase not in @upstream_close_idle_admission_phases
+
+  defp active_turn_upstream_close_gate(nil, _downstream), do: :forward
+
+  # A websocket-bridged `/v1` relay reads only the frames it waits for, and a
+  # public turn is outside the native route this close serves.
+  defp active_turn_upstream_close_gate(%{descriptor: %{kind: :public}}, _downstream), do: {:skip, :public_turn}
+
+  # A cancelled turn has no downstream any more, so it is never deferred.
+  defp active_turn_upstream_close_gate(%{terminal_forwarded?: true, collect?: false} = active_turn, downstream) do
+    if DownstreamState.downstream_status(downstream, Map.get(active_turn, :downstream)) == :active,
+      do: :defer,
+      else: {:skip, :turn_active}
+  end
+
+  defp active_turn_upstream_close_gate(_active_turn, _downstream), do: {:skip, :turn_active}
+
+  defp forward_upstream_close(%{downstream: %{pid: pid, epoch: epoch, correlation_id: correlation_id}} = state, signal) do
+    message = {:websocket_owner_upstream_closed, correlation_id, epoch, signal}
+
+    if WebsocketOwnerContract.upstream_closed_message?(message) do
+      _result = state.callbacks.downstream_sender.(pid, message)
+    end
+
+    state
+  end
+
+  defp deferred_upstream_close(%{upstream_close: deferred}), do: deferred
+  defp deferred_upstream_close(_active_turn), do: nil
+
+  # The turn the instruction waited for has ended and its `:complete` has
+  # gone out: tell the downstream now, if it is still the one the turn's
+  # terminal reached and nothing else holds it.
+  defp apply_deferred_upstream_close(state, nil), do: state
+
+  defp apply_deferred_upstream_close(state, %{downstream: deferred_for, signal: signal}) do
+    case upstream_close_skip_reason(state, signal, deferred_for) do
+      nil ->
+        forward_upstream_close(state, signal)
+
+      reason ->
+        :ok = Logger.upstream_close_kept_open(signal, reason, state.codex_session_id)
+        state
+    end
+  end
+
+  defp drop_deferred_upstream_close(%{active_turn: %{upstream_close: _deferred} = active_turn} = state, reason) do
+    :ok = log_abandoned_upstream_close(state, reason)
+    %{state | active_turn: Map.delete(active_turn, :upstream_close)}
+  end
+
+  defp drop_deferred_upstream_close(state, _reason), do: state
+
+  # The turn a deferred instruction waited for leaves without ending through
+  # `finish_active_turn/2` or `clear_active_turn/1` (a handoff takes it over,
+  # a replay suspends it, the owner stops): the instruction goes with it.
+  defp log_abandoned_upstream_close(%{active_turn: %{upstream_close: %{signal: signal}}} = state, reason),
+    do: Logger.upstream_close_kept_open(signal, reason, state.codex_session_id)
+
+  defp log_abandoned_upstream_close(_state, _reason), do: :ok
+
   defp reply_active_turn(
          %{
            active_turn: %{reply_to: reply_to, submission_observed?: true}
@@ -3112,6 +3287,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
   defp finish_active_turn(state, result) do
     downstream = DownstreamState.active_turn_downstream(state)
+    deferred_upstream_close = deferred_upstream_close(state.active_turn)
     state = %{state | termination_cleanup_witness: OwnerCleanup.from_owner_state(state)}
     clear_active_turn_resources(state.active_turn)
     state = clear_terminal_replay_state(state, result)
@@ -3125,7 +3301,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
         finish_relay_active_turn(state, downstream, result)
       end
 
-    complete_terminal_winner_detach(state)
+    state
+    |> complete_terminal_winner_detach()
+    |> apply_deferred_upstream_close(deferred_upstream_close)
   end
 
   defp clear_terminal_replay_state(
@@ -3478,11 +3656,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp settle_probe_before_reconnect(state), do: state
 
   defp clear_active_turn(state) do
+    deferred_upstream_close = deferred_upstream_close(state.active_turn)
     clear_active_turn_resources(state.active_turn)
 
     state
     |> Map.put(:active_turn, nil)
     |> DownstreamState.maybe_schedule_idle_shutdown()
+    |> apply_deferred_upstream_close(deferred_upstream_close)
   end
 
   defp clear_active_turn_resources(active_turn) do
@@ -3532,6 +3712,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
          } = state
        ) do
     DownstreamState.clear_active_turn_monitors(state.active_turn)
+    :ok = log_abandoned_upstream_close(state, :handoff)
     pending = %{pending | status: :ready}
 
     message =
@@ -4913,6 +5094,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
         reply_active_turn(suspending, {:error, :client_disconnected})
         terminate_predecessor_task(suspending.active_turn)
         clear_active_turn_resources(suspending.active_turn)
+        :ok = log_abandoned_upstream_close(suspending, :replay_armed)
 
         suspended = %{
           cleanup_witness: OwnerCleanup.from_owner_state(suspending),
@@ -5255,10 +5437,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
   defp jittered_owner_renewal_delay(timeout), do: OwnerRenewalSchedule.staggered_delay(timeout)
 
+  # `start` runs inside `init/1`, so the session reports every anchor-ending
+  # close between requests to this owner (findings#270).
   defp upstream_boundary(opts) do
     Keyword.get_lazy(opts, :upstream, fn ->
       %{
-        start: fn -> UpstreamWebsocketSession.start_link([]) end,
+        start: fn -> UpstreamWebsocketSession.start_link(connection_close_subscriber: self()) end,
         send: fn upstream_pid, upstream_payload, writer ->
           send_owner_upstream(upstream_pid, upstream_payload, writer)
         end,

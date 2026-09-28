@@ -66,6 +66,14 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
     DownstreamSession.accept_recovered_runtime(message, state)
   end
 
+  @spec accept_upstream_closed_message(term(), socket_state()) ::
+          {:ok, WebsocketOwnerContract.upstream_closed_signal()}
+          | {:stale, WebsocketOwnerContract.upstream_closed_signal()}
+          | :drop
+  def accept_upstream_closed_message(message, state) do
+    DownstreamSession.accept_upstream_closed_message(message, state)
+  end
+
   @spec handle_monitor_down(socket_state(), pid(), term()) :: DownstreamSession.monitor_result()
   def handle_monitor_down(state, owner_pid, reason) do
     DownstreamSession.handle_monitor_down(state, owner_pid, reason)

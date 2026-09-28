@@ -23,6 +23,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
   alias CodexPoolerWeb.CodexResponsesSocket
+  alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
 
   # Detection budget for a server-side connection teardown the test only
   # observes, never a scenario timeout.
@@ -854,5 +855,83 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
   def release_settled_websocket_turn(hold, task_pid) when is_reference(hold) and is_pid(task_pid) do
     send(task_pid, {hold, :release})
     :ok
+  end
+
+  # Upstream connection closes between two requests (findings#270), shared
+  # by the forwarding-off and forwarding-on families.
+
+  @doc "A native turn request that must carry no `previous_response_id`, on `connection_ordinal` (nil: any)."
+  def anchorless_request(connection_ordinal, respond) do
+    [method: "WEBSOCKET", path: "/backend-api/codex/responses", json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]], respond: respond]
+    |> then(&if(connection_ordinal, do: Keyword.put(&1, :websocket_connection_ordinal, connection_ordinal), else: &1))
+    |> FakeUpstream.expect_request()
+  end
+
+  @doc """
+  Waits until the upstream websocket session holds no connection. The session
+  drops its connection before it sends its close signal, so the signal is
+  then in its subscriber's mailbox or handled.
+  """
+  def await_session_disconnected!(session, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + @detection_timeout_ms
+
+    cond do
+      not Map.has_key?(:sys.get_state(session), :conn) ->
+        :ok
+
+      System.monotonic_time(:millisecond) < deadline ->
+        receive do
+        after
+          5 -> await_session_disconnected!(session, deadline)
+        end
+
+      true ->
+        flunk("the upstream session kept its connection")
+    end
+  end
+
+  @doc """
+  Traces every `handle_in/2` call of one listener connection with its return,
+  until the test ends (the pattern goes on exit; the flag goes with the
+  process).
+  """
+  def trace_socket_frames!(socket) do
+    handle_in = {CodexResponsesSocket, :handle_in, 2}
+    ExUnit.Callbacks.on_exit(fn -> :erlang.trace_pattern(handle_in, false, []) end)
+    1 = :erlang.trace_pattern(handle_in, [{:_, [], [{:return_trace}]}], [])
+    1 = :erlang.trace(socket, true, [:call, {:tracer, self()}])
+    :ok
+  end
+
+  @doc "Splits frames into the decoded terminals before the first non-text frame and the frames from there on."
+  def split_turn_frames(frames) do
+    {texts, rest} = Enum.split_while(frames, &match?({:text, _text}, &1))
+    {Enum.map(texts, fn {:text, text} -> CodexPooler.JSON.decode!(text) end) |> Enum.filter(&(&1["type"] in ["response.completed", "response.failed", "error"])), rest}
+  end
+
+  def downstream_closed_line(cause, lifecycle_id, generation, forwarding \\ "off"),
+    do: "websocket downstream closed after upstream connection close reason_code=#{cause} lifecycle_id=#{lifecycle_id} generation=#{generation} forwarding=#{forwarding} codex_session_id="
+
+  def kept_open_line(cause, skip_reason, lifecycle_id, generation, forwarding \\ "off"),
+    do: "websocket downstream kept open after upstream connection close reason_code=#{cause} skip_reason=#{skip_reason} lifecycle_id=#{lifecycle_id} generation=#{generation} forwarding=#{forwarding} codex_session_id="
+
+  @doc """
+  The socket (and, with owner forwarding on, the owner) logs one line per
+  decision: exactly the expected upstream-close lines, in order.
+  """
+  def assert_upstream_close_lines!(log, expected) do
+    lines = log |> String.split("\n") |> Enum.filter(&(&1 =~ "after upstream connection close"))
+    assert length(lines) == length(expected), "upstream close lines: #{inspect(lines)}"
+    Enum.zip_with(lines, expected, fn line, text -> assert line =~ text end)
+  end
+
+  @doc """
+  Closing the socket and the client's dropped connection leave no warning or
+  error line (the `cleanup_deferred` warning depends only on scheduling).
+  """
+  def assert_quiet_close!(log) do
+    quiet = WebsocketCleanupFence.without_deferred_cleanup(log)
+    refute quiet =~ "[warning]"
+    refute quiet =~ "[error]"
   end
 end

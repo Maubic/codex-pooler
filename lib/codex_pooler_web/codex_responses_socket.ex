@@ -440,6 +440,29 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     |> then(&close_if_revoked_idle({:ok, &1}))
   end
 
+  # With owner forwarding on the websocket owner holds the upstream session
+  # and relays the same facts (findings#270), only to its attached downstream
+  # and only once it holds nothing of it: never under a turn it still runs,
+  # after the `:complete` of a turn whose terminal it relayed. The socket
+  # takes it only for its own owner binding and decides on its own state as
+  # with forwarding off. An owner node of an earlier release never sends it; a
+  # socket of an earlier release drops it in the catch-all below.
+  defp handle_socket_info({:websocket_owner_upstream_closed, _correlation_id, _epoch, _signal} = message, state) do
+    case Adapter.accept_upstream_closed_message(message, state) do
+      {:ok, signal} ->
+        state
+        |> note_upstream_connection_closed(signal, :on)
+        |> then(&close_if_revoked_idle({:ok, &1}))
+
+      {:stale, signal} ->
+        :ok = log_upstream_close_kept_open(state, Map.put(signal, :forwarding, :on), :stale_downstream)
+        {:ok, state}
+
+      :drop ->
+        {:ok, state}
+    end
+  end
+
   defp handle_socket_info(_message, state), do: {:ok, state}
 
   defp handle_response_done(pid, result, state) do
