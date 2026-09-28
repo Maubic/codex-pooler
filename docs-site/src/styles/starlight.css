@@ -42,10 +42,15 @@ header a[href="/"] {
   text-transform: uppercase;
 }
 
-/* The wordmark keeps the brand orange in both themes, like the landing page; a logotype is exempt from contrast minimums. */
+/* The wordmark keeps the brand orange; on white it takes the landing page's deeper wordmark orange, which reaches the 3:1 large text needs. */
 .site-title,
 .site-title:visited {
   color: var(--cp-color-primary);
+}
+
+:root[data-theme="light"] .site-title,
+:root[data-theme="light"] .site-title:visited {
+  color: #d46800;
 }
 
 /* Orange fills carry dark ink in both themes, like the landing page's primary buttons. */

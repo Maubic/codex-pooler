@@ -305,8 +305,13 @@ const extras = [
     animation: pop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
   }
 
-  .agent.is-paused {
-    opacity: 0.6;
+  /* A paused key greys its agent's name and strikes the key through; the Paused chip says why. */
+  .agent.is-paused b {
+    color: var(--ink-3);
+  }
+
+  .agent.is-paused .cred {
+    text-decoration: line-through;
   }
 
   .agent.is-paused .count {
@@ -353,7 +358,7 @@ const extras = [
     border-radius: 16px;
     background: linear-gradient(180deg, #fffaf1, #fff4e2);
     box-shadow: 0 0 0 6px rgb(255 153 0 / 0.07), var(--shadow-sm);
-    color: #b35f00;
+    color: var(--orange-ink);
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }

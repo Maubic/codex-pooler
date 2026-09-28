@@ -193,7 +193,7 @@ const controls = [
     --c-line: rgb(255 255 255 / 0.08);
     --c-ink: #efe8dd;
     --c-ink-2: #a39a8e;
-    --c-ink-3: #756d62;
+    --c-ink-3: #8f877b;
     border-radius: 20px;
     background:
       linear-gradient(rgb(255 255 255 / 0.028) 1px, transparent 1px) 0 0 / 28px 28px,
@@ -348,8 +348,14 @@ const controls = [
     color: #ec6a6a;
   }
 
-  .gate.skip {
-    opacity: 0.38;
+  /* Checks a stopped request never reached: muted colours that stay readable. */
+  .gate.skip .gate-name {
+    color: var(--c-ink-2);
+    font-weight: 600;
+  }
+
+  .gate.skip .gate-detail {
+    font-style: italic;
   }
 
   .verdict {
