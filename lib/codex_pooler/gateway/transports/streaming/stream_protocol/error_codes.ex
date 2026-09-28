@@ -35,6 +35,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes do
   # retry, terminal classification, and route health deliberately have
   # different effects for some of the same provider codes.
   @incomplete_failure_reason_codes [
+    "flex_unavailable",
     "upstream_request_timeout",
     "stream_incomplete",
     "server_error",
@@ -89,6 +90,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes do
   # them demotes the assignment and records a circuit failure the HTTP 400 of
   # the same refusal never records (findings#254 row 254-20).
   @health_neutral_error_codes [
+    "flex_unavailable",
     "context_length_exceeded",
     "cyber_policy",
     "invalid_request",
@@ -121,6 +123,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes do
   # error; a 0.155.1 client still resends after those three and the Pooler
   # refuses that resend as a terminal predecessor.
   @codex_response_failed_non_retryable_codes [
+    "flex_unavailable",
     "context_length_exceeded",
     "insufficient_quota",
     "credit_balance_exhausted",

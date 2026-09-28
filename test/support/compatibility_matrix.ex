@@ -2581,6 +2581,7 @@ defmodule CodexPooler.CompatibilityMatrix do
       v1_message: "upstream quota is exhausted until its reset time",
       recorded_status: :answered_status,
       relayed_provider_usage_limit: %{when: :last_candidate_provider_429, reset: ["resets_at", "resets_in_seconds"], answer: :terminal, without_reset: %{v1_type: "rate_limit_error"}, recorded: %{status: 429, code: "upstream_rate_limited"}},
+      flex_unavailable: %{code: "flex_unavailable", http_status: 429, terminal: true, failover: false, route_health: :neutral, http_x_should_retry: "false", quota_reset_synthesized: false},
       circuit_retry_after: %{status: 503, header: "retry-after", seconds: :earliest_circuit_probe, clamp: {1, 60}, x_should_retry: :absent}
     },
     api_key_reasoning_availability: %{
