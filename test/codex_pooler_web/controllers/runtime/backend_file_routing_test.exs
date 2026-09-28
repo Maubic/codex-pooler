@@ -7,7 +7,7 @@ defmodule CodexPoolerWeb.Runtime.BackendFileRoutingTest do
   import CodexPooler.PoolerFixtures
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport, only: [auth: 2, start_upstream: 1]
 
-  alias CodexPooler.Accounting.Request
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Files
   alias CodexPooler.Files.FileRecord
@@ -163,6 +163,13 @@ defmodule CodexPoolerWeb.Runtime.BackendFileRoutingTest do
     assert finalized_file.status == "uploaded"
     assert finalized_file.finalize_status == "succeeded"
     refute inspect(finalized_file) =~ "fake-download.invalid"
+
+    assert Repo.aggregate(from(f in FileRecord, where: f.pool_id == ^setup.pool.id), :count) == 1
+    assert Repo.aggregate(from(r in Request, where: r.pool_id == ^setup.pool.id and r.endpoint == "/backend-api/files"), :count) == 1
+    assert Repo.aggregate(from(r in Request, where: r.pool_id == ^setup.pool.id and r.endpoint == "/backend-api/files/uploaded"), :count) == 1
+    request_ids = from(r in Request, where: r.pool_id == ^setup.pool.id, select: r.id)
+    assert Repo.aggregate(from(a in Attempt, where: a.request_id in subquery(request_ids)), :count) == 0
+    assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id in subquery(request_ids)), :count) == 0
 
     assert [create_request, first_finalize_request, second_finalize_request] =
              FakeUpstream.requests(upstream)
