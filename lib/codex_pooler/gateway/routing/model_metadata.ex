@@ -138,6 +138,20 @@ defmodule CodexPooler.Gateway.Routing.ModelMetadata do
 
   def metadata_reasoning_levels(_metadata), do: []
 
+  @doc """
+  The description each reasoning level of one metadata map gives, as
+  `{effort, description}` pairs in the map's own order. A level named by a
+  bare string, or whose `description` is not a nonblank string, gives none.
+  """
+  @spec metadata_reasoning_level_descriptions(term()) :: [{String.t(), String.t()}]
+  def metadata_reasoning_level_descriptions(metadata) when is_map(metadata) do
+    metadata
+    |> metadata_values(["supported_reasoning_levels", "reasoning_efforts"])
+    |> Enum.flat_map(&reasoning_level_description/1)
+  end
+
+  def metadata_reasoning_level_descriptions(_metadata), do: []
+
   @spec reasoning_levels_and_default(Model.t()) :: {[String.t()], String.t() | nil}
   def reasoning_levels_and_default(%Model{} = model) do
     metadata = metadata(model)
@@ -231,6 +245,20 @@ defmodule CodexPooler.Gateway.Routing.ModelMetadata do
 
   defp reasoning_level_value(value) when is_binary(value), do: clean_reasoning_level(value)
   defp reasoning_level_value(_value), do: nil
+
+  defp reasoning_level_description(%{"effort" => effort, "description" => description}) when is_binary(effort) and is_binary(description),
+    do: level_description(clean_reasoning_level(effort), description)
+
+  defp reasoning_level_description(%{effort: effort, description: description}) when is_binary(effort) and is_binary(description),
+    do: level_description(clean_reasoning_level(effort), description)
+
+  defp reasoning_level_description(_level), do: []
+
+  defp level_description(nil, _description), do: []
+
+  defp level_description(effort, description) do
+    if String.trim(description) == "", do: [], else: [{effort, description}]
+  end
 
   defp clean_reasoning_level(value) do
     case String.trim(value) do

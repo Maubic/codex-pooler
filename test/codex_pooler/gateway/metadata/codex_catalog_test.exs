@@ -391,6 +391,54 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalogTest do
                ~w(low high max)
     end
 
+    # The union used to describe every level by its bare name, which the
+    # released client shows in its reasoning picker (findings#280 point 3).
+    test "keeps the first upstream description of each level in the reasoning union", context do
+      base_source = context.model.metadata["source_assignment_models"][context.anchor_id]
+
+      oldest_source =
+        Map.put(base_source, "supported_reasoning_levels", [
+          %{"effort" => "low", "description" => "low from the oldest source"},
+          %{"effort" => "high"}
+        ])
+
+      newer_source =
+        base_source
+        |> Map.put("default_reasoning_level", "max")
+        |> Map.put("supported_reasoning_levels", [
+          %{"effort" => "low", "description" => "low from a newer source"},
+          %{"effort" => "high", "description" => "high from a newer source"},
+          %{"effort" => "xhigh", "description" => " "},
+          %{"effort" => "max", "description" => "max from a newer source"}
+        ])
+
+      model =
+        put_source_models(context.model, %{
+          context.anchor_id => oldest_source,
+          context.sibling_id => oldest_source,
+          context.alternate_id => newer_source
+        })
+
+      expected = [
+        %{"effort" => "low", "description" => "low from the oldest source"},
+        %{"effort" => "high", "description" => "high from a newer source"},
+        %{"effort" => "xhigh", "description" => "xhigh"},
+        %{"effort" => "max", "description" => "max from a newer source"}
+      ]
+
+      assert [partition] =
+               CodexCatalog.select_canonical_sources([model], context.candidates,
+                 routable_assignment_ids_by_model_id: fn ->
+                   %{model.id => MapSet.new([context.anchor_id, context.sibling_id, context.alternate_id])}
+                 end
+               )
+
+      assert partition.source["supported_reasoning_levels"] == expected
+
+      assert [served] = build_canonical([model], context.candidates).body["models"]
+      assert served["supported_reasoning_levels"] == expected
+    end
+
     test "excludes an unroutable variant from the advertised union without removing its allowance",
          context do
       base_source = context.model.metadata["source_assignment_models"][context.anchor_id]

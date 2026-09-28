@@ -368,9 +368,10 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalog do
     base_source =
       Map.drop(anchor.source, ["default_reasoning_level" | @reasoning_level_keys])
 
+    ordered_pairs = Enum.sort_by(source_pairs, &partition_pair_key/1)
+
     reasoning_levels =
-      source_pairs
-      |> Enum.sort_by(&partition_pair_key/1)
+      ordered_pairs
       |> Enum.flat_map(&ModelMetadata.metadata_reasoning_levels(&1.source))
       |> Enum.uniq()
       |> Enum.sort_by(&reasoning_level_sort_key/1)
@@ -380,7 +381,8 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalog do
         base_source
 
       [_ | _] ->
-        levels = Enum.map(reasoning_levels, &%{"effort" => &1, "description" => &1})
+        descriptions = reasoning_level_descriptions(ordered_pairs)
+        levels = Enum.map(reasoning_levels, &%{"effort" => &1, "description" => Map.get(descriptions, &1, &1)})
 
         base_source
         |> Map.put("supported_reasoning_levels", levels)
@@ -389,6 +391,16 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalog do
           reasoning_union_default(source_pairs, reasoning_levels)
         )
     end
+  end
+
+  # Each level of the union keeps the first description a source gives it, in
+  # the order the union reads its sources (oldest assignment first); its name
+  # stands in only when no source describes it. The released client shows the
+  # description in its reasoning picker (findings#280 point 3).
+  defp reasoning_level_descriptions(ordered_pairs) do
+    ordered_pairs
+    |> Enum.flat_map(&ModelMetadata.metadata_reasoning_level_descriptions(&1.source))
+    |> Enum.reduce(%{}, fn {effort, description}, descriptions -> Map.put_new(descriptions, effort, description) end)
   end
 
   defp reasoning_union_default(source_pairs, reasoning_levels) do
