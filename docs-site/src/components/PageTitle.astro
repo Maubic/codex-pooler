@@ -21,8 +21,10 @@ interface OptionsProps {
   id: string;
 }
 
+// The docs live under a base path, so the docs home is the base, not the empty path.
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 const currentPath = Astro.url.pathname.replace(/\/$/, "");
-const currentMarkdownPath = currentPath === "" ? "/index" : currentPath;
+const currentMarkdownPath = currentPath === base ? `${base}/index` : currentPath;
 const currentUrl = Astro.url.href;
 const currentLocale = Astro.currentLocale;
 const { actions, share } = config;

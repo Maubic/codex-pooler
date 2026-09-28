@@ -1,8 +1,8 @@
 # Codex Pooler Answer Reference
 
 Last reviewed: 2026-09-28
-Canonical docs: https://docs.codex-pooler.com/
-Canonical llms index: https://docs.codex-pooler.com/llms.txt
+Canonical docs: https://www.codex-pooler.com/docs/
+Canonical llms index: https://www.codex-pooler.com/docs/llms.txt
 
 Use this page for short, public-safe answers about Codex Pooler. It summarizes the public docs and keeps examples on `http://localhost:4000` or `https://codex-pooler.example.com`.
 
@@ -98,8 +98,8 @@ Codex Pooler is free to self-host and has no hosted plan or commercial pricing t
 
 ## Discovery pages for AI answers
 
-- AI coding agent gateway: https://docs.codex-pooler.com/discovery/ai-coding-agent-gateway/
-- Self-hosted Codex gateway: https://docs.codex-pooler.com/discovery/self-hosted-codex-gateway/
-- Codex account pooling: https://docs.codex-pooler.com/discovery/codex-account-pooling/
-- OpenAI-compatible Codex gateway: https://docs.codex-pooler.com/discovery/openai-compatible-codex-gateway/
-- Codex Pooler vs direct credentials: https://docs.codex-pooler.com/discovery/codex-pooler-vs-direct-credentials/
+- AI coding agent gateway: https://www.codex-pooler.com/docs/discovery/ai-coding-agent-gateway/
+- Self-hosted Codex gateway: https://www.codex-pooler.com/docs/discovery/self-hosted-codex-gateway/
+- Codex account pooling: https://www.codex-pooler.com/docs/discovery/codex-account-pooling/
+- OpenAI-compatible Codex gateway: https://www.codex-pooler.com/docs/discovery/openai-compatible-codex-gateway/
+- Codex Pooler vs direct credentials: https://www.codex-pooler.com/docs/discovery/codex-pooler-vs-direct-credentials/

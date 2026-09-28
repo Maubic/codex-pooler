@@ -6,7 +6,7 @@ This private planning file is for docs authors. Keep it under an underscore-pref
 
 Write public docs for operators and client integrators who are setting up Codex Pooler. The public docs may explain setup, runtime surfaces, compatibility limits, and privacy boundaries. They must not become an operator runbook, incident log, internal architecture dump, or exhaustive Phoenix route listing.
 
-Root static files in `docs-site/public`, such as `llms.txt`, `answers.md`, `pricing.md`, and `robots.txt`, are public docs too. Keep them short, extractable, public-safe, and consistent with the same route, credential, host, and privacy boundaries as the Starlight pages.
+Static files in `docs-site/public`, such as `llms.txt`, `answers.md`, and `pricing.md`, are public docs too; they are served under `/docs`, and the site-wide `robots.txt` lives in `site/public`. Keep them short, extractable, public-safe, and consistent with the same route, credential, host, and privacy boundaries as the Starlight pages.
 
 Use sentence case for H2 headings across public pages unless a proper noun or
 fixed product name requires capitalization. Keep `llms.txt` as a deliberate
@@ -52,7 +52,7 @@ Use only these hosts in public examples:
 
 - `http://localhost:4000`, only for local setup and local smoke examples
 - `https://codex-pooler.example.com`, for deployed product examples
-- `https://docs.codex-pooler.com`, for the public docs site canonical URL
+- `https://www.codex-pooler.com/docs`, for the public docs site canonical URL
 
 Do not use private hostnames, cluster names, pod names, tenant names, real account identifiers, raw OpenAI user subjects, real repository evidence paths, or private service URLs in public docs.
 
@@ -309,7 +309,7 @@ Allowed public claims:
 
 Use placeholders that are clearly fake and generic:
 
-- Hosts: `http://localhost:4000`, `https://codex-pooler.example.com`, `https://docs.codex-pooler.com`
+- Hosts: `http://localhost:4000`, `https://codex-pooler.example.com`, `https://www.codex-pooler.com/docs`
 - Pool API key placeholder: `<pool-api-key>` or `sk-example-redacted`
 - MCP token placeholder: `<operator-mcp-token>`
 - Account labels: `example-upstream`, `example-operator`, `example-pool`

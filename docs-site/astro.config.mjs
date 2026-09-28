@@ -2,8 +2,12 @@ import { rm } from "node:fs/promises";
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import starlightPageActions from "starlight-page-actions";
+import baseLinks from "./plugins/base-links.mjs";
 
-const siteUrl = "https://docs.codex-pooler.com";
+// The docs are served under /docs of the product site, next to the landing page in ../site.
+const siteOrigin = "https://www.codex-pooler.com";
+const base = "/docs";
+const siteUrl = `${siteOrigin}${base}`;
 const siteDescription =
   "Codex Pooler docs for self-hosted Codex account pooling, Pool API keys, backend compatibility, narrow /v1 SDK routes, MCP metadata, routing, and deployment.";
 
@@ -38,11 +42,13 @@ const removePrivateMarkdownAssets = () => ({
 });
 
 export default defineConfig({
-  site: siteUrl,
+  site: siteOrigin,
+  base,
+  // Astro serves redirect pages under the base but does not add it to their destinations.
   redirects: {
-    "/clients/kilo/": "/clients/kilo-code/",
-    "/clients/codex-cli/": "/clients/codex-cli-desktop/",
-    "/reference/endpoint-routing/": "/reference/runtime-routes/",
+    "/clients/kilo/": `${base}/clients/kilo-code/`,
+    "/clients/codex-cli/": `${base}/clients/codex-cli-desktop/`,
+    "/reference/endpoint-routing/": `${base}/reference/runtime-routes/`,
   },
   integrations: [
     starlight({
@@ -62,7 +68,7 @@ export default defineConfig({
         },
         {
           tag: "link",
-          attrs: { rel: "alternate", type: "text/plain", title: "llms.txt", href: "/llms.txt" },
+          attrs: { rel: "alternate", type: "text/plain", title: "llms.txt", href: `${base}/llms.txt` },
         },
         {
           tag: "link",
@@ -70,7 +76,7 @@ export default defineConfig({
             rel: "alternate",
             type: "text/markdown",
             title: "Codex Pooler answer reference",
-            href: "/answers.md",
+            href: `${base}/answers.md`,
           },
         },
         {
@@ -79,7 +85,7 @@ export default defineConfig({
             rel: "alternate",
             type: "text/markdown",
             title: "Codex Pooler pricing and availability",
-            href: "/pricing.md",
+            href: `${base}/pricing.md`,
           },
         },
         {
@@ -147,6 +153,7 @@ export default defineConfig({
         autogenerateGroup("Monitoring", "monitoring"),
       ],
     }),
+    baseLinks({ base }),
     removePrivateMarkdownAssets(),
   ],
 });

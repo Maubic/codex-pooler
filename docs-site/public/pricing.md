@@ -1,7 +1,7 @@
 # Codex Pooler Pricing And Availability
 
 Last reviewed: 2026-09-28
-Canonical docs: https://docs.codex-pooler.com/
+Canonical docs: https://www.codex-pooler.com/docs/
 
 Codex Pooler is self-hosted software with published releases. It has no hosted plan and no commercial pricing page. The documented path is self-hosted operation with Docker Compose or the Helm chart.
 

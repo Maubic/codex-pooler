@@ -3,7 +3,9 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const docsSiteRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const canonicalHost = "https://docs.codex-pooler.com";
+// The docs are served under /docs of the product site.
+const canonicalOrigin = "https://www.codex-pooler.com";
+const canonicalBase = `${canonicalOrigin}/docs`;
 const inventoryScopeMarker =
   "Inventory scope: curated primary and discovery pages listed below; this index intentionally excludes other rendered pages.";
 const llmsPath = resolve(process.env.LLMS_PATH ?? join(docsSiteRoot, "public/llms.txt"));
@@ -62,7 +64,7 @@ const fail = (message) => {
   throw new Error(`llms inventory: ${message}`);
 };
 
-const canonicalUrl = (path) => `${canonicalHost}${path}`;
+const canonicalUrl = (path) => `${canonicalBase}${path}`;
 
 const read = (path) => readFile(path, "utf8");
 
@@ -126,7 +128,7 @@ const assertCanonicalInventoryUrls = (urls) => {
   const malformed = urls.filter((url) => {
     try {
       const parsed = new URL(url);
-      return parsed.origin !== canonicalHost || parsed.search || parsed.hash;
+      return parsed.origin !== canonicalOrigin || !parsed.pathname.startsWith("/docs/") || parsed.search || parsed.hash;
     } catch {
       return true;
     }

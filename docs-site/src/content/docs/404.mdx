@@ -3,10 +3,15 @@ title: "404"
 template: splash
 editUrl: false
 pagefind: false
+head:
+  - tag: script
+    content: |
+      // This page is also the site-wide 404. Docs links from before the move under /docs land here: send them on.
+      if (!/^\/docs(\/|$)/.test(location.pathname)) location.replace("/docs" + location.pathname + location.search + location.hash);
 hero:
   tagline: Page not found. Check the URL or search the docs.
   actions:
     - text: Open docs home
-      link: /
+      link: /docs/
       icon: right-arrow
 ---
