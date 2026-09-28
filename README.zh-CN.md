@@ -203,7 +203,7 @@ api_key_model_discovery = true
 使用 Codex Desktop 时，
 请按完整指南设置 API 密钥，使应用能够读取它。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/codex-cli-desktop/)** — 桌面应用配置、账户设置和现有会话。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/)** — 桌面应用配置、账户设置和现有会话。
 
 </details>
 
@@ -289,7 +289,7 @@ api_key_model_discovery = true
 }
 ```
 
-**[OpenCode v2 完整配置与扩展选项](https://docs.codex-pooler.com/clients/opencode-v2/)** — 安装和进阶选项。
+**[OpenCode v2 完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/opencode-v2/)** — 安装和进阶选项。
 
 **OpenCode v1**
 
@@ -370,7 +370,7 @@ api_key_model_discovery = true
 }
 ```
 
-**[OpenCode v1 完整配置与扩展选项](https://docs.codex-pooler.com/clients/opencode/)** — 安装和 OMO 配置。
+**[OpenCode v1 完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/opencode/)** — 安装和 OMO 配置。
 
 </details>
 
@@ -445,7 +445,7 @@ api_key_model_discovery = true
 
 重启 OpenClaw，开始新会话。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/openclaw/)** — 后台任务、更多模型和进阶选项。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/openclaw/)** — 后台任务、更多模型和进阶选项。
 
 </details>
 
@@ -508,7 +508,7 @@ auxiliary:
 将 `model.default` 设置为你的 Pool 提供的模型。
 三个地址都应指向你的 Codex Pooler 实例。图像和转录功能还需要 Pool 提供对应模型。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/hermes/)** — 图像、语音转文字、优先处理和故障排查。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/hermes/)** — 图像、语音转文字、优先处理和故障排查。
 
 </details>
 
@@ -590,7 +590,7 @@ auxiliary:
 pi
 ```
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/pi/)** — 安装、默认模型和扩展选项。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/pi/)** — 安装、默认模型和扩展选项。
 
 </details>
 
@@ -685,7 +685,7 @@ compaction:
 omp
 ```
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/omp/)** — 安装、模型选择和长会话。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/omp/)** — 安装、模型选择和长会话。
 
 </details>
 
@@ -703,7 +703,7 @@ omp
 Cursor BYOK 需要 **Pro 或更高订阅**。请求经过 Cursor 服务器，
 因此 localhost 和私有局域网 URL 无法使用。请选择具体模型，不要使用 Auto 模式。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/cursor/)** — 前置条件、模型选择和连接检查。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/cursor/)** — 前置条件、模型选择和连接检查。
 
 </details>
 
@@ -777,7 +777,7 @@ Cursor BYOK 需要 **Pro 或更高订阅**。请求经过 Cursor 服务器，
 
 重启 Kilo，选择 Codex Pooler 模型。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/kilo-code/)** — 安装、模型选择和扩展选项。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/kilo-code/)** — 安装、模型选择和扩展选项。
 
 </details>
 
@@ -802,7 +802,7 @@ Cursor BYOK 需要 **Pro 或更高订阅**。请求经过 Cursor 服务器，
 URL 末尾不要加斜杠。保存模型后，在 agent 模型选择器中关闭 **Auto Mode**，
 然后在 **Custom Models** 中选择该模型。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/trae/)** — Trae CN、额外设置和连接检查。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/trae/)** — Trae CN、额外设置和连接检查。
 
 </details>
 
@@ -845,7 +845,7 @@ aider
 
 更换模型时，将 `model` 设置为你的 Pool 提供的模型，并保留 `openai/` 前缀。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/aider/)** — 额外模型配置和文件编辑。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/aider/)** — 额外模型配置和文件编辑。
 
 </details>
 
@@ -861,7 +861,7 @@ aider
 | macOS / Linux | `~/.continue/config.yaml` |
 | Windows | `%USERPROFILE%\.continue\config.yaml` |
 
-按[密钥设置说明](https://docs.codex-pooler.com/clients/continue/)，
+按[密钥设置说明](https://www.codex-pooler.com/docs/clients/continue/)，
 在 Continue 中将 Pool API 密钥保存为 `CODEX_POOLER_API_KEY`。
 然后打开对应系统路径下的 `config.yaml`，添加以下配置：
 
@@ -905,7 +905,7 @@ models:
 
 在 Continue 中选择此配置和 Codex Pooler 模型。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/continue/)** — API 密钥保存、额外设置和 CLI 用法。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/continue/)** — API 密钥保存、额外设置和 CLI 用法。
 
 </details>
 
@@ -939,7 +939,7 @@ cline auth --provider openai --apikey "$env:CODEX_POOLER_API_KEY" --baseurl http
 
 将 `--modelid` 设置为你的 Pool 提供的模型。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/cline/)** — IDE 配置、额外设置和连接检查。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/cline/)** — IDE 配置、额外设置和连接检查。
 
 </details>
 
@@ -982,7 +982,7 @@ $env:OPENAI_API_KEY = $env:CODEX_POOLER_API_KEY
 
 更换模型时，将 `GOOSE_MODEL` 设置为你的 Pool 提供的模型。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/goose/)** — 工具、额外设置和 Windows 配置。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/goose/)** — 工具、额外设置和 Windows 配置。
 
 </details>
 
@@ -1028,7 +1028,7 @@ $env:OPENAI_API_KEY = $env:CODEX_POOLER_API_KEY
 添加配置时，请保留这些条目中的现有设置。
 使用 `dsh --profile headless` 启动 DeepSeek Harness。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/deepseek-harness/)** — 安装、工具和额外设置。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/deepseek-harness/)** — 安装、工具和额外设置。
 
 </details>
 
@@ -1072,7 +1072,7 @@ metadata_model:
 使用 Windmill 服务器可访问的 URL；私有地址需要在该服务器上设置
 `ALLOW_PRIVATE_AI_BASE_URLS=true`。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/windmill/)** — 资源创建、工作区配置和支持的功能。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/windmill/)** — 资源创建、工作区配置和支持的功能。
 
 </details>
 
@@ -1091,7 +1091,7 @@ metadata_model:
 
 在 **Settings → Agent** 中关联此 LLM 配置，并使用 Full 服务模式运行已验证的工具流程。如果 Pooler 在本机运行，而 Canvas 使用 Docker Desktop，请填写 `http://host.docker.internal:4000/v1`。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/openhands/)** — Docker 配置、截图和模型配置。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/openhands/)** — Docker 配置、截图和模型配置。
 
 </details>
 
@@ -1123,7 +1123,7 @@ print(response.output_text)
 
 请选择你的 Pool 提供的模型。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/openai-compatible/)** — 流式响应、工具、媒体和 API 兼容性。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/openai-compatible/)** — 流式响应、工具、媒体和 API 兼容性。
 
 </details>
 
@@ -1153,7 +1153,7 @@ console.log(response.output_text);
 
 请选择你的 Pool 提供的模型。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/openai-compatible/)** — 流式响应、工具、媒体和 API 兼容性。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/openai-compatible/)** — 流式响应、工具、媒体和 API 兼容性。
 
 </details>
 
@@ -1184,7 +1184,7 @@ console.log(text);
 
 请选择你的 Pool 提供的模型。
 
-**[完整配置与扩展选项](https://docs.codex-pooler.com/clients/openai-compatible/)** — 流式响应、工具、媒体和 API 兼容性。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/openai-compatible/)** — 流式响应、工具、媒体和 API 兼容性。
 
 </details>
 
@@ -1338,9 +1338,9 @@ OpenAI SDK base URL:    http://localhost:4000/v1
 两个路径都使用 Pool API 密钥认证，并通过同一套 Pool 策略、账号健康状态、模型
 支持、额度证据、会话连续性和仅元数据计费进行路由。Codex Pooler 有意不做通配的
 OpenAI 代理；不支持的 API 区域会以可预测方式失败。精确路由细节请看
-[Runtime Routes](https://docs.codex-pooler.com/reference/runtime-routes/)
+[Runtime Routes](https://www.codex-pooler.com/docs/reference/runtime-routes/)
 参考和
-[OpenAI-compatible client guide](https://docs.codex-pooler.com/clients/openai-compatible/)。
+[OpenAI-compatible client guide](https://www.codex-pooler.com/docs/clients/openai-compatible/)。
 
 ## 运营者 MCP 服务
 
@@ -1404,8 +1404,8 @@ metadata 加密存储，并且只在邮件发送或凭据测试路径中恢复�
 
 | 路径 | 适用场景 | 从这里开始 |
 | --- | --- | --- |
-| Docker Compose | 笔记本、实验服务器或小型单节点上的快速自托管安装 | [Docker Compose deployment guide](https://docs.codex-pooler.com/deployment/docker-compose/) |
-| Kubernetes | 生产安装、托管 ingress、外部 Postgres、metrics，以及独立 runtime roles | [Helm deployment guide](https://docs.codex-pooler.com/deployment/helm/) |
+| Docker Compose | 笔记本、实验服务器或小型单节点上的快速自托管安装 | [Docker Compose deployment guide](https://www.codex-pooler.com/docs/deployment/docker-compose/) |
+| Kubernetes | 生产安装、托管 ingress、外部 Postgres、metrics，以及独立 runtime roles | [Helm deployment guide](https://www.codex-pooler.com/docs/deployment/helm/) |
 
 Kubernetes 路径使用 iCoreTech Helm repository 中的
 [`icoretech/codex-pooler` chart](https://github.com/icoretech/helm/tree/main/charts/codex-pooler)。

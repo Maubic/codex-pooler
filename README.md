@@ -212,7 +212,7 @@ Restart Codex and choose a model available to your Pool.
 If you use Codex Desktop,
 follow the full guide to make your API key available to the app.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/codex-cli-desktop/)** — desktop setup, account settings and existing conversations.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/)** — desktop setup, account settings and existing conversations.
 
 </details>
 
@@ -299,7 +299,7 @@ for your OpenCode version below.
 }
 ```
 
-**[OpenCode v2 full setup & extras](https://docs.codex-pooler.com/clients/opencode-v2/)** — installation and advanced options.
+**[OpenCode v2 full setup & extras](https://www.codex-pooler.com/docs/clients/opencode-v2/)** — installation and advanced options.
 
 **OpenCode v1**
 
@@ -380,7 +380,7 @@ for your OpenCode version below.
 }
 ```
 
-**[OpenCode v1 full setup & extras](https://docs.codex-pooler.com/clients/opencode/)** — installation and OMO setup.
+**[OpenCode v1 full setup & extras](https://www.codex-pooler.com/docs/clients/opencode/)** — installation and OMO setup.
 
 </details>
 
@@ -455,7 +455,7 @@ Open `openclaw.json` at the path for your system and add this configuration:
 
 Restart OpenClaw and start a new conversation.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/openclaw/)** — background tasks, more models and advanced options.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/openclaw/)** — background tasks, more models and advanced options.
 
 </details>
 
@@ -519,7 +519,7 @@ model, set `model.default` to a model available to your Pool.
 Keep all three addresses pointed at your Codex Pooler instance. Your Pool must
 also offer the image and transcription models to use those features.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/hermes/)** — images, speech-to-text, priority processing and troubleshooting.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/hermes/)** — images, speech-to-text, priority processing and troubleshooting.
 
 </details>
 
@@ -601,7 +601,7 @@ Then start Pi:
 pi
 ```
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/pi/)** — installation, default models and extra options.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/pi/)** — installation, default models and extra options.
 
 </details>
 
@@ -696,7 +696,7 @@ Then start OMP:
 omp
 ```
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/omp/)** — installation, model choices and long conversations.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/omp/)** — installation, model choices and long conversations.
 
 </details>
 
@@ -716,7 +716,7 @@ Cursor BYOK requires **Pro or higher**. Requests pass through Cursor's
 servers, so localhost and private LAN URLs do not work. Use an explicit model
 instead of Auto mode.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/cursor/)** — prerequisites, model selection and connection checks.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/cursor/)** — prerequisites, model selection and connection checks.
 
 </details>
 
@@ -790,7 +790,7 @@ Open `kilo.jsonc` at the path for your system and add this configuration:
 
 Restart Kilo and select the Codex Pooler model.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/kilo-code/)** — installation, model choices and extra options.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/kilo-code/)** — installation, model choices and extra options.
 
 </details>
 
@@ -815,7 +815,7 @@ Repeat this setup with another Model ID to add more models available to your Poo
 Do not add a trailing slash to the URL. Save the model, turn **Auto Mode**
 off in the agent model picker, and select it under **Custom Models**.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/trae/)** — Trae CN, extra settings and connection checks.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/trae/)** — Trae CN, extra settings and connection checks.
 
 </details>
 
@@ -860,7 +860,7 @@ full guide.
 To switch models, set `model` to a model available to your Pool, keeping the
 `openai/` prefix.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/aider/)** — additional model setup and editing files.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/aider/)** — additional model setup and editing files.
 
 </details>
 
@@ -877,7 +877,7 @@ To switch models, set `model` to a model available to your Pool, keeping the
 | Windows | `%USERPROFILE%\.continue\config.yaml` |
 
 Save your Pool API key in Continue as `CODEX_POOLER_API_KEY` using the
-[secret setup instructions](https://docs.codex-pooler.com/clients/continue/).
+[secret setup instructions](https://www.codex-pooler.com/docs/clients/continue/).
 Then open `config.yaml` at the path for your system and add this configuration:
 
 ```yaml
@@ -920,7 +920,7 @@ models:
 
 Select this configuration and the Codex Pooler model in Continue.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/continue/)** — saving your API key, extra settings and CLI usage.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/continue/)** — saving your API key, extra settings and CLI usage.
 
 </details>
 
@@ -954,7 +954,7 @@ Start Cline and use the saved model. In the IDE extension, choose
 
 Set `--modelid` to a model available to your Pool.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/cline/)** — IDE setup, extra settings and connection checks.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/cline/)** — IDE setup, extra settings and connection checks.
 
 </details>
 
@@ -997,7 +997,7 @@ $env:OPENAI_API_KEY = $env:CODEX_POOLER_API_KEY
 
 To switch models, set `GOOSE_MODEL` to a model available to your Pool.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/goose/)** — tools, extra settings and Windows setup.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/goose/)** — tools, extra settings and Windows setup.
 
 </details>
 
@@ -1043,7 +1043,7 @@ add the following. If you set `DSH_HOME`, use its `profiles/headless` folder:
 Keep any existing settings in these entries when adding the configuration.
 Start DeepSeek Harness with `dsh --profile headless`.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/deepseek-harness/)** — installation, tools and extra settings.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/deepseek-harness/)** — installation, tools and extra settings.
 
 </details>
 
@@ -1088,7 +1088,7 @@ metadata_model:
 Use a URL reachable from the Windmill server; private addresses require
 `ALLOW_PRIVATE_AI_BASE_URLS=true` on that server.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/windmill/)** — resource creation, workspace configuration and supported features.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/windmill/)** — resource creation, workspace configuration and supported features.
 
 </details>
 
@@ -1107,7 +1107,7 @@ In OpenHands Agent Canvas, select the native **OpenHands** agent. Under **Settin
 
 Link this LLM profile under **Settings → Agent** and use Full serving mode for the verified tool workflow. For a local Pooler with Canvas on Docker Desktop, use `http://host.docker.internal:4000/v1`.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/openhands/)** — Docker setup, screenshots and model profiles.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/openhands/)** — Docker setup, screenshots and model profiles.
 
 </details>
 
@@ -1139,7 +1139,7 @@ print(response.output_text)
 
 Use a model available to your Pool.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/openai-compatible/)** — streaming, tools, media and API compatibility.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/openai-compatible/)** — streaming, tools, media and API compatibility.
 
 </details>
 
@@ -1169,7 +1169,7 @@ console.log(response.output_text);
 
 Use a model available to your Pool.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/openai-compatible/)** — streaming, tools, media and API compatibility.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/openai-compatible/)** — streaming, tools, media and API compatibility.
 
 </details>
 
@@ -1200,7 +1200,7 @@ console.log(text);
 
 Use a model available to your Pool.
 
-**[Full setup & extras](https://docs.codex-pooler.com/clients/openai-compatible/)** — streaming, tools, media and API compatibility.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/openai-compatible/)** — streaming, tools, media and API compatibility.
 
 </details>
 
@@ -1363,9 +1363,9 @@ Both paths authenticate with Pool API keys and route through the same Pool
 policy, account health, model support, quota evidence, session continuity, and
 metadata-only accounting. Codex Pooler is intentionally not a wildcard OpenAI
 proxy; unsupported API areas fail predictably. For exact route details, use the
-[Runtime Routes](https://docs.codex-pooler.com/reference/runtime-routes/)
+[Runtime Routes](https://www.codex-pooler.com/docs/reference/runtime-routes/)
 reference and the
-[OpenAI-compatible client guide](https://docs.codex-pooler.com/clients/openai-compatible/).
+[OpenAI-compatible client guide](https://www.codex-pooler.com/docs/clients/openai-compatible/).
 
 ## Operator MCP Service
 
@@ -1433,8 +1433,8 @@ Choose the deployment path that matches how you want to operate Codex Pooler:
 
 | Path | Use it for | Start here |
 | --- | --- | --- |
-| Docker Compose | A quick self-hosted install on a laptop, lab server, or small single node | [Docker Compose deployment guide](https://docs.codex-pooler.com/deployment/docker-compose/) |
-| Kubernetes | Production installs, managed ingress, external Postgres, metrics, and separate runtime roles | [Helm deployment guide](https://docs.codex-pooler.com/deployment/helm/) |
+| Docker Compose | A quick self-hosted install on a laptop, lab server, or small single node | [Docker Compose deployment guide](https://www.codex-pooler.com/docs/deployment/docker-compose/) |
+| Kubernetes | Production installs, managed ingress, external Postgres, metrics, and separate runtime roles | [Helm deployment guide](https://www.codex-pooler.com/docs/deployment/helm/) |
 
 The Kubernetes path uses the
 [`icoretech/codex-pooler` chart](https://github.com/icoretech/helm/tree/main/charts/codex-pooler)
