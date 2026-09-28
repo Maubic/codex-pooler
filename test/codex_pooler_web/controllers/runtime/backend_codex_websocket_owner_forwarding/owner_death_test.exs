@@ -1094,6 +1094,133 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
     }
   end
 
+  # The owner's upstream connection process exits while a turn is running
+  # (findings#273). The owner settles that turn (its output-commit probe,
+  # then its `upstream_stream_error` when the client saw output, `:complete`
+  # and the task's reply) and retires with `:owner_crashed`, and the socket
+  # closes 1011. The response task used to crash in
+  # `Finalization.Websocket.finalize_failed/2` on the owner's reply, which
+  # carries no response headers, and a public socket cancelled the task that
+  # was settling the owner's result when the owner went away.
+  #
+  # One node, local owner, owner forwarding on, native and public `/v1`
+  # websockets, the Pool's default serving mode; FakeUpstream holds the
+  # request at a frame barrier before any frame, or after `response.created`
+  # and a text delta the client received, and the test kills the owner's
+  # upstream session process.
+  describe "the owner's upstream connection process exits mid-turn" do
+    for route <- ["/backend-api/codex/responses", "/v1/responses"], hold <- [:before_any_event, :after_visible_output] do
+      @tag route: route, hold: hold
+      test "#{hold} on #{route}: the task settles the turn once, the owner retires, one terminal", ctx do
+        release_ref = make_ref()
+
+        upstream =
+          start_upstream(
+            # provenance: synthetic_adversarial (the owner's upstream session process dies while the provider holds the turn)
+            FakeUpstream.barrier_websocket_frames(upstream_exit_frames(), notify: self(), release_ref: release_ref)
+          )
+
+        setup = gateway_setup(upstream)
+        assert :ok = CodexPooler.Events.subscribe_pool(setup.pool)
+        {_server, port} = start_public_endpoint_with_server!()
+        before = WebsocketCleanupFence.listener_sockets()
+        turn_state = if ctx.route == "/v1/responses", do: "", else: "ws-owner-upstream-exit-#{ctx.hold}"
+        {conn, websocket, ref} = public_websocket_connect!(port, setup, turn_state, ctx.route)
+        socket = WebsocketCleanupFence.await_new_listener_socket!(before)
+
+        {result, log} =
+          with_info_log(fn ->
+            {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, upstream_exit_payload(setup))
+            assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^release_ref}, @detection_timeout_ms
+            {conn, websocket, shown} = show_upstream_exit_output!(ctx.hold, upstream, release_ref, conn, websocket, ref)
+
+            socket_state = socket_connection_state!(socket)
+            owner = socket_state.websocket_owner_pid
+            [task] = MapSet.to_list(socket_state.tasks)
+            owner_ref = Process.monitor(owner)
+            task_ref = Process.monitor(task)
+            Process.exit(:sys.get_state(owner).upstream_pid, :kill)
+
+            assert_receive {:DOWN, ^owner_ref, :process, ^owner, owner_reason}, @detection_timeout_ms
+            assert_receive {:DOWN, ^task_ref, :process, ^task, task_reason}, @detection_timeout_ms
+            assert_receive {CodexPooler.Events, %{reason: "request_finalized"}}, @detection_timeout_ms
+            {conn, _websocket, frames} = receive_frames_until_close!(conn, websocket, ref)
+            Mint.HTTP.close(conn)
+            :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(socket)
+            %{shown: shown, frames: frames, owner_reason: owner_reason, task_reason: task_reason, session_id: socket_state.codex_session.id}
+          end)
+
+        # The task settled the owner's result and exited normally; the owner
+        # retired after settling the turn.
+        assert result.task_reason == :normal
+        assert result.owner_reason == :owner_crashed
+
+        # One terminal: the owner's error after visible output, the 1011 close
+        # before any (an error the socket authors may precede it too).
+        texts = for {:text, text} <- result.frames, do: CodexPooler.JSON.decode!(text)["type"]
+        assert List.last(result.frames) == {:close, 1011, "websocket owner crashed"}
+
+        case ctx.hold do
+          :before_any_event -> assert texts in [[], ["error"]]
+          :after_visible_output -> assert result.shown ++ texts == ["response.created", "response.output_text.delta", "error"]
+        end
+
+        # The turn is closed once, as an owner crash.
+        assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
+        assert {request.status, request.last_error_code} == {"failed", "owner_crashed"}
+        assert request.response_status_code in [499, 502]
+        assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
+        assert {attempt.status, attempt.network_error_code} == {"failed", "owner_crashed"}
+        assert %CodexTurn{status: "interrupted", error_code: "owner_crashed"} = Repo.get_by!(CodexTurn, request_id: request.id)
+        assert %CodexSession{status: "interrupted"} = Repo.get!(CodexSession, result.session_id)
+        assert ledger_entry_kinds(request) == ["release", "reservation", "settlement"]
+        assert %BridgeOwnerLease{status: "released"} = Repo.get_by!(BridgeOwnerLease, codex_session_id: result.session_id)
+
+        # No crash and no aborted settlement: the only error line is the
+        # owner's own exit report.
+        refute log =~ "websocket response task failed"
+        refute log =~ "Postgrex.Protocol"
+        assert Enum.all?(error_lines(log), &(&1 =~ "WebsocketOwnerSession.Registry" and &1 =~ "terminating"))
+      end
+    end
+  end
+
+  defp upstream_exit_frames do
+    [
+      %{"type" => "response.created", "response" => %{"id" => "resp_owner_upstream_exit", "status" => "in_progress"}},
+      %{"type" => "response.output_text.delta", "delta" => "synthetic visible text"},
+      %{"type" => "response.completed", "response" => %{"id" => "resp_owner_upstream_exit", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 2, "output_tokens" => 1, "total_tokens" => 3}}}
+    ]
+    |> Enum.map(&CodexPooler.JSON.encode!/1)
+  end
+
+  defp upstream_exit_payload(setup),
+    do: CodexPooler.JSON.encode!(%{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => native_text_input("owner upstream exit"), "stream" => true, "generate" => true})
+
+  defp show_upstream_exit_output!(:before_any_event, _upstream, _release_ref, conn, websocket, _ref), do: {conn, websocket, []}
+
+  # Releases response.created and the delta, and returns once the client got
+  # the delta, so it was shown output before the owner's upstream dies.
+  defp show_upstream_exit_output!(:after_visible_output, upstream, release_ref, conn, websocket, ref) do
+    for ordinal <- [1, 2] do
+      assert :ok = FakeUpstream.release_frame(upstream, release_ref)
+      assert_receive {:fake_upstream_frame_barrier, ^ordinal, _handler, ^release_ref}, @detection_timeout_ms
+    end
+
+    receive_shown_output!(conn, websocket, ref, [])
+  end
+
+  defp receive_shown_output!(conn, websocket, ref, shown) do
+    {conn, websocket, text} = public_websocket_receive_text!(conn, websocket, ref)
+    shown = shown ++ [CodexPooler.JSON.decode!(text)["type"]]
+
+    if List.last(shown) == "response.output_text.delta",
+      do: {conn, websocket, shown},
+      else: receive_shown_output!(conn, websocket, ref, shown)
+  end
+
+  defp error_lines(log), do: log |> String.split("\n") |> Enum.filter(&(&1 =~ "[error]"))
+
   defp released_owner_lease_optional(session_id, lease_token) do
     Repo.one(
       from lease in BridgeOwnerLease,

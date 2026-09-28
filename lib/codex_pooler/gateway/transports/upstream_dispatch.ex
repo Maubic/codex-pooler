@@ -1340,6 +1340,10 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
     end
   end
 
+  # An owner's error reply also crosses a node boundary. The owner's own
+  # failure for a turn whose upstream connection process exited carries no
+  # response headers, and the failure finalization reads them: give every
+  # error reply the empty headers the atom errors get (findings#273).
   defp owner_request_result(
          {:error, %{body: _body, reason: _reason} = response},
          _identity,
@@ -1347,7 +1351,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
          _attempt,
          _request_options
        ) do
-    {:error, response}
+    {:error, Map.put_new(response, :headers, [])}
   end
 
   defp owner_request_result({:error, reason}, _identity, _request, _attempt, _request_options) do

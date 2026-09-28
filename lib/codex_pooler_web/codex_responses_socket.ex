@@ -1931,8 +1931,15 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     |> cancel_tracked_response_tasks(reason)
   end
 
+  # A lost owner can no longer answer the public turn's task, so its task is
+  # cancelled. An owner that completed the turn's leg before it went away
+  # (it sends `:complete` in the same callback as the task's reply, then may
+  # stop, as it does after its upstream connection process exited) already
+  # answered: that task is settling the owner's result, and cancelling it
+  # there aborted the settlement transaction (findings#273).
   defp maybe_abort_public_owner_turn(state, reason) do
-    if public_owner_turn_open?(state) and not public_turn_aborted?(state) do
+    if public_owner_turn_open?(state) and not public_turn_aborted?(state) and
+         not Map.get(state, :public_turn_owner_complete?, false) do
       abort_public_turn(state, reason)
     else
       state
