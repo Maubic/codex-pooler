@@ -45,13 +45,17 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
          entries <- parse_entries(lines, grouped_entries),
          true <- every_line_represented?(lines, entries, grouped_heading_indexes),
          true <- count_matches(entries) >= min_matches,
-         groups when groups != [] <- group_entries(entries) do
+         groups when groups != [] <- group_entries(entries),
+         true <- Enum.all?(groups, &(&1.matches != [])) do
       selected_groups = select_groups(groups, opts)
       compressed_match_count = selected_match_count(selected_groups)
       original_match_count = count_matches(entries)
+      original_context_line_count = count_context_lines(entries)
+      compressed_context_line_count = Enum.sum(Enum.map(selected_groups, &count_context_lines(&1.entries)))
+      omitted_context_line_count = original_context_line_count - compressed_context_line_count
 
       if compressed_match_count > 0 do
-        compressed_lines = envelope ++ render_groups(groups, selected_groups, compressed_match_count)
+        compressed_lines = envelope ++ render_groups(groups, selected_groups, compressed_match_count, omitted_context_line_count)
         compressed = Strategies.join_lines(compressed_lines)
 
         finalize(
@@ -67,6 +71,9 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
             original_match_count: original_match_count,
             compressed_match_count: compressed_match_count,
             omitted_match_count: original_match_count - compressed_match_count,
+            original_context_line_count: original_context_line_count,
+            compressed_context_line_count: compressed_context_line_count,
+            omitted_context_line_count: omitted_context_line_count,
             max_matches_per_file_count:
               Strategies.integer_option(
                 opts,
@@ -318,7 +325,6 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
       entries = groups |> Map.fetch!(path) |> Enum.reverse()
       %{path: path, entries: entries, matches: Enum.filter(entries, &match?/1)}
     end)
-    |> Enum.reject(&(&1.matches == []))
   end
 
   defp select_groups(groups, opts) do
@@ -356,7 +362,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
     Enum.reverse(selected_groups)
   end
 
-  defp render_groups(groups, selected_groups, compressed_match_count) do
+  defp render_groups(groups, selected_groups, compressed_match_count, omitted_context_line_count) do
     original_match_count =
       groups
       |> Enum.map(&length(&1.matches))
@@ -392,7 +398,14 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
         []
       end
 
-    header ++ body ++ footer
+    context_footer =
+      if omitted_context_line_count > 0 do
+        ["[compressed search results: omitted #{omitted_context_line_count} context lines]"]
+      else
+        []
+      end
+
+    header ++ body ++ footer ++ context_footer
   end
 
   defp selected_entries(_entries, []), do: []
@@ -402,55 +415,31 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
     first_index = Enum.min(selected_indexes)
     last_index = Enum.max(selected_indexes)
 
-    entries
-    |> Enum.with_index()
-    |> Enum.filter(fn {entry, position} ->
-      selected_entry?(entry, position, entries, selected_indexes, first_index, last_index)
+    # Walk both directions to keep whole context runs touching a selected match.
+    # Separators, omitted matches and gaps in the original output stop each run.
+    retained_indexes = retain_context_runs(entries, selected_indexes)
+    retained_indexes = retain_context_runs(Enum.reverse(entries), retained_indexes)
+
+    Enum.filter(entries, fn
+      %{kind: :separator, index: index} -> index > first_index and index < last_index
+      %{index: index} -> MapSet.member?(retained_indexes, index)
     end)
-    |> Enum.map(fn {entry, _position} -> entry end)
   end
 
-  defp selected_entry?(
-         %{kind: :match, index: index},
-         _position,
-         _entries,
-         selected_indexes,
-         _first,
-         _last
-       ) do
-    MapSet.member?(selected_indexes, index)
-  end
+  defp retain_context_runs(entries, selected_indexes) do
+    {retained_indexes, _adjacent_index} =
+      Enum.reduce(entries, {selected_indexes, nil}, fn
+        %{kind: :match, index: index}, {retained, _adjacent} ->
+          {retained, if(MapSet.member?(selected_indexes, index), do: index)}
 
-  defp selected_entry?(
-         %{kind: :separator, index: index},
-         _position,
-         _entries,
-         _selected,
-         first,
-         last
-       ) do
-    index > first and index < last
-  end
+        %{kind: :context, index: index}, {retained, adjacent} when is_integer(adjacent) and abs(index - adjacent) == 1 ->
+          {MapSet.put(retained, index), index}
 
-  defp selected_entry?(
-         %{kind: :context, index: index},
-         position,
-         entries,
-         selected_indexes,
-         first,
-         last
-       ) do
-    (index > first and index < last) or
-      adjacent_to_selected_match?(entries, position, selected_indexes)
-  end
+        _entry, {retained, _adjacent} ->
+          {retained, nil}
+      end)
 
-  defp adjacent_to_selected_match?(entries, position, selected_indexes) do
-    Enum.any?([position - 1, position + 1], fn adjacent ->
-      case Enum.at(entries, adjacent) do
-        %{kind: :match, index: index} -> MapSet.member?(selected_indexes, index)
-        _other -> false
-      end
-    end)
+    retained_indexes
   end
 
   defp format_entry(%{kind: :separator}) do
@@ -478,6 +467,8 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResults do
     |> Enum.map(&length(&1.matches))
     |> Enum.sum()
   end
+
+  defp count_context_lines(entries), do: Enum.count(entries, &(&1.kind == :context))
 
   defp count_matches(entries), do: Enum.count(entries, &match?/1)
   defp match?(%{kind: :match}), do: true

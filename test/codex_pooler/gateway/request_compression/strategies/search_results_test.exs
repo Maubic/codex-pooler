@@ -192,6 +192,113 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResultsTest do
       assert_safe_metadata(metadata, :search_results, sentinel)
     end
 
+    test "preserves all three context rows on both sides of every selected match" do
+      content = Enum.map_join(1..8, "\n--\n", &context_block(&1, 4))
+
+      assert {:ok, %{content: compressed, metadata: metadata}} = SearchResults.compress(content, model: @model)
+
+      for file <- 1..8, line <- [1, 2, 3, 5, 6, 7] do
+        assert compressed =~ "  #{line}- context row #{file}-#{line}"
+      end
+
+      assert metadata.original_context_line_count == 48
+      assert metadata.compressed_context_line_count == 48
+      assert metadata.omitted_context_line_count == 0
+      refute compressed =~ "omitted"
+    end
+
+    test "preserves overlapping context runs without duplicating shared rows" do
+      path = "lib/synthetic/long/search/context/example.ex"
+
+      content =
+        Enum.map_join(1..11, "\n", fn line ->
+          separator = if line in [4, 8], do: ":", else: "-"
+          "#{path}#{separator}#{line}#{separator} shared context row #{line}"
+        end)
+
+      assert {:ok, %{content: compressed, metadata: metadata}} = SearchResults.compress(content, model: @model, min_bytes: 0, min_matches: 1)
+
+      for line <- [1, 2, 3, 5, 6, 7, 9, 10, 11] do
+        assert length(Regex.scan(Regex.compile!("(?m)^  #{line}- shared context row #{line}$"), compressed)) == 1
+      end
+
+      assert metadata.original_context_line_count == 9
+      assert metadata.compressed_context_line_count == 9
+      assert metadata.omitted_context_line_count == 0
+    end
+
+    test "an omitted match stops context propagation after an overlapping run" do
+      content =
+        Enum.map_join(1..11, "\n", fn line ->
+          separator = if line in [4, 8], do: ":", else: "-"
+          "lib/synthetic/long/search/context/example.ex#{separator}#{line}#{separator} overlap row #{line}"
+        end)
+
+      assert {:ok, %{content: compressed, metadata: metadata}} = SearchResults.compress(content, model: @model, min_bytes: 0, min_matches: 1, max_matches: 1)
+
+      for line <- [1, 2, 3, 5, 6, 7], do: assert(compressed =~ "  #{line}- overlap row #{line}")
+      for line <- 8..11, do: refute(compressed =~ "overlap row #{line}")
+      assert compressed =~ "omitted 3 context lines"
+      assert metadata.compressed_context_line_count == 6
+      assert metadata.omitted_context_line_count == 3
+    end
+
+    test "preserves full context runs in grouped search output" do
+      content =
+        Enum.map_join(1..2, "\n", fn file ->
+          rows =
+            Enum.map_join(1..11, "\n", fn line ->
+              separator = if line in [4, 8], do: ":", else: "-"
+              "#{line}#{separator} grouped context row #{file}-#{line}"
+            end)
+
+          "lib/synthetic/grouped/example_#{file}.ex\n" <> rows
+        end)
+
+      assert {:ok, %{content: compressed, metadata: metadata}} = SearchResults.compress(content, model: @model, min_bytes: 0, min_matches: 1, max_files: 1)
+
+      for line <- [1, 2, 3, 5, 6, 7, 9, 10, 11], do: assert(compressed =~ "  #{line}- grouped context row 1-#{line}")
+      refute compressed =~ "grouped context row 2-"
+      assert compressed =~ "omitted 1 files"
+      assert compressed =~ "omitted 9 context lines"
+      assert metadata.original_context_line_count == 18
+      assert metadata.compressed_context_line_count == 9
+      assert metadata.omitted_context_line_count == 9
+    end
+
+    test "keeps complete separated selected runs and accounts for omitted context" do
+      content = Enum.map_join([4, 14, 24], "\n--\n", &context_block(1, &1))
+
+      assert {:ok, %{content: compressed, metadata: metadata}} = SearchResults.compress(content, model: @model, min_bytes: 0, min_matches: 1, max_matches: 2)
+
+      for line <- [1, 2, 3, 5, 6, 7, 11, 12, 13, 15, 16, 17] do
+        assert compressed =~ "  #{line}- context row 1-#{line}"
+      end
+
+      assert length(Regex.scan(~r/(?m)^--$/, compressed)) == 1
+      refute compressed =~ "context row 1-21"
+      assert compressed =~ "omitted 6 context lines"
+      assert metadata.original_context_line_count == 18
+      assert metadata.compressed_context_line_count == 12
+      assert metadata.omitted_context_line_count == 6
+    end
+
+    test "does not attach orphan context across a separator" do
+      content = context_block(1, 4) <> "\n--\nlib/synthetic/long/search/context/example_1.ex-30- orphan context row"
+
+      assert {:ok, %{content: compressed, metadata: metadata}} = SearchResults.compress(content, model: @model, min_bytes: 0, min_matches: 1)
+
+      refute compressed =~ "orphan context row"
+      assert compressed =~ "omitted 1 context lines"
+      assert metadata.omitted_context_line_count == 1
+    end
+
+    test "skips context-only files instead of silently dropping them" do
+      content = Enum.map_join(1..8, "\n--\n", &context_block(&1, 4)) <> "\nlib/orphan.ex-1- orphan context row"
+
+      assert :skip = SearchResults.compress(content, model: @model)
+    end
+
     test "skips grep outputs with engine evidence that cannot be safely summarized" do
       unsafe_outputs = [
         """
@@ -390,6 +497,14 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.SearchResultsTest do
                  min_matches: 1
                )
     end
+  end
+
+  defp context_block(file, match_line) do
+    Enum.map_join((match_line - 3)..(match_line + 3), "\n", fn line ->
+      separator = if line == match_line, do: ":", else: "-"
+      kind = if line == match_line, do: "needle", else: "context"
+      "lib/synthetic/long/search/context/example_#{file}.ex#{separator}#{line}#{separator} #{kind} row #{file}-#{line}"
+    end)
   end
 
   defp direct_context_search_fixture(sentinel) do
