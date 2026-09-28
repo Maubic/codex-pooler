@@ -14,6 +14,7 @@ Codex is OpenAI's coding agent for exploring a codebase, making changes and runn
 - Install [Codex CLI](https://developers.openai.com/codex/cli/) or [Codex Desktop](https://developers.openai.com/codex/app/) using the official instructions for your operating system.
 - Have a Codex Pooler URL reachable from the client.
 - Create a [Pool API key](/getting-started/quick-start/) and choose a model available to that Pool.
+- Have Codex signed in with ChatGPT or an OpenAI API key. The provider below keeps `requires_openai_auth = true`, and without a local login Codex CLI opens its sign-in screen even when the Pool API key is set. With only a Pool API key, set `requires_openai_auth = false` instead; [Troubleshooting](#troubleshooting) explains what that turns off.
 
 ## Configure the connection
 
@@ -107,6 +108,8 @@ When you set `model_catalog_url`:
 ## Choose a model
 
 Select a model available to your Pool in Codex's model picker.
+
+Because the provider keeps `name = "OpenAI"` with a Codex Pooler `base_url`, the Codex CLI `/model` picker shows a red "OpenAI base URL is overridden to `<base_url>`. Selecting models may not be supported or work properly." warning. It is expected with this configuration, and selecting a model still works.
 
 When Codex reads the Pool catalog (see [Model catalog discovery](#model-catalog-discovery)), Codex CLI and Codex Desktop derive their effective context window and automatic compaction boundary from that metadata. Leave context sizing automatic so the client follows per-model catalog changes without stale local overrides. Pooler preserves the selected upstream's default `context_window`, supported `max_context_window`, and compaction metadata. A larger supported maximum does not activate that window, and pricing categories do not change any of these values. When the upstream leaves `auto_compact_token_limit` absent or null, Codex derives its compaction threshold from the active window.
 
