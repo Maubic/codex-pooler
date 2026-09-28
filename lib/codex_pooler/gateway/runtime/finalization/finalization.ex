@@ -859,7 +859,6 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
     }
   end
 
-  defp unanswered_failure_result(response, context, body, error_code, validation_rejection, opts) do
   defp unanswered_failure_result(response, context, _body, "flex_unavailable", _validation_rejection, _opts) do
     {:ok,
      %{
@@ -869,6 +868,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
      }}
   end
 
+  defp unanswered_failure_result(response, context, body, error_code, validation_rejection, opts) do
     if public_rate_limit_relay?(response, context.request_options),
       do: {:error, public_rate_limit_error(context)},
       else: relayed_failure_result(response, context, body, error_code, validation_rejection, opts)
