@@ -499,10 +499,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.UpstreamCl
   # that connection: once the provider closed it, the final could no longer be
   # admitted on the socket (it failed `native_compaction_capability_rejected`
   # on the fresh connection and the client met a 502). So the owner counts it
-  # idle: the socket closes, its close clears the admission, and the final the
-  # client sends on its next socket runs as an ordinary turn on the owner's
-  # next connection. Driven through the socket callbacks (this process is the
-  # socket), as the compaction tests are.
+  # idle and drops that admission with the connection: the socket closes, and
+  # the final the client sends on its next socket runs as an ordinary turn on
+  # the owner's next connection. Driven through the socket callbacks (this
+  # process is the socket), as the compaction tests are.
   test "a close while the owner waits for a native compaction's final request closes the socket and the final is served on the next one" do
     compact_item = %{"type" => "compaction", "encrypted_content" => "synthetic-owner-upstream-close-pending-final"}
     frames = fn events -> Enum.map(events, &CodexPooler.JSON.encode!/1) end
@@ -590,11 +590,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.UpstreamCl
 
       assert_upstream_close_lines!(log, [downstream_closed_line("peer_close_frame", lifecycle_id, 1, "on")])
 
-      # The socket's close detaches it from the owner, which drops the
-      # admission bound to the closed connection.
+      # The owner dropped the admission bound to the closed connection on its
+      # session's signal, before the socket's close detaches it (findings#274).
+      assert %{native_compaction_admission: nil} = :sys.get_state(owner)
       :ok = CodexResponsesSocket.terminate(:normal, stopped)
       Process.delete(:pending_final_socket_state)
-      assert %{native_compaction_admission: nil} = :sys.get_state(owner)
 
       {:ok, state} = owner_socket(auth, "ws-owner-upstream-close-pending-final-next", turn_state)
       Process.put(:pending_final_socket_state, state)

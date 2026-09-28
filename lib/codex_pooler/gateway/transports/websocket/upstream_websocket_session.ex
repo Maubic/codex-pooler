@@ -123,9 +123,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # could resolve (findings#270). The subscriber survives every close and
   # reconnect; the session neither links to nor monitors it, so a subscriber
   # that is gone only misses the message.
+  #
+  # `admission_topology: :forwarded` marks the session a websocket owner
+  # holds: the owner keeps the native compaction admission, and the lifecycle
+  # observations this session still emits for its connections (a clear with
+  # nothing to clear, a rejected capability) name the owner's topology
+  # instead of `:direct` (findings#270 row 270-163). It survives every
+  # reconnect.
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
-    case GenServer.start_link(__MODULE__, {:new, Keyword.get(opts, :connection_close_subscriber)}) do
+    init_arg = {:new, Keyword.get(opts, :connection_close_subscriber), Keyword.get(opts, :admission_topology, :direct)}
+
+    case GenServer.start_link(__MODULE__, init_arg) do
       {:ok, pid} = result ->
         _trace = NativeCompactionTrace.enroll(:upstream_session, pid)
         result
@@ -329,15 +338,17 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   @impl GenServer
-  def init(:new), do: init({:new, nil})
+  def init(:new), do: init({:new, nil, :direct})
+  def init({:new, subscriber}), do: init({:new, subscriber, :direct})
 
-  def init({:new, subscriber}) do
+  def init({:new, subscriber, admission_topology}) do
     sensitivity = NativeCompactionTrace.configure_process_sensitivity(:upstream_session)
 
     state =
       new_connection_lifecycle_state()
       |> put_trace_sensitivity(sensitivity)
       |> put_connection_close_subscriber(subscriber)
+      |> put_admission_topology(admission_topology)
 
     {:ok, state}
   end
@@ -2900,6 +2911,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       |> connection_lifecycle_state()
       |> preserve_trace_sensitivity(state)
       |> preserve_connection_close_subscriber(state)
+      |> preserve_admission_topology(state)
 
     if Map.get(state, :reconnect_pending?, false) do
       Map.put(lifecycle, :reconnect_pending?, true)
@@ -2976,7 +2988,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
         Map.get(after_state, :native_compaction_admission),
         operation,
         reason,
-        :direct
+        Map.get(before_state, :admission_topology, :direct)
       )
 
     Logger.debug(fn -> "native compaction lifecycle " <> inspect(observation) end)
@@ -3013,6 +3025,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp preserve_connection_close_subscriber(lifecycle, state) do
     case Map.fetch(state, :connection_close_subscriber) do
       {:ok, subscriber} -> Map.put(lifecycle, :connection_close_subscriber, subscriber)
+      :error -> lifecycle
+    end
+  end
+
+  # Only an owner's session carries the key, so every other session keeps
+  # exactly the state it always had.
+  defp put_admission_topology(state, :forwarded), do: Map.put(state, :admission_topology, :forwarded)
+  defp put_admission_topology(state, _admission_topology), do: state
+
+  defp preserve_admission_topology(lifecycle, state) do
+    case Map.fetch(state, :admission_topology) do
+      {:ok, admission_topology} -> Map.put(lifecycle, :admission_topology, admission_topology)
       :error -> lifecycle
     end
   end

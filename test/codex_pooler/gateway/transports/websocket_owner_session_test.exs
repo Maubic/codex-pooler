@@ -6716,6 +6716,85 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     end
   end
 
+  # The owner drops an admission bound to the connection its session closed,
+  # as the direct session drops its own with the connection (findings#274):
+  # nothing can use it any more, and a stale one failed the final (502) or
+  # refused the next compaction (503) while the socket stayed open.
+  describe "admission bound to a closed upstream connection" do
+    test "is dropped with reason connection_closed once the armed connection closes", context do
+      armed = armed_admission!(context)
+      attach_admission_clear_observer(armed.binding.lifecycle_id)
+      signal = %{upstream_close_signal(:peer_close_frame) | lifecycle_id: armed.binding.lifecycle_id, generation: armed.binding.generation}
+
+      assert %{native_compaction_admission: nil, native_compaction_admission_downstream: nil} = send_upstream_close(armed.owner, signal)
+      assert_receive {:admission_clear, %{reason: :connection_closed, phase_from: :pending_compact, phase_to: :cleared, topology: :forwarded}}
+    end
+
+    for phase <- [:ordinary_success, :pending_final, :consumed_final] do
+      test "is dropped in the idle #{phase} phase", context do
+        %{owner: owner} = idle_upstream_close_owner!(context, "closed-connection-#{unquote(phase)}")
+        signal = upstream_close_signal(:peer_close_frame)
+        attach_admission_clear_observer(signal.lifecycle_id)
+        :sys.replace_state(owner, &%{&1 | native_compaction_admission: closed_connection_admission(unquote(phase), signal)})
+
+        assert %{native_compaction_admission: nil} = send_upstream_close(owner, signal)
+        assert_receive {:admission_clear, %{reason: :connection_closed, phase_from: unquote(phase)}}
+      end
+    end
+
+    test "is kept when it names another connection", context do
+      %{owner: owner} = idle_upstream_close_owner!(context, "closed-connection-other")
+      signal = upstream_close_signal(:peer_close_frame, 2)
+      attach_admission_clear_observer(signal.lifecycle_id)
+
+      for admission <- [closed_connection_admission(:pending_final, %{signal | generation: 3}), closed_connection_admission(:pending_final, %{signal | lifecycle_id: Ecto.UUID.generate()})] do
+        :sys.replace_state(owner, &%{&1 | native_compaction_admission: admission})
+        assert %{native_compaction_admission: ^admission} = send_upstream_close(owner, signal)
+      end
+
+      refute_received {:admission_clear, _observation}
+    end
+
+    test "is kept while a collection waits for its confirmation", context do
+      %{owner: owner} = idle_upstream_close_owner!(context, "closed-connection-collection")
+      signal = upstream_close_signal(:peer_close_frame)
+      attach_admission_clear_observer(signal.lifecycle_id)
+      authorized = closed_connection_admission(:ordinary_success, signal)
+      authorized = %{authorized | first_compact_collection: NativeCompactionAdmission.FirstCompactCollection.issue(authorized.binding, make_ref())}
+      witness = %WebsocketOwnerSession.ForwardedSendWitnessState{digest: <<0::256>>, binding: nil, control_ref: make_ref(), downstream: %{}, status: :issued}
+
+      held = [
+        collected_unconfirmed: %{native_compaction_admission: closed_connection_admission(:collected_unconfirmed, signal)},
+        first_collection_authorized: %{native_compaction_admission: authorized},
+        first_compact_result_held: %{native_compaction_admission: closed_connection_admission(:pending_compact, signal), first_compact_result: %{retained: true}},
+        send_witness_issued: %{native_compaction_admission: closed_connection_admission(:consumed_final, signal), forwarded_send_witness: witness}
+      ]
+
+      for {label, fields} <- held do
+        :sys.replace_state(owner, &Map.merge(&1, fields))
+        assert Map.take(send_upstream_close(owner, signal), Map.keys(fields)) == fields, "#{label} lost its admission"
+        :sys.replace_state(owner, &%{&1 | native_compaction_admission: nil, first_compact_result: nil, forwarded_send_witness: nil})
+      end
+
+      refute_received {:admission_clear, _observation}
+    end
+  end
+
+  defp closed_connection_admission(phase, signal) do
+    binding = %NativeCompactionAdmission.Binding{
+      semantic_turn_key: <<1::256>>,
+      window_digest: <<2::256>>,
+      context_digest: <<3::256>>,
+      window_number: 1,
+      serving_mode: :full,
+      topology: %NativeCompactionAdmission.Topology.Direct{},
+      lifecycle_id: signal.lifecycle_id,
+      generation: signal.generation
+    }
+
+    %NativeCompactionAdmission{phase: phase, binding: binding}
+  end
+
   defp idle_upstream_close_owner!(context, label) do
     upstream = WebsocketOwnerNodeHarness.fake_upstream_boundary(self())
     {:ok, owner} = start_owner(context, upstream: upstream)

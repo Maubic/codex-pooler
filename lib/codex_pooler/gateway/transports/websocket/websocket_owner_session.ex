@@ -3021,6 +3021,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   # so the downstream always sees the turn end first. It lives on the active
   # turn, so it can never outlive the turn it waits for.
   defp note_upstream_connection_closed(state, signal) do
+    state
+    |> pass_on_upstream_close(signal)
+    |> clear_closed_connection_admission(signal)
+  end
+
+  defp pass_on_upstream_close(state, signal) do
     case upstream_close_gate(state, signal) do
       :forward ->
         forward_upstream_close(state, signal)
@@ -3084,15 +3090,42 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   # `ordinary_success`, `consumed_final` and `cleared` hold nothing in flight,
   # so those phases are idle. So is `pending_final`: the compaction it follows
   # is over, and its binding names the closed connection, so its final request
-  # can no longer be admitted on this socket (it failed
-  # `native_compaction_capability_rejected` on the fresh connection); on the
-  # client's new socket that admission is gone and the final runs as an
-  # ordinary turn. Any other phase is a compaction the close would cut. So is
-  # a collected turn, a first full-history compaction the socket has not
-  # authorized yet, a held compaction retry, and a send witness not redeemed
-  # yet. A redeemed witness stays after its final until the admission is
-  # cleared, so it proves nothing about the present.
+  # can no longer be admitted (it failed `native_compaction_capability_rejected`
+  # on the fresh connection); the owner drops that admission with the
+  # connection and the final runs as an ordinary turn, on this socket or on
+  # the client's new one. Any other phase is a compaction the close would
+  # cut. So is a collected turn, a first full-history compaction the socket
+  # has not authorized yet, a held compaction retry, and a send witness not
+  # redeemed yet. A redeemed witness stays after its final until the
+  # admission is cleared, so it proves nothing about the present.
   @upstream_close_idle_admission_phases [:ordinary_success, :pending_compact, :pending_final, :consumed_final, :cleared]
+  @closed_connection_admission_phases List.delete(@upstream_close_idle_admission_phases, :cleared)
+
+  # An admission names the connection its turn ran on, and only a request on
+  # that connection can use it: a final or a next compaction bound to a
+  # connection the provider closed failed without reaching the provider (502),
+  # and a stale `pending_final` refused the next compaction on the socket
+  # (503), whenever the socket stayed open after the close (findings#274). The
+  # direct session drops its admission with its connection; the owner drops
+  # its own on the same signal, after the gate above and whatever it decided,
+  # with the same `connection_closed`. Only an idle phase bound to that very
+  # connection goes, and only while no compaction is in flight: a collection
+  # waiting for its confirmation (`collected_unconfirmed`, an authorized
+  # first collection, a held first compact result, a send witness not
+  # redeemed yet) keeps its admission.
+  defp clear_closed_connection_admission(state, signal) do
+    if closed_connection_admission?(state.native_compaction_admission, signal) and not native_compaction_in_progress?(state),
+      do: clear_native_compaction_admission(state, :connection_closed),
+      else: state
+  end
+
+  defp closed_connection_admission?(
+         %NativeCompactionAdmission{phase: phase, first_compact_collection: nil, binding: %{lifecycle_id: lifecycle_id, generation: generation}},
+         %{lifecycle_id: lifecycle_id, generation: generation}
+       ),
+       do: phase in @closed_connection_admission_phases
+
+  defp closed_connection_admission?(_admission, _signal), do: false
 
   defp native_compaction_in_progress?(state) do
     admission_in_progress?(state.native_compaction_admission) or not is_nil(state.compaction_retry_submit_hold) or
@@ -5442,7 +5475,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp upstream_boundary(opts) do
     Keyword.get_lazy(opts, :upstream, fn ->
       %{
-        start: fn -> UpstreamWebsocketSession.start_link(connection_close_subscriber: self()) end,
+        start: fn -> UpstreamWebsocketSession.start_link(connection_close_subscriber: self(), admission_topology: :forwarded) end,
         send: fn upstream_pid, upstream_payload, writer ->
           send_owner_upstream(upstream_pid, upstream_payload, writer)
         end,
