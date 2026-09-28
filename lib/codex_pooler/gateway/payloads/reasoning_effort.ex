@@ -6,7 +6,9 @@ defmodule CodexPooler.Gateway.Payloads.ReasoningEffort do
   @known_efforts ~w(none minimal low medium high xhigh max ultra)
   @non_ultra_targets ~w(none minimal ultra)
 
-  @spec extract(map(), RequestOptions.t()) :: String.t() | nil
+  @type effort :: String.t() | non_neg_integer() | nil
+
+  @spec extract(map(), RequestOptions.t()) :: effort()
   def extract(payload, %RequestOptions{} = request_options) when is_map(payload) do
     case request_options.openai_compatibility.source_endpoint do
       source_endpoint when is_binary(source_endpoint) ->
@@ -17,11 +19,21 @@ defmodule CodexPooler.Gateway.Payloads.ReasoningEffort do
     end
   end
 
-  @spec extract_native(map()) :: String.t() | nil
-  def extract_native(payload) when is_map(payload) do
+  @spec extract_native(map()) :: effort()
+  def extract_native(payload) when is_map(payload), do: normalize_native(raw_native_effort(payload))
+
+  @spec invalid_native_budget?(map(), RequestOptions.t()) :: boolean()
+  def invalid_native_budget?(payload, %RequestOptions{openai_compatibility: %{source_endpoint: nil}}) do
+    value = raw_native_effort(payload)
+    (is_number(value) or is_boolean(value)) and is_nil(normalize_native(value))
+  end
+
+  def invalid_native_budget?(_payload, %RequestOptions{}), do: false
+
+  defp raw_native_effort(payload) do
     with :absent <- present_nested_effort(payload),
-         :absent <- present_clean_string(payload, "reasoning_effort"),
-         :absent <- present_clean_string(payload, "reasoningEffort"),
+         :absent <- present_native_effort(payload, "reasoning_effort"),
+         :absent <- present_native_effort(payload, "reasoningEffort"),
          :absent <- present_thinking_effort(payload),
          :absent <- present_enabled_effort(payload, "enable_thinking") do
       nil
@@ -29,6 +41,11 @@ defmodule CodexPooler.Gateway.Payloads.ReasoningEffort do
       {:present, effort} -> effort
     end
   end
+
+  @doc "Preserves native unsigned 64-bit budgets without changing their JSON number type."
+  @spec normalize_native(term()) :: effort()
+  def normalize_native(value) when is_integer(value) and value >= 0 and value <= 18_446_744_073_709_551_615, do: value
+  def normalize_native(value), do: clean_string(value)
 
   @spec parameter(RequestOptions.t()) :: String.t()
   def parameter(%RequestOptions{} = request_options) do
@@ -91,7 +108,7 @@ defmodule CodexPooler.Gateway.Payloads.ReasoningEffort do
     case fetch_field(payload, "reasoning") do
       {:ok, reasoning} when is_map(reasoning) ->
         case fetch_field(reasoning, "effort") do
-          {:ok, value} -> {:present, clean_string(value)}
+          {:ok, value} -> {:present, value}
           :error -> :absent
         end
 
@@ -103,9 +120,9 @@ defmodule CodexPooler.Gateway.Payloads.ReasoningEffort do
     end
   end
 
-  defp present_clean_string(payload, key) do
+  defp present_native_effort(payload, key) do
     case fetch_field(payload, key) do
-      {:ok, value} -> {:present, clean_string(value)}
+      {:ok, value} -> {:present, value}
       :error -> :absent
     end
   end

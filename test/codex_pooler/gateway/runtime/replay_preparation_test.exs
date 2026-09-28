@@ -11,6 +11,26 @@ defmodule CodexPooler.Gateway.Runtime.ReplayPreparationTest do
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
   alias CodexPooler.Pools.RoutingSettings
 
+  test "numeric budget preparations survive durable sanitization and restore without permitting numeric policy configuration" do
+    original = original_context()
+    base = ReplayPreparation.attempt_metadata(original)["native_replay_preparation"]
+
+    for effort <- [0, 64, 18_446_744_073_709_551_615] do
+      snapshot = Map.merge(base, %{"reasoning_mode" => "unrestricted", "configured_effort" => nil, "requested_effort" => effort, "applied_effort" => effort})
+      metadata = Accounting.sanitize_metadata(%{"native_replay_preparation" => snapshot})
+      assert ReplayPreparation.replay_eligible?(metadata)
+      assert {:ok, restored, _settings} = ReplayPreparation.restore(RequestOptions.for_websocket(%{}), metadata)
+      assert restored.routing.reasoning_effort_decision.requested_effort === effort
+      assert restored.routing.reasoning_effort_decision.applied_effort === effort
+      assert ReplayPreparation.sanitize(Map.put(snapshot, "configured_effort", effort)) == %{}
+    end
+
+    for effort <- [-1, 18_446_744_073_709_551_616, 64.0] do
+      assert ReplayPreparation.sanitize(Map.put(base, "requested_effort", effort)) == %{}
+      assert ReplayPreparation.sanitize(Map.put(base, "applied_effort", effort)) == %{}
+    end
+  end
+
   test "original native preparation survives metadata sanitization and replaces replay defaults" do
     original = original_context()
     metadata = original |> ReplayPreparation.attempt_metadata() |> Accounting.sanitize_metadata()

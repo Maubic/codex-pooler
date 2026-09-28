@@ -244,8 +244,12 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation do
 
   defp valid_reasoning?(snapshot) do
     Map.has_key?(@modes, snapshot["reasoning_mode"]) and
-      Enum.all?(~w(configured_effort requested_effort applied_effort), fn key ->
-        Map.has_key?(snapshot, key) and snapshot[key] in @efforts
+      Map.has_key?(snapshot, "configured_effort") and snapshot["configured_effort"] in @efforts and
+      Enum.all?(~w(requested_effort applied_effort), fn key ->
+        Map.has_key?(snapshot, key) and valid_effort?(snapshot[key])
       end)
   end
+
+  defp valid_effort?(value) when is_integer(value) and value >= 0 and value <= 18_446_744_073_709_551_615, do: true
+  defp valid_effort?(value), do: value in @efforts
 end

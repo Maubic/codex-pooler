@@ -99,7 +99,7 @@ defmodule CodexPooler.Access.APIKeys do
 
   @spec resolve_reasoning_effort(
           APIKey.t(),
-          String.t() | nil,
+          String.t() | non_neg_integer() | nil,
           [String.t()] | nil,
           String.t() | nil
         ) :: ReasoningEffortPolicy.resolution()
@@ -116,7 +116,7 @@ defmodule CodexPooler.Access.APIKeys do
     to: ReasoningEffortPolicy,
     as: :project_metadata
 
-  @spec project_reasoning_effort_denial_metadata(APIKey.t(), String.t() | nil) ::
+  @spec project_reasoning_effort_denial_metadata(APIKey.t(), String.t() | non_neg_integer() | nil) ::
           ReasoningEffortPolicy.denial_metadata()
   defdelegate project_reasoning_effort_denial_metadata(api_key, requested_effort),
     to: ReasoningEffortPolicy,

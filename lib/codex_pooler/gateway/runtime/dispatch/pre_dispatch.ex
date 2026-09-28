@@ -804,6 +804,14 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
   end
 
   defp resolve_reasoning_effort(auth, model, payload, request_options) do
+    if ReasoningEffort.invalid_native_budget?(payload, request_options) do
+      {:error, error(400, "invalid_request", "reasoning effort budget must be an unsigned 64-bit integer", ReasoningEffort.parameter(request_options))}
+    else
+      resolve_valid_reasoning_effort(auth, model, payload, request_options)
+    end
+  end
+
+  defp resolve_valid_reasoning_effort(auth, model, payload, request_options) do
     requested_effort = ReasoningEffort.extract(payload, request_options)
 
     {model_efforts, model_default} =

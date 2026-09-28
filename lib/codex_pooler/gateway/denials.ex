@@ -264,6 +264,7 @@ defmodule CodexPooler.Gateway.Denials do
   defp safe_reasoning_policy(_policy), do: nil
 
   defp safe_requested_effort(value) when value in @known_reasoning_efforts, do: value
+  defp safe_requested_effort(value) when is_integer(value) and value >= 0 and value <= 18_446_744_073_709_551_615, do: value
   defp safe_requested_effort(nil), do: nil
   defp safe_requested_effort(_value), do: "unknown"
 

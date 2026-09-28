@@ -6,6 +6,22 @@ defmodule CodexPooler.Gateway.Payloads.ReasoningEffortTest do
   @backend_endpoint "/backend-api/codex/responses"
 
   describe "extract/2" do
+    test "native unsigned budgets preserve type and precedence while public effort remains string-only" do
+      for effort <- [0, 64, 18_446_744_073_709_551_615] do
+        payload = %{"reasoning" => %{"effort" => effort}, "reasoning_effort" => "high"}
+        native = RequestOptions.build(%{}, @backend_endpoint, payload)
+        public = RequestOptions.build(%{openai_source_endpoint: "/v1/responses"}, @backend_endpoint, payload)
+        assert ReasoningEffort.extract(payload, native) === effort
+        assert ReasoningEffort.extract(payload, public) == nil
+        assert ReasoningEffort.extract_native(%{"reasoning_effort" => effort}) === effort
+        assert ReasoningEffort.extract_native(%{"reasoningEffort" => effort}) === effort
+      end
+
+      for effort <- [-1, 18_446_744_073_709_551_616, 64.0, true, [], %{}] do
+        assert ReasoningEffort.extract_native(%{"reasoning" => %{"effort" => effort}, "reasoning_effort" => "high"}) == nil
+      end
+    end
+
     test "uses native backend alias precedence without changing custom tokens" do
       cases = [
         {%{
@@ -32,11 +48,11 @@ defmodule CodexPooler.Gateway.Payloads.ReasoningEffortTest do
 
     test "does not fall through present malformed native winners" do
       cases = [
-        {%{"reasoning" => %{"effort" => 42}, "reasoning_effort" => "high"}, nil},
+        {%{"reasoning" => %{"effort" => -1}, "reasoning_effort" => "high"}, nil},
         {%{"reasoning" => %{"effort" => "  "}, "reasoning_effort" => "high"}, nil},
         {%{"reasoning_effort" => %{"invalid" => true}, "reasoningEffort" => "high"}, nil},
         {%{"reasoning_effort" => "  ", "reasoningEffort" => "high"}, nil},
-        {%{"reasoningEffort" => 42, "thinking" => "high"}, nil},
+        {%{"reasoningEffort" => -1, "thinking" => "high"}, nil},
         {%{"reasoningEffort" => " ", "thinking" => "high"}, nil},
         {%{"thinking" => 42, "enable_thinking" => true}, nil},
         {%{"thinking" => " ", "enable_thinking" => true}, nil}

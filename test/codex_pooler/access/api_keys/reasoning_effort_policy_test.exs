@@ -15,7 +15,7 @@ defmodule CodexPooler.Access.APIKeys.ReasoningEffortPolicyTest do
       assert {:ok, %Decision{mode: :unrestricted, applied_effort: nil}} =
                Access.resolve_reasoning_effort(key, nil, [], nil)
 
-      for requested <- ["high", "Focused"] do
+      for requested <- ["high", "Focused", 0, 64, 18_446_744_073_709_551_615] do
         assert {:ok,
                 %Decision{
                   mode: :unrestricted,
@@ -46,7 +46,7 @@ defmodule CodexPooler.Access.APIKeys.ReasoningEffortPolicyTest do
       assert {:ok, %Decision{requested_effort: " Medium ", applied_effort: "medium"}} =
                Access.resolve_reasoning_effort(key, " Medium ", @known, "low")
 
-      for requested <- ["high", "focused"] do
+      for requested <- ["high", "focused", 0, 64, 18_446_744_073_709_551_615] do
         assert {:error, :reasoning_effort_not_allowed} =
                  Access.resolve_reasoning_effort(key, requested, @known, "low")
       end
@@ -84,7 +84,7 @@ defmodule CodexPooler.Access.APIKeys.ReasoningEffortPolicyTest do
     test "always-use applies its configured effort regardless of request or model levels" do
       key = %APIKey{enforced_reasoning_effort: "ultra"}
 
-      for requested <- [nil, "low", "custom"] do
+      for requested <- [nil, "low", "custom", 0, 64, 18_446_744_073_709_551_615] do
         assert {:ok,
                 %Decision{
                   mode: :always_use,
