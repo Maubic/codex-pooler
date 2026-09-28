@@ -1,0 +1,561 @@
+---
+import { docs } from "../data/site";
+
+// The checks a request passes before anything reaches Codex, in the order Pooler applies them.
+const gates = [
+  { id: "ip", name: "Firewall" },
+  { id: "key", name: "Key" },
+  { id: "switch", name: "Pool switches" },
+  { id: "model", name: "Model" },
+  { id: "size", name: "Request size" },
+  { id: "window", name: "Token limits" },
+];
+
+// Example requests with the documented answer for the check that stops them.
+// Addresses come from the documentation ranges.
+const requests = [
+  {
+    who: "Review bot",
+    route: "POST /v1/responses",
+    meta: "gpt-6-luna · 38k input tokens",
+    stop: "",
+    status: "200",
+    result: "Routed to Account C",
+    detail: { ip: "203.0.113.24 allowed", key: "sk-cxp-3f1a9c… active", switch: "OpenAI-compatible API on", model: "gpt-6-luna allowed", size: "38k of 200k input", window: "1.2M of 5M this week" },
+  },
+  {
+    who: "Unknown client",
+    route: "POST /v1/responses",
+    meta: "gpt-6-luna · 12k input tokens",
+    stop: "ip",
+    status: "403",
+    result: "access_denied",
+    detail: { ip: "198.51.100.7 not allowed" },
+  },
+  {
+    who: "Docs writer",
+    route: "POST /v1/images/generations",
+    meta: "image generation",
+    stop: "switch",
+    status: "403",
+    result: "image_generation_disabled",
+    detail: { ip: "203.0.113.24 allowed", key: "sk-cxp-51de4b… active", switch: "Images off in this Pool" },
+  },
+  {
+    who: "Nightly job",
+    route: "POST /v1/responses",
+    meta: "gpt-6-sol · 64k input tokens",
+    stop: "model",
+    status: "400",
+    result: "model_not_allowed",
+    detail: { ip: "203.0.113.24 allowed", key: "sk-cxp-e24b70… active", switch: "OpenAI-compatible API on", model: "gpt-6-sol not allowed" },
+  },
+  {
+    who: "Test fixer",
+    route: "POST /v1/responses",
+    meta: "gpt-6-luna · 410k input tokens",
+    stop: "size",
+    status: "400",
+    result: "api_key_policy_limit_exceeded",
+    detail: { ip: "203.0.113.24 allowed", key: "sk-cxp-0b9d18… active", switch: "OpenAI-compatible API on", model: "gpt-6-luna allowed", size: "410k over the 200k cap" },
+  },
+  {
+    who: "Issue triage",
+    route: "POST /v1/responses",
+    meta: "gpt-6-luna · 22k input tokens",
+    stop: "window",
+    status: "429",
+    result: "api_key_policy_limit_exceeded",
+    detail: { ip: "203.0.113.24 allowed", key: "sk-cxp-9c07d2… active", switch: "OpenAI-compatible API on", model: "gpt-6-luna allowed", size: "22k of 200k input", window: "5M of 5M this week" },
+  },
+];
+
+// Without scripts, and with reduced motion, the page shows the image request being stopped.
+const still = requests[2];
+const stillState = (id: string) => {
+  const index = gates.findIndex((gate) => gate.id === id);
+  const stopAt = gates.findIndex((gate) => gate.id === still.stop);
+  return index < stopAt ? "pass" : index === stopAt ? "fail" : "skip";
+};
+const stillDetail = (id: string) => (still.detail as Record<string, string>)[id] ?? "Not reached";
+
+const controls = [
+  {
+    title: "Who can call",
+    text: "An IP and CIDR allowlist with trusted proxies, and keys you can pause, rotate, revoke or let expire.",
+    link: "Firewall settings",
+    href: docs("/getting-started/configuration/#forwarded-client-ip-policy"),
+    icon: "M12 3 5 6v5c0 4.5 3 8.3 7 10 4-1.7 7-5.5 7-10V6l-7-3ZM9 12l2 2 4-4",
+  },
+  {
+    title: "What they can use",
+    text: "Allowed and enforced models, a reasoning-effort policy and a service tier per key. Image generation, audio transcription and the OpenAI-compatible API switch on or off per Pool.",
+    link: "Key rules",
+    href: docs("/operators/api-keys/"),
+    icon: "M8 6h8a6 6 0 0 1 0 12H8A6 6 0 0 1 8 6Zm8 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
+  },
+  {
+    title: "How much",
+    text: "Requests per minute, concurrent requests, tokens per day and per week, and input and output tokens per request, with an override for one model.",
+    link: "Limits",
+    href: docs("/operators/api-keys/#limits"),
+    icon: "M4 18a8 8 0 1 1 16 0M12 18l4-6",
+  },
+  {
+    title: "How it reaches Codex",
+    text: "Auto, Full or Lite serving for each model, and outbound traffic through your own HTTP proxy if you want one.",
+    link: "Lite and Full",
+    href: docs("/reference/responses-lite-vs-full/"),
+    icon: "M4 12h13m-4-4 4 4-4 4M20 5v14",
+  },
+];
+---
+
+<section class="section guard" id="guardrails" aria-labelledby="guard-title">
+  <div class="wrap">
+    <header class="section-head" data-reveal>
+      <p class="eyebrow">Guardrails</p>
+      <h2 class="h2" id="guard-title">Every request passes <em>your rules first.</em></h2>
+      <p class="lede">
+        Pooler sits between your tools and Codex, so nothing goes out unchecked: who may call and from where, which models and features, how big and how much. Set the rules per key or per Pool and change them live.
+      </p>
+    </header>
+
+    <div class="guard-grid">
+      <div class="inspector" data-guard data-requests={JSON.stringify(requests)} data-reveal aria-hidden="true">
+        <div class="insp-bar">
+          <span class="dots"><i></i><i></i><i></i></span>
+          <span class="insp-title">Request checks</span>
+          <span class="insp-count" data-count>3 / {requests.length}</span>
+        </div>
+        <div class="req">
+          <b data-who>{still.who}</b>
+          <span class="req-route" data-route>{still.route}</span>
+          <span class="req-meta" data-meta>{still.meta}</span>
+        </div>
+        <ol class="gates">
+          {
+            gates.map((gate) => (
+              <li class={`gate ${stillState(gate.id)}`} data-gate={gate.id}>
+                <span class="gate-dot" />
+                <span class="gate-name">{gate.name}</span>
+                <span class="gate-detail" data-detail>
+                  {stillDetail(gate.id)}
+                </span>
+                <span class="gate-mark" />
+              </li>
+            ))
+          }
+        </ol>
+        <p class="verdict bad" data-verdict>
+          <b data-status>{still.status}</b>
+          <span data-result>{still.result}</span>
+        </p>
+      </div>
+
+      <div class="controls">
+        {
+          controls.map((control, index) => (
+            <article class="control" data-reveal style={`--delay:${(index % 2) * 0.06}s`}>
+              <span class="control-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d={control.icon} />
+                </svg>
+              </span>
+              <h3>{control.title}</h3>
+              <p>{control.text}</p>
+              <a href={control.href}>{control.link} →</a>
+            </article>
+          ))
+        }
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .guard {
+    background: var(--paper);
+    border-block: 1px solid var(--line-2);
+  }
+
+  .guard-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+    gap: clamp(24px, 4vw, 48px);
+  }
+
+  /* inspector ---------------------------------------------------- */
+
+  .inspector {
+    --c-panel: #1b1916;
+    --c-line: rgb(255 255 255 / 0.08);
+    --c-ink: #efe8dd;
+    --c-ink-2: #a39a8e;
+    --c-ink-3: #756d62;
+    border-radius: 20px;
+    background:
+      linear-gradient(rgb(255 255 255 / 0.028) 1px, transparent 1px) 0 0 / 28px 28px,
+      linear-gradient(90deg, rgb(255 255 255 / 0.028) 1px, transparent 1px) 0 0 / 28px 28px,
+      #121110;
+    color: var(--c-ink);
+    box-shadow: 0 2px 6px rgb(23 20 15 / 0.1), 0 20px 40px -24px rgb(23 20 15 / 0.45);
+    overflow: hidden;
+  }
+
+  .insp-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 40px;
+    padding-inline: 14px;
+    border-bottom: 1px solid var(--c-line);
+    background: rgb(255 255 255 / 0.02);
+  }
+
+  .dots {
+    display: inline-flex;
+    gap: 6px;
+  }
+
+  .dots i {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #3a3631;
+  }
+
+  .insp-title,
+  .insp-count {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--c-ink-2);
+  }
+
+  .insp-count {
+    margin-left: auto;
+    color: var(--c-ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .req {
+    display: grid;
+    gap: 3px;
+    margin: 14px 14px 10px;
+    padding: 12px 14px;
+    border: 1px solid var(--c-line);
+    border-radius: 12px;
+    background: var(--c-panel);
+  }
+
+  .req b {
+    font-size: 15px;
+  }
+
+  .req-route,
+  .req-meta {
+    overflow: hidden;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .req-route {
+    color: #9cc4ff;
+  }
+
+  .req-meta {
+    color: var(--c-ink-2);
+  }
+
+  .gates {
+    display: grid;
+    gap: 3px;
+    padding-inline: 14px;
+  }
+
+  .gate {
+    display: grid;
+    grid-template-columns: 8px 112px minmax(0, 1fr) 16px;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 9px;
+    font-size: 14px;
+    transition: background-color 0.25s, opacity 0.25s;
+  }
+
+  .gate-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #3a3631;
+    transition: background-color 0.25s, box-shadow 0.25s;
+  }
+
+  .gate-name {
+    font-weight: 700;
+  }
+
+  .gate-detail {
+    min-width: 0;
+    overflow: hidden;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--c-ink-3);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .gate-mark {
+    font-size: 13px;
+    font-weight: 700;
+    text-align: center;
+  }
+
+  .gate.pass .gate-dot {
+    background: #3ddc97;
+    box-shadow: 0 0 8px rgb(61 220 151 / 0.7);
+  }
+
+  .gate.pass .gate-detail {
+    color: var(--c-ink-2);
+  }
+
+  .gate.pass .gate-mark::before {
+    content: "✓";
+    color: #7ee2b8;
+  }
+
+  .gate.fail {
+    background: rgb(236 106 106 / 0.12);
+  }
+
+  .gate.fail .gate-dot {
+    background: #ec6a6a;
+    box-shadow: 0 0 8px rgb(236 106 106 / 0.7);
+  }
+
+  .gate.fail .gate-detail {
+    color: #f3a5a5;
+  }
+
+  .gate.fail .gate-mark::before {
+    content: "✕";
+    color: #ec6a6a;
+  }
+
+  .gate.skip {
+    opacity: 0.38;
+  }
+
+  .verdict {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    margin: 12px 14px 14px;
+    padding: 11px 13px;
+    border: 1px solid transparent;
+    border-radius: 11px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    transition: opacity 0.25s, background-color 0.25s, border-color 0.25s;
+  }
+
+  .verdict span {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .verdict b {
+    flex: none;
+    color: #fff;
+  }
+
+  .verdict.ok {
+    border-color: rgb(19 154 112 / 0.35);
+    background: rgb(19 154 112 / 0.14);
+    color: #b9ecd8;
+  }
+
+  .verdict.bad {
+    border-color: rgb(236 106 106 / 0.35);
+    background: rgb(236 106 106 / 0.12);
+    color: #f3c1c1;
+  }
+
+  .verdict.pending {
+    opacity: 0;
+  }
+
+  /* controls ------------------------------------------------------ */
+
+  .controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .control {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 20px;
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    background: var(--cream);
+  }
+
+  .control-ico {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    margin-bottom: 8px;
+    border-radius: 13px;
+    background: var(--orange-soft);
+    color: var(--orange-ink);
+  }
+
+  .control-ico svg {
+    width: 22px;
+    height: 22px;
+  }
+
+  .control h3 {
+    font-size: 18px;
+    font-weight: 800;
+  }
+
+  .control p {
+    font-size: 15.5px;
+    color: var(--ink-2);
+  }
+
+  .control a {
+    margin-top: auto;
+    margin-bottom: -8px;
+    padding-block: 8px;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--orange-ink);
+  }
+
+  .control a:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  @media (max-width: 1000px) {
+    .guard-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 560px) {
+    .controls {
+      grid-template-columns: 1fr;
+    }
+
+    .gate {
+      grid-template-columns: 8px 96px minmax(0, 1fr) 14px;
+      gap: 8px;
+      padding: 7px 8px;
+      font-size: 13px;
+    }
+
+    .gate-detail {
+      font-size: 11.5px;
+    }
+
+    .req,
+    .verdict {
+      margin-inline: 10px;
+    }
+
+    .gates {
+      padding-inline: 10px;
+    }
+  }
+</style>
+
+<script>
+  type Request = { who: string; route: string; meta: string; stop: string; status: string; result: string; detail: Record<string, string> };
+
+  const root = document.querySelector<HTMLElement>("[data-guard]");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (root && !reduceMotion) init(root);
+
+  function init(root: HTMLElement) {
+    const requests = JSON.parse(root.dataset.requests ?? "[]") as Request[];
+    const gates = Array.from(root.querySelectorAll<HTMLElement>("[data-gate]"));
+    const field = (name: string) => root.querySelector<HTMLElement>(`[data-${name}]`)!;
+    const [who, route, meta, count, verdict, status, result] = ["who", "route", "meta", "count", "verdict", "status", "result"].map(field);
+    const STEP = 300;
+    let index = 0;
+    let timers: number[] = [];
+
+    const later = (ms: number, fn: () => void) => timers.push(window.setTimeout(fn, ms));
+
+    // One request walks the checks; the first failing check stops it with that check's answer.
+    function play() {
+      const request = requests[index];
+      who.textContent = request.who;
+      route.textContent = request.route;
+      meta.textContent = request.meta;
+      count.textContent = `${index + 1} / ${requests.length}`;
+      verdict.classList.remove("ok", "bad");
+      verdict.classList.add("pending");
+      for (const gate of gates) {
+        gate.classList.remove("pass", "fail", "skip");
+        gate.querySelector<HTMLElement>("[data-detail]")!.textContent = "…";
+      }
+      const stopAt = request.stop ? gates.findIndex((gate) => gate.dataset.gate === request.stop) : gates.length;
+      gates.forEach((gate, i) => {
+        later(250 + Math.min(i, stopAt + 1) * STEP, () => {
+          const detail = gate.querySelector<HTMLElement>("[data-detail]")!;
+          if (i > stopAt) {
+            gate.classList.add("skip");
+            detail.textContent = "Not reached";
+          } else {
+            gate.classList.add(i === stopAt ? "fail" : "pass");
+            detail.textContent = request.detail[gate.dataset.gate!] ?? "";
+          }
+        });
+      });
+      const end = 250 + (Math.min(stopAt, gates.length - 1) + 1) * STEP;
+      later(end, () => {
+        status.textContent = request.status;
+        result.textContent = request.result;
+        verdict.classList.remove("pending");
+        verdict.classList.add(request.stop ? "bad" : "ok");
+      });
+      later(end + 2000, () => {
+        index = (index + 1) % requests.length;
+        play();
+      });
+    }
+
+    const stop = () => {
+      timers.forEach(clearTimeout);
+      timers = [];
+    };
+    let onScreen = false;
+    const sync = () => {
+      stop();
+      if (onScreen && !document.hidden) play();
+    };
+    new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting === onScreen) return;
+      onScreen = entry.isIntersecting;
+      sync();
+    }).observe(root);
+    document.addEventListener("visibilitychange", sync);
+  }
+</script>
