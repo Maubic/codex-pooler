@@ -646,6 +646,118 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
     end
   end
 
+  # Every admission transition is reported on the lifecycle event, in the same
+  # order in both topologies (findings#270 row 270-201): with owner forwarding
+  # on, the owner used to arm, consume and collect without an event, so a
+  # forwarded compaction showed reservations and confirmations out of nothing.
+  # An uninterrupted mid-turn compaction on one connection; its final's own
+  # ordinary success re-arms the next compaction from `consumed_final`.
+  for topology <- [:direct, :owner_forwarded] do
+    @tag topology: topology
+    test "#{topology} native compaction admission reports every transition in the same order in both topologies", %{topology: topology} do
+      put_owner_forwarding!(topology == :owner_forwarded)
+      attach_admission_lifecycle!()
+      turn_id = "sequence-#{topology}"
+      compact_item = %{"type" => "compaction", "encrypted_content" => "synthetic-sequence-#{topology}"}
+
+      upstream =
+        start_upstream(
+          # provenance: synthetic_adversarial (compaction v2-shaped mid-turn frames on one connection)
+          FakeUpstream.strict_sequence([
+            window_request(1, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_sequence_anchor", @anchor_usage)])),
+            window_request(1, [equals: %{"previous_response_id" => "resp_sequence_anchor"}], event_frames(compaction_events(compact_item, "resp_sequence_compact"))),
+            window_request(1, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_sequence_final", @resumed_usage)]))
+          ])
+        )
+
+      setup = gateway_setup(upstream, compact?: true)
+      state = callback_socket!(setup, "sequence-#{topology}")
+
+      try do
+        state = run_turn!(state, mid_turn_payload(setup, [window_message("synthetic sequence anchor")], turn_id, "turn", 1))
+        state = run_turn!(state, window_compaction_frame(setup, turn_id, "resp_sequence_anchor"))
+        {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+        assert [%{"type" => "response.completed", "response" => %{"id" => "resp_sequence_final"}}] = frames
+        _state = state
+        assert_window_accounting!(setup, [@anchor_usage, @compact_usage, @resumed_usage])
+
+        events = for event <- drain_lifecycle([]), not (event.from == :cleared and event.to == :cleared), do: event
+        assert MapSet.new(events, & &1.topology) == MapSet.new([lifecycle_topology(topology)])
+
+        assert Enum.map(events, &{&1.operation, &1.reason, &1.from, &1.to}) == [
+                 {:ordinary_success, :success, :cleared, :pending_compact},
+                 {:reserve, :success, :pending_compact, :reserved_compact},
+                 {:accounting, :success, :reserved_compact, :accounting_started_compact},
+                 {:consume, :success, :accounting_started_compact, :consumed_compact},
+                 {:collect, :success, :consumed_compact, :collected_unconfirmed},
+                 {:confirm, :success, :collected_unconfirmed, :pending_final},
+                 {:reserve, :success, :pending_final, :reserved_final},
+                 {:accounting, :success, :reserved_final, :accounting_started_final},
+                 {:consume, :success, :accounting_started_final, :consumed_final},
+                 {:ordinary_success, :success, :consumed_final, :pending_compact}
+               ]
+
+        assert :ok = FakeUpstream.verify!(upstream)
+      after
+        CodexResponsesSocket.terminate(:closed, Process.delete(:crossing_socket_state))
+      end
+    end
+  end
+
+  # The same for a first full-history compaction, whose admission is opened
+  # when the socket authorizes the collected result: authorize, collect and
+  # confirm are reported in both topologies (findings#270 row 270-201).
+  for topology <- [:direct, :owner_forwarded] do
+    @tag topology: topology
+    test "#{topology} first full-history compaction admission reports every transition in the same order in both topologies", %{topology: topology} do
+      put_owner_forwarding!(topology == :owner_forwarded)
+      attach_admission_lifecycle!()
+      turn_id = "first-sequence-#{topology}"
+      compact_item = %{"type" => "compaction", "encrypted_content" => "synthetic-first-sequence-#{topology}"}
+
+      upstream =
+        start_upstream(
+          # provenance: synthetic_adversarial (compaction v2-shaped full-history frames on one connection)
+          FakeUpstream.strict_sequence([
+            window_request(1, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_first_sequence_anchor", @anchor_usage)])),
+            window_request(1, [forbidden: ["previous_response_id"]], event_frames(compaction_events(compact_item, "resp_first_sequence_compact"))),
+            window_request(1, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_first_sequence_final", @resumed_usage)]))
+          ])
+        )
+
+      setup = gateway_setup(upstream, compact?: true)
+      state = callback_socket!(setup, "first-sequence-#{topology}")
+
+      try do
+        history = [window_message("synthetic first sequence anchor")]
+        state = run_turn!(state, mid_turn_payload(setup, history, turn_id, "turn", 1))
+        state = run_turn!(state, mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1))
+        {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+        assert [%{"type" => "response.completed", "response" => %{"id" => "resp_first_sequence_final"}}] = frames
+        _state = state
+        assert_window_accounting!(setup, [@anchor_usage, @compact_usage, @resumed_usage])
+
+        events = for event <- drain_lifecycle([]), not (event.from == :cleared and event.to == :cleared), do: event
+        assert MapSet.new(events, & &1.topology) == MapSet.new([lifecycle_topology(topology)])
+
+        assert Enum.map(events, &{&1.operation, &1.reason, &1.from, &1.to}) == [
+                 {:ordinary_success, :success, :cleared, :pending_compact},
+                 {:ordinary_success, :success, :pending_compact, :ordinary_success},
+                 {:collect, :success, :ordinary_success, :collected_unconfirmed},
+                 {:confirm, :success, :collected_unconfirmed, :pending_final},
+                 {:reserve, :success, :pending_final, :reserved_final},
+                 {:accounting, :success, :reserved_final, :accounting_started_final},
+                 {:consume, :success, :accounting_started_final, :consumed_final},
+                 {:ordinary_success, :success, :consumed_final, :pending_compact}
+               ]
+
+        assert :ok = FakeUpstream.verify!(upstream)
+      after
+        CodexResponsesSocket.terminate(:closed, Process.delete(:crossing_socket_state))
+      end
+    end
+  end
+
   # With owner forwarding on, the client's final can reach the owner before
   # the owner hears that its session closed the connection the admission names
   # (findings#270 row 270-182). The owner checks the session's open connection

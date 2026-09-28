@@ -648,9 +648,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
          {:ok, admission} <- NativeCompactionAdmission.arm_compact(admission, expires_at_ms) do
       {:ok, admission,
        %{
-         state
-         | native_compaction_admission: admission,
-           first_compact_result: nil,
+         put_admission(state, admission)
+         | first_compact_result: nil,
            ordinary_success_result: nil,
            native_compaction_admission_downstream: stable_downstream(downstream)
        }}
@@ -714,9 +713,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
            ) do
       {:ok, provenance,
        %{
-         state
-         | native_compaction_admission: %{admission | compaction_item_digest: receipt.item_digest},
-           first_compact_result: nil,
+         put_admission(state, %{admission | compaction_item_digest: receipt.item_digest})
+         | first_compact_result: nil,
            native_compaction_admission_downstream: stable_downstream(downstream)
        }}
     else
@@ -960,6 +958,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
         phase when phase in [:accounting_started_compact, :accounting_started_final] ->
           :accounting
 
+        phase when phase in [:consumed_compact, :consumed_final] ->
+          :consume
+
         :collected_unconfirmed ->
           :collect
 
@@ -1082,9 +1083,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
       {:ok, witness,
        %{
-         state
-         | native_compaction_admission: consumed,
-           forwarded_send_witness: %ForwardedSendWitnessState{
+         put_admission(state, consumed)
+         | forwarded_send_witness: %ForwardedSendWitnessState{
              digest: ForwardedSendWitnessV1.digest(witness),
              binding: capability.binding,
              control_ref: capability.control_ref,
@@ -3385,7 +3385,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
        ) do
     if successful_upstream_result?(result) do
       case NativeCompactionAdmission.record_compact_collected(state.native_compaction_admission) do
-        {:ok, admission} -> %{state | native_compaction_admission: admission}
+        {:ok, admission} -> put_admission(state, admission)
         {:error, reason} -> clear_native_compaction_admission(state, reason)
       end
     else
@@ -3402,7 +3402,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
              state.native_compaction_admission,
              provenance
            ) do
-        {:ok, admission} -> %{state | native_compaction_admission: admission}
+        {:ok, admission} -> put_admission(state, admission)
         {:error, reason} -> clear_native_compaction_admission(state, reason)
         {:error, _reason, admission} -> put_admission(state, admission)
       end

@@ -261,9 +261,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionAdmission
     on_exit(fn -> :telemetry.detach(handler_id) end)
   end
 
-  # The direct upstream session reports the arm; the owner arms a forwarded
-  # admission without an event, so poll its authoritative state until it is
-  # armed for the attached socket (no completion signal reaches the test).
+  # The direct upstream session reports the arm. The owner reports its arm
+  # too (findings#270 row 270-201), but a forwarded arm counts only once it
+  # names the attached socket, which the event does not carry, so poll the
+  # owner's authoritative state until it is armed for that socket.
   defp await_armed!(:direct, _setup) do
     receive do
       {:admission_lifecycle, _from, :pending_compact} -> :ok
