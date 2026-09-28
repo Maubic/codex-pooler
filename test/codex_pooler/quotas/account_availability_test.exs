@@ -30,7 +30,7 @@ defmodule CodexPooler.Quotas.AccountAvailabilityTest do
 
   describe "windowless provider availability" do
     test "affirmative raw rate flags are plan-independent direct-wire evidence" do
-      for plan_type <- ["plus", "enterprise", "future_plan"] do
+      for plan_type <- ["plus", "promax", "enterprise", "future_plan"] do
         assert_result(
           %{
             "plan_type" => plan_type,
@@ -89,7 +89,7 @@ defmodule CodexPooler.Quotas.AccountAvailabilityTest do
     end
 
     test "plan name never creates availability" do
-      for plan_type <- ["business", "self_serve_business_usage_based"] do
+      for plan_type <- ["business", "self_serve_business_usage_based", "promax"] do
         assert_result(%{"plan_type" => plan_type}, [], nil)
       end
     end
