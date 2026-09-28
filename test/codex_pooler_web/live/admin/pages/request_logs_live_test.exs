@@ -2083,8 +2083,9 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
 
     {:ok, view, _html} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}")
 
-    assert has_element?(view, "#request-log-row-#{translated_request.id} [data-role='route-context-line'] [data-role='route-origin']", "/v1/chat/completions")
+    assert has_element?(view, "#request-log-row-#{translated_request.id} [data-role='route-paths-line'] [data-role='route-origin']", "/v1/chat/completions")
     assert has_element?(view, "#request-log-row-#{translated_request.id} [data-role='route-context-line'] [data-role='user-agent']", "litellm 1.93.0")
+    refute has_element?(view, "#request-log-row-#{translated_request.id} [data-role='route-context-line'] [data-role='route-origin']")
 
     assert has_element?(
              view,
@@ -2100,12 +2101,12 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
 
     assert has_element?(
              view,
-             "#request-log-row-#{translated_request.id} [data-role='route-origin'][title='translated from /v1/chat/completions']"
+             "#request-log-row-#{translated_request.id} [data-role='route-origin'][title='Client endpoint: /v1/chat/completions']"
            )
 
     assert has_element?(
              view,
-             "#request-log-row-#{translated_request.id} [data-role='route-origin'] .hero-arrows-right-left"
+             "#request-log-row-#{translated_request.id} [data-role='route-paths-line'] [data-role='route-translation'] .hero-arrows-right-left"
            )
 
     refute has_element?(

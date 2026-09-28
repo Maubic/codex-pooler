@@ -27,10 +27,9 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
       format_route_latency: 1,
       format_route_metadata: 1,
       format_total: 1,
-      format_transport_route: 1,
       format_upstream_account_label: 1,
       model_default_reasoning?: 1,
-      translated_origin: 1,
+      route_paths: 1,
       protocol_badge_class: 1,
       protocol_label: 1,
       protocol_title: 1,
@@ -423,30 +422,35 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
   attr :prefix, :string, required: true
 
   def request_log_route_cell(assigns) do
+    assigns = assign(assigns, :route_paths, route_paths(assigns.request_log))
+
     ~H"""
     <div class="request-log-lines grid min-w-0 gap-1">
-      <span class="flex min-w-0 items-center gap-2 text-base-content/80">
+      <span data-role="route-paths-line" class="flex min-w-0 items-center gap-1 whitespace-nowrap text-base-content/80" title={if @route_paths.source, do: "Translated from #{@route_paths.source} to #{@route_paths.destination}"}>
+        <span
+          :if={@route_paths.source}
+          id={"#{@prefix}-#{@request_log.id}-route-origin"}
+          data-role="route-origin"
+          class="min-w-0 max-w-[50%] shrink-0 truncate"
+          title={"Client endpoint: #{@route_paths.source}"}
+        >
+          {@route_paths.source}
+        </span>
+        <span :if={@route_paths.source} data-role="route-translation" class="inline-flex shrink-0 items-center text-base-content/55">
+          <.icon name="hero-arrows-right-left" class="size-3" />
+          <span class="sr-only">translated to</span>
+        </span>
         <span
           id={"#{@prefix}-#{@request_log.id}-route"}
           data-role="route"
           class="min-w-0 truncate"
-          title={format_transport_route(@request_log)}
+          title={@route_paths.destination}
         >
-          {format_transport_route(@request_log)}
+          {@route_paths.destination}
         </span>
       </span>
       <span data-role="route-context-line" class="flex min-w-0 items-center gap-1.5 whitespace-nowrap text-[11px]">
         <.request_log_protocol_badge request_log={@request_log} prefix={@prefix} />
-        <span
-          :if={origin = translated_origin(@request_log)}
-          id={"#{@prefix}-#{@request_log.id}-route-origin"}
-          data-role="route-origin"
-          class="flex min-w-0 items-center gap-1 whitespace-nowrap text-base-content/55"
-          title={"translated from #{origin}"}
-        >
-          <.icon name="hero-arrows-right-left" class="size-3 shrink-0" />
-          <span class="truncate">{origin}</span>
-        </span>
         <span
           :if={user_agent = user_agent_display(@request_log)}
           id={"#{@prefix}-#{@request_log.id}-user-agent"}

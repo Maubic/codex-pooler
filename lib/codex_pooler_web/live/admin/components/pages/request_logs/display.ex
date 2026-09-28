@@ -369,6 +369,28 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay do
     log.endpoint || "unknown endpoint"
   end
 
+  @doc "Recorded source and destination paths for the request table, without duplicate endpoints."
+  @spec route_paths(map()) :: %{source: String.t() | nil, destination: String.t()}
+  def route_paths(log) do
+    source = log |> translated_origin() |> present_string()
+    endpoint = log |> Map.get(:endpoint) |> present_string()
+    translated = translated_destination(log)
+
+    destination =
+      if endpoint == source do
+        translated || endpoint
+      else
+        endpoint || translated || source
+      end
+
+    %{source: if(source && source != destination, do: source), destination: destination || "unknown endpoint"}
+  end
+
+  defp translated_destination(%{metadata: metadata}) when is_map(metadata),
+    do: metadata |> nested_metadata_value("openai_compatibility", "translated_endpoint") |> present_string()
+
+  defp translated_destination(_log), do: nil
+
   def format_route_metadata(log) do
     [
       route_class(log),
