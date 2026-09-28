@@ -20,6 +20,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   alias CodexPooler.Gateway.Transports.BoundedResponseBody
   alias CodexPooler.Gateway.Transports.MisalignmentPolicyViolation
   alias CodexPooler.Gateway.Transports.RejectionBody
+  alias CodexPooler.Gateway.Transports.RetryAfter
   alias CodexPooler.Gateway.Transports.Streaming.RuntimeAdmissionProof
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.TransportFailureReason
@@ -406,7 +407,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
 
     result = OutboundHTTP.post(url, request_options)
     CloudflareCookies.store_from_result(url, result)
-    result = maybe_drain_rejection_body(result, opts)
+    result = result |> RetryAfter.capture() |> maybe_drain_rejection_body(opts)
 
     result
     |> normalize_upstream_transport_result(identity, opts)
@@ -478,7 +479,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
 
     result = OutboundHTTP.post(url, request_options)
     CloudflareCookies.store_from_result(url, result)
-    result = maybe_drain_rejection_body(result, opts)
+    result = result |> RetryAfter.capture() |> maybe_drain_rejection_body(opts)
 
     result
     |> normalize_upstream_transport_result(identity, opts)

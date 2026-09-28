@@ -56,7 +56,8 @@ defmodule CodexPooler.Gateway.Contracts do
           # open-circuit candidate (findings#206 row 206-532), and on the `/v1`
           # relayed `429` whose Pool advice is withheld (row 206-593): seconds
           # until that circuit admits a probe, 1..60, rendered as `Retry-After`.
-          optional(:circuit_retry_after_seconds) => pos_integer()
+          optional(:circuit_retry_after_seconds) => pos_integer(),
+          optional(:upstream_retry_after) => String.t() | nil
         }
   @type usage_limit :: %{required(:resets_at) => integer(), required(:resets_in_seconds) => pos_integer()}
   @type body_result :: %{
