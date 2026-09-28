@@ -391,26 +391,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PreviousResponseMissResen
     end
   end
 
-  # A `response.create` shaped like the released client's: its turn metadata
-  # names the thread and the turn, so a resend of the same turn carries the
-  # same turn id.
-  defp released_client_frame(setup, thread) do
-    fn input, turn_id, extra ->
-      metadata = %{"session_id" => thread, "thread_id" => thread, "turn_id" => turn_id}
-
-      %{
-        "type" => "response.create",
-        "model" => setup.model.exposed_model_id,
-        "input" => input,
-        "stream" => true,
-        "generate" => true,
-        "client_metadata" => Map.put(metadata, "x-codex-turn-metadata", CodexPooler.JSON.encode!(Map.put(metadata, "request_kind", "turn")))
-      }
-      |> Map.merge(extra)
-      |> CodexPooler.JSON.encode!()
-    end
-  end
-
   # The resend is admitted as the refused request's one successor: through the
   # owner's client-retry preflight (a retry link) or on its turn claim (the
   # predecessor recorded on the resend).
@@ -448,18 +428,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PreviousResponseMissResen
       upstream_model_id: "provider-gpt-example-unservable",
       metadata: %{"source_assignment_ids" => [setup.assignment.id], "source_assignment_models" => %{setup.assignment.id => source}}
     })
-  end
-
-  defp completed_response_frames(response_id, output, input_tokens, output_tokens) do
-    FakeUpstream.websocket_text_frames(
-      Enum.map(output, &CodexPooler.JSON.encode!(%{"type" => "response.output_item.done", "item" => &1})) ++
-        [
-          CodexPooler.JSON.encode!(%{
-            "type" => "response.completed",
-            "response" => %{"id" => response_id, "status" => "completed", "output" => output, "usage" => %{"input_tokens" => input_tokens, "output_tokens" => output_tokens, "total_tokens" => input_tokens + output_tokens}}
-          })
-        ]
-    )
   end
 
   defp receive_until_terminal(conn, websocket, ref) do

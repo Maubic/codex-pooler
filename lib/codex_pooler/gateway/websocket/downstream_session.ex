@@ -128,6 +128,11 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
   def close_detail(:owner_unavailable), do: {1011, "websocket owner is unavailable"}
   def close_detail(:owner_drained), do: {1001, "websocket owner is draining"}
   def close_detail(:stale_owner), do: {1011, "websocket owner lease is stale"}
+  # An idle native socket whose upstream connection closed between two requests
+  # (findings#270): "going away" with a fixed reason, like `:owner_drained`.
+  # The released client handles a close of its idle socket the same way
+  # whatever the code (1000, 1001, 1011 and 1012 were probed).
+  def close_detail(:upstream_connection_closed), do: {1001, "upstream connection closed"}
   def close_detail(_reason), do: {1011, "websocket owner unavailable"}
 
   @spec maybe_retarget_before_start(binary(), socket_state()) ::

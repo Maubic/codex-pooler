@@ -325,6 +325,44 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
     end
   end
 
+  @doc """
+  A `response.create` shaped like the released client's: its turn metadata
+  names the thread and the turn, so a resend of the same turn carries the same
+  turn id. Returns `fn input, turn_id, extra -> encoded frame end`.
+  """
+  def released_client_frame(setup, thread) do
+    fn input, turn_id, extra ->
+      metadata = %{"session_id" => thread, "thread_id" => thread, "turn_id" => turn_id}
+
+      %{
+        "type" => "response.create",
+        "model" => setup.model.exposed_model_id,
+        "input" => input,
+        "stream" => true,
+        "generate" => true,
+        "client_metadata" => Map.put(metadata, "x-codex-turn-metadata", CodexPooler.JSON.encode!(Map.put(metadata, "request_kind", "turn")))
+      }
+      |> Map.merge(extra)
+      |> CodexPooler.JSON.encode!()
+    end
+  end
+
+  @doc "A native turn's frames: each output item done, then `response.completed` with usage."
+  def completed_response_frames(response_id, output, input_tokens, output_tokens) do
+    FakeUpstream.websocket_text_frames(completed_response_events(response_id, output, input_tokens, output_tokens) |> Enum.map(&CodexPooler.JSON.encode!/1))
+  end
+
+  @doc "The events of `completed_response_frames/4`, for FakeUpstream modes that take events."
+  def completed_response_events(response_id, output, input_tokens, output_tokens) do
+    Enum.map(output, &%{"type" => "response.output_item.done", "item" => &1}) ++
+      [
+        %{
+          "type" => "response.completed",
+          "response" => %{"id" => response_id, "status" => "completed", "output" => output, "usage" => %{"input_tokens" => input_tokens, "output_tokens" => output_tokens, "total_tokens" => input_tokens + output_tokens}}
+        }
+      ]
+  end
+
   def native_previous_response_retry_event do
     %{
       "type" => "error",
@@ -668,5 +706,153 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
       _frame ->
         nil
     end)
+  end
+
+  @doc """
+  The `CodexResponsesSocket` state of one listener connection, read from its
+  ThousandIsland handler process (the pid `WebsocketCleanupFence` registers).
+  """
+  def socket_connection_state!(connection_pid) when is_pid(connection_pid) do
+    {_socket, handler_state} = :sys.get_state(connection_pid)
+    handler_state.connection.websock_state
+  end
+
+  @doc "Polls `socket_connection_state!/1` until `predicate` holds, within the detection budget."
+  def await_socket_connection_state!(connection_pid, predicate, deadline \\ nil) when is_function(predicate, 1) do
+    deadline = deadline || System.monotonic_time(:millisecond) + @detection_timeout_ms
+    state = socket_connection_state!(connection_pid)
+
+    cond do
+      predicate.(state) ->
+        state
+
+      System.monotonic_time(:millisecond) < deadline ->
+        receive do
+        after
+          5 -> await_socket_connection_state!(connection_pid, predicate, deadline)
+        end
+
+      true ->
+        flunk("websocket connection state did not reach the expected condition")
+    end
+  end
+
+  @doc """
+  Pings the Pooler and waits for the pong: the socket handled every frame the
+  client sent before the ping and is still open. A Close or a text frame
+  other than the Pooler's metadata control frame fails the barrier.
+  """
+  def socket_transport_barrier!(conn, websocket, ref) do
+    payload = "transport-barrier-#{System.unique_integer([:positive])}"
+    {:ok, websocket, data} = Mint.WebSocket.encode(websocket, {:ping, payload})
+    {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, data)
+    await_socket_pong!(conn, websocket, ref, payload, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+  end
+
+  defp await_socket_pong!(conn, websocket, ref, payload, deadline) do
+    message = receive_mint_socket_message!(conn, max(deadline - System.monotonic_time(:millisecond), 0), "timed out waiting for the websocket transport barrier")
+
+    case Mint.WebSocket.stream(conn, message) do
+      {:ok, conn, responses} ->
+        {websocket, pong?} =
+          Enum.reduce(responses, {websocket, false}, fn
+            {:data, ^ref, data}, {websocket, pong?} ->
+              assert {:ok, websocket, frames} = Mint.WebSocket.decode(websocket, data)
+              assert Enum.reject(frames, &(&1 == {:pong, payload} or metadata_control_frame?(&1))) == []
+              {websocket, pong? or {:pong, payload} in frames}
+
+            _response, acc ->
+              acc
+          end)
+
+        if pong?, do: {conn, websocket}, else: await_socket_pong!(conn, websocket, ref, payload, deadline)
+
+      {:error, _conn, reason, _responses} ->
+        flunk("websocket transport barrier failed: #{inspect(reason)}")
+
+      :unknown ->
+        await_socket_pong!(conn, websocket, ref, payload, deadline)
+    end
+  end
+
+  @doc """
+  Collects the frames the Pooler sends until its Close frame, without the
+  metadata control frames, and returns `{conn, websocket, frames}` with the
+  `{:close, code, reason}` frame last. The client does not answer the Close,
+  as the released Codex client does not.
+  """
+  def receive_frames_until_close!(conn, websocket, ref, frames \\ []) do
+    message = receive_mint_socket_message!(conn, @connection_shutdown_timeout_ms, "timed out waiting for the websocket close")
+
+    case Mint.WebSocket.stream(conn, message) do
+      {:ok, conn, responses} ->
+        {websocket, frames} =
+          Enum.reduce(responses, {websocket, frames}, fn
+            {:data, ^ref, data}, {websocket, frames} ->
+              assert {:ok, websocket, decoded} = Mint.WebSocket.decode(websocket, data)
+              {websocket, frames ++ Enum.reject(decoded, &metadata_control_frame?/1)}
+
+            _response, acc ->
+              acc
+          end)
+
+        if Enum.any?(frames, &match?({:close, _code, _reason}, &1)),
+          do: {conn, websocket, frames},
+          else: receive_frames_until_close!(conn, websocket, ref, frames)
+
+      {:error, _conn, reason, _responses} ->
+        flunk("websocket connection ended before a close frame: #{inspect(reason)}")
+
+      :unknown ->
+        receive_frames_until_close!(conn, websocket, ref, frames)
+    end
+  end
+
+  @doc "Receives text frames until a native terminal and returns `{conn, websocket, decoded_terminal}`."
+  def receive_native_terminal!(conn, websocket, ref) do
+    {conn, websocket, frame} = public_websocket_receive_text!(conn, websocket, ref)
+
+    case CodexPooler.JSON.decode!(frame) do
+      %{"type" => type} = terminal when type in @native_turn_terminal_types -> {conn, websocket, terminal}
+      _progress -> receive_native_terminal!(conn, websocket, ref)
+    end
+  end
+
+  @doc """
+  Holds the first response task that settles a websocket turn from now on,
+  right after its settlement and outside any transaction, so its socket still
+  tracks the turn until `release_settled_websocket_turn/2`. The held task
+  reports `{hold, :held, task_pid}`; one it is never released from releases
+  itself after the detection budget.
+  """
+  def hold_settled_websocket_turn! do
+    hold = make_ref()
+    handler_id = {__MODULE__, :settled_websocket_turn_hold, hold}
+    ExUnit.Callbacks.on_exit(fn -> :telemetry.detach(handler_id) end)
+    config = %{hold: hold, test: self(), claimed: :atomics.new(1, [])}
+    :ok = :telemetry.attach(handler_id, [:codex_pooler, :gateway, :stream, :outcome], &__MODULE__.hold_settled_websocket_turn_task/4, config)
+    hold
+  end
+
+  @doc false
+  def hold_settled_websocket_turn_task(_event, _measurements, %{outcome: "succeeded", downstream_transport: "websocket"}, %{hold: hold, test: test, claimed: claimed}) do
+    if not Repo.in_transaction?() and :atomics.add_get(claimed, 1, 1) == 1 do
+      send(test, {hold, :held, self()})
+
+      receive do
+        {^hold, :release} -> :ok
+      after
+        @detection_timeout_ms -> :ok
+      end
+    end
+
+    :ok
+  end
+
+  def hold_settled_websocket_turn_task(_event, _measurements, _metadata, _config), do: :ok
+
+  def release_settled_websocket_turn(hold, task_pid) when is_reference(hold) and is_pid(task_pid) do
+    send(task_pid, {hold, :release})
+    :ok
   end
 end

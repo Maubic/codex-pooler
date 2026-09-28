@@ -15,11 +15,14 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.TransportEnvelope
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
+  alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.CloseDiagnostics
   alias CodexPooler.Gateway.Websocket, as: GatewayWebsocket
+  alias CodexPooler.Gateway.Websocket.Adapter, as: WebsocketAdapter
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Assignments.PoolAssignments
   alias CodexPooler.Upstreams.Lifecycle.IdentityLifecycle
+  alias CodexPoolerWeb.WebsocketConnectionLogger
 
   @expected_feature_categories [
     files: [:route, :auth, :error, :ownership],
@@ -51,6 +54,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     reasoning_context: [:route, :auth, :error, :ownership],
     unsupported_upstream_fields: [:route, :auth, :ownership],
     api_key_websocket_revocation: [:auth, :error, :streaming, :ownership],
+    native_websocket_upstream_close: [:streaming, :ownership],
     firewall: [:route, :auth, :error, :ownership],
     pruned_runtime_helper_firewall: [:route, :error],
     decompression: [:route, :error, :overload],
@@ -82,9 +86,9 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     {:delete, "/v1/responses/:response_id"} => ~w(v1_unsupported_public_surface)a,
     {:get, "/api/codex/usage"} => ~w(firewall usage_alias_meter_identity)a,
     {:get, "/backend-api/codex/models"} => ~w(api_key_reasoning_availability backend_models_etag database_unavailable firewall pool_model_serving_modes)a,
-    {:get, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable duplicate_turn_fence exhausted_pool_usage_limit firewall function_tool_schema_lowering multi_agent_product_certification pool_model_serving_modes pooler_authored_error_type rejection_metadata terminal_failure_diagnostics tool_output_preservation upstream_error_param websocket_continuity)a,
+    {:get, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable duplicate_turn_fence exhausted_pool_usage_limit firewall function_tool_schema_lowering multi_agent_product_certification native_websocket_upstream_close pool_model_serving_modes pooler_authored_error_type rejection_metadata terminal_failure_diagnostics tool_output_preservation upstream_error_param websocket_continuity)a,
     {:get, "/backend-api/codex/v1/models"} => ~w(backend_models_etag backend_v1_alias_surface pool_model_serving_modes)a,
-    {:get, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface duplicate_turn_fence function_tool_schema_lowering multi_agent_product_certification pool_model_serving_modes tool_output_preservation)a,
+    {:get, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface duplicate_turn_fence function_tool_schema_lowering multi_agent_product_certification native_websocket_upstream_close pool_model_serving_modes tool_output_preservation)a,
     {:get, "/backend-api/wham/usage"} => ~w(firewall usage_alias_meter_identity)a,
     {:get, "/v1/files"} => ~w(v1_supported_surface)a,
     {:get, "/v1/files/:file_id"} => ~w(v1_supported_surface)a,
@@ -560,6 +564,30 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
 
       assert exact_api_key_websocket_revocation_contract?(fixture)
       refute exact_api_key_websocket_revocation_contract?(malformed_fixture)
+    end
+
+    # findings#270: the fixture names the runtime's own vocabularies, so the
+    # contract cannot drift from the causes, close and skip reasons in use.
+    test "locks the native websocket close after an upstream connection close" do
+      feature = CompatibilityMatrix.by_slug!(:native_websocket_upstream_close)
+      fixture = CompatibilityMatrix.fixture!(:native_websocket_upstream_close)
+
+      assert feature.current == :idle_native_socket_closes_after_upstream_close
+      assert feature.future_routes == []
+
+      assert feature.routes == [
+               %{method: :get, path: "/backend-api/codex/responses", transport: :websocket},
+               %{method: :get, path: "/backend-api/codex/v1/responses", transport: :websocket}
+             ]
+
+      assert fixture.topologies == [:owner_forwarding_off]
+      assert {fixture.close.code, fixture.close.reason} == WebsocketAdapter.close_detail(:upstream_connection_closed)
+      assert fixture.causes == CloseDiagnostics.anchor_invalidating_causes()
+      assert Enum.all?(fixture.excluded_causes, &(not CloseDiagnostics.anchor_invalidating_cause?(&1)))
+      assert fixture.latch.skip_reasons == WebsocketConnectionLogger.upstream_close_skip_reasons()
+      assert fixture.observability.closed == WebsocketConnectionLogger.downstream_closed_after_upstream_close_message()
+      assert fixture.observability.kept_open == WebsocketConnectionLogger.downstream_kept_open_after_upstream_close_message()
+      assert fixture.observability.metric == :none
     end
 
     test "documents the pruned runtime helper firewall matrix" do

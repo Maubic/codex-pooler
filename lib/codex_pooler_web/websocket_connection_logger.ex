@@ -5,6 +5,7 @@ defmodule CodexPoolerWeb.WebsocketConnectionLogger do
 
   alias CodexPooler.Gateway.Contracts
   alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
+  alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.CloseDiagnostics
 
   @init_failed_message "websocket init failed before request reservation"
   @closed_message "websocket closed before request reservation"
@@ -40,6 +41,17 @@ defmodule CodexPoolerWeb.WebsocketConnectionLogger do
   # threw away without ever dispatching it (findings#175).
   @replay_rejection_stages ~w(owner_preflight replay_preflight native_compaction_deferral discarded_submission)
 
+  # A native socket whose upstream connection closed between two requests
+  # closes itself once idle, or says why it stays open, so a
+  # `previous_response_not_found` refusal that still follows such a close can
+  # be attributed (findings#270). `reason_code` is the upstream close cause and
+  # the line joins the upstream close line on `lifecycle_id` and `generation`.
+  @downstream_closed_after_upstream_close_message "websocket downstream closed after upstream connection close"
+  @downstream_kept_open_after_upstream_close_message "websocket downstream kept open after upstream connection close"
+  @upstream_close_metadata_keys [:reason_code, :skip_reason, :lifecycle_id, :generation, :forwarding, :codex_session_id]
+  @upstream_close_skip_reasons ~w(client_frame busy queued public_route revoked handoff reconnect no_completed_response)
+  @upstream_close_forwarding ~w(off on)
+
   @type event_metadata :: keyword() | map()
 
   @spec init_failed_message() :: String.t()
@@ -59,6 +71,54 @@ defmodule CodexPoolerWeb.WebsocketConnectionLogger do
 
   @spec replay_rejection_message() :: String.t()
   def replay_rejection_message, do: @replay_rejection_message
+
+  @spec downstream_closed_after_upstream_close_message() :: String.t()
+  def downstream_closed_after_upstream_close_message, do: @downstream_closed_after_upstream_close_message
+
+  @spec downstream_kept_open_after_upstream_close_message() :: String.t()
+  def downstream_kept_open_after_upstream_close_message, do: @downstream_kept_open_after_upstream_close_message
+
+  @doc "Why a native socket keeps its connection open after its upstream connection closed."
+  @spec upstream_close_skip_reasons() :: [String.t()]
+  def upstream_close_skip_reasons, do: @upstream_close_skip_reasons
+
+  @doc """
+  Logs a native socket closing itself because its upstream connection closed
+  between two requests. The metadata names the close `reason_code` (a cause
+  from `CloseDiagnostics.anchor_invalidating_causes/0`), `lifecycle_id`,
+  `generation`, `forwarding` (`off` or `on`) and `codex_session_id`; a cause
+  outside that vocabulary logs nothing.
+  """
+  @spec log_downstream_closed_after_upstream_close(event_metadata()) :: :ok
+  def log_downstream_closed_after_upstream_close(metadata) do
+    metadata = metadata |> normalize_metadata() |> Map.delete(:skip_reason) |> Map.delete("skip_reason")
+    log_upstream_close_event(@downstream_closed_after_upstream_close_message, metadata)
+  end
+
+  @doc """
+  Logs why a native socket keeps its connection open after its upstream
+  connection closed between two requests: the same metadata as
+  `log_downstream_closed_after_upstream_close/1` plus a `skip_reason` from
+  `upstream_close_skip_reasons/0`. A reason or cause outside those
+  vocabularies logs nothing.
+  """
+  @spec log_downstream_kept_open_after_upstream_close(event_metadata()) :: :ok
+  def log_downstream_kept_open_after_upstream_close(metadata) do
+    metadata = normalize_metadata(metadata)
+
+    case fixed_vocabulary(metadata_value(metadata, :skip_reason), @upstream_close_skip_reasons) do
+      nil -> :ok
+      _skip_reason -> log_upstream_close_event(@downstream_kept_open_after_upstream_close_message, metadata)
+    end
+  end
+
+  # The cause is checked at run time against the upstream session's own
+  # vocabulary, never a copy of it.
+  defp log_upstream_close_event(message, metadata) do
+    if CloseDiagnostics.anchor_invalidating_cause?(metadata_value(metadata, :reason_code)),
+      do: log_event(:info, message, metadata, nil, @upstream_close_metadata_keys),
+      else: :ok
+  end
 
   @spec log_init_failed_before_request_reservation(event_metadata(), term()) :: :ok
   def log_init_failed_before_request_reservation(metadata, reason) do
@@ -247,6 +307,15 @@ defmodule CodexPoolerWeb.WebsocketConnectionLogger do
 
   defp allowed_metadata_value(:rejection_stage, value),
     do: fixed_vocabulary(value, @replay_rejection_stages)
+
+  defp allowed_metadata_value(:skip_reason, value),
+    do: fixed_vocabulary(value, @upstream_close_skip_reasons)
+
+  defp allowed_metadata_value(:forwarding, value),
+    do: fixed_vocabulary(value, @upstream_close_forwarding)
+
+  defp allowed_metadata_value(:generation, value) when is_integer(value) and value > 0, do: value
+  defp allowed_metadata_value(:generation, _value), do: nil
 
   defp allowed_metadata_value(_key, value), do: value
 

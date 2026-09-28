@@ -23,6 +23,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionTrace
   alias CodexPooler.Gateway.Transports.Websocket.RemoteReconnectControlV2
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
+  alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.CloseDiagnostics
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerAdmissionControlV1
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
   alias CodexPooler.Gateway.Websocket
@@ -113,6 +114,8 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   defp handle_socket_frame({_payload, [opcode: opcode]} = frame, state)
        when opcode in [:text, :binary] do
+    state = cancel_upstream_close(state)
+
     if socket_revoked?(state) do
       {:ok, state}
     else
@@ -422,6 +425,19 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       end
 
     close_if_revoked_idle(result)
+  end
+
+  # This socket's own upstream session (owner forwarding off) closed its
+  # connection between two requests (findings#270). A signal from any other
+  # session falls through to the catch-all below.
+  defp handle_socket_info(
+         {:upstream_websocket_connection_closed, session, %{} = signal},
+         %{upstream_websocket_session: session} = state
+       )
+       when is_pid(session) do
+    state
+    |> note_upstream_connection_closed(signal, :off)
+    |> then(&close_if_revoked_idle({:ok, &1}))
   end
 
   defp handle_socket_info(_message, state), do: {:ok, state}
@@ -1157,6 +1173,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     result
     |> flush_discarded_submissions()
     |> close_revoked_socket_result()
+    |> close_upstream_closed_socket_result()
   end
 
   defp flush_discarded_submissions({:ok, state}) do
@@ -1262,6 +1279,154 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     do: Map.put(state, :api_key_close_sent?, true)
 
   defp maybe_mark_api_key_closed(state), do: state
+
+  # The upstream connection a native turn's response came from closed between
+  # two requests (findings#270). A `previous_response_id` resolves only on the
+  # connection that produced it, so an idle client that goes on anchoring on
+  # that response meets `previous_response_not_found` on the next connection
+  # and resends the whole request; a client connected to the provider sees the
+  # provider's close and resends at once instead. Closing the idle socket gives
+  # the client that same close. The socket latches the signal and closes
+  # `1001` once idle; the latch is taken only when the client can hold an
+  # anchor on this socket (its last pushed terminal completed a native
+  # response, `last_completed_native_response`) and nothing newer than that
+  # response is under way. Anything else keeps the socket open with one line
+  # naming why (`skip_reason`).
+  #
+  # `signal` is `%{cause: atom, lifecycle_id: binary, generation: pos_integer}`
+  # (other keys ignored); `forwarding` is `:off` for this socket's own session
+  # signal and `:on` for the same facts relayed by a websocket owner. The
+  # close itself happens in `close_upstream_closed_socket_result/1`, the last
+  # stage of `close_if_revoked_idle/1`, so every path that can leave the
+  # socket idle closes it: a caller runs the note and then the funnel.
+  defp note_upstream_connection_closed(
+         state,
+         %{cause: cause, lifecycle_id: lifecycle_id, generation: generation},
+         forwarding
+       )
+       when is_atom(cause) and is_binary(lifecycle_id) and is_integer(generation) and generation > 0 and
+              forwarding in [:off, :on] do
+    upstream_close = %{cause: cause, lifecycle_id: lifecycle_id, generation: generation, forwarding: forwarding}
+
+    cond do
+      not CloseDiagnostics.anchor_invalidating_cause?(cause) ->
+        state
+
+      skip_reason = upstream_close_skip_reason(state) ->
+        :ok = log_upstream_close_kept_open(state, upstream_close, skip_reason)
+        state
+
+      true ->
+        Map.put(state, :upstream_close_pending, upstream_close)
+    end
+  end
+
+  defp note_upstream_connection_closed(state, _signal, _forwarding), do: state
+
+  # A client frame after the signal shows the client is still using the
+  # socket: its request meets the fresh upstream connection as it did before
+  # this close existed, and the socket stays open.
+  defp cancel_upstream_close(%{upstream_close_pending: %{} = upstream_close} = state),
+    do: drop_upstream_close(state, upstream_close, :client_frame)
+
+  defp cancel_upstream_close(state), do: state
+
+  # Unchanged when nothing is latched: every socket result passes here, and
+  # socket tests compare whole states. A stop passes through untouched, so a
+  # revocation's 1008 always wins.
+  defp close_upstream_closed_socket_result({:ok, %{upstream_close_pending: %{} = upstream_close} = state}) do
+    case upstream_close_decision(state) do
+      :wait -> {:ok, state}
+      {:skip, skip_reason} -> {:ok, drop_upstream_close(state, upstream_close, skip_reason)}
+      :close -> {:stop, :normal, Adapter.close_detail(:upstream_connection_closed), close_after_upstream_close(state, upstream_close)}
+    end
+  end
+
+  defp close_upstream_closed_socket_result({:push, messages, %{upstream_close_pending: %{} = upstream_close} = state}) do
+    case upstream_close_decision(state) do
+      :wait ->
+        {:push, messages, state}
+
+      {:skip, skip_reason} ->
+        {:push, messages, drop_upstream_close(state, upstream_close, skip_reason)}
+
+      :close ->
+        {:stop, :normal, Adapter.close_detail(:upstream_connection_closed), List.wrap(messages), close_after_upstream_close(state, upstream_close)}
+    end
+  end
+
+  defp close_upstream_closed_socket_result(result), do: result
+
+  defp upstream_close_decision(state) do
+    cond do
+      skip_reason = upstream_close_skip_reason(state) -> {:skip, skip_reason}
+      upstream_close_idle?(state) -> :close
+      true -> :wait
+    end
+  end
+
+  # The same conditions hold when the signal arrives and when the socket goes
+  # idle, in this order: first what the socket is (its route, its key, its
+  # owner), then what it is doing.
+  defp upstream_close_skip_reason(state),
+    do: upstream_close_socket_skip_reason(state) || upstream_close_work_skip_reason(state)
+
+  defp upstream_close_socket_skip_reason(state) do
+    cond do
+      Adapter.public_responses_stream?(state) or is_pid(Map.get(state, :public_response_task_pid)) -> :public_route
+      socket_revoked?(state) -> :revoked
+      not is_nil(Map.get(state, :websocket_owner_pending_handoff)) -> :handoff
+      Map.get(state, :websocket_owner_active_turn_reconnect?, false) == true -> :reconnect
+      true -> nil
+    end
+  end
+
+  # `busy`: a tracked task whose terminal the socket has not accepted is a
+  # newer request (or one that failed before any terminal), while tasks whose
+  # terminals were all accepted are turns that ended before the close and are
+  # still settling, which the close waits for.
+  defp upstream_close_work_skip_reason(state) do
+    tasks = Map.get(state, :tasks, MapSet.new())
+
+    cond do
+      not :queue.is_empty(Map.get(state, :queued_response_payloads, :queue.new())) -> :queued
+      not MapSet.subset?(tasks, Map.get(state, :response_task_terminals_accepted, MapSet.new())) -> :busy
+      not is_map(Map.get(state, :last_completed_native_response)) -> :no_completed_response
+      true -> nil
+    end
+  end
+
+  defp upstream_close_idle?(state) do
+    MapSet.size(Map.get(state, :tasks, MapSet.new())) == 0 and
+      map_size(Map.get(state, :direct_cleanup_contexts, %{})) == 0
+  end
+
+  defp drop_upstream_close(state, upstream_close, skip_reason) do
+    :ok = log_upstream_close_kept_open(state, upstream_close, skip_reason)
+    Map.delete(state, :upstream_close_pending)
+  end
+
+  defp close_after_upstream_close(state, upstream_close) do
+    :ok = WebsocketConnectionLogger.log_downstream_closed_after_upstream_close(upstream_close_log_metadata(state, upstream_close))
+    Map.delete(state, :upstream_close_pending)
+  end
+
+  defp log_upstream_close_kept_open(state, upstream_close, skip_reason) do
+    state
+    |> upstream_close_log_metadata(upstream_close)
+    |> Map.put(:skip_reason, skip_reason)
+    |> WebsocketConnectionLogger.log_downstream_kept_open_after_upstream_close()
+  end
+
+  defp upstream_close_log_metadata(state, upstream_close) do
+    %{
+      reason_code: upstream_close.cause,
+      lifecycle_id: upstream_close.lifecycle_id,
+      generation: upstream_close.generation,
+      forwarding: upstream_close.forwarding,
+      codex_session_id: codex_session_id(state)
+    }
+  end
 
   defp handle_owner_frame(message, state) do
     state = bind_reconnect_owner_turn(message, state)

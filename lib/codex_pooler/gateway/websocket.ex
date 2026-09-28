@@ -86,10 +86,21 @@ defmodule CodexPooler.Gateway.Websocket do
 
   defp prepare_local_websocket_session(auth, opts) do
     with {:ok, session} <- start_codex_session(auth, opts),
-         {:ok, upstream_websocket_session} <- UpstreamWebsocketSession.start_link() do
+         {:ok, upstream_websocket_session} <- UpstreamWebsocketSession.start_link(local_upstream_session_options(opts)) do
       {:ok, %{codex_session: session, upstream_websocket_session: upstream_websocket_session}}
     end
   end
+
+  # The native socket preparing its session (this runs in the socket process)
+  # hears when the session's upstream connection closes between two requests,
+  # so it can close the client the way the provider closes a client connected
+  # to it directly, and the client's next request goes out whole instead of
+  # anchored on a response only the closed connection could resolve
+  # (findings#270). A public `/v1` websocket does not subscribe and keeps
+  # today's answer to such an anchor: the close is fitted to the released Codex
+  # client, whose reconnect and whole resend were probed.
+  defp local_upstream_session_options(%RequestOptions{openai_compatibility: %{public_openai_responses_stream: true}}), do: []
+  defp local_upstream_session_options(_opts), do: [connection_close_subscriber: self()]
 
   defp prepare_owner_websocket_session(auth, opts) do
     opts = owner_websocket_opts(opts)

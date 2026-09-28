@@ -593,6 +593,65 @@ defmodule CodexPoolerWeb.WebsocketConnectionLoggerTest do
     end
   end
 
+  # findings#270: a native socket closing itself after its upstream connection
+  # closed between requests, or naming why it stays open.
+  describe "upstream close events" do
+    test "logs the downstream close with the fixed fields in order and nothing else" do
+      lifecycle_id = Ecto.UUID.generate()
+      sentinel = "UPSTREAM_CLOSE_PRIVATE_SENTINEL"
+
+      log =
+        capture_lifecycle_log(fn ->
+          assert :ok =
+                   WebsocketConnectionLogger.log_downstream_closed_after_upstream_close(%{
+                     reason_code: :pong_deadline,
+                     skip_reason: :busy,
+                     lifecycle_id: lifecycle_id,
+                     generation: 4,
+                     forwarding: :off,
+                     codex_session_id: "session-upstream-close",
+                     prompt: sentinel
+                   })
+        end)
+
+      assert log == "websocket downstream closed after upstream connection close reason_code=pong_deadline lifecycle_id=#{lifecycle_id} generation=4 forwarding=off codex_session_id=session-upstream-close\n"
+    end
+
+    test "logs why the downstream stays open, for every fixed skip reason" do
+      for skip_reason <- WebsocketConnectionLogger.upstream_close_skip_reasons() do
+        log =
+          capture_lifecycle_log(fn ->
+            assert :ok =
+                     WebsocketConnectionLogger.log_downstream_kept_open_after_upstream_close(%{
+                       reason_code: :peer_close_frame,
+                       skip_reason: skip_reason,
+                       lifecycle_id: "lifecycle-kept-open",
+                       generation: 1,
+                       forwarding: :on,
+                       codex_session_id: "session-kept-open"
+                     })
+          end)
+
+        assert log == "websocket downstream kept open after upstream connection close reason_code=peer_close_frame skip_reason=#{skip_reason} lifecycle_id=lifecycle-kept-open generation=1 forwarding=on codex_session_id=session-kept-open\n"
+      end
+    end
+
+    test "logs nothing for a cause or skip reason outside the vocabularies, and drops malformed fields" do
+      log =
+        capture_lifecycle_log(fn ->
+          metadata = %{reason_code: :peer_close_frame, skip_reason: :busy, lifecycle_id: "lifecycle-malformed", generation: 2, forwarding: :off}
+
+          assert :ok = WebsocketConnectionLogger.log_downstream_closed_after_upstream_close(%{metadata | reason_code: :request_key_changed})
+          assert :ok = WebsocketConnectionLogger.log_downstream_closed_after_upstream_close(%{metadata | reason_code: "peer_close_frame"})
+          assert :ok = WebsocketConnectionLogger.log_downstream_kept_open_after_upstream_close(%{metadata | skip_reason: :unbounded_private_reason})
+          assert :ok = WebsocketConnectionLogger.log_downstream_kept_open_after_upstream_close(%{metadata | reason_code: :request_key_changed})
+          assert :ok = WebsocketConnectionLogger.log_downstream_closed_after_upstream_close(%{metadata | generation: 0, forwarding: :sideways, lifecycle_id: "Bearer synthetic-private"})
+        end)
+
+      assert log == "websocket downstream closed after upstream connection close reason_code=peer_close_frame lifecycle_id=redacted\n"
+    end
+  end
+
   defp lifecycle_metadata(request_id, session_id, phase) do
     %{
       request_id: request_id,

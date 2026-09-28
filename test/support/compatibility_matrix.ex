@@ -677,6 +677,19 @@ defmodule CodexPooler.CompatibilityMatrix do
       contract: "pausing, revoking or deleting a Pool API key, its expiry, moving it to another Pool, and disabling, archiving or deleting its Pool close existing Responses websockets, all but the move block new authentication, and a pool-scoped event only prompts closure; a newer-epoch pause or revoke event latches directly, key delete, key edit and Pool status or delete events reread durable authorization, an edit that changes the key's Pool or expiry broadcasts to both Pools even when it submits an unchanged status, an event- or expiry-prompted reread that meets a database error retries with backoff while the socket stays open, and an idle socket rereads at the key's expiry; the locked durable key row, its captured revocation epoch, which a Pool move advances, its expiry against the database clock and its Pool status remain authoritative when relay is missed or delayed, refuse a key that no longer exists with the captured epoch, and authorize response.processed before any upstream forward; claim, replay-intent and reservation refusals latch revocation, queued and later work is dropped, only pre-admitted work drains and settles once before the fixed 1008 close, legacy epochless events reread durable authorization, resume or re-enable requires a fresh connection, and firewall revocation semantics remain unchanged"
     },
     %{
+      slug: :native_websocket_upstream_close,
+      status: :supported,
+      current: :idle_native_socket_closes_after_upstream_close,
+      categories: [:streaming, :ownership],
+      routes: [
+        %{method: :get, path: "/backend-api/codex/responses", transport: :websocket},
+        %{method: :get, path: "/backend-api/codex/v1/responses", transport: :websocket}
+      ],
+      future_routes: [],
+      fixture: :native_websocket_upstream_close,
+      contract: "with owner forwarding off, a native backend websocket whose upstream connection closes between two requests, after at least one request was sent on it and for a cause that ends every response it produced as a previous_response_id anchor (a peer Close of any code, a transport close or error, a control frame or request frame that cannot be written, a missed pong, an undecodable frame or an invalidation; never a reuse-key change, whose request has already arrived), closes its client with the fixed 1001 upstream connection closed once idle, so the released client sends its next request whole on a new socket as it does after a close from the provider itself; the socket latches the close only when its last pushed terminal completed a native response and no queued frame, public turn, pending handoff, active-turn reconnect or newer turn is under way, waits for turns that ended before the close to settle, and names every close it does not act on with a fixed skip reason; a client frame that reaches the socket before the close is decided keeps it open and meets the fresh connection's previous_response_not_found guard with nothing sent, a frame that crosses the close starts nothing, a revocation keeps its 1008 close, the client's dropped connection after the close leaves no warning, and the public /v1/responses websocket never closes for it"
+    },
+    %{
       slug: :firewall,
       status: :supported,
       current: :explicit_forwarded_client_policy,
@@ -1039,6 +1052,38 @@ defmodule CodexPooler.CompatibilityMatrix do
   ]
 
   @fixtures %{
+    native_websocket_upstream_close: %{
+      topologies: [:owner_forwarding_off],
+      close: %{code: 1001, reason: "upstream connection closed"},
+      causes: [
+        :peer_close_frame,
+        :transport_closed,
+        :transport_error,
+        :ping_send_failed,
+        :pong_send_failed,
+        :send_failed,
+        :pong_deadline,
+        :decode_error,
+        :frame_error,
+        :invalidated
+      ],
+      excluded_causes: [:request_key_changed],
+      connection_requests: :at_least_one,
+      latch: %{
+        requires: :last_completed_native_response,
+        waits_for: :turns_ended_before_the_close,
+        skip_reasons: ~w(client_frame busy queued public_route revoked handoff reconnect no_completed_response)
+      },
+      client_frame_before_close: :keeps_socket_open,
+      client_frame_crossing_close: :starts_nothing,
+      revocation: :keeps_1008,
+      public_v1_websocket: :stays_open,
+      observability: %{
+        closed: "websocket downstream closed after upstream connection close",
+        kept_open: "websocket downstream kept open after upstream connection close",
+        metric: :none
+      }
+    },
     responses_access_programs: %{
       surfaces: ~w(http_json http_sse responses_websocket),
       serving_modes: ~w(full lite),
