@@ -99,7 +99,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.Diff do
     end
   end
 
-  defp new_file(started?), do: %{started?: started?, header: [], parts: [], hunks: []}
+  defp new_file(started?), do: %{started?: started?, header: [], parts: [], hunks: [], hunk_count: 0}
 
   # Lines before the first file section (a preamble) belong to its header.
   defp start_file(%{file: %{started?: false, parts: [], hunks: []} = preamble, hunk: nil} = state, line) do
@@ -133,7 +133,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.Diff do
 
   defp close_hunk(%{file: file, hunk: hunk} = state) do
     hunk = %{header: hunk.header, body: Enum.reverse(hunk.body), prefix_width: hunk.prefix_width}
-    file = %{file | hunks: [hunk | file.hunks], parts: [{:hunk, length(file.hunks)} | file.parts]}
+    file = %{file | hunks: [hunk | file.hunks], parts: [{:hunk, file.hunk_count} | file.parts], hunk_count: file.hunk_count + 1}
     %{state | file: file, hunk: nil}
   end
 
