@@ -1,0 +1,704 @@
+---
+import { docs } from "../data/site";
+
+// One Codex account and five agents: each signed in with the account itself,
+// or each holding a Pooler key of its own.
+const agents = [
+  { name: "Review bot", key: "3f1a9c", count: 214 },
+  { name: "Issue triage", key: "9c07d2", count: 88 },
+  { name: "Docs writer", key: "51de4b", count: 131 },
+  { name: "Nightly job", key: "e24b70", count: 47 },
+  { name: "Test fixer", key: "0b9d18", count: 162 },
+];
+
+const before = [
+  "Your account's tokens copied to every machine",
+  "Once one copy refreshes the login, the others are asked to sign in again",
+  "No numbers per agent, and nothing to pause one with",
+];
+
+const after = [
+  "One sign-in, on your server, and Pooler keeps it fresh",
+  "Pause, rotate, revoke or expire any key without touching the rest",
+  "Keys aren't tied to your subscription: add or swap an account later and no agent changes a setting",
+];
+
+const extras = [
+  { title: "Numbers per agent", text: "Every request logged with its key, and an Observatory page per key with success rate, cache hits, speed and cost.", href: docs("/operators/api-key-observatory/") },
+  { title: "Lens", text: "Flags responses where the provider reports a different model from the one Pooler sent.", href: docs("/operators/lens/") },
+  { title: "Alerts", text: "An email or a webhook when your account runs low or has to sign in again.", href: docs("/operators/alerts/") },
+  { title: "Your own proxy", text: "Pooler's traffic to OpenAI can leave through your HTTP proxy.", href: docs("/getting-started/configuration/#release-environment-variables") },
+];
+---
+
+<section class="section one" id="one-account" aria-labelledby="one-title">
+  <div class="wrap">
+    <header class="section-head" data-reveal>
+      <p class="eyebrow">Just one account?</p>
+      <h2 class="h2" id="one-title">Five agents on one account, <em>without the mess.</em></h2>
+      <p class="lede">
+        Pooler isn't only for stacks of accounts. Sign five agents in with your Codex login and you have five copies of your tokens to keep alive, and no idea which agent used what. With Pooler you sign in once, on your own server, and every agent gets a key of its own.
+      </p>
+    </header>
+
+    <div class="compare" data-one>
+      <article class="side before" data-reveal>
+        <p class="side-tag">Without Pooler</p>
+        <h3>Every agent signs in to Codex</h3>
+        <div class="flow" data-flow="before" aria-hidden="true">
+          <svg class="wires" data-wires></svg>
+          <ul class="agents">
+            {
+              agents.map((agent) => (
+                <li class="agent" data-agent>
+                  <span class="agent-top">
+                    <b>{agent.name}</b>
+                    <span class="flag">Sign in again</span>
+                  </span>
+                  <span class="cred">Codex login</span>
+                </li>
+              ))
+            }
+          </ul>
+          <div class="node account" data-account>
+            <span class="logo" style="--src:url(/logos/openai.svg)"></span>
+            <span>Your Codex account</span>
+          </div>
+        </div>
+        <ul class="marks bad">
+          {before.map((text) => <li>{text}</li>)}
+        </ul>
+      </article>
+
+      <article class="side after" data-reveal style="--delay:0.08s">
+        <p class="side-tag">With Pooler</p>
+        <h3>Every agent gets its own key</h3>
+        <div class="flow" data-flow="after" aria-hidden="true">
+          <svg class="wires" data-wires></svg>
+          <ul class="agents">
+            {
+              agents.map((agent) => (
+                <li class="agent" data-agent>
+                  <span class="agent-top">
+                    <b>{agent.name}</b>
+                    <span class="count"><span data-count>{agent.count}</span> req</span>
+                    <span class="paused">Paused</span>
+                  </span>
+                  <span class="cred">sk-cxp-{agent.key}…</span>
+                </li>
+              ))
+            }
+          </ul>
+          <div class="node pooler" data-pooler>
+            <img src="/icon.svg" width="26" height="26" alt="" />
+            <span>Pooler</span>
+          </div>
+          <div class="node account" data-account>
+            <span class="logo" style="--src:url(/logos/openai.svg)"></span>
+            <span>Your Codex account</span>
+          </div>
+        </div>
+        <ul class="marks good">
+          {after.map((text) => <li>{text}</li>)}
+        </ul>
+      </article>
+    </div>
+
+    <ul class="extras" data-reveal>
+      {
+        extras.map((extra) => (
+          <li>
+            <a href={extra.href}>
+              <b>
+                {extra.title} <span aria-hidden="true">→</span>
+              </b>
+              <span>{extra.text}</span>
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+  </div>
+</section>
+
+<style>
+  .compare {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .side {
+    padding: clamp(20px, 2.6vw, 28px);
+    border: 1px solid var(--line);
+    border-radius: 26px;
+  }
+
+  .before {
+    background: rgb(255 255 255 / 0.45);
+  }
+
+  .after {
+    border-color: #f2dcb8;
+    background: var(--paper);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .side-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .side-tag::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #c9bfae;
+  }
+
+  .after .side-tag {
+    color: var(--orange-ink);
+  }
+
+  .after .side-tag::before {
+    background: var(--orange);
+    box-shadow: 0 0 0 3px rgb(255 153 0 / 0.18);
+  }
+
+  .side h3 {
+    margin-top: 8px;
+    font-size: clamp(1.3rem, 2vw, 1.55rem);
+    font-weight: 800;
+    line-height: 1.1;
+    letter-spacing: -0.012em;
+  }
+
+  /* flow ------------------------------------------------------- */
+
+  .flow {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 40px auto 22px auto;
+    align-items: center;
+    margin-top: 18px;
+    padding: 16px;
+    border: 1px solid var(--line-2);
+    border-radius: 18px;
+    background: var(--cream);
+  }
+
+  .wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .wires :global(path) {
+    fill: none;
+    stroke: #d8cdbb;
+    stroke-width: 1.6;
+    transition: stroke 0.3s;
+  }
+
+  .wires :global(path.stale) {
+    stroke: #f0a3a5;
+    stroke-dasharray: 5 5;
+  }
+
+  .after .wires :global(path) {
+    stroke: color-mix(in srgb, var(--orange) 45%, #efe4d2);
+  }
+
+  .after .wires :global(path.paused) {
+    stroke: #d8cdbb;
+    stroke-dasharray: 4 5;
+  }
+
+  .wires :global(circle) {
+    fill: var(--orange);
+  }
+
+  /* In a wide single column the list keeps a chip's width and the wires take the rest. */
+  .agents {
+    position: relative;
+    z-index: 1;
+    grid-column: 1;
+    display: grid;
+    gap: 8px;
+    width: 100%;
+    max-width: 300px;
+  }
+
+  .agent {
+    display: grid;
+    gap: 1px;
+    padding: 8px 11px;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    background: var(--paper);
+    transition: border-color 0.3s, opacity 0.3s;
+  }
+
+  .agent-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .agent b {
+    overflow: hidden;
+    font-size: 14.5px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .cred {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+
+  .before .cred {
+    color: var(--amber-ink);
+  }
+
+  .flag,
+  .paused {
+    display: none;
+    flex: none;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 700;
+  }
+
+  .flag {
+    background: var(--red-soft);
+    color: var(--red-ink);
+  }
+
+  .paused {
+    background: var(--amber-soft);
+    color: var(--amber-ink);
+  }
+
+  .agent.stale {
+    border-color: #f3b9bb;
+  }
+
+  .agent.stale .flag,
+  .agent.is-paused .paused {
+    display: inline-block;
+    animation: pop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  .agent.is-paused {
+    opacity: 0.6;
+  }
+
+  .agent.is-paused .count {
+    display: none;
+  }
+
+  .count {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .count span {
+    color: var(--green-ink);
+    font-weight: 700;
+  }
+
+  @keyframes pop {
+    from {
+      transform: scale(0.6);
+      opacity: 0;
+    }
+  }
+
+  .node {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    justify-items: center;
+    gap: 6px;
+    text-align: center;
+    font-size: 12.5px;
+    font-weight: 700;
+    line-height: 1.15;
+  }
+
+  .pooler {
+    grid-column: 3;
+    width: 78px;
+    padding: 12px 6px 10px;
+    border: 1px solid #f6d6a6;
+    border-radius: 16px;
+    background: linear-gradient(180deg, #fffaf1, #fff4e2);
+    box-shadow: 0 0 0 6px rgb(255 153 0 / 0.07), var(--shadow-sm);
+    color: #b35f00;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .pooler img {
+    width: 26px;
+    height: 26px;
+  }
+
+  .account {
+    grid-column: 5;
+    width: 92px;
+    padding: 12px 8px;
+    border-radius: 16px;
+    background: var(--ink);
+    color: #fff;
+    --logo-size: 22px;
+  }
+
+  .account.hit {
+    box-shadow: 0 0 0 4px rgb(255 153 0 / 0.22);
+  }
+
+  /* marks ------------------------------------------------------- */
+
+  .marks {
+    display: grid;
+    gap: 10px;
+    margin-top: 20px;
+  }
+
+  .marks li {
+    display: flex;
+    gap: 10px;
+    font-size: 16px;
+    line-height: 1.4;
+    color: var(--ink-2);
+  }
+
+  .marks li::before {
+    content: "";
+    width: 18px;
+    height: 18px;
+    flex: none;
+    margin-top: 2px;
+    border-radius: 50%;
+  }
+
+  .bad li::before {
+    background: var(--red-soft) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m5.2 5.2 5.6 5.6m0-5.6-5.6 5.6' fill='none' stroke='%23c4343b' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E") center / 14px no-repeat;
+  }
+
+  .good li::before {
+    background: var(--green-soft) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m4.5 8.2 2.3 2.3 4.7-5' fill='none' stroke='%230e7c5a' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 14px no-repeat;
+  }
+
+  .good li {
+    color: var(--ink);
+  }
+
+  /* extras ------------------------------------------------------ */
+
+  .extras {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    margin-top: clamp(24px, 3vw, 32px);
+  }
+
+  .extras li {
+    display: grid;
+  }
+
+  .extras a {
+    display: grid;
+    align-content: start;
+    gap: 4px;
+    padding: 16px 18px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--paper);
+    transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+  }
+
+  .extras a:hover {
+    border-color: #f2c98d;
+    box-shadow: var(--shadow);
+    transform: translateY(-2px);
+  }
+
+  .extras b {
+    font-size: 16.5px;
+    font-weight: 800;
+  }
+
+  .extras b span {
+    color: var(--orange-ink);
+  }
+
+  .extras a > span {
+    font-size: 15px;
+    line-height: 1.45;
+    color: var(--ink-2);
+  }
+
+  /* Narrower panels: Pooler and the account stack in one column beside the agents. */
+  @media (max-width: 1100px) {
+    .flow {
+      grid-template-columns: minmax(0, 1fr) 24px auto;
+      grid-template-rows: 1fr auto auto 1fr;
+      row-gap: 18px;
+      padding: 12px;
+    }
+
+    .agents {
+      grid-row: 1 / -1;
+      gap: 7px;
+    }
+
+    .agent {
+      padding: 7px 9px;
+    }
+
+    .agent b {
+      font-size: 13.5px;
+    }
+
+    .cred,
+    .count {
+      font-size: 11px;
+    }
+
+    .node {
+      font-size: 11px;
+    }
+
+    .pooler {
+      grid-column: 3;
+      grid-row: 2;
+      width: 70px;
+      padding: 10px 4px 8px;
+      font-size: 10.5px;
+    }
+
+    .pooler img {
+      width: 22px;
+      height: 22px;
+    }
+
+    .account {
+      grid-column: 3;
+      grid-row: 3;
+      width: 70px;
+      padding: 10px 5px;
+      --logo-size: 18px;
+    }
+
+    .before .account {
+      grid-row: 1 / -1;
+    }
+  }
+
+  @media (max-width: 1000px) {
+    .extras {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 760px) {
+    .compare {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .extras {
+      grid-template-columns: 1fr;
+    }
+
+    .marks li {
+      font-size: 15.5px;
+    }
+  }
+</style>
+
+<script>
+  const NS = "http://www.w3.org/2000/svg";
+  const root = document.querySelector<HTMLElement>("[data-one]");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  type Flow = {
+    el: HTMLElement;
+    svg: SVGSVGElement;
+    agents: HTMLElement[];
+    pooler: HTMLElement | null;
+    account: HTMLElement;
+    wires: SVGPathElement[];
+    trunk: SVGPathElement | null;
+  };
+
+  if (root) init(root);
+
+  function init(root: HTMLElement) {
+    const flows = Array.from(root.querySelectorAll<HTMLElement>("[data-flow]")).map<Flow>((el) => ({
+      el,
+      svg: el.querySelector<SVGSVGElement>("[data-wires]")!,
+      agents: Array.from(el.querySelectorAll<HTMLElement>("[data-agent]")),
+      pooler: el.querySelector<HTMLElement>("[data-pooler]"),
+      account: el.querySelector<HTMLElement>("[data-account]")!,
+      wires: [],
+      trunk: null,
+    }));
+    const [before, after] = flows;
+
+    // Curves from each agent to the next node; the trunk runs from Pooler to the account,
+    // across or down depending on the layout.
+    function draw(flow: Flow) {
+      const box = flow.el.getBoundingClientRect();
+      flow.svg.setAttribute("viewBox", `0 0 ${box.width} ${box.height}`);
+      const rel = (r: DOMRect) => ({ left: r.left - box.left, right: r.right - box.left, top: r.top - box.top, bottom: r.bottom - box.top, midY: r.top - box.top + r.height / 2, midX: r.left - box.left + r.width / 2 });
+      const target = rel((flow.pooler ?? flow.account).getBoundingClientRect());
+      const curve = (x1: number, y1: number, x2: number, y2: number) => {
+        const dx = (x2 - x1) * 0.55;
+        return `M${x1} ${y1} C${x1 + dx} ${y1} ${x2 - dx} ${y2} ${x2} ${y2}`;
+      };
+      flow.wires = flow.agents.map((agent, i) => {
+        const a = rel(agent.getBoundingClientRect());
+        const path = flow.wires[i] ?? (flow.svg.appendChild(document.createElementNS(NS, "path")) as SVGPathElement);
+        path.setAttribute("d", curve(a.right, a.midY, target.left, target.midY));
+        return path;
+      });
+      if (flow.pooler) {
+        const p = target;
+        const acc = rel(flow.account.getBoundingClientRect());
+        const trunk = flow.trunk ?? (flow.svg.appendChild(document.createElementNS(NS, "path")) as SVGPathElement);
+        trunk.setAttribute("d", acc.left >= p.right - 1 ? `M${p.right} ${p.midY} L${acc.left} ${acc.midY}` : `M${p.midX} ${p.bottom} L${acc.midX} ${acc.top}`);
+        flow.trunk = trunk;
+      }
+    }
+
+    const drawAll = () => flows.forEach(draw);
+    drawAll();
+    new ResizeObserver(drawAll).observe(root);
+    document.fonts?.ready.then(drawAll);
+
+    if (reduceMotion) {
+      // A still picture of the same story.
+      before.agents[1].classList.add("stale");
+      before.wires[1].classList.add("stale");
+      after.agents[3].classList.add("is-paused");
+      after.wires[3].classList.add("paused");
+      return;
+    }
+
+    // Without Pooler: now and then one copy of the login is refreshed elsewhere and this agent has to sign in again.
+    let stale = -1;
+    function staleTick() {
+      if (stale >= 0) {
+        before.agents[stale].classList.remove("stale");
+        before.wires[stale].classList.remove("stale");
+      }
+      let next = Math.floor(Math.random() * before.agents.length);
+      if (next === stale) next = (next + 2) % before.agents.length;
+      stale = next;
+      before.agents[stale].classList.add("stale");
+      before.wires[stale].classList.add("stale");
+    }
+
+    // With Pooler: requests flow, counts climb, and one key is paused for a moment without disturbing the rest.
+    const counts = after.agents.map((agent) => agent.querySelector<HTMLElement>("[data-count]")!);
+    const values = counts.map((el) => Number(el.textContent));
+    let paused = -1;
+    function pauseTick() {
+      if (paused >= 0) {
+        after.agents[paused].classList.remove("is-paused");
+        after.wires[paused].classList.remove("paused");
+        paused = -1;
+        return;
+      }
+      paused = Math.floor(Math.random() * after.agents.length);
+      after.agents[paused].classList.add("is-paused");
+      after.wires[paused].classList.add("paused");
+    }
+
+    type Pulse = { path: SVGPathElement; dot: SVGCircleElement; start: number; dur: number; done: () => void };
+    const pulses: Pulse[] = [];
+    let frame = 0;
+
+    function launch(path: SVGPathElement, dur: number, done: () => void) {
+      const dot = document.createElementNS(NS, "circle");
+      dot.setAttribute("r", "3.5");
+      after.svg.appendChild(dot);
+      pulses.push({ path, dot, start: performance.now(), dur, done });
+      if (!frame) frame = requestAnimationFrame(step);
+    }
+
+    function step(now: number) {
+      for (let i = pulses.length - 1; i >= 0; i--) {
+        const p = pulses[i];
+        const t = Math.min(1, (now - p.start) / p.dur);
+        const eased = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+        const point = p.path.getPointAtLength(eased * p.path.getTotalLength());
+        p.dot.setAttribute("cx", String(point.x));
+        p.dot.setAttribute("cy", String(point.y));
+        if (t >= 1) {
+          p.dot.remove();
+          pulses.splice(i, 1);
+          p.done();
+        }
+      }
+      frame = pulses.length ? requestAnimationFrame(step) : 0;
+    }
+
+    function requestTick() {
+      const i = Math.floor(Math.random() * after.agents.length);
+      if (i === paused) return;
+      launch(after.wires[i], 650, () => {
+        values[i] += 1;
+        counts[i].textContent = String(values[i]);
+        if (after.trunk) {
+          launch(after.trunk, 380, () => {
+            after.account.classList.add("hit");
+            setTimeout(() => after.account.classList.remove("hit"), 180);
+          });
+        }
+      });
+    }
+
+    // Timers run only while the section is on screen and the tab is visible.
+    let timers: number[] = [];
+    const start = () => {
+      if (timers.length) return;
+      staleTick();
+      timers = [window.setInterval(staleTick, 2600), window.setInterval(pauseTick, 3600), window.setInterval(requestTick, 420)];
+    };
+    const stop = () => {
+      timers.forEach(clearInterval);
+      timers = [];
+    };
+    let onScreen = false;
+    new IntersectionObserver(([entry]) => {
+      onScreen = entry.isIntersecting;
+      if (onScreen && !document.hidden) start();
+      else stop();
+    }).observe(root);
+    document.addEventListener("visibilitychange", () => (document.hidden || !onScreen ? stop() : start()));
+  }
+</script>

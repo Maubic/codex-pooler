@@ -11,6 +11,10 @@ const faqs = [
     a: "No. Every account keeps its own limits. Pooler spreads work across the accounts you connect, so capacity you already have doesn't sit unused while someone else is stuck.",
   },
   {
+    q: "Is it worth it with just one account?",
+    a: `Yes. Each agent, machine or script gets its own key instead of a copy of your Codex login, so you can see what each one uses, set its limits and switch it off without signing out the rest. Tools without Codex support can run on your plan too, and when you add a second account later, no key changes. <a href="#one-account">One account, five agents</a>.`,
+  },
+  {
     q: "Can tools without Codex support use it?",
     a: `Yes, if they let you set an OpenAI API key and base URL: use a Pool key and Pooler's /v1 address. Some tools send requests from their own servers, so Pooler has to be reachable over the internet for them. <a href="${docs("/clients/openai-compatible/")}">OpenAI-compatible setup</a>.`,
   },

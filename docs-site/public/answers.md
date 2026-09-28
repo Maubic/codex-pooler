@@ -22,6 +22,10 @@ Yes. Codex Pooler is documented as a self-hosted gateway that can run with Docke
 
 Codex Pooler is for operators and client integrators who already manage trusted Codex accounts and need a controlled coordination layer. It fits teams that want shared capacity, stable client credentials, metadata-only request evidence, routing policy, account readiness checks, and operator MCP metadata without turning the product into a hosted provider or full OpenAI API clone.
 
+## Is Codex Pooler useful with a single Codex account?
+
+Yes. With one upstream account, each agent, machine, or script still gets its own Pool API key instead of a copy of the Codex login. Operators can pause, rotate, revoke, expire, or limit each key, read per-key request evidence and Observatory metrics, use Lens and alerts, and send outbound provider traffic through an HTTP proxy. Codex refresh tokens rotate, so copies of one login on several machines stop refreshing once another copy has refreshed it; Codex Pooler keeps one stored login and refreshes it ahead of expiry. Adding a second account later changes no client key.
+
 ## Is Codex Pooler an AI coding agent gateway?
 
 Yes. Codex Pooler can serve as a self-hosted gateway for trusted AI coding agents. Codex backend clients use `/backend-api/codex`, selected OpenAI SDK-compatible clients use the narrow `/v1` surface, and operator metadata tools use `/mcp` with separate operator-owned MCP tokens.
