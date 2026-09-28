@@ -6,7 +6,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.PrewarmDel
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport
 
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
+
   alias CodexPooler.Access
+  alias CodexPooler.Accounts.Scope
+  alias CodexPooler.AccountsFixtures
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
@@ -20,18 +24,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.PrewarmDel
     :ok
   end
 
-  for topology <- [:local_owner, :proxy] do
+  for topology <- [:local_owner, :proxy], mode <- ["full", "lite"] do
     if topology == :proxy do
       @tag slow: "boots a real peer owner and verifies prewarm acknowledgement releases the queued generation"
     end
 
-    test "#{topology} prewarm acknowledges its local terminal and releases the next generation" do
+    test "#{topology} #{mode} prewarm acknowledges its local terminal and releases the next generation" do
       topology = unquote(topology)
+      mode = unquote(mode)
       prepare_database(topology)
 
-      upstream = start_upstream(FakeUpstream.websocket_text_frames([completed_frame()]))
+      upstream = start_upstream(upstream_response(mode))
       fixture = gateway_setup(upstream)
       register_fixture_cleanup(fixture, topology)
+      set_model_serving_mode!(serving_scope(topology), fixture, mode)
       {:ok, auth} = Access.authenticate_authorization_header(fixture.authorization)
       state = prepare_socket(auth, fixture, topology)
 
@@ -44,6 +50,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.PrewarmDel
       assert {:push, {:text, completed}, state} = receive_native_collect_socket_push(state)
       assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(completed)
       assert FakeUpstream.requests(upstream) == []
+      assert request_logs(fixture.pool.id) == []
+      assert pool_attempts(fixture.pool.id) == []
+      assert pool_ledger_entries(fixture.pool.id) == []
 
       generation = websocket_payload(fixture, "synthetic generation")
       assert {:ok, state} = CodexResponsesSocket.handle_in({generation, [opcode: :text]}, state)
@@ -55,11 +64,23 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.PrewarmDel
       assert {:push, {:text, frame}, state} = receive_owner_socket_push(state)
       assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(frame)
       state = settle_owner_socket_turn(state)
-      assert Enum.map(request_logs(fixture.pool.id), & &1.status) == ["succeeded"]
+      assert [request] = request_logs(fixture.pool.id)
+      assert request.status == "succeeded"
+      assert request.request_metadata["routing"]["model_serving_mode"] == mode
       assert FakeUpstream.count(upstream) == 1
       assert :ok = FakeUpstream.verify!(upstream)
       assert :ok = CodexResponsesSocket.terminate(:closed, state)
     end
+  end
+
+  defp upstream_response("full"), do: FakeUpstream.websocket_text_frames([completed_frame()])
+  defp upstream_response("lite"), do: FakeUpstream.sse_stream([CodexPooler.JSON.decode!(completed_frame())])
+
+  defp serving_scope(:local_owner), do: model_serving_scope()
+
+  defp serving_scope(:proxy) do
+    %{user: owner} = AccountsFixtures.committed_bootstrap_owner_fixture!()
+    Scope.for_user(owner, ["instance_owner"])
   end
 
   defp register_fixture_cleanup(_fixture, :local_owner), do: :ok
