@@ -60,7 +60,6 @@ const accounts = [
       <ul class="facts">
         <li>Free to self-host</li>
         <li>Docker or Kubernetes</li>
-        <li><a href="#one-account">Useful even with one account</a></li>
       </ul>
     </div>
 
@@ -272,20 +271,6 @@ const accounts = [
     display: inline-flex;
     align-items: center;
     gap: 8px;
-  }
-
-  .facts a {
-    padding-block: 4px;
-    text-decoration: underline;
-    text-decoration-color: var(--line);
-    text-decoration-thickness: 1.5px;
-    text-underline-offset: 4px;
-    transition: color 0.2s, text-decoration-color 0.2s;
-  }
-
-  .facts a:hover {
-    color: var(--ink);
-    text-decoration-color: currentColor;
   }
 
   .facts li::before {
