@@ -18,7 +18,6 @@ defmodule CodexPooler.Pools.RoutingSettings do
     field :sticky_http_sessions, :boolean
     field :prompt_cache_affinity_enabled, :boolean, default: true
     field :v1_compatibility_enabled, :boolean, default: true
-    field :request_compression_enabled, :boolean, default: false
     field :allow_image_generation, :boolean, default: true
     field :metadata, :map
     field :created_at, :utc_datetime_usec
@@ -36,7 +35,6 @@ defmodule CodexPooler.Pools.RoutingSettings do
       :sticky_http_sessions,
       :prompt_cache_affinity_enabled,
       :v1_compatibility_enabled,
-      :request_compression_enabled,
       :allow_image_generation,
       :metadata,
       :created_at,
@@ -50,7 +48,6 @@ defmodule CodexPooler.Pools.RoutingSettings do
       :sticky_http_sessions,
       :prompt_cache_affinity_enabled,
       :v1_compatibility_enabled,
-      :request_compression_enabled,
       :allow_image_generation,
       :metadata,
       :created_at,

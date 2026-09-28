@@ -297,67 +297,29 @@ defmodule CodexPooler.Accounting.RequestLogsDetailsTest do
     assert Decimal.equal?(detail.token_counts.cache_write_cost_usd, Decimal.new("0.250000"))
   end
 
-  test "request log rows expose sanitized compression summary without raw candidate strings" do
+  test "historical compression containers are redacted on reads without rewriting stored metadata" do
     %{pool: pool, api_key: api_key} = active_api_key_fixture()
     %{assignment: assignment} = upstream_assignment_fixture(pool)
-    sentinel = "SENTINEL_TOOL_OUTPUT_SHOULD_NOT_RENDER"
-    compressed_sentinel = "SENTINEL_COMPRESSED_OUTPUT_SHOULD_NOT_STORE"
+    sentinel = "synthetic-retired-history-value"
 
-    request =
-      request_fixture(%{pool: pool, api_key: api_key}, %{
-        requested_model: "gpt-row-compression",
-        endpoint: "/backend-api/codex/responses",
-        transport: "http_json",
-        status: "succeeded",
-        correlation_id: "row-compression"
-      })
+    for value <- [%{"attempted" => true, "status" => %{"label" => sentinel}, "strategies" => [sentinel]}, [%{"status" => sentinel}], sentinel] do
+      request = request_fixture(%{pool: pool, api_key: api_key}, %{status: "succeeded"})
+      attempt = attempt_fixture(request, assignment)
+      historical = %{"payload_compression" => value, "nested" => %{"payload_compression" => value}}
+      Repo.update_all(from(r in CodexPooler.Accounting.Request, where: r.id == ^request.id), set: [request_metadata: historical])
+      Repo.update_all(from(a in CodexPooler.Accounting.Attempt, where: a.id == ^attempt.id), set: [response_metadata: historical])
 
-    assert {:ok, _attempt} =
-             with_dispatchable_request(request, fn request ->
-               Accounting.create_attempt(request, assignment, %{
-                 status: "succeeded",
-                 response_metadata: %{
-                   "payload_compression" => %{
-                     "enabled" => true,
-                     "attempted" => true,
-                     "status" => "compressed",
-                     "reason" => "rewritten",
-                     "route_class" => "proxy_http",
-                     "transport" => "http_json",
-                     "candidate_count" => 3,
-                     "compressed_count" => 2,
-                     "skipped_count" => 1,
-                     "original_bytes" => 12_000,
-                     "compressed_bytes" => 3_000,
-                     "original_tokens" => 900,
-                     "compressed_tokens" => 300,
-                     "strategies" => ["log_output", "diff"],
-                     "raw_candidate" => sentinel,
-                     "original_output" => sentinel,
-                     "compressed_output" => compressed_sentinel
-                   }
-                 }
-               })
-             end)
-
-    assert %{items: [log], total: 1} = Accounting.list_request_logs(pool)
-    assert log.id == request.id
-    assert log.metadata["payload_compression"]["candidate_count"] == 3
-    assert log.metadata["payload_compression"]["compressed_count"] == 2
-    assert log.metadata["payload_compression"]["skipped_count"] == 1
-    assert log.metadata["payload_compression"]["saved_bytes"] == 9000
-    assert log.metadata["payload_compression"]["saved_tokens"] == 600
-
-    assert log.payload_compression.status == "compressed"
-    assert log.payload_compression.reason == "rewritten"
-    assert log.payload_compression.unit == "tokens"
-    assert log.payload_compression.saved_count == 600
-    assert log.payload_compression.savings_percent == 66.67
-    assert log.payload_compression.compression_ratio == 0.3333
-
-    log_text = inspect(log)
-    refute log_text =~ sentinel
-    refute log_text =~ compressed_sentinel
+      %{items: logs} = Accounting.list_request_logs(pool)
+      log = Enum.find(logs, &(&1.id == request.id))
+      assert log.metadata["payload_compression"] == "[REDACTED]"
+      assert log.metadata["nested"]["payload_compression"] == "[REDACTED]"
+      refute Map.has_key?(log, :payload_compression)
+      refute inspect(log) =~ sentinel
+      stored_request = Repo.get!(CodexPooler.Accounting.Request, request.id)
+      stored_attempt = Repo.get!(CodexPooler.Accounting.Attempt, attempt.id)
+      assert stored_request.request_metadata === historical
+      assert stored_attempt.response_metadata === historical
+    end
   end
 
   test "request log details omit malformed compaction bridge history and raw nested values" do

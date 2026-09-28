@@ -310,11 +310,6 @@ defmodule CodexPoolerWeb.Admin.PoolWizardComponents do
                         help="OpenAI-style /v1 compatibility routes."
                       />
                       <.routing_toggle_row
-                        field={@form[:request_compression_enabled]}
-                        label="Request compression"
-                        help="Shrinks eligible Responses tool outputs before upstream dispatch."
-                      />
-                      <.routing_toggle_row
                         field={@form[:allow_image_generation]}
                         label="Allow Image Generation"
                         help="Permits image generation and edits for requests using this Pool."

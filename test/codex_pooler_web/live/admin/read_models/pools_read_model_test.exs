@@ -160,7 +160,6 @@ defmodule CodexPoolerWeb.Admin.PoolsReadModelTest do
       routing_strategy: "bridge_ring",
       compat_flags: %{
         v1_compatibility_enabled: true,
-        request_compression_enabled: false,
         allow_image_generation: true
       }
     }

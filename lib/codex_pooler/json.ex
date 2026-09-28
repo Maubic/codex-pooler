@@ -17,7 +17,7 @@ defmodule CodexPooler.JSON do
   Native JSON encoding and decoding with the application's serialization policies.
 
   Objects decode with the first duplicate key winning. Ordered decoding retains
-  every entry for lossless document compression and pricing validation.
+  every entry for ordered document processing and pricing validation.
   """
 
   alias CodexPooler.JSON.OrderedObject

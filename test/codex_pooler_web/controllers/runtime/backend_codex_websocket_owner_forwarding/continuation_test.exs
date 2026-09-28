@@ -19,14 +19,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Websocket, as: Gateway
-  alias CodexPooler.Pools
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport.ReplayRemoteNodeClient
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport.TurnBudgetNodeClient
   alias CodexPoolerWeb.WebsocketConnectionLogger
 
-  @supported_compression_model "gpt-4o"
+  @preservation_model "gpt-4o"
   @queued_owner_upstream_start_timeout_ms 5_000
   @handoff_detection_timeout_ms 15_000
 
@@ -177,8 +176,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
         ])
       )
 
-    setup = gateway_setup(upstream, supported_compression_model_opts())
-    enable_request_compression!(setup.pool)
+    setup = gateway_setup(upstream, preservation_model_opts())
 
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
 
@@ -299,7 +297,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
       assert CodexPooler.JSON.decode!(schema_bound_item["output"]) ==
                CodexPooler.JSON.decode!(schema_bound_output)
 
-      assert unbound_item["output"] != unbound_output
+      assert unbound_item["output"] == unbound_output
 
       assert CodexPooler.JSON.decode!(unbound_item["output"]) ==
                CodexPooler.JSON.decode!(unbound_output)
@@ -316,17 +314,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
           )
         )
 
-      assert %{
-               "enabled" => true,
-               "attempted" => true,
-               "status" => "compressed",
-               "route_class" => "proxy_websocket",
-               "transport" => "websocket",
-               "candidate_count" => 1,
-               "compressed_count" => 1,
-               "skipped_count" => 0,
-               "protected_tool_output_skipped_count" => 1
-             } = second_attempt.response_metadata["payload_compression"]
+      refute Map.has_key?(second_attempt.response_metadata, "payload_compression")
 
       owner_metadata = second_log.request_metadata["websocket_owner_forwarding"]
       assert owner_metadata["enabled"] == true
@@ -335,11 +323,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
       assert owner_metadata["owner_instance_id"] == Atom.to_string(node())
       assert owner_metadata["proxy_instance_id"] == Atom.to_string(node())
       refute inspect(second_log.request_metadata) =~ "lease-token"
-
-      refute_payload_compression_leak!(
-        second_attempt.response_metadata["payload_compression"],
-        ["call_owner_schema_bound", "call_owner_unbound"]
-      )
     after
       CodexResponsesSocket.terminate(:closed, second_state)
     end
@@ -1537,32 +1520,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
 
   defp owner_node_opts(state, :proxy), do: state.opts.websocket_owner_forwarder_opts
 
-  defp enable_request_compression!(pool) do
-    pool
-    |> Pools.ensure_routing_settings()
-    |> Ecto.Changeset.change(%{
-      request_compression_enabled: true,
-      updated_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
-    })
-    |> Repo.update!()
-  end
-
-  defp supported_compression_model_opts do
+  defp preservation_model_opts do
     [
-      exposed_model_id: @supported_compression_model,
-      upstream_model_id: @supported_compression_model,
-      pricing_ref: @supported_compression_model
+      exposed_model_id: @preservation_model,
+      upstream_model_id: @preservation_model,
+      pricing_ref: @preservation_model
     ]
-  end
-
-  defp refute_payload_compression_leak!(metadata, forbidden_values) when is_map(metadata) do
-    metadata_text = inspect(metadata)
-
-    for value <- forbidden_values do
-      if String.contains?(metadata_text, value) do
-        flunk("payload compression metadata leaked forbidden owner websocket request content")
-      end
-    end
   end
 
   defp assert_native_request_correlation!(correlation_id) when is_binary(correlation_id) do

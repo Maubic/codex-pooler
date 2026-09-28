@@ -140,7 +140,6 @@ defmodule CodexPooler.Dev.RoutingStrategyFixture.Provisioner do
         sticky_http_sessions: false,
         prompt_cache_affinity_enabled: true,
         v1_compatibility_enabled: true,
-        request_compression_enabled: settings.request_compression_enabled,
         allow_image_generation: true,
         metadata: settings.metadata || %{},
         created_at: settings.created_at,

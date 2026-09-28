@@ -50,8 +50,6 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.MetadataTest do
              Metadata.websocket_response_metadata([], nil, false_options),
              "prompt_cache_controls_downgraded"
            )
-
-    assert Metadata.request_metadata(true_options) == %{}
   end
 
   test "classifies an upstream status without reference to the serving mode" do

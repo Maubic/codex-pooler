@@ -162,7 +162,6 @@ defmodule CodexPoolerWeb.Admin.PoolForm do
       "sticky_http_sessions" => settings.sticky_http_sessions,
       "prompt_cache_affinity_enabled" => settings.prompt_cache_affinity_enabled,
       "v1_compatibility_enabled" => settings.v1_compatibility_enabled,
-      "request_compression_enabled" => settings.request_compression_enabled,
       "allow_image_generation" => settings.allow_image_generation,
       "upstream_identity_ids" => active_upstream_identity_ids(pool),
       "api_key_ids" => active_api_key_ids(pool)
@@ -315,7 +314,6 @@ defmodule CodexPoolerWeb.Admin.PoolForm do
       "sticky_http_sessions" => false,
       "prompt_cache_affinity_enabled" => true,
       "v1_compatibility_enabled" => true,
-      "request_compression_enabled" => false,
       "allow_image_generation" => true,
       "upstream_identity_ids" => [],
       "api_key_ids" => []

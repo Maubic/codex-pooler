@@ -22,7 +22,6 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketBridge do
   alias CodexPooler.Gateway.Payloads.PayloadNormalizer
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.CodexSession
-  alias CodexPooler.Gateway.RequestCompression
   alias CodexPooler.Gateway.Routing.ModelMetadata
   alias CodexPooler.Gateway.Runtime.Dispatch.PreparedContext
   alias CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream
@@ -222,9 +221,6 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketBridge do
              ws_options,
              assignment_id: context.assignment.id
            ) do
-      {ws_payload, ws_options} =
-        RequestCompression.maybe_compress(ws_payload, context, ws_options)
-
       bridged_options =
         context.request_options
         |> Websocket.bridge_owner_request_options(runtime)
@@ -242,11 +238,6 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketBridge do
     updates = [
       prompt_cache_controls_downgraded: runtime.prompt_cache_controls_downgraded
     ]
-
-    updates =
-      if is_nil(runtime.payload_compression),
-        do: updates,
-        else: Keyword.put(updates, :payload_compression, runtime.payload_compression)
 
     RequestOptions.put_runtime_context(bridged_options, updates)
   end

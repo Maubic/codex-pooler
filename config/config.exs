@@ -210,11 +210,7 @@ config :logger, :default_formatter,
     :request_id,
     :admin_surface,
     :loader,
-    :error_code,
-    :request_compression_reason,
-    :request_compression_exception,
-    :request_compression_route_class,
-    :request_compression_transport
+    :error_code
   ]
 
 config :phoenix, :logger, false

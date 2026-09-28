@@ -44,7 +44,6 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
   alias CodexPooler.Gateway.Transports.Websocket.{RolloutDrain, WebsocketOwnerContract}
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.WebsocketRolloutDrainSupport
-  alias CodexPooler.Pools.Routing, as: PoolRouting
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
   alias CodexPoolerWeb.CodexResponsesSocket
@@ -66,13 +65,6 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
 
     :ok
-  end
-
-  defp enable_request_compression!(pool) do
-    pool
-    |> PoolRouting.ensure_routing_settings()
-    |> Ecto.Changeset.change(request_compression_enabled: true)
-    |> Repo.update!()
   end
 
   defp set_upstream_receive_timeout!(timeout_ms) do
@@ -1257,13 +1249,12 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
     assert %{items: [], total: 0} = RequestLogs.list(setup.pool)
   end
 
-  test "a bridged attempt records payload compression metadata for the websocket envelope", %{
+  test "a bridged attempt preserves output bytes in the websocket envelope", %{
     conn: conn
   } do
-    upstream = start_upstream(FakeUpstream.sse_stream([completed_event("resp_compression")]))
+    upstream = start_upstream(FakeUpstream.sse_stream([completed_event("resp_preservation")]))
     setup = gateway_setup(upstream, exposed_model_id: "gpt-4o", upstream_model_id: "gpt-4o")
-    enable_request_compression!(setup.pool)
-    session = "compression-session-#{System.unique_integer([:positive])}"
+    session = "preservation-session-#{System.unique_integer([:positive])}"
 
     schema_bound_output =
       CodexPooler.JSON.encode!(%{"rows" => Enum.to_list(1..160)}, pretty: true)
@@ -1317,17 +1308,15 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
 
     response = post_stream(conn, setup, session, payload)
     assert response.status == 200
-    assert completed_id(response.resp_body) == "resp_compression"
+    assert completed_id(response.resp_body) == "resp_preservation"
     assert FakeUpstream.websocket_connection_count(upstream) == 1
 
-    # The protected tool output must reach the upstream websocket envelope
-    # untouched: the compression pass ran on the envelope that was actually
-    # sent, and its decision is what the metadata below has to describe.
+    # Compare the values from the second serialization actually sent upstream.
     assert [captured] = FakeUpstream.requests(upstream)
 
     request = latest_request(setup.pool)
     assert [attempt] = attempts_for(request)
-    assert attempt.response_metadata["payload_compression"]["status"] == "compressed"
+    refute Map.has_key?(attempt.response_metadata, "payload_compression")
 
     schema_bound_item =
       Enum.find(captured.json["input"], fn item ->
@@ -1345,36 +1334,17 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
     assert CodexPooler.JSON.decode!(schema_bound_item["output"]) ==
              CodexPooler.JSON.decode!(schema_bound_output)
 
-    assert unbound_item["output"] != unbound_output
+    assert unbound_item["output"] == unbound_output
 
     assert CodexPooler.JSON.decode!(unbound_item["output"]) ==
              CodexPooler.JSON.decode!(unbound_output)
 
     assert attempt.transport == "websocket"
     assert attempt.response_metadata["upstream_websocket_bridge"] == true
-
-    # transport "websocket" and the exact byte count of the captured frame tie
-    # the recorded compression pass to the websocket envelope, not to the
-    # downstream HTTP payload the turn arrived on.
-    assert %{
-             "enabled" => true,
-             "attempted" => true,
-             "status" => "compressed",
-             "transport" => "websocket",
-             "original_bytes" => original_bytes,
-             "candidate_count" => 1,
-             "compressed_count" => 1,
-             "protected_tool_output_skipped_count" => 1
-           } = metadata = attempt.response_metadata["payload_compression"]
-
-    assert original_bytes > byte_size(captured.body)
-
-    refute inspect(metadata) =~ "call_bridge_schema_bound"
-    refute inspect(metadata) =~ "call_bridge_unbound"
   end
 
   @tag :prompt_cache_adaptation
-  test "the bridge carries second-serialization prompt cache state and compression metadata" do
+  test "the bridge carries second-serialization prompt cache state " do
     cases = [
       %{
         label: "false-to-true",
@@ -1416,7 +1386,6 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
         response_id = "resp_bridge_prompt_cache_#{scenario.label}"
         upstream = start_upstream(FakeUpstream.sse_stream([completed_event(response_id)]))
         setup = gateway_setup(upstream)
-        enable_request_compression!(setup.pool)
         session = "prompt-cache-#{scenario.label}-#{System.unique_integer([:positive])}"
 
         {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
@@ -1451,14 +1420,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
         assert [attempt] = attempts_for(request)
         assert attempt.transport == "websocket"
 
-        assert %{
-                 "enabled" => true,
-                 "attempted" => true,
-                 "transport" => "websocket",
-                 "original_bytes" => original_bytes
-               } = attempt.response_metadata["payload_compression"]
-
-        assert original_bytes == byte_size(captured.body)
+        refute Map.has_key?(attempt.response_metadata, "payload_compression")
 
         {scenario.label, attempt.response_metadata["prompt_cache_controls_downgraded"] == true}
       end

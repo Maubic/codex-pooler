@@ -5,7 +5,6 @@
 /priv/gettext/
 /priv/pricing/
 /priv/static/
-/priv/tokenizers/
 /scripts/
 
 # Data and configuration inputs that do not produce AST nodes.

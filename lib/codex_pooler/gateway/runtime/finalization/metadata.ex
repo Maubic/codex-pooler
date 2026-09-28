@@ -104,7 +104,6 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
     opts
     |> route_attempt_metadata()
     |> Map.merge(gateway_debug_attempt_metadata(opts))
-    |> Map.merge(payload_compression_attempt_metadata(opts))
     |> Map.merge(reasoning_effort_attempt_metadata(opts))
     |> Map.merge(RequestOptions.prompt_cache_controls_attempt_metadata(opts))
     |> Map.merge(upstream_websocket_bridge_attempt_metadata(opts))
@@ -429,7 +428,6 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
     opts
     |> route_attempt_metadata()
     |> Map.merge(gateway_debug_attempt_metadata(opts))
-    |> Map.merge(payload_compression_attempt_metadata(opts))
     |> Map.merge(reasoning_effort_attempt_metadata(opts))
     |> Map.merge(RequestOptions.prompt_cache_controls_attempt_metadata(opts))
     |> Map.merge(metadata)
@@ -472,9 +470,6 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
   end
 
   def upstream_websocket_connection_attempt_metadata(_connection), do: %{}
-
-  @spec request_metadata(RequestOptions.t() | map() | term()) :: map()
-  def request_metadata(opts), do: RequestOptions.payload_compression_request_metadata(opts)
 
   @spec first_event_stream_metadata(Req.Response.t(), map(), String.t(), RequestOptions.t()) ::
           map()
@@ -597,10 +592,6 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
   end
 
   defp gateway_debug_attempt_metadata(opts), do: DebugPayloadSummary.attempt_metadata(opts)
-
-  defp payload_compression_attempt_metadata(opts) do
-    RequestOptions.payload_compression_attempt_metadata(opts)
-  end
 
   defp reasoning_effort_attempt_metadata(opts) do
     RequestOptions.reasoning_effort_attempt_metadata(opts)

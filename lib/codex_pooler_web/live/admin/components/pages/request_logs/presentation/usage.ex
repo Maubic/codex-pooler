@@ -7,11 +7,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Usage do
 
   import CodexPoolerWeb.Admin.RequestLogsDisplay,
     only: [
-      compression_savings_line: 1,
-      compression_savings_reason: 1,
-      compression_savings_status: 1,
-      compression_savings_title: 1,
-      compression_savings_unit: 1,
       format_cached_token_breakdown: 1,
       format_token_totals: 1,
       format_total_cost: 1,
@@ -132,20 +127,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Usage do
             class="whitespace-nowrap"
             title={format_total_cost(@request_log.cost)}
           ><span :if={@cost_symbol} class="text-base-content/60">{@cost_symbol}</span>{@cost_amount}</span>
-        </span>
-        <span
-          :if={compression_line = compression_savings_line(@request_log)}
-          id={"#{@prefix}-#{@request_log.id}-compression-savings"}
-          data-role="compression-savings"
-          data-compression-unit={compression_savings_unit(@request_log)}
-          data-compression-status={compression_savings_status(@request_log)}
-          data-compression-reason={compression_savings_reason(@request_log)}
-          class="flex min-w-0 items-center justify-end gap-1 text-[11px] tabular-nums text-base-content/55"
-          title={compression_savings_title(@request_log)}
-        >
-          <.icon name="hero-arrows-pointing-in" class="size-3 shrink-0" />
-          <span class="sr-only">compression</span>
-          <span class="min-w-0 whitespace-normal text-right">{compression_line}</span>
         </span>
       <% else %>
         <span

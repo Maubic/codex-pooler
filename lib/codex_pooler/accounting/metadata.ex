@@ -5,7 +5,6 @@ defmodule CodexPooler.Accounting.Metadata do
 
   alias CodexPooler.Accounting.{Request, RequestLogFacts}
   alias CodexPooler.Events
-  alias CodexPooler.Gateway.RequestCompression.Metadata, as: RequestCompressionMetadata
   alias CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Repo
@@ -65,7 +64,6 @@ defmodule CodexPooler.Accounting.Metadata do
                         ])
   @safe_sensitive_exact_keys MapSet.new([
                                "api_key_id",
-                               "payload_compression",
                                "reservation_snapshot_inputs",
                                "token_refresh_reason_code_preview"
                              ])
@@ -401,9 +399,6 @@ defmodule CodexPooler.Accounting.Metadata do
     normalized = normalize_key(key)
 
     cond do
-      normalized == "payload_compression" ->
-        sanitize_payload_compression_map(value)
-
       normalized == "public_openai_responses_stream" ->
         sanitize_public_openai_responses_stream_map(value)
 
@@ -525,9 +520,6 @@ defmodule CodexPooler.Accounting.Metadata do
        do: value
 
   defp sanitize_usage_observation(_value), do: %{}
-
-  defp sanitize_payload_compression_map(value) when is_map(value),
-    do: RequestCompressionMetadata.sanitize_map(value)
 
   defp sanitize_transport_failure_map(value) do
     Enum.reduce(value, %{}, fn

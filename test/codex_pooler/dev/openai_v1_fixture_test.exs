@@ -17,6 +17,7 @@ defmodule CodexPooler.Dev.OpenAIV1FixtureTest do
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
+  alias Mix.Tasks.Dev.OpenaiV1Fixture, as: FixtureTask
 
   @pool_slug "openai-v1-smoke"
   @account_id "openai-v1-smoke"
@@ -98,7 +99,10 @@ defmodule CodexPooler.Dev.OpenAIV1FixtureTest do
     assert %RoutingSettings{allow_image_generation: true, v1_compatibility_enabled: true} =
              Repo.get(RoutingSettings, pool_id)
 
-    assert Repo.aggregate(from(model in Model, where: model.pool_id == ^pool_id), :count) == 5
+    assert Repo.aggregate(from(model in Model, where: model.pool_id == ^pool_id), :count) == 6
+    lite = Repo.get_by!(Model, pool_id: pool_id, exposed_model_id: "sample-preservation-lite")
+    assert lite.metadata["upstream_model"]["use_responses_lite"] == true
+    assert Repo.get!(UpstreamIdentity, identity_id).metadata["supports_compact_responses"] == true
 
     assert %Model{supports_responses: true, supports_streaming: true} =
              Repo.get_by(Model, pool_id: pool_id, exposed_model_id: "gpt-6-luna")
@@ -157,7 +161,7 @@ defmodule CodexPooler.Dev.OpenAIV1FixtureTest do
                where: window.upstream_identity_id == ^identity_id
              ),
              :count
-           ) == 12
+           ) == 14
 
     assert {:ok, second} = OpenAIV1Fixture.acquire(context.options)
     assert second.leases == 2
@@ -350,7 +354,7 @@ defmodule CodexPooler.Dev.OpenAIV1FixtureTest do
     assert {:ok, %{status: "released"}} = OpenAIV1Fixture.release(context.options)
   end
 
-  test "request compression opt-in restores the exact prior routing setting", context do
+  test "fixture restores the exact prior routing setting", context do
     baseline_updated_at = ~U[2026-08-01 12:34:56.123456Z]
 
     pool = pool_fixture(%{slug: @pool_slug})
@@ -363,7 +367,6 @@ defmodule CodexPooler.Dev.OpenAIV1FixtureTest do
       sticky_http_sessions: true,
       prompt_cache_affinity_enabled: false,
       v1_compatibility_enabled: false,
-      request_compression_enabled: false,
       allow_image_generation: false,
       metadata: %{"baseline" => true},
       created_at: ~U[2026-08-01 12:00:00.000000Z],
@@ -371,15 +374,13 @@ defmodule CodexPooler.Dev.OpenAIV1FixtureTest do
     })
     |> Repo.insert!()
 
-    options = Keyword.put(context.options, :request_compression, :enabled)
+    options = context.options
 
     assert {:ok, %{status: "ready"}} = OpenAIV1Fixture.acquire(options)
 
-    assert %RoutingSettings{request_compression_enabled: true} =
-             Repo.get!(RoutingSettings, pool.id)
-
-    assert {:error, "OpenAI V1 fixture is leased with another request compression mode"} =
-             OpenAIV1Fixture.acquire(context.options)
+    refute Map.has_key?(Repo.get!(RoutingSettings, pool.id), :request_compression_enabled)
+    setup = context.receipt_path |> File.read!() |> CodexPooler.JSON.decode!()
+    refute Map.has_key?(setup, "request_compression_mode")
 
     assert {:ok, %{status: "released"}} = OpenAIV1Fixture.release(options)
 
@@ -390,11 +391,15 @@ defmodule CodexPooler.Dev.OpenAIV1FixtureTest do
              sticky_http_sessions: true,
              prompt_cache_affinity_enabled: false,
              v1_compatibility_enabled: false,
-             request_compression_enabled: false,
              allow_image_generation: false,
              metadata: %{"baseline" => true},
              updated_at: ^baseline_updated_at
            } = Repo.get!(RoutingSettings, pool.id)
+  end
+
+  test "retired request compression CLI option is rejected before acquisition", context do
+    assert_raise Mix.Error, fn -> FixtureTask.run(["acquire", "--request-compression"]) end
+    refute File.exists?(context.receipt_path)
   end
 
   defp assert_private_mode(path, expected) do

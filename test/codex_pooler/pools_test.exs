@@ -175,7 +175,6 @@ defmodule CodexPooler.PoolsTest do
                sticky_http_sessions: false,
                prompt_cache_affinity_enabled: true,
                v1_compatibility_enabled: true,
-               request_compression_enabled: false,
                allow_image_generation: true
              } = Pools.routing_settings_with_defaults(pool)
 
@@ -186,7 +185,6 @@ defmodule CodexPooler.PoolsTest do
                routing_strategy: "bridge_ring",
                prompt_cache_affinity_enabled: true,
                v1_compatibility_enabled: true,
-               request_compression_enabled: false,
                allow_image_generation: true
              } =
                Pools.ensure_routing_settings(pool)
@@ -212,12 +210,12 @@ defmodule CodexPooler.PoolsTest do
                })
 
       refute Pools.get_routing_settings(routed_pool).prompt_cache_affinity_enabled
-      assert Pools.get_routing_settings(routed_pool).request_compression_enabled
+      refute Map.has_key?(Pools.get_routing_settings(routed_pool), :request_compression_enabled)
       refute Pools.get_routing_settings(routed_pool).allow_image_generation
       refute Pools.allow_image_generation?(routed_pool)
       refute Pools.routing_settings_with_defaults(routed_pool).prompt_cache_affinity_enabled
 
-      assert Pools.routing_settings_with_defaults(routed_pool).request_compression_enabled
+      refute Map.has_key?(Pools.routing_settings_with_defaults(routed_pool), :request_compression_enabled)
       refute Pools.v1_compatibility_enabled?(routed_pool)
 
       assert {:ok, %RoutingSettings{} = reenabled_settings} =
@@ -229,7 +227,7 @@ defmodule CodexPooler.PoolsTest do
 
       assert reenabled_settings.prompt_cache_affinity_enabled
       assert reenabled_settings.v1_compatibility_enabled
-      refute reenabled_settings.request_compression_enabled
+      refute Map.has_key?(reenabled_settings, :request_compression_enabled)
       assert Pools.v1_compatibility_enabled?(routed_pool)
 
       assert {:ok, %RoutingSettings{} = string_disabled_settings} =
@@ -237,14 +235,14 @@ defmodule CodexPooler.PoolsTest do
                  "request_compression_enabled" => "false"
                })
 
-      refute string_disabled_settings.request_compression_enabled
+      refute Map.has_key?(string_disabled_settings, :request_compression_enabled)
 
       assert {:ok, %RoutingSettings{} = invalid_disabled_settings} =
                Pools.update_routing_settings(scope, routed_pool, %{
                  "request_compression_enabled" => "invalid"
                })
 
-      refute invalid_disabled_settings.request_compression_enabled
+      refute Map.has_key?(invalid_disabled_settings, :request_compression_enabled)
 
       audits =
         Repo.all(
@@ -269,15 +267,8 @@ defmodule CodexPooler.PoolsTest do
                true
              ]
 
-      assert Enum.map(audits, & &1.details["request_compression_enabled"]) == [
-               true,
-               false,
-               false,
-               false
-             ]
-
       assert Enum.all?(audits, &is_boolean(&1.details["prompt_cache_affinity_enabled"]))
-      assert Enum.all?(audits, &is_boolean(&1.details["request_compression_enabled"]))
+      refute Enum.any?(audits, &Map.has_key?(&1.details, "request_compression_enabled"))
 
       assert Enum.map(audits, & &1.details["allow_image_generation"]) == [
                false,
@@ -308,21 +299,18 @@ defmodule CodexPooler.PoolsTest do
                  routing_strategy: "bridge_ring",
                  prompt_cache_affinity_enabled: true,
                  v1_compatibility_enabled: true,
-                 request_compression_enabled: false,
                  allow_image_generation: true
                },
                ^routed_pool_id => %RoutingSettings{
                  routing_strategy: "deterministic_rotation",
                  prompt_cache_affinity_enabled: true,
                  v1_compatibility_enabled: true,
-                 request_compression_enabled: false,
                  allow_image_generation: false
                },
                ^missing_pool_id => %RoutingSettings{
                  routing_strategy: "bridge_ring",
                  prompt_cache_affinity_enabled: true,
                  v1_compatibility_enabled: true,
-                 request_compression_enabled: false,
                  allow_image_generation: true
                }
              } = settings_by_pool_id
@@ -378,24 +366,31 @@ defmodule CodexPooler.PoolsTest do
       assert Repo.get!(RoutingSettings, pool.id).allow_image_generation == false
     end
 
-    test "routing settings persist boolean request compression enablement" do
-      %{user: owner} = bootstrap_owner_fixture(%{"email" => "compression-owner@example.com"})
+    test "routing settings ignore retired attributes and preserve inert legacy values" do
+      %{user: owner} = bootstrap_owner_fixture()
       scope = Scope.for_user(owner, ["instance_owner"])
+      refute :request_compression_enabled in RoutingSettings.__schema__(:fields)
 
-      assert {:ok, pool} =
-               Pools.create_pool(scope, %{
-                 slug: "request-compression-boolean",
-                 name: "Request Compression Boolean"
-               })
+      for legacy_value <- [false, true] do
+        assert {:ok, pool} = Pools.create_pool(scope, %{slug: "legacy-routing-#{legacy_value}", name: "Legacy Routing #{legacy_value}"})
+        settings = Pools.ensure_routing_settings(pool)
+        refute Map.has_key?(settings, :request_compression_enabled)
+        assert [[false]] = Repo.query!("SELECT request_compression_enabled FROM pool_routing_settings WHERE pool_id = $1", [Ecto.UUID.dump!(pool.id)]).rows
+        Repo.query!("UPDATE pool_routing_settings SET request_compression_enabled = $1 WHERE pool_id = $2", [legacy_value, Ecto.UUID.dump!(pool.id)])
 
-      assert {:ok, %RoutingSettings{} = settings} =
-               Pools.update_routing_settings(scope, pool, %{
-                 "request_compression_enabled" => true
-               })
+        for forged <- [true, false, "true", "false", "invalid"] do
+          assert {:ok, updated} = Pools.update_routing_settings(scope, pool, %{"request_compression_enabled" => forged, "bridge_ring_size" => 5})
+          assert updated.bridge_ring_size == 5
+          refute Map.has_key?(updated, :request_compression_enabled)
+          refute Map.has_key?(Pools.get_routing_settings(pool), :request_compression_enabled)
+          refute Map.has_key?(Pools.routing_settings_with_defaults(pool), :request_compression_enabled)
+          assert [[^legacy_value]] = Repo.query!("SELECT request_compression_enabled FROM pool_routing_settings WHERE pool_id = $1", [Ecto.UUID.dump!(pool.id)]).rows
+        end
 
-      assert settings.request_compression_enabled == true
-      assert Repo.get!(RoutingSettings, pool.id).request_compression_enabled == true
-      assert Pools.get_routing_settings(pool).request_compression_enabled == true
+        audits = Repo.all(from audit in AuditEvent, where: audit.action == "pool.routing_update" and audit.target_id == ^pool.id)
+        assert length(audits) == 5
+        refute Enum.any?(audits, &Map.has_key?(&1.details, "request_compression_enabled"))
+      end
     end
 
     test "pool workflow defaults prompt cache affinity on and persists explicit disables" do

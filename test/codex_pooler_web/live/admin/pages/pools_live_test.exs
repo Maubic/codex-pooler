@@ -809,18 +809,8 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
     refute has_element?(view, "#pool-row-#{pool.id}-compat-panel")
 
-    view |> element("#pool-row-#{pool.id}-compat-compression") |> render_click()
-
-    assert has_element?(view, "#pool-row-#{pool.id}-compat-panel", "Request compression")
-    assert has_element?(view, "#pool-row-#{pool.id}-compat-compression-toggle")
-    refute has_element?(view, "#pool-row-#{pool.id}-compat-compression-toggle[checked]")
-
-    html = view |> element("#pool-row-#{pool.id}-compat-compression-toggle") |> render_click()
-
-    assert html =~ "Request compression enabled on Compat Panel Pool"
-    assert PoolRouting.get_routing_settings(pool.id).request_compression_enabled
-    assert has_element?(view, "#pool-row-#{pool.id}-compat-compression-toggle[checked]")
-    assert has_element?(view, "#pool-row-#{pool.id}-compat-panel", "Request compression")
+    refute has_element?(view, "#pool-row-#{pool.id}-compat-compression")
+    refute has_element?(view, "#pool-row-#{pool.id}-compat-compression-toggle")
 
     view |> element("#pool-row-#{pool.id}-compat-v1") |> render_click()
     assert has_element?(view, "#pool-row-#{pool.id}-compat-panel", "/v1 compatibility")
@@ -833,7 +823,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
     assert has_element?(
              view,
-             "#pool-row-#{pool.id}-compat-v1 + #pool-row-#{pool.id}-compat-compression + #pool-row-#{pool.id}-compat-image-generation"
+             "#pool-row-#{pool.id}-compat-v1 + #pool-row-#{pool.id}-compat-image-generation"
            )
 
     refute has_element?(view, "#pool-row-#{pool.id}-compat-ws-bridge")
@@ -868,6 +858,10 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
       })
 
     assert html =~ "unsupported pool option"
+    assert PoolRouting.get_routing_settings(pool.id) == nil
+
+    stale_html = render_click(view, "toggle_pool_compat_flag", %{"pool-id" => pool.id, "flag" => "request_compression_enabled"})
+    assert stale_html =~ "unsupported pool option"
     assert PoolRouting.get_routing_settings(pool.id) == nil
 
     render_click(view, "toggle_pool_compat_panel", %{
@@ -2128,7 +2122,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert has_element?(view, "#pool-create-routing-controls #pool_sticky_http_sessions")
     assert has_element?(view, "#pool-create-routing-controls #pool_prompt_cache_affinity_enabled")
     assert has_element?(view, "#pool-create-routing-controls #pool_v1_compatibility_enabled")
-    assert has_element?(view, "#pool-create-routing-controls #pool_request_compression_enabled")
+    refute has_element?(view, "#pool-create-routing-controls #pool_request_compression_enabled")
     assert has_element?(view, "#pool_routing_strategy")
     assert has_element?(view, "#pool_bridge_ring_size")
     assert has_element?(view, "#pool_sticky_websocket_sessions")
@@ -2173,7 +2167,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
              "Allow /v1 compatibility"
            )
 
-    assert has_element?(
+    refute has_element?(
              view,
              "#pool-create-routing-controls",
              "Shrinks eligible Responses tool outputs before upstream dispatch."
@@ -2327,7 +2321,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert created_pool.name == "Generated Slug Pool"
     assert settings.prompt_cache_affinity_enabled == true
     assert settings.v1_compatibility_enabled == true
-    assert settings.request_compression_enabled == false
+    refute Map.has_key?(settings, :request_compression_enabled)
     assert has_element?(view, "#pool-row-#{created_pool.id}", "Generated Slug Pool")
     refute has_element?(view, "#pool-row-#{created_pool.id}", "generated-slug-pool")
     refute has_element?(view, "#pool-create-dialog")
@@ -2410,7 +2404,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     _ = await_pool_traffic(view)
   end
 
-  test "creates pools with routing strategy, compatibility, compression, image generation, and upstream identities",
+  test "creates pools with routing strategy, compatibility, image generation, and upstream identities",
        %{conn: conn} do
     first_identity =
       active_identity_fixture(account_label: "First create account", plan_label: "pro")
@@ -2461,7 +2455,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert settings.routing_strategy == "least_recent_success"
     assert settings.prompt_cache_affinity_enabled == false
     assert settings.v1_compatibility_enabled == false
-    assert settings.request_compression_enabled == true
+    refute Map.has_key?(settings, :request_compression_enabled)
     assert settings.allow_image_generation == false
 
     assert Enum.map(assignments, & &1.upstream_identity_id) |> Enum.sort() ==
@@ -2531,7 +2525,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
     refute has_element?(view, "#pool_prompt_cache_affinity_enabled[checked]")
     refute has_element?(view, "#pool_v1_compatibility_enabled[checked]")
-    assert has_element?(view, "#pool_request_compression_enabled[checked]")
+    refute has_element?(view, "#pool_request_compression_enabled")
 
     assert Repo.aggregate(Pool, :count, :id) == initial_pool_count
   end
@@ -3876,7 +3870,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
     assert has_element?(view, "#pool-edit-routing-controls #pool_edit_v1_compatibility_enabled")
 
-    assert has_element?(
+    refute has_element?(
              view,
              "#pool-edit-routing-controls #pool_edit_request_compression_enabled"
            )
@@ -3930,7 +3924,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
              "Allow /v1 compatibility"
            )
 
-    assert has_element?(
+    refute has_element?(
              view,
              "#pool-edit-routing-controls",
              "Shrinks eligible Responses tool outputs before upstream dispatch."
@@ -4054,7 +4048,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert settings.sticky_http_sessions == true
     assert settings.prompt_cache_affinity_enabled == false
     assert settings.v1_compatibility_enabled == false
-    assert settings.request_compression_enabled == true
+    refute Map.has_key?(settings, :request_compression_enabled)
     assert Repo.get!(PoolUpstreamAssignment, removed_assignment.id).status == "deleted"
     assert Repo.get!(PoolUpstreamAssignment, kept_assignment.id).status == "active"
     assert Repo.get!(APIKey, linked_api_key.id).pool_id == pool.id
@@ -4537,13 +4531,15 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
         "allow_image_generation" => false
       })
 
+    Repo.query!("UPDATE pool_routing_settings SET request_compression_enabled = true WHERE pool_id = $1", [Ecto.UUID.dump!(pool.id)])
+
     {:ok, view, _html} = live(conn, ~p"/admin/pools")
     _ = await_pool_traffic(view)
 
     view |> element("#edit-pool-#{pool.id}") |> render_click()
 
     refute has_element?(view, "#pool_edit_prompt_cache_affinity_enabled[checked]")
-    assert has_element?(view, "#pool_edit_request_compression_enabled[checked]")
+    refute has_element?(view, "#pool_edit_request_compression_enabled")
     refute has_element?(view, "#pool_edit_allow_image_generation[checked]")
 
     view
@@ -4570,7 +4566,8 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert settings.sticky_http_sessions == true
     assert settings.prompt_cache_affinity_enabled == false
     assert settings.v1_compatibility_enabled == false
-    assert settings.request_compression_enabled == false
+    refute Map.has_key?(settings, :request_compression_enabled)
+    assert [[true]] = Repo.query!("SELECT request_compression_enabled FROM pool_routing_settings WHERE pool_id = $1", [Ecto.UUID.dump!(pool.id)]).rows
     assert settings.allow_image_generation == true
     assert Repo.get!(Pool, pool.id).name == "Preserved Routing"
     assert has_element?(view, "#pool-edit-dialog[open]")
@@ -4676,7 +4673,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
     refute has_element?(view, "#pool_edit_prompt_cache_affinity_enabled[checked]")
     refute has_element?(view, "#pool_edit_v1_compatibility_enabled[checked]")
-    assert has_element?(view, "#pool_edit_request_compression_enabled[checked]")
+    refute has_element?(view, "#pool_edit_request_compression_enabled")
 
     refute has_element?(
              view,

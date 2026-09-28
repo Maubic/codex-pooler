@@ -79,7 +79,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
   alias CodexPooler.Upstreams.Reconciliation.PoolReconciliation
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport
 
-  @supported_compression_model "gpt-4o"
+  @preservation_model "gpt-4o"
   @reasoning_denial_message "reasoning effort is not available for this API key"
   @native_response_control_headers [
     "openai-model",
@@ -3267,8 +3267,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
         })
       )
 
-    setup = gateway_setup(upstream, supported_compression_model_opts())
-    enable_request_compression!(setup.pool)
+    setup = gateway_setup(upstream, preservation_model_opts())
     native_id = "shell_backend_private_json_read"
     private_path = "src/private-example.json"
 
@@ -3312,30 +3311,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
     assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
 
-    assert %{
-             "status" => "skipped",
-             "reason" => "protected_tool_outputs",
-             "route_class" => "proxy_http",
-             "transport" => "http_json",
-             "candidate_count" => 0,
-             "compressed_count" => 0,
-             "skipped_count" => 0,
-             "protected_tool_output_skipped_count" => 1
-           } = metadata = attempt.response_metadata["payload_compression"]
-
-    metadata_text = inspect(metadata)
-    refute metadata_text =~ native_id
-    refute metadata_text =~ private_path
-    refute metadata_text =~ "backend private json output sentinel"
-    refute Map.has_key?(metadata, "strategies")
+    refute Map.has_key?(attempt.response_metadata, "payload_compression")
   end
 
-  test "POST /backend-api/codex/responses keeps disabled request compression as passthrough",
+  test "POST /backend-api/codex/responses preserves ordinary tool output",
        %{conn: conn} do
     upstream =
       start_upstream(
         FakeUpstream.json_response(%{
-          "id" => "resp_backend_compression_disabled",
+          "id" => "resp_backend_preservation",
           "object" => "response",
           "status" => "completed",
           "output" => [],
@@ -3344,7 +3328,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
       )
 
     setup = gateway_setup(upstream)
-    original_output = compression_log_fixture("disabled backend sentinel")
+    original_output = preservation_log_fixture("disabled backend sentinel")
 
     conn =
       conn
@@ -3354,13 +3338,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
         "input" => [
           %{
             "type" => "function_call_output",
-            "call_id" => "call_backend_compression_disabled",
+            "call_id" => "call_backend_preservation",
             "output" => original_output
           }
         ]
       })
 
-    assert %{"id" => "resp_backend_compression_disabled"} = json_response(conn, 200)
+    assert %{"id" => "resp_backend_preservation"} = json_response(conn, 200)
     assert [captured] = FakeUpstream.requests(upstream)
     assert captured.path == "/backend-api/codex/responses"
     assert captured.json["input"] |> List.first() |> Map.fetch!("output") == original_output
@@ -3368,11 +3352,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
     assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
 
-    assert get_in(attempt.response_metadata, ["payload_compression", "status"]) == "disabled"
-    assert get_in(attempt.response_metadata, ["payload_compression", "reason"]) == "pool_disabled"
+    refute Map.has_key?(attempt.response_metadata, "payload_compression")
   end
 
-  test "POST /backend-api/codex/responses skips lossy streaming local shell tool output",
+  test "POST /backend-api/codex/responses preserves streaming local shell tool output",
        %{conn: conn} do
     upstream =
       start_upstream(
@@ -3389,10 +3372,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
         ])
       )
 
-    setup = gateway_setup(upstream, supported_compression_model_opts())
-    enable_request_compression!(setup.pool)
+    setup = gateway_setup(upstream, preservation_model_opts())
     omitted_sentinel = "backend streaming omitted sentinel"
-    original_output = compression_log_fixture(omitted_sentinel)
+    original_output = preservation_log_fixture(omitted_sentinel)
 
     conn =
       conn
@@ -3421,20 +3403,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
 
     assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
 
-    assert_skipped_payload_metadata!(
-      attempt,
-      "proxy_stream",
-      "http_sse",
-      "lossy_unrecoverable_tool_output"
-    )
-
-    refute inspect(attempt.response_metadata["payload_compression"]) =~ omitted_sentinel
-
-    refute inspect(attempt.response_metadata["payload_compression"]) =~
-             "call_backend_stream_compressed"
+    refute Map.has_key?(attempt.response_metadata, "payload_compression")
   end
 
-  test "POST /backend-api/codex/v1/responses compresses eligible alias tool output",
+  test "POST /backend-api/codex/v1/responses preserves alias tool output bytes",
        %{conn: conn} do
     upstream =
       start_upstream(
@@ -3447,9 +3419,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
         })
       )
 
-    setup = gateway_setup(upstream, supported_compression_model_opts())
-    enable_request_compression!(setup.pool)
-    schema_bound_rows = compression_rows_fixture()
+    setup = gateway_setup(upstream, preservation_model_opts())
+    schema_bound_rows = preservation_rows_fixture()
     schema_bound_output = CodexPooler.JSON.encode!(schema_bound_rows, pretty: true)
     unbound_rows = Enum.reverse(schema_bound_rows)
     unbound_output = CodexPooler.JSON.encode!(unbound_rows, pretty: true)
@@ -3513,32 +3484,28 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
 
     assert schema_bound_item["output"] == schema_bound_output
     assert CodexPooler.JSON.decode!(schema_bound_item["output"]) == schema_bound_rows
-    assert unbound_item["output"] != unbound_output
+    assert unbound_item["output"] == unbound_output
     assert CodexPooler.JSON.decode!(unbound_item["output"]) == unbound_rows
 
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
     assert request.transport == "http_json"
 
     assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
-    assert_compressed_payload_metadata!(attempt, "proxy_http", "http_json", "json_array_lossless")
-
-    assert attempt.response_metadata["payload_compression"]["protected_tool_output_skipped_count"] ==
-             1
+    refute Map.has_key?(attempt.response_metadata, "payload_compression")
   end
 
-  test "curl -i reaches the isolated native HTTP compression boundary through FakeUpstream" do
+  test "curl -i reaches the isolated native HTTP preservation boundary through FakeUpstream" do
     upstream =
       start_upstream(
         FakeUpstream.json_response(%{
-          "id" => "resp_curl_schema_bound_compression",
+          "id" => "resp_curl_schema_bound_preservation",
           "object" => "response",
           "status" => "completed",
           "output" => []
         })
       )
 
-    setup = gateway_setup(upstream, supported_compression_model_opts())
-    enable_request_compression!(setup.pool)
+    setup = gateway_setup(upstream, preservation_model_opts())
     {_server, port} = start_public_endpoint_with_server!()
 
     schema_bound_output =
@@ -3603,7 +3570,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
 
     assert schema_bound_item["output"] == schema_bound_output
     assert is_map(CodexPooler.JSON.decode!(schema_bound_item["output"]))
-    assert unbound_item["output"] != unbound_output
+    assert unbound_item["output"] == unbound_output
 
     assert CodexPooler.JSON.decode!(unbound_item["output"]) ==
              CodexPooler.JSON.decode!(unbound_output)
@@ -3611,20 +3578,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
     assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
 
-    assert %{
-             "candidate_count" => 1,
-             "compressed_count" => 1,
-             "protected_tool_output_skipped_count" => 1,
-             "status" => "compressed"
-           } = attempt.response_metadata["payload_compression"]
+    refute Map.has_key?(attempt.response_metadata, "payload_compression")
   end
 
-  test "POST /backend-api/codex/responses compresses embedded JSON in eligible function output",
+  test "POST /backend-api/codex/responses preserves embedded JSON in function output",
        %{conn: conn} do
     upstream =
       start_upstream(
         FakeUpstream.json_response(%{
-          "id" => "resp_backend_embedded_json_compressed",
+          "id" => "resp_backend_embedded_json_preserved",
           "object" => "response",
           "status" => "completed",
           "output" => [],
@@ -3632,16 +3594,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
         })
       )
 
-    setup = gateway_setup(upstream, supported_compression_model_opts())
-    enable_request_compression!(setup.pool)
+    setup = gateway_setup(upstream, preservation_model_opts())
     prefix = "synthetic report begins\n"
     suffix = "\nsynthetic report ends"
 
     original_json =
-      CodexPooler.JSON.encode!(%{"rows" => compression_rows_fixture()}, pretty: true)
+      CodexPooler.JSON.encode!(%{"rows" => preservation_rows_fixture()}, pretty: true)
 
     original_output = prefix <> original_json <> suffix
-    call_id = "call_backend_embedded_json_compressed"
+    call_id = "call_backend_embedded_json_preserved"
 
     conn =
       conn
@@ -3663,41 +3624,35 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
         ]
       })
 
-    assert %{"id" => "resp_backend_embedded_json_compressed"} = json_response(conn, 200)
+    assert %{"id" => "resp_backend_embedded_json_preserved"} = json_response(conn, 200)
     assert [captured] = FakeUpstream.requests(upstream)
     assert captured.path == "/backend-api/codex/responses"
 
-    compressed_output =
+    forwarded_output =
       captured.json["input"]
       |> Enum.find(&(&1["type"] == "function_call_output"))
       |> Map.fetch!("output")
 
-    assert String.starts_with?(compressed_output, prefix)
-    assert String.ends_with?(compressed_output, suffix)
+    assert String.starts_with?(forwarded_output, prefix)
+    assert String.ends_with?(forwarded_output, suffix)
 
-    compressed_json =
+    forwarded_json =
       binary_part(
-        compressed_output,
+        forwarded_output,
         byte_size(prefix),
-        byte_size(compressed_output) - byte_size(prefix) - byte_size(suffix)
+        byte_size(forwarded_output) - byte_size(prefix) - byte_size(suffix)
       )
 
-    assert CodexPooler.JSON.decode!(compressed_json) == CodexPooler.JSON.decode!(original_json)
-    assert byte_size(compressed_json) < byte_size(original_json)
+    assert CodexPooler.JSON.decode!(forwarded_json) == CodexPooler.JSON.decode!(original_json)
+    assert forwarded_output == original_output
+    assert forwarded_json == original_json
 
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
     assert request.transport == "http_json"
 
     assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
 
-    assert_compressed_payload_metadata!(
-      attempt,
-      "proxy_http",
-      "http_json",
-      "embedded_json_lossless"
-    )
-
-    refute inspect(attempt.response_metadata["payload_compression"]) =~ call_id
+    refute Map.has_key?(attempt.response_metadata, "payload_compression")
   end
 
   @tag :lineage_metadata_forwarding
@@ -11841,7 +11796,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     assert turn.status == "succeeded"
   end
 
-  test "POST /backend-api/codex/responses/compact attempts compression and no-ops without candidates",
+  test "POST /backend-api/codex/responses/compact preserves ordinary compact input",
        %{conn: conn} do
     upstream =
       start_upstream(
@@ -11851,8 +11806,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
         })
       )
 
-    setup = gateway_setup(upstream, supported_compression_model_opts(compact?: true))
-    enable_request_compression!(setup.pool)
+    setup = gateway_setup(upstream, preservation_model_opts(compact?: true))
 
     conn =
       conn
@@ -11873,15 +11827,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
 
     assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
 
-    assert %{
-             "status" => "no_change",
-             "reason" => "no_candidates",
-             "route_class" => "proxy_compact",
-             "transport" => "http_compact_json",
-             "candidate_count" => 0,
-             "compressed_count" => 0,
-             "skipped_count" => 0
-           } = attempt.response_metadata["payload_compression"]
+    refute Map.has_key?(attempt.response_metadata, "payload_compression")
   end
 
   @tag :client_metadata
@@ -15188,17 +15134,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     refute metadata_text =~ "upstream-token"
   end
 
-  defp enable_request_compression!(pool) do
-    pool
-    |> Pools.ensure_routing_settings()
-    |> Ecto.Changeset.change(%{
-      request_compression_enabled: true,
-      updated_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
-    })
-    |> Repo.update!()
-  end
-
-  defp compression_log_fixture(omitted_sentinel) do
+  defp preservation_log_fixture(omitted_sentinel) do
     middle =
       1..96
       |> Enum.map(fn
@@ -15221,7 +15157,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     |> Enum.join("\n")
   end
 
-  defp compression_rows_fixture do
+  defp preservation_rows_fixture do
     for index <- 1..32 do
       %{
         "id" => index,
@@ -15231,51 +15167,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     end
   end
 
-  defp assert_compressed_payload_metadata!(attempt, route_class, transport, strategy) do
-    assert %{
-             "enabled" => true,
-             "attempted" => true,
-             "status" => "compressed",
-             "route_class" => ^route_class,
-             "transport" => ^transport,
-             "candidate_count" => 1,
-             "compressed_count" => 1,
-             "skipped_count" => 0
-           } = metadata = attempt.response_metadata["payload_compression"]
-
-    assert strategy in metadata["strategies"]
-    assert metadata["original_bytes"] > metadata["compressed_bytes"]
-    assert metadata["saved_bytes"] > 0
-    assert metadata["original_tokens"] > metadata["compressed_tokens"]
-    assert metadata["saved_tokens"] > 0
-  end
-
-  defp assert_skipped_payload_metadata!(attempt, route_class, transport, reason) do
-    assert %{
-             "enabled" => true,
-             "attempted" => true,
-             "status" => "skipped",
-             "reason" => ^reason,
-             "route_class" => ^route_class,
-             "transport" => ^transport,
-             "candidate_count" => 1,
-             "compressed_count" => 0,
-             "skipped_count" => 1,
-             "lossy_unrecoverable_tool_output_skipped_count" => 1
-           } = metadata = attempt.response_metadata["payload_compression"]
-
-    refute Map.has_key?(metadata, "strategies")
-    refute Map.has_key?(metadata, "original_tokens")
-    refute Map.has_key?(metadata, "compressed_tokens")
-    refute Map.has_key?(metadata, "saved_tokens")
-  end
-
-  defp supported_compression_model_opts(opts \\ []) do
+  defp preservation_model_opts(opts \\ []) do
     Keyword.merge(
       [
-        exposed_model_id: @supported_compression_model,
-        upstream_model_id: @supported_compression_model,
-        pricing_ref: @supported_compression_model
+        exposed_model_id: @preservation_model,
+        upstream_model_id: @preservation_model,
+        pricing_ref: @preservation_model
       ],
       opts
     )

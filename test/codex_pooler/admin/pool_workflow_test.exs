@@ -333,7 +333,7 @@ defmodule CodexPooler.Admin.PoolWorkflowTest do
   end
 
   describe "pool routing settings workflow" do
-    test "creation persists request compression routing setting when enabled" do
+    test "creation ignores retired routing attributes" do
       %{user: owner} = bootstrap_owner_fixture(%{"email" => "owner@example.com"})
       scope = Scope.for_user(owner, ["instance_owner"])
 
@@ -346,12 +346,13 @@ defmodule CodexPooler.Admin.PoolWorkflowTest do
 
       settings = Pools.get_routing_settings(pool)
 
-      assert settings.request_compression_enabled == true
+      refute Map.has_key?(settings, :request_compression_enabled)
+      assert [[false]] = Repo.query!("SELECT request_compression_enabled FROM pool_routing_settings WHERE pool_id = $1", [Ecto.UUID.dump!(pool.id)]).rows
       assert settings.prompt_cache_affinity_enabled == true
       assert settings.v1_compatibility_enabled == true
     end
 
-    test "update persists request compression routing setting with compatibility toggles" do
+    test "update ignores retired routing attributes while persisting compatibility toggles" do
       %{user: owner} = bootstrap_owner_fixture(%{"email" => "owner@example.com"})
       scope = Scope.for_user(owner, ["instance_owner"])
       pool = pool_fixture(%{slug: "compression-workflow-edit", name: "Compression Workflow Edit"})
@@ -360,6 +361,8 @@ defmodule CodexPooler.Admin.PoolWorkflowTest do
                Pools.update_routing_settings(scope, pool, %{
                  "request_compression_enabled" => true
                })
+
+      Repo.query!("UPDATE pool_routing_settings SET request_compression_enabled = true WHERE pool_id = $1", [Ecto.UUID.dump!(pool.id)])
 
       assert {:ok, updated_pool} =
                PoolWorkflow.update_pool_with_related_settings(scope, pool, %{
@@ -376,7 +379,8 @@ defmodule CodexPooler.Admin.PoolWorkflowTest do
       settings = Pools.get_routing_settings(updated_pool)
 
       assert updated_pool.id == pool.id
-      assert settings.request_compression_enabled == false
+      refute Map.has_key?(settings, :request_compression_enabled)
+      assert [[true]] = Repo.query!("SELECT request_compression_enabled FROM pool_routing_settings WHERE pool_id = $1", [Ecto.UUID.dump!(pool.id)]).rows
       assert settings.prompt_cache_affinity_enabled == false
       assert settings.v1_compatibility_enabled == false
     end

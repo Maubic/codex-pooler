@@ -18,7 +18,7 @@ defmodule Mix.Tasks.Dev.RoutingStrategyFixture do
   `--target-database NAME` targets an explicitly named local database reached
   over loopback (a kind port-forward is fine) instead of `codex_pooler_dev`.
 
-  The routing strategy is leased like `--request-compression` is in
+  The routing strategy is leased with the same lifecycle as
   `mix dev.openai_v1_fixture`: the exact prior `pool_routing_settings` row,
   `updated_at` included, is restored by the final release.
   """

@@ -1933,159 +1933,33 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
            )
   end
 
-  test "renders compression savings from safe metadata with token-first and byte fallback",
-       %{conn: conn, scope: scope} do
-    {:ok, pool} =
-      Pools.create_pool(scope, %{
-        slug: "compression-savings-logs",
-        name: "Compression Savings Logs"
-      })
-
-    %{api_key: api_key} = active_api_key_fixture(pool, %{display_name: "Compression key"})
+  test "historical payload metadata stays hidden in the table and actual detail drawer", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "historical-metadata", name: "Historical metadata"})
+    %{api_key: api_key} = active_api_key_fixture(pool)
     %{assignment: assignment} = upstream_assignment_fixture(pool)
-    sentinel = "SENTINEL_TOOL_OUTPUT_SHOULD_NOT_RENDER"
-    compressed_sentinel = "SENTINEL_COMPRESSED_OUTPUT_SHOULD_NOT_STORE"
+    sentinel = "synthetic-retired-history-value"
 
-    assert {:ok, %{request: token_request}} =
-             Accounting.record_metadata_request(%{pool: pool, api_key: api_key}, %{
-               endpoint: "/backend-api/codex/responses",
-               requested_model: "gpt-compression-token-ui",
-               transport: "http_json",
-               status: "succeeded",
-               correlation_id: "compression-token-ui",
-               request_metadata: %{"body" => %{"input" => sentinel}}
-             })
-
-    assert {:ok, _token_attempt} =
-             with_dispatchable_request(token_request, fn token_request ->
-               Accounting.create_attempt(token_request, assignment, %{
-                 status: "succeeded",
-                 response_metadata:
-                   ui_compression_metadata(%{
-                     route_class: "proxy_http",
-                     transport: "http_json",
-                     original_bytes: 4096,
-                     compressed_bytes: 1024,
-                     original_tokens: 1000,
-                     compressed_tokens: 400,
-                     tokenizer_input_skipped_count: 1,
-                     raw_candidate: sentinel,
-                     original_output: sentinel,
-                     compressed_output: compressed_sentinel
-                   })
-               })
-             end)
-
-    ledger_entry_fixture(token_request, %{
-      input_tokens: 80,
-      cached_input_tokens: 0,
-      output_tokens: 20,
-      total_tokens: 100,
-      settled_cost_micros: 1_000,
-      details: %{"pricing_status" => "priced", "settled_cost_micros" => "1000"}
-    })
-
-    assert {:ok, %{request: byte_request}} =
-             Accounting.record_metadata_request(%{pool: pool, api_key: api_key}, %{
-               endpoint: "/backend-api/codex/responses",
-               requested_model: "gpt-compression-byte-ui",
-               transport: "websocket",
-               status: "succeeded",
-               correlation_id: "compression-byte-ui",
-               request_metadata: %{"websocket_frame" => sentinel}
-             })
-
-    assert {:ok, _byte_attempt} =
-             with_dispatchable_request(byte_request, fn byte_request ->
-               Accounting.create_attempt(byte_request, assignment, %{
-                 status: "succeeded",
-                 response_metadata:
-                   ui_compression_metadata(%{
-                     route_class: "proxy_websocket",
-                     transport: "websocket",
-                     original_bytes: 8192,
-                     compressed_bytes: 4096,
-                     raw_candidate: sentinel,
-                     original_output: sentinel,
-                     compressed_output: compressed_sentinel
-                   })
-               })
-             end)
-
-    ledger_entry_fixture(byte_request, %{
-      input_tokens: 40,
-      cached_input_tokens: 0,
-      output_tokens: 10,
-      total_tokens: 50,
-      settled_cost_micros: 500,
-      details: %{"pricing_status" => "priced", "settled_cost_micros" => "500"}
-    })
-
-    assert {:ok, %{request: zero_request}} =
-             Accounting.record_metadata_request(%{pool: pool, api_key: api_key}, %{
-               endpoint: "/backend-api/codex/responses",
-               requested_model: "gpt-compression-zero-ui",
-               transport: "http_json",
-               status: "succeeded",
-               correlation_id: "compression-zero-ui"
-             })
-
-    assert {:ok, _zero_attempt} =
-             with_dispatchable_request(zero_request, fn zero_request ->
-               Accounting.create_attempt(zero_request, assignment, %{
-                 status: "succeeded",
-                 response_metadata:
-                   ui_compression_metadata(%{
-                     route_class: "proxy_http",
-                     transport: "http_json",
-                     original_bytes: 4096,
-                     compressed_bytes: 4096,
-                     raw_candidate: sentinel,
-                     original_output: sentinel,
-                     compressed_output: compressed_sentinel
-                   })
-               })
-             end)
-
-    ledger_entry_fixture(zero_request, %{
-      input_tokens: 30,
-      cached_input_tokens: 0,
-      output_tokens: 10,
-      total_tokens: 40,
-      settled_cost_micros: 400,
-      details: %{"pricing_status" => "priced", "settled_cost_micros" => "400"}
-    })
-
-    {:ok, view, _html} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}")
-
-    assert has_element?(
-             view,
-             "#request-log-#{token_request.id}-compression-savings[data-compression-unit='tokens'][data-compression-status='compressed'][data-compression-reason='rewritten']",
-             "600 (60%)"
-           )
-
-    assert has_element?(
-             view,
-             "#request-log-#{token_request.id}-compression-savings .hero-arrows-pointing-in"
-           )
-
-    assert has_element?(
-             view,
-             "#request-log-#{token_request.id}-compression-savings[title*='tokenizer input skipped: 1']"
-           )
-
-    assert has_element?(
-             view,
-             "#request-log-#{token_request.id}-compression-savings[title*='not total request tokens']"
-           )
-
-    refute has_element?(view, "#request-log-#{byte_request.id}-compression-savings")
-
-    refute has_element?(view, "#request-log-#{zero_request.id}-compression-savings")
-
-    html = render(view)
-    refute html =~ sentinel
-    refute html =~ compressed_sentinel
+    for {value, index} <- Enum.with_index([%{"attempted" => true, "status" => "compressed", "original_tokens" => 1000, "compressed_tokens" => 400, "reason" => %{"label" => sentinel}, "nested" => [%{"label" => sentinel}]}, [%{"label" => sentinel}], sentinel]) do
+      request = request_fixture(%{pool: pool, api_key: api_key}, %{status: "succeeded", requested_model: "example-model", correlation_id: "historical-#{index}"})
+      attempt = attempt_fixture(request, assignment, %{status: "succeeded"})
+      historical = %{"payload_compression" => value, "nested" => %{"payload_compression" => value}}
+      request |> Ecto.Changeset.change(request_metadata: historical) |> Repo.update!()
+      attempt |> Ecto.Changeset.change(response_metadata: historical) |> Repo.update!()
+      ledger_entry_fixture(request, %{input_tokens: 80, cached_input_tokens: 0, output_tokens: 20, total_tokens: 100, settled_cost_micros: 1_000, details: %{"pricing_status" => "priced", "settled_cost_micros" => "1000"}})
+      {:ok, view, _html} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}")
+      refute has_element?(view, "[data-role='compression-savings']")
+      refute render(view) =~ sentinel
+      render_click(element(view, "#request-log-#{request.id}-open-details"))
+      assert has_element?(view, "#request-log-detail-sidebar")
+      assert has_element?(view, "#request-log-detail-token-counts", "100 tokens")
+      assert has_element?(view, "#request-log-detail-input-tokens", "80")
+      assert has_element?(view, "#request-log-detail-output-tokens", "20")
+      refute has_element?(view, "[id^='request-log-detail-compression-']")
+      refute render(view) =~ sentinel
+      assert Repo.get!(CodexPooler.Accounting.Request, request.id).request_metadata === historical
+      assert Repo.get!(CodexPooler.Accounting.Attempt, attempt.id).response_metadata === historical
+      GenServer.stop(view.pid)
+    end
   end
 
   test "transport and route helpers render in separate columns",
@@ -3736,41 +3610,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
 
     %{request: request, attempt: attempt, identity: identity, assignment: assignment}
   end
-
-  defp ui_compression_metadata(attrs) do
-    metadata =
-      %{
-        "enabled" => true,
-        "attempted" => true,
-        "status" => "compressed",
-        "reason" => "rewritten",
-        "route_class" => Map.fetch!(attrs, :route_class),
-        "transport" => Map.fetch!(attrs, :transport),
-        "candidate_count" => 1,
-        "compressed_count" => 1,
-        "skipped_count" => 0,
-        "original_bytes" => Map.fetch!(attrs, :original_bytes),
-        "compressed_bytes" => Map.fetch!(attrs, :compressed_bytes),
-        "strategies" => ["log_output"],
-        "raw_candidate" => Map.fetch!(attrs, :raw_candidate),
-        "original_output" => Map.fetch!(attrs, :original_output),
-        "compressed_output" => Map.fetch!(attrs, :compressed_output)
-      }
-
-    metadata =
-      metadata
-      |> maybe_put("original_tokens", Map.get(attrs, :original_tokens))
-      |> maybe_put("compressed_tokens", Map.get(attrs, :compressed_tokens))
-      |> maybe_put(
-        "tokenizer_input_skipped_count",
-        Map.get(attrs, :tokenizer_input_skipped_count)
-      )
-
-    %{"payload_compression" => metadata}
-  end
-
-  defp maybe_put(metadata, _key, nil), do: metadata
-  defp maybe_put(metadata, key, value), do: Map.put(metadata, key, value)
 
   defp normalize_repo_source(value) when is_binary(value), do: value
   defp normalize_repo_source(value) when is_atom(value), do: Atom.to_string(value)

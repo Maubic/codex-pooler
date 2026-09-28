@@ -1115,120 +1115,23 @@ defmodule CodexPooler.CompatibilityMatrixTest do
     end
   end
 
-  describe "request compression compatibility contract" do
-    test "documents Pool-gated request-side fail-open metadata-only behavior" do
-      feature = CompatibilityMatrix.by_slug!(:request_compression)
-      fixture = CompatibilityMatrix.fixture!(:request_compression)
-
+  describe "tool-output preservation compatibility contract" do
+    test "keeps accepted bytes, adapter boundaries and privacy explicit" do
+      feature = CompatibilityMatrix.by_slug!(:tool_output_preservation)
+      fixture = CompatibilityMatrix.fixture!(:tool_output_preservation)
       assert feature.status == :supported
-      assert feature.current == :pool_gated_request_side_payload_rewrite
-      assert :route in feature.categories
-      assert :auth in feature.categories
-      assert :error in feature.categories
-      assert :streaming in feature.categories
-      assert :ownership in feature.categories
-      assert :degraded in feature.categories
-
-      assert feature.contract =~ "Pool-gated"
-      assert feature.contract =~ "request_compression_enabled"
-      assert feature.contract =~ "request-side only"
-      assert feature.contract =~ "fail-open"
-      assert feature.contract =~ "metadata-only"
-      assert feature.contract =~ "payload_compression"
-      assert feature.contract =~ "command-backed file reads"
-
-      assert feature.contract =~
-               "remain byte-exact before output range lookup or content detection"
-
-      assert feature.contract =~ "malformed or unrecognized commands retain existing behavior"
-      assert feature.contract =~ "valid JSON object or array spans embedded in ordinary prose"
-      assert feature.contract =~ "minified lexically"
-      assert feature.contract =~ "deterministic per-dispatch work budget"
-
-      assert Map.fetch!(fixture, :fidelity) == %{
-               json_minification: "lexical_token_bytes_preserved",
-               search_tool_output_envelope: "preserved_verbatim",
-               search_omission_markers: "always_including_context_output",
-               search_context: "complete_adjacent_runs_retained_other_omissions_marked",
-               diff_hunkless_file_sections: "preserved_verbatim",
-               diff_hunk_headers: "kept_with_every_hunk",
-               diff_file_sections: "split_at_diff_lines_and_header_pairs_after_counted_hunks"
-             }
-
-      assert Map.fetch!(fixture, :guardrails) == %{
-               max_body_bytes: 67_108_864,
-               max_candidates: 50,
-               candidate_cap: "first_candidates_in_body_order_rest_unchanged",
-               max_json_values: 262_144,
-               max_nesting_depth: 512,
-               work_budget: "deterministic_per_dispatch_remaining_candidates_unchanged",
-               detection_budget: "charged_before_detection_in_candidate_order",
-               nested_json: "byte_depth_and_structure_checks_before_decode",
-               command_inspection: "bounded_once_per_owner_in_output_order_unsafe_protected",
-               bounded_original_count: "stable_prefix_lower_bound"
-             }
-
-      assert "diagnostic_evidence" in get_in(fixture, [:supported_input_shapes, :false_positive_guards])
-      assert "non_search_command_provenance" in get_in(fixture, [:supported_input_shapes, :false_positive_guards])
-
-      assert Map.fetch!(fixture, :pool_gate) == %{
-               setting: "request_compression_enabled",
-               default_enabled: false,
-               disabled_behavior: "original_request_passthrough"
-             }
-
-      assert Map.fetch!(fixture, :direction) == "request_side_only"
-      assert Map.fetch!(fixture, :failure_mode) == "fail_open_original_request"
-
-      assert get_in(fixture, [:protected_tool_outputs, :command_backed_reads]) == %{
-               arguments: ["cmd", "command"],
-               native_action: %{type: "exec", command: "argv"},
-               direct_commands: ["cat", "nl", "head", "tail", "sed_print_only"],
-               pipeline: "nl_to_sed_print_only",
-               producer_aliases: %{
-                 function_call: ["call_id"],
-                 local_shell_call: ["call_id", "id"]
-               },
-               output_aliases: %{
-                 function_call_output: ["call_id"],
-                 local_shell_call_output: ["call_id", "id"]
-               },
-               output_compatibility: %{
-                 function_call_output: ["function_call", "local_shell_call"],
-                 local_shell_call_output: ["local_shell_call"]
-               },
-               owner_identity: "positional_producer_path",
-               unresolved_function_output: "protected_legacy",
-               unresolved_local_shell_output: "existing_behavior",
-               duplicate_aliases: "protected_original_output_preserved",
-               cross_kind_collisions: "protected_original_output_preserved",
-               conflicting_output_aliases: "protected_original_output_preserved",
-               recognized_owner_stage: "before_output_range_lookup_and_content_detection",
-               malformed_or_unrecognized: "existing_behavior",
-               output_behavior: "byte_exact",
-               metadata: "aggregate_counts_only"
-             }
-
-      assert get_in(fixture, [:supported_input_shapes, :embedded_json]) == %{
-               container_kinds: ["object", "array"],
-               surrounding_bytes: "preserved",
-               quoted_json_looking_text: "preserved",
-               malformed_or_over_limit_behavior: "original_output_preserved",
-               maximum_spans: 50
-             }
-
-      assert Map.fetch!(fixture, :privacy) == %{
-               raw_outputs_stored: false,
-               raw_response_bodies_stored: false,
-               ccr_retrieval: false,
-               request_log_metadata: "payload_compression",
-               metadata_only: true
-             }
+      assert feature.current == :accepted_tool_output_byte_preservation
+      assert fixture.behavior == "accepted_output_bytes_preserved"
+      assert fixture.adapter_oracle == "original_strings_or_ordered_concatenated_text_parts"
+      assert fixture.serving_modes == ["full", "lite"]
+      assert fixture.call_ids == "preserved"
+      assert fixture.item_order == "preserved"
+      assert fixture.privacy == %{raw_outputs_stored: false, raw_response_bodies_stored: false, new_compression_metadata: false, metadata_only: true}
     end
 
-    test "keeps eligible routes and public compact unsupported behavior explicit" do
-      feature = CompatibilityMatrix.by_slug!(:request_compression)
-      fixture = CompatibilityMatrix.fixture!(:request_compression)
+    test "keeps delivery routes and unsupported public compact explicit" do
+      feature = CompatibilityMatrix.by_slug!(:tool_output_preservation)
+      fixture = CompatibilityMatrix.fixture!(:tool_output_preservation)
 
       assert feature.routes == [
                %{method: :post, path: "/backend-api/codex/responses"},
@@ -1243,38 +1146,7 @@ defmodule CodexPooler.CompatibilityMatrixTest do
                %{method: :get, path: "/v1/responses", transport: "websocket"}
              ]
 
-      assert Map.fetch!(fixture, :eligible_route_families) == [
-               "backend_responses",
-               "backend_v1_responses_alias",
-               "backend_v1_chat_alias",
-               "public_v1_responses",
-               "public_v1_chat_translation",
-               "backend_compact",
-               "backend_v1_compact_alias",
-               "backend_websocket_response_create",
-               "backend_v1_websocket_response_create_alias",
-               "public_v1_websocket_response_create"
-             ]
-
-      assert Map.fetch!(fixture, :ineligible_surfaces) == [
-               "multipart",
-               "files",
-               "audio",
-               "images",
-               "admin",
-               "mcp",
-               "usage",
-               "control_plane"
-             ]
-
-      assert Map.fetch!(fixture, :public_unsupported_compact) == %{
-               method: :post,
-               path: "/v1/responses/compact",
-               status: 404,
-               error_code: "unsupported_endpoint",
-               compression_eligible: false,
-               upstream_dispatch: false
-             }
+      assert fixture.public_unsupported_compact == %{method: :post, path: "/v1/responses/compact", status: 404, error_code: "unsupported_endpoint", upstream_dispatch: false}
     end
   end
 

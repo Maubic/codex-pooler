@@ -22,6 +22,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn}
   alias CodexPooler.Gateway.Routing.ModelMetadata
+  alias CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation
   alias CodexPooler.Gateway.Runtime.Finalization.InterruptionOutcome
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
   alias CodexPooler.InstanceSettings.AppSecretCrypto
@@ -57,6 +58,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
   @spec consume(consume_input()) :: {:ok, map()} | {:error, atom() | Ecto.Changeset.t()}
   def consume(input) when is_map(input) do
     with :ok <- validate_consume_input(input),
+         :ok <- validate_original_preparation(input.request_id, input.eligible_attempt_id),
          %CodexSession{} = session <- reserve_session_snapshot(input),
          {:ok, consume_fence} <- consume_owner_reserve(session, input) do
       finish_consume(input, session, consume_fence)
@@ -582,6 +584,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
              },
              now
            ),
+         :ok <- validate_attempt_preparation(attempt, input.request_id, input.eligible_attempt_id),
          {:ok, provisional_digest} <-
            RequestReplayEntitlement.provisional_binding_digest(input.provisional_token),
          {:ok, reserve_receipt_digest} <-
@@ -1258,7 +1261,8 @@ defmodule CodexPooler.Accounting.RequestReplay do
          true <- open_request?(request),
          %Attempt{} = attempt <- latest_attempt(request.id),
          true <- coherent_armed_attempt?(attempt, entitlement),
-         true <- DateTime.compare(entitlement.expires_at, db_now) == :gt do
+         true <- DateTime.compare(entitlement.expires_at, db_now) == :gt,
+         :ok <- validate_original_preparation(request.id, entitlement.eligible_attempt_id) do
       {:armed_generation_one, entitlement |> entitlement_snapshot() |> put_matched_replay_claim(matched)}
     else
       {:error, _reason} = error -> error
@@ -1747,6 +1751,18 @@ defmodule CodexPooler.Accounting.RequestReplay do
       is_list(input.owner_forwarder_opts) and is_integer(input.reserve_timeout_ms) and
       input.reserve_timeout_ms in 1..60_000
   end
+
+  defp validate_original_preparation(request_id, attempt_id) do
+    validate_attempt_preparation(Repo.get(Attempt, attempt_id), request_id, attempt_id)
+  end
+
+  defp validate_attempt_preparation(%Attempt{id: attempt_id, request_id: request_id} = attempt, request_id, attempt_id) do
+    if ReplayPreparation.replay_eligible?(attempt.response_metadata),
+      do: :ok,
+      else: {:error, :invalid_replay_preparation}
+  end
+
+  defp validate_attempt_preparation(_attempt, _request_id, _attempt_id), do: {:error, :invalid_replay_preparation}
 
   defp reserve_session_snapshot(input) do
     Repo.one(

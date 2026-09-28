@@ -61,7 +61,8 @@ defmodule CodexPooler.RequestReplayFixtures do
         status: "in_progress",
         completed_at: nil,
         upstream_status_code: nil,
-        usage_status: "usage_pending"
+        usage_status: "usage_pending",
+        response_metadata: replay_preparation_metadata()
       })
 
     attempt = attempt |> Ecto.Changeset.change(%{model_id: model.id}) |> Repo.update!()
@@ -113,6 +114,23 @@ defmodule CodexPooler.RequestReplayFixtures do
       semantic_digest: semantic_digest,
       session: session,
       turn: turn
+    }
+  end
+
+  def replay_preparation_metadata do
+    %{
+      "native_replay_preparation" => %{
+        "version" => 1,
+        "configured_mode" => "full",
+        "effective_mode" => "full",
+        "source" => "override",
+        "reasoning_mode" => "unrestricted",
+        "configured_effort" => nil,
+        "requested_effort" => nil,
+        "applied_effort" => nil,
+        "supports_reasoning_summary" => true,
+        "request_compression_enabled" => false
+      }
     }
   end
 

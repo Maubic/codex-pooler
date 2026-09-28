@@ -54,7 +54,6 @@ defmodule CodexPooler.Dev.RoutingStrategyFixtureTest do
         sticky_http_sessions: true,
         prompt_cache_affinity_enabled: false,
         v1_compatibility_enabled: false,
-        request_compression_enabled: false,
         allow_image_generation: false,
         metadata: %{"baseline" => true},
         created_at: ~U[2026-08-01 12:00:00.000000Z],
@@ -130,7 +129,6 @@ defmodule CodexPooler.Dev.RoutingStrategyFixtureTest do
                sticky_http_sessions: true,
                prompt_cache_affinity_enabled: false,
                v1_compatibility_enabled: false,
-               request_compression_enabled: false,
                allow_image_generation: false,
                metadata: %{"baseline" => true},
                updated_at: ^baseline_updated_at

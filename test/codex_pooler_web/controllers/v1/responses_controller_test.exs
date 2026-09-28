@@ -4500,10 +4500,9 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       )
 
     setup = gateway_setup(upstream, exposed_model_id: "gpt-4o", upstream_model_id: "gpt-4o")
-    enable_request_compression!(setup.pool)
     command = "nl -ba src/private-example.ex | sed -n '1,75p'"
     call_id = "call_v1_private_file_read"
-    original_output = compression_log_fixture("v1 private build output sentinel")
+    original_output = preservation_log_fixture("v1 private build output sentinel")
 
     conn =
       conn
@@ -4546,25 +4545,10 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
     assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
 
-    assert %{
-             "status" => "skipped",
-             "reason" => "protected_tool_outputs",
-             "route_class" => "proxy_stream",
-             "transport" => "http_sse",
-             "candidate_count" => 0,
-             "compressed_count" => 0,
-             "skipped_count" => 0,
-             "protected_tool_output_skipped_count" => 1
-           } = metadata = attempt.response_metadata["payload_compression"]
-
-    metadata_text = inspect(metadata)
-    refute metadata_text =~ command
-    refute metadata_text =~ call_id
-    refute metadata_text =~ "v1 private build output sentinel"
-    refute Map.has_key?(metadata, "strategies")
+    refute Map.has_key?(attempt.response_metadata, "payload_compression")
   end
 
-  test "POST /v1/responses preserves schema-bound tool output while compressing an unbound output",
+  test "POST /v1/responses preserves schema-bound tool output and unbound output bytes",
        %{conn: conn} do
     upstream =
       start_upstream(
@@ -4583,7 +4567,6 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       )
 
     setup = gateway_setup(upstream, exposed_model_id: "gpt-4o", upstream_model_id: "gpt-4o")
-    enable_request_compression!(setup.pool)
 
     schema_bound_output =
       CodexPooler.JSON.encode!(%{"rows" => Enum.to_list(1..160)}, pretty: true)
@@ -4659,7 +4642,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     assert CodexPooler.JSON.decode!(schema_bound_item["output"]) ==
              CodexPooler.JSON.decode!(schema_bound_output)
 
-    assert unbound_item["output"] != unbound_output
+    assert unbound_item["output"] == unbound_output
 
     assert CodexPooler.JSON.decode!(unbound_item["output"]) ==
              CodexPooler.JSON.decode!(unbound_output)
@@ -4674,20 +4657,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
     assert attempt.status == "succeeded"
 
-    assert %{
-             "enabled" => true,
-             "attempted" => true,
-             "status" => "compressed",
-             "route_class" => "proxy_stream",
-             "transport" => "http_sse",
-             "candidate_count" => 1,
-             "compressed_count" => 1,
-             "skipped_count" => 0,
-             "protected_tool_output_skipped_count" => 1
-           } = metadata = attempt.response_metadata["payload_compression"]
-
-    refute inspect(metadata) =~ "call_public_http_schema_bound"
-    refute inspect(metadata) =~ "call_public_http_unbound"
+    refute Map.has_key?(attempt.response_metadata, "payload_compression")
   end
 
   @tag :v1_websocket_bridge_usage
@@ -11258,16 +11228,6 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     end
   end
 
-  defp enable_request_compression!(pool) do
-    pool
-    |> CodexPooler.Pools.ensure_routing_settings()
-    |> Ecto.Changeset.change(%{
-      request_compression_enabled: true,
-      updated_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
-    })
-    |> Repo.update!()
-  end
-
   defp long_turn_progress_events(response_id) do
     progress_events =
       for index <- 1..6 do
@@ -12189,7 +12149,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     }
   end
 
-  defp compression_log_fixture(omitted_sentinel) do
+  defp preservation_log_fixture(omitted_sentinel) do
     middle =
       1..96
       |> Enum.map(fn

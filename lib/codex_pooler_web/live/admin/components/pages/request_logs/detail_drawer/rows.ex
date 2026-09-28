@@ -16,8 +16,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawer.Rows do
       status_label: 1
     ]
 
-  import CodexPoolerWeb.Admin.RequestLogDetailDrawer.Format, only: [safe_text: 1]
-
   alias CodexPooler.ServiceTier
 
   @serving_mode_configured_key "model_serving_mode_configured"
@@ -361,7 +359,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawer.Rows do
   @spec sanitized_metadata_rows(map()) :: [detail_row()]
   def sanitized_metadata_rows(log) do
     quota = metadata_section(log, "quota_decision")
-    compression = log.payload_compression || %{}
     file = metadata_section(log, "file")
 
     [
@@ -372,14 +369,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawer.Rows do
         Map.get(log.metadata || %{}, "operation"),
         mono: true
       ),
-      detail("request-log-detail-file-status", "File status", Map.get(file, "status"), mono: true),
-      detail("request-log-detail-compression-status", "Compression status", compression[:status], mono: true),
-      detail("request-log-detail-compression-reason", "Compression reason", compression[:reason], mono: true),
-      detail(
-        "request-log-detail-compression-saved",
-        "Compression saved",
-        compression_saved(compression)
-      )
+      detail("request-log-detail-file-status", "File status", Map.get(file, "status"), mono: true)
     ]
     |> present_rows()
   end
@@ -454,12 +444,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawer.Rows do
 
   defp list_count(value) when is_list(value), do: length(value)
   defp list_count(_value), do: nil
-
-  defp compression_saved(%{saved_count: saved, unit: unit})
-       when is_integer(saved) and is_binary(unit),
-       do: "#{safe_text(saved)} #{unit}"
-
-  defp compression_saved(_compression), do: nil
 
   defp format_debug_timestamp(nil, _preferences), do: nil
 

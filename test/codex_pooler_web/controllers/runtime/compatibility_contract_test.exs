@@ -61,7 +61,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     public_strict_schema_object_roots: [:route, :auth, :error, :streaming, :ownership],
     unsupported_input_image_reference: [:route, :auth, :error, :ownership],
     first_event_stream_retry: [:route, :auth, :error, :streaming, :ownership, :degraded],
-    request_compression: [:route, :auth, :error, :streaming, :ownership, :degraded],
+    tool_output_preservation: [:route, :auth, :error, :streaming, :ownership, :degraded],
     upstream_websocket_bridge: [:route, :auth, :error, :streaming, :ownership, :degraded],
     image_generation_permission: [:route, :auth, :error],
     responses_access_programs: [:route, :auth, :error, :streaming],
@@ -81,32 +81,32 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     {:delete, "/v1/responses/:response_id"} => ~w(v1_unsupported_public_surface)a,
     {:get, "/api/codex/usage"} => ~w(firewall usage_alias_meter_identity)a,
     {:get, "/backend-api/codex/models"} => ~w(api_key_reasoning_availability backend_models_etag database_unavailable firewall pool_model_serving_modes)a,
-    {:get, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable duplicate_turn_fence exhausted_pool_usage_limit firewall function_tool_schema_lowering multi_agent_product_certification pool_model_serving_modes pooler_authored_error_type rejection_metadata request_compression terminal_failure_diagnostics upstream_error_param websocket_continuity)a,
+    {:get, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable duplicate_turn_fence exhausted_pool_usage_limit firewall function_tool_schema_lowering multi_agent_product_certification pool_model_serving_modes pooler_authored_error_type rejection_metadata terminal_failure_diagnostics tool_output_preservation upstream_error_param websocket_continuity)a,
     {:get, "/backend-api/codex/v1/models"} => ~w(backend_models_etag backend_v1_alias_surface pool_model_serving_modes)a,
-    {:get, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface duplicate_turn_fence function_tool_schema_lowering multi_agent_product_certification pool_model_serving_modes request_compression)a,
+    {:get, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface duplicate_turn_fence function_tool_schema_lowering multi_agent_product_certification pool_model_serving_modes tool_output_preservation)a,
     {:get, "/backend-api/wham/usage"} => ~w(firewall usage_alias_meter_identity)a,
     {:get, "/v1/files"} => ~w(v1_supported_surface)a,
     {:get, "/v1/files/:file_id"} => ~w(v1_supported_surface)a,
     {:get, "/v1/files/:file_id/content"} => ~w(v1_supported_surface)a,
     {:get, "/v1/models"} => ~w(firewall v1_supported_surface)a,
-    {:get, "/v1/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_responses_envelope direct_responses_strict_schema_repair exhausted_pool_usage_limit firewall function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type public_strict_schema_object_roots request_compression responses_access_programs responses_allowed_tools responses_executable_custom_tools v1_supported_surface)a,
+    {:get, "/v1/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_responses_envelope direct_responses_strict_schema_repair exhausted_pool_usage_limit firewall function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type public_strict_schema_object_roots responses_access_programs responses_allowed_tools responses_executable_custom_tools tool_output_preservation v1_supported_surface)a,
     {:get, "/v1/responses/:response_id"} => ~w(v1_unsupported_public_surface)a,
     {:get, "/v1/usage"} => ~w(v1_supported_surface)a,
     {:get, "/wham/usage"} => ~w(firewall usage_alias_meter_identity)a,
     {:post, "/backend-api/codex/images/edits"} => ~w(api_key_terminal_policy_denials backend_image_proxy_surface image_generation_permission)a,
     {:post, "/backend-api/codex/images/generations"} => ~w(api_key_terminal_policy_denials backend_image_proxy_surface image_generation_permission)a,
-    {:post, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable decompression degraded_routing duplicate_turn_fence exhausted_pool_usage_limit firewall first_event_stream_retry function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type reasoning_minimal reasoning_none reasoning_ultra rejection_metadata request_compression response_body_cap responses_chat strict_schema_validation terminal_failure_diagnostics unsupported_input_image_reference unsupported_upstream_fields upstream_error_param upstream_validation_rejection_relay)a,
-    {:post, "/backend-api/codex/responses/compact"} => ~w(api_key_reasoning_availability bulkheads duplicate_turn_fence pool_model_serving_modes pooler_authored_error_type reasoning_ultra request_compression)a,
-    {:post, "/backend-api/codex/v1/chat/completions"} => ~w(api_key_reasoning_availability backend_responses_envelope backend_v1_alias_surface pool_model_serving_modes public_strict_schema_object_roots request_compression upstream_validation_rejection_relay)a,
-    {:post, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface function_tool_schema_lowering pool_model_serving_modes request_compression response_body_cap upstream_validation_rejection_relay)a,
-    {:post, "/backend-api/codex/v1/responses/compact"} => ~w(api_key_reasoning_availability backend_v1_alias_surface pool_model_serving_modes request_compression)a,
+    {:post, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable decompression degraded_routing duplicate_turn_fence exhausted_pool_usage_limit firewall first_event_stream_retry function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type reasoning_minimal reasoning_none reasoning_ultra rejection_metadata response_body_cap responses_chat strict_schema_validation terminal_failure_diagnostics tool_output_preservation unsupported_input_image_reference unsupported_upstream_fields upstream_error_param upstream_validation_rejection_relay)a,
+    {:post, "/backend-api/codex/responses/compact"} => ~w(api_key_reasoning_availability bulkheads duplicate_turn_fence pool_model_serving_modes pooler_authored_error_type reasoning_ultra tool_output_preservation)a,
+    {:post, "/backend-api/codex/v1/chat/completions"} => ~w(api_key_reasoning_availability backend_responses_envelope backend_v1_alias_surface pool_model_serving_modes public_strict_schema_object_roots tool_output_preservation upstream_validation_rejection_relay)a,
+    {:post, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface function_tool_schema_lowering pool_model_serving_modes response_body_cap tool_output_preservation upstream_validation_rejection_relay)a,
+    {:post, "/backend-api/codex/v1/responses/compact"} => ~w(api_key_reasoning_availability backend_v1_alias_surface pool_model_serving_modes tool_output_preservation)a,
     {:post, "/backend-api/files"} => ~w(files firewall pooler_authored_error_type)a,
     {:post, "/backend-api/files/:file_id/uploaded"} => ~w(files firewall)a,
     {:post, "/backend-api/transcribe"} => ~w(backend_transcription firewall response_body_cap)a,
     {:post, "/mcp"} => ~w(firewall)a,
     {:post, "/v1/audio/transcriptions"} => ~w(v1_supported_surface)a,
     {:post, "/v1/batches"} => ~w(v1_unsupported_public_surface)a,
-    {:post, "/v1/chat/completions"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_responses_envelope exhausted_pool_usage_limit pool_model_serving_modes public_strict_schema_object_roots request_compression response_body_cap responses_chat responses_executable_custom_tools unsupported_input_image_reference upstream_validation_rejection_relay v1_supported_surface)a,
+    {:post, "/v1/chat/completions"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_responses_envelope exhausted_pool_usage_limit pool_model_serving_modes public_strict_schema_object_roots response_body_cap responses_chat responses_executable_custom_tools tool_output_preservation unsupported_input_image_reference upstream_validation_rejection_relay v1_supported_surface)a,
     {:post, "/v1/content_provenance_checks"} => ~w(v1_unsupported_public_surface)a,
     {:post, "/v1/embeddings"} => ~w(v1_unsupported_public_surface)a,
     {:post, "/v1/files"} => ~w(v1_supported_surface)a,
@@ -115,7 +115,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     {:post, "/v1/images/generations"} => ~w(image_generation_permission v1_supported_surface)a,
     {:post, "/v1/images/variations"} => ~w(v1_unsupported_public_surface)a,
     {:post, "/v1/moderations"} => ~w(v1_unsupported_public_surface)a,
-    {:post, "/v1/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_responses_envelope database_unavailable direct_responses_strict_schema_repair exhausted_pool_usage_limit firewall function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type public_strict_schema_object_roots reasoning_context request_compression response_body_cap responses_access_programs responses_allowed_tools responses_chat responses_executable_custom_tools unsupported_input_image_reference upstream_validation_rejection_relay upstream_websocket_bridge v1_supported_surface)a,
+    {:post, "/v1/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_responses_envelope database_unavailable direct_responses_strict_schema_repair exhausted_pool_usage_limit firewall function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type public_strict_schema_object_roots reasoning_context response_body_cap responses_access_programs responses_allowed_tools responses_chat responses_executable_custom_tools tool_output_preservation unsupported_input_image_reference upstream_validation_rejection_relay upstream_websocket_bridge v1_supported_surface)a,
     {:post, "/v1/responses/:response_id/cancel"} => ~w(v1_unsupported_public_surface)a,
     {:post, "/v1/responses/compact"} => ~w(v1_supported_surface)a
   }
@@ -1373,7 +1373,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       assert fixture.implemented_runtime_outcomes.routing_hint ==
                "trusted_effective_model_and_service_tier_native_and_v1_translated"
 
-      assert fixture.implemented_runtime_outcomes.schema_bound_function_output_compression ==
+      assert fixture.implemented_runtime_outcomes.schema_bound_function_output_preservation ==
                "byte_exact_json_preserved"
 
       assert fixture.implemented_runtime_outcomes.responses_lite_full.auto_source ==
@@ -1578,113 +1578,15 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
              ]
     end
 
-    test "documents request compression supported input shapes" do
-      feature = CompatibilityMatrix.by_slug!(:request_compression)
-      fixture = CompatibilityMatrix.fixture!(:request_compression)
-
+    test "documents tool-output preservation across the accepted corpus" do
+      feature = CompatibilityMatrix.by_slug!(:tool_output_preservation)
+      fixture = CompatibilityMatrix.fixture!(:tool_output_preservation)
       assert feature.status == :supported
-      assert feature.contract =~ "grouped heading matches"
-      assert feature.contract =~ "portable NUL-delimited matches"
-      assert feature.contract =~ "additions-only"
-      assert feature.contract =~ "deletions-only"
-      assert feature.contract =~ "minimal unified diffs"
-      assert feature.contract =~ "combined unified diffs"
-      assert feature.contract =~ "long-preamble diffs"
-      assert feature.contract =~ "protected exact-output function tool outputs"
-      assert feature.contract =~ "WebSearch, WebFetch, web_search, web_fetch"
-      assert feature.contract =~ "external retrieval"
-      assert feature.contract =~ "output-only function tool results fail closed"
-      assert feature.contract =~ "command-backed file reads"
-
-      assert feature.contract =~
-               "remain byte-exact before output range lookup or content detection"
-
-      assert feature.contract =~ "malformed or unrecognized commands retain existing behavior"
-      assert feature.contract =~ "valid JSON object or array spans embedded in ordinary prose"
-      assert feature.contract =~ "quoted JSON-looking text"
-
-      assert fixture.protected_tool_outputs == %{
-               default_function_names: [
-                 "Read",
-                 "Glob",
-                 "Grep",
-                 "Write",
-                 "Edit",
-                 "WebSearch",
-                 "WebFetch",
-                 "web_search",
-                 "web_fetch"
-               ],
-               lowercase_variants: true,
-               external_retrieval: true,
-               unknown_function_output_behavior: "protected_original_output_preserved",
-               command_backed_reads: %{
-                 arguments: ["cmd", "command"],
-                 native_action: %{type: "exec", command: "argv"},
-                 direct_commands: ["cat", "nl", "head", "tail", "sed_print_only"],
-                 pipeline: "nl_to_sed_print_only",
-                 producer_aliases: %{
-                   function_call: ["call_id"],
-                   local_shell_call: ["call_id", "id"]
-                 },
-                 output_aliases: %{
-                   function_call_output: ["call_id"],
-                   local_shell_call_output: ["call_id", "id"]
-                 },
-                 output_compatibility: %{
-                   function_call_output: ["function_call", "local_shell_call"],
-                   local_shell_call_output: ["local_shell_call"]
-                 },
-                 owner_identity: "positional_producer_path",
-                 unresolved_function_output: "protected_legacy",
-                 unresolved_local_shell_output: "existing_behavior",
-                 duplicate_aliases: "protected_original_output_preserved",
-                 cross_kind_collisions: "protected_original_output_preserved",
-                 conflicting_output_aliases: "protected_original_output_preserved",
-                 recognized_owner_stage: "before_output_range_lookup_and_content_detection",
-                 malformed_or_unrecognized: "existing_behavior",
-                 output_behavior: "byte_exact",
-                 metadata: "aggregate_counts_only"
-               },
-               output_behavior: "original_output_preserved",
-               metadata: "aggregate_counts_only"
-             }
-
-      assert feature.contract =~ "ordinary prose"
-
-      assert fixture.supported_input_shapes == %{
-               embedded_json: %{
-                 container_kinds: ["object", "array"],
-                 surrounding_bytes: "preserved",
-                 quoted_json_looking_text: "preserved",
-                 malformed_or_over_limit_behavior: "original_output_preserved",
-                 maximum_spans: 50
-               },
-               search_results: [
-                 "classic_path_line",
-                 "grouped_heading",
-                 "portable_nul_delimited"
-               ],
-               diffs: [
-                 "hunk_additions_only",
-                 "hunk_deletions_only",
-                 "hunk_replacement",
-                 "minimal_unified_hunk",
-                 "combined_unified_hunk",
-                 "long_preamble_diff",
-                 "recursive_unified_diff",
-                 "concatenated_unified_diffs"
-               ],
-               false_positive_guards: [
-                 "path_like_group_heading",
-                 "minimum_grouped_matches",
-                 "hunk_header_required",
-                 "diagnostic_evidence",
-                 "non_search_command_provenance",
-                 "unrepresented_line_refusal"
-               ],
-               log_output: ["failure_summary_guard"]
-             }
+      assert fixture.corpus == ["pretty_json_object", "pretty_json_array", "ndjson", "concatenated_json", "embedded_json", "numeric_lexemes_escapes_duplicate_keys", "malformed_json_text", "multiline_diagnostics", "search_context", "multi_file_diff", "source_unicode", "over_one_mib", "over_fifty_outputs"]
+      assert fixture.adapter_oracle == "original_strings_or_ordered_concatenated_text_parts"
+      assert fixture.privacy.new_compression_metadata == false
+      bridge = CompatibilityMatrix.fixture!(:upstream_websocket_bridge)
+      assert bridge.accounting.tool_output_preservation_subject == "websocket_envelope"
     end
 
     test "documents narrow chat input fallback and non-executable additional_tools" do
@@ -1896,8 +1798,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                "public_responses_websocket"
              ]
 
-      assert programmatic.compression.program_output_candidate == false
-      assert programmatic.compression.program_output_rewrite == false
+      assert programmatic.tool_output_preservation.program_output == "byte_exact"
       assert programmatic.privacy.mode == "metadata_only"
       assert programmatic.privacy.stored_program_code == false
       assert programmatic.privacy.stored_program_results == false

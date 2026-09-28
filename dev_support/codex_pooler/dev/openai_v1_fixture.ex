@@ -24,7 +24,6 @@ defmodule CodexPooler.Dev.OpenAIV1Fixture do
   @receipt_root Path.join(["tmp", "openai-v1-fixture"])
   @default_receipt_path Path.join(@receipt_root, "setup.json")
 
-  @type request_compression_mode :: :preserve | :enabled
   @type options :: [
           environment: atom(),
           allow_test_database: boolean(),
@@ -32,7 +31,6 @@ defmodule CodexPooler.Dev.OpenAIV1Fixture do
           target_database: String.t(),
           receipt_path: String.t(),
           upstream_base_url: String.t(),
-          request_compression: request_compression_mode(),
           repo_config: keyword()
         ]
   @type status :: %{
@@ -51,12 +49,11 @@ defmodule CodexPooler.Dev.OpenAIV1Fixture do
   @spec acquire(options()) :: {:ok, status()} | {:error, String.t()}
   def acquire(options \\ []) do
     with :ok <- validate_environment(options),
-         {:ok, upstream_base_url} <- upstream_base_url(options),
-         {:ok, request_compression_mode} <- request_compression_mode(options) do
+         {:ok, upstream_base_url} <- upstream_base_url(options) do
       path = resolved_receipt_path(options)
 
       Receipt.with_lock(path, fn ->
-        acquire_locked(path, upstream_base_url, request_compression_mode)
+        acquire_locked(path, upstream_base_url)
       end)
     end
   end
@@ -117,35 +114,30 @@ defmodule CodexPooler.Dev.OpenAIV1Fixture do
   defp allowed_environment?(:test, _repo_config, _allow_isolated_dev_database?, true), do: true
   defp allowed_environment?(_environment, _repo_config, _allow_isolated_dev_database?, _allow_test_database?), do: false
 
-  defp acquire_locked(path, upstream_base_url, request_compression_mode) do
+  defp acquire_locked(path, upstream_base_url) do
     case Receipt.read(path) do
       {:ok, %{"state" => "ready", "leases" => leases} = setup}
       when is_integer(leases) and leases > 0 ->
-        cond do
-          setup["upstream_base_url"] != upstream_base_url ->
-            {:error, "OpenAI V1 fixture is leased for another upstream origin"}
-
-          setup["request_compression_mode"] != Atom.to_string(request_compression_mode) ->
-            {:error, "OpenAI V1 fixture is leased with another request compression mode"}
-
-          true ->
-            updated = Map.put(setup, "leases", leases + 1)
-            Receipt.write!(path, updated)
-            public_status(updated, path)
+        if setup["upstream_base_url"] != upstream_base_url do
+          {:error, "OpenAI V1 fixture is leased for another upstream origin"}
+        else
+          updated = Map.put(setup, "leases", leases + 1)
+          Receipt.write!(path, updated)
+          public_status(updated, path)
         end
 
       {:ok, _setup} ->
         {:error, "OpenAI V1 fixture receipt requires cleanup before reuse"}
 
       :missing ->
-        provision_new(path, upstream_base_url, request_compression_mode)
+        provision_new(path, upstream_base_url)
 
       {:error, message} ->
         {:error, message}
     end
   end
 
-  defp provision_new(path, upstream_base_url, request_compression_mode) do
+  defp provision_new(path, upstream_base_url) do
     snapshot = Snapshot.capture()
 
     Receipt.write!(path, %{
@@ -153,13 +145,12 @@ defmodule CodexPooler.Dev.OpenAIV1Fixture do
       "state" => "prepared",
       "leases" => 1,
       "upstream_base_url" => upstream_base_url,
-      "request_compression_mode" => Atom.to_string(request_compression_mode),
       "receipt" => Receipt.encode_snapshot(snapshot)
     })
 
     try do
-      provisioned = Provisioner.provision!(upstream_base_url, request_compression_mode)
-      setup = ready_setup(snapshot, upstream_base_url, request_compression_mode, provisioned)
+      provisioned = Provisioner.provision!(upstream_base_url)
+      setup = ready_setup(snapshot, upstream_base_url, provisioned)
       Receipt.write!(path, setup)
       public_status(setup, path)
     rescue
@@ -226,13 +217,12 @@ defmodule CodexPooler.Dev.OpenAIV1Fixture do
 
   defp restore_setup(_setup), do: {:error, "OpenAI V1 fixture receipt has no snapshot"}
 
-  defp ready_setup(snapshot, upstream_base_url, request_compression_mode, provisioned) do
+  defp ready_setup(snapshot, upstream_base_url, provisioned) do
     %{
       "version" => 1,
       "state" => "ready",
       "leases" => 1,
       "upstream_base_url" => upstream_base_url,
-      "request_compression_mode" => Atom.to_string(request_compression_mode),
       "receipt" => Receipt.encode_snapshot(snapshot),
       "created" => %{
         "identity_id" => if(provisioned.identity_created?, do: provisioned.identity_id),
@@ -265,13 +255,6 @@ defmodule CodexPooler.Dev.OpenAIV1Fixture do
 
   defp upstream_base_url(options),
     do: LocalTarget.upstream_base_url(Keyword.get(options, :upstream_base_url), @default_upstream_base_url)
-
-  defp request_compression_mode(options) do
-    case Keyword.get(options, :request_compression, :preserve) do
-      mode when mode in [:preserve, :enabled] -> {:ok, mode}
-      _mode -> {:error, "request compression mode must be :preserve or :enabled"}
-    end
-  end
 
   defp resolved_receipt_path(options) do
     case Keyword.fetch(options, :receipt_path) do

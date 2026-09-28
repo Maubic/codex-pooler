@@ -6,7 +6,6 @@ defmodule CodexPooler.Gateway.Runtime.ReplayPreparationTest do
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Gateway.Payloads.PayloadNormalizer
   alias CodexPooler.Gateway.Payloads.RequestOptions
-  alias CodexPooler.Gateway.RequestCompression
   alias CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
@@ -26,7 +25,8 @@ defmodule CodexPooler.Gateway.Runtime.ReplayPreparationTest do
              original.request_options.routing.reasoning_effort_decision
 
     assert restored.routing.supports_reasoning_summary_parameter? == false
-    assert %RoutingSettings{request_compression_enabled: true} = settings
+    assert %RoutingSettings{} = settings
+    assert metadata["native_replay_preparation"]["request_compression_enabled"] == false
     assert restored.continuity.request_claim_key == nil
     assert restored.transport.websocket_owner.enabled? == false
   end
@@ -125,7 +125,7 @@ defmodule CodexPooler.Gateway.Runtime.ReplayPreparationTest do
     assert ReplayPreparation.attempt_metadata(%{original | request_options: translated}) == %{}
   end
 
-  test "restored preparation retains real normalization and token-proven compression" do
+  test "restored preparation retains real normalization and exact tool output" do
     payload = %{
       "model" => "gpt-4o",
       "instructions" => "synthetic instructions",
@@ -159,27 +159,18 @@ defmodule CodexPooler.Gateway.Runtime.ReplayPreparationTest do
         route_state: %{original.route_state | routing_settings: settings}
     }
 
-    {original_bytes, original_compressed, original_opts} = prepared_payload(original)
-    {_replay_bytes, replay_compressed, replay_opts} = prepared_payload(replay)
-
-    assert byte_size(original_compressed) < byte_size(original_bytes)
-    byte_identical? = original_compressed == replay_compressed
-    assert byte_identical?
-    assert original_opts.runtime.payload_compression["status"] == "compressed"
-    assert replay_opts.runtime.payload_compression["status"] == "compressed"
+    {original_bytes, _original_opts} = prepared_payload(original)
+    {replay_bytes, _replay_opts} = prepared_payload(replay)
+    assert original_bytes == replay_bytes
+    decoded = CodexPooler.JSON.decode!(replay_bytes)
+    assert List.last(decoded["input"])["output"] == List.last(payload["input"])["output"]
   end
 
   defp prepared_payload(context) do
     assert {:ok, bytes, options} =
-             PayloadNormalizer.prepare_upstream_payload(
-               context.payload,
-               context.model,
-               context.endpoint,
-               context.request_options
-             )
+             PayloadNormalizer.prepare_upstream_payload(context.payload, context.model, context.endpoint, context.request_options)
 
-    {compressed, options} = RequestCompression.maybe_compress(bytes, context, options)
-    {bytes, compressed, options}
+    {bytes, options}
   end
 
   defp original_context do
@@ -216,7 +207,7 @@ defmodule CodexPooler.Gateway.Runtime.ReplayPreparationTest do
         RouteState.new(%{
           visible_model: %Model{},
           candidates: [],
-          routing_settings: %RoutingSettings{request_compression_enabled: true}
+          routing_settings: Map.put(%RoutingSettings{}, :request_compression_enabled, true)
         })
     }
   end

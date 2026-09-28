@@ -133,14 +133,6 @@ defmodule CodexPooler.Pools.Routing do
               settings.v1_compatibility_enabled
             )
           ),
-        request_compression_enabled:
-          parse_boolean(
-            routing_attr(
-              attrs,
-              "request_compression_enabled",
-              settings.request_compression_enabled
-            )
-          ),
         allow_image_generation:
           parse_required_boolean(
             routing_attr(
@@ -162,7 +154,6 @@ defmodule CodexPooler.Pools.Routing do
             sticky_websocket_sessions: settings.sticky_websocket_sessions,
             sticky_http_sessions: settings.sticky_http_sessions,
             prompt_cache_affinity_enabled: settings.prompt_cache_affinity_enabled,
-            request_compression_enabled: settings.request_compression_enabled,
             allow_image_generation: settings.allow_image_generation
           })
 
@@ -198,7 +189,6 @@ defmodule CodexPooler.Pools.Routing do
       sticky_http_sessions: false,
       prompt_cache_affinity_enabled: true,
       v1_compatibility_enabled: true,
-      request_compression_enabled: false,
       allow_image_generation: true,
       metadata: %{},
       created_at: now,

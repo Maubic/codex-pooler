@@ -20,7 +20,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ContinuationTest do
   }
 
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
-  alias CodexPooler.Pools
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
 
@@ -1021,11 +1020,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ContinuationTest do
     end
   end
 
-  test "direct websocket preserves schema-bound output while compressing an unbound output" do
+  test "direct websocket preserves schema-bound output and unbound output bytes" do
     upstream =
       start_upstream(
         FakeUpstream.json_response(%{
-          "id" => "resp_ws_schema_bound_compression",
+          "id" => "resp_ws_schema_bound_preservation",
           "object" => "response",
           "status" => "completed"
         })
@@ -1038,19 +1037,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ContinuationTest do
         pricing_ref: "gpt-4o"
       )
 
-    setup.pool
-    |> Pools.ensure_routing_settings()
-    |> Ecto.Changeset.change(request_compression_enabled: true)
-    |> Repo.update!()
-
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
 
     {:ok, state} =
       CodexResponsesSocket.init(%{
         auth: auth,
         opts: %{
-          request_id: "ws-schema-bound-compression",
-          accepted_turn_state: "stable-ws-schema-bound-compression",
+          request_id: "ws-schema-bound-preservation",
+          accepted_turn_state: "stable-ws-schema-bound-preservation",
           client_ip: "127.0.0.1"
         }
       })
@@ -1106,7 +1100,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ContinuationTest do
     try do
       assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
       assert {:push, {:text, frame}, state} = receive_socket_push(state)
-      assert %{"id" => "resp_ws_schema_bound_compression"} = CodexPooler.JSON.decode!(frame)
+      assert %{"id" => "resp_ws_schema_bound_preservation"} = CodexPooler.JSON.decode!(frame)
       assert {:ok, _state} = receive_socket_done(state)
 
       assert [captured] = FakeUpstream.requests(upstream)
@@ -1127,7 +1121,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ContinuationTest do
       assert CodexPooler.JSON.decode!(schema_bound_item["output"]) ==
                CodexPooler.JSON.decode!(schema_bound_output)
 
-      assert unbound_item["output"] != unbound_output
+      assert unbound_item["output"] == unbound_output
 
       assert CodexPooler.JSON.decode!(unbound_item["output"]) ==
                CodexPooler.JSON.decode!(unbound_output)
@@ -1135,13 +1129,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ContinuationTest do
       assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
       assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
 
-      assert %{
-               "candidate_count" => 1,
-               "compressed_count" => 1,
-               "protected_tool_output_skipped_count" => 1,
-               "status" => "compressed",
-               "transport" => "websocket"
-             } = attempt.response_metadata["payload_compression"]
+      refute Map.has_key?(attempt.response_metadata, "payload_compression")
     after
       CodexResponsesSocket.terminate(:closed, state)
     end

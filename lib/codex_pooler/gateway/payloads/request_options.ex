@@ -21,7 +21,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
   alias CodexPooler.Gateway.Payloads.ContinuityPayload
   alias CodexPooler.Gateway.Persistence.CodexSession
   alias CodexPooler.Gateway.Persistence.SessionContinuity.OwnerWitness
-  alias CodexPooler.Gateway.RequestCompression.Metadata, as: RequestCompressionMetadata
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerAdmissionControlV1
@@ -136,7 +135,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
     :openai_translated_endpoint,
     :openai_chat_payload,
     :owner_instance_id,
-    :payload_compression,
     :pool_timeout,
     :pool_timeout_ms,
     :reasoning_effort_snapshot,
@@ -887,20 +885,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
     OpenAICompatibility.metadata(compatibility)
   end
 
-  @spec payload_compression_attempt_metadata(t() | map() | term()) :: map()
-  def payload_compression_attempt_metadata(%__MODULE__{
-        runtime: %{payload_compression: metadata}
-      }),
-      do: payload_compression_metadata_envelope(metadata)
-
-  def payload_compression_attempt_metadata(%{runtime: %{payload_compression: metadata}}),
-    do: payload_compression_metadata_envelope(metadata)
-
-  def payload_compression_attempt_metadata(%{payload_compression: metadata}),
-    do: payload_compression_metadata_envelope(metadata)
-
-  def payload_compression_attempt_metadata(_opts), do: %{}
-
   @spec reasoning_effort_attempt_metadata(t() | map() | term()) :: map()
   def reasoning_effort_attempt_metadata(%__MODULE__{
         runtime: %{reasoning_effort_snapshot: snapshot}
@@ -932,9 +916,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
   end
 
   def prompt_cache_controls_attempt_metadata(_opts), do: %{}
-
-  @spec payload_compression_request_metadata(t() | map() | term()) :: map()
-  def payload_compression_request_metadata(opts), do: payload_compression_attempt_metadata(opts)
 
   @spec route_class(t()) :: String.t() | nil
   def route_class(%__MODULE__{transport: %{route_class: route_class}})
@@ -1177,7 +1158,4 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
   end
 
   defp reasoning_effort_metadata_envelope(_snapshot), do: %{}
-
-  defp payload_compression_metadata_envelope(metadata),
-    do: RequestCompressionMetadata.request_envelope(metadata)
 end

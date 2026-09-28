@@ -471,7 +471,6 @@ defmodule CodexPoolerWeb.Dev.ComponentShowcaseLive do
       token_counts: nil,
       cost: nil,
       usage_status: "usage_unknown",
-      payload_compression: %{},
       debug: %{
         continuity: %{},
         failure: %{error_code: "invalid_compaction_response", error_source: "request_error"},

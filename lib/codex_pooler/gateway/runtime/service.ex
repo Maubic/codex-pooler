@@ -459,6 +459,26 @@ defmodule CodexPooler.Gateway.Runtime.Service do
 
   defp native_replay_execution?(%RequestOptions{}, _proof), do: false
 
+  if Mix.env() == :test do
+    defp maybe_wait_before_replay_dispatch do
+      case Application.get_env(:codex_pooler, :request_replay_dispatch_test_barrier) do
+        {observer, barrier} when is_pid(observer) and is_reference(barrier) ->
+          send(observer, {:request_replay_dispatch_ready, self(), barrier})
+
+          receive do
+            {:release_request_replay_dispatch, ^barrier} -> :ok
+          after
+            15_000 -> raise "replay dispatch test barrier timed out"
+          end
+
+        _no_barrier ->
+          :ok
+      end
+    end
+  else
+    defp maybe_wait_before_replay_dispatch, do: :ok
+  end
+
   defp execute_replay_visible_model(
          auth,
          endpoint,
@@ -467,6 +487,8 @@ defmodule CodexPooler.Gateway.Runtime.Service do
          %Model{} = model,
          %RuntimeAdmissionProof{kind: :native_replay}
        ) do
+    maybe_wait_before_replay_dispatch()
+
     with lifecycle when is_map(lifecycle) <- request_options.runtime.replay_lifecycle_binding,
          {:ok, replay} <- Accounting.request_replay_dispatch_lifecycle(lifecycle),
          true <-

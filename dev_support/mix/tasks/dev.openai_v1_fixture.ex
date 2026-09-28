@@ -3,7 +3,6 @@ defmodule Mix.Tasks.Dev.OpenaiV1Fixture do
   Acquires, releases, or inspects the reversible local OpenAI V1 smoke fixture.
 
       MIX_ENV=dev mix dev.openai_v1_fixture acquire --upstream-base-url http://127.0.0.1:4057
-      MIX_ENV=dev mix dev.openai_v1_fixture acquire --upstream-base-url http://127.0.0.1:4057 --request-compression
       MIX_ENV=dev mix dev.openai_v1_fixture status
       MIX_ENV=dev mix dev.openai_v1_fixture release
       MIX_ENV=dev mix dev.openai_v1_fixture acquire --target-database codex_pooler_replica --upstream-base-url http://fake-upstream:4058
@@ -42,7 +41,6 @@ defmodule Mix.Tasks.Dev.OpenaiV1Fixture do
     case OptionParser.parse(args,
            strict: [
              upstream_base_url: :string,
-             request_compression: :boolean,
              allow_isolated_dev_database: :boolean,
              target_database: :string
            ],
@@ -58,13 +56,12 @@ defmodule Mix.Tasks.Dev.OpenaiV1Fixture do
         {:ok, :status, normalize_release_options(options)}
 
       _invalid ->
-        {:error, "use acquire [--upstream-base-url URL] [--request-compression] [--target-database NAME], release [--target-database NAME], or status [--target-database NAME]"}
+        {:error, "use acquire [--upstream-base-url URL] [--target-database NAME], release [--target-database NAME], or status [--target-database NAME]"}
     end
   end
 
   defp normalize_acquire_options(options) do
     options
-    |> maybe_enable_request_compression()
     |> maybe_allow_isolated_dev_database()
   end
 
@@ -75,14 +72,6 @@ defmodule Mix.Tasks.Dev.OpenaiV1Fixture do
   defp run_action(:acquire, options), do: OpenAIV1Fixture.acquire(options)
   defp run_action(:release, options), do: OpenAIV1Fixture.release(options)
   defp run_action(:status, options), do: OpenAIV1Fixture.status(options)
-
-  defp maybe_enable_request_compression(options) do
-    if Keyword.get(options, :request_compression, false) do
-      Keyword.put(options, :request_compression, :enabled)
-    else
-      Keyword.delete(options, :request_compression)
-    end
-  end
 
   defp maybe_allow_isolated_dev_database(options) do
     if Keyword.get(options, :allow_isolated_dev_database, false) do

@@ -114,7 +114,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation do
           {:ok, RequestOptions.t(), RoutingSettings.t()} | {:error, :invalid_replay_preparation}
   def restore(%RequestOptions{} = options, metadata) when is_map(metadata) do
     case sanitize(Map.get(metadata, @metadata_key)) do
-      %{"version" => 1} = snapshot ->
+      %{"version" => 1, "request_compression_enabled" => false} = snapshot ->
         options =
           options
           |> RequestOptions.put_model_serving_mode(%{
@@ -137,12 +137,21 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation do
               )
           )
 
-        {:ok, options, %RoutingSettings{request_compression_enabled: snapshot["request_compression_enabled"]}}
+        {:ok, options, %RoutingSettings{}}
 
       _invalid ->
         {:error, :invalid_replay_preparation}
     end
   end
+
+  # The v1 marker is retained for old readers, but a historical preparation
+  # requiring the retired rewrite cannot authorize a differently prepared replay.
+  @spec replay_eligible?(term()) :: boolean()
+  def replay_eligible?(metadata) when is_map(metadata) do
+    match?(%{"version" => 1, "request_compression_enabled" => false}, sanitize(Map.get(metadata, @metadata_key)))
+  end
+
+  def replay_eligible?(_metadata), do: false
 
   @spec sanitize(term()) :: snapshot()
   def sanitize(%{"version" => 1} = snapshot) do
@@ -196,7 +205,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation do
           "requested_effort" => decision.requested_effort,
           "applied_effort" => decision.applied_effort,
           "supports_reasoning_summary" => options.routing.supports_reasoning_summary_parameter? != false,
-          "request_compression_enabled" => Map.get(route_state.routing_settings || %{}, :request_compression_enabled) == true,
+          "request_compression_enabled" => false,
           "models_etag" => route_state_models_etag(route_state)
         })
 

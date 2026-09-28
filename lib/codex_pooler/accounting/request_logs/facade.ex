@@ -26,7 +26,6 @@ defmodule CodexPooler.Accounting.RequestLogs do
     CompactionBridgeProjection,
     DebugProjection,
     ErrorSummaries,
-    PayloadCompressionProjection,
     SettlementPresentation
   }
 
@@ -247,7 +246,7 @@ defmodule CodexPooler.Accounting.RequestLogs do
        ) do
     request_attempts = Map.get(attempts, request.id, [])
     turn = Map.get(turns_by_request, request.id)
-    metadata = safe_request_log_metadata(request.request_metadata || %{}, request_attempts)
+    metadata = safe_request_log_metadata(request.request_metadata || %{})
     reasoning_metadata = latest_attempt_reasoning_metadata(request_attempts)
 
     %{
@@ -292,7 +291,6 @@ defmodule CodexPooler.Accounting.RequestLogs do
       token_counts: SettlementPresentation.token_counts(settlement),
       cost: SettlementPresentation.cost(settlement),
       compaction_bridge: CompactionBridgeProjection.build(metadata),
-      payload_compression: PayloadCompressionProjection.build(metadata),
       errors: ErrorSummaries.build(request, metadata, request_attempts),
       debug: DebugProjection.build(request, metadata, turn, request_attempts, surface),
       admitted_at: request.admitted_at,
@@ -301,10 +299,9 @@ defmodule CodexPooler.Accounting.RequestLogs do
     }
   end
 
-  defp safe_request_log_metadata(metadata, attempts) do
+  defp safe_request_log_metadata(metadata) do
     metadata
     |> Accounting.sanitize_metadata()
-    |> PayloadCompressionProjection.normalize_metadata(attempts)
     |> control_plane_metadata_only()
   end
 

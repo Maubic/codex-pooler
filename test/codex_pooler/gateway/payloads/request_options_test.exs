@@ -580,7 +580,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptionsTest do
 
       assert RequestOptions.prompt_cache_controls_attempt_metadata(options) == %{}
       assert RequestOptions.openai_compatibility_metadata(options) == %{}
-      assert RequestOptions.payload_compression_request_metadata(options) == %{}
 
       updated =
         RequestOptions.put_runtime_context(options, prompt_cache_controls_downgraded: true)
@@ -590,7 +589,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptionsTest do
              }
 
       assert RequestOptions.openai_compatibility_metadata(updated) == %{}
-      assert RequestOptions.payload_compression_request_metadata(updated) == %{}
     end
 
     test "defaults normalized previous response state false and permits only typed internal updates" do
@@ -1897,176 +1895,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptionsTest do
       assert options.extra == %{}
     end
 
-    test "keeps safe payload compression metadata in the runtime context" do
-      sensitive_placeholder =
-        "placeholder raw candidate prompt with bearer example-token and call id example-call"
-
-      compression_metadata = %{
-        "enabled" => true,
-        "attempted" => true,
-        "status" => "compressed",
-        "reason" => nil,
-        "route_class" => "proxy_stream",
-        "transport" => "http",
-        "tokenizer" => "local:o200k_base",
-        "candidate_count" => 2,
-        "compressed_count" => 1,
-        "skipped_count" => 1,
-        "original_bytes" => 1000,
-        "compressed_bytes" => 400,
-        "original_tokens" => 500,
-        "compressed_tokens" => 200,
-        "strategies" => ["log_output", "diff"],
-        "elapsed_ms" => 4,
-        "raw_candidate" => sensitive_placeholder,
-        "call_id" => "call_sensitive_placeholder",
-        "json_path" => "$.input[0].output"
-      }
-
-      options =
-        RequestOptions.build(
-          %{payload_compression: compression_metadata},
-          "/backend-api/codex/responses",
-          %{"model" => "example-model"}
-        )
-
-      assert options.runtime.payload_compression == %{
-               "enabled" => true,
-               "attempted" => true,
-               "status" => "compressed",
-               "route_class" => "proxy_stream",
-               "transport" => "http",
-               "tokenizer" => "local:o200k_base",
-               "candidate_count" => 2,
-               "compressed_count" => 1,
-               "skipped_count" => 1,
-               "original_bytes" => 1000,
-               "compressed_bytes" => 400,
-               "saved_bytes" => 600,
-               "byte_savings_ratio" => 0.6,
-               "byte_savings_percent" => 60.0,
-               "compression_ratio" => 0.4,
-               "original_tokens" => 500,
-               "compressed_tokens" => 200,
-               "saved_tokens" => 300,
-               "token_savings_ratio" => 0.6,
-               "token_savings_percent" => 60.0,
-               "strategies" => ["log_output", "diff"],
-               "elapsed_ms" => 4
-             }
-
-      assert RequestOptions.payload_compression_request_metadata(options) == %{
-               "payload_compression" => options.runtime.payload_compression
-             }
-
-      metadata_text = inspect(options.runtime.payload_compression)
-      refute metadata_text =~ sensitive_placeholder
-      refute metadata_text =~ "call_sensitive_placeholder"
-      refute metadata_text =~ "$.input[0].output"
-      assert options.extra == %{}
-    end
-
-    test "allowlists payload compression strategy metadata" do
-      options =
-        RequestOptions.build(
-          %{
-            payload_compression: %{
-              "attempted" => true,
-              "status" => "compressed",
-              "strategies" => [
-                "log_output",
-                "call_probe_secret",
-                "json_document_lossless",
-                "json_array_lossless"
-              ],
-              "candidate_count" => 1
-            }
-          },
-          "/backend-api/codex/responses",
-          %{"model" => "example-model"}
-        )
-
-      assert options.runtime.payload_compression["strategies"] == [
-               "log_output",
-               "json_document_lossless",
-               "json_array_lossless"
-             ]
-
-      assert get_in(RequestOptions.payload_compression_attempt_metadata(options), [
-               "payload_compression",
-               "strategies"
-             ]) == ["log_output", "json_document_lossless", "json_array_lossless"]
-
-      refute inspect(options.runtime.payload_compression) =~ "call_probe_secret"
-    end
-
-    test "keeps tokenizer input limit metadata without raw skipped content" do
-      sensitive_placeholder = "placeholder skipped tokenizer input body"
-
-      options =
-        RequestOptions.build(
-          %{
-            payload_compression: %{
-              "attempted" => true,
-              "status" => "skipped",
-              "reason" => "tokenizer_input_limit",
-              "candidate_count" => 2,
-              "compressed_count" => 0,
-              "skipped_count" => 2,
-              "tokenizer_input_skipped_count" => 2,
-              "raw_candidate" => sensitive_placeholder
-            }
-          },
-          "/backend-api/codex/responses",
-          %{"model" => "example-model"}
-        )
-
-      assert options.runtime.payload_compression == %{
-               "attempted" => true,
-               "status" => "skipped",
-               "reason" => "tokenizer_input_limit",
-               "candidate_count" => 2,
-               "compressed_count" => 0,
-               "skipped_count" => 2,
-               "tokenizer_input_skipped_count" => 2
-             }
-
-      assert RequestOptions.payload_compression_request_metadata(options) == %{
-               "payload_compression" => options.runtime.payload_compression
-             }
-
-      refute inspect(options.runtime.payload_compression) =~ sensitive_placeholder
-    end
-
-    test "normalizes payload compression updates through put_runtime_context" do
-      options =
-        %{}
-        |> RequestOptions.build("/backend-api/codex/responses", %{"model" => "example-model"})
-        |> RequestOptions.put_runtime_context(
-          payload_compression: %{
-            attempted: true,
-            status: :no_change,
-            reason: :no_token_shrink,
-            original_bytes: 0,
-            compressed_bytes: 0,
-            original_tokens: 0,
-            compressed_tokens: 0
-          }
-        )
-
-      assert options.runtime.payload_compression == %{
-               "attempted" => true,
-               "status" => "no_change",
-               "reason" => "no_token_shrink",
-               "original_bytes" => 0,
-               "compressed_bytes" => 0,
-               "saved_bytes" => 0,
-               "original_tokens" => 0,
-               "compressed_tokens" => 0,
-               "saved_tokens" => 0
-             }
-    end
-
     test "normalizes explicit interrupt reason without keeping legacy aliases in extra" do
       options =
         RequestOptions.build(
@@ -2232,7 +2060,7 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptionsTest do
       assert options.routing.prompt_cache_key == nil
     end
 
-    test "classifies request compression route surfaces without promoting public compact" do
+    test "classifies route surfaces without promoting public compact" do
       cases = [
         {"POST", "/backend-api/codex/responses", %{}, nil, "proxy_http", "http_json"},
         {"POST", "/backend-api/codex/responses", %{"stream" => true}, nil, "proxy_stream", "http_sse"},
@@ -2771,7 +2599,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptionsTest do
             session_header_source: "session-id",
             forwarded_headers: [{"x-codex-client", "fixture"}],
             finalize_retry_timeout_ms: 500,
-            payload_compression: %{"attempted" => true, "status" => "compressed"},
             websocket_owner_forwarding_enabled?: true,
             websocket_owner_downstream: %{pid: self()},
             websocket_owner_downstream_epoch: 3
@@ -2794,7 +2621,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptionsTest do
           forwarded_headers: [{"x-codex-client", :invalid}],
           finalize_retry_timeout_ms: -1
         )
-        |> RequestOptions.put_runtime_context(payload_compression: %{"enabled" => true, "attempted" => false, "status" => "disabled"})
 
       assert updated.continuity.session_header_source == "session-id"
       assert updated.continuity.reconnect_window_seconds == nil
@@ -2802,11 +2628,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptionsTest do
       assert updated.transport.websocket_owner.downstream_epoch == 3
       assert updated.file_bridge.forwarded_headers == [{"x-codex-client", "fixture"}]
       assert updated.file_bridge.finalize_retry_timeout_ms == 500
-
-      assert updated.runtime.payload_compression == %{
-               "attempted" => true,
-               "status" => "compressed"
-             }
     end
 
     test "optional normalizers still accept explicit valid replacements" do
@@ -2816,7 +2637,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptionsTest do
             session_header_source: "session-id",
             forwarded_headers: [{"x-codex-client", "fixture"}],
             finalize_retry_timeout_ms: 500,
-            payload_compression: %{"attempted" => true, "status" => "compressed"},
             websocket_owner_forwarding_enabled?: true,
             websocket_owner_downstream_epoch: 3
           },
@@ -2835,7 +2655,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptionsTest do
           forwarded_headers: [{"user-agent", "codex_cli_rs/0.0.0"}],
           finalize_retry_timeout_ms: 0
         )
-        |> RequestOptions.put_runtime_context(payload_compression: %{"attempted" => true, "status" => "no_change"})
 
       assert updated.continuity.session_header_source == "x-session-id"
 
@@ -2846,11 +2665,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptionsTest do
       assert updated.transport.websocket_owner.downstream_epoch == 4
       assert updated.file_bridge.forwarded_headers == [{"user-agent", "codex_cli_rs/0.0.0"}]
       assert updated.file_bridge.finalize_retry_timeout_ms == 0
-
-      assert updated.runtime.payload_compression == %{
-               "attempted" => true,
-               "status" => "no_change"
-             }
     end
 
     test "reject unknown section fields" do

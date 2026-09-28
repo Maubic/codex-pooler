@@ -1207,7 +1207,6 @@ defmodule CodexPoolerWeb.Admin.PoolsLive do
 
   @compat_flag_labels %{
     "v1_compatibility_enabled" => "/v1 compatibility",
-    "request_compression_enabled" => "Request compression",
     "allow_image_generation" => "Allow Image Generation"
   }
 

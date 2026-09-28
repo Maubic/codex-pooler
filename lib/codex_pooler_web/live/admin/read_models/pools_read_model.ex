@@ -38,7 +38,6 @@ defmodule CodexPoolerWeb.Admin.PoolsReadModel do
         }
   @type compat_flags :: %{
           required(:v1_compatibility_enabled) => boolean(),
-          required(:request_compression_enabled) => boolean(),
           required(:allow_image_generation) => boolean()
         }
   @type pool_row :: %{
@@ -256,7 +255,6 @@ defmodule CodexPoolerWeb.Admin.PoolsReadModel do
         routing_strategy: settings.routing_strategy,
         compat_flags: %{
           v1_compatibility_enabled: settings.v1_compatibility_enabled,
-          request_compression_enabled: settings.request_compression_enabled,
           allow_image_generation: settings.allow_image_generation
         },
         deletion: Map.get(deletion_states, pool.id)

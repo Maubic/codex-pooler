@@ -769,14 +769,6 @@ defmodule CodexPoolerWeb.Admin.PoolListComponents do
       description: "OpenAI-style /v1 compatibility routes."
     },
     %{
-      key: :request_compression_enabled,
-      id_suffix: "compression",
-      icon: "hero-arrows-pointing-in",
-      label: "Request compression",
-      docs_url: "https://docs.codex-pooler.com/operators/pools/#compatibility",
-      description: "Shrinks eligible Responses tool outputs before upstream dispatch."
-    },
-    %{
       key: :allow_image_generation,
       id_suffix: "image-generation",
       icon: "hero-photo",

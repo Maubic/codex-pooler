@@ -824,9 +824,9 @@ defmodule CodexPooler.CompatibilityMatrix do
       contract: "transient SSE failures may retry only before the client sees output, message, tool, or delta events"
     },
     %{
-      slug: :request_compression,
+      slug: :tool_output_preservation,
       status: :supported,
-      current: :pool_gated_request_side_payload_rewrite,
+      current: :accepted_tool_output_byte_preservation,
       categories: [:route, :auth, :error, :streaming, :ownership, :degraded],
       routes: [
         %{method: :post, path: "/backend-api/codex/responses"},
@@ -841,8 +841,8 @@ defmodule CodexPooler.CompatibilityMatrix do
         %{method: :get, path: "/v1/responses", transport: "websocket"}
       ],
       future_routes: [],
-      fixture: :request_compression,
-      contract: "Request compression is Pool-gated by request_compression_enabled, request-side only, fail-open to the original upstream request when scanning, token counting, rewriting, or limits fail, and metadata-only through safe payload_compression request-log metadata; eligible routes are backend Responses, backend /v1 Responses/chat aliases, public /v1 Responses/chat translations, backend compact routes, and backend or narrow public websocket response.create dispatches; protected exact-output function tool outputs for Read, Glob, Grep, Write, Edit, WebSearch, WebFetch, web_search, web_fetch, and external retrieval are skipped before rewriting with aggregate-only skip counts; output-only function tool results fail closed as protected when their tool name is unavailable; recognized same-frame command-backed file reads use bounded cat, nl, head, tail, sed-print-only, or nl-to-sed-print-only grammar and remain byte-exact before output range lookup or content detection; function and native local-shell producers and outputs resolve only through their declared same-frame identifiers, and duplicate, cross-kind, or conflicting identifiers preserve the original output; malformed or unrecognized commands retain existing behavior; search-result compression covers classic path-line matches, grouped heading matches, and portable NUL-delimited matches, keeps a leading tool-output envelope verbatim, marks every omission including in grep context output, and leaves unchanged any output with a line it cannot represent, with compiler or linter diagnostic evidence, or whose readable producing command runs no search engine; diff compression covers hunk-based additions-only, deletions-only, replacement, minimal unified diffs, combined unified diffs, and long-preamble diffs, splits recursive and concatenated unified diffs into their file sections by hunk line counts, keeps file sections without text hunks, lines between sections, and every kept hunk header, and leaves unchanged diffs with changeless hunks or nothing to omit; log-output compression preserves every failure block when a summary reports failure/error counts; valid JSON documents, arrays, and object streams, and valid JSON object or array spans embedded in ordinary prose, are minified lexically so every number, string escape, key order, and duplicate key keeps its original bytes, while surrounding bytes, quoted JSON-looking text, malformed spans, and over-limit span sets remain unchanged; a deterministic per-dispatch work budget leaves the remaining candidates unchanged once spent, only the first 50 candidates in body order are processed so a growing history keeps its earlier rewrites, bodies over 64 MiB, with more than 262144 JSON values, or nested beyond 512 levels skip before candidate planning, and outputs over the exact-count window are rewritten only against a lower bound counted from prefix chunks the whole output is guaranteed to share; ordinary prose without eligible embedded JSON remains outside diff/search/log compression shapes; public /v1/responses/compact remains unsupported with no upstream compact dispatch or compression eligibility"
+      fixture: :tool_output_preservation,
+      contract: "Accepted tool-output text remains byte-identical at the upstream boundary through existing Full and Lite protocol adapters, with ordered text parts concatenated for comparison where the adapter splits them; call identifiers and item order remain intact, no output minification or selection runs, and no new compression metadata is emitted; HTTP SSE, native and public websocket, owner forwarding, bridge second serialization, backend aliases and native compact retain their existing contracts; public /v1/responses/compact remains unsupported without upstream dispatch"
     },
     %{
       slug: :upstream_websocket_bridge,
@@ -865,7 +865,7 @@ defmodule CodexPooler.CompatibilityMatrix do
         payload_disclosure: false,
         authorization_disclosure: false
       },
-      contract: "the upstream websocket bridge applies only to public /v1/responses streaming turns with websocket owner forwarding enabled, no attached websocket writer, and a continuity session that is unpinned or pinned to the selected assignment; the downstream contract stays HTTP SSE while the turn dispatches over the session's owner websocket as a cache-locality heuristic, never a cache guarantee; the bridge commits on the first client-rendered content event, on any unknown event fail-closed, on any structurally valid terminal, or at its bounded pre-content buffer caps and commit deadline, buffering lifecycle envelopes, item and part adds, and internal codex.* events until then; after any accepted websocket payload, complete silence through the bounded preflight, a pre-content peer close, TCP cut, receive timeout, pong timeout, or missing terminal fails once without HTTP fallback or automatic replay because zero downstream content does not prove zero provider work; a private owner barrier delays settlement of a terminal-bearing result until its terminal frame is delivered, and a committed terminal-delivery timeout fails once without HTTP fallback or automatic replay; timeout diagnostics move through one atomic one-shot metadata handoff and remain health-neutral; invalidation preserves the owner lifecycle, so the next explicit turn reconnects at generation plus one and a later healthy turn reuses that generation; persisted leases provide two-node owner forwarding, fencing, transfer, and takeover; after visible output an upstream death finalizes the request as failed instead of synthesizing an empty success; a provider refusal the upstream websocket sends before any content as its wrapped error frame with a 4xx status other than 429 (except the websocket-retry codes websocket_connection_limit_reached and previous_response_not_found) answers the public client with the same HTTP status and OpenAI error body as the HTTP path and records the same rejection fields on the websocket attempt, without HTTP resubmission; a turn anchored on previous_response_id is bound to its owner connection, because the provider resolves the anchor only on the connection that produced it: on a fresh connection the owner refuses it before its response.create with the codeless 400 the provider answers there, and that refusal or the provider's own Invalid previous_response_id refusal on a reused connection answers the public client 400 previous_response_not_found with param previous_response_id and a Pooler-authored message naming the requirement, while a public /v1/responses request anchored on previous_response_id that is not bridged (not streaming, owner forwarding off, or a session pinned to another assignment) is answered with the same error before any upstream call; websocket owner submission is versioned and data-only, and callbacks are built only on the owner node; incompatible remote legacy protocol submission fails before owner lookup or upstream submission without hidden HTTP resubmission; format_status/1 and opaque transient inspection protect crash and status observability from payload and authorization disclosure; websocket_owner_idle_timeout_ms controls post-detach owner retention with a 1_800_000 ms default and 60_000..3_600_000 ms bounds, is captured node-locally by each new or recovered owner, and does not change existing owners; the attempt-only upstream_websocket_connection namespace contains exactly lifecycle_id, generation, reused, and reconnected; the attempt records transport websocket plus upstream_websocket_bridge and upstream_transport metadata while the request keeps the downstream http_sse transport, and payload_compression metadata describes the websocket envelope actually sent; the submit task surfaces owner failures as scrubbed atom reasons without copying payload or authorization into crash logs; option-carrying bridge attaches fail closed without resubmission against owner nodes still running the previous release while option-less native attaches keep the two-argument remote shape and previous-release owners retain legacy five-minute behavior without connection metadata"
+      contract: "the upstream websocket bridge applies only to public /v1/responses streaming turns with websocket owner forwarding enabled, no attached websocket writer, and a continuity session that is unpinned or pinned to the selected assignment; the downstream contract stays HTTP SSE while the turn dispatches over the session's owner websocket as a cache-locality heuristic, never a cache guarantee; the bridge commits on the first client-rendered content event, on any unknown event fail-closed, on any structurally valid terminal, or at its bounded pre-content buffer caps and commit deadline, buffering lifecycle envelopes, item and part adds, and internal codex.* events until then; after any accepted websocket payload, complete silence through the bounded preflight, a pre-content peer close, TCP cut, receive timeout, pong timeout, or missing terminal fails once without HTTP fallback or automatic replay because zero downstream content does not prove zero provider work; a private owner barrier delays settlement of a terminal-bearing result until its terminal frame is delivered, and a committed terminal-delivery timeout fails once without HTTP fallback or automatic replay; timeout diagnostics move through one atomic one-shot metadata handoff and remain health-neutral; invalidation preserves the owner lifecycle, so the next explicit turn reconnects at generation plus one and a later healthy turn reuses that generation; persisted leases provide two-node owner forwarding, fencing, transfer, and takeover; after visible output an upstream death finalizes the request as failed instead of synthesizing an empty success; a provider refusal the upstream websocket sends before any content as its wrapped error frame with a 4xx status other than 429 (except the websocket-retry codes websocket_connection_limit_reached and previous_response_not_found) answers the public client with the same HTTP status and OpenAI error body as the HTTP path and records the same rejection fields on the websocket attempt, without HTTP resubmission; a turn anchored on previous_response_id is bound to its owner connection, because the provider resolves the anchor only on the connection that produced it: on a fresh connection the owner refuses it before its response.create with the codeless 400 the provider answers there, and that refusal or the provider's own Invalid previous_response_id refusal on a reused connection answers the public client 400 previous_response_not_found with param previous_response_id and a Pooler-authored message naming the requirement, while a public /v1/responses request anchored on previous_response_id that is not bridged (not streaming, owner forwarding off, or a session pinned to another assignment) is answered with the same error before any upstream call; websocket owner submission is versioned and data-only, and callbacks are built only on the owner node; incompatible remote legacy protocol submission fails before owner lookup or upstream submission without hidden HTTP resubmission; format_status/1 and opaque transient inspection protect crash and status observability from payload and authorization disclosure; websocket_owner_idle_timeout_ms controls post-detach owner retention with a 1_800_000 ms default and 60_000..3_600_000 ms bounds, is captured node-locally by each new or recovered owner, and does not change existing owners; the attempt-only upstream_websocket_connection namespace contains exactly lifecycle_id, generation, reused, and reconnected; the attempt records transport websocket plus upstream_websocket_bridge and upstream_transport metadata while the request keeps the downstream http_sse transport, and accepted tool-output values remain byte-identical in the websocket envelope actually sent; the submit task surfaces owner failures as scrubbed atom reasons without copying payload or authorization into crash logs; option-carrying bridge attaches fail closed without resubmission against owner nodes still running the previous release while option-less native attaches keep the two-argument remote shape and previous-release owners retain legacy five-minute behavior without connection metadata"
     },
     %{
       slug: :image_generation_permission,
@@ -1598,7 +1598,7 @@ defmodule CodexPooler.CompatibilityMatrix do
           semantic_tool_result_continuation: "accept"
         },
         relay_surfaces: ["collected_json", "public_sse", "public_responses_websocket"],
-        compression: %{program_output_candidate: false, program_output_rewrite: false},
+        tool_output_preservation: %{program_output: "byte_exact"},
         privacy: %{
           mode: "metadata_only",
           stored_program_code: false,
@@ -2914,159 +2914,15 @@ defmodule CodexPooler.CompatibilityMatrix do
       json: %{"model" => "gpt-fixture-text", "input" => "synthetic stream", "stream" => true},
       retry_window: "before_visible_output"
     },
-    request_compression: %{
-      pool_gate: %{
-        setting: "request_compression_enabled",
-        default_enabled: false,
-        disabled_behavior: "original_request_passthrough"
-      },
-      direction: "request_side_only",
-      failure_mode: "fail_open_original_request",
-      route_classes: %{
-        http: ["proxy_http", "proxy_stream"],
-        compact: "proxy_compact",
-        websocket: "proxy_websocket",
-        public_unsupported_compact: "proxy_http"
-      },
-      eligible_route_families: [
-        "backend_responses",
-        "backend_v1_responses_alias",
-        "backend_v1_chat_alias",
-        "public_v1_responses",
-        "public_v1_chat_translation",
-        "backend_compact",
-        "backend_v1_compact_alias",
-        "backend_websocket_response_create",
-        "backend_v1_websocket_response_create_alias",
-        "public_v1_websocket_response_create"
-      ],
-      ineligible_surfaces: [
-        "multipart",
-        "files",
-        "audio",
-        "images",
-        "admin",
-        "mcp",
-        "usage",
-        "control_plane"
-      ],
-      public_unsupported_compact: %{
-        method: :post,
-        path: "/v1/responses/compact",
-        status: 404,
-        error_code: "unsupported_endpoint",
-        compression_eligible: false,
-        upstream_dispatch: false
-      },
-      privacy: %{
-        raw_outputs_stored: false,
-        raw_response_bodies_stored: false,
-        ccr_retrieval: false,
-        request_log_metadata: "payload_compression",
-        metadata_only: true
-      },
-      protected_tool_outputs: %{
-        default_function_names: [
-          "Read",
-          "Glob",
-          "Grep",
-          "Write",
-          "Edit",
-          "WebSearch",
-          "WebFetch",
-          "web_search",
-          "web_fetch"
-        ],
-        lowercase_variants: true,
-        external_retrieval: true,
-        unknown_function_output_behavior: "protected_original_output_preserved",
-        command_backed_reads: %{
-          arguments: ["cmd", "command"],
-          native_action: %{type: "exec", command: "argv"},
-          direct_commands: ["cat", "nl", "head", "tail", "sed_print_only"],
-          pipeline: "nl_to_sed_print_only",
-          producer_aliases: %{
-            function_call: ["call_id"],
-            local_shell_call: ["call_id", "id"]
-          },
-          output_aliases: %{
-            function_call_output: ["call_id"],
-            local_shell_call_output: ["call_id", "id"]
-          },
-          output_compatibility: %{
-            function_call_output: ["function_call", "local_shell_call"],
-            local_shell_call_output: ["local_shell_call"]
-          },
-          owner_identity: "positional_producer_path",
-          unresolved_function_output: "protected_legacy",
-          unresolved_local_shell_output: "existing_behavior",
-          duplicate_aliases: "protected_original_output_preserved",
-          cross_kind_collisions: "protected_original_output_preserved",
-          conflicting_output_aliases: "protected_original_output_preserved",
-          recognized_owner_stage: "before_output_range_lookup_and_content_detection",
-          malformed_or_unrecognized: "existing_behavior",
-          output_behavior: "byte_exact",
-          metadata: "aggregate_counts_only"
-        },
-        output_behavior: "original_output_preserved",
-        metadata: "aggregate_counts_only"
-      },
-      supported_input_shapes: %{
-        embedded_json: %{
-          container_kinds: ["object", "array"],
-          surrounding_bytes: "preserved",
-          quoted_json_looking_text: "preserved",
-          malformed_or_over_limit_behavior: "original_output_preserved",
-          maximum_spans: 50
-        },
-        search_results: [
-          "classic_path_line",
-          "grouped_heading",
-          "portable_nul_delimited"
-        ],
-        diffs: [
-          "hunk_additions_only",
-          "hunk_deletions_only",
-          "hunk_replacement",
-          "minimal_unified_hunk",
-          "combined_unified_hunk",
-          "long_preamble_diff",
-          "recursive_unified_diff",
-          "concatenated_unified_diffs"
-        ],
-        false_positive_guards: [
-          "path_like_group_heading",
-          "minimum_grouped_matches",
-          "hunk_header_required",
-          "diagnostic_evidence",
-          "non_search_command_provenance",
-          "unrepresented_line_refusal"
-        ],
-        log_output: [
-          "failure_summary_guard"
-        ]
-      },
-      fidelity: %{
-        json_minification: "lexical_token_bytes_preserved",
-        search_tool_output_envelope: "preserved_verbatim",
-        search_omission_markers: "always_including_context_output",
-        search_context: "complete_adjacent_runs_retained_other_omissions_marked",
-        diff_hunkless_file_sections: "preserved_verbatim",
-        diff_hunk_headers: "kept_with_every_hunk",
-        diff_file_sections: "split_at_diff_lines_and_header_pairs_after_counted_hunks"
-      },
-      guardrails: %{
-        max_body_bytes: 67_108_864,
-        max_candidates: 50,
-        candidate_cap: "first_candidates_in_body_order_rest_unchanged",
-        max_json_values: 262_144,
-        max_nesting_depth: 512,
-        work_budget: "deterministic_per_dispatch_remaining_candidates_unchanged",
-        detection_budget: "charged_before_detection_in_candidate_order",
-        nested_json: "byte_depth_and_structure_checks_before_decode",
-        command_inspection: "bounded_once_per_owner_in_output_order_unsafe_protected",
-        bounded_original_count: "stable_prefix_lower_bound"
-      }
+    tool_output_preservation: %{
+      behavior: "accepted_output_bytes_preserved",
+      adapter_oracle: "original_strings_or_ordered_concatenated_text_parts",
+      serving_modes: ["full", "lite"],
+      call_ids: "preserved",
+      item_order: "preserved",
+      corpus: ["pretty_json_object", "pretty_json_array", "ndjson", "concatenated_json", "embedded_json", "numeric_lexemes_escapes_duplicate_keys", "malformed_json_text", "multiline_diagnostics", "search_context", "multi_file_diff", "source_unicode", "over_one_mib", "over_fifty_outputs"],
+      public_unsupported_compact: %{method: :post, path: "/v1/responses/compact", status: 404, error_code: "unsupported_endpoint", upstream_dispatch: false},
+      privacy: %{raw_outputs_stored: false, raw_response_bodies_stored: false, new_compression_metadata: false, metadata_only: true}
     },
     backend_agent_v2_handoffs: %{
       transports: ["websocket_response_create"],
@@ -3170,7 +3026,7 @@ defmodule CodexPooler.CompatibilityMatrix do
         },
         native_encrypted_function_args: "pass_through",
         routing_hint: "trusted_effective_model_and_service_tier_native_and_v1_translated",
-        schema_bound_function_output_compression: "byte_exact_json_preserved",
+        schema_bound_function_output_preservation: "byte_exact_json_preserved",
         encrypted_continuity: "evidence_selected_without_node_local_state",
         responses_lite_full: %{
           native_input_and_tools: "same_validation_across_modes",
@@ -4073,7 +3929,7 @@ defmodule CodexPooler.CompatibilityMatrix do
         request_transport: "http_sse",
         attempt_transport: "websocket",
         attempt_metadata: ["upstream_websocket_bridge", "upstream_transport"],
-        payload_compression_subject: "websocket_envelope",
+        tool_output_preservation_subject: "websocket_envelope",
         upstream_websocket_connection: %{
           projection: "admin_attempt_detail_only",
           exact_fields: ["lifecycle_id", "generation", "reused", "reconnected"],

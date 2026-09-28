@@ -37,14 +37,6 @@ ExUnit.start(
 :ok = CodexPooler.TestDurationGuard.start!()
 ExUnit.after_suite(fn _stats -> CodexPooler.TestProfiles.verify_loaded_unix_files!() end)
 
-# Load immutable tokenizer dictionaries once before async tests race to use
-# them. Cold-loading regression tests still explicitly clear their own cache.
-alias CodexPooler.Gateway.RequestCompression.TokenCounter.Ranks
-
-for encoding <- Ranks.supported_encodings() do
-  {:ok, _ranks} = Ranks.load(encoding)
-end
-
 # The cache process can start while the reset test database is still being
 # migrated. Publish one authoritative snapshot before manual sandbox ownership
 # makes background retries unable to read the Repo.

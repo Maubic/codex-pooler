@@ -3,7 +3,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions.RuntimeContext do
 
   alias CodexPooler.Gateway.Payloads.RequestOptions.Normalization
   alias CodexPooler.Gateway.Persistence.SessionContinuity.OwnerWitness
-  alias CodexPooler.Gateway.RequestCompression.Metadata, as: RequestCompressionMetadata
   alias CodexPooler.Gateway.Transports.Websocket.CompactionRetrySubmitHold
 
   defstruct [
@@ -13,7 +12,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions.RuntimeContext do
     :owner_cleanup,
     :direct_cleanup,
     :gateway_debug_payload,
-    :payload_compression,
     :reasoning_effort_snapshot,
     :prompt_cache_controls_downgraded,
     :upstream_input_index_map,
@@ -35,7 +33,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions.RuntimeContext do
           owner_cleanup: CodexPooler.Gateway.Websocket.OwnerCleanup.t() | nil,
           direct_cleanup: CodexPooler.Gateway.Websocket.DirectCleanup.t() | nil,
           gateway_debug_payload: map() | nil,
-          payload_compression: map() | nil,
           reasoning_effort_snapshot: map() | nil,
           prompt_cache_controls_downgraded: boolean(),
           upstream_input_index_map: upstream_input_index_map() | nil,
@@ -75,7 +72,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions.RuntimeContext do
       api_key_runtime_epoch: Normalization.optional_non_negative_integer(Map.get(opts, :api_key_runtime_epoch)),
       interrupt_reason: Map.get(opts, :interrupt_reason) || Map.get(opts, :reason),
       gateway_debug_payload: Map.get(opts, :gateway_debug_payload),
-      payload_compression: RequestCompressionMetadata.runtime_metadata(Map.get(opts, :payload_compression)),
       reasoning_effort_snapshot: Map.get(opts, :reasoning_effort_snapshot),
       prompt_cache_controls_downgraded: false,
       replay_authorization_binding: Map.get(opts, :replay_authorization_binding),
@@ -97,10 +93,6 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions.RuntimeContext do
     |> Normalization.normalize_optional_update(
       :api_key_runtime_epoch,
       &Normalization.optional_non_negative_integer/1
-    )
-    |> Normalization.normalize_optional_update(
-      :payload_compression,
-      &RequestCompressionMetadata.runtime_metadata/1
     )
     |> Normalization.normalize_optional_update(
       :prompt_cache_controls_downgraded,

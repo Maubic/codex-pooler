@@ -24,6 +24,7 @@ defmodule CodexPooler.Dev.OpenAIV1Fixture.Models do
 
   @type provisioned :: %{
           required(:text) => Model.t(),
+          required(:preservation_lite) => Model.t(),
           required(:alternate_text) => Model.t(),
           required(:review_decoy) => Model.t(),
           required(:audio) => Model.t(),
@@ -34,6 +35,7 @@ defmodule CodexPooler.Dev.OpenAIV1Fixture.Models do
   def provision!(pool, assignment, identity) do
     models = %{
       text: upsert!(pool, assignment, text_attributes(assignment)),
+      preservation_lite: upsert!(pool, assignment, preservation_lite_attributes(assignment)),
       review_decoy: upsert!(pool, assignment, review_attributes(assignment)),
       alternate_text:
         upsert!(
@@ -84,6 +86,13 @@ defmodule CodexPooler.Dev.OpenAIV1Fixture.Models do
       nil ->
         %Model{} |> Model.changeset(changes) |> Repo.insert!()
     end
+  end
+
+  defp preservation_lite_attributes(assignment) do
+    attributes = model_attributes("sample-preservation-lite", "Synthetic Preservation Lite", true, true, true, true, assignment, ["text"])
+    metadata = attributes.metadata
+    source = Map.put(metadata["upstream_model"], "use_responses_lite", true)
+    %{attributes | metadata: metadata |> Map.put("upstream_model", source) |> Map.put("source_assignment_models", %{assignment.id => source})}
   end
 
   defp text_attributes(assignment) do

@@ -1153,7 +1153,7 @@ defmodule CodexPooler.SchemaContractTest do
     end
   end
 
-  test "pool routing settings expose feature flags as non-null boolean storage" do
+  test "pool routing settings retain inert legacy column and its default" do
     columns = table_columns("pool_routing_settings")
 
     assert columns["prompt_cache_affinity_enabled"] == {"boolean", "NO"}
@@ -1536,8 +1536,7 @@ defmodule CodexPooler.SchemaContractTest do
     assert RoutingSettings.__schema__(:type, :prompt_cache_affinity_enabled) ==
              :boolean
 
-    assert RoutingSettings.__schema__(:type, :request_compression_enabled) ==
-             :boolean
+    refute :request_compression_enabled in RoutingSettings.__schema__(:fields)
 
     assert Model.__schema__(:type, :metadata) == :map
     assert FileRecord.__schema__(:type, :byte_size) == :integer
