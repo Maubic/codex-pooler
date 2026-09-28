@@ -705,13 +705,11 @@ forwarding of this accepted shape only. Web search availability and any
 allow-list or block-list enforcement can vary by selected upstream model and
 account.
 
-## Request compression behavior
+## Tool-output preservation
 
-Per-Pool request compression can apply to `POST /v1/responses`, `POST /v1/chat/completions`, and narrow Responses websocket `response.create` traffic. It is transparent to SDK clients and does not require a client flag. Operators enable it with the Pool setting `request_compression_enabled`.
+Accepted tool-output text on `POST /v1/responses`, `POST /v1/chat/completions` and the supported Responses websocket route reaches the upstream without gateway minification or summarization. Protocol adapters may change the surrounding request or split text into ordered parts; the output text itself is preserved. Full/Lite tool handling and strict-schema normalization remain in effect.
 
-The feature is request-side only. Codex Pooler may compress upstream-bound Responses tool-output payloads before dispatch, but it does not store raw outputs, does not store upstream response bodies, and does not implement CCR/retrieval. Public `/v1/responses/compact` remains unsupported.
-
-If compression is enabled but savings do not appear, check the request log's `payload_compression` status and reason. The UI prefers saved token count and token savings percent when local token counts are available, then falls back to saved bytes and byte savings percent.
+No Pool compression switch or savings display remains. Raw outputs are not stored. Public `/v1/responses/compact` remains unsupported, while provider and client compaction keep their separate contracts.
 
 ## Routed but unsupported boundaries
 

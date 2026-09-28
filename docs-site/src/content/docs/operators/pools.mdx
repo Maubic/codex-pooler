@@ -29,10 +29,9 @@ A Pool controls:
 4. routing strategy, which decides how eligible upstreams are ordered
 5. continuity settings, which decide when related requests should prefer the same upstream
 6. compatibility settings, such as OpenAI-style `/v1` routes
-7. request compression, which can reduce upstream-bound Responses tool-output payloads for eligible route families
-8. image-generation permission for the supported image generation and edit routes
-9. reporting scope for Pool-filtered request logs, audit logs, and traffic summaries
-10. per-model serving mode, which chooses Auto, Lite, or Full backend Responses behavior without changing the model id clients use
+7. image-generation permission for the supported image generation and edit routes
+8. reporting scope for Pool-filtered request logs, audit logs, and traffic summaries
+9. per-model serving mode, which chooses Auto, Lite, or Full backend Responses behavior without changing the model id clients use
 
 ## Page Metrics
 
@@ -231,23 +230,7 @@ Routing settings are split into selection policy, continuity, and compatibility.
 
 `Allow /v1 compatibility` enables OpenAI-style `/v1` compatibility routes for clients that use that surface.
 
-`Request compression` enables per-Pool request compression. It is off by default and applies only to upstream-bound Responses tool-output payloads on eligible request routes. It is request-side only: Codex Pooler does not store raw outputs, does not store upstream response bodies, and does not implement CCR/retrieval.
-
-Eligible families are backend and public Responses, translated chat completions, direct backend compact routes, and websocket `response.create` dispatches. Multipart, file, audio, image, admin, MCP, usage, and other non-Responses requests are not eligible. Public `/v1/responses/compact` remains unsupported.
-
-Within eligible tool outputs, valid JSON objects or arrays can be minified even when they are surrounded by ordinary explanatory text. Minification removes only the whitespace between JSON tokens: numbers, strings with their escapes, key order, and duplicate keys keep their original bytes, and every surrounding byte stays unchanged. Quoted JSON-looking text, malformed or over-limit spans, and protected exact-output tool results remain pass-through.
-
-Search-result, log, and diff rewrites mark every omission in the text sent upstream, and keep the header a tool runner puts before the command output. Output they cannot represent faithfully is sent unchanged: for example, compiler or linter diagnostics that look like search results, search output with lines the summary would drop, or diff hunks without changes. Diffs are split into their file sections, including recursive `diff -ru` output and concatenated unified diffs; file sections without text hunks, such as mode changes, binary files, and renames, and lines between sections are kept in full.
-
-Search rewrites preserve complete contiguous context runs next to retained matches, including overlapping context. Context omitted with other matches or files has its own count and marker. A file group containing only context and no match is left unchanged with the rest of that output.
-
-Recognized same-frame command-backed file reads remain byte-for-byte pass-through before output-range lookup, content detection, or any compression strategy. The bounded read grammar permits direct `cat`, `nl`, `head`, `tail`, and print-only `sed` reads, plus one `nl`-to-print-only-`sed` pipeline. Function-call outputs match `call_id`; native local-shell outputs match `call_id` or `id`. Duplicate, cross-kind, or conflicting identifiers protect the original output, while malformed or unrecognized commands retain existing behavior.
-
-Request compression is fail-open. If scanning, token counting, rewriting, or limits fail, the original request body is sent upstream and request logs record a safe `payload_compression` status and reason. JSON bodies over 64 MiB skip before scanning, and bodies with more than 262,144 JSON values or nested more than 512 levels deep skip before candidate planning, because planning cost follows the number of values rather than bytes. A dispatch processes the first 50 output candidates in request order and sends later ones unchanged, so a growing conversation keeps the compressed form of the outputs it already had instead of losing it when it crosses a limit. Each dispatch also has a fixed compression work budget; once it is spent, the remaining candidates are sent unchanged while rewrites already made stay in place. The budget depends only on the request content, so the same request always stops at the same point. Token counting is local and in-process using tokenizer data shipped with the application; it does not call OpenAI or load a local model.
-
-The work budget is checked before classifying each candidate. JSON inside output and argument strings is checked before decoding as well: text above 1 MiB, nesting above 512 levels, or excess structural complexity remains unchanged. Argument inspection occurs once per producer when its output appears; calls without outputs need no argument decoding. If inspection exceeds its separate safety allowance, the corresponding output is protected. Appending such an output does not undo earlier rewrites.
-
-Request logs may show compression savings when safe aggregate data exists. The UI prefers saved token count and token savings percent, then falls back to saved bytes and byte savings percent when token counts are unavailable.
+Codex Pooler preserves accepted tool-output text through the existing protocol adapters. There is no Pool compression setting or savings display. Full and Lite retain their existing tool-manifest and request-normalization behavior; neither minifies or summarizes accepted tool-output text.
 
 `Allow image generation` controls these exact authenticated POST routes:
 
@@ -376,7 +359,7 @@ When a Pool is not behaving as expected, check it in this order:
 5. confirm the requested model and route shape are supported by the assigned upstreams
 6. inspect recent Requests 5h, TPS 5h, and Traffic 24h for changes in load
 7. open Request logs filtered from the card footer for request-level metadata
-8. for request-compression questions, inspect `payload_compression` status, reason, route class, candidate counts, and savings display in the Request log row
+8. for tool-output delivery questions, compare the selected transport, serving mode, request outcome, and attempt outcome; request logs do not retain tool-output content
 9. for explicit Full failures, inspect `upstream_status` for non-rate-limit 4xx and for 5xx or `upstream_rate_limited` for 429, the upstream status, and the three bounded serving-mode labels, which are what identify the failure as a Full one, before selecting `Auto` or `Lite`
 10. check Audit logs when a Pool, upstream assignment, API key, routing setting, or model serving mode changed recently
 

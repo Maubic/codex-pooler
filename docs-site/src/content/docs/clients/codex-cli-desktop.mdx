@@ -149,11 +149,11 @@ requires_openai_auth = true
 
 Both providers use the same Pool API key and the same Codex backend compatibility route in Codex CLI and Codex Desktop. Codex Pooler routes each request through Pool policy, account eligibility, limits, session continuity, and request accounting.
 
-### Request compression behavior
+### Tool-output preservation
 
-Codex CLI and Codex Desktop do not need a client-side switch for Codex Pooler's per-Pool request compression. When an operator enables `request_compression_enabled`, eligible backend Responses, backend compact, backend `/v1/responses` aliases, translated backend chat, and websocket `response.create` requests may have upstream-bound Responses tool-output payloads compressed before dispatch.
+Codex Pooler preserves accepted tool-output text on Codex backend Responses, compatible aliases, native compact and supported websocket requests. No client or Pool compression switch is required. Existing Full/Lite normalization and provider or client compaction remain unchanged.
 
-The feature is request-side only. Codex Pooler does not store raw outputs, does not store upstream response bodies, and does not implement CCR/retrieval. Request logs may show safe aggregate `payload_compression` savings, preferring saved token count and token savings percent when token counts are available and falling back to byte savings when they are not.
+Raw tool outputs are not stored in request logs, and compression savings are not displayed. During an upgrade, old nodes retain their old behavior until replaced; changing the serialized upstream prefix can also change prompt-cache reuse.
 
 ### Existing session migration
 
