@@ -2,7 +2,7 @@
 // TechArticle with its breadcrumbs, tied to the landing page's Organization, WebSite and
 // SoftwareApplication by @id. The 404 page only turns indexing off.
 import { defineRouteMiddleware, type StarlightRouteData } from "@astrojs/starlight/route-data";
-import { BRAND, SITE, cardTitle, cardUrl, fullTitle, sectionOf } from "./og/meta";
+import { BRAND, SITE, cardTitle, cardUrl, fullTitle } from "./og/meta";
 
 type Head = StarlightRouteData["head"][number];
 
@@ -27,9 +27,9 @@ export const onRequest = defineRouteMiddleware(({ locals }) => {
   const url = `${SITE}/${entry.id}/`;
   const image = cardUrl(entry.id);
   const imageAlt = `${cardTitle(entry.id, entry.data.title)}, from the ${BRAND} docs`;
-  const section = sectionOf(entry.id);
 
-  const crumbs = [{ name: BRAND, item: `${SITE}/` }, ...(entry.id === "docs" ? [{ name: "Docs" }] : [{ name: "Docs", item: `${SITE}/docs/` }, ...(section ? [{ name: section }] : []), { name: entry.data.title }])];
+  // Every crumb but the last needs its own page, so the sidebar sections, which have none, stay out.
+  const crumbs = [{ name: BRAND, item: `${SITE}/` }, ...(entry.id === "docs" ? [{ name: "Docs" }] : [{ name: "Docs", item: `${SITE}/docs/` }, { name: entry.data.title }])];
 
   const graph = {
     "@context": "https://schema.org",
