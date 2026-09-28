@@ -45,7 +45,7 @@ const poolNote = (ids: string[]) => `Accounts ${ids.map((id) => id.toUpperCase()
         </div>
         <p class="status" data-status-badge data-tone="bad" aria-live="polite">
           <span class="led" aria-hidden="true"></span>
-          <span class="status-text" data-caption>2 tools stuck · Account B's saved reset sits unused</span>
+          <span class="status-text" data-caption>2 tools stuck · a saved reset sits unused</span>
         </p>
       </div>
 
@@ -245,26 +245,27 @@ const poolNote = (ids: string[]) => `Accounts ${ids.map((id) => id.toUpperCase()
     }
   }
 
+  /* A fixed width, so a longer message never reflows the row around it. */
   .status {
     display: inline-flex;
     align-items: center;
-    gap: 12px;
+    gap: 9px;
+    width: 22.5rem;
     max-width: 100%;
-    padding: 11px 18px 11px 14px;
-    border-radius: 14px;
+    padding: 8px 14px 8px 11px;
+    border-radius: 12px;
     background: #17140f;
-    box-shadow: 0 1px 0 rgb(255 255 255 / 0.06) inset, 0 12px 26px -16px rgb(23 20 15 / 0.7);
-    font-family: var(--mono);
-    font-size: 13.5px;
+    box-shadow: 0 1px 0 rgb(255 255 255 / 0.06) inset, 0 10px 22px -16px rgb(23 20 15 / 0.7);
+    font-size: 14.5px;
     font-weight: 600;
-    letter-spacing: 0.01em;
+    line-height: 1.3;
     color: #f2ece2;
   }
 
   .led {
     --led: #ff5b61;
-    width: 10px;
-    height: 10px;
+    width: 8px;
+    height: 8px;
     flex: none;
     border-radius: 50%;
     background: var(--led);
@@ -846,10 +847,6 @@ const poolNote = (ids: string[]) => `Accounts ${ids.map((id) => id.toUpperCase()
       width: 100%;
     }
 
-    .status-text {
-      white-space: normal;
-    }
-
     .stage {
       grid-template-columns: 1fr;
       gap: 26px;
@@ -1143,12 +1140,12 @@ const poolNote = (ids: string[]) => `Accounts ${ids.map((id) => id.toUpperCase()
     function steadyStatus(stuck: number, unused: number): [string, Tone] {
       if (mode === "on") {
         const dry = [...pools.values()].find((pool) => poolDry(pool) && !poolRedeeming(pool));
-        if (dry) return [`${stuck} tools waiting · ${dry.name} is out of quota`, "bad"];
+        if (dry) return [`${stuck} tools waiting · ${dry.name} is dry`, "bad"];
         const standby = [...accounts.values()].some((a) => isDry(a) && a.bank > 0);
-        return [standby ? "All tools working · saved resets wait until a Pool runs dry" : "All tools working · each Pool shares its accounts", "ok"];
+        return [standby ? "All tools working · resets saved for later" : "All tools working · Pools share accounts", "ok"];
       }
-      if (stuck === tools.size) return [`All ${stuck} tools stuck · ${unused} saved resets unused or expired`, "bad"];
-      if (accounts.get("b")!.bank === 1) return [`${stuck} tools stuck · Account B's saved reset sits unused`, "bad"];
+      if (stuck === tools.size) return [`All ${stuck} tools stuck · ${unused} saved resets wasted`, "bad"];
+      if (accounts.get("b")!.bank === 1) return [`${stuck} tools stuck · a saved reset sits unused`, "bad"];
       return [`${stuck} tools stuck · ${unused} saved resets unused`, "bad"];
     }
 
@@ -1273,9 +1270,9 @@ const poolNote = (ids: string[]) => `Accounts ${ids.map((id) => id.toUpperCase()
       if (account.redeemKind === "expiring") {
         account.expiresAt = 0;
         if (account.expiry) account.expiry.hidden = true;
-        announce(`${pool.name} · Account ${LETTER(account.id)}'s saved reset used before it expired`, "reset", now);
+        announce(`Account ${LETTER(account.id)}'s saved reset used before expiry`, "reset", now);
       } else {
-        announce(`${pool.name} ran dry · saved reset used on Account ${LETTER(account.id)}`, "reset", now);
+        announce(`${pool.name} ran dry · ${LETTER(account.id)}'s saved reset used`, "reset", now);
       }
     }
 
@@ -1286,9 +1283,10 @@ const poolNote = (ids: string[]) => `Accounts ${ids.map((id) => id.toUpperCase()
       account.segs[account.bank - 1]?.classList.add("expired");
       if (account.expiry) {
         account.expiry.textContent = "expired";
-        account.expiry.className = "expiry gone";
+        account.expiry.classList.remove("soon");
+        account.expiry.classList.add("gone");
       }
-      announce(`Account ${LETTER(account.id)}'s saved reset expired · nobody used it`, "warn", now);
+      announce(`Account ${LETTER(account.id)}'s saved reset expired unused`, "warn", now);
     }
 
     // Now and then OpenAI banks a saved reset on an account. It lands where a
@@ -1340,7 +1338,7 @@ const poolNote = (ids: string[]) => `Accounts ${ids.map((id) => id.toUpperCase()
         if (account.expiry) {
           account.expiresAt = now + EXPIRY_HOURS * HOUR;
           account.expiry.hidden = false;
-          account.expiry.className = "expiry";
+          account.expiry.classList.remove("soon", "gone");
         }
       }
       let index = 0;
@@ -1410,7 +1408,9 @@ const poolNote = (ids: string[]) => `Accounts ${ids.map((id) => id.toUpperCase()
         const left = Math.max(0, Math.min(1, account.shownLeft));
         account.fill.style.width = `${left * 100}%`;
         const saved = now < account.flashUntil;
-        account.fill.className = `meter-fill${saved ? " reset" : left > 0.5 ? "" : left > 0.2 ? " mid" : " low"}`;
+        // Toggle classes rather than assign className, which would drop the component's scope class.
+        const fillTone = saved ? "reset" : left > 0.5 ? "" : left > 0.2 ? "mid" : "low";
+        for (const name of ["reset", "mid", "low"]) account.fill.classList.toggle(name, name === fillTone);
         const text = `${Math.round(left * 100)}% left`;
         if (account.leftText.textContent !== text) account.leftText.textContent = text;
 
@@ -1431,7 +1431,7 @@ const poolNote = (ids: string[]) => `Accounts ${ids.map((id) => id.toUpperCase()
           tone = "idle";
         }
         if (account.state.textContent !== label) account.state.textContent = label;
-        account.state.className = `acct-state ${tone}`;
+        for (const name of ["busy", "bad", "idle", "reset"]) account.state.classList.toggle(name, name === tone);
 
         // An expiring saved reset: in its last hour Pooler spends it, as long
         // as the account has used some quota. Without Pooler it lapses.
@@ -1454,7 +1454,8 @@ const poolNote = (ids: string[]) => `Accounts ${ids.map((id) => id.toUpperCase()
         const chip = mode === "on" ? "Auto redeem" : waiting ? "Not used" : "";
         account.auto.hidden = chip === "";
         if (account.auto.textContent !== chip) account.auto.textContent = chip;
-        account.auto.className = `auto${mode === "on" ? " on" : " unused"}`;
+        account.auto.classList.toggle("on", mode === "on");
+        account.auto.classList.toggle("unused", mode !== "on");
       }
 
       for (const pool of pools.values()) {

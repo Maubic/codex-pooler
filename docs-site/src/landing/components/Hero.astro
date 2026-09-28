@@ -1116,12 +1116,14 @@ const accounts = [
         const left = Math.max(0, Math.min(1, account.shown));
         account.fill.style.width = `${left * 100}%`;
         const flashing = account.flash !== null && now < account.flashUntil;
-        account.fill.className = flashing && account.flash === "saved" ? "saved" : left > 0.5 ? "" : left > 0.2 ? "mid" : "low";
+        // Toggle classes rather than assign className, which would drop the component's scope class.
+        const fillTone = flashing && account.flash === "saved" ? "saved" : left > 0.5 ? "" : left > 0.2 ? "mid" : "low";
+        for (const tone of ["saved", "mid", "low"]) account.fill.classList.toggle(tone, tone === fillTone);
         const text = `${Math.round(left * 100)}% left`;
         if (account.pct.textContent !== text) account.pct.textContent = text;
         const [label, cls] = flashing ? ["saved reset used", "saved"] : account.left <= 0.08 ? (account.redeeming ? ["redeeming…", "saved"] : ["limit", "limit"]) : ["", ""];
         if (account.state.textContent !== label) account.state.textContent = label;
-        account.state.className = `acct-state ${cls}`;
+        for (const tone of ["saved", "limit"]) account.state.classList.toggle(tone, tone === cls);
       }
       for (const [poolId, poolEl] of pools) {
         const list = (hits.get(poolId) ?? []).filter((t) => now - t < 10000);
