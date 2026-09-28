@@ -2,30 +2,14 @@ import { rm } from "node:fs/promises";
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import starlightPageActions from "starlight-page-actions";
+import sitemap from "@astrojs/sitemap";
 import docsLinks from "./plugins/docs-links.mjs";
 
 // The landing page is the site root (src/pages/index.astro) and the docs are
 // served under /docs (see src/content.config.ts).
 const siteOrigin = "https://www.codex-pooler.com";
-const docsUrl = `${siteOrigin}/docs`;
 const siteDescription =
   "Codex Pooler docs for self-hosted Codex account pooling, Pool API keys, backend compatibility, narrow /v1 SDK routes, MCP metadata, routing, and deployment.";
-
-const softwareStructuredData = {
-  "@context": "https://schema.org",
-  "@type": "SoftwareApplication",
-  name: "Codex Pooler",
-  applicationCategory: "DeveloperApplication",
-  applicationSubCategory: "AI developer tooling",
-  operatingSystem: "Docker Compose and Kubernetes",
-  url: `${docsUrl}/`,
-  description: siteDescription,
-  softwareRequirements: "Docker Compose or Kubernetes for self-hosted deployments",
-  softwareHelp: {
-    "@type": "CreativeWork",
-    url: `${docsUrl}/`,
-  },
-};
 
 const autogenerateGroup = (label, directory) => ({
   label,
@@ -37,6 +21,8 @@ const removePrivateMarkdownAssets = () => ({
   hooks: {
     "astro:build:done": async ({ dir }) => {
       await rm(new URL("_docs-contract.md", dir), { force: true });
+      // The page-actions Markdown copy of the 404 page is only its title.
+      await rm(new URL("404.md", dir), { force: true });
     },
   },
 });
@@ -49,6 +35,8 @@ export default defineConfig({
     "/docs/reference/endpoint-routing/": "/docs/reference/runtime-routes/",
   },
   integrations: [
+    // Starlight's default sitemap, minus a noindex page kept only for old bookmarks and their anchors.
+    sitemap({ filter: (page) => !page.endsWith("/docs/operators/monitoring/") }),
     starlight({
       title: "Codex Pooler",
       description: siteDescription,
@@ -97,11 +85,6 @@ export default defineConfig({
         },
         {
           tag: "script",
-          attrs: { type: "application/ld+json" },
-          content: JSON.stringify(softwareStructuredData),
-        },
-        {
-          tag: "script",
           attrs: {
             async: true,
             src: "https://analytics.icorete.ch/js/pa-5Klr1c-TW2X9D5KwXBBis.js",
@@ -128,6 +111,8 @@ export default defineConfig({
       lastUpdated: true,
       pagefind: true,
       disable404Route: true,
+      // Titles, social cards and structured data per page (src/routeData.ts).
+      routeMiddleware: "./src/routeData.ts",
       components: {
         PageTitle: "./src/components/PageTitle.astro",
         Sidebar: "./src/components/Sidebar.astro",

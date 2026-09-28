@@ -1,14 +1,8 @@
 ---
 title: Codex Account Pooling
-description: Public answer page explaining Codex account pooling in Codex Pooler, including Pools, upstream assignments, routing eligibility, continuity, and metadata-only logs.
+description: "How Codex account pooling works in Codex Pooler: Pools, account assignments, routing eligibility, session continuity and metadata-only request logs."
 sidebar:
   hidden: true
-head:
-  - tag: script
-    attrs:
-      type: application/ld+json
-    content: |
-      {"@context":"https://schema.org","@type":"TechArticle","headline":"Codex Account Pooling","description":"Codex account pooling in Codex Pooler means assigning authorized upstream Codex accounts to Pools so clients use stable Pool API keys while the gateway selects eligible accounts for supported work.","url":"https://www.codex-pooler.com/docs/discovery/codex-account-pooling/","about":["Codex account pooling","Pool API keys","upstream accounts","routing eligibility"]}
 ---
 
 Codex account pooling means grouping authorized upstream Codex accounts behind a Pool. Clients use a stable Pool API key, and Codex Pooler chooses an eligible upstream account based on Pool assignment, lifecycle state, model support, quota evidence, route health, policy, and continuity.

@@ -24,7 +24,7 @@ const dropdownId = id ? `dropdown-${id}` : "dropdown-0";
   <div id="dropdown-menu">
     {
       options.map((option) => (
-        <a href={option.href} class="dropdown-item" target="_blank">
+        <a href={option.href} class="dropdown-item" target="_blank" rel="nofollow noopener">
           <span>{option.label}</span>
           <Icon name="external" size="1rem" class="external-icon" />
         </a>

@@ -1,14 +1,8 @@
 ---
 title: OpenAI-Compatible Codex Gateway
-description: Public answer page for using Codex Pooler as a narrow OpenAI-compatible /v1 gateway over Codex account Pools.
+description: "Use Codex accounts from OpenAI SDK clients through Codex Pooler's /v1 endpoint: selected routes such as Responses and Chat Completions, not full parity."
 sidebar:
   hidden: true
-head:
-  - tag: script
-    attrs:
-      type: application/ld+json
-    content: |
-      {"@context":"https://schema.org","@type":"TechArticle","headline":"OpenAI-Compatible Codex Gateway","description":"Codex Pooler provides narrow OpenAI-compatible /v1 support for selected SDK routes by translating supported requests into Codex-compatible work and routing them through Pool policy.","url":"https://www.codex-pooler.com/docs/discovery/openai-compatible-codex-gateway/","about":["OpenAI-compatible /v1","Codex gateway","OpenAI SDK clients","Pool API keys"]}
 ---
 
 Codex Pooler can act as a narrow OpenAI-compatible Codex gateway for selected SDK clients. Clients call `/v1` with a Pool API key, and Codex Pooler translates supported requests into Codex-compatible work before applying the same Pool routing, limits, account selection, and accounting path.

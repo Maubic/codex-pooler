@@ -2,35 +2,55 @@
 import "@fontsource-variable/roboto-condensed";
 import fontLatin from "@fontsource-variable/roboto-condensed/files/roboto-condensed-latin-wght-normal.woff2?url";
 import "../styles/global.css";
-import { LICENSE_URL, REDDIT_URL, REPO_URL, SITE_URL, X_URL } from "../data/site";
+import { DOCS_URL, LICENSE_URL, RELEASES_URL, REDDIT_URL, REPO_URL, SITE_URL, X_URL } from "../data/site";
+import { RELEASE_VERSION } from "../data/release";
 
 interface Props {
   title?: string;
+  shareTitle?: string;
   description?: string;
 }
 
+// The page title names what the product is for search; link previews use the headline.
 const {
-  title = "Codex Pooler — your Codex accounts, pooled your way",
-  description = "Codex Pooler is a self-hosted gateway for OpenAI Codex. Group your accounts into Pools for teams and agents, give every tool a key you control, and use your Codex subscriptions even in tools that only speak the OpenAI API.",
+  title = "Codex Pooler: self-hosted gateway for your Codex accounts",
+  shareTitle = "Codex Pooler — your Codex accounts, pooled your way",
+  description = "Self-hosted gateway for OpenAI Codex: Pools for teams and agents, a key with limits for every tool, and your Codex plan in OpenAI API tools.",
 } = Astro.props;
 
 const canonical = new URL(Astro.url.pathname, Astro.site ?? SITE_URL).href;
 const ogImage = new URL("/og.jpg", Astro.site ?? SITE_URL).href;
+const ogImageAlt = "Codex Pooler: two friendly robots floating in a pool under an orange umbrella, next to the words Your Codex accounts, pooled your way.";
 
+// One graph for the whole site: every docs page points at these three by @id.
+const organization = `${SITE_URL}/#organization`;
 const structuredData = {
   "@context": "https://schema.org",
-  "@type": "SoftwareApplication",
-  name: "Codex Pooler",
-  applicationCategory: "DeveloperApplication",
-  operatingSystem: "Docker Compose, Kubernetes",
-  description,
-  url: SITE_URL,
-  image: ogImage,
-  license: LICENSE_URL,
-  codeRepository: REPO_URL,
-  offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
-  sameAs: [REPO_URL, REDDIT_URL],
-  publisher: { "@type": "Organization", name: "iCoreTech", sameAs: [X_URL] },
+  "@graph": [
+    { "@type": "Organization", "@id": organization, name: "iCoreTech", url: "https://github.com/icoretech", sameAs: ["https://github.com/icoretech", X_URL] },
+    { "@type": "WebSite", "@id": `${SITE_URL}/#website`, url: `${SITE_URL}/`, name: "Codex Pooler", inLanguage: "en", publisher: { "@id": organization } },
+    {
+      "@type": "SoftwareApplication",
+      "@id": `${SITE_URL}/#software`,
+      name: "Codex Pooler",
+      url: `${SITE_URL}/`,
+      description,
+      image: ogImage,
+      applicationCategory: "DeveloperApplication",
+      operatingSystem: "Linux",
+      processorRequirements: "x86-64 or ARM64",
+      softwareRequirements: "Docker with Compose, or Kubernetes with Helm",
+      softwareVersion: RELEASE_VERSION,
+      downloadUrl: RELEASES_URL,
+      license: LICENSE_URL,
+      isAccessibleForFree: true,
+      offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+      author: { "@id": organization },
+      publisher: { "@id": organization },
+      sameAs: [REPO_URL, REDDIT_URL],
+      softwareHelp: { "@type": "WebPage", url: `${SITE_URL}${DOCS_URL}` },
+    },
+  ],
 };
 ---
 
@@ -41,7 +61,11 @@ const structuredData = {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
     <meta name="description" content={description} />
+    <meta name="robots" content="index,follow,max-snippet:-1,max-image-preview:large,max-video-preview:-1" />
     <link rel="canonical" href={canonical} />
+    <link rel="alternate" type="text/plain" title="llms.txt" href="/llms.txt" />
+    <link rel="alternate" type="text/markdown" title="Codex Pooler answer reference" href="/answers.md" />
+    <link rel="alternate" type="text/markdown" title="Codex Pooler pricing and availability" href="/pricing.md" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
     <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
@@ -50,18 +74,21 @@ const structuredData = {
 
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Codex Pooler" />
-    <meta property="og:title" content={title} />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:title" content={shareTitle} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />
     <meta property="og:image" content={ogImage} />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta property="og:image:type" content="image/jpeg" />
-    <meta property="og:image:alt" content="Codex Pooler: two friendly robots floating in a pool under an orange umbrella, next to the words Your Codex accounts, pooled your way." />
+    <meta property="og:image:alt" content={ogImageAlt} />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content={title} />
+    <meta name="twitter:site" content="@icoretech_inc" />
+    <meta name="twitter:title" content={shareTitle} />
     <meta name="twitter:description" content={description} />
     <meta name="twitter:image" content={ogImage} />
+    <meta name="twitter:image:alt" content={ogImageAlt} />
 
     <script is:inline type="application/ld+json" set:html={JSON.stringify(structuredData)} />
     <script is:inline>document.documentElement.classList.add("js");</script>

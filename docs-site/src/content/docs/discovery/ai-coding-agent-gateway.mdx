@@ -1,14 +1,8 @@
 ---
 title: AI Coding Agent Gateway
-description: Public answer page for using Codex Pooler as a self-hosted gateway for AI coding agents, Codex backend clients, selected /v1 SDK clients, and operator MCP metadata.
+description: "Codex Pooler as a self-hosted gateway for AI coding agents: Codex backend clients and selected /v1 SDK clients on Pool API keys, with MCP metadata."
 sidebar:
   hidden: true
-head:
-  - tag: script
-    attrs:
-      type: application/ld+json
-    content: |
-      {"@context":"https://schema.org","@type":"TechArticle","headline":"AI Coding Agent Gateway","description":"Codex Pooler can serve as a self-hosted gateway for trusted AI coding agents by giving clients stable Pool API keys, routing Codex backend or narrow /v1 traffic through account Pools, and keeping operator evidence metadata-only.","url":"https://www.codex-pooler.com/docs/discovery/ai-coding-agent-gateway/","about":["AI coding agent gateway","Codex Pooler","Codex backend clients","OpenAI-compatible /v1","Pool API keys"]}
 ---
 
 Codex Pooler can act as a self-hosted gateway for trusted AI coding agents. Operators run Codex Pooler themselves, connect authorized upstream Codex accounts to Pools, issue stable Pool API keys to agent clients, and route supported Codex backend or narrow `/v1` requests through Pool policy without exposing upstream account secrets to every workstation or automation host.

@@ -2,13 +2,7 @@
 title: Codex CLI / Desktop on Codex Pooler
 sidebar:
   label: Codex CLI / Desktop
-description: Configure Codex CLI and Codex Desktop with Codex Pooler backend compatibility, shared CODEX_HOME/config.toml provider settings, HTTP/SSE fallback, optional operator MCP access, and local session migration.
-head:
-  - tag: script
-    attrs:
-      type: application/ld+json
-    content: |
-      {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Does Codex Pooler work with Codex CLI and Codex Desktop?","acceptedAnswer":{"@type":"Answer","text":"Yes. Codex CLI and Codex Desktop share Codex configuration layers. Put the Codex Pooler provider in CODEX_HOME/config.toml, set model_provider to codex-pooler-ws, and point base_url at https://codex-pooler.example.com/backend-api/codex. On Codex 0.156.0 and later, also set model_catalog_url to https://codex-pooler.example.com/backend-api/codex/models and enable the api_key_model_discovery feature so Codex reads the Pool model catalog."}},{"@type":"Question","name":"Should Codex CLI or Codex Desktop use /v1 with Codex Pooler?","acceptedAnswer":{"@type":"Answer","text":"No. Codex backend clients should use /backend-api/codex. The /v1 surface is for selected OpenAI SDK-compatible clients, not Codex CLI or Codex Desktop backend traffic."}},{"@type":"Question","name":"Where should Codex Pooler provider settings live for Codex?","acceptedAnswer":{"@type":"Answer","text":"Use the user-level CODEX_HOME/config.toml file for provider and auth settings. Project-local .codex/config.toml files are trust-gated and cannot override machine-local provider keys such as model_provider and model_providers."}}]}
+description: "Point Codex CLI and Codex Desktop at Codex Pooler: one shared config.toml provider, a Pool API key, HTTP/SSE fallback and optional operator MCP access."
 ---
 
 Codex is OpenAI's coding agent for exploring a codebase, making changes and running checks. Use it from the terminal or the desktop app, with Codex Pooler providing access to your Pool's models through one API key. The configuration below is shared by both clients.
