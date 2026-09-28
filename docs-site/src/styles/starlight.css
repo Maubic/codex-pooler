@@ -1,35 +1,3 @@
-@font-face {
-  font-family: "Roboto Condensed";
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url("/fonts/roboto-condensed/roboto-condensed-400.ttf") format("truetype");
-}
-
-@font-face {
-  font-family: "Roboto Condensed";
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-  src: url("/fonts/roboto-condensed/roboto-condensed-500.ttf") format("truetype");
-}
-
-@font-face {
-  font-family: "Roboto Condensed";
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url("/fonts/roboto-condensed/roboto-condensed-600.ttf") format("truetype");
-}
-
-@font-face {
-  font-family: "Roboto Condensed";
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url("/fonts/roboto-condensed/roboto-condensed-700.ttf") format("truetype");
-}
-
 /*
   Accent palette. Starlight reads the accent variables with fixed roles: `text-accent` colours links,
   the current table-of-contents entry and the header icons; `accent-low` sits behind text (focused
@@ -37,7 +5,8 @@
   light for text on white (2.4:1), so light mode writes text with the landing page's orange ink.
 */
 :root {
-  --cp-font-sans: "Roboto Condensed", ui-sans-serif, system-ui, sans-serif;
+  /* The variable Roboto Condensed from @fontsource-variable, the same WOFF2 files the landing page loads. */
+  --cp-font-sans: "Roboto Condensed Variable", "Roboto Condensed", ui-sans-serif, system-ui, sans-serif;
   /* Brand orange: fills, borders, and accent text on the dark theme (7.3:1 on its page background). */
   --cp-color-primary: #fe8618;
   /* Orange ink for text on light backgrounds (5.5:1 on white). */

@@ -25,10 +25,15 @@ npm run preview  # serve the build locally
 | `src/landing/` | Landing page components, layout, styles, data and images |
 | `src/content/docs/` | Documentation pages. `src/content.config.ts` gives their ids a `docs/` prefix, so they are served under `/docs` without living in a `docs/` folder |
 | `plugins/docs-links.mjs` | Adds `/docs` to root-relative page links in the docs, so pages keep linking with paths like `/operators/pools/` |
-| `public/` | Files served at the site root: images, fonts, `llms.txt`, `answers.md`, `pricing.md`, `robots.txt`, the monitoring dashboards, and the landing page's logos and icons |
+| `plugins/docs-images.mjs` | Gives docs images from `public/` their width and height, loads a page's first image eagerly with high priority and the rest lazily |
+| `src/routeData.ts` | Starlight route middleware: page titles without a doubled brand, the social card tags, and a TechArticle with breadcrumbs per docs page |
+| `src/og/`, `src/pages/og/` | Build-time social cards, one 1200x630 JPEG per docs page at `/og/<page id>.jpg`, with the text drawn as paths from the Roboto Condensed files in `src/og/fonts/` |
+| `public/` | Files served at the site root: images (the docs banners are 1440px WebP copies of the README banners), `llms.txt`, `answers.md`, `pricing.md`, `robots.txt`, the landing page's social card `og.jpg`, the monitoring dashboards, and the landing page's logos and icons |
 | `scripts/`, `dashboards/` | Checks run by `npm run check`, and the dashboard build |
 
 The 404 page (`src/content/docs/404.mdx`) serves the whole site and forwards links from before the docs moved under `/docs` to their new address.
+
+The landing page carries one structured-data graph (Organization, WebSite, SoftwareApplication) that every docs page points at by `@id`. The docs use the same variable Roboto Condensed WOFF2 files as the landing page, from `@fontsource-variable/roboto-condensed`.
 
 ## Landing page
 
@@ -41,6 +46,8 @@ The 404 page (`src/content/docs/404.mdx`) serves the whole site and forwards lin
 | Logo strip | `LogoStrip.astro` | Marquee of supported tools, each linking to its setup guide |
 | How it works | `Simulator.astro` | "Flip the switch": the same four tools and four accounts without and with Pooler, with an LED status badge. With Pooler the gateway holds two Pools (Product team, Automation), each serving its own tools from its own accounts. Bars show quota left and only drain (faster on smaller plans); an empty account comes back to 100% only when a saved reset is spent. Mirrors the product rules: a Pool spends a saved reset only once all its accounts are dry, one at a time, waiting for confirmation before another; an expiring reset on an account with some usage is spent in its last hour. Without Pooler, Account C's saved reset counts down and expires unused. OpenAI occasionally banks a new saved reset |
 | Pools | `Pools.astro` | Three example Pools with their own accounts, keys and rules, one account shared between two |
+| Just one account? | `OneAccount.astro` | Five agents signed in with one Codex login next to the same agents holding Pool keys: a copy of the login asks to sign in again, key counts climb, one key pauses without touching the rest. Linked from the FAQ |
+| Guardrails | `Guardrails.astro` | Example requests walk the checks in the order Pooler applies them (firewall, key, Pool switches, model, request size, token windows); a request that fails a check stops there with the documented status and code |
 | OpenAI-compatible | `Compat.astro` | Codex subscriptions in tools without Codex support: a generic settings example and buttons to every tool's setup guide |
 | Features | `Features.astro` | Bento: keys, Observatory, MCP, saved resets, Stats and request log, alerts |
 | Everything else | `AllFeatures.astro` | Grouped list of the remaining features, each backed by the docs |

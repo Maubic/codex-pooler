@@ -4,6 +4,7 @@ import starlight from "@astrojs/starlight";
 import starlightPageActions from "starlight-page-actions";
 import sitemap from "@astrojs/sitemap";
 import docsLinks from "./plugins/docs-links.mjs";
+import docsImages from "./plugins/docs-images.mjs";
 
 // The landing page is the site root (src/pages/index.astro) and the docs are
 // served under /docs (see src/content.config.ts).
@@ -45,6 +46,10 @@ export default defineConfig({
         {
           tag: "link",
           attrs: { rel: "icon", href: "/favicon-32.png", sizes: "32x32", type: "image/png" },
+        },
+        {
+          tag: "link",
+          attrs: { rel: "icon", href: "/icon-192.png", sizes: "192x192", type: "image/png" },
         },
         {
           tag: "link",
@@ -132,7 +137,7 @@ export default defineConfig({
           },
         }),
       ],
-      customCss: ["/src/styles/starlight.css"],
+      customCss: ["@fontsource-variable/roboto-condensed", "/src/styles/starlight.css"],
       sidebar: [
         {
           label: "Getting Started",
@@ -150,6 +155,7 @@ export default defineConfig({
       ],
     }),
     docsLinks({ prefix: "/docs" }),
+    docsImages(),
     removePrivateMarkdownAssets(),
   ],
 });
