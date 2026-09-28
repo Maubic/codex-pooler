@@ -8,6 +8,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.JsonDocumentLossless
   existing array strategy so row-oriented metadata stays stable.
   """
 
+  alias CodexPooler.Gateway.RequestCompression.BoundedJson
   alias CodexPooler.Gateway.RequestCompression.JsonMinifier
   alias CodexPooler.Gateway.RequestCompression.Strategies
 
@@ -17,7 +18,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.JsonDocumentLossless
   def compress(content, opts \\ [])
 
   def compress(content, opts) when is_binary(content) do
-    case CodexPooler.JSON.decode(content, objects: :ordered_objects) do
+    case BoundedJson.decode(content, objects: :ordered_objects) do
       {:ok, %CodexPooler.JSON.OrderedObject{} = document} ->
         Strategies.finalize(
           @strategy,

@@ -8,6 +8,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.JsonArrayLossless do
   nested data is intentionally left out until a recoverability design exists.
   """
 
+  alias CodexPooler.Gateway.RequestCompression.BoundedJson
   alias CodexPooler.Gateway.RequestCompression.ContentDetector
   alias CodexPooler.Gateway.RequestCompression.JsonMinifier
   alias CodexPooler.Gateway.RequestCompression.Strategies
@@ -18,7 +19,7 @@ defmodule CodexPooler.Gateway.RequestCompression.Strategies.JsonArrayLossless do
   def compress(content, opts \\ [])
 
   def compress(content, opts) when is_binary(content) do
-    case CodexPooler.JSON.decode(content, objects: :ordered_objects) do
+    case BoundedJson.decode(content, objects: :ordered_objects) do
       {:ok, rows} when is_list(rows) ->
         Strategies.finalize(@strategy, content, JsonMinifier.minify(content), %{row_count: length(rows)}, opts)
 

@@ -1,10 +1,12 @@
 defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
   @moduledoc false
 
+  alias CodexPooler.Gateway.RequestCompression.BoundedJson
   alias CodexPooler.Gateway.RequestCompression.CommandProvenance
   alias CodexPooler.Gateway.RequestCompression.ContentDetector
   alias CodexPooler.Gateway.RequestCompression.DirectReadCommand
   alias CodexPooler.Gateway.RequestCompression.JsonStringRanges
+  alias CodexPooler.Gateway.RequestCompression.WorkBudget
 
   defmodule Candidate do
     @moduledoc false
@@ -25,6 +27,8 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
       :strategy
     ]
     defstruct [
+      :command_provenance,
+      :detection_deferred,
       :item_type,
       :output_path,
       :byte_start,
@@ -38,6 +42,8 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
     ]
 
     @type t :: %__MODULE__{
+            command_provenance: :search | :other | :unknown | nil,
+            detection_deferred: boolean() | nil,
             item_type: String.t(),
             output_path: JsonStringRanges.path(),
             byte_start: non_neg_integer(),
@@ -84,6 +90,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
           required(:known_function_call_ids) => MapSet.t(),
           required(:schema_bound_call_ids) => MapSet.t(),
           required(:command_owners) => map(),
+          required(:defer_detection) => boolean(),
           required(:min_bytes) => non_neg_integer()
         }
 
@@ -119,7 +126,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
 
     with {:ok, ranges} <- JsonStringRanges.scan(json, scan_opts),
          {:ok, payload} <- decode_json(json) do
-      {:ok, collect_candidates(json, payload, ranges, min_bytes, excluded_function_tool_names, max_candidates(opts))}
+      {:ok, collect_candidates(json, payload, ranges, min_bytes, excluded_function_tool_names, max_candidates(opts), defer_detection?(opts))}
     end
   end
 
@@ -147,7 +154,8 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
          ranges,
          min_bytes,
          excluded_function_tool_names,
-         max_candidates
+         max_candidates,
+         defer_detection
        )
        when is_list(input) do
     range_by_path = Map.new(ranges, &{&1.path, &1})
@@ -166,7 +174,8 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
       known_function_call_ids: known_function_call_ids,
       schema_bound_call_ids: schema_bound_call_ids,
       command_owners: command_owners,
-      min_bytes: min_bytes
+      min_bytes: min_bytes,
+      defer_detection: defer_detection
     }
 
     # Candidates are taken in body order and only the first `max_candidates`
@@ -190,7 +199,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
     }
   end
 
-  defp collect_candidates(_json, _payload, _ranges, _min_bytes, _excluded_function_tool_names, _max_candidates),
+  defp collect_candidates(_json, _payload, _ranges, _min_bytes, _excluded_function_tool_names, _max_candidates, _defer_detection),
     do: %{candidates: [], deferred_candidate_count: 0, protected_tool_output_skipped_count: 0}
 
   defp split_at_limit(located, :infinity), do: {located, []}
@@ -222,9 +231,12 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
   end
 
   defp detected_candidate(context, located) do
-    decision = ContentDetector.detect(located.output, command: command_provenance(located.item, context.command_owners))
+    command = command_provenance(located.item, context.command_owners)
+    decision = if context.defer_detection, do: %{kind: :text, confidence: 0.0, compressible: false, strategy: nil}, else: ContentDetector.detect(located.output, command: command)
 
     %Candidate{
+      command_provenance: command,
+      detection_deferred: context.defer_detection,
       item_type: located.item_type,
       output_path: located.output_path,
       byte_start: located.byte_start,
@@ -259,29 +271,36 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
   end
 
   defp command_owners(items) do
-    Enum.reduce(items, %{aliases: %{}, owners: %{}}, fn {item, path}, registry ->
-      case producer(item, path) do
-        nil -> registry
-        owner -> put_owner(registry, owner)
+    registry =
+      Enum.reduce(items, %{aliases: %{}, owners: %{}}, fn {item, path}, registry ->
+        case producer(item, path) do
+          nil -> registry
+          owner -> put_owner(registry, owner)
+        end
+      end)
+
+    budget = WorkBudget.new(1_048_576)
+
+    # Inspect producers only when their first unambiguous output arrives. An
+    # appended output for an older unused call must not spend the allowance
+    # before an already inspected prefix. Unknown safety remains protected.
+    Enum.reduce(items, registry, fn {item, _path}, registry ->
+      case resolve_command_owner(item, registry) do
+        {:resolved, %{arguments: arguments} = owner} ->
+          decoded = decoded_arguments(arguments, budget)
+          inspected = owner |> Map.delete(:arguments) |> Map.merge(%{read?: decoded == :bounded_skip or DirectReadCommand.read?(decoded), command: CommandProvenance.classify(decoded)})
+          %{registry | owners: Map.put(registry.owners, owner.path, inspected)}
+
+        _other ->
+          registry
       end
     end)
   end
 
   defp producer(%{"type" => "function_call"} = item, path) do
     case usable_alias(Map.get(item, "call_id")) do
-      nil ->
-        nil
-
-      call_id ->
-        arguments = decoded_arguments(item["arguments"])
-
-        %{
-          path: path,
-          kind: :function_call,
-          aliases: [call_id],
-          read?: DirectReadCommand.read?(arguments),
-          command: CommandProvenance.classify(arguments)
-        }
+      nil -> nil
+      call_id -> %{path: path, kind: :function_call, aliases: [call_id], arguments: item["arguments"], read?: true, command: :unknown}
     end
   end
 
@@ -295,23 +314,46 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
         path: path,
         kind: :local_shell_call,
         aliases: aliases,
-        read?: DirectReadCommand.read?(item),
-        command: CommandProvenance.classify(item)
+        arguments: item,
+        read?: true,
+        command: :unknown
       }
     end
   end
 
   defp producer(_item, _path), do: nil
 
-  defp decoded_arguments(arguments) when is_binary(arguments) do
-    case CodexPooler.JSON.decode(arguments) do
-      {:ok, decoded} when is_map(decoded) -> decoded
+  defp decoded_arguments(arguments, budget) when is_binary(arguments) do
+    with :ok <- WorkBudget.charge(budget, byte_size(arguments)),
+         {:ok, decoded} when is_map(decoded) <- BoundedJson.decode(arguments) do
+      bounded_command(decoded, budget)
+    else
+      {:error, reason} when reason in [:work_budget_exhausted, :inner_json_limit, :depth_limit, :structure_limit] -> :bounded_skip
       _invalid -> nil
     end
   end
 
-  defp decoded_arguments(arguments) when is_map(arguments), do: arguments
-  defp decoded_arguments(_arguments), do: nil
+  defp decoded_arguments(arguments, budget) when is_map(arguments), do: bounded_command(arguments, budget)
+  defp decoded_arguments(_arguments, _budget), do: nil
+
+  defp bounded_command(arguments, budget) do
+    command =
+      case arguments do
+        %{"type" => "local_shell_call", "action" => %{"command" => command}} -> command
+        _ -> [Map.get(arguments, "cmd"), Map.get(arguments, "command")]
+      end
+
+    # Shell token readers allocate byte lists. Charge their expansion before
+    # entering the lexer, for both JSON-decoded and already structured args.
+    case WorkBudget.charge(budget, command_bytes(command) * 16) do
+      :ok -> arguments
+      {:error, :work_budget_exhausted} -> :bounded_skip
+    end
+  end
+
+  defp command_bytes(command) when is_binary(command), do: byte_size(command)
+  defp command_bytes(command) when is_list(command), do: Enum.reduce(command, 0, &(command_bytes(&1) + &2))
+  defp command_bytes(_command), do: 0
 
   defp put_owner(registry, owner) do
     aliases =
@@ -527,6 +569,10 @@ defmodule CodexPooler.Gateway.RequestCompression.ResponsesLiveZone do
   end
 
   defp schema_bound_tool_names(_payload), do: MapSet.new()
+
+  defp defer_detection?(opts) when is_list(opts), do: Keyword.get(opts, :defer_detection, false)
+  defp defer_detection?(opts) when is_map(opts), do: Map.get(opts, :defer_detection, false)
+  defp defer_detection?(_opts), do: false
 
   defp min_bytes(opts) when is_list(opts) do
     opts

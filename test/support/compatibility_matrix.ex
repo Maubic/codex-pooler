@@ -3050,6 +3050,7 @@ defmodule CodexPooler.CompatibilityMatrix do
         json_minification: "lexical_token_bytes_preserved",
         search_tool_output_envelope: "preserved_verbatim",
         search_omission_markers: "always_including_context_output",
+        search_context: "complete_adjacent_runs_retained_other_omissions_marked",
         diff_hunkless_file_sections: "preserved_verbatim",
         diff_hunk_headers: "kept_with_every_hunk",
         diff_file_sections: "split_at_diff_lines_and_header_pairs_after_counted_hunks"
@@ -3061,6 +3062,9 @@ defmodule CodexPooler.CompatibilityMatrix do
         max_json_values: 262_144,
         max_nesting_depth: 512,
         work_budget: "deterministic_per_dispatch_remaining_candidates_unchanged",
+        detection_budget: "charged_before_detection_in_candidate_order",
+        nested_json: "byte_depth_and_structure_checks_before_decode",
+        command_inspection: "bounded_once_per_owner_in_output_order_unsafe_protected",
         bounded_original_count: "stable_prefix_lower_bound"
       }
     },

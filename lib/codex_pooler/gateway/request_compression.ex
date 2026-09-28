@@ -4,6 +4,7 @@ defmodule CodexPooler.Gateway.RequestCompression do
   require Logger
 
   alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.Gateway.RequestCompression.ContentDetector
   alias CodexPooler.Gateway.RequestCompression.Eligibility
   alias CodexPooler.Gateway.RequestCompression.JsonStringRanges
   alias CodexPooler.Gateway.RequestCompression.Metadata
@@ -101,7 +102,7 @@ defmodule CodexPooler.Gateway.RequestCompression do
   defp compress_payload(upstream_payload, context, request_options, metadata, started)
        when is_binary(upstream_payload) do
     with {:ok, opts} <- strategy_opts(context, request_options),
-         {:ok, plan} <- ResponsesLiveZone.plan(upstream_payload, opts ++ [max_candidates: @max_candidate_count, max_json_values: @max_json_values]) do
+         {:ok, plan} <- ResponsesLiveZone.plan(upstream_payload, opts ++ [defer_detection: true, max_candidates: @max_candidate_count, max_json_values: @max_json_values]) do
       metadata =
         metadata
         |> put_protected_tool_output_skips(plan)
@@ -240,6 +241,18 @@ defmodule CodexPooler.Gateway.RequestCompression do
           {:halt, {:error, reason}}
       end
     end)
+  end
+
+  defp candidate_replacement(upstream_payload, %{detection_deferred: true} = candidate, opts) do
+    with :ok <- WorkBudget.charge(WorkBudget.from_opts(opts), candidate.output_byte_size),
+         {:ok, output} <- JsonStringRanges.decode_string(upstream_payload, Map.from_struct(candidate)) do
+      decision = ContentDetector.detect(output, command: candidate.command_provenance)
+      detected = %{candidate | detection_deferred: false, content_kind: decision.kind, content_confidence: decision.confidence, compressible: decision.compressible, strategy: decision.strategy}
+      candidate_replacement(upstream_payload, detected, opts)
+    else
+      {:error, :work_budget_exhausted} -> {:skip, :work_budget_exhausted}
+      {:error, _reason} -> {:error, :scanner_error}
+    end
   end
 
   defp candidate_replacement(

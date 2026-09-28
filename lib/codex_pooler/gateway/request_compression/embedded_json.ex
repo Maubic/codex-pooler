@@ -1,6 +1,8 @@
 defmodule CodexPooler.Gateway.RequestCompression.EmbeddedJson do
   @moduledoc false
 
+  alias CodexPooler.Gateway.RequestCompression.BoundedJson
+
   @max_span_count 50
 
   @type span_kind :: :array | :object
@@ -19,7 +21,7 @@ defmodule CodexPooler.Gateway.RequestCompression.EmbeddedJson do
 
   @spec plan(term()) :: {:ok, [span()]} | :skip
   def plan(content) when is_binary(content) do
-    if String.valid?(content) do
+    if BoundedJson.within_limits?(content) and String.valid?(content) do
       case scan(content, 0, [], 0) do
         {:ok, spans} -> finalize_plan(content, Enum.reverse(spans))
         :error -> :skip
@@ -133,7 +135,7 @@ defmodule CodexPooler.Gateway.RequestCompression.EmbeddedJson do
   end
 
   defp container_kind(content) do
-    case CodexPooler.JSON.decode(content, objects: :ordered_objects) do
+    case BoundedJson.decode(content, objects: :ordered_objects) do
       {:ok, value} -> decoded_container_kind(value)
       _invalid_json -> :error
     end

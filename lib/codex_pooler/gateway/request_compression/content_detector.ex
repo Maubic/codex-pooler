@@ -1,6 +1,7 @@
 defmodule CodexPooler.Gateway.RequestCompression.ContentDetector do
   @moduledoc false
 
+  alias CodexPooler.Gateway.RequestCompression.BoundedJson
   alias CodexPooler.Gateway.RequestCompression.EmbeddedJson
   alias CodexPooler.Gateway.RequestCompression.JsonMinifier
 
@@ -95,7 +96,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ContentDetector do
   def detect(content, opts) when is_binary(content) do
     trimmed = String.trim(content)
 
-    if trimmed == "" do
+    if trimmed == "" or not BoundedJson.within_limits?(content) do
       decision(:text, 100)
     else
       case json_kind(trimmed) do
@@ -201,13 +202,15 @@ defmodule CodexPooler.Gateway.RequestCompression.ContentDetector do
   def normalize_concatenated_json_objects(_content), do: :error
 
   defp decode_concatenated_json_objects(content) do
-    content
-    |> String.trim()
-    |> decode_object_stream([])
+    if BoundedJson.within_limits?(content) do
+      content |> String.trim() |> decode_object_stream([])
+    else
+      :error
+    end
   end
 
   defp json_kind(content) do
-    case CodexPooler.JSON.decode(content) do
+    case BoundedJson.decode(content) do
       {:ok, value} when is_list(value) -> {:ok, :json_array}
       {:ok, value} when is_map(value) -> {:ok, :json_document}
       {:error, _reason} -> concatenated_json_kind(content)
@@ -254,7 +257,7 @@ defmodule CodexPooler.Gateway.RequestCompression.ContentDetector do
     with {:ok, byte_end} <- json_object_byte_end(content),
          object_json = binary_part(content, 0, byte_end),
          {:ok, %CodexPooler.JSON.OrderedObject{}} <-
-           CodexPooler.JSON.decode(object_json, objects: :ordered_objects) do
+           BoundedJson.decode(object_json, objects: :ordered_objects) do
       rest = binary_part(content, byte_end, byte_size(content) - byte_end)
       {:ok, object_json, rest}
     else

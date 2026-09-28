@@ -3,7 +3,7 @@ defmodule CodexPooler.Gateway.RequestCompression.WorkBudget do
 
   # Deterministic cap on the compression work one dispatch may spend. Work is
   # charged in bytes read before the work happens: each candidate output handed
-  # to a strategy, each text handed to the tokenizer, and a surcharge for the
+  # to detection and to a strategy, each text handed to the tokenizer, and a surcharge for the
   # bytes of tokenizer pieces long enough to take the heap merge. The same
   # payload therefore always stops at the same point, whatever the machine or
   # its load. Once a charge does not fit, the budget is spent for good: the
