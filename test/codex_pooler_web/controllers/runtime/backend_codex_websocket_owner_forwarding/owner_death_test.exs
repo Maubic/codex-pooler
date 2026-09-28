@@ -1144,6 +1144,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
             [task] = MapSet.to_list(socket_state.tasks)
             owner_ref = Process.monitor(owner)
             task_ref = Process.monitor(task)
+            :ok = slow_owner_interruption!(owner)
             Process.exit(:sys.get_state(owner).upstream_pid, :kill)
 
             assert_receive {:DOWN, ^owner_ref, :process, ^owner, owner_reason}, @detection_timeout_ms
@@ -1170,12 +1171,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
           :after_visible_output -> assert result.shown ++ texts == ["response.created", "response.output_text.delta", "error"]
         end
 
-        # The turn is closed once, as an owner crash.
+        # The turn is closed once, as an owner crash, by the owner before it
+        # answers the task (findings#270 row 270-167): the same record on every
+        # run, the shape a released client's resend is admitted against, where
+        # the owner's exit and the task used to race for it (499 with the turn
+        # interrupted, or 502 with the turn failed).
         assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
-        assert {request.status, request.last_error_code} == {"failed", "owner_crashed"}
-        assert request.response_status_code in [499, 502]
+        assert {request.status, request.last_error_code, request.response_status_code} == {"failed", "owner_crashed", 499}
         assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
-        assert {attempt.status, attempt.network_error_code} == {"failed", "owner_crashed"}
+        assert {attempt.status, attempt.network_error_code, attempt.upstream_status_code} == {"failed", "owner_crashed", 499}
+        assert attempt.error_message == "websocket owner stopped unexpectedly before the turn completed"
         assert %CodexTurn{status: "interrupted", error_code: "owner_crashed"} = Repo.get_by!(CodexTurn, request_id: request.id)
         assert %CodexSession{status: "interrupted"} = Repo.get!(CodexSession, result.session_id)
         assert ledger_entry_kinds(request) == ["release", "reservation", "settlement"]
@@ -1244,6 +1249,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
             _idle = await_socket_connection_state!(socket, &(MapSet.size(&1.tasks) == 0))
             owner = socket_connection_state!(socket).websocket_owner_pid
             owner_ref = Process.monitor(owner)
+            :ok = slow_owner_interruption!(owner)
             hold = if ctx.moment == :confirming_the_result, do: hold_settled_websocket_turn!()
             trigger = [%{"type" => "custom_tool_call_output", "call_id" => "call_#{turn_id}", "output" => "synthetic tool output"}, %{"type" => "compaction_trigger"}]
             {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, compaction_turn_frame(setup, turn_id, "compaction", trigger, "resp_owner_death_anchor"))
@@ -1258,7 +1264,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
           end)
 
         # One terminal: the 1011 close, which the owner crash error the socket
-        # authors for a turn that showed nothing may precede.
+        # authors may precede when it reaches the client first.
         assert result.owner_reason == :owner_crashed
         assert List.last(result.frames) == {:close, 1011, "websocket owner crashed"}
         texts = for {:text, text} <- result.frames, do: CodexPooler.JSON.decode!(text)
@@ -1269,12 +1275,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
         assert {anchor.endpoint, anchor.status} == {"/backend-api/codex/responses", "succeeded"}
         assert compaction.endpoint == "/backend-api/codex/responses/compact"
 
-        # A compaction collected in full was settled before its confirmation.
+        # A compaction collected in full was settled before its confirmation;
+        # one still collecting is settled by its owner as an owner crash.
         if ctx.moment == :confirming_the_result do
           assert {compaction.status, compaction.response_status_code} == {"succeeded", 200}
         else
-          assert {compaction.status, compaction.last_error_code} == {"failed", "owner_crashed"}
-          assert compaction.response_status_code in [499, 502]
+          assert {compaction.status, compaction.last_error_code, compaction.response_status_code} == {"failed", "owner_crashed", 499}
         end
 
         for request <- [anchor, compaction] do
@@ -1292,6 +1298,25 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
         assert FakeUpstream.count(upstream) == 2
       end
     end
+  end
+
+  # The owner's interruption of a crashed turn takes 200 ms, as behind a slow
+  # database. The task the owner answers settles the same turn from the
+  # owner's error, so an interruption that ran only as the owner exited lost
+  # the turn to the task on every such run, and to a plain race otherwise
+  # (findings#270 row 270-167); settled before the answer, it is the only
+  # record whatever the timing.
+  defp slow_owner_interruption!(owner) do
+    :sys.replace_state(owner, fn state ->
+      interrupt = state.persistence.interrupt_codex_session
+
+      put_in(state.persistence.interrupt_codex_session, fn session_id, opts ->
+        Process.sleep(200)
+        interrupt.(session_id, opts)
+      end)
+    end)
+
+    :ok
   end
 
   defp kill_owner_upstream_during!(:collecting_before_any_frame, owner, _upstream, release_ref, _hold) do

@@ -1275,7 +1275,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
            attempt_status: "failed",
            response_status_code: 499,
            last_error_code: reason,
-           error_message: "websocket client disconnected before the turn completed",
+           error_message: interrupted_error_message(reason),
            usage: %{status: "usage_unknown", source: reason}
          }) do
       {:ok, %{finalization_disposition: :inserted}} ->
@@ -1445,6 +1445,17 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
        do: reason
 
   defp interrupt_reason(%RequestOptions{}), do: "client_disconnected"
+
+  # The interruption's message names its cause (findings#270 row 270-167):
+  # every interruption, an owner crash included, used to be recorded as a
+  # client disconnect. The `499` stays for every cause: it marks a turn the
+  # Pooler cut, the shape `ClientRetry.verified_proven_owner_crash?/3` admits
+  # a resend against.
+  defp interrupted_error_message("owner_crashed"), do: "websocket owner stopped unexpectedly before the turn completed"
+  defp interrupted_error_message("owner_drained"), do: "websocket owner drained before the turn completed"
+  defp interrupted_error_message("owner_unavailable"), do: "websocket owner became unavailable before the turn completed"
+  defp interrupted_error_message("owner_forward_timeout"), do: "websocket owner forwarding timed out before the turn completed"
+  defp interrupted_error_message(_reason), do: "websocket client disconnected before the turn completed"
 
   defp request_id(%RequestOptions{request_metadata: %{request_id: request_id}})
        when is_binary(request_id) do

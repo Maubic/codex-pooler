@@ -1049,15 +1049,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
           with_log(fn -> finalized_websocket_request(prepared_context, request, []) end)
         end)
 
+      # The retiring owner settles the turn as an owner crash before it
+      # answers the task (findings#270 row 270-167): while that interruption is
+      # held the task still waits for its answer, and once it is written the
+      # task's own settlement of the owner's error finds the turn settled.
       assert_receive {:callback_failure_interruption_ready, interruption_pid, ^interruption_release_ref}
+      assert Task.yield(finalizer, 50) == nil
+      send(interruption_pid, {:release_callback_failure_interruption, interruption_release_ref})
+      assert_receive {:callback_failure_interruption_complete, ^interruption_release_ref}
 
       assert {result, _log} = Task.await(finalizer, @detection_timeout_ms)
 
       assert {:error, %{code: "owner_crashed", status: 502}} = result
-      assert_failed_accounting!(fixture.accounting, "failed", "owner_crashed")
-
-      send(interruption_pid, {:release_callback_failure_interruption, interruption_release_ref})
-      assert_receive {:callback_failure_interruption_complete, ^interruption_release_ref}
+      assert_owner_crash_interruption!(fixture.accounting)
       assert_receive {:mandatory_callback_invoked, ^callback_kind}
       assert_receive {:DOWN, ^owner_ref, :process, ^owner, _reason}, @detection_timeout_ms
       assert FakeUpstream.count(upstream) == 1
@@ -1072,7 +1076,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
                      @detection_timeout_ms
 
       refute_received {:websocket_owner_frame, ^correlation_id, 1, _duplicate}
-      assert_failed_accounting!(fixture.accounting, "failed", "owner_crashed")
+      assert_owner_crash_interruption!(fixture.accounting)
     end
   end
 
@@ -1561,6 +1565,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
     assert release.occurred_at == request.completed_at
     assert DateTime.compare(reservation.occurred_at, settlement.occurred_at) in [:lt, :eq]
     assert DateTime.compare(settlement.occurred_at, release.occurred_at) in [:lt, :eq]
+  end
+
+  # The owner's interruption of an owner crash: the Pooler cut the turn (499),
+  # under the cause's own message, once.
+  defp assert_owner_crash_interruption!(accounting) do
+    assert %Request{status: "failed", usage_status: "usage_unknown", response_status_code: 499, last_error_code: "owner_crashed"} = request = Repo.get!(Request, accounting.request.id)
+
+    assert %Attempt{status: "failed", usage_status: "usage_unknown", upstream_status_code: 499, network_error_code: "owner_crashed", error_message: "websocket owner stopped unexpectedly before the turn completed"} =
+             Repo.get!(Attempt, accounting.attempt.id)
+
+    assert %CodexTurn{status: "interrupted", error_code: "owner_crashed"} = Repo.get!(CodexTurn, accounting.turn.id)
+    assert_failed_ledger!(Repo.all(from entry in LedgerEntry, where: entry.request_id == ^request.id), request, accounting.attempt)
   end
 
   defp failure_status_code("client_disconnected"), do: 499

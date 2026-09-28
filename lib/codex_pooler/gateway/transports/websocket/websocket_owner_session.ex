@@ -109,7 +109,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     provisional_issuances: [],
     pending_admissions: %{},
     pending_admission_monitors: %{},
-    abandoned_submissions: []
+    abandoned_submissions: [],
+    exit_interrupted?: false
   ]
 
   @type downstream :: %{
@@ -2726,7 +2727,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     try do
       state = OwnerCleanup.resolve_owner_state(state)
 
-      case Persistence.interrupt_codex_session(state, owner_exit_reason) do
+      case exit_interruption(state, owner_exit_reason) do
         :ok -> Persistence.release_owner_lease(state, owner_exit_reason, owner_exit_cause)
         {:error, _reason} -> :ok
       end
@@ -2736,6 +2737,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
     :ok
   end
+
+  # A retiring owner persisted its exit when it settled the turn it held
+  # (`settle_retiring_turn/1`), so the exit interrupts the session once.
+  defp exit_interruption(%{exit_interrupted?: true}, _owner_exit_reason), do: :ok
+  defp exit_interruption(state, owner_exit_reason), do: Persistence.interrupt_codex_session(state, owner_exit_reason)
 
   defp cancel_pending_admissions(state, reason) do
     Enum.each(state.pending_admissions, fn {_task, context} ->
@@ -3598,10 +3604,29 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     if output_commit_probe_required?(state, result) do
       retain_output_commit_probe(state, result)
     else
+      state = settle_retiring_turn(state)
       reply_active_turn(state, result)
       finish_active_turn(state, result)
     end
   end
+
+  # An owner retiring because its upstream connection process exited settles
+  # the turn it holds as an owner crash, the interruption its exit would
+  # write, before it answers the turn's task (findings#270 row 270-167). The
+  # exit used to interrupt the turn while the task settled the owner's answer,
+  # and whichever committed first recorded the request: `499` with the turn
+  # interrupted, or `502` with the turn failed. Written before the answer, the
+  # interruption precedes every other party that could settle the turn (the
+  # task, and the socket once it sees the owner go), so the record is the same
+  # on every run, and the exit does not interrupt the session again.
+  defp settle_retiring_turn(%{retire_after_active_turn?: true, exit_interrupted?: false, active_turn: %{cleanup_witness: %OwnerCleanup{}}} = state) do
+    case Persistence.interrupt_codex_session(state, :owner_crashed) do
+      :ok -> %{state | exit_interrupted?: true}
+      {:error, _reason} -> state
+    end
+  end
+
+  defp settle_retiring_turn(state), do: state
 
   defp resolve_active_turn_result(%{active_turn: %{collect?: true}} = state, result),
     do: settle_active_turn(state, result)
@@ -3719,6 +3744,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     end
 
     _result = send_downstream(state, downstream, :complete)
+    state = settle_retiring_turn(state)
     reply_active_turn(state, result)
     clear_active_turn(state)
   end
@@ -3729,11 +3755,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     cancel_output_commit_probe_timer(state.active_turn)
     _result = send_owner_error(state, downstream, :owner_forward_timeout)
     _result = send_downstream(state, downstream, :complete)
+    state = settle_retiring_turn(state)
     reply_active_turn(state, result)
     clear_active_turn(state)
   end
 
   defp settle_active_turn_without_downstream_delivery(state, result) do
+    state = settle_retiring_turn(state)
     reply_active_turn(state, result)
     clear_active_turn(state)
   end
@@ -3775,6 +3803,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp reply_predecessor_once(%{active_turn: %{reply_sent?: true}} = state, _result), do: state
 
   defp reply_predecessor_once(state, result) do
+    state = settle_retiring_turn(state)
     reply_active_turn(state, result)
     put_in(state.active_turn.reply_sent?, true)
   end
