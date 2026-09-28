@@ -1855,9 +1855,12 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTest do
     frame =
       {:websocket_owner_frame, "corr-owner-generic", 25, task_pid, {:error, :owner_unavailable, safe_payload}}
 
-    assert {:push, {:text, payload}, ^state} =
+    assert {:push, {:text, payload}, pushed_state} =
              CodexResponsesSocket.handle_info(frame, state)
 
+    # The turn goes on; the socket only notes that the client was sent an
+    # error, so the turn's own error is not sent after it (findings#272).
+    assert pushed_state == Map.put(state, :public_owner_error_pushed?, true)
     assert CodexPooler.JSON.decode!(payload)["stream_id"] == "lane-owner-generic"
   end
 

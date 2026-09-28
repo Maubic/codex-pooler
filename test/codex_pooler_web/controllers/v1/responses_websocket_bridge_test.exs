@@ -793,9 +793,11 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
     owner_frame =
       {:websocket_owner_frame, "corr-owner-error", 7, task_pid, {:error, :owner_unavailable, safe_payload}}
 
-    assert {:push, {:text, payload}, ^state} =
+    assert {:push, {:text, payload}, pushed_state} =
              CodexResponsesSocket.handle_info(owner_frame, state)
 
+    # The socket only notes that the client was sent an error (findings#272).
+    assert pushed_state == Map.put(state, :public_owner_error_pushed?, true)
     assert CodexPooler.JSON.decode!(payload)["stream_id"] == "lane-owner-error"
     refute Map.has_key?(safe_payload, "stream_id")
     refute Map.has_key?(state.websocket_owner_downstream, :stream_id)

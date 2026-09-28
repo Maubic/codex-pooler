@@ -1544,21 +1544,20 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     end
   end
 
+  # A generic owner error does not end the turn, but the client was sent an
+  # `error` event: the turn's own error is not sent after it (findings#272).
   defp handle_public_owner_payload({:error, _reason, payload}, state) do
-    {:push, {:text, encode_public_error(payload, state)}, state}
+    {:push, {:text, encode_public_error(payload, state)}, Map.put(state, :public_owner_error_pushed?, true)}
   end
 
   defp handle_public_owner_payload(:complete, %{public_turn_owner_complete?: true} = state),
     do: {:ok, state}
 
   defp handle_public_owner_payload(:complete, state) do
-    state =
-      state
-      |> Map.put(:public_turn_owner_complete?, true)
-      |> Map.put(:websocket_owner_active_turn_reconnect?, false)
-      |> maybe_finish_public_owner_turn()
-
-    {:ok, state}
+    state
+    |> Map.put(:public_turn_owner_complete?, true)
+    |> Map.put(:websocket_owner_active_turn_reconnect?, false)
+    |> maybe_finish_public_owner_turn()
   end
 
   defp handle_non_public_owner_payload({:data, data}, state) do
@@ -1746,12 +1745,10 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
       {:stop, :normal, Adapter.close_detail(reason), state}
     else
-      state =
-        state
-        |> Map.put(:public_turn_task_done?, true)
-        |> maybe_finish_public_owner_turn()
-
-      {:ok, state}
+      state
+      |> Map.put(:public_turn_task_done?, true)
+      |> put_public_owner_turn_error(result)
+      |> maybe_finish_public_owner_turn()
     end
   end
 
@@ -1838,13 +1835,54 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   defp maybe_finish_public_owner_turn(state) do
-    if Map.get(state, :public_turn_task_done?, false) and
-         Map.get(state, :public_turn_owner_complete?, false) and
-         not public_turn_aborted?(state) do
-      finish_public_turn(state)
-    else
-      state
+    cond do
+      not Map.get(state, :public_turn_task_done?, false) or not Map.get(state, :public_turn_owner_complete?, false) or public_turn_aborted?(state) ->
+        {:ok, state}
+
+      error = Map.get(state, :public_owner_turn_error) ->
+        push_public_owner_turn_error(state, error)
+
+      true ->
+        {:ok, finish_public_turn(state)}
     end
+  end
+
+  # The owner settles an interruption that showed the client nothing without
+  # an error of its own (its output-commit probe answered `false`), expecting
+  # a retry that no longer comes once the request reached the provider, so a
+  # public turn whose task then failed would end with no terminal at all
+  # (findings#272). The error is kept when the task finishes, and only when
+  # the client has no terminal of this turn yet; the socket sends it once the
+  # owner's leg is complete too, as it does with owner forwarding off.
+  defp put_public_owner_turn_error(state, result) do
+    case public_owner_turn_error(result) do
+      {:ok, error} ->
+        if public_turn_terminal_sent?(state), do: state, else: Map.put(state, :public_owner_turn_error, error)
+
+      :none ->
+        state
+    end
+  end
+
+  defp public_owner_turn_error({:response_task_result, {:error, reason}, _visible_output?}), do: {:ok, {:log, reason}}
+  defp public_owner_turn_error({:error, reason}), do: {:ok, {:log, reason}}
+  defp public_owner_turn_error({:response_task_failure, {:error, reason}}), do: {:ok, {:unlogged, reason}}
+  defp public_owner_turn_error(_result), do: :none
+
+  defp public_turn_terminal_sent?(state) do
+    pid = Map.get(state, :public_response_task_pid)
+
+    Map.get(state, :public_owner_error_pushed?, false) or
+      match?(%{terminal_latched?: true}, Map.get(state, :public_responses_websocket_state)) or
+      MapSet.member?(Map.get(state, :public_pushed_terminals, MapSet.new()), pid) or
+      (is_pid(pid) and is_binary(downstream_delivery_evidence(state, pid).terminal_class))
+  end
+
+  defp push_public_owner_turn_error(state, {logging, reason}) do
+    pid = Map.fetch!(state, :public_response_task_pid)
+    if logging == :log, do: log_failed_native_websocket_turn(state, pid, reason, false)
+    payload = encode_public_error(reason, state)
+    {:push, {:text, payload}, state |> record_downstream_terminal(pid, "error") |> finish_public_turn()}
   end
 
   # A public turn's task can submit more than one attempt to the owner: a
@@ -1874,6 +1912,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     task_pid = Map.get(state, :public_response_task_pid)
 
     state
+    |> Map.drop([:public_owner_turn_error, :public_owner_error_pushed?])
     |> Map.put(:public_response_task_pid, nil)
     |> clear_public_response_context()
     |> Map.put(:public_turn_task_done?, false)
