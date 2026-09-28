@@ -6,12 +6,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
   import Ecto.Query
   import ExUnit.CaptureLog
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [receive_frames_until_close!: 3]
+  import CodexPooler.AccountingTestSupport, only: [key_usage_events: 1]
 
   alias CodexPooler.Access
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.{CodexSession, CodexTurn}
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
+  alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
@@ -35,6 +38,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
   @resumed_turn_id "019a0000-0000-7000-8000-00000000a006"
   @resumed_window_id "#{@thread_id}:1"
   @resumed_response_id "resp_post_turn_resumed_00001"
+  @compact_usage %{"input_tokens" => 3_000, "output_tokens" => 40, "total_tokens" => 3_040}
+  @resumed_usage %{"input_tokens" => 500, "output_tokens" => 3, "total_tokens" => 503}
+  @lifecycle_event [:codex_pooler, :gateway, :native_compaction, :lifecycle]
   @socket_messages [
     :codex_response_chunk,
     :websocket_owner_frame,
@@ -332,6 +338,110 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
     refute Enum.any?(clears, &(&1 =~ "reason: :request_rejected"))
   end
 
+  # The provider closes the connection a post-turn compaction ran on (its
+  # connection-age limit) while the admission waits in `pending_final` for the
+  # next turn (findings#270 row 270-145). The socket closes 1001 and the
+  # released client sends that turn, carrying the compaction item, on a new
+  # socket of the rotated window, where it runs as an ordinary turn on a new
+  # upstream connection. Owner forwarding off and on end alike: whoever held
+  # the admission clears it (the direct session with its connection, the owner
+  # when the socket's close detaches it), nothing bound to the closed
+  # connection is left, and each of the three requests is settled once, for
+  # its own usage.
+  for topology <- [:direct, :owner_forwarded] do
+    @tag topology: topology
+    test "#{topology} provider close after a post-turn compaction closes the socket 1001 and the next turn runs as an ordinary turn, each request billed once", %{topology: topology} do
+      put_owner_forwarding!(topology == :owner_forwarded)
+      attach_admission_lifecycle!()
+      compact_item = %{"type" => "compaction", "encrypted_content" => "synthetic-post-turn-upstream-close-#{topology}"}
+
+      upstream =
+        start_upstream(
+          # provenance: observed released-binary exec + resume frame shapes; reply frames and usage synthetic; the provider's close of the idle connection as attributed in findings#270
+          FakeUpstream.strict_sequence([
+            FakeUpstream.expect_request(method: "WEBSOCKET", websocket_connection_ordinal: 1, json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]], respond: completed_frames(@anchor_response_id)),
+            FakeUpstream.expect_request(
+              method: "WEBSOCKET",
+              websocket_connection_ordinal: 1,
+              json: [valid: true, equals: %{"type" => "response.create", "previous_response_id" => @anchor_response_id, "input.0.type" => "compaction_trigger"}],
+              respond: compaction_frames(compact_item, @compact_usage)
+            ),
+            FakeUpstream.expect_request(
+              method: "WEBSOCKET",
+              websocket_connection_ordinal: 2,
+              json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]],
+              respond: completed_frames(@resumed_response_id, @resumed_usage)
+            )
+          ])
+        )
+
+      setup = gateway_setup(upstream, compact?: true)
+      port = start_public_endpoint!()
+      {conn, websocket, ref} = post_turn_compacted_socket!(port, setup, "post-turn-upstream-close-#{topology}")
+      assert_receive {:admission_lifecycle, %{from: :collected_unconfirmed, to: :pending_final} = pending_final}, 15_000
+
+      close_ref = make_ref()
+      assert :ok = FakeUpstream.close_websocket_connection(upstream, 1, close_ref: close_ref, notify: self(), code: 1000, reason: "synthetic age limit")
+      assert_receive {:fake_upstream_websocket_peer_closed, 1, ^close_ref}, 15_000
+
+      try do
+        {_conn, _websocket, frames} = receive_frames_until_close!(conn, websocket, ref)
+        assert frames == [{:close, 1001, "upstream connection closed"}]
+      after
+        Mint.HTTP.close(conn)
+      end
+
+      # Cleared by whoever held it, bound to the closed connection.
+      assert_receive {:admission_lifecycle, %{operation: :clear, from: :pending_final, to: :cleared} = clear}, 15_000
+      assert {clear.reason, clear.lifecycle_id, clear.generation} == {pending_final_clear_reason(topology), pending_final.lifecycle_id, pending_final.generation}
+
+      {conn, websocket, ref, _headers} =
+        public_websocket_connect_with_request_headers!(
+          port,
+          setup,
+          "post-turn-upstream-close-next-#{topology}",
+          "/backend-api/codex/responses",
+          [{"session-id", @session_id}, {"thread-id", @thread_id}, {"x-client-request-id", @thread_id}, {"x-codex-window-id", @resumed_window_id}]
+        )
+
+      try do
+        {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, resumed_turn_frame(setup, compact_item))
+        {conn, websocket, created} = public_websocket_receive_text!(conn, websocket, ref)
+        assert %{"type" => "response.created"} = CodexPooler.JSON.decode!(created)
+        {_conn, _websocket, completed} = public_websocket_receive_text!(conn, websocket, ref)
+        assert %{"type" => "response.completed", "response" => %{"id" => @resumed_response_id}} = CodexPooler.JSON.decode!(completed)
+      after
+        Mint.HTTP.close(conn)
+      end
+
+      assert [first_turn, compact, resumed] = FakeUpstream.requests(upstream)
+      assert compact.websocket_connection_id == first_turn.websocket_connection_id
+      assert resumed.websocket_connection_id != first_turn.websocket_connection_id
+      assert compact_item in resumed.json["input"]
+
+      assert await_settled_rows!(setup) == [
+               {"/backend-api/codex/responses", "websocket", "succeeded"},
+               {"/backend-api/codex/responses/compact", "websocket", "succeeded"},
+               {"/backend-api/codex/responses", "websocket", "succeeded"}
+             ]
+
+      # One attempt per request, its reservation released by one settlement
+      # for its own usage: nothing billed twice, nothing left provisional.
+      requests = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: request.admitted_at))
+
+      for {request, total_tokens} <- Enum.zip(requests, [20_001, @compact_usage["total_tokens"], @resumed_usage["total_tokens"]]) do
+        assert [%Attempt{status: "succeeded"}] = Repo.all(from(attempt in Attempt, where: attempt.request_id == ^request.id))
+        assert ledger_entry_kinds(request) == ["release", "reservation", "settlement"]
+        assert key_usage_events(request.id) == %{known: total_tokens, provisional: 0, admissions: 1}
+      end
+
+      # No owner still holds an admission bound to the closed connection (with
+      # owner forwarding off the socket's session held it and went with it).
+      refute Enum.any?(owner_admissions(setup), &bound_to?(&1, pending_final))
+      assert :ok = FakeUpstream.verify!(upstream)
+    end
+  end
+
   # Drives the socket callbacks until no response task is tracked and nothing
   # is queued, returning every client-visible frame in push order. Every
   # producer of a frame for a task has fired before the task reports its
@@ -411,6 +521,44 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
         {:cont, nil}
     end)
   end
+
+  defp pending_final_clear_reason(:direct), do: :connection_closed
+  defp pending_final_clear_reason(:owner_forwarded), do: :downstream_detached
+
+  # Every admission transition of an owner or of a socket's own upstream
+  # session is reported on this event, so the test waits on transitions
+  # instead of on time.
+  defp attach_admission_lifecycle! do
+    handler_id = {__MODULE__, self(), make_ref()}
+    :ok = :telemetry.attach(handler_id, @lifecycle_event, &__MODULE__.relay_admission_lifecycle/4, self())
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  @doc false
+  def relay_admission_lifecycle(_event, _measurements, metadata, test_pid) do
+    send(
+      test_pid,
+      {:admission_lifecycle,
+       %{
+         operation: metadata.operation,
+         reason: metadata.reason,
+         from: metadata.phase_from,
+         to: metadata.phase_to,
+         lifecycle_id: metadata.native_lifecycle_id,
+         generation: metadata.generation
+       }}
+    )
+  end
+
+  # The admission each live owner of the Pool's sessions holds now.
+  defp owner_admissions(setup) do
+    for session <- Repo.all(from(session in CodexSession, where: session.pool_id == ^setup.pool.id)),
+        {:ok, owner} <- [WebsocketOwnerSession.lookup(session.id)],
+        do: :sys.get_state(owner).native_compaction_admission
+  end
+
+  defp bound_to?(%NativeCompactionAdmission{binding: %{lifecycle_id: lifecycle_id, generation: generation}}, %{lifecycle_id: lifecycle_id, generation: generation}), do: true
+  defp bound_to?(_admission, _connection), do: false
 
   defp put_owner_forwarding!(enabled?) do
     previous = Application.fetch_env(:codex_pooler, :websocket_owner_forwarding_enabled)
@@ -586,7 +734,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
     }
   end
 
-  defp completed_frames(response_id) do
+  defp completed_frames(response_id, usage \\ %{"input_tokens" => 20_000, "output_tokens" => 1, "total_tokens" => 20_001}) do
     FakeUpstream.websocket_text_frames([
       CodexPooler.JSON.encode!(%{"type" => "response.created", "response" => %{"id" => response_id, "status" => "in_progress"}}),
       CodexPooler.JSON.encode!(%{
@@ -595,18 +743,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
           "id" => response_id,
           "status" => "completed",
           "output" => [],
-          "usage" => %{"input_tokens" => 20_000, "output_tokens" => 1, "total_tokens" => 20_001}
+          "usage" => usage
         }
       })
     ])
   end
 
-  defp compaction_frames(item) do
+  defp compaction_frames(item, usage \\ nil) do
+    response = %{"id" => @compact_response_id, "status" => "completed", "output" => [item]}
+
     FakeUpstream.websocket_text_frames([
       CodexPooler.JSON.encode!(%{"type" => "response.output_item.done", "item" => item}),
       CodexPooler.JSON.encode!(%{
         "type" => "response.completed",
-        "response" => %{"id" => @compact_response_id, "status" => "completed", "output" => [item]}
+        "response" => if(usage, do: Map.put(response, "usage", usage), else: response)
       })
     ])
   end
