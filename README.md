@@ -121,8 +121,8 @@ assigned Pools.
   a guided browser flow, without sending you credential files
 - 🚨 **Know when attention is needed:** receive alerts about low capacity,
   account problems and reset events in the dashboard, by email or through webhooks
-- 🗜️ **Send smaller requests:** optionally shrink supported tool outputs before
-  sending them to the AI provider, and see how much was saved
+- 🔎 **Spot model downgrades:** see when the provider
+  reports a different model from the one sent, or changes the model name during a response
 - 🧷 **Fill in missing continuity:** derive stable session identities from cache
   keys or conversation IDs when a harness does not send them directly
 - 🧱 **Choose who can connect:** optionally allow requests only from approved
