@@ -1687,12 +1687,35 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # A terminal decoded beside the transport error completed its request, so
   # the connection closes after that request like any close between requests:
   # one close line, and the subscriber is told, since the client now holds the
-  # terminal's response as an anchor (findings#270). This close used to leave
-  # no trace. Any other halt failed its request, which records the close.
-  defp close_after_transport_error(state, halted, reason) when elem(halted, 0) == :terminal,
-    do: close_between_requests(state, idle_transport_cause(reason), transport_reason: reason)
+  # terminal's response as an anchor (findings#270). A retryable pre-visible
+  # first frame also ends its exchange and would have kept the connection, as
+  # its coalesced Close shows, so it closes the same way. Both closes used to
+  # leave no trace. Any other halt failed its request, which records the close.
+  defp close_after_transport_error(state, {:terminal, _state, _receive_state, _terminal, _trailing}, reason),
+    do: close_after_exchange(state, idle_transport_cause(reason), transport_reason: reason)
+
+  defp close_after_transport_error(
+         state,
+         {:failure, _state, %ReceiveState{termination_source: :upstream_terminal_event}, _failure, _trailing},
+         reason
+       ),
+       do: close_after_exchange(state, idle_transport_cause(reason), transport_reason: reason)
 
   defp close_after_transport_error(state, _halted, _reason), do: close_state(state)
+
+  # A close at the end of an exchange is logged before the request call records
+  # the exchange's completion, so it records it first: the line's `idle_ms`
+  # then counts from this exchange, not from the one before it or `none`.
+  defp close_after_exchange(state, cause, details) do
+    state
+    |> mark_exchange_completed()
+    |> close_between_requests(cause, details)
+  end
+
+  defp mark_exchange_completed(%{conn: _conn} = state),
+    do: Map.put(state, :last_request_completed_at_monotonic_ms, System.monotonic_time(:millisecond))
+
+  defp mark_exchange_completed(state), do: state
 
   defp transport_error_result(state, %ReceiveState{} = receive_state, reason) do
     {:error,
@@ -1847,7 +1870,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp drain_trailing_frames(state, [], _halt), do: state
 
   defp drain_trailing_frames(state, trailing_frames, halt) when halt in [:terminal, :retryable_first_frame] do
-    handle_async_frames(state, trailing_frames, {:trailing, halt})
+    state
+    |> mark_exchange_completed()
+    |> handle_async_frames(trailing_frames, {:trailing, halt})
   end
 
   defp coalesced_close_code(code) when is_integer(code) and code in 1000..4999, do: code

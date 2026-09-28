@@ -4471,6 +4471,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
 
       assert_close_signal!(session, lifecycle, 1, :frame_error, 1)
       assert log =~ "reason_code=frame_error closed_by=pooler "
+      assert_exchange_end_idle_ms!(log)
       assert_subscribed_disconnected!(session, %{lifecycle | generation: 1})
     end
 
@@ -4523,7 +4524,65 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
       assert log =~ "reason_code=transport_error closed_by=transport close_code=none close_reason=none transport_reason=einval "
       assert log =~ " connection_requests=1 "
       assert log =~ " lifecycle_id=#{lifecycle.lifecycle_id} generation=1"
+      assert_exchange_end_idle_ms!(log)
       refute log =~ "resp_ws_signal_beside_transport_error"
+      assert_subscribed_disconnected!(session, %{lifecycle | generation: 1})
+    end
+
+    # A retryable pre-visible first frame keeps its connection when nothing
+    # else happens (its coalesced Close is drained like the terminal's), so a
+    # transport error decoded beside it closes the connection after the
+    # exchange, not inside it: one close line and the signal. The native
+    # socket drops that signal (its task has no accepted terminal yet).
+    test "a retryable first frame decoded beside a transport error signals transport_error and logs one close line" do
+      release_ref = make_ref()
+
+      upstream =
+        start_upstream(
+          FakeUpstream.websocket_close_without_terminal_barrier(
+            notify: self(),
+            release_ref: release_ref
+          )
+        )
+
+      session = start_subscribed_session!()
+      lifecycle = lifecycle_state(session)
+      parent = self()
+      request = websocket_request(FakeUpstream.url(upstream), @held_timeouts)
+      request = %{request | writer: fn frame -> send(parent, {:relayed_frame, frame}) end}
+      request_task = Task.async(fn -> UpstreamWebsocketSession.request(session, request) end)
+
+      assert_receive {:fake_upstream_websocket_barrier, :before_close, barrier_pid, ^release_ref}, @message_detection_timeout_ms
+      on_exit(fn -> send(barrier_pid, {:fake_upstream_release_websocket, release_ref}) end)
+
+      first_frame =
+        CodexPooler.JSON.encode!(%{
+          "type" => "response.failed",
+          "response" => %{
+            "id" => "resp_ws_retryable_beside_transport_error",
+            "status" => "failed",
+            "error" => %{"code" => "usage_limit_reached", "message" => "synthetic quota denial"}
+          }
+        })
+
+      {result, log} =
+        with_info_log(fn ->
+          socket = session_socket(session)
+          :ok = :gen_tcp.close(socket)
+          send(session, {:tcp, socket, raw_websocket_server_text_frame(first_frame)})
+          result = Task.await(request_task, @message_detection_timeout_ms)
+          _state = :sys.get_state(session)
+          result
+        end)
+
+      assert {:error, %{reason: {:quota_exhausted_first_event, %{code: "usage_limit_reached"}}}} = result
+      refute_received {:relayed_frame, _frame}
+      assert_close_signal!(session, lifecycle, 1, :transport_error, 1)
+      assert length(String.split(log, "upstream websocket connection closed between requests")) == 2
+      assert log =~ "reason_code=transport_error closed_by=transport close_code=none close_reason=none transport_reason=einval "
+      assert log =~ " connection_requests=1 "
+      assert_exchange_end_idle_ms!(log)
+      refute log =~ "synthetic quota denial"
       assert_subscribed_disconnected!(session, %{lifecycle | generation: 1})
     end
 
@@ -7256,6 +7315,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
            }
 
     refute_received {:upstream_websocket_connection_closed, _session, _signal}
+  end
+
+  # A close at the end of the connection's first exchange: `idle_ms` counts
+  # from that exchange's end, so it is a number no larger than the connection's
+  # age. Counted from the exchange before it, as it used to be, the first
+  # exchange's close read `idle_ms=none` (findings#270 row 270-55).
+  defp assert_exchange_end_idle_ms!(log) do
+    assert [_all, idle_ms, connection_age_ms] = Regex.run(~r/closed between requests .* idle_ms=(\d+) connection_age_ms=(\d+) /, log)
+    assert String.to_integer(idle_ms) <= String.to_integer(connection_age_ms)
   end
 
   defp assert_subscribed_disconnected!(session, expected_lifecycle) do
