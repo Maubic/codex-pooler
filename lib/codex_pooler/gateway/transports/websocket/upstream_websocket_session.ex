@@ -521,11 +521,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
         {:reply, {:ok, provenance}, state |> Map.delete(:first_compact_result) |> put_admission(admission)}
 
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        authorize_closed_connection_first_compact(state, binding, receipt, {:error, reason})
 
       false ->
-        {:reply, {:error, :invalid_transition}, state}
+        authorize_closed_connection_first_compact(state, binding, receipt, {:error, :invalid_transition})
     end
+  end
+
+  def handle_call({:record_first_compact_collected, provenance}, _from, %{closed_connection_collection: %NativeCompactionAdmission{phase: :ordinary_success, first_compact_collection: %FirstCompactCollection{}}} = state)
+      when not is_map_key(state, :native_compaction_admission) do
+    record_closed_connection_first_collection(state, provenance)
   end
 
   def handle_call({:record_first_compact_collected, provenance}, _from, state) do
@@ -2908,9 +2913,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # arrives in the compaction's own terminal read closes the connection
   # before the collection is recorded, so a consumed compaction is kept too
   # and recorded as collected once its request succeeded
-  # (`collect_closed_connection_compaction/2`).
+  # (`collect_closed_connection_compaction/2`). A first full-history
+  # compaction not authorized yet keeps its result as the one authorization it
+  # can still accept (`authorize_closed_connection_first_compact/4`, findings#270
+  # row 270-200).
   defp close_connection_state(state) do
     collection = admission_state(state)
+    first_compact = Map.get(state, :first_compact_result)
 
     state
     |> cancel_keepalive()
@@ -2918,6 +2927,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     |> clear_admission(:connection_closed)
     |> disconnected_state()
     |> then(&if(collection.phase in [:consumed_compact, :collected_unconfirmed], do: Map.put(&1, :closed_connection_collection, collection), else: &1))
+    |> then(&if(match?(%FirstCompactResult{}, first_compact), do: Map.put(&1, :closed_connection_first_compact, first_compact), else: &1))
   end
 
   defp invalidate_state(state) do
@@ -2940,6 +2950,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       |> preserve_connection_close_subscriber(state)
       |> preserve_admission_topology(state)
       |> preserve_closed_connection_collection(state)
+      |> preserve_closed_connection_first_compact(state)
 
     if Map.get(state, :reconnect_pending?, false) do
       Map.put(lifecycle, :reconnect_pending?, true)
@@ -3001,6 +3012,35 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       {:reply, :ok, Map.delete(state, :closed_connection_collection)}
     else
       _refused -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  # The provider closed the connection a first full-history compaction ran on
+  # between its collection and its authorization (findings#270 row 270-200).
+  # The close kept the compaction's result as the one authorization it can
+  # still accept: that authorization succeeds once, and the admission it opens
+  # stays with the closed connection (`closed_connection_collection`), never
+  # the session's, where the collection is recorded
+  # (`record_closed_connection_first_collection/2`) and confirmed with nothing
+  # armed (`confirm_closed_connection_collection/5`). Any other authorization
+  # is refused as before.
+  defp authorize_closed_connection_first_compact(state, binding, receipt, refusal) do
+    with %FirstCompactResult{} = kept <- Map.get(state, :closed_connection_first_compact),
+         true <- kept == receipt and receipt.owner == self() and FirstCompactResult.binding_matches?(receipt, binding),
+         {:ok, admission} <- NativeCompactionAdmission.ordinary_success(binding),
+         {:ok, admission, provenance} <- NativeCompactionAdmission.authorize_first_compact_collection(admission, receipt.result_ref) do
+      collection = %{admission | compaction_item_digest: receipt.item_digest}
+      {:reply, {:ok, provenance}, state |> Map.delete(:closed_connection_first_compact) |> Map.put(:closed_connection_collection, collection)}
+    else
+      _refused -> {:reply, refusal, state}
+    end
+  end
+
+  defp record_closed_connection_first_collection(state, provenance) do
+    case NativeCompactionAdmission.record_first_compact_collected(state.closed_connection_collection, provenance) do
+      {:ok, collected} -> {:reply, :ok, Map.put(state, :closed_connection_collection, collected)}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:error, reason, _cleared} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -3102,6 +3142,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp preserve_closed_connection_collection(lifecycle, state) do
     case Map.fetch(state, :closed_connection_collection) do
       {:ok, collection} -> Map.put(lifecycle, :closed_connection_collection, collection)
+      :error -> lifecycle
+    end
+  end
+
+  defp preserve_closed_connection_first_compact(lifecycle, state) do
+    case Map.fetch(state, :closed_connection_first_compact) do
+      {:ok, first_compact} -> Map.put(lifecycle, :closed_connection_first_compact, first_compact)
       :error -> lifecycle
     end
   end

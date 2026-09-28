@@ -330,6 +330,61 @@ defmodule CodexPooler.Gateway.NativeCompactionFirstCollectionTest do
     end)
   end
 
+  # The provider closes the connection between a first full-history
+  # compaction's collection and its authorization (findings#270 row 270-200).
+  # The close keeps the collected result as the one authorization it can still
+  # accept: altered receipts are refused, the real one is authorized once, and
+  # its collection is recorded and confirmed off the closed connection with
+  # nothing armed.
+  test "a result collected on a connection that closed before its authorization is authorized once with nothing armed" do
+    with_owner(fn owner, upstream ->
+      receipt = collect(owner, upstream)
+      :ok = FakeUpstream.close_websocket_connections(upstream)
+      await_closed_connection!(owner, System.monotonic_time(:millisecond) + 15_000)
+      assert Owner.compaction_admission_phase(owner) == :cleared
+
+      altered = [
+        %{receipt | result_ref: make_ref()},
+        %{receipt | item_digest: digest()},
+        %{receipt | binding: %{receipt.binding | generation: receipt.binding.generation + 1}}
+      ]
+
+      for invalid <- altered, do: assert({:error, _} = Owner.authorize_first_compact_collection(owner, invalid.binding, invalid))
+
+      assert {:ok, provenance} = Owner.authorize_first_compact_collection(owner, receipt.binding, receipt)
+      assert {:error, _} = Owner.authorize_first_compact_collection(owner, receipt.binding, receipt)
+      assert :ok = Owner.record_first_compact_collected(owner, provenance)
+
+      confirmation = %Admission.Confirmation{
+        source_phase: :first_full_history_compact,
+        source_control_ref: provenance.control_ref,
+        binding: %{receipt.binding | compaction_item_digest: receipt.item_digest}
+      }
+
+      finalization = {:success, receipt.item_digest, confirmation, now() + 30_000}
+      assert :ok = Owner.acknowledge_compact_finalization(owner, finalization)
+      assert Owner.compaction_admission_phase(owner) == :cleared
+      assert {:error, _} = Owner.acknowledge_compact_finalization(owner, finalization)
+    end)
+  end
+
+  # The session holds no open connection once it handled the close; no
+  # message marks it, so it is polled on a monotonic deadline.
+  defp await_closed_connection!(owner, deadline) do
+    case Owner.live_connection(owner) do
+      {:ok, %{generation: nil}} ->
+        :ok
+
+      live ->
+        if System.monotonic_time(:millisecond) >= deadline, do: flunk("the session still reported #{inspect(live)}")
+
+        receive do
+        after
+          1 -> await_closed_connection!(owner, deadline)
+        end
+    end
+  end
+
   defp collect(owner, upstream) do
     request = collection_request(upstream)
     assert {:ok, result} = Owner.request(owner, request)

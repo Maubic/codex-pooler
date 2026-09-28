@@ -628,6 +628,24 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
     end
   end
 
+  # A first full-history compaction (no anchor) is collected whole, and its
+  # admission is opened only when the socket authorizes the collected result
+  # (findings#270 row 270-200). The provider closes the connection between the
+  # collection and that authorization, while the compaction's response task is
+  # held after its settlement. With owner forwarding off the close dropped the
+  # collected result and the client got `502 invalid_compaction_response` for a
+  # compaction it had been billed for; the session now keeps that result as
+  # the one authorization it can still accept, off the connection, and nothing
+  # is armed. With owner forwarding on the owner keeps its result, and the
+  # confirmation check of findings#275 ends the admission. Both deliver the
+  # compaction and serve the final as an ordinary turn, each request billed once.
+  for topology <- [:direct, :owner_forwarded], mode <- ["full", "lite"] do
+    @tag topology: topology, serving_mode: mode
+    test "#{topology} #{mode} provider close between a first full-history compaction's collection and its authorization delivers the compaction and serves its final", ctx do
+      assert_first_compaction_window_close!(ctx.topology, ctx.serving_mode)
+    end
+  end
+
   # With owner forwarding on, the client's final can reach the owner before
   # the owner hears that its session closed the connection the admission names
   # (findings#270 row 270-182). The owner checks the session's open connection
@@ -887,6 +905,74 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
     assert {clear.reason, clear.lifecycle_id, clear.generation} == {:connection_closed, lifecycle_id, 1}
     if variant == :held_confirmation, do: assert(clear.from == :collected_unconfirmed and not Enum.any?(events, &(&1.to in [:pending_final, :reserved_final])))
     assert MapSet.new(events, & &1.topology) == MapSet.new([lifecycle_topology(topology)])
+  end
+
+  defp assert_first_compaction_window_close!(topology, mode) do
+    put_owner_forwarding!(topology == :owner_forwarded)
+    attach_admission_lifecycle!()
+    label = "first-window-close-#{topology}-#{mode}"
+    turn_id = "#{label}-turn"
+    compact_item = %{"type" => "compaction", "encrypted_content" => "synthetic-#{label}"}
+
+    upstream =
+      start_upstream(
+        # provenance: synthetic_adversarial (compaction v2-shaped full-history frames; the provider's close of the connection between a first compaction's collection and its authorization, findings#270 row 270-200)
+        FakeUpstream.strict_sequence([
+          window_request(1, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_first_window_anchor", @anchor_usage)])),
+          window_request(1, [forbidden: ["previous_response_id"]], event_frames(compaction_events(compact_item, "resp_first_window_compact"))),
+          window_request(2, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_first_window_final", @resumed_usage)]))
+        ])
+      )
+
+    setup = gateway_setup(upstream, compact?: true)
+    if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    state = callback_socket!(setup, label)
+
+    try do
+      history = [window_message("synthetic first compaction anchor")]
+      state = run_turn!(state, mid_turn_payload(setup, history, turn_id, "turn", 1))
+      hold = hold_settled_websocket_turn!()
+      assert {:ok, state} = CodexResponsesSocket.handle_in({mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1), [opcode: :text]}, state)
+      Process.put(:crossing_socket_state, state)
+      close_held_compaction_connection!(upstream, hold, setup, state)
+
+      {state, frames} = collect_until_idle!(state, [])
+      Process.put(:crossing_socket_state, state)
+      assert [%{"type" => "response.output_item.done", "item" => ^compact_item}, %{"type" => "response.completed", "response" => %{"output" => [^compact_item]}}] = frames
+
+      {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+      assert [%{"type" => "response.completed", "response" => %{"id" => "resp_first_window_final"}}] = frames
+
+      assert_window_accounting!(setup, [@anchor_usage, @compact_usage, @resumed_usage])
+      assert [first, _compaction_request, final_request] = FakeUpstream.requests(upstream)
+      assert lite_context?(first) == (mode == "lite")
+      assert compact_item in final_request.json["input"]
+      assert_first_compaction_ended!(topology, state, setup)
+      assert :ok = FakeUpstream.verify!(upstream)
+    after
+      CodexResponsesSocket.terminate(:closed, Process.delete(:crossing_socket_state))
+    end
+  end
+
+  # No final was armed or reserved for the compaction, and nothing of it is
+  # left: the direct session keeps no result or admission of the closed
+  # connection; the owner ended the admission it authorized on that connection
+  # as `connection_closed`. Every lifecycle event names the arm's topology.
+  defp assert_first_compaction_ended!(topology, state, setup) do
+    events = drain_lifecycle([])
+    refute Enum.any?(events, &(&1.to in [:pending_final, :reserved_final]))
+    assert MapSet.new(events, & &1.topology) == MapSet.new([lifecycle_topology(topology)])
+
+    case topology do
+      :direct ->
+        session_state = :sys.get_state(state.upstream_websocket_session)
+        refute Map.has_key?(session_state, :closed_connection_first_compact)
+        refute Map.has_key?(session_state, :closed_connection_collection)
+
+      :owner_forwarded ->
+        assert [%{reason: :connection_closed, generation: 1}] = Enum.filter(events, &(&1.operation == :clear and &1.from == :collected_unconfirmed))
+        assert [%{first_compact_result: nil}] = Enum.map(live_owners(setup), &:sys.get_state/1)
+    end
   end
 
   # Closes the compaction's connection while its response task is held after
