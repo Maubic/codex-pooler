@@ -611,14 +611,21 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTest do
       native_turn_output_task_pids: MapSet.new()
     }
 
-    for control_type <- ["codex.rate_limits", "codex.response.metadata"] do
-      control = CodexPooler.JSON.encode!(%{"type" => control_type})
+    metadata = CodexPooler.JSON.encode!(%{"type" => "codex.response.metadata"})
 
-      assert {:push, {:text, ^control}, control_state} =
-               CodexResponsesSocket.handle_info({:codex_response_chunk, task_pid, control}, state)
+    assert {:push, {:text, ^metadata}, metadata_state} =
+             CodexResponsesSocket.handle_info({:codex_response_chunk, task_pid, metadata}, state)
 
-      assert control_state.native_turn_output_task_pids == MapSet.new()
-    end
+    assert metadata_state.native_turn_output_task_pids == MapSet.new()
+
+    # The served account's windows never reach the native client
+    # (findings#279 point 1): the frame goes nowhere and latches nothing.
+    rate_limits = CodexPooler.JSON.encode!(%{"type" => "codex.rate_limits", "rate_limits" => %{"primary" => %{"used_percent" => 92, "window_minutes" => 300}}})
+
+    assert {:ok, rate_limits_state} =
+             CodexResponsesSocket.handle_info({:codex_response_chunk, task_pid, rate_limits}, state)
+
+    assert rate_limits_state.native_turn_output_task_pids == MapSet.new()
 
     unknown_control = CodexPooler.JSON.encode!(%{"type" => "codex.future_control"})
 

@@ -245,7 +245,9 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
           |> maybe_accept_response_task_terminal(task_pid, data)
           |> maybe_schedule_accepted_response_task_delivery(task_pid)
 
-        {:push, {:text, Adapter.native_downstream_response_chunk(data, sole_account_check(state, task_pid))}, state}
+        data
+        |> Adapter.native_downstream_response_chunk(sole_account_check(state, task_pid))
+        |> native_push(state)
 
       true ->
         {:ok, maybe_record_skipped_downstream_terminal(state, task_pid, data)}
@@ -1665,7 +1667,9 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
           state
       end
 
-    {:push, {:text, Adapter.native_downstream_response_chunk(data, sole_account_check(state, active_native_owner_turn_pid(state)))}, state}
+    data
+    |> Adapter.native_downstream_response_chunk(sole_account_check(state, active_native_owner_turn_pid(state)))
+    |> native_push(state)
   end
 
   # A draining owner tells its idle downstream too. The client has no request
@@ -1710,6 +1714,13 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
     {:ok, state}
   end
+
+  # A provider frame the native client never receives (the served account's
+  # `codex.rate_limits`, `Adapter.native_downstream_response_chunk/2`) is an
+  # internal control: the bookkeeping before it left the turn's latches,
+  # delivery evidence and terminal as they were, and nothing goes out.
+  defp native_push(:drop, state), do: {:ok, state}
+  defp native_push(frame, state) when is_binary(frame), do: {:push, {:text, frame}, state}
 
   defp handle_drained_native_owner_turn(payload, state) do
     maybe_log_failed_native_websocket_turn(state, tracked_response_task_pid(state), payload)

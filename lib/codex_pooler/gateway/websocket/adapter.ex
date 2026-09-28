@@ -131,24 +131,39 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
     DownstreamSession.cancel_owner_turn(state, owner_turn_id, reason)
   end
 
-  @spec downstream_response_chunk(binary()) :: binary()
+  @spec downstream_response_chunk(binary()) :: binary() | :drop
   def downstream_response_chunk(data) when is_binary(data), do: native_downstream_response_chunk(data, fn -> false end)
 
   @doc """
-  The native frame the client receives. `sole_account?` is asked only for a
-  provider 403 that demotes the account: when the Pool has no other routable
-  assignment for the turn, that refusal goes out final (row 254-93).
+  The native frame the client receives, or `:drop` for a provider frame it
+  never receives. `sole_account?` is asked only for a provider 403 that
+  demotes the account: when the Pool has no other routable assignment for the
+  turn, that refusal goes out final (row 254-93).
+
+  `codex.rate_limits` is dropped: it carries the windows of the one upstream
+  account that served the turn, and the released client shows them as the
+  user's own limits (its "less than 10% of your 5h limit left" warning), which
+  says nothing about the Pool. Native HTTP never relays the provider's
+  rate-limit headers for the same reason (findings#279 point 1). The frame
+  still reaches the quota observers before the socket; every other control,
+  `codex.response.metadata` and unknown ones included, passes.
   """
-  @spec native_downstream_response_chunk(binary(), (-> boolean())) :: binary()
+  @spec native_downstream_response_chunk(binary(), (-> boolean())) :: binary() | :drop
   def native_downstream_response_chunk(data, sole_account?) when is_binary(data) and is_function(sole_account?, 0) do
     case CodexPooler.JSON.decode(data) do
       {:ok, %{} = decoded} ->
-        {canonical, canonical_decoded} = StreamProtocol.canonicalize_native_codex_responses_json_message(data, decoded)
-        native_refusal_frame(canonical, canonical_decoded, sole_account?)
+        if StreamProtocol.internal_rate_limit_event?(decoded),
+          do: :drop,
+          else: native_client_frame(data, decoded, sole_account?)
 
       _other ->
         StreamProtocol.canonicalize_native_codex_responses_json_message(data)
     end
+  end
+
+  defp native_client_frame(data, decoded, sole_account?) do
+    {canonical, canonical_decoded} = StreamProtocol.canonicalize_native_codex_responses_json_message(data, decoded)
+    native_refusal_frame(canonical, canonical_decoded, sole_account?)
   end
 
   # A provider 400 refusal arrives as the wrapped
