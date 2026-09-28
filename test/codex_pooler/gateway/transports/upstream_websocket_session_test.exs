@@ -21,6 +21,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAuthorizationObservation
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionLifecycleObservation
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
+  alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.CloseDiagnostics
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.ConnectionUpgrade
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketFrameWriter
@@ -4234,6 +4235,405 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     refute log =~ "closed between requests"
   end
 
+  # A `previous_response_id` resolves only on the connection that produced
+  # it, and the downstream client never sees the provider close an idle
+  # connection (its 60-minute limit, a restart). The session tells its
+  # subscriber when a connection that carried a request closes outside a
+  # request, so the client's socket can be closed and the next request sent
+  # whole (findings#270). Every signal is asserted with `assert_received`
+  # after a reply or state read from the session, which the session sends
+  # after the signal; every absence after the same kind of marker.
+  describe "connection close subscriber" do
+    test "only a pid given at start subscribes" do
+      starts = [
+        fn -> UpstreamWebsocketSession.start_link() end,
+        fn -> UpstreamWebsocketSession.start_link([]) end,
+        fn -> UpstreamWebsocketSession.start_link(connection_close_subscriber: nil) end,
+        fn -> GenServer.start(UpstreamWebsocketSession, :new) end
+      ]
+
+      for start <- starts do
+        {:ok, session} = start.()
+        on_exit(fn -> UpstreamWebsocketSession.close(session) end)
+        assert Enum.sort(Map.keys(:sys.get_state(session))) == [:generation, :lifecycle_id]
+      end
+
+      session = start_subscribed_session!()
+      assert %{connection_close_subscriber: subscriber} = :sys.get_state(session)
+      assert subscriber == self()
+    end
+
+    # `decode_error` has no session test: with mint_web_socket 1.0.6 and no
+    # negotiated extension, `Mint.WebSocket.decode/2` reports bytes it cannot
+    # decode in-band, which the session closes as `frame_error`, and never
+    # returns an error of its own.
+    test "every close cause but a reuse-key change ends the closed connection's anchors" do
+      assert CloseDiagnostics.anchor_invalidating_causes() == [
+               :peer_close_frame,
+               :transport_closed,
+               :transport_error,
+               :ping_send_failed,
+               :pong_send_failed,
+               :send_failed,
+               :pong_deadline,
+               :decode_error,
+               :frame_error,
+               :invalidated
+             ]
+
+      for cause <- CloseDiagnostics.anchor_invalidating_causes() do
+        assert CloseDiagnostics.anchor_invalidating_cause?(cause)
+      end
+
+      refute CloseDiagnostics.anchor_invalidating_cause?(:request_key_changed)
+      refute CloseDiagnostics.anchor_invalidating_cause?(:request_caller_down)
+      refute CloseDiagnostics.anchor_invalidating_cause?("peer_close_frame")
+    end
+
+    for close_code <- [1000, 1012] do
+      @close_code close_code
+
+      test "an idle peer Close #{close_code} signals peer_close_frame with the closed generation and its request count" do
+        peer = start_raw_websocket_peer()
+        session = start_subscribed_session!()
+        request = raw_websocket_request(peer.url, self())
+        lifecycle = lifecycle_state(session)
+
+        assert {:ok, _first} = UpstreamWebsocketSession.request(session, request)
+        assert {:ok, _second} = UpstreamWebsocketSession.request(session, request)
+
+        log =
+          close_idle_connection_from_peer!(peer, session, fn server_socket ->
+            :ok = :gen_tcp.send(server_socket, raw_websocket_server_close_frame(@close_code))
+          end)
+
+        assert log =~ "reason_code=peer_close_frame closed_by=peer close_code=#{@close_code} "
+        assert_close_signal!(session, lifecycle, 1, :peer_close_frame, 2)
+        assert_subscribed_disconnected!(session, %{lifecycle | generation: 1})
+      end
+    end
+
+    test "an idle transport close signals transport_closed" do
+      {session, peer, lifecycle} = subscribed_session_after_one_request!()
+
+      log = close_idle_connection_from_peer!(peer, session, fn server_socket -> :ok = :gen_tcp.shutdown(server_socket, :write) end)
+
+      assert log =~ "reason_code=transport_closed closed_by=peer close_code=none close_reason=none transport_reason=closed "
+      assert_close_signal!(session, lifecycle, 1, :transport_closed, 1)
+    end
+
+    # The driver's own error message for the session's socket: a peer reset
+    # reaches the session as a plain close unless its socket asks for
+    # `show_econnreset`, so the error is delivered the way the driver would.
+    test "an idle transport error signals transport_error" do
+      {session, _peer, lifecycle} = subscribed_session_after_one_request!()
+
+      {_state, log} =
+        with_info_log(fn ->
+          send(session, {:tcp_error, session_socket(session), :econnreset})
+          :sys.get_state(session)
+        end)
+
+      assert log =~ "reason_code=transport_error closed_by=transport close_code=none close_reason=none transport_reason=econnreset "
+      assert_close_signal!(session, lifecycle, 1, :transport_error, 1)
+    end
+
+    test "a keepalive ping that cannot be written signals ping_send_failed" do
+      with_held_keepalive(keepalive_pong_timeout_ms: @held_pong_timeout_ms)
+      {session, _peer, lifecycle} = subscribed_session_after_one_request!()
+
+      :ok = :gen_tcp.close(session_socket(session))
+      {:ok, log} = with_info_log(fn -> fire_keepalive!(session) end)
+
+      assert log =~ "reason_code=ping_send_failed closed_by=transport "
+      assert_close_signal!(session, lifecycle, 1, :ping_send_failed, 1)
+    end
+
+    # A connection that still reads but can no longer write. The session's
+    # socket turns passive first, so the peer's close answering the half-close
+    # is never delivered ahead of the ping; the ping comes in the driver's
+    # message shape and the session re-arms the socket to read it.
+    test "a pong that cannot be written signals pong_send_failed" do
+      {session, _peer, lifecycle} = subscribed_session_after_one_request!()
+      socket = session_socket(session)
+      :ok = :inet.setopts(socket, active: false)
+      :ok = :gen_tcp.shutdown(socket, :write)
+
+      {_state, log} =
+        with_info_log(fn ->
+          send(session, {:tcp, socket, raw_websocket_server_ping_frame("unanswerable-ping")})
+          :sys.get_state(session)
+        end)
+
+      assert log =~ "reason_code=pong_send_failed closed_by=transport "
+      assert_close_signal!(session, lifecycle, 1, :pong_send_failed, 1)
+    end
+
+    test "a frame forwarded between requests that cannot be written signals send_failed" do
+      {session, _peer, lifecycle} = subscribed_session_after_one_request!()
+
+      :ok = :gen_tcp.close(session_socket(session))
+      {result, log} = with_info_log(fn -> UpstreamWebsocketSession.send_request_frame(session, ~s({"type":"response.processed"})) end)
+
+      assert {:error, _reason} = result
+      assert log =~ "reason_code=send_failed closed_by=transport "
+      assert_close_signal!(session, lifecycle, 1, :send_failed, 1)
+    end
+
+    test "a missed idle pong deadline signals pong_deadline" do
+      with_held_keepalive(keepalive_pong_timeout_ms: @held_pong_timeout_ms)
+      {session, _peer, lifecycle} = subscribed_session_after_one_request!()
+
+      fire_keepalive!(session)
+      assert_receive {:raw_upstream_websocket_control, :ping, 1, 1, _payload_bytes}, @detection_timeout_ms
+      assert_pong_deadline_armed!(session, @held_pong_timeout_ms)
+
+      {_state, log} =
+        with_info_log(fn ->
+          fire_pong_deadline!(session)
+          :sys.get_state(session)
+        end)
+
+      assert log =~ "reason_code=pong_deadline closed_by=pooler "
+      assert_close_signal!(session, lifecycle, 1, :pong_deadline, 1)
+    end
+
+    test "an idle text frame that is not UTF-8 signals frame_error" do
+      {session, peer, lifecycle} = subscribed_session_after_one_request!()
+
+      log = close_idle_connection_from_peer!(peer, session, fn server_socket -> :ok = :gen_tcp.send(server_socket, <<0x81, 1, 0xFF>>) end)
+
+      assert log =~ "reason_code=frame_error closed_by=pooler "
+      assert_close_signal!(session, lifecycle, 1, :frame_error, 1)
+    end
+
+    test "an explicit invalidation signals invalidated before its reply" do
+      {session, _peer, lifecycle} = subscribed_session_after_one_request!()
+
+      {result, log} = with_info_log(fn -> UpstreamWebsocketSession.invalidate_connection(session) end)
+
+      assert result == :ok
+      assert log =~ "reason_code=invalidated closed_by=pooler "
+      assert_close_signal!(session, lifecycle, 1, :invalidated, 1)
+      assert %{reconnect_pending?: true, connection_close_subscriber: subscriber} = :sys.get_state(session)
+      assert subscriber == self()
+    end
+
+    for {response_mode, halt, relays_terminal?} <- [
+          {:terminal_then_coalesced_close, "terminal", true},
+          {:retryable_first_then_coalesced_close, "retryable_first_frame", false}
+        ] do
+      @response_mode response_mode
+      @halt halt
+      @relays_terminal relays_terminal?
+
+      test "a Close coalesced behind the #{halt} is signalled before the request returns" do
+        peer = start_raw_websocket_peer(response_mode: @response_mode)
+        session = start_subscribed_session!()
+        request = raw_websocket_request(peer.url, self())
+        lifecycle = lifecycle_state(session)
+
+        {result, log} = with_info_log(fn -> UpstreamWebsocketSession.request(session, request) end)
+
+        {:messages, messages} = Process.info(self(), :messages)
+        signal_index = Enum.find_index(messages, &match?({:upstream_websocket_connection_closed, ^session, _signal}, &1))
+        frame_index = Enum.find_index(messages, &match?({:upstream_websocket_frame, _text}, &1))
+        assert is_integer(signal_index)
+
+        if @relays_terminal do
+          assert {:ok, %{terminal: "response.completed"}} = result
+          assert is_integer(frame_index) and frame_index < signal_index
+        else
+          assert {:error, %{reason: {:quota_exhausted_first_event, %{code: "usage_limit_reached"}}}} = result
+          assert frame_index == nil
+        end
+
+        assert_close_signal!(session, lifecycle, 1, :peer_close_frame, 1)
+        assert_coalesced_close_log(log, @response_mode, @halt, lifecycle)
+        assert_subscribed_disconnected!(session, %{lifecycle | generation: 1})
+      end
+    end
+
+    # A trailing frame that retires the connection for another cause than a
+    # Close goes through the ordinary close line, still inside the request.
+    test "a malformed frame behind the terminal is signalled as frame_error before the request returns" do
+      peer = start_raw_websocket_peer(response_mode: :terminal_then_invalid_text)
+      session = start_subscribed_session!()
+      lifecycle = lifecycle_state(session)
+
+      {result, log} = with_info_log(fn -> UpstreamWebsocketSession.request(session, raw_websocket_request(peer.url, self())) end)
+
+      assert {:ok, %{terminal: "response.completed"}} = result
+      {:messages, messages} = Process.info(self(), :messages)
+      frame_index = Enum.find_index(messages, &match?({:upstream_websocket_frame, _text}, &1))
+      signal_index = Enum.find_index(messages, &match?({:upstream_websocket_connection_closed, ^session, _signal}, &1))
+      assert is_integer(frame_index) and is_integer(signal_index) and frame_index < signal_index
+
+      assert_close_signal!(session, lifecycle, 1, :frame_error, 1)
+      assert log =~ "reason_code=frame_error closed_by=pooler "
+      assert_subscribed_disconnected!(session, %{lifecycle | generation: 1})
+    end
+
+    test "a terminal decoded beside a transport error signals transport_error and logs one close line" do
+      release_ref = make_ref()
+
+      upstream =
+        start_upstream(
+          FakeUpstream.websocket_close_without_terminal_barrier(
+            notify: self(),
+            release_ref: release_ref
+          )
+        )
+
+      session = start_subscribed_session!()
+      lifecycle = lifecycle_state(session)
+      parent = self()
+      request = websocket_request(FakeUpstream.url(upstream), @held_timeouts)
+      request = %{request | writer: fn frame -> send(parent, {:coalesced_frame, frame}) end}
+      request_task = Task.async(fn -> UpstreamWebsocketSession.request(session, request) end)
+
+      assert_receive {:fake_upstream_websocket_barrier, :before_close, barrier_pid, ^release_ref}, @message_detection_timeout_ms
+      on_exit(fn -> send(barrier_pid, {:fake_upstream_release_websocket, release_ref}) end)
+
+      terminal =
+        CodexPooler.JSON.encode!(%{
+          "type" => "response.completed",
+          "response" => %{"id" => "resp_ws_signal_beside_transport_error", "status" => "completed"}
+        })
+
+      {result, log} =
+        with_info_log(fn ->
+          socket = session_socket(session)
+          :ok = :gen_tcp.close(socket)
+          send(session, {:tcp, socket, server_text_frame(terminal)})
+          result = Task.await(request_task, @message_detection_timeout_ms)
+          _state = :sys.get_state(session)
+          result
+        end)
+
+      assert {:ok, %{terminal: "response.completed", status: 200}} = result
+
+      {:messages, messages} = Process.info(self(), :messages)
+      frame_index = Enum.find_index(messages, &match?({:coalesced_frame, _frame}, &1))
+      signal_index = Enum.find_index(messages, &match?({:upstream_websocket_connection_closed, ^session, _signal}, &1))
+      assert is_integer(frame_index) and is_integer(signal_index) and frame_index < signal_index
+
+      assert_close_signal!(session, lifecycle, 1, :transport_error, 1)
+      assert length(String.split(log, "upstream websocket connection closed between requests")) == 2
+      assert log =~ "reason_code=transport_error closed_by=transport close_code=none close_reason=none transport_reason=einval "
+      assert log =~ " connection_requests=1 "
+      assert log =~ " lifecycle_id=#{lifecycle.lifecycle_id} generation=1"
+      refute log =~ "resp_ws_signal_beside_transport_error"
+      assert_subscribed_disconnected!(session, %{lifecycle | generation: 1})
+    end
+
+    test "the subscriber is kept across a close and hears the next generation's close" do
+      {session, peer, lifecycle} = subscribed_session_after_one_request!()
+
+      _log = close_idle_connection_from_peer!(peer, session, fn server_socket -> :ok = :gen_tcp.send(server_socket, raw_websocket_server_close_frame(1000)) end)
+
+      assert_close_signal!(session, lifecycle, 1, :peer_close_frame, 1)
+      assert_subscribed_disconnected!(session, %{lifecycle | generation: 1})
+
+      assert {:ok, second} = UpstreamWebsocketSession.request(session, raw_websocket_request(peer.url, self()))
+      assert_connection_metadata(second, %{lifecycle | generation: 2}, false, false)
+
+      _log = close_idle_connection_from_peer!(peer, session, fn server_socket -> :ok = :gen_tcp.shutdown(server_socket, :write) end, 2)
+
+      assert_close_signal!(session, lifecycle, 2, :transport_closed, 1)
+      assert_subscribed_disconnected!(session, %{lifecycle | generation: 2})
+    end
+
+    test "a connection replaced for another reuse key signals nothing" do
+      {session, peer, lifecycle} = subscribed_session_after_one_request!()
+      rotated = %{raw_websocket_request(peer.url, self()) | headers: [{"authorization", "Bearer rotated-upstream-token"}]}
+
+      {result, log} = with_info_log(fn -> UpstreamWebsocketSession.request(session, rotated) end)
+
+      assert {:ok, second} = result
+      assert_connection_metadata(second, %{lifecycle | generation: 2}, false, false)
+      assert log =~ "reason_code=request_key_changed closed_by=pooler "
+      refute_received {:upstream_websocket_connection_closed, _session, _signal}
+    end
+
+    test "a connection that carried no request signals nothing when it closes" do
+      peer = start_raw_websocket_peer()
+      session = start_subscribed_session!()
+      request = raw_websocket_request(peer.url, self())
+
+      # An anchored request meeting a fresh connection is refused before
+      # anything is sent, so the connection it opened carries no request.
+      assert {:ok, %{terminal: "error", upstream_error_code: "previous_response_not_found"}} =
+               UpstreamWebsocketSession.request(session, %{request | connection_bound_continuation?: true})
+
+      log =
+        close_idle_connection_from_peer!(peer, session, fn server_socket ->
+          :ok = :gen_tcp.send(server_socket, raw_websocket_server_close_frame(1000))
+        end)
+
+      refute_received {:raw_upstream_websocket_request, 1, _request_count}
+      assert log =~ "reason_code=peer_close_frame closed_by=peer close_code=1000 "
+      assert log =~ " connection_requests=0 "
+      refute_received {:upstream_websocket_connection_closed, _session, _signal}
+    end
+
+    test "a peer Close inside a request signals nothing" do
+      peer = start_raw_websocket_peer(response_mode: :peer_close)
+      session = start_subscribed_session!()
+
+      assert {:error, %{reason: :upstream_websocket_closed_before_terminal}} =
+               UpstreamWebsocketSession.request(session, raw_websocket_request(peer.url, self()))
+
+      refute_received {:upstream_websocket_connection_closed, _session, _signal}
+    end
+
+    test "a receive timeout signals nothing" do
+      peer = start_raw_websocket_peer(response_mode: :hold)
+      session = start_subscribed_session!()
+      request = %{raw_websocket_request(peer.url, self()) | timeouts: %{connect_timeout_ms: 1_000, receive_timeout_ms: 100}}
+
+      assert {:error, %{reason: :upstream_websocket_receive_timeout}} = UpstreamWebsocketSession.request(session, request)
+      refute_received {:upstream_websocket_connection_closed, _session, _signal}
+      assert %{reconnect_pending?: true} = :sys.get_state(session)
+    end
+
+    test "closing the session signals nothing" do
+      {session, _peer, _lifecycle} = subscribed_session_after_one_request!()
+      monitor = Process.monitor(session)
+
+      assert :ok = UpstreamWebsocketSession.close(session)
+      assert_receive {:DOWN, ^monitor, :process, ^session, :normal}, @message_detection_timeout_ms
+      refute_received {:upstream_websocket_connection_closed, _session, _signal}
+    end
+
+    test "a subscriber that is gone leaves the session serving" do
+      # Trapped, so a session tied to its subscriber fails the assertions below
+      # instead of taking the test process down with it.
+      Process.flag(:trap_exit, true)
+      subscriber = spawn(fn -> receive do: (:never_sent -> :ok) end)
+      peer = start_raw_websocket_peer()
+      session = start_subscribed_session!(subscriber)
+      request = raw_websocket_request(peer.url, self())
+      lifecycle = lifecycle_state(session)
+
+      subscriber_monitor = Process.monitor(subscriber)
+      Process.exit(subscriber, :kill)
+      assert_receive {:DOWN, ^subscriber_monitor, :process, ^subscriber, :killed}, @message_detection_timeout_ms
+
+      assert {:ok, _first} = UpstreamWebsocketSession.request(session, request)
+
+      _log =
+        close_idle_connection_from_peer!(peer, session, fn server_socket ->
+          :ok = :gen_tcp.send(server_socket, raw_websocket_server_close_frame(1000))
+        end)
+
+      assert {:ok, second} = UpstreamWebsocketSession.request(session, request)
+      assert_connection_metadata(second, %{lifecycle | generation: 2}, false, false)
+      assert Process.alive?(session)
+      refute_received {:EXIT, ^session, _reason}
+    end
+  end
+
   for pong_mode <- [:ignore_ping, :match_active_ping] do
     test "in-flight keepalive cannot extend a silent response timeout with #{pong_mode}" do
       with_short_keepalive(keepalive_interval_ms: 25, keepalive_pong_timeout_ms: @held_pong_timeout_ms)
@@ -6810,18 +7210,60 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
   # Runs `close` against the raw peer's socket of the one established
   # connection while the session is idle, and returns the info log captured
   # until the session has closed that connection and handled every message.
-  defp close_idle_connection_from_peer!(peer, session, close) do
+  defp close_idle_connection_from_peer!(peer, session, close, connection_id \\ 1) do
     assert [server_socket] = Agent.get(peer.state, &MapSet.to_list(&1.client_sockets))
 
     {:closed, log} =
       with_info_log(fn ->
         close.(server_socket)
-        closed = wait_for_raw_websocket_connection_closed(1, @message_detection_timeout_ms)
+        closed = wait_for_raw_websocket_connection_closed(connection_id, @message_detection_timeout_ms)
         _state = :sys.get_state(session)
         closed
       end)
 
     log
+  end
+
+  defp start_subscribed_session!(subscriber \\ self()) do
+    {:ok, session} = UpstreamWebsocketSession.start_link(connection_close_subscriber: subscriber)
+    on_exit(fn -> UpstreamWebsocketSession.close(session) end)
+    session
+  end
+
+  # A subscribed session whose first connection (generation 1) served one
+  # request of the raw peer; returns the session's initial lifecycle.
+  defp subscribed_session_after_one_request! do
+    peer = start_raw_websocket_peer()
+    session = start_subscribed_session!()
+    lifecycle = lifecycle_state(session)
+
+    assert {:ok, result} = UpstreamWebsocketSession.request(session, raw_websocket_request(peer.url, self()))
+    assert_connection_metadata(result, %{lifecycle | generation: 1}, false, false)
+
+    {session, peer, lifecycle}
+  end
+
+  # The subscriber's one message for a close. Callers read it after a reply or
+  # a state read from the session, which the session sends after the signal.
+  defp assert_close_signal!(session, lifecycle, generation, cause, connection_requests) do
+    assert_received {:upstream_websocket_connection_closed, ^session, signal}
+
+    assert signal == %{
+             cause: cause,
+             lifecycle_id: lifecycle.lifecycle_id,
+             generation: generation,
+             connection_requests: connection_requests
+           }
+
+    refute_received {:upstream_websocket_connection_closed, _session, _signal}
+  end
+
+  defp assert_subscribed_disconnected!(session, expected_lifecycle) do
+    state = :sys.get_state(session)
+
+    assert lifecycle_from_state(state) == expected_lifecycle
+    assert Enum.sort(Map.keys(state)) == [:connection_close_subscriber, :generation, :lifecycle_id]
+    assert state.connection_close_subscriber == self()
   end
 
   defp assert_single_close_line!(log, expected) do

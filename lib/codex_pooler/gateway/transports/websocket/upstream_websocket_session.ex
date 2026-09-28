@@ -102,10 +102,30 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   @type request_result :: {:ok, request_success()} | {:error, request_failure()}
   @type send_result :: {:ok, :sent} | {:error, term()}
   @type invalidation_result :: :ok | {:error, :upstream_websocket_not_connected}
+  @type connection_closed_signal ::
+          {:upstream_websocket_connection_closed, pid(),
+           %{
+             required(:cause) => CloseDiagnostics.cause(),
+             required(:lifecycle_id) => Ecto.UUID.t(),
+             required(:generation) => pos_integer(),
+             required(:connection_requests) => pos_integer()
+           }}
 
+  # `connection_close_subscriber: pid` names the one process that learns when
+  # a connection that carried at least one request closes outside a request
+  # for a cause in `CloseDiagnostics.anchor_invalidating_causes/0`, as a
+  # `t:connection_closed_signal/0` sent right after the connection closed.
+  # `generation` names the closed connection (the next one is
+  # `generation + 1`) and `connection_requests` counts the requests sent on
+  # it. The provider closes an idle connection (its 60-minute limit, a
+  # restart) without the downstream client seeing it, and the client's next
+  # request then carries a `previous_response_id` only the closed connection
+  # could resolve (findings#270). The subscriber survives every close and
+  # reconnect; the session neither links to nor monitors it, so a subscriber
+  # that is gone only misses the message.
   @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(_opts \\ []) do
-    case GenServer.start_link(__MODULE__, :new) do
+  def start_link(opts \\ []) when is_list(opts) do
+    case GenServer.start_link(__MODULE__, {:new, Keyword.get(opts, :connection_close_subscriber)}) do
       {:ok, pid} = result ->
         _trace = NativeCompactionTrace.enroll(:upstream_session, pid)
         result
@@ -309,10 +329,17 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   @impl GenServer
-  def init(:new) do
+  def init(:new), do: init({:new, nil})
+
+  def init({:new, subscriber}) do
     sensitivity = NativeCompactionTrace.configure_process_sensitivity(:upstream_session)
 
-    {:ok, put_trace_sensitivity(new_connection_lifecycle_state(), sensitivity)}
+    state =
+      new_connection_lifecycle_state()
+      |> put_trace_sensitivity(sensitivity)
+      |> put_connection_close_subscriber(subscriber)
+
+    {:ok, state}
   end
 
   @impl GenServer
@@ -638,7 +665,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   def handle_call(:invalidate_connection, _from, %{conn: _conn} = state) do
     :ok = CloseDiagnostics.log_close(state, :invalidated)
-    {:reply, :ok, invalidate_state(state)}
+    {:reply, :ok, close_and_signal(state, :invalidated, &invalidate_state/1)}
   end
 
   def handle_call(:invalidate_connection, _from, state),
@@ -1653,9 +1680,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
       halted ->
         {result, state} = finish_receive_result(halted)
-        {result, close_state(state)}
+        {result, close_after_transport_error(state, halted, reason)}
     end
   end
+
+  # A terminal decoded beside the transport error completed its request, so
+  # the connection closes after that request like any close between requests:
+  # one close line, and the subscriber is told, since the client now holds the
+  # terminal's response as an anchor (findings#270). This close used to leave
+  # no trace. Any other halt failed its request, which records the close.
+  defp close_after_transport_error(state, halted, reason) when elem(halted, 0) == :terminal,
+    do: close_between_requests(state, idle_transport_cause(reason), transport_reason: reason)
+
+  defp close_after_transport_error(state, _halted, _reason), do: close_state(state)
 
   defp transport_error_result(state, %ReceiveState{} = receive_state, reason) do
     {:error,
@@ -1925,10 +1962,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   defp close_async(state, :idle, cause, details), do: close_between_requests(state, cause, details)
 
+  # A provider Close sent right after a response (its connection-age limit, a
+  # restart) can arrive in the same read as the terminal (findings#270), so
+  # the subscriber is told here too, inside the request call: before its reply
+  # and after every frame the request relayed.
   defp close_async(state, {:trailing, halt}, :peer_close_frame, details) do
     lifecycle = connection_lifecycle_state(state)
     Logger.info("upstream websocket coalesced close drained reason_code=peer_close_frame halt=#{halt} close_code=#{coalesced_close_code(Keyword.get(details, :close_code))} lifecycle_id=#{lifecycle.lifecycle_id} generation=#{lifecycle.generation}")
-    close_state(state)
+    close_and_signal(state, :peer_close_frame, &close_state/1)
   end
 
   defp close_async(state, {:trailing, _halt}, cause, details), do: close_between_requests(state, cause, details)
@@ -1938,8 +1979,40 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # 206-356); a close inside a request is recorded on the attempt instead.
   defp close_between_requests(state, cause, details \\ []) do
     :ok = CloseDiagnostics.log_close(state, cause, details)
-    close_state(state)
+    close_and_signal(state, cause, &close_state/1)
   end
+
+  # The signal is built from the state before the close, which drops the
+  # connection's request count, and sent once the connection is closed.
+  defp close_and_signal(state, cause, close) do
+    signal = connection_closed_signal(state, cause)
+    closed = close.(state)
+    :ok = send_connection_closed_signal(signal)
+    closed
+  end
+
+  # Nothing to tell without a subscriber or a live connection, for a cause
+  # that ends no anchor, or for a connection that never carried a request: a
+  # connection that sent nothing produced no response to anchor on.
+  defp connection_closed_signal(%{conn: _conn, connection_close_subscriber: subscriber} = state, cause)
+       when is_pid(subscriber) do
+    requests = Map.get(state, :connection_request_count, 0)
+
+    if is_integer(requests) and requests > 0 and CloseDiagnostics.anchor_invalidating_cause?(cause) do
+      {subscriber, {:upstream_websocket_connection_closed, self(), %{cause: cause, lifecycle_id: state.lifecycle_id, generation: state.generation, connection_requests: requests}}}
+    else
+      nil
+    end
+  end
+
+  defp connection_closed_signal(_state, _cause), do: nil
+
+  defp send_connection_closed_signal({subscriber, message}) do
+    send(subscriber, message)
+    :ok
+  end
+
+  defp send_connection_closed_signal(nil), do: :ok
 
   defp close_replaced_connection(%{conn: _conn, key: old_key} = state, key) do
     close_between_requests(state, :request_key_changed, key_change: {old_key, key})
@@ -2801,6 +2874,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       state
       |> connection_lifecycle_state()
       |> preserve_trace_sensitivity(state)
+      |> preserve_connection_close_subscriber(state)
 
     if Map.get(state, :reconnect_pending?, false) do
       Map.put(lifecycle, :reconnect_pending?, true)
@@ -2900,6 +2974,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp preserve_trace_sensitivity(lifecycle, state) do
     case Map.fetch(state, :native_compaction_trace_sensitivity) do
       {:ok, sensitivity} -> Map.put(lifecycle, :native_compaction_trace_sensitivity, sensitivity)
+      :error -> lifecycle
+    end
+  end
+
+  # Only a pid subscribes, so a session started without one keeps exactly the
+  # state it always had.
+  defp put_connection_close_subscriber(state, subscriber) when is_pid(subscriber),
+    do: Map.put(state, :connection_close_subscriber, subscriber)
+
+  defp put_connection_close_subscriber(state, _subscriber), do: state
+
+  defp preserve_connection_close_subscriber(lifecycle, state) do
+    case Map.fetch(state, :connection_close_subscriber) do
+      {:ok, subscriber} -> Map.put(lifecycle, :connection_close_subscriber, subscriber)
       :error -> lifecycle
     end
   end

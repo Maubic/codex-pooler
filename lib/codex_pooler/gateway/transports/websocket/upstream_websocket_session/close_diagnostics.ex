@@ -47,6 +47,34 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Clos
   @transport_causes [:transport_error, :ping_send_failed, :pong_send_failed, :send_failed]
   @max_changed_headers 8
 
+  # Every cause but a reuse-key change. That close runs only for a request
+  # that has already arrived and needs a connection under another key, so
+  # telling the subscriber could no longer spare that request its anchor.
+  @anchor_invalidating_causes [
+    :peer_close_frame,
+    :transport_closed,
+    :transport_error,
+    :ping_send_failed,
+    :pong_send_failed,
+    :send_failed,
+    :pong_deadline,
+    :decode_error,
+    :frame_error,
+    :invalidated
+  ]
+
+  @doc """
+  The close causes the session reports to its connection close subscriber: a
+  `previous_response_id` produced on a connection resolves only on that
+  connection, so after such a close no response it produced can anchor a later
+  request (findings#270).
+  """
+  @spec anchor_invalidating_causes() :: [cause()]
+  def anchor_invalidating_causes, do: @anchor_invalidating_causes
+
+  @spec anchor_invalidating_cause?(term()) :: boolean()
+  def anchor_invalidating_cause?(cause), do: cause in @anchor_invalidating_causes
+
   @doc """
   Logs the close of the state's live connection. A state without a connection
   logs nothing: there is nothing to close.
