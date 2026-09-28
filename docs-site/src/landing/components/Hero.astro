@@ -157,7 +157,7 @@ const accounts = [
   .hero {
     position: relative;
     padding-top: clamp(20px, 3.5vw, 44px);
-    padding-bottom: clamp(36px, 5vw, 64px);
+    padding-bottom: clamp(32px, 4vw, 52px);
   }
 
   /* The glow fades out before the section ends, so the next band never cuts it. */
@@ -179,14 +179,15 @@ const accounts = [
     grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
     align-items: center;
     gap: clamp(24px, 4vw, 56px);
-    min-height: min(620px, calc(100svh - var(--nav-h) - 120px));
+    /* On short screens the hero fills the first screen, so the logo strip never shows only half its label. */
+    min-height: min(640px, calc(100svh - var(--nav-h) - 95px));
   }
 
   .release {
     display: inline-flex;
     align-items: center;
     gap: 10px;
-    margin-bottom: 26px;
+    margin-bottom: 22px;
     padding: 6px 12px 6px 6px;
     border: 1px solid var(--line);
     border-radius: 999px;
@@ -247,21 +248,21 @@ const accounts = [
 
   .hero .lede {
     max-width: 34em;
-    margin-top: 28px;
+    margin-top: 24px;
   }
 
   .cta-row {
     display: flex;
     flex-wrap: wrap;
     gap: 12px;
-    margin-top: 34px;
+    margin-top: 30px;
   }
 
   .facts {
     display: flex;
     flex-wrap: wrap;
     gap: 10px 22px;
-    margin-top: 30px;
+    margin-top: 24px;
     font-size: 15.5px;
     font-weight: 500;
     color: var(--ink-2);

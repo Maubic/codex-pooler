@@ -265,6 +265,13 @@ const links = [
     }
   }
 
+  /* The bar keeps its own Get started above 420px, so the menu doesn't repeat it. */
+  @media (min-width: 421px) {
+    .mobile-menu .btn {
+      display: none;
+    }
+  }
+
   @media (max-width: 420px) {
     .start {
       display: none;

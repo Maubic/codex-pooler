@@ -254,7 +254,8 @@ ol {
 p,
 li,
 dt,
-dd {
+dd,
+summary {
   text-wrap-style: pretty;
 }
 
