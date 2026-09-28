@@ -106,7 +106,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ReservedPreAttemptInterru
       assert_receive {:codex_response_done, ^task, result}, @detection_timeout_ms
       remove_turn_insert_fault!()
 
-      assert {:socket_response_result, _source, {:response_task_result, {:error, %{status: 503, code: "service_unavailable"}}, false}} = result
+      assert {:socket_response_result, _source, {:response_task_result, {:error, %{status: 503, code: "service_unavailable"}}}} = result
 
       shapes = fixture.setup.pool.id |> pool_requests() |> Enum.map(&request_shape/1)
       assert Enum.all?(shapes, &(&1.status not in ["accepted", "in_progress"])), inspect(shapes)

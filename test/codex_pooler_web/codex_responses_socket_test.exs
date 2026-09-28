@@ -982,7 +982,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTest do
 
     results = [
       {:response_task_failure, {:error, error}},
-      {:response_task_result, {:error, error}, false},
+      {:response_task_result, {:error, error}},
       {:error, error}
     ]
 
@@ -1827,7 +1827,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTest do
 
         assert {:ok, _done_state} =
                  CodexResponsesSocket.handle_info(
-                   {:codex_response_done, task_pid, {:response_task_result, {:error, :upstream_stream_error}, true}},
+                   {:codex_response_done, task_pid, {:response_task_result, {:error, :upstream_stream_error}}},
                    pushed_state
                  )
       end)
@@ -1910,7 +1910,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTest do
 
     assert {:stop, :normal, {1011, "websocket owner crashed"}, closed_state} =
              CodexResponsesSocket.handle_info(
-               {:codex_response_done, task_pid, {:response_task_result, {:error, :owner_crashed}, true}},
+               {:codex_response_done, task_pid, {:response_task_result, {:error, :owner_crashed}}},
                state
              )
 

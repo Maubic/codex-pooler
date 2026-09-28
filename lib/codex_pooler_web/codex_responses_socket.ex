@@ -519,7 +519,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp api_key_revocation_disposition({:socket_response_result, _source, result}),
     do: api_key_revocation_disposition(result)
 
-  defp api_key_revocation_disposition({:response_task_result, result, _visible_output?}),
+  defp api_key_revocation_disposition({:response_task_result, result}),
     do: api_key_revocation_disposition(result)
 
   defp api_key_revocation_disposition({:response_task_failure, result}),
@@ -1507,12 +1507,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   defp handle_public_owner_payload({:error, :owner_drained, payload}, state) do
-    log_failed_native_websocket_turn(
-      state,
-      Map.fetch!(state, :public_response_task_pid),
-      payload,
-      active_owner_turn_visible_output?(state)
-    )
+    log_failed_native_websocket_turn(state, Map.fetch!(state, :public_response_task_pid), payload)
 
     encoded = encode_public_error(payload, state)
 
@@ -1527,12 +1522,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   defp handle_public_owner_payload({:error, :upstream_stream_error, payload}, state) do
-    log_failed_native_websocket_turn(
-      state,
-      Map.fetch!(state, :public_response_task_pid),
-      payload,
-      active_owner_turn_visible_output?(state)
-    )
+    log_failed_native_websocket_turn(state, Map.fetch!(state, :public_response_task_pid), payload)
 
     if match?(
          %{terminal_latched?: true},
@@ -1578,12 +1568,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   defp handle_non_public_owner_payload({:error, :owner_drained, payload}, state) do
-    maybe_log_failed_native_websocket_turn(
-      state,
-      tracked_response_task_pid(state),
-      payload,
-      active_owner_turn_visible_output?(state)
-    )
+    maybe_log_failed_native_websocket_turn(state, tracked_response_task_pid(state), payload)
 
     state =
       state
@@ -1697,16 +1682,16 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         state = state |> record_downstream_terminal(pid, "error") |> finish_public_turn()
         {:push, {:text, payload}, state}
 
-      match?({:response_task_result, {:error, _reason}, _visible_output?}, result) ->
-        {:response_task_result, {:error, reason}, visible_output?} = result
-        log_failed_native_websocket_turn(state, pid, reason, visible_output?)
+      match?({:response_task_result, {:error, _reason}}, result) ->
+        {:response_task_result, {:error, reason}} = result
+        log_failed_native_websocket_turn(state, pid, reason)
         payload = encode_public_error(reason, state)
         state = state |> record_downstream_terminal(pid, "error") |> finish_public_turn()
         {:push, {:text, payload}, state}
 
       match?({:error, _reason}, result) ->
         {:error, reason} = result
-        log_failed_native_websocket_turn(state, pid, reason, false)
+        log_failed_native_websocket_turn(state, pid, reason)
         payload = encode_public_error(reason, state)
         state = state |> record_downstream_terminal(pid, "error") |> finish_public_turn()
         {:push, {:text, payload}, state}
@@ -1788,17 +1773,13 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     native_turn_error_result(state, pid, reason)
   end
 
-  defp handle_non_public_response_done(
-         pid,
-         {:response_task_result, {:error, reason}, visible_output?},
-         state
-       ) do
-    log_failed_native_websocket_turn(state, pid, reason, visible_output?)
+  defp handle_non_public_response_done(pid, {:response_task_result, {:error, reason}}, state) do
+    log_failed_native_websocket_turn(state, pid, reason)
     native_turn_error_result(state, pid, reason)
   end
 
   defp handle_non_public_response_done(pid, {:error, reason}, state) do
-    log_failed_native_websocket_turn(state, pid, reason, false)
+    log_failed_native_websocket_turn(state, pid, reason)
     native_turn_error_result(state, pid, reason)
   end
 
@@ -1864,7 +1845,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     end
   end
 
-  defp public_owner_turn_error({:response_task_result, {:error, reason}, _visible_output?}), do: {:ok, {:log, reason}}
+  defp public_owner_turn_error({:response_task_result, {:error, reason}}), do: {:ok, {:log, reason}}
   defp public_owner_turn_error({:error, reason}), do: {:ok, {:log, reason}}
   defp public_owner_turn_error({:response_task_failure, {:error, reason}}), do: {:ok, {:unlogged, reason}}
   defp public_owner_turn_error(_result), do: :none
@@ -1880,7 +1861,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   defp push_public_owner_turn_error(state, {logging, reason}) do
     pid = Map.fetch!(state, :public_response_task_pid)
-    if logging == :log, do: log_failed_native_websocket_turn(state, pid, reason, false)
+    if logging == :log, do: log_failed_native_websocket_turn(state, pid, reason)
     payload = encode_public_error(reason, state)
     {:push, {:text, payload}, state |> record_downstream_terminal(pid, "error") |> finish_public_turn()}
   end
@@ -4073,7 +4054,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   defp handle_public_retarget_error_done(pid, {:error, reason}, state) do
-    log_failed_native_websocket_turn(state, pid, reason, false)
+    log_failed_native_websocket_turn(state, pid, reason)
     payload = encode_public_error(reason, state)
     {:push, {:text, payload}, finish_public_turn(state)}
   end
@@ -4776,7 +4757,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp response_task_cleanup_result({:socket_response_result, _source, result}),
     do: response_task_cleanup_result(result)
 
-  defp response_task_cleanup_result({:response_task_result, result, _visible?}),
+  defp response_task_cleanup_result({:response_task_result, result}),
     do: response_task_cleanup_result(result)
 
   defp response_task_cleanup_result(_result), do: :error
@@ -5010,7 +4991,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp response_result_outcome({:socket_response_result, _source, result}),
     do: response_result_outcome(result)
 
-  defp response_result_outcome({:response_task_result, result, _visible?}),
+  defp response_result_outcome({:response_task_result, result}),
     do: response_result_outcome(result)
 
   defp response_result_outcome({:response_task_failure, _result}), do: :error
@@ -5164,7 +5145,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     end
   end
 
-  defp owner_liveness_error?({:response_task_result, {:error, reason}, _visible_output?})
+  defp owner_liveness_error?({:response_task_result, {:error, reason}})
        when reason in [
               :owner_crashed,
               :owner_unavailable,
@@ -5176,7 +5157,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   defp owner_liveness_error?(_result), do: false
 
-  defp owner_liveness_error({:response_task_result, {:error, reason}, _visible_output?}),
+  defp owner_liveness_error({:response_task_result, {:error, reason}}),
     do: reason
 
   defp remove_tracked_response_task(state, pid) when is_pid(pid) do
@@ -5319,7 +5300,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     try do
       case run_prepared_response(parent, task_pid, state.auth, prepared) do
         {:socket_response_result, completion_source, {:error, _reason} = result} ->
-          {:socket_response_result, completion_source, {:response_task_result, result, response_task_visible_output?()}}
+          {:socket_response_result, completion_source, {:response_task_result, result}}
 
         result ->
           result
@@ -5797,33 +5778,20 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   defp run_prepared_response(parent, task_pid, auth, prepared) do
     Websocket.run_prepared_websocket_response_for_socket(auth, prepared, fn data ->
-      unless StreamProtocol.internal_control_event?(data) do
-        # Not read (findings#271): the failed-turn log reads what the socket pushed.
-        Process.put(:response_task_visible_output?, true)
-      end
-
       send(parent, {:codex_response_chunk, task_pid, data})
     end)
   end
 
-  defp response_task_visible_output? do
-    Process.get(:response_task_visible_output?, false)
-  end
-
-  defp log_failed_native_websocket_turn(state, pid, reason, visible_output?) do
-    visible_output? = direct_turn_visible_output?(state, pid, visible_output?)
-
+  defp log_failed_native_websocket_turn(state, pid, reason) do
     state
-    |> failed_native_websocket_turn_metadata(pid, reason, visible_output?)
+    |> failed_native_websocket_turn_metadata(pid, reason, direct_turn_visible_output?(state, pid))
     |> WebsocketConnectionLogger.log_failed_native_websocket_turn(reason)
   end
 
-  defp maybe_log_failed_native_websocket_turn(state, pid, reason, visible_output?)
-       when is_pid(pid) do
-    log_failed_native_websocket_turn(state, pid, reason, visible_output?)
-  end
+  defp maybe_log_failed_native_websocket_turn(state, pid, reason) when is_pid(pid),
+    do: log_failed_native_websocket_turn(state, pid, reason)
 
-  defp maybe_log_failed_native_websocket_turn(_state, _pid, _reason, _visible_output?), do: :ok
+  defp maybe_log_failed_native_websocket_turn(_state, _pid, _reason), do: :ok
 
   defp failed_native_websocket_turn_metadata(state, pid, reason, visible_output?) do
     opts = response_task_opts(state, pid)
@@ -5862,36 +5830,19 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp websocket_turn_error_code(_reason), do: ErrorCodes.websocket_request_failed_code()
 
   # What the client was shown before the turn failed, read from the socket's
-  # own state for both routes: a public turn's committed output (the field an
-  # owner-forwarded public turn reports too) and a native turn's pushed
-  # output. The flag a caller reports is not consulted: with owner forwarding
-  # off the response task's writer runs in its upstream websocket session's
-  # process, so the flag the task carries stays false (findings#271). With
-  # forwarding on the owner's `:complete` clears the native marker, which the
-  # output-commit probe answers from, before the task's error arrives, so a
-  # native turn also counts the frames its delivery evidence recorded.
-  defp direct_turn_visible_output?(state, pid, _reported_visible_output?) do
+  # own state for both routes: a public turn's committed output and a native
+  # turn's pushed output. The response task cannot know it: with owner
+  # forwarding off its writer runs in the upstream websocket session's
+  # process (findings#271). With forwarding on the owner's `:complete` clears
+  # the native marker, which the output-commit probe answers from, before the
+  # task's error arrives, so a native turn also counts the frames its
+  # delivery evidence recorded.
+  defp direct_turn_visible_output?(state, pid) do
     if active_public_turn?(state, pid) do
       Map.get(state, :public_turn_output_committed?, false)
     else
       MapSet.member?(Map.get(state, :native_turn_output_task_pids, MapSet.new()), pid) or
         downstream_delivery_evidence(state, pid).frames > 0
-    end
-  end
-
-  defp active_owner_turn_visible_output?(state) do
-    if Adapter.public_responses_stream?(state) do
-      Map.get(state, :public_turn_output_committed?, false)
-    else
-      case active_native_owner_turn_pid(state) do
-        pid when is_pid(pid) ->
-          state
-          |> Map.get(:native_turn_output_task_pids, MapSet.new())
-          |> MapSet.member?(pid)
-
-        nil ->
-          false
-      end
     end
   end
 

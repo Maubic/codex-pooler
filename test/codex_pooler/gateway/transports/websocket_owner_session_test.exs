@@ -2670,7 +2670,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
     assert {:ok, final_state} =
              CodexResponsesSocket.handle_info(
-               {:codex_response_done, owner_turn_id, {:response_task_result, interrupted_result(), true}},
+               {:codex_response_done, owner_turn_id, {:response_task_result, interrupted_result()}},
                completed_state
              )
 

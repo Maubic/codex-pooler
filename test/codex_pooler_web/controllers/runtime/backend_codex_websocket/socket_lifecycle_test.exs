@@ -837,7 +837,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SocketLifecycleTest do
     {_result, logs} =
       capture_native_turn_warning(fn ->
         CodexResponsesSocket.handle_info(
-          {:codex_response_done, current_task, {:response_task_result, {:error, %{status: 502, code: "upstream_request_failed", message: "upstream request failed"}}, false}},
+          {:codex_response_done, current_task, {:response_task_result, {:error, %{status: 502, code: "upstream_request_failed", message: "upstream request failed"}}}},
           state_after_chunk
         )
       end)
@@ -870,7 +870,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SocketLifecycleTest do
     {_result, logs} =
       capture_native_turn_warning(fn ->
         CodexResponsesSocket.handle_info(
-          {:codex_response_done, output_task, {:response_task_result, {:error, %{status: 502, code: "upstream_request_failed", message: "upstream request failed"}}, false}},
+          {:codex_response_done, output_task, {:response_task_result, {:error, %{status: 502, code: "upstream_request_failed", message: "upstream request failed"}}}},
           state
         )
       end)

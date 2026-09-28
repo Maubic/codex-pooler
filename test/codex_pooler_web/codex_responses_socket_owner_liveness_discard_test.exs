@@ -94,7 +94,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocketOwnerLivenessDiscardTest do
     # the turn.
     assert {:stop, :normal, close_detail, frames, closed_state} =
              CodexResponsesSocket.handle_info(
-               {:codex_response_done, active_turn, {:response_task_result, {:error, :owner_drained}, false}},
+               {:codex_response_done, active_turn, {:response_task_result, {:error, :owner_drained}}},
                queued_state
              )
 
@@ -155,7 +155,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocketOwnerLivenessDiscardTest do
     # terminal, and the socket must not fabricate a second one.
     assert {:stop, :normal, {1011, "websocket owner crashed"}, closed_state} =
              CodexResponsesSocket.handle_info(
-               {:codex_response_done, active_turn, {:response_task_result, {:error, :owner_crashed}, true}},
+               {:codex_response_done, active_turn, {:response_task_result, {:error, :owner_crashed}}},
                state
              )
 

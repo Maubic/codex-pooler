@@ -76,7 +76,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketForwardedPrevisibleInterruptionTes
     assert %{"type" => "error"} = CodexPooler.JSON.decode!(pushed)
     assert {:ok, state} = CodexResponsesSocket.handle_info(owner_frame(downstream, task, :complete), state)
 
-    task_error = {:response_task_result, {:error, %{status: 502, code: "upstream_request_failed", message: "upstream request failed"}}, false}
+    task_error = {:response_task_result, {:error, %{status: 502, code: "upstream_request_failed", message: "upstream request failed"}}}
     assert {:ok, state} = CodexResponsesSocket.handle_info({:codex_response_done, task, {:socket_response_result, :owner_completion_pending, task_error}}, state)
     assert is_nil(state.public_response_task_pid)
   end
