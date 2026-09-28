@@ -1,0 +1,1217 @@
+---
+import { QUICKSTART_URL, REPO_URL } from "../data/site";
+import { RELEASE_URL, RELEASE_VERSION } from "../data/github";
+import GitHubIcon from "./icons/GitHubIcon.astro";
+
+// A live routing console: clients on the left, Pools inside the gateway,
+// accounts on the right. Everything here is illustrative.
+const clients = [
+  { id: "cli", logo: "codex", name: "Codex CLI", proto: "WebSocket", pool: "product", ua: "codex_cli_rs" },
+  { id: "opencode", logo: "opencode", name: "OpenCode", proto: "HTTP SSE", pool: "product", ua: "opencode" },
+  { id: "cursor", logo: "cursor", name: "Cursor", proto: "/v1", pool: "product", ua: "cursor" },
+  { id: "sdk", logo: "python", name: "Agents SDK", proto: "/v1", pool: "automation", ua: "OpenAI/Python" },
+  { id: "hermes", logo: "hermesagent", name: "Hermes Agent", proto: "WebSocket", pool: "research", ua: "hermes-cli" },
+];
+
+const pools = [
+  { id: "product", name: "Product team", strategy: "bridge ring", accounts: ["a", "b", "c"] },
+  { id: "automation", name: "Automation", strategy: "quota first", accounts: ["d", "e"] },
+  { id: "research", name: "Research", strategy: "bridge ring", accounts: ["c", "f"] },
+];
+
+const accounts = [
+  { id: "a", name: "Account A", plan: "Pro", left: 72, bank: 1 },
+  { id: "b", name: "Account B", plan: "Team", left: 38, bank: 0 },
+  { id: "c", name: "Account C", plan: "Pro", left: 91, bank: 2 },
+  { id: "d", name: "Account D", plan: "Plus", left: 57, bank: 1 },
+  { id: "e", name: "Account E", plan: "Pro", left: 24, bank: 0 },
+  { id: "f", name: "Account F", plan: "Team", left: 83, bank: 0 },
+];
+---
+
+<section class="hero" aria-labelledby="hero-title">
+  <div class="hero-bg" aria-hidden="true"></div>
+
+  <div class="wrap hero-grid">
+    <div class="hero-copy">
+      <a class="release" href={RELEASE_URL}>
+        <span class="release-tag">New</span>
+        <span>v{RELEASE_VERSION} is out</span>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+      </a>
+
+      <h1 class="h1" id="hero-title">Your Codex accounts, <em>pooled your way.</em></h1>
+
+      <p class="lede">
+        Codex Pooler is a gateway you run yourself. Group your Codex accounts into Pools for your teams, agents and projects, give every tool its own key, and each request goes to an account with room to spare. Even tools without Codex support can run on your subscriptions, through the OpenAI-compatible API.
+      </p>
+
+      <div class="cta-row">
+        <a class="btn btn-primary" href={QUICKSTART_URL}>
+          Get started
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 10h11m-4.5-4.5L15 10l-4.5 4.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        </a>
+        <a class="btn" href={REPO_URL}>
+          <GitHubIcon />
+          Star on GitHub
+        </a>
+      </div>
+
+      <ul class="facts">
+        <li>Free to self-host</li>
+        <li>Docker or Kubernetes</li>
+      </ul>
+    </div>
+
+    <div class="console" data-console role="img" aria-label="Illustration: requests from several clients pass through Pools inside Codex Pooler and reach the Codex accounts with the most quota left.">
+      <div class="console-bar" aria-hidden="true">
+        <span class="dots"><i></i><i></i><i></i></span>
+        <span class="console-title">Live routing</span>
+        <span class="live"><i></i>live</span>
+      </div>
+
+      <div class="stage-labels" aria-hidden="true">
+        <p class="col-label">Clients</p>
+        <p class="col-label">Codex Pooler</p>
+        <p class="col-label">Accounts</p>
+      </div>
+      <div class="stage" data-stage aria-hidden="true">
+        <svg class="links" data-links></svg>
+
+        <div class="col col-clients">
+          {
+            clients.map((client) => (
+              <div class="client" data-client={client.id} data-pool={client.pool} data-proto={client.proto} data-ua={client.ua}>
+                <span class="client-logo">
+                  <span class="logo" style={`--src:url(/logos/${client.logo}.svg)`} />
+                </span>
+                <span class="client-text">
+                  <span class="client-name">{client.name}</span>
+                  <span class="proto">{client.proto}</span>
+                </span>
+              </div>
+            ))
+          }
+        </div>
+
+        <div class="col col-gateway">
+          <div class="gateway">
+            <div class="checks">
+              <span data-check>Key</span>
+              <i></i>
+              <span data-check>Pool</span>
+              <i></i>
+              <span data-check>Eligible</span>
+              <i></i>
+              <span data-check>Route</span>
+            </div>
+            {
+              pools.map((pool) => (
+                <div class={`pool tone-${pool.id}`} data-pool-row={pool.id} data-accounts={pool.accounts.join(",")}>
+                  <span class="pool-text">
+                    <b>{pool.name}</b>
+                    <small>{pool.strategy}</small>
+                  </span>
+                  <span class="pool-rate" data-rate>0/min</span>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+
+        <div class="col col-accounts">
+          {
+            accounts.map((account) => (
+              <div class="acct" data-acct={account.id} data-left={account.left} data-bank={account.bank}>
+                <span class="acct-top">
+                  <b>{account.name}</b>
+                  <span class="plan">{account.plan}</span>
+                </span>
+                <span class="meter">
+                  <i data-fill style={`width:${account.left}%`} />
+                </span>
+                <span class="acct-foot">
+                  <span data-pct>{account.left}% left</span>
+                  <span class="pips" data-pips title="Saved resets">
+                    {[0, 1, 2].map((i) => <i class={i < account.bank ? "on" : undefined} />)}
+                  </span>
+                </span>
+                <span class="acct-state" data-state />
+              </div>
+            ))
+          }
+        </div>
+      </div>
+
+      <ol class="log" data-log aria-hidden="true">
+        <li><span class="t">--:--:--</span><span class="m">WS</span><span class="d">codex_cli_rs → Product team → Account C</span><span class="s">200</span><span class="l">1.8s</span></li>
+        <li><span class="t">--:--:--</span><span class="m">v1</span><span class="d">OpenAI/Python → Automation → Account D</span><span class="s">200</span><span class="l">2.3s</span></li>
+        <li><span class="t">--:--:--</span><span class="m">SSE</span><span class="d">opencode → Product team → Account A</span><span class="s">200</span><span class="l">1.1s</span></li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<style>
+  .hero {
+    position: relative;
+    padding-top: clamp(20px, 3.5vw, 44px);
+    padding-bottom: clamp(36px, 5vw, 64px);
+  }
+
+  /* The glow fades out before the section ends, so the next band never cuts it. */
+  .hero-bg {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(760px 520px at 80% 40%, rgb(255 170 60 / 0.18), transparent 62%),
+      radial-gradient(620px 420px at 62% 70%, rgb(51 176 255 / 0.1), transparent 64%),
+      radial-gradient(900px 600px at 8% 0%, rgb(255 255 255 / 0.9), transparent 60%);
+    -webkit-mask-image: linear-gradient(#000 55%, transparent);
+    mask-image: linear-gradient(#000 55%, transparent);
+  }
+
+  .hero-grid {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+    align-items: center;
+    gap: clamp(24px, 4vw, 56px);
+    min-height: min(680px, calc(100svh - var(--nav-h) - 120px));
+  }
+
+  .release {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 26px;
+    padding: 6px 12px 6px 6px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.75);
+    box-shadow: var(--shadow-sm);
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--ink-2);
+    transition: border-color 0.2s, transform 0.2s;
+  }
+
+  .release:hover {
+    border-color: #f5c27a;
+    transform: translateY(-1px);
+  }
+
+  .release svg {
+    width: 15px;
+    height: 15px;
+  }
+
+  .release-tag {
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: var(--orange);
+    color: #1a1206;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .h1 {
+    font-size: clamp(3rem, 6vw, 5.5rem);
+    font-weight: 850;
+    line-height: 0.93;
+    letter-spacing: -0.032em;
+    text-wrap: balance;
+  }
+
+  .h1 em {
+    display: inline-block;
+    position: relative;
+    white-space: nowrap;
+  }
+
+  .h1 em::after {
+    content: "";
+    position: absolute;
+    left: 2%;
+    right: 4%;
+    bottom: -0.21em;
+    height: 0.2em;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 300 20' preserveAspectRatio='none'%3E%3Cpath d='M3 14C60 5 140 3 297 9' fill='none' stroke='%2333b0ff' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E") center / 100% 100% no-repeat;
+    opacity: 0.85;
+  }
+
+  .hero .lede {
+    max-width: 34em;
+    margin-top: 28px;
+  }
+
+  .cta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 34px;
+  }
+
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 22px;
+    margin-top: 30px;
+    font-size: 15.5px;
+    font-weight: 500;
+    color: var(--ink-2);
+  }
+
+  .facts li {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .facts li::before {
+    content: "";
+    width: 18px;
+    height: 18px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--green-soft) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m4.5 8.2 2.3 2.3 4.7-5' fill='none' stroke='%230e7c5a' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 14px no-repeat;
+  }
+
+  /* console --------------------------------------------------- */
+
+  .console {
+    container-type: inline-size;
+    --c-bg: #121110;
+    --c-panel: #1b1916;
+    --c-line: rgb(255 255 255 / 0.08);
+    --c-ink: #efe8dd;
+    --c-ink-2: #a39a8e;
+    --c-ink-3: #756d62;
+    position: relative;
+    width: 100%;
+    max-width: 640px;
+    justify-self: end;
+    border-radius: 18px;
+    background:
+      linear-gradient(rgb(255 255 255 / 0.028) 1px, transparent 1px) 0 0 / 28px 28px,
+      linear-gradient(90deg, rgb(255 255 255 / 0.028) 1px, transparent 1px) 0 0 / 28px 28px,
+      var(--c-bg);
+    color: var(--c-ink);
+    box-shadow: 0 2px 6px rgb(23 20 15 / 0.1), 0 20px 40px -24px rgb(23 20 15 / 0.45), 0 0 0 1px rgb(255 255 255 / 0.06) inset;
+    overflow: hidden;
+  }
+
+  .console-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 40px;
+    padding-inline: 14px;
+    border-bottom: 1px solid var(--c-line);
+    background: rgb(255 255 255 / 0.02);
+  }
+
+  .dots {
+    display: inline-flex;
+    gap: 6px;
+  }
+
+  .dots i {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #3a3631;
+  }
+
+  .console-title {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--c-ink-2);
+  }
+
+  .live {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #7ee2b8;
+  }
+
+  .live i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #3ddc97;
+    box-shadow: 0 0 10px #3ddc97;
+    animation: blink 1.6s ease-in-out infinite;
+  }
+
+  @keyframes blink {
+    50% {
+      opacity: 0.4;
+    }
+  }
+
+  .stage,
+  .stage-labels {
+    display: grid;
+    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.25fr) minmax(0, 0.95fr);
+    gap: 20px;
+    padding-inline: 16px;
+  }
+
+  .stage-labels {
+    padding-top: 14px;
+  }
+
+  .stage {
+    position: relative;
+    padding-block: 10px 16px;
+  }
+
+  .links {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .links :global(path) {
+    fill: none;
+    stroke: rgb(255 255 255 / 0.13);
+    stroke-width: 1.3;
+  }
+
+  .links :global(path.out) {
+    stroke: var(--tone);
+    stroke-opacity: 0.3;
+  }
+
+  .links :global(circle) {
+    fill: var(--tone, #fff);
+    filter: drop-shadow(0 0 4px var(--tone, #fff));
+  }
+
+  .col {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    align-content: center;
+    gap: 8px;
+  }
+
+  .col-label {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--c-ink-3);
+  }
+
+  .client {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 9px;
+    border: 1px solid var(--c-line);
+    border-radius: 10px;
+    background: var(--c-panel);
+    transition: border-color 0.3s;
+  }
+
+  .client.pulse {
+    border-color: rgb(255 255 255 / 0.26);
+  }
+
+  .client-logo {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    flex: none;
+    border-radius: 7px;
+    background: rgb(255 255 255 / 0.06);
+    color: #f3ece2;
+    --logo-size: 15px;
+  }
+
+  .client-text {
+    display: grid;
+    min-width: 0;
+    line-height: 1.15;
+  }
+
+  .client-name {
+    font-size: 13px;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .proto {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--c-ink-2);
+  }
+
+  .gateway {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+    padding: 10px;
+    border: 1px solid rgb(255 153 0 / 0.3);
+    border-radius: 14px;
+    background: linear-gradient(180deg, rgb(255 153 0 / 0.08), rgb(255 153 0 / 0.02));
+    box-shadow: 0 0 0 4px rgb(255 153 0 / 0.04);
+  }
+
+  .checks {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    min-width: 0;
+    margin-bottom: 2px;
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--c-ink-3);
+  }
+
+  .checks span {
+    flex: none;
+    padding: 3px 4px;
+    border-radius: 5px;
+    background: rgb(255 255 255 / 0.04);
+    transition: background-color 0.2s, color 0.2s;
+  }
+
+  .checks span.on {
+    background: rgb(61 220 151 / 0.16);
+    color: #7ee2b8;
+  }
+
+  .checks i {
+    flex: 1 1 0;
+    height: 1px;
+    min-width: 2px;
+    background: var(--c-line);
+  }
+
+  /* Narrower consoles stack the four checks in two rows. */
+  @container (max-width: 620px) {
+    .checks {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+    }
+
+    .checks span {
+      text-align: center;
+    }
+
+    .checks i {
+      display: none;
+    }
+  }
+
+  .pool {
+    --tone: #ff9900;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 9px;
+    border: 1px solid var(--c-line);
+    border-left: 3px solid var(--tone);
+    border-radius: 9px;
+    background: var(--c-panel);
+    transition: box-shadow 0.3s;
+  }
+
+  .pool.tone-automation {
+    --tone: #5b8dff;
+  }
+
+  .pool.tone-research {
+    --tone: #a084ff;
+  }
+
+  .pool.pulse {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tone) 22%, transparent), 0 0 18px -4px var(--tone);
+  }
+
+  .pool-text {
+    display: grid;
+    min-width: 0;
+    line-height: 1.15;
+  }
+
+  .pool-text b {
+    overflow: hidden;
+    font-size: 13px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .pool-text small {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--c-ink-3);
+  }
+
+  .pool-rate {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--c-ink-2);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .acct {
+    display: grid;
+    gap: 4px;
+    padding: 7px 9px;
+    border: 1px solid var(--c-line);
+    border-radius: 10px;
+    background: var(--c-panel);
+    transition: border-color 0.3s;
+  }
+
+  .acct.hit {
+    border-color: rgb(255 255 255 / 0.24);
+  }
+
+  .acct.refill-saved {
+    animation: refill-saved 0.9s ease-out;
+  }
+
+  @keyframes refill-saved {
+    from {
+      box-shadow: 0 0 0 0 rgb(160 132 255 / 0.6);
+    }
+    to {
+      box-shadow: 0 0 0 10px rgb(160 132 255 / 0);
+    }
+  }
+
+  .acct-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .acct-top b {
+    font-size: 12.5px;
+    white-space: nowrap;
+  }
+
+  .plan {
+    padding: 1px 6px;
+    border-radius: 5px;
+    background: rgb(255 153 0 / 0.14);
+    color: #ffc266;
+    font-size: 9.5px;
+    font-weight: 700;
+  }
+
+  .meter {
+    display: block;
+    height: 4px;
+    border-radius: 99px;
+    background: rgb(255 255 255 / 0.08);
+    overflow: hidden;
+  }
+
+  .meter i {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: #3ddc97;
+    transition: background-color 0.4s;
+  }
+
+  .meter i.mid {
+    background: #f0a52e;
+  }
+
+  .meter i.low {
+    background: #ec6a6a;
+  }
+
+  .meter i.saved {
+    background: #a084ff;
+  }
+
+  .acct-foot {
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--c-ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .acct {
+    position: relative;
+  }
+
+  .acct-state {
+    position: absolute;
+    right: 9px;
+    bottom: 6px;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: var(--c-panel);
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+  }
+
+  .acct-state:empty {
+    display: none;
+  }
+
+  .pips {
+    display: inline-flex;
+    gap: 3px;
+  }
+
+  .pips i {
+    width: 8px;
+    height: 4px;
+    border-radius: 2px;
+    background: rgb(255 255 255 / 0.1);
+  }
+
+  .pips i.on {
+    background: #a084ff;
+  }
+
+  .pips i.grant {
+    animation: pip-grant 0.9s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  .pips i.spend {
+    animation: pip-spend 0.8s ease-out;
+  }
+
+  @keyframes pip-grant {
+    0% {
+      transform: scale(0.2);
+    }
+    60% {
+      transform: scale(1.6);
+      box-shadow: 0 0 10px #a084ff;
+    }
+  }
+
+  @keyframes pip-spend {
+    30% {
+      transform: translateY(-4px) scale(1.4);
+      background: #a084ff;
+      box-shadow: 0 0 10px #a084ff;
+    }
+  }
+
+  .acct-state.limit {
+    color: #ec6a6a;
+  }
+
+  .acct-state.reset {
+    color: #7ee2b8;
+  }
+
+  .acct-state.saved {
+    color: #b9a6ff;
+  }
+
+  .log {
+    display: grid;
+    align-content: start;
+    height: 86px;
+    overflow: hidden;
+    padding: 8px 14px 10px;
+    border-top: 1px solid var(--c-line);
+    background: rgb(0 0 0 / 0.22);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--c-ink-2);
+  }
+
+  .log :global(li) {
+    display: grid;
+    grid-template-columns: 58px 30px minmax(0, 1fr) 30px 34px;
+    align-items: center;
+    gap: 8px;
+    height: 22px;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .log :global(li.enter) {
+    animation: log-in 0.4s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+
+  @keyframes log-in {
+    from {
+      height: 0;
+      opacity: 0;
+    }
+    to {
+      height: 22px;
+      opacity: 1;
+    }
+  }
+
+  .log :global(.t) {
+    color: var(--c-ink-3);
+  }
+
+  .log :global(.m) {
+    color: #9cc4ff;
+  }
+
+  .log :global(.d) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--c-ink);
+  }
+
+  .log :global(.s) {
+    color: #7ee2b8;
+  }
+
+  .log :global(li.sys .d),
+  .log :global(li.sys .s) {
+    color: #b9a6ff;
+  }
+
+  @media (max-width: 1000px) {
+    .hero-grid {
+      grid-template-columns: 1fr;
+      min-height: 0;
+    }
+
+    .console {
+      justify-self: center;
+    }
+  }
+
+  @media (max-width: 600px) {
+    .stage {
+      grid-template-columns: minmax(0, 0.85fr) minmax(0, 1fr) minmax(0, 0.95fr);
+      gap: 14px;
+      padding: 12px 10px;
+    }
+
+    .proto,
+    .pool-text small,
+    .pool-rate,
+    .checks,
+    .acct-foot,
+    .plan {
+      display: none;
+    }
+
+    .client {
+      padding: 6px;
+      gap: 6px;
+    }
+
+    .client-logo {
+      width: 22px;
+      height: 22px;
+      --logo-size: 13px;
+    }
+
+    .client-name,
+    .pool-text b,
+    .acct-top b {
+      font-size: 11px;
+    }
+
+    .acct[data-acct="e"],
+    .acct[data-acct="f"] {
+      display: none;
+    }
+
+    .stage-labels {
+      grid-template-columns: minmax(0, 0.85fr) minmax(0, 1fr) minmax(0, 0.95fr);
+      gap: 14px;
+      padding-inline: 10px;
+    }
+
+    .log :global(li) {
+      grid-template-columns: 24px minmax(0, 1fr) 26px;
+      gap: 6px;
+      font-size: 10px;
+    }
+
+    .log :global(.t),
+    .log :global(.l) {
+      display: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .live i {
+      animation: none;
+    }
+  }
+</style>
+
+<script>
+  type Account = {
+    id: string;
+    el: HTMLElement;
+    name: string;
+    fill: HTMLElement;
+    pct: HTMLElement;
+    state: HTMLElement;
+    left: number;
+    shown: number;
+    bank: number;
+    pips: HTMLElement[];
+    flashUntil: number;
+    flash: "saved" | null;
+    redeeming: boolean;
+  };
+
+  const consoleEl = document.querySelector<HTMLElement>("[data-console]");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (consoleEl) initConsole(consoleEl);
+
+  function initConsole(root: HTMLElement) {
+    const stage = root.querySelector<HTMLElement>("[data-stage]")!;
+    const svg = root.querySelector<SVGSVGElement>("[data-links]")!;
+    const log = root.querySelector<HTMLElement>("[data-log]")!;
+    const checks = Array.from(root.querySelectorAll<HTMLElement>("[data-check]"));
+    const NS = "http://www.w3.org/2000/svg";
+    const TONES: Record<string, string> = { product: "#ff9900", automation: "#5b8dff", research: "#a084ff" };
+    const POOL_NAMES: Record<string, string> = { product: "Product team", automation: "Automation", research: "Research" };
+    const PROTO_SHORT: Record<string, string> = { WebSocket: "WS", "HTTP SSE": "SSE", "/v1": "v1" };
+
+    const clients = Array.from(root.querySelectorAll<HTMLElement>("[data-client]"));
+    const pools = new Map(Array.from(root.querySelectorAll<HTMLElement>("[data-pool-row]")).map((el) => [el.dataset.poolRow!, el]));
+    const accounts = new Map<string, Account>();
+    root.querySelectorAll<HTMLElement>("[data-acct]").forEach((el) => {
+      const left = Number(el.dataset.left) / 100;
+      accounts.set(el.dataset.acct!, {
+        id: el.dataset.acct!,
+        el,
+        name: el.querySelector("b")!.textContent ?? "",
+        fill: el.querySelector("[data-fill]")!,
+        pct: el.querySelector("[data-pct]")!,
+        state: el.querySelector("[data-state]")!,
+        left,
+        shown: left,
+        bank: Number(el.dataset.bank ?? 0),
+        pips: Array.from(el.querySelectorAll<HTMLElement>("[data-pips] i")),
+        flashUntil: 0,
+        flash: null,
+        redeeming: false,
+      });
+    });
+
+    const visibleAccount = (account: Account) => getComputedStyle(account.el).display !== "none";
+    const hits = new Map<string, number[]>();
+    const links = new Map<string, SVGPathElement>();
+
+    interface Packet {
+      legs: SVGPathElement[];
+      leg: number;
+      start: number;
+      dot: SVGCircleElement;
+      client: HTMLElement;
+      pool: string;
+      account: Account;
+    }
+    const packets: Packet[] = [];
+
+    /* geometry ---------------------------------------------------- */
+
+    const box = (el: Element) => {
+      const base = stage.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
+      return { l: r.left - base.left, r: r.right - base.left, cy: r.top - base.top + r.height / 2 };
+    };
+
+    const curve = (x1: number, y1: number, x2: number, y2: number) => {
+      const dx = (x2 - x1) * 0.55;
+      return `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+    };
+
+    const link = (key: string) => {
+      let path = links.get(key);
+      if (!path) {
+        path = document.createElementNS(NS, "path");
+        svg.prepend(path);
+        links.set(key, path);
+      }
+      return path;
+    };
+
+    function layout() {
+      const base = stage.getBoundingClientRect();
+      svg.setAttribute("viewBox", `0 0 ${base.width} ${base.height}`);
+      for (const client of clients) {
+        const c = box(client);
+        const p = box(pools.get(client.dataset.pool!)!);
+        link(`in:${client.dataset.client}`).setAttribute("d", curve(c.r, c.cy, p.l, p.cy));
+      }
+      for (const [poolId, poolEl] of pools) {
+        const p = box(poolEl);
+        for (const accountId of poolEl.dataset.accounts!.split(",")) {
+          const account = accounts.get(accountId)!;
+          const path = link(`out:${poolId}:${accountId}`);
+          path.classList.add("out");
+          path.style.setProperty("--tone", TONES[poolId]);
+          if (!visibleAccount(account)) {
+            path.setAttribute("d", "");
+            continue;
+          }
+          const a = box(account.el);
+          path.setAttribute("d", curve(p.r, p.cy, a.l, a.cy));
+        }
+      }
+    }
+
+    /* events -------------------------------------------------------- */
+
+    const clock = () => new Date().toLocaleTimeString("en-GB", { hour12: false });
+
+    function addLog(parts: string[], system = false) {
+      const li = document.createElement("li");
+      li.className = system ? "enter sys" : "enter";
+      ["t", "m", "d", "s", "l"].forEach((cls, i) => {
+        const span = document.createElement("span");
+        span.className = cls;
+        span.textContent = parts[i] ?? "";
+        li.append(span);
+      });
+      log.prepend(li);
+      while (log.children.length > 3) log.lastElementChild?.remove();
+    }
+
+    const paintPips = (account: Account) => account.pips.forEach((pip, i) => pip.classList.toggle("on", i < account.bank));
+
+    // Quota only drains with traffic. An empty account comes back all at once
+    // when auto-redeem spends one of its saved resets.
+    function redeem(account: Account, now: number) {
+      account.redeeming = false;
+      if (account.bank === 0) return;
+      const pip = account.pips[account.bank - 1];
+      account.bank -= 1;
+      pip?.classList.remove("grant", "spend");
+      void pip?.offsetWidth;
+      pip?.classList.add("spend");
+      window.setTimeout(() => paintPips(account), 700);
+      account.left = 1;
+      account.shown = 1;
+      account.flash = "saved";
+      account.flashUntil = now + 1800;
+      account.el.classList.remove("refill-saved");
+      void account.el.offsetWidth;
+      account.el.classList.add("refill-saved");
+      addLog([clock(), "", `Saved reset used on ${account.name} · back to 100%`, "ok", ""], true);
+    }
+
+    // Now and then OpenAI banks a saved reset on an account; if that account
+    // is empty, auto-redeem spends it straight away.
+    function grant() {
+      const candidates = [...accounts.values()].filter((a) => a.bank < 3 && visibleAccount(a));
+      if (!candidates.length) return;
+      candidates.sort((x, y) => (x.left <= 0.08 ? 0 : 1) - (y.left <= 0.08 ? 0 : 1) || x.bank - y.bank || x.left - y.left);
+      const account = candidates[0];
+      account.bank += 1;
+      paintPips(account);
+      const pip = account.pips[account.bank - 1];
+      pip?.classList.remove("grant", "spend");
+      void pip?.offsetWidth;
+      pip?.classList.add("grant");
+      addLog([clock(), "", `OpenAI banked a saved reset on ${account.name}`, "+1", ""], true);
+      if (account.left <= 0.08 && !account.redeeming) {
+        account.redeeming = true;
+        window.setTimeout(() => redeem(account, performance.now()), 900);
+      }
+    }
+
+    function choose(poolId: string): Account | null {
+      const usable = pools
+        .get(poolId)!
+        .dataset.accounts!.split(",")
+        .map((id) => accounts.get(id)!)
+        .filter((account) => account.left > 0.08 && visibleAccount(account));
+      if (!usable.length) return null;
+      usable.sort((x, y) => y.left - x.left);
+      return usable[Math.random() < 0.72 ? 0 : Math.min(1, usable.length - 1)];
+    }
+
+    let lastClient = -1;
+    function emit(now: number) {
+      let index = Math.floor(Math.random() * clients.length);
+      if (index === lastClient) index = (index + 1) % clients.length;
+      lastClient = index;
+      const client = clients[index];
+      const poolId = client.dataset.pool!;
+      const account = choose(poolId);
+      if (!account) return;
+      const dot = document.createElementNS(NS, "circle");
+      dot.setAttribute("r", "3.2");
+      dot.style.setProperty("--tone", TONES[poolId]);
+      svg.append(dot);
+      packets.push({ legs: [links.get(`in:${client.dataset.client}`)!, links.get(`out:${poolId}:${account.id}`)!], leg: 0, start: now, dot, client, pool: poolId, account });
+      client.classList.add("pulse");
+      window.setTimeout(() => client.classList.remove("pulse"), 300);
+    }
+
+    function lightChecks() {
+      checks.forEach((check, i) => {
+        window.setTimeout(() => {
+          check.classList.add("on");
+          window.setTimeout(() => check.classList.remove("on"), 240);
+        }, i * 65);
+      });
+    }
+
+    function arrive(packet: Packet, now: number) {
+      const account = packet.account;
+      account.left = Math.max(0, account.left - (0.028 + Math.random() * 0.024));
+      if (account.left < 0.03) account.left = 0;
+      account.el.classList.add("hit");
+      window.setTimeout(() => account.el.classList.remove("hit"), 220);
+      if (account.left <= 0.08 && account.bank > 0 && !account.redeeming) {
+        account.redeeming = true;
+        window.setTimeout(() => redeem(account, performance.now()), 700);
+      }
+      const proto = PROTO_SHORT[packet.client.dataset.proto ?? ""] ?? "v1";
+      const latency = (0.8 + Math.random() * 2.4).toFixed(1);
+      addLog([clock(), proto, `${packet.client.dataset.ua} → ${POOL_NAMES[packet.pool]} → ${account.name}`, "200", `${latency}s`]);
+      const list = hits.get(packet.pool) ?? [];
+      list.push(now);
+      hits.set(packet.pool, list);
+    }
+
+    function render(now: number) {
+      for (const account of accounts.values()) {
+        account.shown = account.left >= account.shown ? account.left : account.shown + (account.left - account.shown) * 0.2;
+        const left = Math.max(0, Math.min(1, account.shown));
+        account.fill.style.width = `${left * 100}%`;
+        const flashing = account.flash !== null && now < account.flashUntil;
+        account.fill.className = flashing && account.flash === "saved" ? "saved" : left > 0.5 ? "" : left > 0.2 ? "mid" : "low";
+        const text = `${Math.round(left * 100)}% left`;
+        if (account.pct.textContent !== text) account.pct.textContent = text;
+        const [label, cls] = flashing ? ["saved reset used", "saved"] : account.left <= 0.08 ? (account.redeeming ? ["redeeming…", "saved"] : ["limit", "limit"]) : ["", ""];
+        if (account.state.textContent !== label) account.state.textContent = label;
+        account.state.className = `acct-state ${cls}`;
+      }
+      for (const [poolId, poolEl] of pools) {
+        const list = (hits.get(poolId) ?? []).filter((t) => now - t < 10000);
+        hits.set(poolId, list);
+        const rate = poolEl.querySelector<HTMLElement>("[data-rate]")!;
+        const text = `${list.length * 6}/min`;
+        if (rate.textContent !== text) rate.textContent = text;
+      }
+    }
+
+    /* loop ------------------------------------------------------------ */
+
+    let raf = 0;
+    let running = false;
+    let nextEmit = 0;
+    let nextGrant = performance.now() + 9000;
+    let pausedAt = 0;
+
+    function frame(now: number) {
+      if (now >= nextEmit && packets.length < 7) {
+        emit(now);
+        nextEmit = now + 360 + Math.random() * 400;
+      }
+      for (let i = packets.length - 1; i >= 0; i -= 1) {
+        const packet = packets[i];
+        const path = packet.legs[packet.leg];
+        const duration = packet.leg === 0 ? 680 : 540;
+        const t = Math.min(1, (now - packet.start) / duration);
+        const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        const length = path.getTotalLength();
+        if (length > 0) {
+          const p = path.getPointAtLength(length * e);
+          packet.dot.setAttribute("cx", String(p.x));
+          packet.dot.setAttribute("cy", String(p.y));
+        }
+        if (t >= 1) {
+          if (packet.leg === 0) {
+            packet.leg = 1;
+            packet.start = now;
+            const poolEl = pools.get(packet.pool)!;
+            poolEl.classList.remove("pulse");
+            void poolEl.offsetWidth;
+            poolEl.classList.add("pulse");
+            window.setTimeout(() => poolEl.classList.remove("pulse"), 380);
+            lightChecks();
+          } else {
+            arrive(packet, now);
+            packet.dot.remove();
+            packets.splice(i, 1);
+          }
+        }
+      }
+      if (now >= nextGrant) {
+        grant();
+        nextGrant = now + 7000 + Math.random() * 4000;
+      }
+      render(now);
+      raf = requestAnimationFrame(frame);
+    }
+
+    function setRunning(value: boolean) {
+      if (value === running) return;
+      running = value;
+      if (running) {
+        const now = performance.now();
+        if (pausedAt) {
+          const delta = now - pausedAt;
+          nextGrant += delta;
+          for (const account of accounts.values()) account.flashUntil += delta;
+          for (const packet of packets) packet.start += delta;
+        }
+        nextEmit = now + 200;
+        raf = requestAnimationFrame(frame);
+      } else {
+        pausedAt = performance.now();
+        cancelAnimationFrame(raf);
+      }
+    }
+
+    new ResizeObserver(() => layout()).observe(stage);
+    layout();
+    log.querySelectorAll(".t").forEach((cell) => (cell.textContent = clock()));
+    render(performance.now());
+    if (reduceMotion) return;
+
+    let visible = false;
+    new IntersectionObserver(([entry]) => {
+      visible = entry.isIntersecting;
+      setRunning(visible && !document.hidden);
+    }).observe(root);
+    document.addEventListener("visibilitychange", () => setRunning(visible && !document.hidden));
+  }
+</script>

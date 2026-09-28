@@ -1,0 +1,146 @@
+---
+import { DOCS_URL, HELM_URL, LICENSE_URL, QUICKSTART_URL, RELEASES_URL, REPO_URL, docs } from "../data/site";
+
+const columns = [
+  {
+    title: "Product",
+    links: [
+      { href: "#how", label: "How it works" },
+      { href: "#pools", label: "Pools" },
+      { href: "#compat", label: "OpenAI-compatible" },
+      { href: "#features", label: "Features" },
+      { href: "#dashboard", label: "Dashboard" },
+      { href: "#faq", label: "FAQ" },
+    ],
+  },
+  {
+    title: "Docs",
+    links: [
+      { href: QUICKSTART_URL, label: "Quick start" },
+      { href: docs("/clients/codex-cli-desktop/"), label: "Setup guides" },
+      { href: docs("/deployment/docker-compose/"), label: "Deployment" },
+      { href: DOCS_URL, label: "All docs" },
+    ],
+  },
+  {
+    title: "Project",
+    links: [
+      { href: REPO_URL, label: "GitHub" },
+      { href: RELEASES_URL, label: "Releases" },
+      { href: HELM_URL, label: "Helm chart" },
+      { href: LICENSE_URL, label: "License" },
+    ],
+  },
+];
+---
+
+<footer class="footer">
+  <div class="wrap">
+    <div class="foot-top">
+      <div class="foot-brand">
+        <a class="brand" href="/" aria-label="Codex Pooler home">
+          <img src="/favicon.svg" width="36" height="36" alt="" />
+          <span>Codex Pooler</span>
+        </a>
+        <p>The self-hosted gateway for your Codex accounts, pooled your way.</p>
+      </div>
+      {
+        columns.map((column) => (
+          <nav class="foot-col" aria-label={column.title}>
+            <p class="foot-title">{column.title}</p>
+            {column.links.map((link) => (
+              <a href={link.href}>{link.label}</a>
+            ))}
+          </nav>
+        ))
+      }
+    </div>
+
+    <div class="foot-bottom">
+      <p>© {new Date().getFullYear()} iCoreTech · Source available under the Elastic License 2.0</p>
+      <p>OpenAI and Codex are trademarks of OpenAI. All other product names, logos and brands shown on this site belong to their respective owners and appear only to show which tools Codex Pooler works with. Codex Pooler is an independent project, not affiliated with, sponsored or endorsed by OpenAI or by the makers of any tool shown here.</p>
+    </div>
+  </div>
+</footer>
+
+<style>
+  .footer {
+    padding-block: 64px 36px;
+    background: var(--night);
+    color: var(--night-ink-2);
+  }
+
+  .foot-top {
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) repeat(3, minmax(0, 1fr));
+    gap: 32px;
+    padding-bottom: 40px;
+    border-bottom: 1px solid var(--night-line);
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 11px;
+    font-size: 21px;
+    font-weight: 850;
+    text-transform: uppercase;
+    color: var(--orange);
+  }
+
+  .foot-brand p {
+    max-width: 22em;
+    margin-top: 14px;
+    font-size: 16px;
+  }
+
+  .foot-col {
+    display: grid;
+    align-content: start;
+    gap: 10px;
+    font-size: 16px;
+  }
+
+  .foot-title {
+    margin-bottom: 4px;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--night-ink-3);
+  }
+
+  .foot-col a {
+    color: var(--night-ink);
+    transition: color 0.15s;
+  }
+
+  .foot-col a:hover {
+    color: var(--orange-2);
+  }
+
+  .foot-bottom {
+    display: grid;
+    gap: 8px;
+    padding-top: 26px;
+    font-size: 13.5px;
+    color: var(--night-ink-3);
+  }
+
+  @media (max-width: 820px) {
+    .foot-top {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .foot-brand {
+      grid-column: 1 / -1;
+    }
+  }
+
+  @media (max-width: 460px) {
+    .foot-top {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+</style>

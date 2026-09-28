@@ -1,0 +1,1633 @@
+---
+// "Flip the switch": the same tools and accounts, first wired one-to-one,
+// then through Codex Pooler with two Pools. An illustrative model.
+const tools = [
+  { id: "cli", logo: "codex", name: "Codex CLI", pool: "product" },
+  { id: "cursor", logo: "cursor", name: "Cursor", pool: "product" },
+  { id: "opencode", logo: "opencode", name: "OpenCode", pool: "automation" },
+  { id: "openhands", logo: "openhands", name: "OpenHands", pool: "automation" },
+];
+
+const pools = [
+  { id: "product", name: "Product team", accounts: ["a", "b"] },
+  { id: "automation", name: "Automation", accounts: ["c", "d"] },
+];
+
+// Quota bars show what is left. Nothing refills on its own here: an account
+// that runs dry comes back only when a saved reset is spent on it.
+const accounts = [
+  { id: "a", name: "Account A", plan: "Pro", bank: 2 },
+  { id: "b", name: "Account B", plan: "Team", bank: 1 },
+  { id: "c", name: "Account C", plan: "Plus", bank: 1, expires: true },
+  { id: "d", name: "Account D", plan: "Pro", bank: 0 },
+];
+
+const bankText = (n: number) => (n === 0 ? "No saved resets" : `${n} saved reset${n === 1 ? "" : "s"}`);
+const poolNote = (ids: string[]) => `Accounts ${ids.map((id) => id.toUpperCase()).join(" · ")}`;
+---
+
+<section class="section sim-section" id="how" aria-labelledby="how-title">
+  <div class="wrap">
+    <header class="section-head center" data-reveal>
+      <p class="eyebrow">How it works</p>
+      <h2 class="h2" id="how-title">Flip the switch.</h2>
+      <p class="lede">
+        Without Pooler, each tool is tied to one account: when it runs out the tool stalls, other accounts sit idle, and saved resets expire before anyone uses them. With Pooler, each Pool shares its accounts among its tools, and saved resets get used when a Pool runs dry or just before they expire.
+      </p>
+    </header>
+
+    <div class="sim card" data-sim data-mode="off" data-reveal>
+      <div class="sim-top">
+        <div class="switch" role="group" aria-label="Compare the two setups">
+          <button type="button" class="switch-opt" data-set-mode="off" aria-pressed="true">Without Pooler</button>
+          <button type="button" class="switch-opt" data-set-mode="on" aria-pressed="false">With Pooler</button>
+          <span class="switch-thumb" aria-hidden="true"></span>
+        </div>
+        <p class="status" data-status-badge data-tone="bad" aria-live="polite">
+          <span class="led" aria-hidden="true"></span>
+          <span class="status-text" data-caption>2 tools stuck · Account B's saved reset sits unused</span>
+        </p>
+      </div>
+
+      <div class="stage" data-stage>
+        <svg class="wires" data-wires aria-hidden="true"></svg>
+
+        <div class="col tools">
+          <p class="col-head">Your tools</p>
+          <div class="tool-list">
+            {
+              tools.map((tool) => (
+                <div class="tool" data-tool={tool.id} data-pool={tool.pool}>
+                  <span class="tool-logo">
+                    <span class="logo" style={`--src:url(/logos/${tool.logo}.svg)`} />
+                  </span>
+                  <span class="tool-body">
+                    <span class="tool-name">{tool.name}</span>
+                    <span class="tool-status" data-status>
+                      Working
+                    </span>
+                    <span class="tool-cred" data-cred>
+                      Account token stored here
+                    </span>
+                  </span>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+
+        <div class="col gw-col">
+          <div class="gw" data-gw>
+            <p class="gw-head">
+              <img src="/favicon.svg" width="22" height="22" alt="" />
+              <span>Codex Pooler</span>
+            </p>
+            <div class="gw-pools">
+              {
+                pools.map((pool) => (
+                  <div class={`gw-pool tone-${pool.id}`} data-pool-node={pool.id} data-accounts={pool.accounts.join(",")}>
+                    <b data-pool-name>{pool.name}</b>
+                    <small data-pool-note>{poolNote(pool.accounts)}</small>
+                  </div>
+                ))
+              }
+            </div>
+          </div>
+          <div class="no-hub" aria-hidden="true">No gateway</div>
+        </div>
+
+        <div class="col accounts">
+          <p class="col-head">Your Codex accounts</p>
+          <div class="acct-list">
+            {
+              accounts.map((account) => (
+                <div class="acct" data-acct={account.id} data-bank={account.bank} data-plan={account.plan}>
+                  <div class="acct-head">
+                    <span class="acct-name">{account.name}</span>
+                    <span class="plan">{account.plan}</span>
+                  </div>
+                  <div class="meter" aria-hidden="true">
+                    <span class="meter-fill" data-fill />
+                  </div>
+                  <div class="acct-foot">
+                    <span data-left>–</span>
+                    <span class="acct-state" data-state />
+                  </div>
+                  <div class="bank">
+                    <span class="bank-segs" data-segs>
+                      {[0, 1, 2].map((i) => (
+                        <i class={i < account.bank ? "on" : undefined} />
+                      ))}
+                    </span>
+                    <span class="bank-label" data-bank-label>
+                      {bankText(account.bank)}
+                    </span>
+                    {account.expires && <span class="expiry" data-expiry />}
+                    <span class="auto" data-auto hidden />
+                  </div>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      </div>
+
+      <dl class="stats">
+        <div>
+          <dt>Tools stuck on a limit</dt>
+          <dd data-stat="stuck">2</dd>
+        </div>
+        <div>
+          <dt>Accounts sitting idle</dt>
+          <dd data-stat="idle">2</dd>
+        </div>
+        <div>
+          <dt>Saved resets unused or expired</dt>
+          <dd data-stat="unused">1</dd>
+        </div>
+        <div>
+          <dt>Machines holding account tokens</dt>
+          <dd data-stat="tokens">4</dd>
+        </div>
+      </dl>
+    </div>
+
+    <p class="sim-note" data-reveal>Illustrative simulation with hours compressed into seconds. Auto redeem is opt-in per account, and real routing also weighs model support, account health and ongoing sessions.</p>
+  </div>
+</section>
+
+<style>
+  .sim-section {
+    background: linear-gradient(180deg, var(--cream) 0%, #f7f1e7 100%);
+  }
+
+  .sim {
+    padding: clamp(18px, 3vw, 34px);
+    border-radius: 30px;
+    box-shadow: var(--shadow-lg);
+  }
+
+  .sim-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px 28px;
+    margin-bottom: clamp(20px, 3vw, 30px);
+  }
+
+  .switch {
+    position: relative;
+    display: inline-grid;
+    grid-template-columns: 1fr 1fr;
+    padding: 5px;
+    border-radius: 15px;
+    background: var(--cream-2);
+    border: 1px solid var(--line);
+  }
+
+  .switch-opt {
+    position: relative;
+    z-index: 1;
+    padding: 11px 20px;
+    border: 0;
+    border-radius: 11px;
+    background: transparent;
+    font-size: 16.5px;
+    font-weight: 700;
+    color: var(--ink-3);
+    cursor: pointer;
+    transition: color 0.25s;
+  }
+
+  .switch-opt[aria-pressed="true"] {
+    color: var(--ink);
+  }
+
+  .switch-thumb {
+    position: absolute;
+    top: 5px;
+    bottom: 5px;
+    left: 5px;
+    width: calc(50% - 5px);
+    border-radius: 11px;
+    background: var(--paper);
+    box-shadow: var(--shadow);
+    transition: transform 0.45s cubic-bezier(0.34, 1.4, 0.64, 1), background-color 0.3s;
+  }
+
+  .sim[data-mode="on"] .switch-thumb {
+    transform: translateX(100%);
+    background: var(--orange);
+  }
+
+  .sim[data-mode="on"] .switch-opt[data-set-mode="on"] {
+    color: #1a1206;
+  }
+
+  .switch-opt.nudge::after {
+    content: "";
+    position: absolute;
+    inset: -5px;
+    border-radius: 14px;
+    border: 2px solid var(--orange);
+    animation: nudge 1.2s ease-out infinite;
+  }
+
+  @keyframes nudge {
+    from {
+      opacity: 0.9;
+      transform: scale(0.96);
+    }
+    to {
+      opacity: 0;
+      transform: scale(1.12);
+    }
+  }
+
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    max-width: 100%;
+    padding: 11px 18px 11px 14px;
+    border-radius: 14px;
+    background: #17140f;
+    box-shadow: 0 1px 0 rgb(255 255 255 / 0.06) inset, 0 12px 26px -16px rgb(23 20 15 / 0.7);
+    font-family: var(--mono);
+    font-size: 13.5px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: #f2ece2;
+  }
+
+  .led {
+    --led: #ff5b61;
+    width: 10px;
+    height: 10px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--led);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--led) 22%, transparent), 0 0 12px var(--led);
+    animation: led 1.6s ease-in-out infinite;
+  }
+
+  .status[data-tone="ok"] .led {
+    --led: #3ddc97;
+  }
+
+  .status[data-tone="reset"] .led {
+    --led: #a28dff;
+  }
+
+  .status[data-tone="warn"] .led {
+    --led: #ffb020;
+  }
+
+  @keyframes led {
+    50% {
+      opacity: 0.55;
+    }
+  }
+
+  .status-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .status-text.swap {
+    animation: status-in 0.35s cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+
+  @keyframes status-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* stage ------------------------------------------------------- */
+
+  .stage {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(170px, 0.62fr) minmax(0, 1fr);
+    gap: 0 clamp(28px, 4vw, 52px);
+    padding: 22px;
+    border-radius: 22px;
+    background:
+      radial-gradient(420px 320px at 50% 55%, rgb(51 176 255 / 0.1), transparent 70%),
+      var(--cream);
+    border: 1px solid var(--line-2);
+  }
+
+  .wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .wires :global(path) {
+    fill: none;
+    stroke: #d8cdbb;
+    stroke-width: 2;
+    transition: stroke 0.35s, opacity 0.35s;
+  }
+
+  .wires :global(path.blocked) {
+    stroke: #f0a3a5;
+    stroke-dasharray: 5 6;
+  }
+
+  .wires :global(path.pooled) {
+    stroke: color-mix(in srgb, var(--tone) 42%, #efe4d2);
+  }
+
+  .wires :global(circle) {
+    fill: var(--tone, var(--orange));
+  }
+
+  .wires :global(circle.plain) {
+    fill: #8a8175;
+  }
+
+  .wires :global(circle.rejected) {
+    fill: var(--red);
+  }
+
+  .col {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    gap: 12px;
+  }
+
+  .col-head {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .tool-list,
+  .acct-list {
+    display: grid;
+    gap: 12px;
+  }
+
+  /* Four tools beside four taller accounts: spread them so each pair lines up with its Pool. */
+  .tool-list {
+    align-content: space-around;
+  }
+
+  .acct-list {
+    align-content: start;
+  }
+
+  .tool,
+  .acct {
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--paper);
+    box-shadow: var(--shadow-sm);
+    transition: border-color 0.3s, box-shadow 0.3s, transform 0.3s;
+  }
+
+  .tool {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+  }
+
+  .tool.is-stuck {
+    border-color: #f3b7b8;
+    box-shadow: 0 0 0 4px var(--red-soft);
+  }
+
+  .tool-logo {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    flex: none;
+    border-radius: 12px;
+    background: var(--cream-2);
+    --logo-size: 22px;
+  }
+
+  .tool-body {
+    display: grid;
+    min-width: 0;
+    line-height: 1.25;
+  }
+
+  .tool-name {
+    font-size: 16.5px;
+    font-weight: 700;
+  }
+
+  .tool-status {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--green-ink);
+  }
+
+  .tool.is-stuck .tool-status {
+    color: var(--red-ink);
+  }
+
+  .tool-cred {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 3px;
+    font-size: 13px;
+    color: var(--amber-ink);
+  }
+
+  .tool-cred::before {
+    content: "";
+    width: 13px;
+    height: 13px;
+    flex: none;
+    background: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M10.5 1a4.5 4.5 0 0 0-4.36 5.63L1 11.77V15h3.23l.77-.77V13h1.23l.77-.77V11h1.23l1.14-1.14A4.5 4.5 0 1 0 10.5 1Zm1.25 4.5a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5Z'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M10.5 1a4.5 4.5 0 0 0-4.36 5.63L1 11.77V15h3.23l.77-.77V13h1.23l.77-.77V11h1.23l1.14-1.14A4.5 4.5 0 1 0 10.5 1Zm1.25 4.5a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5Z'/%3E%3C/svg%3E") center / contain no-repeat;
+  }
+
+  .sim[data-mode="on"] .tool-cred {
+    color: var(--green-ink);
+  }
+
+  /* gateway with two Pools --------------------------------------- */
+
+  .gw-col {
+    grid-template-rows: 1fr;
+    /* line the panel up with the lists under the column heads */
+    padding-top: 30px;
+  }
+
+  .gw,
+  .no-hub {
+    grid-area: 1 / 1;
+  }
+
+  .gw {
+    display: grid;
+    grid-template-rows: auto 1fr;
+    gap: 10px;
+    padding: 14px 12px;
+    border: 1px solid #f6d6a6;
+    border-radius: 20px;
+    background: linear-gradient(180deg, #fffaf1, #fff4e2);
+    box-shadow: 0 0 0 8px rgb(255 153 0 / 0.07), var(--shadow);
+    opacity: 0;
+    transform: scale(0.86);
+    transition: opacity 0.4s, transform 0.55s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  .sim[data-mode="on"] .gw {
+    opacity: 1;
+    transform: none;
+  }
+
+  .gw-head {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: 13.5px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #d67500;
+  }
+
+  .gw-head img {
+    width: 22px;
+    height: 22px;
+  }
+
+  .gw-pools {
+    display: grid;
+    grid-template-rows: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .gw-pool {
+    --tone: var(--orange);
+    --tone-soft: var(--orange-soft);
+    align-self: center;
+    display: grid;
+    gap: 2px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--tone);
+    border-radius: 12px;
+    background: var(--paper);
+    box-shadow: var(--shadow-sm);
+    line-height: 1.2;
+    transition: box-shadow 0.3s;
+  }
+
+  .gw-pool.tone-automation {
+    --tone: var(--blue-2);
+    --tone-soft: var(--blue-soft);
+  }
+
+  .gw-pool b {
+    font-size: 15.5px;
+  }
+
+  .gw-pool small {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+
+  .gw-pool small.busy {
+    color: var(--violet);
+    font-weight: 700;
+  }
+
+  .gw-pool.pulse {
+    box-shadow: 0 0 0 4px var(--tone-soft), var(--shadow-sm);
+  }
+
+  .no-hub {
+    place-self: center;
+    display: grid;
+    place-items: center;
+    width: 96px;
+    height: 96px;
+    border-radius: 50%;
+    border: 2px dashed var(--line);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink-3);
+    text-align: center;
+    line-height: 1.1;
+    transition: opacity 0.3s;
+  }
+
+  .sim[data-mode="on"] .no-hub {
+    opacity: 0;
+  }
+
+  /* accounts ----------------------------------------------------- */
+
+  .acct {
+    padding: 12px 15px 11px;
+  }
+
+  .acct.is-hit {
+    transform: translateX(-3px);
+  }
+
+  .acct.refilled {
+    animation: refilled 0.9s ease-out;
+  }
+
+  @keyframes refilled {
+    from {
+      box-shadow: 0 0 0 0 rgb(118 86 242 / 0.45);
+    }
+    to {
+      box-shadow: 0 0 0 14px rgb(118 86 242 / 0);
+    }
+  }
+
+  .acct-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .acct-name {
+    font-size: 16.5px;
+    font-weight: 700;
+  }
+
+  .plan {
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: var(--orange-soft);
+    border: 1px solid #f7d49c;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--orange-ink);
+  }
+
+  .meter {
+    height: 8px;
+    margin-top: 9px;
+    border-radius: 99px;
+    background: var(--line-2);
+    overflow: hidden;
+  }
+
+  .meter-fill {
+    display: block;
+    width: 50%;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--green);
+    transition: background-color 0.4s;
+  }
+
+  .meter-fill.mid {
+    background: var(--amber);
+  }
+
+  .meter-fill.low {
+    background: var(--red);
+  }
+
+  .meter-fill.reset {
+    background: var(--violet);
+  }
+
+  .acct-foot {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 6px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--ink-3);
+  }
+
+  .acct-state {
+    font-weight: 700;
+  }
+
+  .acct-state.bad {
+    color: var(--red-ink);
+  }
+
+  .acct-state.idle {
+    color: var(--ink-3);
+  }
+
+  .acct-state.busy {
+    color: var(--green-ink);
+  }
+
+  .acct-state.reset {
+    color: var(--violet);
+  }
+
+  .bank {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px 9px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--line);
+    font-size: 13px;
+    color: var(--ink-3);
+  }
+
+  .bank-segs {
+    display: inline-flex;
+    gap: 3px;
+  }
+
+  .bank-segs i {
+    width: 16px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--line);
+  }
+
+  .bank-segs i.on {
+    background: var(--violet);
+  }
+
+  .bank-segs i.expired {
+    background: repeating-linear-gradient(135deg, var(--red) 0 3px, #f7b9bb 3px 6px);
+  }
+
+  .bank-segs i.grant {
+    animation: grant 0.9s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  @keyframes grant {
+    0% {
+      transform: scale(0.2);
+      box-shadow: 0 0 0 0 var(--violet);
+    }
+    60% {
+      transform: scale(1.35);
+      box-shadow: 0 0 12px 2px var(--violet);
+    }
+    100% {
+      transform: none;
+      box-shadow: none;
+    }
+  }
+
+  .bank-segs i.spend {
+    animation: spend 0.9s cubic-bezier(0.3, 0.6, 0.3, 1) forwards;
+  }
+
+  @keyframes spend {
+    40% {
+      transform: translateY(-9px) scale(1.25);
+      background: var(--violet);
+      box-shadow: 0 0 12px var(--violet);
+    }
+    100% {
+      transform: none;
+      background: var(--line);
+    }
+  }
+
+  .expiry {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--amber-ink);
+    white-space: nowrap;
+  }
+
+  .expiry.soon,
+  .expiry.gone {
+    color: var(--red-ink);
+  }
+
+  .expiry[hidden],
+  .auto[hidden] {
+    display: none;
+  }
+
+  .auto {
+    margin-left: auto;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .auto.on {
+    background: var(--violet-soft);
+    color: #5a3fd0;
+  }
+
+  .auto.unused {
+    background: var(--amber-soft);
+    color: var(--amber-ink);
+  }
+
+  /* stats -------------------------------------------------------- */
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: clamp(16px, 2.4vw, 24px);
+  }
+
+  .stats div {
+    display: flex;
+    flex-direction: column-reverse;
+    gap: 2px;
+    padding: 16px 18px;
+    border-radius: 16px;
+    background: var(--cream);
+    border: 1px solid var(--line-2);
+  }
+
+  .stats dt {
+    font-size: 15px;
+    color: var(--ink-2);
+  }
+
+  .stats dd {
+    font-size: clamp(2rem, 3.6vw, 2.8rem);
+    font-weight: 850;
+    line-height: 1;
+    letter-spacing: -0.02em;
+    color: var(--red);
+    font-variant-numeric: tabular-nums;
+    transition: color 0.4s;
+  }
+
+  .stats dd.good {
+    color: var(--green);
+  }
+
+  .sim-note {
+    margin-top: 16px;
+    text-align: center;
+    font-size: 14.5px;
+    color: var(--ink-3);
+  }
+
+  /* narrow: tools on top, the two Pools in the middle, accounts below */
+
+  @media (max-width: 860px) {
+    .status {
+      width: 100%;
+    }
+
+    .status-text {
+      white-space: normal;
+    }
+
+    .stage {
+      grid-template-columns: 1fr;
+      gap: 26px;
+      padding: 16px;
+    }
+
+    /* Each Pool's tools and accounts share a column, above and below its node. */
+    .tool-list,
+    .acct-list {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-rows: auto auto;
+      grid-auto-flow: column;
+      align-content: start;
+      gap: 10px;
+    }
+
+    .gw-col {
+      padding-top: 0;
+    }
+
+    .gw {
+      justify-self: center;
+      width: 100%;
+      max-width: 460px;
+      grid-template-rows: auto auto;
+      padding: 12px;
+    }
+
+    .gw-pools {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-rows: auto;
+      gap: 10px;
+    }
+
+    .gw-pool b {
+      font-size: 14.5px;
+    }
+
+    /* Two lines reserved, so a longer note never shifts the accounts below. */
+    .gw-pool small {
+      min-height: 2.4em;
+      font-size: 11px;
+    }
+
+    .no-hub {
+      width: 76px;
+      height: 76px;
+    }
+
+    .tool {
+      padding: 10px;
+      gap: 9px;
+    }
+
+    .tool-logo {
+      width: 32px;
+      height: 32px;
+      border-radius: 10px;
+      --logo-size: 18px;
+    }
+
+    .tool-name,
+    .acct-name {
+      font-size: 15px;
+    }
+
+    .tool-status,
+    .tool-cred {
+      font-size: 12.5px;
+    }
+
+    .acct {
+      padding: 10px;
+    }
+
+    .plan,
+    .bank-label {
+      display: none;
+    }
+
+    .acct-foot {
+      flex-direction: column;
+      gap: 1px;
+      font-size: 11.5px;
+    }
+
+    .stats {
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+
+    .stats div {
+      flex-direction: row-reverse;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 16px;
+    }
+
+    .stats dd {
+      font-size: 1.9rem;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .tool-cred {
+      display: none;
+    }
+
+    .switch-opt {
+      padding: 10px 14px;
+      font-size: 15.5px;
+    }
+  }
+</style>
+
+<script>
+  type Mode = "off" | "on";
+  type AccountId = "a" | "b" | "c" | "d";
+  type ToolId = "cli" | "cursor" | "opencode" | "openhands";
+  type PoolId = "product" | "automation";
+  type Tone = "ok" | "bad" | "reset" | "warn";
+  type Point = { x: number; y: number };
+
+  const root = document.querySelector<HTMLElement>("[data-sim]");
+  if (root) initSimulator(root);
+
+  function initSimulator(sim: HTMLElement) {
+    const stage = sim.querySelector<HTMLElement>("[data-stage]")!;
+    const gw = sim.querySelector<HTMLElement>("[data-gw]")!;
+    const svg = sim.querySelector<SVGSVGElement>("[data-wires]")!;
+    const caption = sim.querySelector<HTMLElement>("[data-caption]")!;
+    const statusBox = sim.querySelector<HTMLElement>("[data-status-badge]")!;
+    const buttons = Array.from(sim.querySelectorAll<HTMLButtonElement>("[data-set-mode]"));
+    const onButton = buttons.find((b) => b.dataset.setMode === "on")!;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const narrow = window.matchMedia("(max-width: 860px)");
+    const NS = "http://www.w3.org/2000/svg";
+
+    // Both pictures start from the same accounts. Bars show quota left and only
+    // go down: an empty account comes back only when a saved reset is spent.
+    const OFF_MAP: Record<ToolId, AccountId> = { cli: "a", cursor: "b", opencode: "b", openhands: "a" };
+    const START: Record<AccountId, number> = { a: 0.09, b: 0, c: 0.93, d: 0.88 };
+    const COST: Record<Mode, number> = { off: 0.026, on: 0.02 };
+    // Smaller plans have lower limits, so the same request uses more of them.
+    const PLAN_FACTOR: Record<string, number> = { Pro: 0.8, Team: 1, Plus: 1.8 };
+    const TONE: Record<PoolId, string> = { product: "#ff9900", automation: "#4f86ff" };
+    const EMPTY = 0.02;
+    const MAX_BANK = 3;
+    const HOUR = 1000; // one compressed hour
+    const EXPIRY_HOURS = 6;
+    // After spending a saved reset, a Pool waits for the account to confirm
+    // before it would spend another one.
+    const CONFIRM_MS = 1800;
+    const LETTER = (id: AccountId) => id.toUpperCase();
+    const bankText = (n: number) => (n === 0 ? "No saved resets" : `${n} saved reset${n === 1 ? "" : "s"}`);
+
+    interface Account {
+      id: AccountId;
+      el: HTMLElement;
+      fill: HTMLElement;
+      leftText: HTMLElement;
+      state: HTMLElement;
+      segs: HTMLElement[];
+      bankLabel: HTMLElement;
+      expiry: HTMLElement | null;
+      auto: HTMLElement;
+      pool: PoolId;
+      factor: number;
+      startBank: number;
+      bank: number;
+      left: number;
+      shownLeft: number;
+      dryAt: number;
+      flashUntil: number;
+      redeemAt: number;
+      redeemKind: "dry" | "expiring";
+      expiresAt: number;
+      expiredDropAt: number;
+    }
+
+    interface Pool {
+      id: PoolId;
+      node: HTMLElement;
+      name: string;
+      note: HTMLElement;
+      idleNote: string;
+      accounts: Account[];
+      busyUntil: number;
+    }
+
+    interface Tool {
+      id: ToolId;
+      el: HTMLElement;
+      pool: PoolId;
+      status: HTMLElement;
+      cred: HTMLElement;
+      nextAt: number;
+      stick: AccountId | null;
+    }
+
+    interface Trip {
+      legs: SVGPathElement[];
+      leg: number;
+      start: number;
+      duration: number;
+      dot: SVGCircleElement;
+      target: Account;
+      rejected: boolean;
+    }
+
+    const pools = new Map<PoolId, Pool>();
+    for (const node of sim.querySelectorAll<HTMLElement>("[data-pool-node]")) {
+      const id = node.dataset.poolNode as PoolId;
+      const note = node.querySelector<HTMLElement>("[data-pool-note]")!;
+      pools.set(id, { id, node, name: node.querySelector("[data-pool-name]")!.textContent ?? "", note, idleNote: note.textContent ?? "", accounts: [], busyUntil: 0 });
+    }
+
+    const accounts = new Map<AccountId, Account>();
+    for (const el of sim.querySelectorAll<HTMLElement>("[data-acct]")) {
+      const id = el.dataset.acct as AccountId;
+      const pool = [...pools.values()].find((p) => p.node.dataset.accounts!.split(",").includes(id))!;
+      const bank = Number(el.dataset.bank ?? 0);
+      const account: Account = {
+        id,
+        el,
+        fill: el.querySelector("[data-fill]")!,
+        leftText: el.querySelector("[data-left]")!,
+        state: el.querySelector("[data-state]")!,
+        segs: Array.from(el.querySelectorAll<HTMLElement>("[data-segs] i")),
+        bankLabel: el.querySelector("[data-bank-label]")!,
+        expiry: el.querySelector("[data-expiry]"),
+        auto: el.querySelector("[data-auto]")!,
+        pool: pool.id,
+        factor: PLAN_FACTOR[el.dataset.plan ?? ""] ?? 1,
+        startBank: bank,
+        bank,
+        left: START[id],
+        shownLeft: START[id],
+        dryAt: 0,
+        flashUntil: 0,
+        redeemAt: 0,
+        redeemKind: "dry",
+        expiresAt: 0,
+        expiredDropAt: 0,
+      };
+      accounts.set(id, account);
+      pool.accounts.push(account);
+    }
+
+    const tools = new Map<ToolId, Tool>();
+    for (const el of sim.querySelectorAll<HTMLElement>("[data-tool]")) {
+      const id = el.dataset.tool as ToolId;
+      tools.set(id, { id, el, pool: el.dataset.pool as PoolId, status: el.querySelector("[data-status]")!, cred: el.querySelector("[data-cred]")!, nextAt: 0, stick: null });
+    }
+
+    let mode: Mode = "off";
+    let touched = false;
+    let running = false;
+    let raf = 0;
+    let nextGrantAt = 0;
+    let expiredCount = 0;
+    const trips: Trip[] = [];
+    const wires = new Map<string, SVGPathElement>();
+    const shownStats: Record<string, number> = { stuck: 2, idle: 2, unused: 1, tokens: 4 };
+
+    const isDry = (account: Account) => account.left <= EMPTY;
+    const poolDry = (pool: Pool) => pool.accounts.every(isDry);
+    const poolRedeeming = (pool: Pool) => pool.accounts.some((a) => a.redeemAt > 0);
+
+    /* status badge: events queue up so each one can be read ------------ */
+
+    const events: { text: string; tone: Tone }[] = [];
+    let eventShownAt = 0;
+    let eventUntil = 0;
+
+    function setStatus(text: string, tone: Tone) {
+      if (caption.textContent === text && statusBox.dataset.tone === tone) return;
+      caption.textContent = text;
+      statusBox.dataset.tone = tone;
+      caption.classList.remove("swap");
+      void caption.offsetWidth;
+      caption.classList.add("swap");
+    }
+
+    function announce(text: string, tone: Tone, now: number) {
+      events.push({ text, tone });
+      // A newer event shortens the one on screen, but never below two seconds.
+      if (now < eventUntil) eventUntil = Math.max(now, Math.min(eventUntil, eventShownAt + 2000));
+    }
+
+    function steadyStatus(stuck: number, unused: number): [string, Tone] {
+      if (mode === "on") {
+        const dry = [...pools.values()].find((pool) => poolDry(pool) && !poolRedeeming(pool));
+        if (dry) return [`${stuck} tools waiting · ${dry.name} is out of quota`, "bad"];
+        const standby = [...accounts.values()].some((a) => isDry(a) && a.bank > 0);
+        return [standby ? "All tools working · saved resets wait until a Pool runs dry" : "All tools working · each Pool shares its accounts", "ok"];
+      }
+      if (stuck === tools.size) return [`All ${stuck} tools stuck · ${unused} saved resets unused or expired`, "bad"];
+      if (accounts.get("b")!.bank === 1) return [`${stuck} tools stuck · Account B's saved reset sits unused`, "bad"];
+      return [`${stuck} tools stuck · ${unused} saved resets unused`, "bad"];
+    }
+
+    /* geometry: layout boxes, so a scaled or nudged card never bends a wire */
+
+    function box(el: HTMLElement) {
+      let x = 0;
+      let y = 0;
+      let node: HTMLElement | null = el;
+      while (node && node !== stage) {
+        x += node.offsetLeft;
+        y += node.offsetTop;
+        node = node.offsetParent as HTMLElement | null;
+      }
+      return { x, y, w: el.offsetWidth, h: el.offsetHeight };
+    }
+
+    function edge(el: HTMLElement, side: "in" | "out"): Point {
+      const b = box(el);
+      if (narrow.matches) return { x: b.x + b.w / 2, y: side === "in" ? b.y : b.y + b.h };
+      return { x: side === "in" ? b.x : b.x + b.w, y: b.y + b.h / 2 };
+    }
+
+    // Wires meet the gateway panel level with each Pool (or, when stacked, under it).
+    function poolEdge(pool: Pool, side: "in" | "out"): Point {
+      const panel = box(gw);
+      const node = box(pool.node);
+      if (narrow.matches) return { x: node.x + node.w / 2, y: side === "in" ? panel.y : panel.y + panel.h };
+      return { x: side === "in" ? panel.x : panel.x + panel.w, y: node.y + node.h / 2 };
+    }
+
+    function curve(a: Point, b: Point) {
+      if (narrow.matches) {
+        const dy = (b.y - a.y) * 0.5;
+        return `M${a.x},${a.y} C${a.x},${a.y + dy} ${b.x},${b.y - dy} ${b.x},${b.y}`;
+      }
+      const dx = (b.x - a.x) * 0.5;
+      return `M${a.x},${a.y} C${a.x + dx},${a.y} ${b.x - dx},${b.y} ${b.x},${b.y}`;
+    }
+
+    function wire(key: string) {
+      let path = wires.get(key);
+      if (!path) {
+        path = document.createElementNS(NS, "path");
+        svg.prepend(path);
+        wires.set(key, path);
+      }
+      return path;
+    }
+
+    function layout() {
+      svg.setAttribute("viewBox", `0 0 ${stage.clientWidth} ${stage.clientHeight}`);
+      for (const tool of tools.values()) {
+        const from = edge(tool.el, "out");
+        wire(`direct:${tool.id}`).setAttribute("d", curve(from, edge(accounts.get(OFF_MAP[tool.id])!.el, "in")));
+        const inWire = wire(`in:${tool.id}`);
+        inWire.setAttribute("d", curve(from, poolEdge(pools.get(tool.pool)!, "in")));
+        inWire.style.setProperty("--tone", TONE[tool.pool]);
+      }
+      for (const account of accounts.values()) {
+        const outWire = wire(`out:${account.id}`);
+        outWire.setAttribute("d", curve(poolEdge(pools.get(account.pool)!, "out"), edge(account.el, "in")));
+        outWire.style.setProperty("--tone", TONE[account.pool]);
+      }
+      paintWires();
+    }
+
+    function paintWires() {
+      for (const [key, path] of wires) {
+        const [kind, id] = key.split(":");
+        const direct = kind === "direct";
+        path.style.opacity = direct === (mode === "off") ? "1" : "0";
+        path.classList.toggle("blocked", direct && isDry(accounts.get(OFF_MAP[id as ToolId])!));
+        path.classList.toggle("pooled", !direct);
+      }
+    }
+
+    /* saved resets ----------------------------------------------------- */
+
+    function paintBank(account: Account) {
+      account.segs.forEach((seg, i) => {
+        seg.classList.toggle("on", i < account.bank);
+        seg.classList.remove("expired");
+      });
+      account.bankLabel.textContent = bankText(account.bank);
+    }
+
+    function queueRedeem(account: Account, now: number, kind: "dry" | "expiring") {
+      const pool = pools.get(account.pool)!;
+      if (account.redeemAt || account.bank === 0 || poolRedeeming(pool)) return;
+      account.redeemKind = kind;
+      // One saved reset at a time per Pool: the next waits for the last to confirm.
+      account.redeemAt = Math.max(now + 700, pool.busyUntil);
+      pool.busyUntil = account.redeemAt + CONFIRM_MS;
+    }
+
+    // A Pool spends a saved reset only once none of its accounts can serve,
+    // starting with the account that has been out the longest.
+    function recoverPool(pool: Pool, now: number) {
+      if (mode !== "on" || !poolDry(pool) || poolRedeeming(pool)) return;
+      const candidates = pool.accounts.filter((a) => a.bank > 0).sort((x, y) => x.dryAt - y.dryAt || y.bank - x.bank);
+      if (candidates.length) queueRedeem(candidates[0], now, "dry");
+    }
+
+    function spendReset(account: Account, now: number) {
+      account.redeemAt = 0;
+      if (account.bank === 0) return;
+      const seg = account.segs[account.bank - 1];
+      seg.classList.remove("spend", "grant");
+      void seg.offsetWidth;
+      seg.classList.add("spend");
+      account.bank -= 1;
+      account.bankLabel.textContent = bankText(account.bank);
+      account.left = 1;
+      account.shownLeft = 1;
+      account.dryAt = 0;
+      account.flashUntil = now + 1900;
+      account.el.classList.remove("refilled");
+      void account.el.offsetWidth;
+      account.el.classList.add("refilled");
+      const pool = pools.get(account.pool)!;
+      if (account.redeemKind === "expiring") {
+        account.expiresAt = 0;
+        if (account.expiry) account.expiry.hidden = true;
+        announce(`${pool.name} · Account ${LETTER(account.id)}'s saved reset used before it expired`, "reset", now);
+      } else {
+        announce(`${pool.name} ran dry · saved reset used on Account ${LETTER(account.id)}`, "reset", now);
+      }
+    }
+
+    function expire(account: Account, now: number) {
+      account.expiresAt = 0;
+      account.expiredDropAt = now + 1400;
+      expiredCount += 1;
+      account.segs[account.bank - 1]?.classList.add("expired");
+      if (account.expiry) {
+        account.expiry.textContent = "expired";
+        account.expiry.className = "expiry gone";
+      }
+      announce(`Account ${LETTER(account.id)}'s saved reset expired · nobody used it`, "warn", now);
+    }
+
+    // Now and then OpenAI banks a saved reset on an account. It lands where a
+    // Pool is shortest of quota, and with Pooler a dry Pool spends it.
+    function grant(now: number) {
+      const reserve = (pool: Pool) => pool.accounts.reduce((sum, a) => sum + a.left + a.bank, 0);
+      const candidates = [...accounts.values()].filter((a) => a.bank < MAX_BANK && !a.expiry);
+      if (!candidates.length) return;
+      candidates.sort((x, y) => reserve(pools.get(x.pool)!) - reserve(pools.get(y.pool)!) || x.bank - y.bank || x.left - y.left);
+      const account = candidates[0];
+      account.bank += 1;
+      paintBank(account);
+      const seg = account.segs[account.bank - 1];
+      seg.classList.remove("spend", "grant");
+      void seg.offsetWidth;
+      seg.classList.add("grant");
+      announce(`OpenAI banked a saved reset on Account ${LETTER(account.id)}`, "reset", now);
+      recoverPool(pools.get(account.pool)!, now);
+    }
+
+    /* modes ------------------------------------------------------------ */
+
+    function setMode(next: Mode, byUser: boolean) {
+      if (byUser) touched = true;
+      onButton.classList.remove("nudge");
+      if (next !== mode) applyMode(next);
+    }
+
+    function applyMode(next: Mode) {
+      mode = next;
+      const now = performance.now();
+      sim.dataset.mode = mode;
+      buttons.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.setMode === mode)));
+      for (const trip of trips.splice(0)) trip.dot.remove();
+      events.length = 0;
+      eventUntil = 0;
+      expiredCount = 0;
+      for (const pool of pools.values()) pool.busyUntil = 0;
+      for (const account of accounts.values()) {
+        account.left = START[account.id];
+        account.shownLeft = account.left;
+        account.dryAt = isDry(account) ? now : 0;
+        account.bank = account.startBank;
+        account.flashUntil = 0;
+        account.redeemAt = 0;
+        account.expiredDropAt = 0;
+        account.segs.forEach((seg) => seg.classList.remove("spend", "grant", "expired"));
+        paintBank(account);
+        if (account.expiry) {
+          account.expiresAt = now + EXPIRY_HOURS * HOUR;
+          account.expiry.hidden = false;
+          account.expiry.className = "expiry";
+        }
+      }
+      let index = 0;
+      for (const tool of tools.values()) {
+        tool.stick = null;
+        tool.nextAt = now + 250 + index * 300 + Math.random() * 250;
+        index += 1;
+      }
+      nextGrantAt = now + 11000;
+      paintWires();
+      render(now);
+    }
+
+    /* traffic ---------------------------------------------------------- */
+
+    function pickTarget(tool: Tool): Account | null {
+      const pool = pools.get(tool.pool)!;
+      const usable = pool.accounts.filter((a) => !isDry(a));
+      // A request that finds its Pool dry rides along to the account being recovered.
+      if (usable.length === 0) return pool.accounts.find((a) => a.redeemAt > 0) ?? null;
+      if (tool.stick) {
+        const current = accounts.get(tool.stick)!;
+        if (current.left > 0.3 && usable.includes(current) && Math.random() < 0.55) return current;
+      }
+      usable.sort((x, y) => y.left - x.left);
+      const choice = usable[Math.random() < 0.75 ? 0 : usable.length - 1];
+      tool.stick = choice.id;
+      return choice;
+    }
+
+    function launch(tool: Tool, now: number) {
+      const dot = document.createElementNS(NS, "circle");
+      dot.setAttribute("r", narrow.matches ? "4" : "5");
+      if (mode === "off") {
+        const target = accounts.get(OFF_MAP[tool.id])!;
+        dot.classList.add("plain");
+        svg.append(dot);
+        trips.push({ legs: [wires.get(`direct:${tool.id}`)!], leg: 0, start: now, duration: 900, dot, target, rejected: isDry(target) });
+        return;
+      }
+      const target = pickTarget(tool);
+      if (!target) return;
+      dot.style.setProperty("--tone", TONE[tool.pool]);
+      svg.append(dot);
+      trips.push({ legs: [wires.get(`in:${tool.id}`)!, wires.get(`out:${target.id}`)!], leg: 0, start: now, duration: 520, dot, target, rejected: false });
+    }
+
+    function arrive(trip: Trip, now: number) {
+      const account = trip.target;
+      if (trip.rejected || isDry(account)) return;
+      account.left = Math.max(0, account.left - COST[mode] * account.factor);
+      if (account.left < 0.03) {
+        account.left = 0;
+        account.dryAt = now;
+      }
+      account.el.classList.add("is-hit");
+      window.setTimeout(() => account.el.classList.remove("is-hit"), 180);
+      recoverPool(pools.get(account.pool)!, now);
+    }
+
+    /* rendering -------------------------------------------------------- */
+
+    function render(now: number) {
+      let unused = expiredCount;
+      for (const account of accounts.values()) {
+        account.shownLeft = account.left >= account.shownLeft ? account.left : account.shownLeft + (account.left - account.shownLeft) * 0.2;
+        const left = Math.max(0, Math.min(1, account.shownLeft));
+        account.fill.style.width = `${left * 100}%`;
+        const saved = now < account.flashUntil;
+        account.fill.className = `meter-fill${saved ? " reset" : left > 0.5 ? "" : left > 0.2 ? " mid" : " low"}`;
+        const text = `${Math.round(left * 100)}% left`;
+        if (account.leftText.textContent !== text) account.leftText.textContent = text;
+
+        const dry = isDry(account);
+        let label = "In use";
+        let tone = "busy";
+        if (saved) {
+          label = narrow.matches ? "Reset used" : "Saved reset used";
+          tone = "reset";
+        } else if (account.redeemAt) {
+          label = "Redeeming…";
+          tone = "reset";
+        } else if (dry) {
+          label = "Limit reached";
+          tone = "bad";
+        } else if (mode === "off" && !Object.values(OFF_MAP).includes(account.id)) {
+          label = "Idle";
+          tone = "idle";
+        }
+        if (account.state.textContent !== label) account.state.textContent = label;
+        account.state.className = `acct-state ${tone}`;
+
+        // An expiring saved reset: in its last hour Pooler spends it, as long
+        // as the account has used some quota. Without Pooler it lapses.
+        if (account.expiry && account.expiresAt) {
+          const hours = Math.max(0, Math.ceil((account.expiresAt - now) / HOUR));
+          const expiryText = hours > 0 ? `expires in ${hours}h` : "expires now";
+          if (account.expiry.textContent !== expiryText) account.expiry.textContent = expiryText;
+          account.expiry.classList.toggle("soon", hours <= 1);
+          if (mode === "on" && hours <= 1 && account.left < 0.97) queueRedeem(account, now, "expiring");
+          if (now >= account.expiresAt && !account.redeemAt) expire(account, now);
+        }
+        if (account.expiredDropAt && now >= account.expiredDropAt) {
+          account.expiredDropAt = 0;
+          account.bank = Math.max(0, account.bank - 1);
+          paintBank(account);
+        }
+
+        const waiting = mode === "off" && dry && account.bank > 0;
+        if (waiting) unused += account.bank;
+        const chip = mode === "on" ? "Auto redeem" : waiting ? "Not used" : "";
+        account.auto.hidden = chip === "";
+        if (account.auto.textContent !== chip) account.auto.textContent = chip;
+        account.auto.className = `auto${mode === "on" ? " on" : " unused"}`;
+      }
+
+      for (const pool of pools.values()) {
+        const redeeming = poolRedeeming(pool);
+        const busy = mode === "on" && (redeeming || now < pool.busyUntil);
+        const note = !busy ? pool.idleNote : redeeming ? "Spending a saved reset" : "One reset at a time";
+        if (pool.note.textContent !== note) pool.note.textContent = note;
+        pool.note.classList.toggle("busy", busy);
+      }
+
+      let stuck = 0;
+      for (const tool of tools.values()) {
+        const pool = pools.get(tool.pool)!;
+        const blocked = mode === "off" ? isDry(accounts.get(OFF_MAP[tool.id])!) : poolDry(pool) && !poolRedeeming(pool);
+        if (blocked) stuck += 1;
+        tool.el.classList.toggle("is-stuck", blocked);
+        const status = blocked ? "Stuck until the limit resets" : "Working";
+        if (tool.status.textContent !== status) tool.status.textContent = status;
+        const cred = mode === "off" ? "Account token stored here" : "Own Pool key, revocable";
+        if (tool.cred.textContent !== cred) tool.cred.textContent = cred;
+      }
+
+      if (now >= eventUntil) {
+        const next = events.shift();
+        if (next) {
+          setStatus(next.text, next.tone);
+          eventShownAt = now;
+          eventUntil = now + 2800;
+        } else {
+          setStatus(...steadyStatus(stuck, unused));
+        }
+      }
+
+      const idle = mode === "off" ? [...accounts.values()].filter((a) => !isDry(a) && !Object.values(OFF_MAP).includes(a.id)).length : 0;
+      updateStats({ stuck, idle, unused, tokens: mode === "off" ? tools.size : 0 });
+    }
+
+    function updateStats(values: Record<string, number>) {
+      for (const [key, value] of Object.entries(values)) {
+        if (shownStats[key] === value) continue;
+        const from = shownStats[key];
+        shownStats[key] = value;
+        const el = sim.querySelector<HTMLElement>(`[data-stat="${key}"]`)!;
+        el.classList.toggle("good", value === 0);
+        if (reduceMotion) {
+          el.textContent = String(value);
+          continue;
+        }
+        const start = performance.now();
+        const step = (t: number) => {
+          const p = Math.min(1, (t - start) / 600);
+          el.textContent = String(Math.round(from + (value - from) * (1 - Math.pow(1 - p, 3))));
+          if (p < 1) requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+      }
+    }
+
+    /* loop ------------------------------------------------------------- */
+
+    function frame(now: number) {
+      for (const account of accounts.values()) {
+        if (account.redeemAt && now >= account.redeemAt) spendReset(account, now);
+      }
+      if (now >= nextGrantAt) {
+        grant(now);
+        nextGrantAt = now + 11000 + Math.random() * 4000;
+      }
+
+      for (const tool of tools.values()) {
+        if (now >= tool.nextAt) {
+          launch(tool, now);
+          tool.nextAt = now + (mode === "off" ? 950 : 800) + Math.random() * 550;
+        }
+      }
+
+      for (let i = trips.length - 1; i >= 0; i -= 1) {
+        const trip = trips[i];
+        const path = trip.legs[trip.leg];
+        const t = (now - trip.start) / trip.duration;
+        const stop = 0.82;
+        if (trip.rejected && t > stop) {
+          // The account is out: the request bounces back to the tool.
+          trip.dot.classList.add("rejected");
+          const back = Math.min(1, (t - stop) / 0.5);
+          const p = path.getPointAtLength(path.getTotalLength() * (stop - back * 0.25));
+          trip.dot.setAttribute("cx", String(p.x));
+          trip.dot.setAttribute("cy", String(p.y));
+          trip.dot.style.opacity = String(1 - back);
+          if (back >= 1) {
+            trip.dot.remove();
+            trips.splice(i, 1);
+          }
+          continue;
+        }
+        const u = Math.min(1, t);
+        const e = u < 0.5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+        const p = path.getPointAtLength(path.getTotalLength() * e);
+        trip.dot.setAttribute("cx", String(p.x));
+        trip.dot.setAttribute("cy", String(p.y));
+        if (u >= 1) {
+          if (trip.leg < trip.legs.length - 1) {
+            trip.leg += 1;
+            trip.start = now;
+            const node = pools.get(trip.target.pool)!.node;
+            node.classList.remove("pulse");
+            void node.offsetWidth;
+            node.classList.add("pulse");
+            window.setTimeout(() => node.classList.remove("pulse"), 360);
+          } else {
+            arrive(trip, now);
+            trip.dot.remove();
+            trips.splice(i, 1);
+          }
+        }
+      }
+
+      render(now);
+      paintWires();
+      raf = requestAnimationFrame(frame);
+    }
+
+    let pausedAt = 0;
+    function setRunning(value: boolean) {
+      if (value === running) return;
+      running = value;
+      if (running) {
+        if (pausedAt) {
+          // Shift every timer by the pause, so nothing fires at once on return.
+          const delta = performance.now() - pausedAt;
+          nextGrantAt += delta;
+          eventUntil += delta;
+          eventShownAt += delta;
+          for (const pool of pools.values()) if (pool.busyUntil) pool.busyUntil += delta;
+          for (const account of accounts.values()) {
+            account.flashUntil += delta;
+            if (account.redeemAt) account.redeemAt += delta;
+            if (account.expiresAt) account.expiresAt += delta;
+            if (account.expiredDropAt) account.expiredDropAt += delta;
+          }
+          for (const tool of tools.values()) tool.nextAt += delta;
+          for (const trip of trips) trip.start += delta;
+        }
+        raf = requestAnimationFrame(frame);
+      } else {
+        pausedAt = performance.now();
+        cancelAnimationFrame(raf);
+      }
+    }
+
+    buttons.forEach((button) => button.addEventListener("click", () => setMode(button.dataset.setMode as Mode, true)));
+
+    applyMode("off");
+    new ResizeObserver(() => layout()).observe(stage);
+    narrow.addEventListener("change", layout);
+    layout();
+
+    if (reduceMotion) return;
+
+    let shown = false;
+    new IntersectionObserver(
+      ([entry]) => {
+        setRunning(entry.isIntersecting && !document.hidden);
+        if (entry.isIntersecting && entry.intersectionRatio > 0.5 && !shown) {
+          shown = true;
+          // Start the story from the beginning the first time it is seen.
+          if (!touched) applyMode("off");
+          window.setTimeout(() => !touched && onButton.classList.add("nudge"), 7600);
+          window.setTimeout(() => !touched && setMode("on", false), 9000);
+        }
+      },
+      { threshold: [0, 0.5] },
+    ).observe(sim);
+    document.addEventListener("visibilitychange", () => setRunning(!document.hidden && sim.getBoundingClientRect().top < innerHeight));
+  }
+</script>

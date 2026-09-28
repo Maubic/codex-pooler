@@ -1,0 +1,100 @@
+---
+import { TOOLS } from "../data/site";
+---
+
+<section class="strip" aria-labelledby="strip-title">
+  <p class="strip-title" id="strip-title">Works with the tools you already use</p>
+  <div class="marquee">
+    <ul class="track">
+      {
+        [0, 1].map((copy) =>
+          TOOLS.map((tool) => (
+            <li aria-hidden={copy === 1 ? "true" : undefined}>
+              <a href={tool.guide} tabindex={copy === 1 ? -1 : undefined}>
+                <span class="logo" style={`--src:url(/logos/${tool.logo}.svg)`} />
+                <span>{tool.name}</span>
+              </a>
+            </li>
+          )),
+        )
+      }
+    </ul>
+  </div>
+</section>
+
+<style>
+  .strip {
+    padding-block: 8px 30px;
+  }
+
+  .strip-title {
+    margin-bottom: 20px;
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .marquee {
+    overflow: hidden;
+    mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
+  }
+
+  .track {
+    display: flex;
+    gap: 44px;
+    width: max-content;
+    padding-block: 6px;
+    animation: marquee 44s linear infinite;
+  }
+
+  .marquee:hover .track {
+    animation-play-state: paused;
+  }
+
+  .track a {
+    display: inline-flex;
+    align-items: center;
+    gap: 11px;
+    font-size: 18px;
+    font-weight: 650;
+    color: #5f574c;
+    white-space: nowrap;
+    transition: color 0.2s;
+    --logo-size: 26px;
+  }
+
+  .track a:hover {
+    color: var(--ink);
+  }
+
+  @keyframes marquee {
+    to {
+      transform: translateX(calc(-50% - 22px));
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .marquee {
+      mask-image: none;
+      -webkit-mask-image: none;
+    }
+
+    .track {
+      flex-wrap: wrap;
+      justify-content: center;
+      width: auto;
+      gap: 18px 32px;
+      padding-inline: var(--gutter);
+      animation: none;
+    }
+
+    .track li[aria-hidden="true"] {
+      display: none;
+    }
+  }
+</style>

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Codex Pooler">
+  <defs>
+    <linearGradient id="cp-body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4f86ff"/>
+      <stop offset="1" stop-color="#1c3fcf"/>
+    </linearGradient>
+    <linearGradient id="cp-screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a5cf0"/>
+      <stop offset="1" stop-color="#3f7dff"/>
+    </linearGradient>
+  </defs>
+  <rect x="22" y="4" width="20" height="8" rx="3.5" fill="#8cc4ff"/>
+  <rect x="5" y="9" width="54" height="50" rx="16" fill="url(#cp-body)"/>
+  <rect x="11" y="16" width="42" height="36" rx="11" fill="url(#cp-screen)" stroke="#6ea3ff" stroke-opacity=".55" stroke-width="1.5"/>
+  <ellipse cx="23.5" cy="32" rx="3.9" ry="4.7" fill="#0c173d"/>
+  <ellipse cx="40.5" cy="32" rx="3.9" ry="4.7" fill="#0c173d"/>
+  <circle cx="24.9" cy="30.3" r="1.35" fill="#fff"/>
+  <circle cx="41.9" cy="30.3" r="1.35" fill="#fff"/>
+  <path d="M27.5 39.2q4.5 4.3 9 0" fill="none" stroke="#0c173d" stroke-width="2.6" stroke-linecap="round"/>
+  <ellipse cx="17.6" cy="39.4" rx="3.1" ry="1.9" fill="#ff7eb0" opacity=".8"/>
+  <ellipse cx="46.4" cy="39.4" rx="3.1" ry="1.9" fill="#ff7eb0" opacity=".8"/>
+</svg>

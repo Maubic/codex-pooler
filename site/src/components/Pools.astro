@@ -1,0 +1,407 @@
+---
+import { docs } from "../data/site";
+
+// Three example Pools. Account C serves two of them, as accounts can.
+const pools = [
+  {
+    name: "Product team",
+    tone: "orange",
+    accounts: [
+      { name: "Account A", left: 64 },
+      { name: "Account B", left: 41 },
+      { name: "Account C", left: 78, shared: true },
+    ],
+    keys: ["Codex CLI", "Cursor", "OpenCode"],
+    keyCount: 12,
+    rules: ["Bridge ring routing", "Sticky sessions"],
+    bars: [22, 30, 28, 40, 52, 61, 70, 66, 74, 80, 72, 64, 58, 69, 77, 83, 79, 70, 62, 55, 48, 40, 33, 27],
+  },
+  {
+    name: "Automation",
+    tone: "blue",
+    accounts: [
+      { name: "Account D", left: 55 },
+      { name: "Account E", left: 83 },
+    ],
+    keys: ["Nightly agent", "Review bot"],
+    keyCount: 3,
+    rules: ["Quota first routing", "Keys: gpt-6-luna only"],
+    bars: [60, 64, 70, 72, 68, 50, 34, 28, 26, 30, 35, 32, 30, 28, 33, 38, 42, 48, 58, 66, 72, 76, 70, 64],
+  },
+  {
+    name: "Research",
+    tone: "violet",
+    accounts: [
+      { name: "Account C", left: 78, shared: true },
+      { name: "Account F", left: 92 },
+    ],
+    keys: ["Notebook SDK"],
+    keyCount: 2,
+    rules: ["OpenAI-compatible API", "Images on"],
+    bars: [8, 10, 12, 10, 14, 22, 30, 38, 34, 42, 50, 46, 40, 44, 52, 48, 36, 30, 24, 18, 16, 12, 10, 9],
+  },
+];
+
+const points = [
+  { title: "Own accounts, keys and rules", text: "Each Pool decides which accounts serve it, which keys can use it and how requests are routed." },
+  { title: "Share when it makes sense", text: "An account can serve several Pools at once, like Account C here." },
+  { title: "Switches per Pool", text: "Turn the OpenAI-compatible API, image generation or audio on only where you need them." },
+  { title: "Numbers per Pool", text: "Stats, request logs, alerts and admin access can all be scoped to a single Pool." },
+];
+---
+
+<section class="section pools" id="pools" aria-labelledby="pools-title">
+  <div class="wrap">
+    <header class="section-head" data-reveal>
+      <p class="eyebrow">Pools</p>
+      <h2 class="h2" id="pools-title">A Pool for every team, <em>agent and project.</em></h2>
+      <p class="lede">
+        Split your accounts and traffic into as many Pools as you need. The team, the agents and each project get their own accounts, keys and rules, so background jobs stop competing with the people at their keyboards.
+      </p>
+    </header>
+
+    <div class="pool-grid">
+      {
+        pools.map((pool, index) => (
+          <article class={`pool tone-${pool.tone}`} data-reveal style={`--delay:${index * 0.08}s`}>
+            <header class="pool-head">
+              <span class="pool-dot" aria-hidden="true" />
+              <h3>{pool.name}</h3>
+              <span class="pool-status">active</span>
+            </header>
+
+            <div class="chart" aria-hidden="true">
+              {pool.bars.map((h, i) => (
+                <i style={`--h:${h}%;--i:${i}`} />
+              ))}
+            </div>
+
+            <div class="pool-block">
+              <p class="block-title">Accounts</p>
+              <ul class="accts">
+                {pool.accounts.map((account) => (
+                  <li>
+                    <span class="acct-name">
+                      {account.name}
+                      {account.shared && <span class="shared">shared</span>}
+                    </span>
+                    <span class="mini-bar" aria-hidden="true">
+                      <i style={`--w:${account.left}%`} />
+                    </span>
+                    <span class="acct-left">{account.left}% left</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div class="pool-block">
+              <p class="block-title">
+                Keys <span class="count">{pool.keyCount}</span>
+              </p>
+              <p class="keys">
+                {pool.keys.map((key) => (
+                  <span>{key}</span>
+                ))}
+                {pool.keyCount > pool.keys.length && <span class="more">+{pool.keyCount - pool.keys.length} more</span>}
+              </p>
+            </div>
+
+            <div class="rules">
+              {pool.rules.map((rule) => (
+                <span>{rule}</span>
+              ))}
+            </div>
+          </article>
+        ))
+      }
+    </div>
+
+    <ul class="points" data-reveal>
+      {
+        points.map((point) => (
+          <li>
+            <b>{point.title}</b>
+            <span>{point.text}</span>
+          </li>
+        ))
+      }
+    </ul>
+    <p class="pools-link" data-reveal><a href={docs("/operators/pools/")}>How Pools work →</a></p>
+  </div>
+</section>
+
+<style>
+  .pools {
+    background: var(--paper);
+    border-block: 1px solid var(--line-2);
+  }
+
+  .pool-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .pool {
+    --tone: var(--orange);
+    --tone-soft: var(--orange-soft);
+    --tone-ink: var(--orange-ink);
+    display: grid;
+    align-content: start;
+    gap: 18px;
+    padding: 22px;
+    border: 1px solid var(--line);
+    border-top: 4px solid var(--tone);
+    border-radius: 22px;
+    background: var(--cream);
+  }
+
+  .tone-blue {
+    --tone: var(--blue-2);
+    --tone-soft: var(--blue-soft);
+    --tone-ink: var(--blue-ink);
+  }
+
+  .tone-violet {
+    --tone: var(--violet);
+    --tone-soft: var(--violet-soft);
+    --tone-ink: #5a3fd0;
+  }
+
+  .pool-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .pool-head h3 {
+    font-size: 20px;
+    font-weight: 800;
+  }
+
+  .pool-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--tone);
+    box-shadow: 0 0 0 4px var(--tone-soft);
+    animation: beat 2.4s ease-in-out infinite;
+  }
+
+  @keyframes beat {
+    50% {
+      box-shadow: 0 0 0 7px transparent;
+    }
+  }
+
+  .pool-status {
+    margin-left: auto;
+    padding: 2px 10px;
+    border-radius: 999px;
+    background: var(--green-soft);
+    color: var(--green-ink);
+    font-size: 12.5px;
+    font-weight: 700;
+  }
+
+  .chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    height: 64px;
+    padding: 8px 10px;
+    border-radius: 12px;
+    background: var(--paper);
+    border: 1px solid var(--line-2);
+  }
+
+  .chart i {
+    flex: 1;
+    height: var(--h);
+    border-radius: 3px 3px 1px 1px;
+    background: var(--tone);
+    opacity: 0.85;
+    transform-origin: bottom;
+  }
+
+  :global(.js) .pool:not(.is-in) .chart i {
+    transform: scaleY(0);
+  }
+
+  :global(.js) .pool.is-in .chart i {
+    transition: transform 0.6s cubic-bezier(0.2, 0.7, 0.2, 1);
+    transition-delay: calc(0.1s + var(--i) * 0.018s);
+  }
+
+  .block-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .block-title .count {
+    padding: 1px 7px;
+    border-radius: 6px;
+    background: var(--tone-soft);
+    color: var(--tone-ink);
+    letter-spacing: 0;
+  }
+
+  .accts {
+    display: grid;
+    gap: 7px;
+  }
+
+  .accts li {
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--paper);
+    font-size: 14px;
+  }
+
+  .acct-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .shared {
+    padding: 1px 6px;
+    border-radius: 5px;
+    background: var(--violet-soft);
+    color: #5a3fd0;
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  .mini-bar {
+    display: block;
+    height: 6px;
+    border-radius: 99px;
+    background: var(--line-2);
+    overflow: hidden;
+  }
+
+  .mini-bar i {
+    display: block;
+    width: var(--w);
+    height: 100%;
+    border-radius: inherit;
+    background: var(--green);
+  }
+
+  .acct-left {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-3);
+  }
+
+  .keys {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .keys span {
+    padding: 4px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--paper);
+    font-size: 13.5px;
+    font-weight: 600;
+  }
+
+  .keys .more {
+    border-style: dashed;
+    color: var(--ink-3);
+  }
+
+  .rules {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--line);
+  }
+
+  .rules span {
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--tone-soft);
+    color: var(--tone-ink);
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .points {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 24px;
+    margin-top: clamp(32px, 4vw, 48px);
+  }
+
+  .points li {
+    display: grid;
+    align-content: start;
+    gap: 6px;
+    padding-left: 16px;
+    border-left: 3px solid var(--line);
+  }
+
+  .points b {
+    font-size: 17px;
+  }
+
+  .points span {
+    font-size: 15.5px;
+    color: var(--ink-2);
+  }
+
+  .pools-link {
+    margin-top: 28px;
+    font-weight: 700;
+    color: var(--orange-ink);
+  }
+
+  .pools-link a:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  @media (max-width: 1000px) {
+    .pool-grid {
+      grid-template-columns: 1fr;
+      max-width: 560px;
+    }
+
+    .points {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 520px) {
+    .points {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pool-dot {
+      animation: none;
+    }
+  }
+</style>

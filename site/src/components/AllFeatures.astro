@@ -1,0 +1,209 @@
+---
+import { DOCS_URL } from "../data/site";
+
+// Every item here is described in the public docs.
+const groups = [
+  {
+    title: "Routing and continuity",
+    icon: "M4 7h9m0 0-3-3m3 3-3 3M20 17h-9m0 0 3-3m-3 3 3 3",
+    items: [
+      "Each request goes to an account that can serve it: model support, quota, health and key limits are checked first",
+      "Conversations stay on the account that started them",
+      "No session ID from the client? Pooler derives a stable one, so the provider's cache stays warm",
+      "Requests that share a cache key prefer the same account",
+      "Four routing strategies, from an even spread to quota first",
+      "Failing accounts are set aside for a while, then tried again",
+    ],
+  },
+  {
+    title: "Protocols",
+    icon: "M8 6 3 12l5 6M16 6l5 6-5 6",
+    items: [
+      "Codex backend API over HTTP streaming and WebSocket, for Codex CLI, Desktop and other Codex-native tools",
+      "OpenAI-compatible Responses and Chat Completions",
+      "Files, audio transcription, image generation and edits",
+      "Compressed request bodies: gzip, deflate and zstd",
+      "WebSocket reconnects that tell an exact retry from an edited turn",
+      "A read-only MCP endpoint for operators and their assistants",
+    ],
+  },
+  {
+    title: "Keys and access",
+    icon: "M14.5 3a6.5 6.5 0 0 0-6.3 8.1L2 17.3V22h4.7l1-1v-2h2l1-1v-2h2l1.6-1.6A6.5 6.5 0 1 0 14.5 3Zm2 6a1.8 1.8 0 1 1 0-3.6 1.8 1.8 0 0 1 0 3.6Z",
+    items: [
+      "Keys you can pause, rotate, revoke or give an expiry",
+      "Per key: allowed models, an enforced model, a reasoning-effort ceiling and a service tier",
+      "Per key: concurrent requests, requests per minute, tokens per day and per week",
+      "Per Pool: switches for the OpenAI-compatible API, images and audio",
+      "Owners and Pool-scoped admins, with two-factor sign-in",
+    ],
+  },
+  {
+    title: "Accounts and quota",
+    icon: "M4 19V5h16v14H4Zm0-10h16M8 13h3M8 16h6",
+    items: [
+      "Add accounts by signing in with OpenAI, importing an auth.json, or sending an invite link",
+      "5-hour, weekly and per-model quota for every account",
+      "Saved resets with guarded auto-redeem and a reserve you choose",
+      "Upcoming reset expirations as a calendar file",
+      "Provider throttling is respected, never pushed past",
+    ],
+  },
+  {
+    title: "Visibility",
+    icon: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Zm10 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
+    items: [
+      "Stats per Pool: requests, tokens and estimated cost",
+      "A request log with cache hits, timing and cost",
+      "An Observatory dashboard for each key",
+      "Lens, to spot responses that report a different model",
+      "An audit log of every admin change",
+      "OpenAI incidents right in the dashboard",
+      "Prometheus metrics and ready-made Grafana dashboards",
+    ],
+  },
+  {
+    title: "Security and operations",
+    icon: "M12 3 5 6v5c0 4.5 3 8.3 7 10 4-1.7 7-5.5 7-10V6l-7-3Z",
+    items: [
+      "A runtime firewall with an IP and CIDR allowlist and trusted proxies",
+      "Outbound traffic through your own HTTP proxy, if you want",
+      "Account secrets encrypted at rest; keys shown only once",
+      "Alerts by email and webhook",
+      "Settings you can change live, without a redeploy",
+      "Docker Compose for one machine, or Helm on Kubernetes with separate web, worker and scheduler roles across several replicas",
+    ],
+  },
+];
+---
+
+<section class="section all" id="all-features" aria-labelledby="all-title">
+  <div class="wrap">
+    <header class="section-head center" data-reveal>
+      <p class="eyebrow">Everything else</p>
+      <h2 class="h2" id="all-title">And a lot more, <em>already built.</em></h2>
+      <p class="lede">The details that matter once real teams and agents run on Pooler every day.</p>
+    </header>
+
+    <div class="groups">
+      {
+        groups.map((group, index) => (
+          <article class="group" data-reveal style={`--delay:${(index % 3) * 0.06}s`}>
+            <header>
+              <span class="group-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d={group.icon} />
+                </svg>
+              </span>
+              <h3>{group.title}</h3>
+            </header>
+            <ul>
+              {group.items.map((item) => (
+                <li>{item}</li>
+              ))}
+            </ul>
+          </article>
+        ))
+      }
+    </div>
+
+    <p class="all-link" data-reveal><a href={DOCS_URL}>Read the docs for the full details →</a></p>
+  </div>
+</section>
+
+<style>
+  .all {
+    background: var(--paper);
+    border-block: 1px solid var(--line-2);
+  }
+
+  .groups {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .group {
+    padding: 24px 24px 26px;
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    background: var(--cream);
+  }
+
+  .group header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .group-ico {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    flex: none;
+    border-radius: 13px;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    color: var(--orange-ink);
+  }
+
+  .group-ico svg {
+    width: 22px;
+    height: 22px;
+  }
+
+  .group h3 {
+    font-size: 19px;
+    font-weight: 800;
+  }
+
+  .group ul {
+    display: grid;
+    gap: 10px;
+  }
+
+  .group li {
+    position: relative;
+    padding-left: 20px;
+    font-size: 15.5px;
+    line-height: 1.45;
+    color: var(--ink-2);
+  }
+
+  .group li::before {
+    content: "";
+    position: absolute;
+    left: 2px;
+    top: 0.62em;
+    width: 7px;
+    height: 7px;
+    border-radius: 2px;
+    background: var(--orange);
+  }
+
+  .all-link {
+    margin-top: 32px;
+    text-align: center;
+    font-weight: 700;
+    color: var(--orange-ink);
+  }
+
+  .all-link a:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  @media (max-width: 1000px) {
+    .groups {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 620px) {
+    .groups {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

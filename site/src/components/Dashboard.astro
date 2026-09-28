@@ -1,0 +1,390 @@
+---
+import { Picture, getImage } from "astro:assets";
+import pools from "../assets/screens/pools.webp";
+import accounts from "../assets/screens/accounts.webp";
+import account from "../assets/screens/account.webp";
+import usage from "../assets/screens/usage.webp";
+import requestLog from "../assets/screens/request-log.webp";
+import keys from "../assets/screens/keys.webp";
+import alerts from "../assets/screens/alerts.webp";
+import firewall from "../assets/screens/firewall.webp";
+
+const tabs = [
+  { id: "pools", label: "Pools", path: "/admin/pools", title: "Every Pool at a glance", text: "Traffic, keys, requests and cost for each Pool over the last 24 hours.", image: pools },
+  { id: "accounts", label: "Accounts", path: "/admin/upstreams", title: "Quota for every account", text: "5-hour and weekly quota left, saved resets, token health and routing state.", image: accounts },
+  { id: "account", label: "Account detail", path: "/admin/upstreams/…", title: "One account, up close", text: "Routing readiness per Pool, credential freshness, quota windows and the auto-redeem policy.", image: account },
+  { id: "usage", label: "Usage", path: "/admin/stats", title: "Usage and spend", text: "Requests, tokens, latency, cache rate and cost, for any Pool and time window.", image: usage },
+  { id: "log", label: "Request log", path: "/admin/request-logs", title: "Every request, accounted for", text: "Client, account, model, transport, cache hits, timing and cost for each request.", image: requestLog },
+  { id: "keys", label: "API keys", path: "/admin/api-keys", title: "Keys under control", text: "Status, expiry, prefix and model access for every key, grouped by Pool.", image: keys },
+  { id: "alerts", label: "Alerts", path: "/admin/alerts", title: "Alerts that fit your Pools", text: "Rules on usable accounts, quota, sign-in state and saved resets, sent by email or webhook.", image: alerts },
+  { id: "firewall", label: "Firewall", path: "/admin/system?tab=firewall", title: "Ingress under your rules", text: "Client IP allowlists, trusted proxies and accepted request compression, changed live.", image: firewall },
+];
+
+// Full-size copies for anyone who wants to read the details.
+const full = await Promise.all(tabs.map((tab) => getImage({ src: tab.image, format: "webp", width: 2880 })));
+---
+
+<section class="section dash" id="dashboard" aria-labelledby="dash-title">
+  <div class="dash-glow" aria-hidden="true"></div>
+  <div class="wrap">
+    <header class="section-head center" data-reveal>
+      <p class="eyebrow">The dashboard</p>
+      <h2 class="h2" id="dash-title">A control room for <em>every Pool.</em></h2>
+      <p class="lede">Every account, Pool, key and request in one place, updated as traffic flows.</p>
+    </header>
+
+    <div class="tour" data-tour data-reveal>
+      <div class="tabs" role="tablist" aria-label="Dashboard pages">
+        {
+          tabs.map((tab, index) => (
+            <button type="button" role="tab" class="tab" id={`tab-${tab.id}`} aria-controls={`panel-${tab.id}`} aria-selected={index === 0 ? "true" : "false"} tabindex={index === 0 ? "0" : "-1"} data-tab>
+              {tab.label}
+              <span class="tab-progress" aria-hidden="true" />
+            </button>
+          ))
+        }
+      </div>
+
+      <div class="window">
+        <div class="window-bar" aria-hidden="true">
+          <span class="dots"><i></i><i></i><i></i></span>
+          <span class="url">
+            codex-pooler.example.com<span data-url-path>{tabs[0].path}</span>
+          </span>
+          <span class="bar-spacer"></span>
+        </div>
+        <div class="screens">
+          {
+            tabs.map((tab, index) => (
+              <div class="screen" role="tabpanel" id={`panel-${tab.id}`} aria-labelledby={`tab-${tab.id}`} data-panel data-path={tab.path} hidden={index !== 0}>
+                <a class="zoom" href={full[index].src} target="_blank" rel="noopener" aria-label={`${tab.label}: open the full-size screenshot`}>
+                  <Picture src={tab.image} formats={["avif", "webp"]} fallbackFormat="webp" widths={[800, 1200, 1600, 2400]} sizes="(min-width: 1240px) 1200px, 96vw" alt={`${tab.title}: ${tab.text}`} loading="lazy" />
+                </a>
+              </div>
+            ))
+          }
+        </div>
+      </div>
+
+      <div class="caption" aria-live="polite">
+        {
+          tabs.map((tab, index) => (
+            <p class="caption-item" data-caption={tab.id} hidden={index !== 0}>
+              <b>{tab.title}</b>
+              <span>{tab.text}</span>
+            </p>
+          ))
+        }
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .dash {
+    overflow: hidden;
+    background: var(--night);
+    color: var(--night-ink);
+  }
+
+  .dash-glow {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(900px 520px at 50% 108%, rgb(255 122 60 / 0.28), transparent 65%),
+      radial-gradient(700px 380px at 92% 0%, rgb(51 176 255 / 0.1), transparent 70%);
+  }
+
+  .dash .wrap {
+    position: relative;
+  }
+
+  .dash .eyebrow {
+    color: var(--orange-2);
+  }
+
+  .dash .lede {
+    color: var(--night-ink-2);
+  }
+
+  .dash .h2 em {
+    color: var(--orange);
+  }
+
+  .tour {
+    display: grid;
+    gap: 18px;
+  }
+
+  .tabs {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .tab {
+    position: relative;
+    padding: 9px 16px;
+    border: 1px solid var(--night-line);
+    border-radius: 999px;
+    background: rgb(255 255 255 / 0.03);
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--night-ink-2);
+    cursor: pointer;
+    overflow: hidden;
+    transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+  }
+
+  .tab:hover {
+    color: #fff;
+    background: rgb(255 255 255 / 0.06);
+  }
+
+  .tab[aria-selected="true"] {
+    border-color: rgb(255 174 51 / 0.6);
+    background: rgb(255 153 0 / 0.12);
+    color: #fff;
+  }
+
+  .tab-progress {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 2px;
+    width: 0;
+    background: var(--orange);
+  }
+
+  .tab[aria-selected="true"] .tab-progress.run {
+    animation: progress var(--tour-ms, 6000ms) linear forwards;
+  }
+
+  @keyframes progress {
+    to {
+      width: 100%;
+    }
+  }
+
+  .window {
+    border-radius: 16px;
+    background: #1c1a17;
+    box-shadow: 0 60px 120px -50px rgb(0 0 0 / 0.9), 0 0 0 1px rgb(255 255 255 / 0.08);
+    overflow: hidden;
+  }
+
+  .window-bar {
+    display: grid;
+    grid-template-columns: 80px 1fr 80px;
+    align-items: center;
+    height: 42px;
+    padding-inline: 16px;
+    border-bottom: 1px solid rgb(255 255 255 / 0.06);
+    background: linear-gradient(180deg, #23201c, #1c1a17);
+  }
+
+  .dots {
+    display: inline-flex;
+    gap: 7px;
+  }
+
+  .dots i {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: #ff5f57;
+  }
+
+  .dots i:nth-child(2) {
+    background: #febc2e;
+  }
+
+  .dots i:nth-child(3) {
+    background: #28c840;
+  }
+
+  .url {
+    justify-self: center;
+    max-width: 100%;
+    overflow: hidden;
+    padding: 5px 16px;
+    border-radius: 8px;
+    background: rgb(255 255 255 / 0.05);
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: #9d948a;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .url span {
+    color: #ece5da;
+  }
+
+  .screens {
+    display: grid;
+    background: #0e0e0e;
+  }
+
+  .screen {
+    grid-area: 1 / 1;
+  }
+
+  .screen:not([hidden]) {
+    animation: screen-in 0.45s cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+
+  .zoom {
+    display: block;
+    cursor: zoom-in;
+  }
+
+  .screen :global(img) {
+    width: 100%;
+    aspect-ratio: 8 / 5;
+    object-fit: cover;
+  }
+
+  @keyframes screen-in {
+    from {
+      opacity: 0;
+      transform: scale(1.01);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .caption {
+    display: grid;
+    justify-items: center;
+    min-height: 3.2em;
+    text-align: center;
+  }
+
+  .caption-item {
+    display: grid;
+    gap: 2px;
+    max-width: 640px;
+    grid-area: 1 / 1;
+  }
+
+  .caption-item[hidden] {
+    display: none;
+  }
+
+  .caption-item b {
+    font-size: 18px;
+    color: #fff;
+  }
+
+  .caption-item span {
+    font-size: 15.5px;
+    color: var(--night-ink-2);
+  }
+
+  @media (max-width: 760px) {
+    .tabs {
+      flex-wrap: nowrap;
+      justify-content: flex-start;
+      overflow-x: auto;
+      margin-inline: calc(var(--gutter) * -1);
+      padding-inline: var(--gutter);
+      scrollbar-width: none;
+    }
+
+    .tabs::-webkit-scrollbar {
+      display: none;
+    }
+
+    .tab {
+      flex: none;
+      font-size: 14px;
+    }
+
+    .window-bar {
+      grid-template-columns: 50px 1fr 0;
+      height: 36px;
+      padding-inline: 12px;
+    }
+
+    .url {
+      font-size: 11px;
+      padding: 4px 10px;
+    }
+  }
+</style>
+
+<script>
+  const tour = document.querySelector<HTMLElement>("[data-tour]");
+  if (tour) {
+    const tabs = Array.from(tour.querySelectorAll<HTMLButtonElement>("[data-tab]"));
+    const panels = Array.from(tour.querySelectorAll<HTMLElement>("[data-panel]"));
+    const captions = Array.from(tour.querySelectorAll<HTMLElement>("[data-caption]"));
+    const urlPath = tour.querySelector<HTMLElement>("[data-url-path]");
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const DURATION = 6000;
+    tour.style.setProperty("--tour-ms", `${DURATION}ms`);
+    let current = 0;
+    let timer = 0;
+    let auto = !reduceMotion;
+    let visible = false;
+
+    const select = (index: number, focus = false) => {
+      current = (index + tabs.length) % tabs.length;
+      tabs.forEach((tab, i) => {
+        const on = i === current;
+        tab.setAttribute("aria-selected", String(on));
+        tab.tabIndex = on ? 0 : -1;
+        const bar = tab.querySelector<HTMLElement>(".tab-progress")!;
+        bar.classList.remove("run");
+        if (on && auto && visible) {
+          void bar.offsetWidth;
+          bar.classList.add("run");
+        }
+      });
+      panels.forEach((panel, i) => (panel.hidden = i !== current));
+      captions.forEach((caption, i) => (caption.hidden = i !== current));
+      if (urlPath) urlPath.textContent = panels[current].dataset.path ?? "";
+      if (focus) tabs[current].focus();
+      window.clearTimeout(timer);
+      if (auto && visible) timer = window.setTimeout(() => select(current + 1), DURATION);
+    };
+
+    const stopAuto = () => {
+      auto = false;
+      window.clearTimeout(timer);
+      tabs.forEach((tab) => tab.querySelector(".tab-progress")!.classList.remove("run"));
+    };
+
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => {
+        stopAuto();
+        select(index);
+      });
+      tab.addEventListener("keydown", (event) => {
+        const keys: Record<string, number> = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
+        if (event.key in keys) {
+          event.preventDefault();
+          stopAuto();
+          select(current + keys[event.key], true);
+        } else if (event.key === "Home" || event.key === "End") {
+          event.preventDefault();
+          stopAuto();
+          select(event.key === "Home" ? 0 : tabs.length - 1, true);
+        }
+      });
+    });
+
+    new IntersectionObserver(
+      ([entry]) => {
+        visible = entry.isIntersecting;
+        select(current);
+      },
+      { threshold: 0.3 },
+    ).observe(tour);
+  }
+</script>

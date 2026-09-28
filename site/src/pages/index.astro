@@ -1,0 +1,40 @@
+---
+import Base from "../layouts/Base.astro";
+import Nav from "../components/Nav.astro";
+import Hero from "../components/Hero.astro";
+import LogoStrip from "../components/LogoStrip.astro";
+import Simulator from "../components/Simulator.astro";
+import Pools from "../components/Pools.astro";
+import Compat from "../components/Compat.astro";
+import Features from "../components/Features.astro";
+import AllFeatures from "../components/AllFeatures.astro";
+import Dashboard from "../components/Dashboard.astro";
+import GetStarted from "../components/GetStarted.astro";
+import Trust from "../components/Trust.astro";
+import Faq from "../components/Faq.astro";
+import FinalCta from "../components/FinalCta.astro";
+import Footer from "../components/Footer.astro";
+---
+
+<Base>
+  <Nav />
+  <main id="main">
+    <Hero />
+    <LogoStrip />
+    <Simulator />
+    <Pools />
+    <Compat />
+    <Features />
+    <AllFeatures />
+    <Dashboard />
+    <GetStarted />
+    <Trust />
+    <Faq />
+    <FinalCta />
+  </main>
+  <Footer />
+</Base>
+
+<script>
+  import "../scripts/reveal";
+</script>

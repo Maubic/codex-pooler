@@ -1,0 +1,288 @@
+---
+import { DOCS_URL, QUICKSTART_URL, REPO_URL } from "../data/site";
+import { formatStars, getStars } from "../data/github";
+import GitHubIcon from "./icons/GitHubIcon.astro";
+
+const stars = await getStars();
+
+const links = [
+  { href: "#how", label: "How it works" },
+  { href: "#pools", label: "Pools" },
+  { href: "#compat", label: "Compatibility" },
+  { href: "#features", label: "Features" },
+  { href: "#dashboard", label: "Dashboard" },
+  { href: "#faq", label: "FAQ" },
+];
+---
+
+<header class="nav" data-nav>
+  <div class="wrap nav-in">
+    <a class="brand" href="/" aria-label="Codex Pooler home">
+      <img src="/favicon.svg" width="34" height="34" alt="" />
+      <span class="wordmark">Codex Pooler</span>
+    </a>
+
+    <nav class="nav-links" aria-label="Main">
+      {links.map((link) => <a href={link.href}>{link.label}</a>)}
+      <a href={DOCS_URL}>Docs</a>
+    </nav>
+
+    <div class="nav-actions">
+      <a class="btn btn-sm gh" href={REPO_URL} aria-label={stars === null ? "Codex Pooler on GitHub" : `Codex Pooler on GitHub, ${stars} stars`}>
+        <GitHubIcon />
+        <span class="gh-label">GitHub</span>
+        {
+          stars !== null && (
+            <span class="stars" aria-hidden="true">
+              <svg viewBox="0 0 16 16"><path d="M8 1.2l2.05 4.16 4.6.67-3.33 3.24.79 4.57L8 11.68l-4.11 2.16.79-4.57L1.35 6.03l4.6-.67L8 1.2Z" /></svg>
+              {formatStars(stars)}
+            </span>
+          )
+        }
+      </a>
+      <a class="btn btn-sm btn-primary start" href={QUICKSTART_URL}>Get started</a>
+      <button class="menu-btn" type="button" aria-expanded="false" aria-controls="mobile-menu" data-menu-btn>
+        <span class="visually-hidden">Menu</span>
+        <span class="bars" aria-hidden="true"><i></i><i></i></span>
+      </button>
+    </div>
+  </div>
+
+  <div class="mobile-menu" id="mobile-menu" data-menu hidden>
+    <nav class="wrap" aria-label="Mobile">
+      {links.map((link) => <a href={link.href}>{link.label}</a>)}
+      <a href={DOCS_URL}>Docs</a>
+      <a href={REPO_URL}>GitHub</a>
+      <a class="btn btn-primary" href={QUICKSTART_URL}>Get started</a>
+    </nav>
+  </div>
+</header>
+
+<style>
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: color-mix(in srgb, var(--cream) 78%, transparent);
+    backdrop-filter: saturate(1.4) blur(14px);
+    -webkit-backdrop-filter: saturate(1.4) blur(14px);
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.25s, box-shadow 0.25s, background-color 0.25s;
+  }
+
+  .nav.is-scrolled {
+    border-bottom-color: var(--line);
+    box-shadow: 0 10px 30px -24px rgb(23 20 15 / 0.45);
+  }
+
+  .nav-in {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    height: var(--nav-h);
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 11px;
+    flex: none;
+  }
+
+  .brand img {
+    width: 34px;
+    height: 34px;
+    transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  .brand:hover img {
+    transform: rotate(-8deg) scale(1.06);
+  }
+
+  .wordmark {
+    font-size: 21px;
+    font-weight: 850;
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
+    color: #f28a00;
+    line-height: 1;
+  }
+
+  .nav-links {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: 10px;
+  }
+
+  .nav-links a {
+    padding: 8px 12px;
+    border-radius: 9px;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--ink-2);
+    transition: color 0.15s, background-color 0.15s;
+  }
+
+  .nav-links a:hover {
+    color: var(--ink);
+    background: rgb(23 20 15 / 0.05);
+  }
+
+  .nav-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-left: auto;
+  }
+
+  .gh {
+    gap: 8px;
+    padding-right: 6px;
+  }
+
+  .stars {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: 2px;
+    padding: 4px 9px 4px 7px;
+    border-radius: 8px;
+    background: linear-gradient(180deg, #fff6e2, #ffecc4);
+    border: 1px solid #f6d58c;
+    font-size: 13.5px;
+    font-weight: 800;
+    color: #7a4a00;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .stars svg {
+    width: 14px;
+    height: 14px;
+    fill: #f5a623;
+    filter: drop-shadow(0 1px 0 rgb(122 74 0 / 0.25));
+    transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  .gh:hover .stars svg {
+    transform: rotate(72deg) scale(1.15);
+  }
+
+  .menu-btn {
+    display: none;
+    width: 42px;
+    height: 42px;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    background: var(--paper);
+    cursor: pointer;
+  }
+
+  .bars {
+    display: grid;
+    gap: 5px;
+    width: 18px;
+    margin: auto;
+  }
+
+  .bars i {
+    display: block;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--ink);
+    transition: transform 0.25s;
+  }
+
+  .menu-btn[aria-expanded="true"] .bars i:first-child {
+    transform: translateY(3.5px) rotate(45deg);
+  }
+
+  .menu-btn[aria-expanded="true"] .bars i:last-child {
+    transform: translateY(-3.5px) rotate(-45deg);
+  }
+
+  .mobile-menu {
+    border-top: 1px solid var(--line);
+    background: var(--cream);
+  }
+
+  .mobile-menu nav {
+    display: grid;
+    gap: 2px;
+    padding-block: 14px 20px;
+  }
+
+  .mobile-menu a:not(.btn) {
+    padding: 12px 4px;
+    border-bottom: 1px solid var(--line-2);
+    font-size: 18px;
+    font-weight: 600;
+  }
+
+  .mobile-menu .btn {
+    margin-top: 14px;
+  }
+
+  @media (max-width: 1180px) {
+    .nav-links a[href="#dashboard"],
+    .nav-links a[href="#compat"] {
+      display: none;
+    }
+  }
+
+  @media (max-width: 1040px) {
+    .nav-links a[href="#faq"] {
+      display: none;
+    }
+  }
+
+  @media (max-width: 900px) {
+    .nav-links,
+    .gh {
+      display: none;
+    }
+
+    .menu-btn {
+      display: grid;
+    }
+  }
+
+  @media (max-width: 420px) {
+    .start {
+      display: none;
+    }
+
+    .wordmark {
+      font-size: 19px;
+    }
+  }
+</style>
+
+<script>
+  const nav = document.querySelector<HTMLElement>("[data-nav]");
+  const button = document.querySelector<HTMLButtonElement>("[data-menu-btn]");
+  const menu = document.querySelector<HTMLElement>("[data-menu]");
+
+  if (nav) {
+    const onScroll = () => nav.classList.toggle("is-scrolled", window.scrollY > 8);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+  }
+
+  if (button && menu) {
+    const setOpen = (open: boolean) => {
+      button.setAttribute("aria-expanded", String(open));
+      menu.hidden = !open;
+    };
+    button.addEventListener("click", () => setOpen(button.getAttribute("aria-expanded") !== "true"));
+    menu.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("a")) setOpen(false);
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") setOpen(false);
+    });
+    window.matchMedia("(min-width: 901px)").addEventListener("change", (event) => {
+      if (event.matches) setOpen(false);
+    });
+  }
+</script>

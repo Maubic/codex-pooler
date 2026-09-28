@@ -1,0 +1,75 @@
+---
+import "@fontsource-variable/roboto-condensed";
+import fontLatin from "@fontsource-variable/roboto-condensed/files/roboto-condensed-latin-wght-normal.woff2?url";
+import "../styles/global.css";
+import { LICENSE_URL, REPO_URL, SITE_URL } from "../data/site";
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const {
+  title = "Codex Pooler — your Codex accounts, pooled your way",
+  description = "Codex Pooler is a self-hosted gateway for OpenAI Codex. Group your accounts into Pools for teams and agents, give every tool a key you control, and use your Codex subscriptions even in tools that only speak the OpenAI API.",
+} = Astro.props;
+
+const canonical = new URL(Astro.url.pathname, Astro.site ?? SITE_URL).href;
+const ogImage = new URL("/og.jpg", Astro.site ?? SITE_URL).href;
+
+const structuredData = {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  name: "Codex Pooler",
+  applicationCategory: "DeveloperApplication",
+  operatingSystem: "Docker Compose, Kubernetes",
+  description,
+  url: SITE_URL,
+  image: ogImage,
+  license: LICENSE_URL,
+  codeRepository: REPO_URL,
+  offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+  publisher: { "@type": "Organization", name: "iCoreTech" },
+};
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#fbf7f0" />
+    <link rel="preload" href={fontLatin} as="font" type="font/woff2" crossorigin />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Codex Pooler" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:type" content="image/jpeg" />
+    <meta property="og:image:alt" content="Codex Pooler: two friendly robots floating in a pool under an orange umbrella, next to the words Your Codex accounts, pooled your way." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+
+    <script is:inline type="application/ld+json" set:html={JSON.stringify(structuredData)} />
+    <script is:inline>document.documentElement.classList.add("js");</script>
+    <!-- Same privacy-friendly analytics as the docs. -->
+    <script is:inline async src="https://analytics.icorete.ch/js/pa-5Klr1c-TW2X9D5KwXBBis.js"></script>
+    <script is:inline>window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};plausible.init();</script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <slot />
+  </body>
+</html>

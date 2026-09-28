@@ -1,0 +1,442 @@
+---
+import { docs } from "../data/site";
+import { CHART_VERSION, RELEASE_VERSION } from "../data/github";
+
+type Line = { kind: "cmd" | "note" | "cont"; text: string };
+
+const setups: { id: string; label: string; lines: Line[]; guide: { href: string; label: string } }[] = [
+  {
+    id: "compose",
+    label: "Docker Compose",
+    lines: [
+      { kind: "cmd", text: "git clone https://github.com/icoretech/codex-pooler.git" },
+      { kind: "cmd", text: "cd codex-pooler" },
+      { kind: "note", text: "# pin the latest stable release" },
+      { kind: "cmd", text: `export CODEX_POOLER_IMAGE_TAG=${RELEASE_VERSION}` },
+      { kind: "cmd", text: "scripts/self-host/generate-env.sh" },
+      { kind: "cmd", text: "docker compose pull" },
+      { kind: "cmd", text: "docker compose up -d" },
+      { kind: "note", text: "# then open http://localhost:4000" },
+    ],
+    guide: { href: docs("/deployment/docker-compose/"), label: "Docker Compose guide" },
+  },
+  {
+    id: "helm",
+    label: "Kubernetes · Helm",
+    lines: [
+      { kind: "cmd", text: "helm repo add icoretech https://icoretech.github.io/helm" },
+      { kind: "cmd", text: "helm repo update" },
+      { kind: "cmd", text: "helm upgrade --install codex-pooler icoretech/codex-pooler \\" },
+      { kind: "cont", text: "--namespace codex-pooler --create-namespace \\" },
+      { kind: "cont", text: `--version ${CHART_VERSION} \\` },
+      { kind: "cont", text: "--values ./values.production.yaml" },
+      { kind: "note", text: "# values: host, ingress, secrets and database" },
+    ],
+    guide: { href: docs("/deployment/helm/"), label: "Helm guide" },
+  },
+];
+
+const copyText = (lines: Line[]) =>
+  lines
+    .filter((line) => line.kind !== "note")
+    .map((line) => (line.kind === "cont" ? `  ${line.text}` : line.text))
+    .join("\n");
+
+const steps = [
+  {
+    title: "Start Pooler",
+    text: "Docker Compose runs the app and its database on one machine. On Kubernetes, the Helm chart runs separate web, worker and scheduler roles. Both pin a stable release.",
+  },
+  {
+    title: "Add your accounts",
+    text: "Sign in with OpenAI, import an existing Codex login, or send a teammate an invite link.",
+    link: { href: docs("/operators/upstreams/"), label: "Adding accounts" },
+  },
+  {
+    title: "Hand out keys",
+    text: "Create a key for each tool or person and point the tool at Pooler. That's the whole setup.",
+    link: { href: docs("/operators/api-keys/"), label: "Creating keys" },
+  },
+];
+---
+
+<section class="section start" id="start" aria-labelledby="start-title">
+  <div class="wrap start-grid">
+    <div>
+      <header class="section-head" data-reveal>
+        <p class="eyebrow">Get started</p>
+        <h2 class="h2" id="start-title">Up and running <em>in minutes.</em></h2>
+        <p class="lede">A machine with Docker, or a Kubernetes cluster. No sign-up with us, and nothing is ever sent to us.</p>
+      </header>
+
+      <ol class="steps">
+        {
+          steps.map((step, index) => (
+            <li class="step" data-reveal style={`--delay:${index * 0.08}s`}>
+              <span class="step-n">{index + 1}</span>
+              <div>
+                <h3>{step.title}</h3>
+                <p>{step.text}</p>
+                {step.link && <a href={step.link.href}>{step.link.label} →</a>}
+              </div>
+            </li>
+          ))
+        }
+      </ol>
+    </div>
+
+    <div class="term-wrap" data-reveal style="--delay:0.12s" data-setup>
+      <div class="term">
+        <div class="term-bar">
+          <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <div class="term-tabs" role="tablist" aria-label="Installation method">
+            {
+              setups.map((setup, index) => (
+                <button type="button" role="tab" class="term-tab" id={`setup-tab-${setup.id}`} aria-controls={`setup-${setup.id}`} aria-selected={index === 0 ? "true" : "false"} tabindex={index === 0 ? "0" : "-1"} data-setup-tab>
+                  {setup.label}
+                </button>
+              ))
+            }
+          </div>
+          <button type="button" class="copy" data-copy>
+            <span data-copy-label>Copy</span>
+          </button>
+        </div>
+        {
+          setups.map((setup, index) => (
+            <pre class="term-body" role="tabpanel" id={`setup-${setup.id}`} aria-labelledby={`setup-tab-${setup.id}`} data-setup-panel data-copy-text={copyText(setup.lines)} hidden={index !== 0}><code>{setup.lines.map((line, i) => (
+              <span class={`line ${line.kind}`} style={`--i:${i}`}>{line.kind === "cmd" && <span class="prompt" aria-hidden="true">$</span>}{line.text}</span>
+            ))}</code></pre>
+          ))
+        }
+      </div>
+      <div class="guides">
+        {
+          setups.map((setup, index) => (
+            <a class="btn btn-dark" href={setup.guide.href} data-setup-guide hidden={index !== 0}>
+              {setup.guide.label}
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 10h11m-4.5-4.5L15 10l-4.5 4.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </a>
+          ))
+        }
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .start {
+    background: linear-gradient(180deg, var(--cream) 0%, var(--cream-2) 100%);
+  }
+
+  .start-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr);
+    align-items: center;
+    gap: clamp(32px, 6vw, 80px);
+  }
+
+  .steps {
+    display: grid;
+    gap: 14px;
+  }
+
+  .step {
+    display: grid;
+    grid-template-columns: 46px minmax(0, 1fr);
+    gap: 18px;
+    padding: 20px 22px;
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    background: var(--paper);
+  }
+
+  .step-n {
+    display: grid;
+    place-items: center;
+    width: 46px;
+    height: 46px;
+    border-radius: 14px;
+    background: var(--ink);
+    color: #fff;
+    font-size: 21px;
+    font-weight: 800;
+  }
+
+  .step h3 {
+    font-size: 20px;
+    font-weight: 800;
+  }
+
+  .step p {
+    margin-top: 4px;
+    font-size: 16.5px;
+    color: var(--ink-2);
+  }
+
+  .step a {
+    display: inline-block;
+    margin-top: 8px;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--orange-ink);
+  }
+
+  .step a:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .term-wrap {
+    display: grid;
+    gap: 14px;
+  }
+
+  .term {
+    border-radius: 20px;
+    background: #15120e;
+    box-shadow: var(--shadow-lg), 0 0 0 1px rgb(255 255 255 / 0.04) inset;
+    overflow: hidden;
+  }
+
+  .term-bar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 12px 0 16px;
+    border-bottom: 1px solid #2a251d;
+  }
+
+  .dots {
+    display: inline-flex;
+    gap: 7px;
+    padding-bottom: 10px;
+  }
+
+  .dots i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #ff5f57;
+  }
+
+  .dots i:nth-child(2) {
+    background: #febc2e;
+  }
+
+  .dots i:nth-child(3) {
+    background: #28c840;
+  }
+
+  .term-tabs {
+    display: flex;
+    gap: 2px;
+    align-self: flex-end;
+  }
+
+  .term-tab {
+    padding: 8px 14px 10px;
+    border: 0;
+    border-radius: 10px 10px 0 0;
+    background: transparent;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-weight: 600;
+    color: #8f8577;
+    cursor: pointer;
+    transition: color 0.2s, background-color 0.2s;
+  }
+
+  .term-tab:hover {
+    color: #e9e1d4;
+  }
+
+  .term-tab[aria-selected="true"] {
+    background: #221e18;
+    color: #fff;
+    box-shadow: inset 0 2px 0 var(--orange);
+  }
+
+  .copy {
+    margin-left: auto;
+    margin-bottom: 8px;
+    padding: 6px 12px;
+    border: 1px solid #3a3328;
+    border-radius: 9px;
+    background: #211d17;
+    color: #e9e1d4;
+    font-size: 13.5px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background-color 0.2s, border-color 0.2s;
+  }
+
+  .copy:hover {
+    background: #2b261e;
+    border-color: #50473a;
+  }
+
+  .copy.done {
+    border-color: #1f6f53;
+    color: #7ee2b8;
+  }
+
+  .term-body {
+    margin: 0;
+    padding: 20px 22px 24px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.9;
+    color: #efe7da;
+    background: #221e18;
+  }
+
+  .term-body code {
+    display: grid;
+    font: inherit;
+  }
+
+  .line {
+    white-space: pre;
+  }
+
+  .line.cont {
+    padding-left: 2.6em;
+  }
+
+  .line.note {
+    color: #8f8577;
+  }
+
+  .prompt {
+    margin-right: 12px;
+    color: var(--orange);
+    user-select: none;
+  }
+
+  :global(.js) .term-wrap:not(.is-in) .line {
+    opacity: 0;
+  }
+
+  :global(.js) .term-wrap.is-in .line {
+    animation: line-in 0.35s ease both;
+    animation-delay: calc(0.15s + var(--i) * 0.18s);
+  }
+
+  @keyframes line-in {
+    from {
+      opacity: 0;
+      transform: translateX(-6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .guides .btn {
+    width: 100%;
+  }
+
+  .guides .btn[hidden] {
+    display: none;
+  }
+
+  @media (max-width: 920px) {
+    .start-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .term-bar {
+      flex-wrap: wrap;
+      padding-right: 10px;
+    }
+
+    .dots {
+      display: none;
+    }
+
+    .copy {
+      margin-bottom: 6px;
+    }
+
+    .term-body {
+      font-size: 12.5px;
+      padding: 18px 16px 22px;
+    }
+
+    .line {
+      padding-left: 1.6em;
+      text-indent: -1.6em;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .line.cont {
+      padding-left: 2.8em;
+    }
+
+    .step {
+      grid-template-columns: 38px minmax(0, 1fr);
+      gap: 14px;
+      padding: 18px;
+    }
+
+    .step-n {
+      width: 38px;
+      height: 38px;
+      border-radius: 12px;
+      font-size: 18px;
+    }
+  }
+</style>
+
+<script>
+  const setup = document.querySelector<HTMLElement>("[data-setup]");
+  if (setup) {
+    const tabs = Array.from(setup.querySelectorAll<HTMLButtonElement>("[data-setup-tab]"));
+    const panels = Array.from(setup.querySelectorAll<HTMLElement>("[data-setup-panel]"));
+    const guides = Array.from(setup.querySelectorAll<HTMLElement>("[data-setup-guide]"));
+    const copy = setup.querySelector<HTMLButtonElement>("[data-copy]")!;
+    const label = copy.querySelector<HTMLElement>("[data-copy-label]")!;
+    let current = 0;
+
+    const select = (index: number, focus = false) => {
+      current = (index + tabs.length) % tabs.length;
+      tabs.forEach((tab, i) => {
+        tab.setAttribute("aria-selected", String(i === current));
+        tab.tabIndex = i === current ? 0 : -1;
+      });
+      panels.forEach((panel, i) => (panel.hidden = i !== current));
+      guides.forEach((guide, i) => (guide.hidden = i !== current));
+      if (focus) tabs[current].focus();
+    };
+
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => select(index));
+      tab.addEventListener("keydown", (event) => {
+        if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+          event.preventDefault();
+          select(current + (event.key === "ArrowRight" ? 1 : -1), true);
+        }
+      });
+    });
+
+    copy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(panels[current].dataset.copyText ?? "");
+        label.textContent = "Copied";
+        copy.classList.add("done");
+      } catch {
+        label.textContent = "Select and copy";
+      }
+      window.setTimeout(() => {
+        label.textContent = "Copy";
+        copy.classList.remove("done");
+      }, 1800);
+    });
+  }
+</script>

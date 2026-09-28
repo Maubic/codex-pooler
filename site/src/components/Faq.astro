@@ -1,0 +1,185 @@
+---
+import { LICENSE_URL, docs } from "../data/site";
+
+const faqs = [
+  {
+    q: "Is Codex Pooler a hosted service?",
+    a: "No. You run it on your own machine, server or cluster. There's no hosted version and no account to create with us.",
+  },
+  {
+    q: "Does it let me go past Codex limits?",
+    a: "No. Every account keeps its own limits. Pooler spreads work across the accounts you connect, so capacity you already have doesn't sit unused while someone else is stuck.",
+  },
+  {
+    q: "Can tools without Codex support use it?",
+    a: `Yes, if they let you set an OpenAI API key and base URL: use a Pool key and Pooler's /v1 address. Some tools send requests from their own servers, so Pooler has to be reachable over the internet for them. <a href="${docs("/clients/openai-compatible/")}">OpenAI-compatible setup</a>.`,
+  },
+  {
+    q: "Does Pooler store my prompts or code?",
+    a: "No. It keeps what it needs for routing and accounting, like the tool, account, model, timing, tokens and estimated cost, and nothing of the content.",
+  },
+  {
+    q: "Which tools work with it?",
+    a: `Codex-native tools like Codex CLI and Desktop, OpenCode, Hermes Agent, OpenClaw, Pi and OMP, plus tools that only speak the OpenAI API, like Aider, Cline, Continue, Cursor, Goose and Kilo Code, and apps built on the OpenAI SDKs. The OpenAI-compatible endpoint covers the requests those tools send, not the entire OpenAI API. <a href="${docs("/clients/openai-compatible/")}">See what's supported</a>.`,
+  },
+  {
+    q: "Which accounts can I add?",
+    a: "Codex accounts you're allowed to use this way. Pooler doesn't change what your OpenAI plan permits, so check its terms. Account owners can join through an invite link and sign in with OpenAI themselves.",
+  },
+  {
+    q: "What do I need to run it?",
+    a: `Docker with Compose is enough to start, and the database comes included. For production there's a Helm chart for Kubernetes with separate web, worker and scheduler roles. <a href="${docs("/deployment/docker-compose/")}">Deployment guides</a>.`,
+  },
+  {
+    q: "How much does it cost?",
+    a: `Nothing. It's free to self-host. The source is available under the <a href="${LICENSE_URL}">Elastic License 2.0</a>, which lets you run, modify and self-host it, but not offer it to others as a managed service.`,
+  },
+  {
+    q: "Is it made by OpenAI?",
+    a: "No. Codex Pooler is an independent project by iCoreTech. It is not affiliated with or endorsed by OpenAI.",
+  },
+];
+---
+
+<section class="section faq" id="faq" aria-labelledby="faq-title">
+  <div class="wrap faq-grid">
+    <header class="section-head" data-reveal>
+      <p class="eyebrow">FAQ</p>
+      <h2 class="h2" id="faq-title">Questions, <em>answered.</em></h2>
+      <p class="lede">Something missing? The <a href={docs("/")}>docs</a> go deeper on every part of Pooler.</p>
+    </header>
+
+    <div class="faq-list" data-reveal>
+      {
+        faqs.map((item, index) => (
+          <details open={index === 0}>
+            <summary>
+              {item.q}
+              <span class="chev" aria-hidden="true" />
+            </summary>
+            <p set:html={item.a} />
+          </details>
+        ))
+      }
+    </div>
+  </div>
+</section>
+
+<style>
+  .faq {
+    background: var(--paper);
+    border-top: 1px solid var(--line-2);
+  }
+
+  .faq-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    gap: clamp(28px, 6vw, 80px);
+    align-items: start;
+  }
+
+  .faq .section-head {
+    position: sticky;
+    top: calc(var(--nav-h) + 24px);
+  }
+
+  .faq .lede a {
+    color: var(--orange-ink);
+    font-weight: 700;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .faq-list {
+    display: grid;
+    border-top: 1px solid var(--line);
+  }
+
+  details {
+    border-bottom: 1px solid var(--line);
+  }
+
+  summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 22px 2px;
+    font-size: clamp(1.1rem, 1.6vw, 1.28rem);
+    font-weight: 750;
+    cursor: pointer;
+    list-style: none;
+  }
+
+  summary::-webkit-details-marker {
+    display: none;
+  }
+
+  summary:hover {
+    color: var(--orange-ink);
+  }
+
+  .chev {
+    position: relative;
+    width: 32px;
+    height: 32px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--cream-2);
+    transition: transform 0.3s, background-color 0.2s;
+  }
+
+  .chev::before,
+  .chev::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 12px;
+    height: 2px;
+    margin: -1px 0 0 -6px;
+    border-radius: 2px;
+    background: var(--ink);
+    transition: transform 0.3s;
+  }
+
+  .chev::after {
+    transform: rotate(90deg);
+  }
+
+  details[open] .chev {
+    background: var(--orange-soft);
+  }
+
+  details[open] .chev::after {
+    transform: rotate(0deg);
+  }
+
+  details p {
+    padding: 0 48px 24px 2px;
+    font-size: 17px;
+    color: var(--ink-2);
+    text-wrap: pretty;
+  }
+
+  details p :global(a) {
+    color: var(--orange-ink);
+    font-weight: 700;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  @media (max-width: 900px) {
+    .faq-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .faq .section-head {
+      position: static;
+    }
+
+    details p {
+      padding-right: 8px;
+    }
+  }
+</style>

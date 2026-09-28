@@ -1,0 +1,463 @@
+---
+import { docs } from "../data/site";
+
+// Tools that speak the OpenAI API, each linking to its setup guide.
+const tools = [
+  { logo: "aider", name: "Aider", guide: "/clients/aider/" },
+  { logo: "cline", name: "Cline", guide: "/clients/cline/" },
+  { logo: "continue", name: "Continue", guide: "/clients/continue/" },
+  { logo: "cursor", name: "Cursor", guide: "/clients/cursor/" },
+  { logo: "deepseek-harness", name: "DeepSeek Harness", guide: "/clients/deepseek-harness/" },
+  { logo: "goose", name: "Goose", guide: "/clients/goose/" },
+  { logo: "kilocode", name: "Kilo Code", guide: "/clients/kilo-code/" },
+  { logo: "openhands", name: "OpenHands", guide: "/clients/openhands/" },
+  { logo: "trae", name: "Trae", guide: "/clients/trae/" },
+  { logo: "windmill", name: "Windmill", guide: "/clients/windmill/" },
+  { logo: "python", name: "OpenAI SDKs", guide: "/clients/openai-compatible/" },
+  { logo: "vercel", name: "Vercel AI SDK", guide: "/clients/openai-compatible/" },
+];
+
+const covered = ["Responses and Chat Completions, with streaming", "Model list", "Files", "Audio transcription", "Image generation and edits"];
+---
+
+<section class="section compat" id="compat" aria-labelledby="compat-title">
+  <div class="wrap compat-grid">
+    <div class="compat-copy">
+      <header data-reveal>
+        <p class="eyebrow">OpenAI-compatible</p>
+        <h2 class="h2" id="compat-title">Your Codex plan, even where <em>Codex isn't supported.</em></h2>
+        <p class="lede">
+          Plenty of coding tools and agents can't talk to Codex, but they can talk to the OpenAI API. So can Pooler. Paste a Pool key and Pooler's address, and those tools run on your Codex subscriptions instead of pay-per-token API credits.
+        </p>
+      </header>
+
+      <div class="covered" data-reveal>
+        <p class="covered-title">What the OpenAI-compatible endpoint covers</p>
+        <ul>
+          {covered.map((item) => <li>{item}</li>)}
+        </ul>
+        <p class="fine">
+          It covers the requests coding tools and SDK apps actually send, not the entire OpenAI API. Some tools call the endpoint from their own servers, so Pooler has to be reachable over the internet for them. Each guide says what its tool needs.
+        </p>
+        <div class="links">
+          <a href={docs("/clients/openai-compatible/")}>Everything /v1 supports →</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="compat-visual" data-reveal style="--delay:0.1s">
+      <div class="settings" aria-hidden="true">
+        <div class="settings-bar">
+          <span class="app-dot" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="crumbs">Your tool's settings <i>›</i> Models <i>›</i> OpenAI-compatible</span>
+        </div>
+        <div class="settings-body">
+          <div class="setting">
+            <div class="setting-row">
+              <b>OpenAI API key</b>
+              <span class="switch-ui"><i></i></span>
+            </div>
+            <span class="input type-a">sk-cxp-••••••••••••••••</span>
+          </div>
+          <div class="setting">
+            <div class="setting-row">
+              <b>Override OpenAI base URL</b>
+              <span class="switch-ui late"><i></i></span>
+            </div>
+            <span class="input type-b">https://codex-pooler.example.com/v1</span>
+          </div>
+          <div class="setting model">
+            <b>Model</b>
+            <span class="model-chip"><span class="logo" style="--src:url(/logos/openai.svg)"></span>gpt-6-luna</span>
+          </div>
+          <div class="result">
+            <span class="result-dot"></span>
+            <span>Answered by <b>Account C</b> in the Product team Pool</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="tool-list">
+        <p class="tool-list-title">Setup guides</p>
+        <ul class="tool-grid">
+          {
+            tools.map((tool) => (
+              <li>
+                <a href={docs(tool.guide)}>
+                  <span class="logo" style={`--src:url(/logos/${tool.logo}.svg)`} />
+                  <span class="tool-name">{tool.name}</span>
+                  <span class="go" aria-hidden="true">→</span>
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .compat {
+    overflow: hidden;
+    background:
+      radial-gradient(700px 420px at 85% 30%, rgb(255 153 0 / 0.12), transparent 70%),
+      var(--cream);
+  }
+
+  .compat-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: center;
+    gap: clamp(32px, 6vw, 80px);
+  }
+
+  .covered {
+    margin-top: 30px;
+    padding: 22px 24px;
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    background: var(--paper);
+  }
+
+  .covered-title {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .covered ul {
+    display: grid;
+    gap: 8px;
+    margin-top: 14px;
+  }
+
+  .covered li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 16.5px;
+    font-weight: 600;
+  }
+
+  .covered li::before {
+    content: "";
+    width: 18px;
+    height: 18px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--green-soft) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m4.5 8.2 2.3 2.3 4.7-5' fill='none' stroke='%230e7c5a' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 14px no-repeat;
+  }
+
+  .fine {
+    margin-top: 16px;
+    font-size: 14.5px;
+    color: var(--ink-3);
+  }
+
+  .links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 22px;
+    margin-top: 14px;
+    font-size: 15.5px;
+    font-weight: 700;
+    color: var(--orange-ink);
+  }
+
+  .links a:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  /* settings mock ------------------------------------------------ */
+
+  .compat-visual {
+    display: grid;
+    gap: 18px;
+  }
+
+  .settings {
+    border-radius: 20px;
+    background: #1b1a18;
+    color: #ece7de;
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+  }
+
+  .settings-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 13px 18px;
+    border-bottom: 1px solid #2d2b27;
+    font-size: 14px;
+    color: #b5ada0;
+    --logo-size: 18px;
+  }
+
+  .app-dot {
+    display: inline-flex;
+    gap: 6px;
+  }
+
+  .app-dot i {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #4a463f;
+  }
+
+  .crumbs i {
+    margin-inline: 4px;
+    font-style: normal;
+    color: #6f685d;
+  }
+
+  .settings-body {
+    display: grid;
+    gap: 14px;
+    padding: 18px;
+  }
+
+  .setting {
+    display: grid;
+    gap: 8px;
+  }
+
+  .setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .setting b {
+    font-size: 15px;
+    font-weight: 700;
+  }
+
+  .switch-ui {
+    position: relative;
+    width: 38px;
+    height: 22px;
+    border-radius: 99px;
+    background: #3a3833;
+    animation: switch-on 0.3s ease 0.7s forwards;
+  }
+
+  .switch-ui i {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    animation: knob-on 0.3s ease 0.7s forwards;
+  }
+
+  .switch-ui.late,
+  .switch-ui.late i {
+    animation-delay: 1.6s;
+  }
+
+  @keyframes switch-on {
+    to {
+      background: var(--green);
+    }
+  }
+
+  @keyframes knob-on {
+    to {
+      transform: translateX(16px);
+    }
+  }
+
+  .input {
+    display: block;
+    overflow: hidden;
+    padding: 10px 12px;
+    border: 1px solid #36332e;
+    border-radius: 10px;
+    background: #12110f;
+    font-family: var(--mono);
+    font-size: 13px;
+    white-space: nowrap;
+  }
+
+  .type-a,
+  .type-b {
+    animation: type 0.75s steps(30, end) both;
+  }
+
+  .type-b {
+    animation-delay: 0.95s;
+  }
+
+  @keyframes type {
+    from {
+      clip-path: inset(0 100% 0 0);
+    }
+    to {
+      clip-path: inset(0 0 0 0);
+    }
+  }
+
+  .model {
+    grid-template-columns: 1fr auto;
+    align-items: center;
+  }
+
+  .model-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 12px;
+    border: 1px solid #3a3833;
+    border-radius: 9px;
+    background: #24221f;
+    font-family: var(--mono);
+    font-size: 13px;
+    --logo-size: 14px;
+  }
+
+  .result {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 11px 13px;
+    border-radius: 11px;
+    background: rgb(19 154 112 / 0.14);
+    border: 1px solid rgb(19 154 112 / 0.35);
+    color: #b9ecd8;
+    font-size: 14px;
+    animation: pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) 2.2s both;
+  }
+
+  .result b {
+    color: #fff;
+  }
+
+  .result-dot {
+    width: 9px;
+    height: 9px;
+    flex: none;
+    border-radius: 50%;
+    background: #3ddc97;
+    box-shadow: 0 0 10px #3ddc97;
+  }
+
+  @keyframes pop {
+    from {
+      opacity: 0;
+      transform: translateY(6px) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* the settings animation starts once revealed */
+  .settings *,
+  .settings {
+    animation-play-state: paused;
+  }
+
+  :global(.is-in) .settings,
+  :global(.is-in) .settings * {
+    animation-play-state: running;
+  }
+
+  .tool-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .tool-list-title {
+    margin-bottom: 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .tool-grid a {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 10px 26px 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--paper);
+    font-size: 14.5px;
+    font-weight: 650;
+    white-space: nowrap;
+    transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+    --logo-size: 18px;
+  }
+
+  .tool-grid a:hover {
+    border-color: #f2c98d;
+    box-shadow: var(--shadow);
+    transform: translateY(-2px);
+  }
+
+  .tool-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .go {
+    position: absolute;
+    right: 11px;
+    color: var(--orange-ink);
+    opacity: 0;
+    transform: translateX(-4px);
+    transition: opacity 0.2s, transform 0.2s;
+  }
+
+  .tool-grid a:hover .go,
+  .tool-grid a:focus-visible .go {
+    opacity: 1;
+    transform: none;
+  }
+
+  @media (max-width: 960px) {
+    .compat-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 460px) {
+    .tool-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .input {
+      font-size: 12px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .settings *,
+    .settings {
+      animation: none !important;
+    }
+
+    .switch-ui {
+      background: var(--green);
+    }
+
+    .switch-ui i {
+      transform: translateX(16px);
+    }
+  }
+</style>

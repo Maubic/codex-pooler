@@ -1,0 +1,149 @@
+---
+import { LICENSE_URL, REPO_URL } from "../data/site";
+
+const pillars = [
+  {
+    title: "Runs where you want",
+    text: "A laptop, one server with Docker Compose, or Kubernetes with the Helm chart. Nothing is hosted by us.",
+    icon: "M4 6h16v5H4zM4 13h16v5H4zM7.5 8.5h.01M7.5 15.5h.01",
+  },
+  {
+    title: "Secrets stay locked",
+    text: "Account tokens are encrypted at rest. Pool keys are shown once, then only as a short prefix.",
+    icon: "M6 10V8a6 6 0 1 1 12 0v2M5 10h14v10H5zM12 14v2",
+  },
+  {
+    title: "Your network, your rules",
+    text: "Allow only the IP ranges you choose, trust your own reverse proxies, and send outbound traffic through an HTTP proxy.",
+    icon: "M12 3 5 6v5c0 4.5 3 8.3 7 10 4-1.7 7-5.5 7-10V6l-7-3ZM9 12l2 2 4-4",
+  },
+  {
+    title: "Read every line",
+    text: "The full source is on GitHub, free to self-host under the Elastic License 2.0.",
+    icon: "m9 8-4 4 4 4M15 8l4 4-4 4",
+  },
+];
+---
+
+<section class="section trust" aria-labelledby="trust-title">
+  <div class="wrap trust-grid">
+    <div class="trust-copy" data-reveal>
+      <p class="eyebrow">Yours, end to end</p>
+      <h2 class="h2" id="trust-title">Your server. Your accounts. <em>Your data.</em></h2>
+      <p class="lede">Pooler is software you run, not a service you sign up for. Requests travel from your server to OpenAI, directly or through your own proxy, and never through us.</p>
+      <p class="honest">
+        <strong>What Pooler is not:</strong> a way around OpenAI's limits or terms. Every account keeps its own limits. Pooler helps you make full use of the accounts you're allowed to use, together.
+      </p>
+      <div class="trust-links">
+        <a href={REPO_URL}>Source on GitHub →</a>
+        <a href={LICENSE_URL}>License →</a>
+      </div>
+    </div>
+
+    <ul class="pillars">
+      {
+        pillars.map((pillar, index) => (
+          <li class="pillar" data-reveal style={`--delay:${(index % 2) * 0.08}s`}>
+            <span class="pillar-ico">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d={pillar.icon} />
+              </svg>
+            </span>
+            <h3>{pillar.title}</h3>
+            <p>{pillar.text}</p>
+          </li>
+        ))
+      }
+    </ul>
+  </div>
+</section>
+
+<style>
+  .trust-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+    align-items: center;
+    gap: clamp(32px, 6vw, 80px);
+  }
+
+  .honest {
+    margin-top: 26px;
+    padding: 18px 20px;
+    border-left: 4px solid var(--sky);
+    border-radius: 0 14px 14px 0;
+    background: var(--sky-soft);
+    font-size: 16.5px;
+    color: #17405e;
+  }
+
+  .honest strong {
+    color: #0d2f49;
+  }
+
+  .trust-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 22px;
+    margin-top: 24px;
+    font-weight: 700;
+    color: var(--orange-ink);
+  }
+
+  .trust-links a:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .pillars {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+
+  .pillar {
+    padding: 24px;
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    background: var(--paper);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .pillar-ico {
+    display: grid;
+    place-items: center;
+    width: 46px;
+    height: 46px;
+    margin-bottom: 16px;
+    border-radius: 14px;
+    background: var(--blue-soft);
+    color: var(--blue-ink);
+  }
+
+  .pillar-ico svg {
+    width: 23px;
+    height: 23px;
+  }
+
+  .pillar h3 {
+    font-size: 19px;
+    font-weight: 800;
+  }
+
+  .pillar p {
+    margin-top: 6px;
+    font-size: 16px;
+    color: var(--ink-2);
+  }
+
+  @media (max-width: 920px) {
+    .trust-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .pillars {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

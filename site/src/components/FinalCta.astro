@@ -1,0 +1,130 @@
+---
+import { Image } from "astro:assets";
+import mascot from "../assets/pooler.webp";
+import { QUICKSTART_URL, REPO_URL } from "../data/site";
+import GitHubIcon from "./icons/GitHubIcon.astro";
+---
+
+<section class="final" aria-labelledby="final-title">
+  <div class="wrap final-grid">
+    <div class="final-art" data-reveal>
+      <Image src={mascot} widths={[360, 540, 720]} sizes="(min-width: 900px) 420px, 70vw" alt="" loading="lazy" />
+    </div>
+    <div class="final-copy" data-reveal style="--delay:0.08s">
+      <h2 class="final-title" id="final-title">Jump in.</h2>
+      <p>Set up Codex Pooler in a few minutes and put every Codex account you have to work, for every tool your team uses.</p>
+      <div class="final-cta">
+        <a class="btn btn-dark" href={QUICKSTART_URL}>
+          Get started
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 10h11m-4.5-4.5L15 10l-4.5 4.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        </a>
+        <a class="btn" href={REPO_URL}>
+          <GitHubIcon />
+          View on GitHub
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .final {
+    position: relative;
+    overflow: hidden;
+    padding-block: clamp(64px, 9vw, 120px);
+    background: linear-gradient(118deg, #ffeccd 0%, #ffc070 30%, #ff9a4c 58%, #f5654a 82%, #e8474b 100%);
+  }
+
+  .final::before {
+    /* soft light ripples */
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(600px 300px at 20% 80%, rgb(255 255 255 / 0.35), transparent 70%),
+      radial-gradient(500px 300px at 90% 10%, rgb(255 255 255 / 0.18), transparent 70%);
+    pointer-events: none;
+  }
+
+  .final-grid {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    align-items: center;
+    gap: clamp(20px, 5vw, 64px);
+  }
+
+  .final-art {
+    justify-self: center;
+    width: min(420px, 100%);
+  }
+
+  .final-art :global(img) {
+    width: 100%;
+    filter: drop-shadow(0 30px 40px rgb(120 30 0 / 0.3));
+    animation: bob 7s ease-in-out infinite;
+  }
+
+  @keyframes bob {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(-10px);
+    }
+  }
+
+  .final-title {
+    font-size: clamp(3.6rem, 9vw, 7.4rem);
+    font-weight: 900;
+    line-height: 0.9;
+    letter-spacing: -0.04em;
+    color: #1d1208;
+  }
+
+  .final-copy p {
+    max-width: 30em;
+    margin-top: 20px;
+    font-size: clamp(1.1rem, 1.6vw, 1.3rem);
+    font-weight: 500;
+    color: #3b2412;
+  }
+
+  .final-cta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 30px;
+  }
+
+  .final-cta .btn:not(.btn-dark) {
+    --btn-bg: rgb(255 255 255 / 0.85);
+    --btn-line: rgb(255 255 255 / 0.9);
+  }
+
+  @media (max-width: 760px) {
+    .final-grid {
+      grid-template-columns: 1fr;
+      text-align: center;
+    }
+
+    .final-art {
+      width: min(300px, 80%);
+    }
+
+    .final-copy p {
+      margin-inline: auto;
+    }
+
+    .final-cta {
+      justify-content: center;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .final-art :global(img) {
+      animation: none;
+    }
+  }
+</style>

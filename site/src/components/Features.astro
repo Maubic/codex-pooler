@@ -1,0 +1,1346 @@
+---
+import { docs } from "../data/site";
+
+const statBars = [18, 22, 20, 26, 34, 48, 62, 71, 76, 70, 74, 80, 77, 69, 72, 78, 81, 74, 63, 52, 44, 36, 28, 22];
+---
+
+<section class="section" id="features" aria-labelledby="features-title">
+  <div class="wrap">
+    <header class="section-head" data-reveal>
+      <p class="eyebrow">What you get</p>
+      <h2 class="h2" id="features-title">Control over every key, <em>eyes on every request.</em></h2>
+      <p class="lede">Pooler takes care of the parts that get messy when several people, tools and agents run on a handful of Codex accounts.</p>
+    </header>
+
+    <div class="bento">
+      <!-- keys ------------------------------------------------------ -->
+      <article class="tile wide stack" data-reveal>
+        <div class="tile-copy">
+          <h3>Keys you control</h3>
+          <p>Every tool, teammate or bot gets its own key. Give it an expiry, choose which models it may use, cap requests per minute or tokens per day, and pause or revoke it in one click. Account tokens never leave Pooler.</p>
+        </div>
+        <div class="viz keys" aria-hidden="true">
+          <div class="k-head"><span>Key</span><span>Models</span><span>Limits</span><span>Expires</span><span>Status</span></div>
+          <div class="k-row">
+            <span class="k-name"><i class="k-ico"></i>Codex CLI<small>Laptop</small></span>
+            <span>All models</span>
+            <span>—</span>
+            <span>Never</span>
+            <span class="pill ok">Active</span>
+          </div>
+          <div class="k-row">
+            <span class="k-name"><i class="k-ico"></i>Cursor<small>Design team</small></span>
+            <span>gpt-6-luna</span>
+            <span>2M tokens/day</span>
+            <span>In 30 days</span>
+            <span class="pill ok">Active</span>
+          </div>
+          <div class="k-row">
+            <span class="k-name"><i class="k-ico"></i>Review bot<small>CI runner</small></span>
+            <span>gpt-6-luna</span>
+            <span>2 concurrent</span>
+            <span>In 90 days</span>
+            <span class="pill warn">Paused</span>
+          </div>
+          <div class="k-row">
+            <span class="k-name"><i class="k-ico"></i>Research notebook<small>Data team</small></span>
+            <span>All models</span>
+            <span>5M tokens/week</span>
+            <span>Never</span>
+            <span class="pill ok">Active</span>
+          </div>
+          <div class="k-row k-revoke">
+            <span class="k-name"><i class="k-ico"></i>Contractor<small>Temporary</small></span>
+            <span>gpt-6-luna, gpt-6-sol</span>
+            <span>60 requests/min</span>
+            <span>In 6 days</span>
+            <span class="k-status"><span class="pill ok swap-a">Active</span><span class="pill bad swap-b">Revoked</span></span>
+          </div>
+          <div class="k-actions">
+            <span>Contractor</span>
+            <span class="act">Pause</span>
+            <span class="act">Rotate</span>
+            <span class="act danger">Revoke</span>
+            <span class="act">Delete</span>
+          </div>
+        </div>
+      </article>
+
+      <!-- observatory ---------------------------------------------- -->
+      <article class="tile" data-reveal style="--delay:0.08s">
+        <div class="tile-copy">
+          <h3>Observatory for every key</h3>
+          <p>Turn it on for a key and whoever holds it gets a read-only dashboard of their own usage: success rate, cache hits, speed and cost. No admin access needed.</p>
+        </div>
+        <div class="viz obs" aria-hidden="true">
+          <div class="obs-tabs"><span>1h</span><span>5h</span><span class="on">24h</span><span>7d</span></div>
+          <div class="obs-kpis">
+            <div><small>Success</small><b>99.4%</b></div>
+            <div><small>Cache hits</small><b>96%</b></div>
+            <div><small>Median time</small><b>2.1 s</b></div>
+            <div><small>Cost</small><b>$4.18</b></div>
+          </div>
+          <svg class="obs-spark" viewBox="0 0 200 48" preserveAspectRatio="none">
+            <path class="area" d="M0 48 L0 36 L20 32 L40 34 L60 24 L80 27 L100 18 L120 21 L140 12 L160 16 L180 9 L200 6 L200 48 Z"></path>
+            <path class="line" d="M0 36 L20 32 L40 34 L60 24 L80 27 L100 18 L120 21 L140 12 L160 16 L180 9 L200 6"></path>
+          </svg>
+        </div>
+        <a class="tile-link" href={docs("/operators/api-key-observatory/")}>About the Observatory →</a>
+      </article>
+
+      <!-- mcp -------------------------------------------------------- -->
+      <article class="tile" data-reveal>
+        <div class="tile-copy">
+          <h3>Ask your AI assistant</h3>
+          <p>Connect any MCP client to Pooler's read-only MCP endpoint and ask about accounts, quota, Pools, keys and requests in plain words.</p>
+        </div>
+        <div class="viz chat" aria-hidden="true">
+          <p class="msg me">Which accounts are close to their weekly limit?</p>
+          <p class="call"><i></i>codex_pooler_list_upstream_quotas</p>
+          <p class="msg bot">Account C has 9% of its weekly quota left and a saved reset banked. Every other account is above 40%.</p>
+        </div>
+        <a class="tile-link" href={docs("/reference/runtime-routes/#mcp-endpoint")}>MCP endpoint →</a>
+      </article>
+
+      <!-- saved resets ------------------------------------------------ -->
+      <article class="tile wide" data-reveal style="--delay:0.08s">
+        <div class="tile-copy">
+          <h3>Saved resets, never wasted</h3>
+          <p>Codex sometimes banks a limit reset for an account. Turn on auto-redeem and Pooler spends it when that account runs dry, or before it would expire unused. Keep a few in reserve if you like, and export the upcoming expirations to your calendar.</p>
+        </div>
+        <div class="viz resets" aria-hidden="true">
+          <div class="acct-card">
+            <div class="ac-head"><b>Account B</b><span class="pill plan">Team</span></div>
+            <div class="ac-row"><span>Weekly quota</span><span class="ac-pct"></span></div>
+            <span class="bar big"><i class="refill"></i></span>
+            <div class="ac-row bank-row">
+              <span>Saved resets</span>
+              <span class="segs"><i class="on"></i><i class="on"></i><i class="on fly"></i><i></i><i></i></span>
+            </div>
+            <div class="ac-foot">
+              <span class="toggle"><span class="sw"></span>Auto redeem</span>
+              <span class="used">Saved reset used</span>
+            </div>
+          </div>
+          <ul class="policy">
+            <li><span>Spend when</span><b>The account runs dry</b></li>
+            <li><span>Or</span><b>Just before a reset expires</b></li>
+            <li><span>Keep in reserve</span><b>1 reset</b></li>
+          </ul>
+        </div>
+      </article>
+
+      <!-- stats and request log -------------------------------------- -->
+      <article class="tile wide stack" data-reveal>
+        <div class="tile-copy">
+          <h3>Stats per Pool, a log of every request</h3>
+          <p>The Stats page adds up requests, tokens and estimated cost for each Pool. The request log shows every single one: which tool sent it, which account and model served it, cache hits, timing and cost.</p>
+        </div>
+        <div class="viz log" aria-hidden="true">
+          <div class="log-kpis">
+            <div><small>Requests</small><b data-kpi="requests">1,572</b></div>
+            <div><small>Tokens</small><b data-kpi="tokens">41.2M</b></div>
+            <div><small>Est. cost</small><b data-kpi="cost">$58.40</b></div>
+          </div>
+          <div class="log-chart">
+            <span class="chart-label">Product team · last 24 hours</span>
+            {statBars.map((h, i) => <i style={`--h:${h}%;--i:${i}`} />)}
+          </div>
+          <div class="log-head"><span>Client</span><span>Account</span><span>Model</span><span>Tokens</span><span>Cost</span></div>
+          <div class="log-body" data-live-log>
+            <div class="log-row"><span><i class="logo" style="--src:url(/logos/opencode.svg)"></i>opencode 2.0.0</span><span>Account C</span><span>gpt-6-luna</span><span>72.1k</span><span>$0.08</span></div>
+            <div class="log-row"><span><i class="logo" style="--src:url(/logos/codex.svg)"></i>codex_cli_rs 0.160.0</span><span>Account A</span><span>gpt-6-sol</span><span>55.0k</span><span>$0.06</span></div>
+            <div class="log-row"><span><i class="logo" style="--src:url(/logos/python.svg)"></i>OpenAI/Python 2.8.1</span><span>Account B</span><span>gpt-6-luna</span><span>46.7k</span><span>$0.05</span></div>
+            <div class="log-row"><span><i class="logo" style="--src:url(/logos/goose.svg)"></i>goose 1.12.0</span><span>Account C</span><span>gpt-6-astra</span><span>31.9k</span><span>$0.03</span></div>
+          </div>
+        </div>
+      </article>
+
+      <!-- alerts ------------------------------------------------------ -->
+      <article class="tile" data-reveal style="--delay:0.08s">
+        <div class="tile-copy">
+          <h3>Hear about trouble first</h3>
+          <p>Get an email or a webhook when an account runs low, needs to sign in again, or a Pool is running out of usable accounts.</p>
+        </div>
+        <div class="viz alerts" aria-hidden="true">
+          <span class="bell"></span>
+          <div class="toast t1"><span class="t-ico mail"></span><span><b>Email</b>Account C used 90% of its weekly limit</span></div>
+          <div class="toast t2"><span class="t-ico hook"></span><span><b>Webhook</b>Account B needs to sign in again</span></div>
+          <div class="toast t3"><span class="t-ico gift"></span><span><b>Email</b>Account A just banked a saved reset</span></div>
+          <div class="toast t4"><span class="t-ico hook"></span><span><b>Webhook</b>Automation Pool is down to 1 usable account</span></div>
+        </div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<style>
+  .bento {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .tile {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+    padding: clamp(22px, 2.6vw, 30px);
+    border: 1px solid var(--line);
+    border-radius: 26px;
+    background: var(--paper);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+  }
+
+  .tile.wide {
+    grid-column: span 2;
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    align-items: center;
+    gap: 28px;
+  }
+
+  .tile.wide.stack {
+    grid-template-columns: 1fr;
+    align-items: start;
+    align-content: space-between;
+  }
+
+  .tile h3 {
+    font-size: clamp(1.35rem, 2vw, 1.6rem);
+    font-weight: 800;
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
+
+  .tile p {
+    margin-top: 10px;
+    font-size: 16.5px;
+    color: var(--ink-2);
+    text-wrap: pretty;
+  }
+
+  .tile.stack .tile-copy p {
+    max-width: 44em;
+  }
+
+  .tile-link {
+    margin-top: auto;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--orange-ink);
+  }
+
+  .tile-link:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .viz {
+    position: relative;
+    border-radius: 18px;
+    background: var(--cream);
+    border: 1px solid var(--line-2);
+    padding: 16px;
+    font-size: 14px;
+  }
+
+  /* animations wait until the tile has been revealed */
+  .viz *,
+  .viz {
+    animation-play-state: paused;
+  }
+
+  :global(.is-in) .viz,
+  :global(.is-in) .viz * {
+    animation-play-state: running;
+  }
+
+  .bar {
+    position: relative;
+    display: block;
+    height: 8px;
+    border-radius: 99px;
+    background: var(--line-2);
+    overflow: hidden;
+  }
+
+  .bar i {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: var(--w);
+    border-radius: inherit;
+    background: var(--green);
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    justify-self: start;
+    width: max-content;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .pill.ok {
+    background: var(--green-soft);
+    color: var(--green-ink);
+  }
+
+  .pill.bad {
+    background: var(--red-soft);
+    color: var(--red-ink);
+  }
+
+  .pill.warn {
+    background: var(--amber-soft);
+    color: var(--amber-ink);
+  }
+
+  .pill.plan {
+    background: var(--orange-soft);
+    color: var(--orange-ink);
+  }
+
+  /* keys ------------------------------------------------------- */
+
+  .keys {
+    padding: 0;
+    overflow: hidden;
+    background: var(--paper);
+    border-color: var(--line);
+  }
+
+  .k-head,
+  .k-row {
+    display: grid;
+    grid-template-columns: 1.3fr 1.2fr 1.1fr 0.8fr 0.7fr;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 18px;
+  }
+
+  .k-head {
+    background: var(--cream);
+    border-bottom: 1px solid var(--line-2);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .k-row {
+    border-bottom: 1px solid var(--line-2);
+    font-size: 14px;
+    color: var(--ink-2);
+  }
+
+  .k-row:last-child {
+    border-bottom: 0;
+  }
+
+  .k-name {
+    display: grid;
+    grid-template-columns: 26px 1fr;
+    column-gap: 10px;
+    align-items: center;
+    font-weight: 700;
+    color: var(--ink);
+    line-height: 1.2;
+  }
+
+  .k-name small {
+    grid-column: 2;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ink-3);
+  }
+
+  .k-ico {
+    grid-row: span 2;
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+    background: var(--orange-soft) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%23a65200' d='M10.5 1a4.5 4.5 0 0 0-4.36 5.63L1 11.77V15h3.23l.77-.77V13h1.23l.77-.77V11h1.23l1.14-1.14A4.5 4.5 0 1 0 10.5 1Zm1.25 4.5a1.25 1.25 0 1 1 0-2.5 1.25 1.25 0 0 1 0 2.5Z'/%3E%3C/svg%3E") center / 14px no-repeat;
+  }
+
+  .k-status {
+    display: grid;
+  }
+
+  .k-status .pill {
+    grid-area: 1 / 1;
+    justify-self: start;
+  }
+
+  .k-revoke {
+    animation: revoke-row 5s ease-in-out infinite;
+  }
+
+  .k-revoke .swap-a {
+    animation: fade-out 5s ease-in-out infinite;
+  }
+
+  .k-revoke .swap-b {
+    opacity: 0;
+    animation: fade-in 5s ease-in-out infinite;
+  }
+
+  @keyframes revoke-row {
+    0%,
+    40%,
+    96%,
+    100% {
+      background: var(--paper);
+      color: var(--ink-2);
+    }
+    48%,
+    88% {
+      background: var(--cream-2);
+      color: var(--ink-3);
+    }
+  }
+
+  @keyframes fade-out {
+    0%,
+    40%,
+    96%,
+    100% {
+      opacity: 1;
+    }
+    46%,
+    90% {
+      opacity: 0;
+    }
+  }
+
+  @keyframes fade-in {
+    0%,
+    40%,
+    96%,
+    100% {
+      opacity: 0;
+    }
+    46%,
+    90% {
+      opacity: 1;
+    }
+  }
+
+  .k-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 18px;
+    border-top: 1px solid var(--line-2);
+    background: var(--cream);
+    font-size: 13px;
+  }
+
+  .k-actions > span:first-child {
+    margin-right: auto;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .act {
+    padding: 5px 12px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--paper);
+    font-weight: 700;
+    color: var(--ink-2);
+  }
+
+  .act.danger {
+    border-color: #f1b9ba;
+    color: var(--red-ink);
+    animation: press 5s ease-in-out infinite;
+  }
+
+  @keyframes press {
+    0%,
+    34%,
+    46%,
+    100% {
+      transform: none;
+      background: var(--paper);
+      box-shadow: none;
+    }
+    38%,
+    42% {
+      transform: scale(0.94);
+      background: var(--red-soft);
+      box-shadow: 0 0 0 4px rgb(220 63 70 / 0.12);
+    }
+  }
+
+  /* observatory ------------------------------------------------ */
+
+  .obs {
+    display: grid;
+    gap: 12px;
+  }
+
+  .obs-tabs {
+    display: inline-flex;
+    justify-self: start;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 10px;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--ink-3);
+  }
+
+  .obs-tabs span {
+    padding: 4px 9px;
+    border-radius: 7px;
+  }
+
+  .obs-tabs .on {
+    background: var(--ink);
+    color: #fff;
+  }
+
+  .obs-kpis {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .obs-kpis div {
+    display: grid;
+    padding: 9px 11px;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    background: var(--paper);
+  }
+
+  .obs-kpis small {
+    font-size: 12px;
+    color: var(--ink-3);
+  }
+
+  .obs-kpis b {
+    font-size: 19px;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .obs-spark {
+    width: 100%;
+    height: 48px;
+  }
+
+  .obs-spark .area {
+    fill: rgb(255 153 0 / 0.16);
+  }
+
+  .obs-spark .line {
+    fill: none;
+    stroke: var(--orange);
+    stroke-width: 2.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+    stroke-dasharray: 400;
+    stroke-dashoffset: 400;
+    animation: draw 1.1s cubic-bezier(0.3, 0.6, 0.3, 1) 0.2s forwards;
+  }
+
+  @keyframes draw {
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  /* mcp chat --------------------------------------------------- */
+
+  .chat {
+    display: grid;
+    gap: 10px;
+  }
+
+  .chat p {
+    margin: 0;
+  }
+
+  .msg {
+    max-width: 88%;
+    padding: 10px 13px;
+    border-radius: 14px;
+    font-size: 14.5px !important;
+    line-height: 1.4;
+  }
+
+  .msg.me {
+    justify-self: end;
+    border-bottom-right-radius: 4px;
+    background: var(--ink);
+    color: #fff !important;
+    animation: bubble 0.4s ease 0.2s both;
+  }
+
+  .call {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    justify-self: start;
+    padding: 5px 10px;
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    background: var(--paper);
+    font-family: var(--mono);
+    font-size: 11.5px !important;
+    color: var(--ink-3) !important;
+    animation: bubble 0.35s ease 0.7s both;
+  }
+
+  .call i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--violet);
+  }
+
+  .msg.bot {
+    justify-self: start;
+    border-bottom-left-radius: 4px;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    color: var(--ink) !important;
+    animation: bubble 0.35s ease 1.25s both;
+  }
+
+  @keyframes bubble {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* saved resets ------------------------------------------------ */
+
+  .resets {
+    padding: 18px;
+    background:
+      radial-gradient(300px 180px at 80% 20%, rgb(118 86 242 / 0.12), transparent 70%),
+      var(--cream);
+  }
+
+  .acct-card {
+    display: grid;
+    gap: 10px;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--paper);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .ac-head,
+  .ac-row,
+  .ac-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .ac-head b {
+    font-size: 16px;
+  }
+
+  .ac-row span:first-child {
+    font-weight: 700;
+    font-size: 13.5px;
+  }
+
+  /* One animated number drives both the bar and its label: the quota left
+     drains, then jumps back to full the moment the saved reset is used. */
+  @property --left {
+    syntax: "<integer>";
+    inherits: true;
+    initial-value: 100;
+  }
+
+  .acct-card {
+    animation: left-cycle 5.5s linear infinite;
+  }
+
+  @keyframes left-cycle {
+    0% {
+      --left: 100;
+    }
+    40%,
+    42.9% {
+      --left: 4;
+    }
+    43%,
+    100% {
+      --left: 100;
+    }
+  }
+
+  .ac-pct {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--ink-2);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ac-pct::after {
+    counter-reset: left var(--left);
+    content: counter(left) "% left";
+  }
+
+  .bar.big {
+    height: 10px;
+  }
+
+  .bar .refill {
+    width: calc(var(--left) * 1%);
+    background: var(--green);
+    animation: refill-tone 5.5s linear infinite;
+  }
+
+  @keyframes refill-tone {
+    0%,
+    18% {
+      background: var(--green);
+    }
+    26% {
+      background: var(--amber);
+    }
+    34%,
+    42.9% {
+      background: var(--red);
+    }
+    43%,
+    52% {
+      background: var(--violet);
+    }
+    60%,
+    100% {
+      background: var(--green);
+    }
+  }
+
+  .segs {
+    display: inline-flex;
+    gap: 4px;
+  }
+
+  .segs i {
+    width: 22px;
+    height: 7px;
+    border-radius: 4px;
+    background: var(--line);
+  }
+
+  .segs i.on {
+    background: var(--violet);
+  }
+
+  .segs i.fly {
+    animation: fly 5.5s cubic-bezier(0.5, 0, 0.3, 1) infinite;
+  }
+
+  @keyframes fly {
+    0%,
+    30% {
+      transform: none;
+      background: var(--violet);
+      opacity: 1;
+    }
+    36% {
+      transform: translateY(-6px) scale(1.2);
+      box-shadow: 0 0 14px var(--violet);
+      background: var(--violet);
+    }
+    42.9% {
+      transform: translate(-60px, -48px) scale(0.6);
+      opacity: 0;
+      background: var(--violet);
+    }
+    43%,
+    99% {
+      transform: none;
+      opacity: 1;
+      background: var(--line);
+      box-shadow: none;
+    }
+    100% {
+      transform: none;
+      opacity: 1;
+      background: var(--violet);
+    }
+  }
+
+  .ac-foot {
+    padding-top: 10px;
+    border-top: 1px dashed var(--line);
+    font-size: 13px;
+  }
+
+  .toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 700;
+  }
+
+  .sw {
+    position: relative;
+    width: 34px;
+    height: 20px;
+    border-radius: 99px;
+    background: var(--orange);
+  }
+
+  .sw::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.2);
+  }
+
+  .used {
+    font-weight: 700;
+    color: var(--violet);
+    opacity: 0;
+    animation: used-in 5.5s linear infinite;
+  }
+
+  @keyframes used-in {
+    0%,
+    42.9% {
+      opacity: 0;
+    }
+    43%,
+    96% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0;
+    }
+  }
+
+  .policy {
+    display: grid;
+    gap: 6px;
+    margin-top: 12px;
+  }
+
+  .policy li {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    border: 1px dashed #d9cff8;
+    border-radius: 10px;
+    background: rgb(255 255 255 / 0.6);
+    font-size: 13px;
+  }
+
+  .policy span {
+    color: var(--ink-3);
+  }
+
+  .policy b {
+    color: var(--violet);
+    text-align: right;
+  }
+
+  /* stats and log --------------------------------------------- */
+
+  .log {
+    padding: 0;
+    overflow: hidden;
+    background: var(--paper);
+    border-color: var(--line);
+  }
+
+  .log-kpis {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    border-bottom: 1px solid var(--line-2);
+  }
+
+  .log-kpis div {
+    display: grid;
+    padding: 12px 16px;
+  }
+
+  .log-kpis div + div {
+    border-left: 1px solid var(--line-2);
+  }
+
+  .log-kpis small {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .log-kpis b {
+    font-size: 20px;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .log-chart {
+    position: relative;
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    height: 70px;
+    padding: 24px 16px 8px;
+    border-bottom: 1px solid var(--line-2);
+    background: var(--cream);
+  }
+
+  .log-chart i {
+    flex: 1;
+    height: var(--h);
+    border-radius: 3px 3px 1px 1px;
+    background: var(--orange);
+    transform-origin: bottom;
+    animation: grow 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+    animation-delay: calc(0.1s + var(--i) * 0.02s);
+  }
+
+  .chart-label {
+    position: absolute;
+    top: 6px;
+    left: 16px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  @keyframes grow {
+    from {
+      transform: scaleY(0);
+    }
+  }
+
+  .log-head,
+  .log-body :global(.log-row) {
+    display: grid;
+    grid-template-columns: 1.7fr 0.9fr 0.9fr 0.6fr 0.5fr;
+    gap: 10px;
+    padding: 0 16px;
+    align-items: center;
+    white-space: nowrap;
+  }
+
+  .log-head {
+    height: 34px;
+    background: var(--cream);
+    border-bottom: 1px solid var(--line-2);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .log-body {
+    height: 164px;
+    overflow: hidden;
+  }
+
+  .log-body :global(.log-row) {
+    height: 41px;
+    overflow: hidden;
+    border-bottom: 1px solid var(--line-2);
+    font-size: 13.5px;
+    color: var(--ink-2);
+  }
+
+  .log-body :global(.log-row span) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .log-body :global(.log-row span:first-child) {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--ink);
+    --logo-size: 15px;
+  }
+
+  .log-body :global(.log-row .logo) {
+    flex: none;
+  }
+
+  .log-body :global(.log-row span:nth-child(n + 3)) {
+    font-family: var(--mono);
+    font-size: 12.5px;
+  }
+
+  .log-body :global(.log-row.enter) {
+    animation: row-in 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+
+  @keyframes row-in {
+    0% {
+      height: 0;
+      opacity: 0;
+      background: var(--orange-soft);
+    }
+    55% {
+      height: 41px;
+      opacity: 1;
+      background: var(--orange-soft);
+    }
+    100% {
+      height: 41px;
+      opacity: 1;
+      background: transparent;
+    }
+  }
+
+  /* alerts --------------------------------------------------- */
+
+  .alerts {
+    display: grid;
+    gap: 10px;
+    margin-top: auto;
+    padding-top: 22px;
+  }
+
+  .bell {
+    position: absolute;
+    top: 12px;
+    right: 14px;
+    width: 22px;
+    height: 22px;
+    background: var(--orange);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2a6 6 0 0 0-6 6c0 6-3 7-3 7h18s-3-1-3-7a6 6 0 0 0-6-6Zm-2.5 16a2.5 2.5 0 0 0 5 0h-5Z'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2a6 6 0 0 0-6 6c0 6-3 7-3 7h18s-3-1-3-7a6 6 0 0 0-6-6Zm-2.5 16a2.5 2.5 0 0 0 5 0h-5Z'/%3E%3C/svg%3E") center / contain no-repeat;
+    transform-origin: 50% 10%;
+    animation: ring 5s ease-in-out infinite;
+  }
+
+  @keyframes ring {
+    0%,
+    8%,
+    52%,
+    100% {
+      transform: rotate(0);
+    }
+    2%,
+    46% {
+      transform: rotate(14deg);
+    }
+    4%,
+    48% {
+      transform: rotate(-12deg);
+    }
+    6%,
+    50% {
+      transform: rotate(8deg);
+    }
+  }
+
+  .toast {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 11px 13px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--paper);
+    box-shadow: var(--shadow);
+    font-size: 13.5px;
+    line-height: 1.3;
+    animation: toast 5s cubic-bezier(0.2, 0.7, 0.2, 1) infinite;
+  }
+
+  .toast b {
+    display: block;
+    font-size: 12px;
+    font-family: var(--mono);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .t2 {
+    animation-name: toast-2;
+  }
+
+  .t3 {
+    animation-name: toast-3;
+  }
+
+  .t4 {
+    animation-name: toast-4;
+  }
+
+  @keyframes toast-4 {
+    0%,
+    70% {
+      opacity: 0;
+      transform: translateX(30px);
+    }
+    76%,
+    90% {
+      opacity: 1;
+      transform: none;
+    }
+    100% {
+      opacity: 0;
+    }
+  }
+
+  @keyframes toast {
+    0% {
+      opacity: 0;
+      transform: translateX(30px);
+    }
+    6%,
+    90% {
+      opacity: 1;
+      transform: none;
+    }
+    100% {
+      opacity: 0;
+    }
+  }
+
+  @keyframes toast-2 {
+    0%,
+    30% {
+      opacity: 0;
+      transform: translateX(30px);
+    }
+    36%,
+    90% {
+      opacity: 1;
+      transform: none;
+    }
+    100% {
+      opacity: 0;
+    }
+  }
+
+  @keyframes toast-3 {
+    0%,
+    56% {
+      opacity: 0;
+      transform: translateX(30px);
+    }
+    62%,
+    90% {
+      opacity: 1;
+      transform: none;
+    }
+    100% {
+      opacity: 0;
+    }
+  }
+
+  .t-ico {
+    width: 34px;
+    height: 34px;
+    flex: none;
+    border-radius: 10px;
+  }
+
+  .t-ico.mail {
+    background: var(--blue-soft) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%231c3fc4' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='5' width='18' height='14' rx='2'/%3E%3Cpath d='m4 7 8 6 8-6'/%3E%3C/svg%3E") center / 18px no-repeat;
+  }
+
+  .t-ico.hook {
+    background: var(--violet-soft) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237656f2' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9.5 14.5 14.5 9.5M8 11l-2 2a3.5 3.5 0 0 0 5 5l2-2M16 13l2-2a3.5 3.5 0 0 0-5-5l-2 2'/%3E%3C/svg%3E") center / 18px no-repeat;
+  }
+
+  .t-ico.gift {
+    background: var(--violet-soft) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237656f2' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 12v8H4v-8M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7Zm0 0h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7Z'/%3E%3C/svg%3E") center / 18px no-repeat;
+  }
+
+  @media (max-width: 1040px) {
+    .tile.wide {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 760px) {
+    .bento {
+      grid-template-columns: 1fr;
+    }
+
+    .tile.wide {
+      grid-column: auto;
+    }
+
+    .k-head,
+    .k-row {
+      grid-template-columns: 1.4fr 1fr 0.8fr;
+      padding-inline: 12px;
+    }
+
+    .k-head span:nth-child(3),
+    .k-head span:nth-child(4),
+    .k-row > span:nth-child(3),
+    .k-row > span:nth-child(4) {
+      display: none;
+    }
+  }
+
+  @media (max-width: 560px) {
+    .log-head,
+    .log-body :global(.log-row) {
+      grid-template-columns: 1.6fr 1fr 0.6fr;
+      padding-inline: 12px;
+    }
+
+    .log-head span:nth-child(3),
+    .log-head span:nth-child(4),
+    .log-body :global(.log-row span:nth-child(3)),
+    .log-body :global(.log-row span:nth-child(4)) {
+      display: none;
+    }
+
+    .log-kpis b {
+      font-size: 17px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .viz *,
+    .viz {
+      animation: none !important;
+    }
+
+    .used {
+      opacity: 1;
+    }
+
+    .bar .refill {
+      width: 100%;
+      background: var(--green) !important;
+    }
+
+    .obs-spark .line {
+      stroke-dashoffset: 0;
+    }
+  }
+</style>
+
+<script>
+  // A request log that keeps receiving requests from a mix of clients.
+  const body = document.querySelector<HTMLElement>("[data-live-log]");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  if (body && !reduceMotion) {
+    const clients = [
+      { logo: "codex", ua: "codex_cli_rs 0.160.0" },
+      { logo: "codex", ua: "Codex Desktop 1.4.2" },
+      { logo: "opencode", ua: "opencode 2.0.0" },
+      { logo: "python", ua: "OpenAI/Python 2.8.1" },
+      { logo: "nodedotjs", ua: "OpenAI/JS 6.3.0" },
+      { logo: "vercel", ua: "ai-sdk/openai 3.0.12" },
+      { logo: "goose", ua: "goose 1.12.0" },
+      { logo: "hermesagent", ua: "hermes-cli 1.0.0" },
+      { logo: "omp", ua: "omp 1.0.0" },
+      { logo: "aider", ua: "aider 0.86.1" },
+      { logo: "cline", ua: "Cline 3.36.0" },
+      { logo: "continue", ua: "Continue 1.2.9" },
+      { logo: "kilocode", ua: "Kilo-Code 4.98.0" },
+      { logo: "openhands", ua: "openhands 0.59.0" },
+    ];
+    const accounts = ["Account A", "Account B", "Account C", "Account D", "Account E"];
+    const models = ["gpt-6-luna", "gpt-6-luna", "gpt-6-sol", "gpt-6-astra"];
+    const kpi = (name: string) => document.querySelector<HTMLElement>(`[data-kpi="${name}"]`);
+    const shown = { requests: kpi("requests"), tokens: kpi("tokens"), cost: kpi("cost") };
+    let requests = 1572;
+    let tokens = 41.2e6;
+    let cost = 58.4;
+    let last = -1;
+    let timer = 0;
+    const pick = <T,>(list: T[]) => list[Math.floor(Math.random() * list.length)];
+
+    const addRow = () => {
+      let index = Math.floor(Math.random() * clients.length);
+      if (index === last) index = (index + 1) % clients.length;
+      last = index;
+      const client = clients[index];
+      const rowTokens = 18_000 + Math.round(Math.random() * 70_000);
+      const rowCost = rowTokens * (0.00000085 + Math.random() * 0.0000004);
+
+      const row = document.createElement("div");
+      row.className = "log-row enter";
+      [client.ua, pick(accounts), pick(models), `${(rowTokens / 1000).toFixed(1)}k`, `$${rowCost.toFixed(2)}`].forEach((text, i) => {
+        const cell = document.createElement("span");
+        if (i === 0) {
+          const logo = document.createElement("i");
+          logo.className = "logo";
+          logo.style.setProperty("--src", `url(/logos/${client.logo}.svg)`);
+          cell.append(logo);
+        }
+        cell.append(text);
+        row.append(cell);
+      });
+      body.prepend(row);
+      while (body.children.length > 5) body.lastElementChild?.remove();
+
+      requests += 1;
+      tokens += rowTokens;
+      cost += rowCost;
+      if (shown.requests) shown.requests.textContent = requests.toLocaleString("en-US");
+      if (shown.tokens) shown.tokens.textContent = `${(tokens / 1e6).toFixed(1)}M`;
+      if (shown.cost) shown.cost.textContent = `$${cost.toFixed(2)}`;
+    };
+
+    const tick = () => {
+      addRow();
+      timer = window.setTimeout(tick, 900 + Math.random() * 900);
+    };
+
+    new IntersectionObserver(([entry]) => {
+      window.clearTimeout(timer);
+      if (entry.isIntersecting) timer = window.setTimeout(tick, 500);
+    }).observe(body);
+  }
+</script>
