@@ -729,7 +729,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
     )
   end
 
-  test "idle owner monitor shutdown exit drains lease without warning or finalization" do
+  # The idle native socket closes 1001 once its owner is gone (findings#276):
+  # every response its client could anchor on went with the owner's upstream
+  # connection, and the client's next request goes out whole on a new socket.
+  test "idle owner monitor shutdown exit drains lease and closes the idle native socket without warning or finalization" do
     upstream =
       start_upstream(FakeUpstream.json_response(%{"id" => "resp_idle_owner_shutdown"}))
 
@@ -759,9 +762,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
         CodexResponsesSocket.handle_info(owner_down, monitored_state)
       end)
 
-    assert {:ok, kept_state} = handle_result
-    refute Map.has_key?(kept_state, :websocket_owner_monitor)
-    refute Map.has_key?(kept_state, :websocket_owner_pid)
+    assert {:stop, :normal, {1001, "websocket owner is draining"}, stopped_state} = handle_result
+    refute Map.has_key?(stopped_state, :websocket_owner_monitor)
+    refute Map.has_key?(stopped_state, :websocket_owner_pid)
+    refute Map.has_key?(stopped_state, :owner_exit_close_pending)
     assert warning_logs == ""
     assert_no_leak!("idle owner shutdown monitor logs", warning_logs)
 
@@ -791,7 +795,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
 
     CodexResponsesSocket.terminate(
       :closed,
-      Map.delete(kept_state, :websocket_owner_downstream)
+      Map.delete(stopped_state, :websocket_owner_downstream)
     )
   end
 

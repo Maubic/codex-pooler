@@ -41,6 +41,7 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
     state
     |> Map.delete(:websocket_owner_cleanup_witness)
     |> Map.delete(:websocket_owner_cleanup_task)
+    |> Map.delete(:websocket_owner_lost?)
     |> Map.put(:codex_session, session)
     |> Map.put(:websocket_owner_lease_token, owner_lease_token)
     |> Map.put(:websocket_owner_downstream, downstream)
@@ -92,7 +93,8 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
         {:ok, state}
 
       :owner_drained ->
-        handle_owner_exit(:owner_drained, state, reason)
+        {:ok, state} = handle_owner_exit(:owner_drained, state, reason)
+        {:ok, Map.put(state, :websocket_owner_lost?, true)}
 
       :owner_crashed ->
         {:ok, state} = handle_owner_exit(:owner_crashed, state, reason)
@@ -193,6 +195,21 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
     do: not Process.alive?(pid)
 
   defp missing_local_owner?(_state), do: true
+
+  # The socket saw its owner exit without crashing (a drain, a normal stop)
+  # (findings#276): an idle native socket closes, and a socket that stays open
+  # takes the session over before its next request reaches an owner. An owner
+  # that crashed closes the socket at once.
+  @spec owner_lost?(socket_state()) :: boolean()
+  def owner_lost?(state), do: owner?(state) and Map.get(state, :websocket_owner_lost?, false)
+
+  @spec recover_lost_owner(socket_state()) :: {:ok, socket_state()} | {:error, term()}
+  def recover_lost_owner(state) do
+    case Websocket.recover_lost_websocket_owner_runtime(response_options(state)) do
+      {:ok, runtime} -> {:ok, state |> clear_monitor() |> put_runtime(runtime)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   @spec accept_downstream_message(term(), socket_state()) ::
           WebsocketOwnerContract.downstream_match_result() | :drop
@@ -588,7 +605,7 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
   defp drain_owner_session(_state), do: {:error, :owner_unavailable}
 
   defp put_monitor(state, session) do
-    case Websocket.monitor_websocket_owner(session) do
+    case Websocket.monitor_websocket_owner(session, Map.get(state, :opts, %{})) do
       {:ok, owner_pid, owner_monitor} ->
         state
         |> Map.put(:websocket_owner_pid, owner_pid)

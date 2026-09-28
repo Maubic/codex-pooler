@@ -79,6 +79,12 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
     DownstreamSession.handle_monitor_down(state, owner_pid, reason)
   end
 
+  @spec owner_lost?(socket_state()) :: boolean()
+  def owner_lost?(state), do: DownstreamSession.owner_lost?(state)
+
+  @spec recover_lost_owner(socket_state()) :: {:ok, socket_state()} | {:error, term()}
+  def recover_lost_owner(state), do: DownstreamSession.recover_lost_owner(state)
+
   @spec maybe_retarget_before_start(binary(), socket_state()) ::
           {:ok, socket_state()} | {:error, WebsocketOwnerContract.owner_error()}
   def maybe_retarget_before_start(payload, state) do

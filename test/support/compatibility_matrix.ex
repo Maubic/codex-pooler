@@ -690,6 +690,19 @@ defmodule CodexPooler.CompatibilityMatrix do
       contract: "with owner forwarding off or on, a native backend websocket whose upstream connection closes between two requests, after at least one request was sent on it and for a cause that ends every response it produced as a previous_response_id anchor (a peer Close of any code, a transport close or error, a control frame or request frame that cannot be written, a missed pong, an undecodable frame or an invalidation; never a reuse-key change, whose request has already arrived), closes its client with the fixed 1001 upstream connection closed once idle, so the released client sends its next request whole on a new socket as it does after a close from the provider itself; the socket latches the close only when its last pushed terminal completed a native response and no queued frame, public turn, pending handoff, active-turn reconnect or newer turn is under way, waits for turns that ended before the close to settle, and names every close it does not act on with a fixed skip reason; a client frame that reaches the socket before the close is decided keeps it open and meets the fresh connection's previous_response_not_found guard with nothing sent, a frame that crosses the close starts nothing, a revocation keeps its 1008 close, the client's dropped connection after the close leaves no warning, and the public /v1/responses websocket never closes for it; with owner forwarding on the websocket owner holding the upstream session tells only its attached downstream, only while it holds nothing of that socket (no drain, handoff, armed replay or native compaction in flight: an ordinary success, a pending compaction, a pending final whose compaction is over and whose admission the closed connection took with it, a consumed final or a cleared admission all count as idle; and no running turn), after the complete of a turn whose terminal it had already relayed to that socket, never for its own invalidation, and names every close it does not pass on with its own fixed skip reason; the socket takes the word only for its current owner binding (another binding keeps it open with stale_downstream) and decides on its own state as with forwarding off; an owner node of an earlier release never sends the word and a socket of an earlier release drops it, so a rolling upgrade keeps today's previous_response_not_found answer until both sides run this release"
     },
     %{
+      slug: :native_websocket_owner_exit,
+      status: :supported,
+      current: :idle_native_socket_closes_after_owner_exit,
+      categories: [:streaming, :ownership],
+      routes: [
+        %{method: :get, path: "/backend-api/codex/responses", transport: :websocket},
+        %{method: :get, path: "/backend-api/codex/v1/responses", transport: :websocket}
+      ],
+      future_routes: [],
+      fixture: :native_websocket_owner_exit,
+      contract: "with owner forwarding on, a websocket monitors its session's websocket owner whether the owner runs on its node or another; when the owner exits without crashing (drained or stopped) a native backend websocket closes its client with the fixed 1001 websocket owner is draining once idle and sends no owner_drained event to the idle client, so the released client sends its next request whole on a new socket, which takes the session over; the close is latched when the exit is seen, waits for the socket to go idle and names every close it does not act on with a fixed skip reason (a client frame first, a queued frame, the public route, a revoked key, a pending handoff, an active-turn reconnect); a socket kept open, the public /v1/responses websocket among them, which is never closed this way, takes the session over before its next request reaches an owner by compare-and-set on the owner and lease it still holds, so a session another socket already took keeps the owner_unavailable refusal; an owner that crashed (killed, its upstream connection process gone, its node disconnected) closes the socket with the fixed 1011 websocket owner crashed at once; each close logs one fixed line naming how the owner went and whether it ran on this node or another"
+    },
+    %{
       slug: :firewall,
       status: :supported,
       current: :explicit_forwarded_client_policy,
@@ -1087,6 +1100,22 @@ defmodule CodexPooler.CompatibilityMatrix do
       observability: %{
         closed: "websocket downstream closed after upstream connection close",
         kept_open: "websocket downstream kept open after upstream connection close",
+        metric: :none
+      }
+    },
+    native_websocket_owner_exit: %{
+      topologies: [:owner_on_this_node, :owner_on_another_node],
+      close: %{
+        owner_drained: %{code: 1001, reason: "websocket owner is draining"},
+        owner_crashed: %{code: 1011, reason: "websocket owner crashed"}
+      },
+      reason_codes: ~w(owner_drained owner_crashed),
+      latch: %{waits_for: :idle_socket, skip_reasons: ~w(client_frame queued public_route revoked handoff reconnect)},
+      kept_open_socket: :takes_the_session_over_before_its_next_request,
+      public_v1_websocket: :stays_open,
+      observability: %{
+        closed: "websocket downstream closed after owner exit",
+        kept_open: "websocket downstream kept open after owner exit",
         metric: :none
       }
     },

@@ -43,7 +43,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexOwnerCompletionDrainTest do
       first_owner = state.websocket_owner_pid
       WebsocketOwnerSession.begin_drain(first_owner)
       assert :ok = WebsocketOwnerSession.drain_owner(first_owner)
-      state = receive_until(state, {:error, "owner_drained"})
+      # The idle socket closes rather than tell its client (findings#276).
+      state = receive_until(state, {:close, {1001, "websocket owner is draining"}})
       assert :ok = CodexResponsesSocket.terminate(:closed, state)
       {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
 

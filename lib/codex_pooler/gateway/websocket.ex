@@ -360,6 +360,26 @@ defmodule CodexPooler.Gateway.Websocket do
   def recover_websocket_owner_response_options(%RequestOptions{}),
     do: {:error, :owner_unavailable}
 
+  # A connected owner-forwarded socket that stays open after its owner exited
+  # (the socket saw it exit) takes the session over the way a new socket on it
+  # would when its next request arrives, wherever that owner ran. It used to
+  # answer every later request `503 owner_unavailable` until the client
+  # reconnected: a remote owner was never monitored, and the recovery before a
+  # turn ran only for a local owner, after the native preflight and never for a
+  # public `/v1` request (findings#276). The takeover is a compare-and-set on
+  # the session's owner and lease this socket still holds: a session another
+  # socket took over in the meantime refuses it `stale_owner`, and the request
+  # meets the refusal it always met.
+  @spec recover_lost_websocket_owner_runtime(RequestOptions.t()) ::
+          {:ok, websocket_runtime()} | {:error, term()}
+  def recover_lost_websocket_owner_runtime(%RequestOptions{continuity: %{codex_session: %CodexSession{} = session}} = opts) do
+    with :ok <- reject_if_rollout_draining() do
+      prepare_owner_websocket_session_with_recovery(session, owner_websocket_opts(opts), true)
+    end
+  end
+
+  def recover_lost_websocket_owner_runtime(%RequestOptions{}), do: {:error, :owner_unavailable}
+
   @spec retarget_websocket_owner_runtime(auth(), websocket_runtime(), payload(), opts()) ::
           owner_runtime_retarget_result()
   def retarget_websocket_owner_runtime(auth, runtime, payload, opts \\ %{})
@@ -597,20 +617,25 @@ defmodule CodexPooler.Gateway.Websocket do
   defp owner_retarget_error(reason, session, opts),
     do: OwnerErrorDiagnostics.normalize(reason, :retarget, owner_error_context(session, opts))
 
-  @spec monitor_websocket_owner(CodexSession.t() | nil) ::
+  # The socket monitors its owner wherever it runs, so a remote owner's exit
+  # reaches it as a local one's does (findings#276).
+  @spec monitor_websocket_owner(CodexSession.t() | nil, opts()) ::
           {:ok, pid(), reference()} | {:error, :owner_unavailable}
-  def monitor_websocket_owner(%CodexSession{owner_instance_id: owner_instance_id, id: id})
+  def monitor_websocket_owner(session, opts \\ %{})
+
+  def monitor_websocket_owner(%CodexSession{owner_instance_id: owner_instance_id, id: id} = session, opts)
       when is_binary(owner_instance_id) and is_binary(id) do
-    if owner_instance_id == Atom.to_string(node()) do
-      with {:ok, owner_pid} <- WebsocketOwnerSession.lookup(id) do
-        {:ok, owner_pid, Process.monitor(owner_pid)}
-      end
-    else
-      {:error, :owner_unavailable}
+    lookup =
+      if owner_instance_id == Atom.to_string(node()),
+        do: WebsocketOwnerSession.lookup(id),
+        else: WebsocketOwnerForwarder.lookup_remote_owner(session, owner_forwarder_opts(opts))
+
+    with {:ok, owner_pid} <- lookup do
+      {:ok, owner_pid, Process.monitor(owner_pid)}
     end
   end
 
-  def monitor_websocket_owner(_session), do: {:error, :owner_unavailable}
+  def monitor_websocket_owner(_session, _opts), do: {:error, :owner_unavailable}
 
   @spec release_websocket_owner_lease(
           CodexSession.t() | nil,

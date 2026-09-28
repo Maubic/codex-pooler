@@ -57,6 +57,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     unsupported_upstream_fields: [:route, :auth, :ownership],
     api_key_websocket_revocation: [:auth, :error, :streaming, :ownership],
     native_websocket_upstream_close: [:streaming, :ownership],
+    native_websocket_owner_exit: [:streaming, :ownership],
     firewall: [:route, :auth, :error, :ownership],
     pruned_runtime_helper_firewall: [:route, :error],
     decompression: [:route, :error, :overload],
@@ -88,9 +89,9 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     {:delete, "/v1/responses/:response_id"} => ~w(v1_unsupported_public_surface)a,
     {:get, "/api/codex/usage"} => ~w(firewall usage_alias_meter_identity)a,
     {:get, "/backend-api/codex/models"} => ~w(api_key_reasoning_availability backend_models_etag database_unavailable firewall pool_model_serving_modes)a,
-    {:get, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable duplicate_turn_fence exhausted_pool_usage_limit firewall function_tool_schema_lowering multi_agent_product_certification native_websocket_upstream_close pool_model_serving_modes pooler_authored_error_type rejection_metadata terminal_failure_diagnostics tool_output_preservation upstream_error_param websocket_continuity)a,
+    {:get, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable duplicate_turn_fence exhausted_pool_usage_limit firewall function_tool_schema_lowering multi_agent_product_certification native_websocket_owner_exit native_websocket_upstream_close pool_model_serving_modes pooler_authored_error_type rejection_metadata terminal_failure_diagnostics tool_output_preservation upstream_error_param websocket_continuity)a,
     {:get, "/backend-api/codex/v1/models"} => ~w(backend_models_etag backend_v1_alias_surface pool_model_serving_modes)a,
-    {:get, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface duplicate_turn_fence function_tool_schema_lowering multi_agent_product_certification native_websocket_upstream_close pool_model_serving_modes tool_output_preservation)a,
+    {:get, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface duplicate_turn_fence function_tool_schema_lowering multi_agent_product_certification native_websocket_owner_exit native_websocket_upstream_close pool_model_serving_modes tool_output_preservation)a,
     {:get, "/backend-api/wham/usage"} => ~w(firewall usage_alias_meter_identity)a,
     {:get, "/v1/files"} => ~w(v1_supported_surface)a,
     {:get, "/v1/files/:file_id"} => ~w(v1_supported_surface)a,
@@ -592,6 +593,30 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       assert WebsocketOwnerContract.upstream_closed_message?({fixture.owner.message, "corr-compat", 1, %{cause: hd(fixture.causes), lifecycle_id: Ecto.UUID.generate(), generation: 1}})
       assert fixture.observability.closed == WebsocketConnectionLogger.downstream_closed_after_upstream_close_message()
       assert fixture.observability.kept_open == WebsocketConnectionLogger.downstream_kept_open_after_upstream_close_message()
+      assert fixture.observability.metric == :none
+    end
+
+    # findings#276: the fixture names the runtime's own closes and line
+    # vocabularies, so the contract cannot drift from the ones in use.
+    test "locks the native websocket close after its websocket owner exits" do
+      feature = CompatibilityMatrix.by_slug!(:native_websocket_owner_exit)
+      fixture = CompatibilityMatrix.fixture!(:native_websocket_owner_exit)
+
+      assert feature.current == :idle_native_socket_closes_after_owner_exit
+      assert feature.future_routes == []
+
+      assert feature.routes == [
+               %{method: :get, path: "/backend-api/codex/responses", transport: :websocket},
+               %{method: :get, path: "/backend-api/codex/v1/responses", transport: :websocket}
+             ]
+
+      assert fixture.topologies == [:owner_on_this_node, :owner_on_another_node]
+      assert {fixture.close.owner_drained.code, fixture.close.owner_drained.reason} == WebsocketAdapter.close_detail(:owner_drained)
+      assert {fixture.close.owner_crashed.code, fixture.close.owner_crashed.reason} == WebsocketAdapter.close_detail(:owner_crashed)
+      assert fixture.reason_codes == WebsocketConnectionLogger.owner_exit_reason_codes()
+      assert fixture.latch.skip_reasons == WebsocketConnectionLogger.owner_exit_skip_reasons()
+      assert fixture.observability.closed == WebsocketConnectionLogger.downstream_closed_after_owner_exit_message()
+      assert fixture.observability.kept_open == WebsocketConnectionLogger.downstream_kept_open_after_owner_exit_message()
       assert fixture.observability.metric == :none
     end
 

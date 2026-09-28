@@ -55,6 +55,17 @@ defmodule CodexPoolerWeb.WebsocketConnectionLogger do
   @upstream_close_skip_reasons ~w(client_frame busy queued public_route revoked handoff reconnect no_completed_response stale_downstream)
   @upstream_close_forwarding ~w(off on)
 
+  # A socket whose websocket owner exited closes, or says why it stays open
+  # (findings#276): `reason_code` is how the owner went (`owner_crashed` closes
+  # 1011 at once, `owner_drained` closes an idle native socket 1001) and
+  # `owner` whether it ran on this node or another.
+  @downstream_closed_after_owner_exit_message "websocket downstream closed after owner exit"
+  @downstream_kept_open_after_owner_exit_message "websocket downstream kept open after owner exit"
+  @owner_exit_metadata_keys [:reason_code, :skip_reason, :owner, :codex_session_id]
+  @owner_exit_reason_codes ~w(owner_drained owner_crashed)
+  @owner_exit_skip_reasons ~w(client_frame queued public_route revoked handoff reconnect)
+  @owner_exit_owners ~w(local remote)
+
   @type event_metadata :: keyword() | map()
 
   @spec init_failed_message() :: String.t()
@@ -84,6 +95,55 @@ defmodule CodexPoolerWeb.WebsocketConnectionLogger do
   @doc "Why a native socket keeps its connection open after its upstream connection closed."
   @spec upstream_close_skip_reasons() :: [String.t()]
   def upstream_close_skip_reasons, do: @upstream_close_skip_reasons
+
+  @spec downstream_closed_after_owner_exit_message() :: String.t()
+  def downstream_closed_after_owner_exit_message, do: @downstream_closed_after_owner_exit_message
+
+  @spec downstream_kept_open_after_owner_exit_message() :: String.t()
+  def downstream_kept_open_after_owner_exit_message, do: @downstream_kept_open_after_owner_exit_message
+
+  @doc "How a socket's websocket owner went, as its owner-exit lines name it."
+  @spec owner_exit_reason_codes() :: [String.t()]
+  def owner_exit_reason_codes, do: @owner_exit_reason_codes
+
+  @doc "Why a socket keeps its connection open after its websocket owner exited."
+  @spec owner_exit_skip_reasons() :: [String.t()]
+  def owner_exit_skip_reasons, do: @owner_exit_skip_reasons
+
+  @doc """
+  Logs a socket closing itself because its websocket owner exited. The
+  metadata names `reason_code` (`owner_exit_reason_codes/0`), `owner`
+  (`local` or `remote`) and `codex_session_id`; a reason outside that
+  vocabulary logs nothing.
+  """
+  @spec log_downstream_closed_after_owner_exit(event_metadata()) :: :ok
+  def log_downstream_closed_after_owner_exit(metadata) do
+    metadata = metadata |> normalize_metadata() |> Map.delete(:skip_reason) |> Map.delete("skip_reason")
+    log_owner_exit_event(@downstream_closed_after_owner_exit_message, metadata)
+  end
+
+  @doc """
+  Logs why a socket keeps its connection open after its websocket owner
+  exited: the same metadata as `log_downstream_closed_after_owner_exit/1` plus
+  a `skip_reason` from `owner_exit_skip_reasons/0`. A reason outside those
+  vocabularies logs nothing.
+  """
+  @spec log_downstream_kept_open_after_owner_exit(event_metadata()) :: :ok
+  def log_downstream_kept_open_after_owner_exit(metadata) do
+    metadata = normalize_metadata(metadata)
+
+    case fixed_vocabulary(metadata_value(metadata, :skip_reason), @owner_exit_skip_reasons) do
+      nil -> :ok
+      _skip_reason -> log_owner_exit_event(@downstream_kept_open_after_owner_exit_message, metadata)
+    end
+  end
+
+  defp log_owner_exit_event(message, metadata) do
+    case fixed_vocabulary(metadata_value(metadata, :reason_code), @owner_exit_reason_codes) do
+      nil -> :ok
+      _reason_code -> log_event(:info, message, metadata, nil, @owner_exit_metadata_keys)
+    end
+  end
 
   @doc """
   Logs a native socket closing itself because its upstream connection closed
@@ -316,6 +376,9 @@ defmodule CodexPoolerWeb.WebsocketConnectionLogger do
 
   defp allowed_metadata_value(:forwarding, value),
     do: fixed_vocabulary(value, @upstream_close_forwarding)
+
+  defp allowed_metadata_value(:owner, value),
+    do: fixed_vocabulary(value, @owner_exit_owners)
 
   defp allowed_metadata_value(:generation, value) when is_integer(value) and value > 0, do: value
   defp allowed_metadata_value(:generation, _value), do: nil

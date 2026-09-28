@@ -114,7 +114,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   defp handle_socket_frame({_payload, [opcode: opcode]} = frame, state)
        when opcode in [:text, :binary] do
-    state = cancel_upstream_close(state)
+    state = state |> cancel_upstream_close() |> cancel_owner_exit_close()
 
     if socket_revoked?(state) do
       {:ok, state}
@@ -381,6 +381,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
          %{websocket_owner_monitor: ref} = state
        ) do
     outcome = owner_monitor_handoff_outcome(reason)
+    owner = owner_location(state)
 
     state =
       state
@@ -392,9 +393,12 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
     case Adapter.handle_monitor_down(state, pid, reason) do
       {:ok, state} ->
-        close_if_revoked_idle({:ok, state})
+        state
+        |> note_owner_exit(owner)
+        |> then(&close_if_revoked_idle({:ok, &1}))
 
       {:stop, close_detail, state} ->
+        :ok = WebsocketConnectionLogger.log_downstream_closed_after_owner_exit(owner_exit_log_metadata(state, %{reason_code: :owner_crashed, owner: owner}))
         close_if_revoked_idle({:stop, :normal, close_detail, state})
     end
   end
@@ -1197,6 +1201,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     |> flush_discarded_submissions()
     |> close_revoked_socket_result()
     |> close_upstream_closed_socket_result()
+    |> close_owner_exited_socket_result()
   end
 
   defp flush_discarded_submissions({:ok, state}) do
@@ -1379,6 +1384,102 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   defp close_upstream_closed_socket_result(result), do: result
+
+  # The socket's websocket owner exited without crashing (drained or stopped),
+  # here or on another node (findings#276). Every response the client could
+  # anchor on went with the owner's upstream connection, so a native socket
+  # closes its client `1001` once idle, as for an upstream close, and the
+  # released client sends its next request whole on a new socket, which takes
+  # the session over. Before, the socket stayed open and every later request
+  # met `503 owner_unavailable` until the client reconnected. The close is
+  # latched when the owner's exit is seen and taken once idle; what the socket
+  # is (public route, revoked key, pending handoff, active-turn reconnect) or a
+  # queued frame keeps it open, as does a client frame that reaches the socket
+  # first, and its next request takes the session over instead
+  # (`maybe_recover_lost_owner/1`). A crashed owner closes the socket `1011`
+  # at once, as it did; both closes log one line, every kept-open decision one
+  # with its reason.
+  defp note_owner_exit(state, owner) do
+    if Adapter.owner_lost?(state) do
+      owner_exit = %{reason_code: :owner_drained, owner: owner}
+
+      case owner_exit_skip_reason(state) do
+        nil ->
+          Map.put(state, :owner_exit_close_pending, owner_exit)
+
+        skip_reason ->
+          :ok = log_owner_exit_kept_open(state, owner_exit, skip_reason)
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp cancel_owner_exit_close(%{owner_exit_close_pending: %{} = owner_exit} = state),
+    do: drop_owner_exit_close(state, owner_exit, :client_frame)
+
+  defp cancel_owner_exit_close(state), do: state
+
+  # Unchanged when nothing is latched, like the upstream-close stage.
+  defp close_owner_exited_socket_result({:ok, %{owner_exit_close_pending: %{} = owner_exit} = state}) do
+    case owner_exit_close_decision(state) do
+      :wait -> {:ok, state}
+      {:skip, skip_reason} -> {:ok, drop_owner_exit_close(state, owner_exit, skip_reason)}
+      :close -> {:stop, :normal, Adapter.close_detail(:owner_drained), close_after_owner_exit(state, owner_exit)}
+    end
+  end
+
+  defp close_owner_exited_socket_result({:push, messages, %{owner_exit_close_pending: %{} = owner_exit} = state}) do
+    case owner_exit_close_decision(state) do
+      :wait -> {:push, messages, state}
+      {:skip, skip_reason} -> {:push, messages, drop_owner_exit_close(state, owner_exit, skip_reason)}
+      :close -> {:stop, :normal, Adapter.close_detail(:owner_drained), List.wrap(messages), close_after_owner_exit(state, owner_exit)}
+    end
+  end
+
+  defp close_owner_exited_socket_result(result), do: result
+
+  defp owner_exit_close_decision(state) do
+    cond do
+      skip_reason = owner_exit_skip_reason(state) -> {:skip, skip_reason}
+      upstream_close_idle?(state) -> :close
+      true -> :wait
+    end
+  end
+
+  defp owner_exit_skip_reason(state) do
+    cond do
+      skip_reason = upstream_close_socket_skip_reason(state) -> skip_reason
+      not :queue.is_empty(Map.get(state, :queued_response_payloads, :queue.new())) -> :queued
+      true -> nil
+    end
+  end
+
+  defp drop_owner_exit_close(state, owner_exit, skip_reason) do
+    :ok = log_owner_exit_kept_open(state, owner_exit, skip_reason)
+    Map.delete(state, :owner_exit_close_pending)
+  end
+
+  defp close_after_owner_exit(state, owner_exit) do
+    :ok = WebsocketConnectionLogger.log_downstream_closed_after_owner_exit(owner_exit_log_metadata(state, owner_exit))
+    Map.delete(state, :owner_exit_close_pending)
+  end
+
+  defp log_owner_exit_kept_open(state, owner_exit, skip_reason) do
+    state
+    |> owner_exit_log_metadata(owner_exit)
+    |> Map.put(:skip_reason, skip_reason)
+    |> WebsocketConnectionLogger.log_downstream_kept_open_after_owner_exit()
+  end
+
+  defp owner_exit_log_metadata(state, owner_exit),
+    do: %{reason_code: owner_exit.reason_code, owner: owner_exit.owner, codex_session_id: codex_session_id(state)}
+
+  defp owner_location(%{codex_session: %{owner_instance_id: owner_instance_id}}) when is_binary(owner_instance_id),
+    do: if(owner_instance_id == Atom.to_string(node()), do: :local, else: :remote)
+
+  defp owner_location(_state), do: nil
 
   defp upstream_close_decision(state) do
     cond do
@@ -1567,18 +1668,15 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     {:push, {:text, Adapter.native_downstream_response_chunk(data, sole_account_check(state, active_native_owner_turn_pid(state)))}, state}
   end
 
+  # A draining owner tells its idle downstream too. The client has no request
+  # in flight to fail: the released client reads such an event as the first
+  # event of its next request and fails that request (findings#276). The drain
+  # is noted for the owner's exit that follows, which closes the idle socket
+  # (`note_owner_exit/2`), and nothing is sent.
   defp handle_non_public_owner_payload({:error, :owner_drained, payload}, state) do
-    maybe_log_failed_native_websocket_turn(state, tracked_response_task_pid(state), payload)
-
-    state =
-      state
-      |> record_downstream_terminal(tracked_response_task_pid(state), "error")
-      |> Map.put(:websocket_owner_drain_observed?, true)
-      |> cancel_tracked_response_tasks(:owner_drained)
-      |> reset_owner_turn_output()
-      |> schedule_active_response_task_delivery()
-
-    {:push, {:text, CodexPooler.JSON.encode!(Adapter.websocket_error(payload))}, state}
+    if active_native_owner_turn_pid(state) == nil,
+      do: {:ok, Map.put(state, :websocket_owner_drain_observed?, true)},
+      else: handle_drained_native_owner_turn(payload, state)
   end
 
   # An owner error on a native turn is that turn's terminal: the owner relays it
@@ -1611,6 +1709,20 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       |> Map.put(:websocket_owner_active_turn_reconnect?, false)
 
     {:ok, state}
+  end
+
+  defp handle_drained_native_owner_turn(payload, state) do
+    maybe_log_failed_native_websocket_turn(state, tracked_response_task_pid(state), payload)
+
+    state =
+      state
+      |> record_downstream_terminal(tracked_response_task_pid(state), "error")
+      |> Map.put(:websocket_owner_drain_observed?, true)
+      |> cancel_tracked_response_tasks(:owner_drained)
+      |> reset_owner_turn_output()
+      |> schedule_active_response_task_delivery()
+
+    {:push, {:text, CodexPooler.JSON.encode!(Adapter.websocket_error(payload))}, state}
   end
 
   defp maybe_schedule_finalized_owner_task_delivery(state) do
@@ -2005,6 +2117,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   defp prepare_and_dispatch_response(payload, state) do
     _trace = NativeCompactionTrace.enroll(:socket, self())
+    state = maybe_recover_lost_owner(state)
     original_public_context = public_response_context(state)
 
     submission_state =
@@ -4080,6 +4193,28 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   defp owner_forwarded_socket?(state), do: Adapter.owner?(state)
+
+  # A socket left open after its owner exited without crashing, the public
+  # `/v1` socket always and a native one for a reason `note_owner_exit/2`
+  # names, takes the session over as a new socket on it would before anything
+  # of its next request reaches an owner: the native compaction reservation
+  # while the frame is prepared, the replay preflight, the task's admission
+  # (findings#276). Only a socket with nothing in flight does; a request queued
+  # behind a turn meets the refusal, and the next one recovers. A failed
+  # takeover leaves the socket as it was, so the request meets the refusal it
+  # met before, and the next request tries again.
+  defp maybe_recover_lost_owner(state) do
+    if Adapter.owner_lost?(state) and not active_response_task?(state) and not public_turn_open?(state) and
+         not Map.get(state, :websocket_owner_active_turn_reconnect?, false) and
+         not is_map(Map.get(state, :websocket_owner_pending_handoff)) do
+      case Adapter.recover_lost_owner(state) do
+        {:ok, recovered} -> recovered
+        {:error, _reason} -> state
+      end
+    else
+      state
+    end
+  end
 
   defp active_response_task?(state), do: MapSet.size(Map.get(state, :tasks, MapSet.new())) > 0
 

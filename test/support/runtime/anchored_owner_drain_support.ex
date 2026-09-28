@@ -156,7 +156,9 @@ defmodule CodexPoolerWeb.Runtime.AnchoredOwnerDrainSupport do
     }
   end
 
-  @spec receive_until(map(), :complete | String.t() | {:error | :event, String.t()}) ::
+  # `{:close, close_detail}` waits for the socket to close itself with that
+  # detail, as an idle native socket does once its owner drained (findings#276).
+  @spec receive_until(map(), :complete | String.t() | {:error | :event, String.t()} | {:close, {pos_integer(), String.t()}}) ::
           map() | {map(), map()}
   def receive_until(state, expected) do
     if expected == :complete and MapSet.size(state.tasks) == 0,
@@ -204,6 +206,9 @@ defmodule CodexPoolerWeb.Runtime.AnchoredOwnerDrainSupport do
              (not is_nil(code) and expected == {:error, code}),
            do: event_result(event, state, expected),
            else: receive_until(state, expected)
+
+      {:stop, :normal, close_detail, state} when expected == {:close, close_detail} ->
+        state
     end
   end
 

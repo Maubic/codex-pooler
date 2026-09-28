@@ -348,6 +348,29 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
 
   def resolve_owner(%CodexSession{}, _opts), do: {:error, :owner_unavailable}
 
+  # The pid of the remote owner a socket just attached to, for the socket's
+  # monitor (findings#276). It asks the owner node's registry directly, which
+  # every release answers the same way, so a socket on a new release monitors
+  # an owner on the previous one too. Anything but that owner node's live pid
+  # leaves the socket unmonitored, as every remote owner used to be.
+  @spec lookup_remote_owner(CodexSession.t(), submit_opts()) :: {:ok, pid()} | {:error, :owner_unavailable}
+  def lookup_remote_owner(%CodexSession{id: codex_session_id} = session, opts \\ []) when is_binary(codex_session_id) do
+    with {:ok, {:remote, node, _owner_instance_id}} <- resolve_owner(session, opts),
+         {:ok, owner_pid} when is_pid(owner_pid) <-
+           node_client(opts).call_owner(
+             node,
+             WebsocketOwnerSession,
+             :lookup,
+             [codex_session_id],
+             Keyword.get(opts, :timeout, WebsocketOwnerContract.default_owner_call_timeout_ms())
+           ),
+         true <- node(owner_pid) == node do
+      {:ok, owner_pid}
+    else
+      _local_missing_or_unreachable -> {:error, :owner_unavailable}
+    end
+  end
+
   @doc false
   @spec reserve_compaction_retry_v7(
           CodexSession.t(),
