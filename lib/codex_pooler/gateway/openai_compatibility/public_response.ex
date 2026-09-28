@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.PublicResponse do
   @moduledoc false
 
   alias CodexPooler.Gateway.ErrorClassification
+  alias CodexPooler.Gateway.Runtime.Finalization.FlexUnavailable
   alias CodexPooler.Gateway.Runtime.Finalization.ValidationRejection
   alias CodexPooler.Gateway.Transports.MisalignmentPolicyViolation
 
@@ -106,6 +107,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.PublicResponse do
 
     cond do
       input_file_capability_error?(status, opts) -> input_file_capability_error()
+      field(error, "code") == "flex_unavailable" -> FlexUnavailable.error()
       misalignment_policy_violation?(error) -> misalignment_policy_violation_error(error)
       overload_error?(error) -> overload_error()
       local_validation_error?(error, status, opts) -> explicit_error(error, status)

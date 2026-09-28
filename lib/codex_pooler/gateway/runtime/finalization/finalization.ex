@@ -14,6 +14,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
 
   alias CodexPooler.Gateway.Runtime.Finalization.{
     AttemptSettlement,
+    FlexUnavailable,
     Metadata,
     NativeRateLimitRelay,
     ProviderUsageLimit,
@@ -215,10 +216,18 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
          context,
          body
        ) do
-    if assignment_model_unavailable?(status, body, context) do
-      finalize_assignment_model_unavailable(response, context, body)
-    else
-      finalize_retryable_status_or_failure(response, context, body)
+    cond do
+      FlexUnavailable.response?(response) ->
+        finalize_upstream_status_failure(response, context, body,
+          error_code: "flex_unavailable",
+          before_finalize: fn -> DispatchLifecycle.neutral_completion(context) end
+        )
+
+      assignment_model_unavailable?(status, body, context) ->
+        finalize_assignment_model_unavailable(response, context, body)
+
+      true ->
+        finalize_retryable_status_or_failure(response, context, body)
     end
   end
 
@@ -569,7 +578,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
 
     # Decided before settlement so the attempt records the reset the client
     # is told (findings#206 row 206-553).
-    relayed_usage_limit = relayed_usage_limit(response, context)
+    relayed_usage_limit = if error_code == "flex_unavailable", do: :unknown, else: relayed_usage_limit(response, context)
 
     attrs =
       SettlementAttrs.failure(
@@ -851,6 +860,15 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
   end
 
   defp unanswered_failure_result(response, context, body, error_code, validation_rejection, opts) do
+  defp unanswered_failure_result(response, context, _body, "flex_unavailable", _validation_rejection, _opts) do
+    {:ok,
+     %{
+       status: 429,
+       headers: [{"x-should-retry", "false"} | json_content_type(Metadata.response_headers(response, false, context.request_options))],
+       raw_body: CodexPooler.JSON.encode!(%{"error" => FlexUnavailable.error()})
+     }}
+  end
+
     if public_rate_limit_relay?(response, context.request_options),
       do: {:error, public_rate_limit_error(context)},
       else: relayed_failure_result(response, context, body, error_code, validation_rejection, opts)

@@ -65,6 +65,7 @@ defmodule CodexPoolerWeb.PublicGatewayResult do
 
       {:ok, normalized} ->
         conn
+        |> put_retry_headers(Enum.filter(GatewayHelpers.result_headers(result), fn {name, _value} -> name in ["retry-after", "x-should-retry"] end))
         |> put_status(public_error_status(status, result))
         |> json(normalized)
 
