@@ -714,19 +714,19 @@ defmodule CodexPoolerWeb.Admin.OperatorsLiveTest do
     docs_url =
       case footer_id do
         "operator-create-dialog-footer" ->
-          "https://docs.codex-pooler.com/operators/operators/#create-operator"
+          "https://www.codex-pooler.com/docs/operators/operators/#create-operator"
 
         "operator-create-temporary-password-receipt-footer" ->
-          "https://docs.codex-pooler.com/operators/operators/#password-reset"
+          "https://www.codex-pooler.com/docs/operators/operators/#password-reset"
 
         "operator-edit-dialog-footer" ->
-          "https://docs.codex-pooler.com/operators/operators/#action-menu"
+          "https://www.codex-pooler.com/docs/operators/operators/#action-menu"
 
         "operator-password-dialog-footer" ->
-          "https://docs.codex-pooler.com/operators/operators/#password-reset"
+          "https://www.codex-pooler.com/docs/operators/operators/#password-reset"
 
         "operator-temporary-password-dialog-receipt-footer" ->
-          "https://docs.codex-pooler.com/operators/operators/#password-reset"
+          "https://www.codex-pooler.com/docs/operators/operators/#password-reset"
       end
 
     assert has_element?(

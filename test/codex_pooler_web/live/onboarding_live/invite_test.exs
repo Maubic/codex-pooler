@@ -943,7 +943,7 @@ defmodule CodexPoolerWeb.OnboardingLive.InviteTest do
     app_version = :codex_pooler |> Application.spec(:vsn) |> to_string()
 
     assert has_element?(view, selector, "Codex Pooler #{app_version}")
-    assert has_element?(view, "#{selector} a[href='https://docs.codex-pooler.com']")
+    assert has_element?(view, "#{selector} a[href='https://www.codex-pooler.com/']")
     assert has_element?(view, selector, "© #{Date.utc_today().year} iCoreTech, Inc.")
     assert has_element?(view, "#{selector} a[href='https://github.com/icoretech/codex-pooler']")
     assert has_element?(view, "#{selector} a[aria-label='Codex Pooler on GitHub']")

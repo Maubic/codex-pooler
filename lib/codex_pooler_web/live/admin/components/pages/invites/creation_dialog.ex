@@ -5,7 +5,7 @@ defmodule CodexPoolerWeb.Admin.InviteCreationDialog do
 
   alias CodexPoolerWeb.Admin.Components, as: AdminComponents
 
-  @invite_docs_url "https://docs.codex-pooler.com/operators/invites/#create-pool-invite"
+  @invite_docs_url "https://www.codex-pooler.com/docs/operators/invites/#create-pool-invite"
 
   attr :creating_invite, :boolean, required: true
   attr :invite_form, :any, required: true

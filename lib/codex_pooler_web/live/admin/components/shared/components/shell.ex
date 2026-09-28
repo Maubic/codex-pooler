@@ -507,7 +507,7 @@ defmodule CodexPoolerWeb.Admin.Components.Shell do
               href={@docs_url}
               icon="hero-book-open"
               title="Documentation"
-              subtitle="docs.codex-pooler.com"
+              subtitle="www.codex-pooler.com/docs"
             />
             <.github_resource_row
               id="admin-github-x-profile"
@@ -885,7 +885,7 @@ defmodule CodexPoolerWeb.Admin.Components.Shell do
 
   defp repository_url, do: "https://github.com/icoretech/codex-pooler"
 
-  defp docs_url, do: "https://docs.codex-pooler.com/"
+  defp docs_url, do: "https://www.codex-pooler.com/docs/"
 
   defp x_profile_url, do: "https://x.com/icoretech_inc"
 end

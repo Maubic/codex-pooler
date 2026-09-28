@@ -113,7 +113,7 @@ defmodule CodexPoolerWeb.Admin.PoolListComponents do
 
         <AdminComponents.dialog_footer
           id="pool-delete-dialog-footer"
-          docs_url="https://docs.codex-pooler.com/operators/pools/"
+          docs_url="https://www.codex-pooler.com/docs/operators/pools/"
         >
           <:actions>
             <AdminComponents.action_button
@@ -765,7 +765,7 @@ defmodule CodexPoolerWeb.Admin.PoolListComponents do
       id_suffix: "v1",
       icon: "hero-code-bracket",
       label: "/v1 compatibility",
-      docs_url: "https://docs.codex-pooler.com/operators/pools/#compatibility",
+      docs_url: "https://www.codex-pooler.com/docs/operators/pools/#compatibility",
       description: "OpenAI-style /v1 compatibility routes."
     },
     %{
@@ -773,7 +773,7 @@ defmodule CodexPoolerWeb.Admin.PoolListComponents do
       id_suffix: "image-generation",
       icon: "hero-photo",
       label: "Allow Image Generation",
-      docs_url: "https://docs.codex-pooler.com/operators/pools/#compatibility",
+      docs_url: "https://www.codex-pooler.com/docs/operators/pools/#compatibility",
       description: "Permits image generation and edits for requests using this Pool."
     },
     %{
@@ -781,7 +781,7 @@ defmodule CodexPoolerWeb.Admin.PoolListComponents do
       id_suffix: "audio-transcription",
       icon: "hero-microphone",
       label: "Allow Audio Transcription",
-      docs_url: "https://docs.codex-pooler.com/operators/pools/#compatibility",
+      docs_url: "https://www.codex-pooler.com/docs/operators/pools/#compatibility",
       description: "Permits speech-to-text transcription for requests using this Pool."
     }
   ]

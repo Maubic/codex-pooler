@@ -73,7 +73,7 @@ defmodule CodexPoolerWeb.Admin.LensLiveTest do
     assert page_title(view) == "Lens - Codex Pooler"
     assert has_element?(view, "#admin-nav-audit-logs + #admin-nav-lens[href='/admin/lens'][aria-current=page]", "Lens")
     assert has_element?(view, "#admin-nav-lens .hero-magnifying-glass")
-    assert has_element?(view, "#lens-guide-link[href='https://docs.codex-pooler.com/operators/lens/'][target='_blank'][rel='noopener noreferrer']")
+    assert has_element?(view, "#lens-guide-link[href='https://www.codex-pooler.com/docs/operators/lens/'][target='_blank'][rel='noopener noreferrer']")
     assert has_element?(view, "#lens-signal-help", "Pooler sent model A, but the provider first reported model B")
     assert has_element?(view, "#lens-signal-help", "then model B during the same attempt")
     assert has_element?(view, "[data-role=model-count-mismatches]", "Different from sent")

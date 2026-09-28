@@ -19,7 +19,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeyWizardComponents do
     %{id: :review, label: "Review", description: "Effective policy"}
   ]
   @step_ids Enum.map(@steps, &Atom.to_string(&1.id))
-  @api_key_docs_url "https://docs.codex-pooler.com/operators/api-keys/#create-api-key"
+  @api_key_docs_url "https://www.codex-pooler.com/docs/operators/api-keys/#create-api-key"
 
   @spec steps() :: [map()]
   def steps, do: @steps

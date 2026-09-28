@@ -637,10 +637,10 @@ defmodule CodexPoolerWeb.Admin.InvitesLiveTest do
     docs_url =
       case footer_id do
         "invite-revoke-dialog-footer" ->
-          "https://docs.codex-pooler.com/operators/invites/#active-invite-actions"
+          "https://www.codex-pooler.com/docs/operators/invites/#active-invite-actions"
 
         _footer_id ->
-          "https://docs.codex-pooler.com/operators/invites/#create-pool-invite"
+          "https://www.codex-pooler.com/docs/operators/invites/#create-pool-invite"
       end
 
     assert has_element?(

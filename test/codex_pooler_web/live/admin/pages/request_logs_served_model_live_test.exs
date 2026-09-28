@@ -46,7 +46,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsServedModelLiveTest do
 
     {:ok, view, _html} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}")
 
-    assert has_element?(view, "#request-log-model-guide-link[href='https://docs.codex-pooler.com/operators/lens/#read-the-request-log-warnings'][target='_blank'][rel='noopener noreferrer']", "Model warnings explained")
+    assert has_element?(view, "#request-log-model-guide-link[href='https://www.codex-pooler.com/docs/operators/lens/#read-the-request-log-warnings'][target='_blank'][rel='noopener noreferrer']", "Model warnings explained")
 
     assert has_element?(
              view,

@@ -521,7 +521,7 @@ defmodule CodexPoolerWeb.AuthControllerTest do
 
       assert has_element?(
                view,
-               "#auth-footer a[href='https://docs.codex-pooler.com']",
+               "#auth-footer a[href='https://www.codex-pooler.com/']",
                "Codex Pooler"
              )
 

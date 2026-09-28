@@ -190,11 +190,11 @@ defmodule CodexPoolerWeb.Admin.AuthLiveTest do
 
         assert has_element?(
                  view,
-                 "#admin-github-docs[href='https://docs.codex-pooler.com/'][target='_blank']",
+                 "#admin-github-docs[href='https://www.codex-pooler.com/docs/'][target='_blank']",
                  "Documentation"
                )
 
-        assert has_element?(view, "#admin-github-docs", "docs.codex-pooler.com")
+        assert has_element?(view, "#admin-github-docs", "www.codex-pooler.com/docs")
 
         assert has_element?(
                  view,

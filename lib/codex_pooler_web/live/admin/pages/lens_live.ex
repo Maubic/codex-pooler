@@ -167,7 +167,7 @@ defmodule CodexPoolerWeb.Admin.LensLive do
       <section id="admin-model-history" class="grid min-w-0 gap-6" aria-busy={to_string(@history_loading?)}>
         <AdminComponents.page_header id="model-history-header" title="Lens" description="Find responses where the provider reports a different model than the one sent, or changes the model name during the response.">
           <:actions>
-            <.link id="lens-guide-link" href="https://docs.codex-pooler.com/operators/lens/" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-sm gap-1.5"><.icon name="hero-book-open" class="size-4" /><span class="admin-control-label">Lens guide</span></.link>
+            <.link id="lens-guide-link" href="https://www.codex-pooler.com/docs/operators/lens/" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-sm gap-1.5"><.icon name="hero-book-open" class="size-4" /><span class="admin-control-label">Lens guide</span></.link>
           </:actions>
         </AdminComponents.page_header>
         <LensFilters.filters form={@filter_form} pool_options={@pool_options} model_options={@model_options} />

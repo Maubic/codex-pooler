@@ -6950,13 +6950,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     docs_url =
       case footer_id do
         "auth-json-import-dialog-footer" ->
-          "https://docs.codex-pooler.com/operators/upstreams/#import-authjson"
+          "https://www.codex-pooler.com/docs/operators/upstreams/#import-authjson"
 
         "cockpit-rename-upstream-account-dialog-footer" ->
-          "https://docs.codex-pooler.com/operators/upstreams/#card-action-menu"
+          "https://www.codex-pooler.com/docs/operators/upstreams/#card-action-menu"
 
         "cockpit-delete-upstream-account-dialog-footer" ->
-          "https://docs.codex-pooler.com/operators/upstreams/#card-action-menu"
+          "https://www.codex-pooler.com/docs/operators/upstreams/#card-action-menu"
       end
 
     assert has_element?(
@@ -6974,7 +6974,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
   defp assert_oauth_dialog_docs_link(view, footer_id) do
     assert has_element?(
              view,
-             "##{footer_id} [data-role='admin-dialog-docs-link'][href='https://docs.codex-pooler.com/operators/upstreams/#openai-oauth-upstream-linking'][target='_blank'][rel='noopener noreferrer'].text-xs",
+             "##{footer_id} [data-role='admin-dialog-docs-link'][href='https://www.codex-pooler.com/docs/operators/upstreams/#openai-oauth-upstream-linking'][target='_blank'][rel='noopener noreferrer'].text-xs",
              "Docs"
            )
 

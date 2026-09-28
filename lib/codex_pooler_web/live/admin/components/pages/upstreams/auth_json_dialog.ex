@@ -5,7 +5,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AuthJsonDialog do
 
   alias CodexPoolerWeb.Admin.Components, as: AdminComponents
 
-  @auth_json_docs_url "https://docs.codex-pooler.com/operators/upstreams/#import-authjson"
+  @auth_json_docs_url "https://www.codex-pooler.com/docs/operators/upstreams/#import-authjson"
 
   attr :auth_json_form, :any, required: true
   attr :importing_auth_json, :boolean, required: true

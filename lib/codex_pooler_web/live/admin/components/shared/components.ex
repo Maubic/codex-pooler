@@ -9,7 +9,7 @@ defmodule CodexPoolerWeb.Admin.Components do
 
   def admin_shell(assigns), do: Shell.admin_shell(assigns)
 
-  @docs_url "https://docs.codex-pooler.com/operators/admin-ui/"
+  @docs_url "https://www.codex-pooler.com/docs/operators/admin-ui/"
 
   attr :id, :string, required: true
   attr :eyebrow, :string, default: "Admin"

@@ -19,7 +19,7 @@ defmodule CodexPoolerWeb.Admin.PoolWizardComponents do
     %{id: :models, label: "Models", description: "Serving mode"}
   ]
 
-  @pool_docs_url "https://docs.codex-pooler.com/operators/pools/"
+  @pool_docs_url "https://www.codex-pooler.com/docs/operators/pools/"
 
   @pool_wizard_step_ids Enum.map(@pool_wizard_steps, &to_string(&1.id))
 

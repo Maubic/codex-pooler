@@ -9,9 +9,9 @@ defmodule CodexPoolerWeb.Admin.OperatorComponents.Dialogs do
   alias CodexPoolerWeb.Admin.OperatorForm
   alias Phoenix.HTML.{Form, FormField}
 
-  @operator_docs_url "https://docs.codex-pooler.com/operators/operators/#create-operator"
-  @operator_actions_docs_url "https://docs.codex-pooler.com/operators/operators/#action-menu"
-  @operator_password_docs_url "https://docs.codex-pooler.com/operators/operators/#password-reset"
+  @operator_docs_url "https://www.codex-pooler.com/docs/operators/operators/#create-operator"
+  @operator_actions_docs_url "https://www.codex-pooler.com/docs/operators/operators/#action-menu"
+  @operator_password_docs_url "https://www.codex-pooler.com/docs/operators/operators/#password-reset"
 
   attr :creating_operator, :boolean, required: true
   attr :create_form, Form, required: true

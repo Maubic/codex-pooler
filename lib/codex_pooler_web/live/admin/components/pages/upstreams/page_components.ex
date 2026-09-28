@@ -14,9 +14,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   alias CodexPoolerWeb.RelativeTime
   alias Phoenix.HTML.Form
 
-  @oauth_docs_url "https://docs.codex-pooler.com/operators/upstreams/#openai-oauth-upstream-linking"
-  @upstream_actions_docs_url "https://docs.codex-pooler.com/operators/upstreams/#card-action-menu"
-  @saved_reset_docs_url "https://docs.codex-pooler.com/operators/upstreams/#saved-resets"
+  @oauth_docs_url "https://www.codex-pooler.com/docs/operators/upstreams/#openai-oauth-upstream-linking"
+  @upstream_actions_docs_url "https://www.codex-pooler.com/docs/operators/upstreams/#card-action-menu"
+  @saved_reset_docs_url "https://www.codex-pooler.com/docs/operators/upstreams/#saved-resets"
 
   attr :pools, :list, required: true
   attr :can_manage_pools?, :boolean, required: true

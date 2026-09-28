@@ -6,8 +6,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Dialogs do
   alias CodexPoolerWeb.Admin.Components, as: AdminComponents
   alias CodexPoolerWeb.Admin.UpstreamOAuthDialogComponents
 
-  @oauth_docs_url "https://docs.codex-pooler.com/operators/upstreams/#openai-oauth-upstream-linking"
-  @upstream_actions_docs_url "https://docs.codex-pooler.com/operators/upstreams/#card-action-menu"
+  @oauth_docs_url "https://www.codex-pooler.com/docs/operators/upstreams/#openai-oauth-upstream-linking"
+  @upstream_actions_docs_url "https://www.codex-pooler.com/docs/operators/upstreams/#card-action-menu"
 
   attr :account_label, :string, required: true
   attr :oauth_relinking, :boolean, required: true

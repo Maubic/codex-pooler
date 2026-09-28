@@ -9,7 +9,7 @@ defmodule CodexPoolerWeb.Admin.InvitesPageComponents do
   alias CodexPoolerWeb.RelativeTime
   alias Phoenix.LiveView.JS
 
-  @invite_docs_url "https://docs.codex-pooler.com/operators/invites/#active-invite-actions"
+  @invite_docs_url "https://www.codex-pooler.com/docs/operators/invites/#active-invite-actions"
 
   attr :id, :string, required: true
   attr :label, :string, required: true

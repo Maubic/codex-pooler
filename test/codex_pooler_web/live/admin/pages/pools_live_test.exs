@@ -818,7 +818,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
     assert has_element?(
              view,
-             ~s(#pool-row-#{pool.id}-compat-v1-docs-link[href="https://docs.codex-pooler.com/operators/pools/#compatibility"])
+             ~s(#pool-row-#{pool.id}-compat-v1-docs-link[href="https://www.codex-pooler.com/docs/operators/pools/#compatibility"])
            )
 
     assert has_element?(
@@ -5234,7 +5234,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
   defp assert_policy_editor_docs_link(view, dialog_id) do
     assert has_element?(
              view,
-             "##{dialog_id}-footer [data-role='policy-editor-docs-link'][href='https://docs.codex-pooler.com/operators/pools/'][target='_blank'][rel='noopener noreferrer'].text-xs",
+             "##{dialog_id}-footer [data-role='policy-editor-docs-link'][href='https://www.codex-pooler.com/docs/operators/pools/'][target='_blank'][rel='noopener noreferrer'].text-xs",
              "Docs"
            )
 

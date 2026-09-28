@@ -77,7 +77,7 @@ defmodule CodexPoolerWeb.Layouts do
     >
       <aside class="flex flex-col items-center gap-2 sm:flex-row sm:gap-3">
         <.link
-          href="https://docs.codex-pooler.com"
+          href="https://www.codex-pooler.com/"
           target="_blank"
           rel="noopener noreferrer"
           class="font-medium text-base-content/75 hover:text-base-content"

@@ -8,7 +8,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPageComponents do
   alias CodexPoolerWeb.Admin.Components, as: AdminComponents
   alias CodexPoolerWeb.DateTimeDisplay
 
-  @api_key_docs_url "https://docs.codex-pooler.com/operators/api-keys/"
+  @api_key_docs_url "https://www.codex-pooler.com/docs/operators/api-keys/"
 
   attr :created_secret, :map, required: true
 
