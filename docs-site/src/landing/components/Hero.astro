@@ -43,7 +43,7 @@ const accounts = [
       <h1 class="h1" id="hero-title">Your Codex accounts, <em>pooled your way.</em></h1>
 
       <p class="lede">
-        Codex Pooler is a gateway you run yourself. Group your Codex accounts into Pools for your teams, agents and projects, give every tool its own key, and each request goes to an account with room to spare. Even tools without Codex support can run on your subscriptions, through the OpenAI-compatible API.
+        Codex Pooler is a gateway you run yourself. Group your Codex accounts into Pools for your teams, agents and projects, give every tool its own key, and each request goes to an account with room to spare. Even tools without Codex support can run on your subscriptions, through the <span class="nw">OpenAI-compatible</span> API.
       </p>
 
       <div class="cta-row">
@@ -178,7 +178,7 @@ const accounts = [
     grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
     align-items: center;
     gap: clamp(24px, 4vw, 56px);
-    min-height: min(680px, calc(100svh - var(--nav-h) - 120px));
+    min-height: min(620px, calc(100svh - var(--nav-h) - 120px));
   }
 
   .release {
@@ -515,7 +515,7 @@ const accounts = [
   }
 
   /* Narrower consoles stack the four checks in two rows. */
-  @container (max-width: 620px) {
+  @container (max-width: 590px) {
     .checks {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -528,6 +528,17 @@ const accounts = [
 
     .checks i {
       display: none;
+    }
+  }
+
+  /* A narrow console, as in a two-column hero on small laptops, wraps long client names instead of cutting them. */
+  @container (max-width: 540px) {
+    .client-name {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      white-space: normal;
+      line-height: 1.1;
     }
   }
 
@@ -810,15 +821,45 @@ const accounts = [
       min-height: 0;
     }
 
+    /* Stacked under left-aligned copy, the console shares its left edge. */
     .console {
-      justify-self: center;
+      justify-self: start;
+      max-width: 760px;
+    }
+  }
+
+  @media (max-height: 500px) and (orientation: landscape) {
+    .hero {
+      padding-top: 12px;
+    }
+
+    .release {
+      margin-bottom: 14px;
+    }
+
+    .hero .lede {
+      margin-top: 16px;
+    }
+
+    .cta-row {
+      margin-top: 20px;
+    }
+
+    .facts {
+      margin-top: 18px;
+    }
+  }
+
+  @media (max-width: 400px) {
+    .cta-row .btn {
+      flex: 1 1 auto;
     }
   }
 
   @media (max-width: 600px) {
     .stage {
-      grid-template-columns: minmax(0, 0.85fr) minmax(0, 1fr) minmax(0, 0.95fr);
-      gap: 14px;
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr) minmax(0, 0.85fr);
+      gap: 12px;
       padding: 12px 10px;
     }
 
@@ -833,13 +874,13 @@ const accounts = [
 
     .client {
       padding: 6px;
-      gap: 6px;
+      gap: 5px;
     }
 
     .client-logo {
-      width: 22px;
-      height: 22px;
-      --logo-size: 13px;
+      width: 20px;
+      height: 20px;
+      --logo-size: 12px;
     }
 
     .client-name,
@@ -848,14 +889,23 @@ const accounts = [
       font-size: 11px;
     }
 
+    .client-name,
+    .pool-text b {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      white-space: normal;
+      line-height: 1.1;
+    }
+
     .acct[data-acct="e"],
     .acct[data-acct="f"] {
       display: none;
     }
 
     .stage-labels {
-      grid-template-columns: minmax(0, 0.85fr) minmax(0, 1fr) minmax(0, 0.95fr);
-      gap: 14px;
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr) minmax(0, 0.85fr);
+      gap: 12px;
       padding-inline: 10px;
     }
 

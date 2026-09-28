@@ -201,9 +201,27 @@ const links = [
     transform: translateY(-3.5px) rotate(-45deg);
   }
 
+  /* Never taller than the screen below the bar, so every entry stays reachable in landscape. */
   .mobile-menu {
+    max-height: calc(100vh - var(--nav-h));
+    max-height: calc(100dvh - var(--nav-h));
+    overflow-y: auto;
+    overscroll-behavior: contain;
     border-top: 1px solid var(--line);
     background: var(--cream);
+  }
+
+  @media (max-height: 560px) {
+    .mobile-menu nav {
+      grid-template-columns: 1fr 1fr;
+      column-gap: 28px;
+      padding-block: 8px 14px;
+    }
+
+    .mobile-menu .btn {
+      grid-column: 1 / -1;
+      margin-top: 10px;
+    }
   }
 
   .mobile-menu nav {

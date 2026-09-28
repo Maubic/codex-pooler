@@ -92,8 +92,11 @@ const full = await Promise.all(tabs.map((tab) => getImage({ src: tab.image, form
     inset: 0;
     pointer-events: none;
     background:
-      radial-gradient(900px 520px at 50% 108%, rgb(255 122 60 / 0.28), transparent 65%),
+      radial-gradient(900px 520px at 50% 92%, rgb(255 122 60 / 0.28), transparent 65%),
       radial-gradient(700px 380px at 92% 0%, rgb(51 176 255 / 0.1), transparent 70%);
+    /* The glow fades out before the section ends, so the next band never cuts it. */
+    -webkit-mask-image: linear-gradient(#000 70%, transparent);
+    mask-image: linear-gradient(#000 70%, transparent);
   }
 
   .dash .wrap {
@@ -241,10 +244,13 @@ const full = await Promise.all(tabs.map((tab) => getImage({ src: tab.image, form
     cursor: zoom-in;
   }
 
+  /* The crop ends mid-page, so the screenshot fades into the window instead of stopping on a hard line. */
   .screen :global(img) {
     width: 100%;
     aspect-ratio: 8 / 5;
     object-fit: cover;
+    -webkit-mask-image: linear-gradient(#000 80%, transparent);
+    mask-image: linear-gradient(#000 80%, transparent);
   }
 
   @keyframes screen-in {
@@ -284,6 +290,15 @@ const full = await Promise.all(tabs.map((tab) => getImage({ src: tab.image, form
   .caption-item span {
     font-size: 15.5px;
     color: var(--night-ink-2);
+  }
+
+  /* Tablets: the eight tabs sit in two even rows of four. */
+  @media (min-width: 761px) and (max-width: 900px) {
+    .tabs {
+      display: grid;
+      grid-template-columns: repeat(4, auto);
+      justify-content: center;
+    }
   }
 
   @media (max-width: 760px) {

@@ -250,6 +250,25 @@ ol {
   text-wrap: pretty;
 }
 
+/* No single word left alone on the last line of body text. */
+p,
+li,
+dt,
+dd {
+  text-wrap-style: pretty;
+}
+
+.nw {
+  white-space: nowrap;
+}
+
+/* Landscape phones: a slimmer bar leaves room for the page. */
+@media (max-height: 500px) and (orientation: landscape) {
+  :root {
+    --nav-h: 56px;
+  }
+}
+
 .section-head.center .lede {
   margin-inline: auto;
   max-width: 640px;

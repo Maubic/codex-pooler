@@ -19,7 +19,7 @@ const pillars = [
   },
   {
     title: "Read every line",
-    text: "The full source is on GitHub, free to self-host under the Elastic License 2.0.",
+    text: "The full source is on GitHub, free to self-host under the Elastic License\u00a02.0.",
     icon: "m9 8-4 4 4 4M15 8l4 4-4 4",
   },
 ];
@@ -29,7 +29,7 @@ const pillars = [
   <div class="wrap trust-grid">
     <div class="trust-copy" data-reveal>
       <p class="eyebrow">Yours, end to end</p>
-      <h2 class="h2" id="trust-title">Your server. Your accounts. <em>Your data.</em></h2>
+      <h2 class="h2" id="trust-title"><span class="nw">Your server.</span> <span class="nw">Your accounts.</span> <em class="nw">Your data.</em></h2>
       <p class="lede">Pooler is software you run, not a service you sign up for. Requests travel from your server to OpenAI, directly or through your own proxy, and never through us.</p>
       <p class="honest">
         <strong>What Pooler is not:</strong> a way around OpenAI's limits or terms. Every account keeps its own limits. Pooler helps you make full use of the accounts you're allowed to use, together.
@@ -135,7 +135,8 @@ const pillars = [
     color: var(--ink-2);
   }
 
-  @media (max-width: 920px) {
+  /* Four cards need the full width well before phones do. */
+  @media (max-width: 1100px) {
     .trust-grid {
       grid-template-columns: 1fr;
     }

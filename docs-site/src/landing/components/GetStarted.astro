@@ -6,10 +6,11 @@ const chartVersion = await getChartVersion();
 
 type Line = { kind: "cmd" | "note" | "cont"; text: string };
 
-const setups: { id: string; label: string; lines: Line[]; guide: { href: string; label: string } }[] = [
+const setups: { id: string; label: string; short: string; lines: Line[]; guide: { href: string; label: string } }[] = [
   {
     id: "compose",
     label: "Docker Compose",
+    short: "Docker",
     lines: [
       { kind: "cmd", text: "git clone https://github.com/icoretech/codex-pooler.git" },
       { kind: "cmd", text: "cd codex-pooler" },
@@ -25,6 +26,7 @@ const setups: { id: string; label: string; lines: Line[]; guide: { href: string;
   {
     id: "helm",
     label: "Kubernetes · Helm",
+    short: "Helm",
     lines: [
       { kind: "cmd", text: "helm repo add icoretech https://icoretech.github.io/helm" },
       { kind: "cmd", text: "helm repo update" },
@@ -37,6 +39,9 @@ const setups: { id: string; label: string; lines: Line[]; guide: { href: string;
     guide: { href: docs("/deployment/helm/"), label: "Helm guide" },
   },
 ];
+
+// A long command wraps at a space or after a path slash, never inside a name.
+const pieces = (text: string) => text.split(/(\s+)/).map((token) => (/^\s*$/.test(token) ? token : token.split(/(?<=[^/]\/)(?=[^/])/)));
 
 const copyText = (lines: Line[]) =>
   lines
@@ -95,7 +100,8 @@ const steps = [
             {
               setups.map((setup, index) => (
                 <button type="button" role="tab" class="term-tab" id={`setup-tab-${setup.id}`} aria-controls={`setup-${setup.id}`} aria-selected={index === 0 ? "true" : "false"} tabindex={index === 0 ? "0" : "-1"} data-setup-tab>
-                  {setup.label}
+                  <span class="tab-long">{setup.label}</span>
+                  <span class="tab-short">{setup.short}</span>
                 </button>
               ))
             }
@@ -107,7 +113,7 @@ const steps = [
         {
           setups.map((setup, index) => (
             <pre class="term-body" role="tabpanel" id={`setup-${setup.id}`} aria-labelledby={`setup-tab-${setup.id}`} data-setup-panel data-copy-text={copyText(setup.lines)} hidden={index !== 0}><code>{setup.lines.map((line, i) => (
-              <span class={`line ${line.kind}`} style={`--i:${i}`}>{line.kind === "cmd" && <span class="prompt" aria-hidden="true">$</span>}{line.text}</span>
+              <span class={`line ${line.kind}`} style={`--i:${i}`}>{line.kind === "cmd" && <span class="prompt" aria-hidden="true">$</span>}{pieces(line.text).map((token) => (typeof token === "string" ? token : token.map((part, j) => [j ? <wbr /> : null, <span class="nw">{part}</span>])))}</span>
             ))}</code></pre>
           ))
         }
@@ -178,7 +184,8 @@ const steps = [
 
   .step a {
     display: inline-block;
-    margin-top: 8px;
+    margin-bottom: -8px;
+    padding-block: 8px;
     font-size: 15px;
     font-weight: 700;
     color: var(--orange-ink);
@@ -299,12 +306,17 @@ const steps = [
     font: inherit;
   }
 
+  /* A long command wraps under a hanging indent rather than scrolling out of sight. */
   .line {
-    white-space: pre;
+    padding-left: 1.6em;
+    text-indent: -1.6em;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   .line.cont {
-    padding-left: 2.6em;
+    padding-left: 3.6em;
+    text-indent: -1em;
   }
 
   .line.note {
@@ -312,9 +324,15 @@ const steps = [
   }
 
   .prompt {
-    margin-right: 12px;
+    display: inline-block;
+    width: 1.6em;
+    text-indent: 0;
     color: var(--orange);
     user-select: none;
+  }
+
+  .tab-short {
+    display: none;
   }
 
   :global(.js) .term-wrap:not(.is-in) .line {
@@ -365,20 +383,18 @@ const steps = [
       margin-bottom: 6px;
     }
 
+    /* Short tab names keep Copy on the same row. */
+    .tab-long {
+      display: none;
+    }
+
+    .tab-short {
+      display: inline;
+    }
+
     .term-body {
       font-size: 12.5px;
       padding: 18px 16px 22px;
-    }
-
-    .line {
-      padding-left: 1.6em;
-      text-indent: -1.6em;
-      white-space: pre-wrap;
-      word-break: break-all;
-    }
-
-    .line.cont {
-      padding-left: 2.8em;
     }
 
     .step {

@@ -127,6 +127,7 @@ const covered = ["Responses and Chat Completions, with streaming", "Model list",
     letter-spacing: 0.12em;
     text-transform: uppercase;
     color: var(--ink-3);
+    text-wrap: balance;
   }
 
   .covered ul {
@@ -177,7 +178,7 @@ const covered = ["Responses and Chat Completions, with streaming", "Model list",
 
   .compat-visual {
     display: grid;
-    gap: 18px;
+    gap: 32px;
   }
 
   .settings {
@@ -209,6 +210,13 @@ const covered = ["Responses and Chat Completions, with streaming", "Model list",
     height: 10px;
     border-radius: 50%;
     background: #4a463f;
+  }
+
+  .crumbs {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 
   .crumbs i {
@@ -388,6 +396,11 @@ const covered = ["Responses and Chat Completions, with streaming", "Model list",
     color: var(--ink-3);
   }
 
+  /* A button fills its cell, so a row with one wrapped name keeps even heights. */
+  .tool-grid li {
+    display: grid;
+  }
+
   .tool-grid a {
     position: relative;
     display: flex;
@@ -399,7 +412,7 @@ const covered = ["Responses and Chat Completions, with streaming", "Model list",
     background: var(--paper);
     font-size: 14.5px;
     font-weight: 650;
-    white-space: nowrap;
+    line-height: 1.2;
     transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
     --logo-size: 18px;
   }
@@ -411,8 +424,7 @@ const covered = ["Responses and Chat Completions, with streaming", "Model list",
   }
 
   .tool-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
+    min-width: 0;
   }
 
   .go {
@@ -428,6 +440,16 @@ const covered = ["Responses and Chat Completions, with streaming", "Model list",
   .tool-grid a:focus-visible .go {
     opacity: 1;
     transform: none;
+  }
+
+  @media (hover: none) {
+    .tool-grid a {
+      padding-right: 12px;
+    }
+
+    .go {
+      display: none;
+    }
   }
 
   @media (max-width: 960px) {

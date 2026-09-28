@@ -142,18 +142,28 @@ const points = [
     gap: 18px;
   }
 
+  /* The keys block takes any spare height, so the rule chips line up at the foot of every card. */
   .pool {
     --tone: var(--orange);
     --tone-soft: var(--orange-soft);
     --tone-ink: var(--orange-ink);
+    position: relative;
     display: grid;
-    align-content: start;
+    grid-template-rows: auto auto auto 1fr auto;
     gap: 18px;
-    padding: 22px;
+    padding: 26px 22px 22px;
     border: 1px solid var(--line);
-    border-top: 4px solid var(--tone);
     border-radius: 22px;
     background: var(--cream);
+    overflow: hidden;
+  }
+
+  .pool::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 4px;
+    background: var(--tone);
   }
 
   .tone-blue {
@@ -254,6 +264,10 @@ const points = [
     letter-spacing: 0;
   }
 
+  .pool-block {
+    container-type: inline-size;
+  }
+
   .accts {
     display: grid;
     gap: 7px;
@@ -308,6 +322,19 @@ const points = [
     font-family: var(--mono);
     font-size: 12px;
     color: var(--ink-3);
+  }
+
+  /* In a narrow card the bar moves under the name, so a shared badge never runs into it. */
+  @container (max-width: 330px) {
+    .accts li {
+      grid-template-columns: minmax(0, 1fr) auto;
+      row-gap: 7px;
+    }
+
+    .mini-bar {
+      grid-column: 1 / -1;
+      grid-row: 2;
+    }
   }
 
   .keys {
@@ -382,14 +409,48 @@ const points = [
     text-underline-offset: 3px;
   }
 
+  /* Tablets: two cards side by side, and the third spans the row with its chart beside the accounts and keys. */
   @media (max-width: 1000px) {
     .pool-grid {
-      grid-template-columns: 1fr;
-      max-width: 560px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .pool:last-child {
+      grid-column: 1 / -1;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-rows: auto;
+      column-gap: 24px;
+    }
+
+    .pool:last-child .pool-head,
+    .pool:last-child .rules {
+      grid-column: 1 / -1;
+    }
+
+    .pool:last-child .chart {
+      grid-row: span 2;
+      height: auto;
+      min-height: 64px;
     }
 
     .points {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 600px) {
+    .pool-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .pool:last-child {
+      grid-column: auto;
+      grid-template-columns: 1fr;
+    }
+
+    .pool:last-child .chart {
+      grid-row: auto;
+      height: 64px;
     }
   }
 
