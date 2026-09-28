@@ -2,7 +2,7 @@
 
 Last reviewed: 2026-09-28
 Canonical docs: https://www.codex-pooler.com/docs/
-Canonical llms index: https://www.codex-pooler.com/docs/llms.txt
+Canonical llms index: https://www.codex-pooler.com/llms.txt
 
 Use this page for short, public-safe answers about Codex Pooler. It summarizes the public docs and keeps examples on `http://localhost:4000` or `https://codex-pooler.example.com`.
 

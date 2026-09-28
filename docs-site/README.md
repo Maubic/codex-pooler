@@ -1,40 +1,38 @@
 # Codex Pooler website
 
-The landing page at [www.codex-pooler.com](https://www.codex-pooler.com). The documentation in [`../docs-site`](../docs-site) is published with it, under `/docs`.
-
-A single static page built with [Astro](https://astro.build), with no CSS framework and no client-side libraries: the animations are hand-written CSS and small TypeScript modules.
+The public website at [www.codex-pooler.com](https://www.codex-pooler.com), in one [Astro](https://astro.build) project: the landing page at the site root and the documentation, built with [Starlight](https://starlight.astro.build), under `/docs`.
 
 ## Develop
 
 ```sh
 npm ci
-npm run dev      # http://localhost:4321
+npm run dev      # http://localhost:4321/ and http://localhost:4321/docs/
 ```
 
-Links into the docs point at `/docs/...` on the same host, which `npm run dev` does not serve. Follow them in a full build (below) or on the published site.
-
-## Build
+## Check and build
 
 ```sh
-npm run check    # astro check (types and templates)
+npm run check    # astro check and the docs contract checks
 npm run build    # static site in dist/
+npm run preview  # serve the build locally
 ```
 
-To build the whole published site from the repository root, landing page and docs together, as the Pages workflow does:
+## Layout
 
-```sh
-npm ci --prefix site && npm run build --prefix site
-npm ci --prefix docs-site && npm run build --prefix docs-site
-cp -R docs-site/dist site/dist/docs
-cp docs-site/dist/404.html docs-site/dist/llms.txt site/dist/
-npm run preview --prefix site
-```
+| Path | What |
+| --- | --- |
+| `src/pages/index.astro` | The landing page, assembled from `src/landing/components/` |
+| `src/landing/` | Landing page components, layout, styles, data and images |
+| `src/content/docs/` | Documentation pages. `src/content.config.ts` gives their ids a `docs/` prefix, so they are served under `/docs` without living in a `docs/` folder |
+| `plugins/docs-links.mjs` | Adds `/docs` to root-relative page links in the docs, so pages keep linking with paths like `/operators/pools/` |
+| `public/` | Files served at the site root: images, fonts, `llms.txt`, `answers.md`, `pricing.md`, `robots.txt`, the monitoring dashboards, and the landing page's logos and icons |
+| `scripts/`, `dashboards/` | Checks run by `npm run check`, and the dashboard build |
 
-The release shown in the hero and pinned in the Compose instructions comes from `.release-please-manifest.json`, and the chart version pinned in the Helm instructions comes from the Helm deployment guide, which Renovate keeps on the latest chart. Both change only through commits, so the page always matches the docs. The GitHub star count is read from the GitHub API at build time and left out when the API can't be reached; the Pages workflow passes `GITHUB_TOKEN` to avoid the anonymous rate limit.
+The 404 page (`src/content/docs/404.mdx`) serves the whole site and forwards links from before the docs moved under `/docs` to their new address.
 
-## Page structure
+## Landing page
 
-`src/pages/index.astro` assembles the sections from `src/components/`:
+`src/pages/index.astro` assembles the sections from `src/landing/components/`:
 
 | Section | Component | Notes |
 | --- | --- | --- |
@@ -52,11 +50,13 @@ The release shown in the hero and pinned in the Compose instructions comes from 
 | FAQ | `Faq.astro` | Native `<details>` accordion |
 | Final CTA and footer | `FinalCta.astro`, `Footer.astro` | |
 
-Every link into the docs goes through `docs()` in `src/data/site.ts`, which points at `/docs` on the same host. The supported tools and their guide links live in the same file.
+Every link into the docs goes through `docs()` in `src/landing/data/site.ts`, which points at `/docs`. The supported tools and their guide links live in the same file.
 
 All motion respects `prefers-reduced-motion`, and the animations pause when their section is off screen or the tab is hidden.
 
-## Writing rules
+The release shown in the hero and pinned in the Compose instructions comes from `.release-please-manifest.json`, and the chart version pinned in the Helm instructions comes from the Helm deployment guide, which Renovate keeps on the latest chart. Both change only through commits, so the landing page always matches the docs. The GitHub star count is read from the GitHub API at build time and left out when the API can't be reached; the Pages workflow passes `GITHUB_TOKEN` to avoid the anonymous rate limit.
+
+### Writing rules
 
 The page makes public claims about the product, so keep them measured and checkable against the docs:
 
@@ -70,18 +70,18 @@ The page makes public claims about the product, so keep them measured and checka
 - No "demo data" or "illustration" disclaimers on product visuals; the captures come from deterministic fixtures, not from anyone's traffic.
 - Privacy is a fact to state once, not the headline. Traffic can leave through the operator's own HTTP proxy, so never claim requests go "straight" to OpenAI.
 
-## Assets
+### Assets
 
 | Path | Source |
 | --- | --- |
-| `src/assets/pooler.webp` | The mascot, from `.github/assets/pooler.png` (used in the closing call to action) |
-| `src/assets/screens/*.webp` | Dark-theme admin captures (1440×900 at 2×) taken from the deterministic screenshot fixtures, converted to WebP. Retake them when the admin UI changes |
-| `public/logos/*.svg` | Normalized monochrome marks from `priv/static/images/client-logos/`, with provenance in `assets/client-logos/manifest.json`; the upstream licenses are in `licenses/` |
-| `public/favicon.svg` | The mascot's face, drawn for small sizes |
+| `src/landing/assets/pooler.webp` | The mascot, from `.github/assets/pooler.png` (used in the closing call to action) |
+| `src/landing/assets/screens/*.webp` | Dark-theme admin captures (1440×900 at 2×) taken from the deterministic screenshot fixtures, converted to WebP. Retake them when the admin UI changes |
+| `public/logos/*.svg` | Normalized monochrome marks from `priv/static/images/client-logos/`, with provenance in `assets/client-logos/manifest.json` and the upstream licenses next to it |
+| `public/icon.svg` | The mascot's face, drawn for small sizes: the site icon for every page |
 | `public/og.jpg` | 1200×630 social preview |
 
 Product names and logos belong to their owners. OpenAI and Codex are trademarks of OpenAI; Codex Pooler is not affiliated with OpenAI.
 
 ## Deploy
 
-Pushes to `main` that touch `site/`, `docs-site/` or `.release-please-manifest.json` run `.github/workflows/pages.yml`. It checks and builds both sites, puts the docs under `/docs`, and publishes the result to GitHub Pages; the custom domain `www.codex-pooler.com` is set in the repository's **Settings → Pages**. The docs' 404 page serves the whole site and forwards links from before the docs moved under `/docs` to their new address.
+Pushes to `main` that touch `docs-site/` or `.release-please-manifest.json` run `.github/workflows/pages.yml`, which checks, builds and publishes `dist/` to GitHub Pages. The custom domain `www.codex-pooler.com` is set in the repository's **Settings → Pages**.

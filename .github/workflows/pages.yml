@@ -1,17 +1,15 @@
 name: pages
 
-# The landing page (site/) and the docs (docs-site/) are published together:
-# the landing page at the root and the docs under /docs.
+# Publishes docs-site/ to GitHub Pages: the landing page at the site root
+# and the docs under /docs.
 on:
   pull_request:
     paths:
-      - 'site/**'
       - 'docs-site/**'
       - '.release-please-manifest.json'
       - '.github/workflows/pages.yml'
   push:
     paths:
-      - 'site/**'
       - 'docs-site/**'
       - '.release-please-manifest.json'
       - '.github/workflows/pages.yml'
@@ -38,41 +36,26 @@ jobs:
         with:
           node-version: '26.10.0'
           cache: npm
-          cache-dependency-path: |
-            site/package-lock.json
-            docs-site/package-lock.json
+          cache-dependency-path: docs-site/package-lock.json
 
       - name: Install dependencies
-        run: |
-          npm ci --prefix site
-          npm ci --prefix docs-site
+        run: npm ci --prefix docs-site
 
       - name: Check
-        run: |
-          npm run check --prefix site
-          npm run check --prefix docs-site
+        run: npm run check --prefix docs-site
 
       - name: Build
         env:
           # Optional: lets the landing page read the star count without the anonymous rate limit.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          npm run build --prefix site
-          npm run build --prefix docs-site
-
-      # The docs' 404 page serves the whole site and forwards links from before
-      # the docs moved under /docs; llms.txt is also offered at the root.
-      - name: Assemble the site
-        run: |
-          cp -R docs-site/dist site/dist/docs
-          cp docs-site/dist/404.html docs-site/dist/llms.txt site/dist/
+        run: npm run build --prefix docs-site
 
       - name: Upload Pages artifact
         if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         uses: actions/upload-pages-artifact@v5.0.0
         with:
           name: github-pages-${{ github.run_attempt }}
-          path: site/dist
+          path: docs-site/dist
 
   deploy:
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}

@@ -2,12 +2,12 @@ import { rm } from "node:fs/promises";
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import starlightPageActions from "starlight-page-actions";
-import baseLinks from "./plugins/base-links.mjs";
+import docsLinks from "./plugins/docs-links.mjs";
 
-// The docs are served under /docs of the product site, next to the landing page in ../site.
+// The landing page is the site root (src/pages/index.astro) and the docs are
+// served under /docs (see src/content.config.ts).
 const siteOrigin = "https://www.codex-pooler.com";
-const base = "/docs";
-const siteUrl = `${siteOrigin}${base}`;
+const docsUrl = `${siteOrigin}/docs`;
 const siteDescription =
   "Codex Pooler docs for self-hosted Codex account pooling, Pool API keys, backend compatibility, narrow /v1 SDK routes, MCP metadata, routing, and deployment.";
 
@@ -18,12 +18,12 @@ const softwareStructuredData = {
   applicationCategory: "DeveloperApplication",
   applicationSubCategory: "AI developer tooling",
   operatingSystem: "Docker Compose and Kubernetes",
-  url: `${siteUrl}/`,
+  url: `${docsUrl}/`,
   description: siteDescription,
   softwareRequirements: "Docker Compose or Kubernetes for self-hosted deployments",
   softwareHelp: {
     "@type": "CreativeWork",
-    url: `${siteUrl}/`,
+    url: `${docsUrl}/`,
   },
 };
 
@@ -43,18 +43,25 @@ const removePrivateMarkdownAssets = () => ({
 
 export default defineConfig({
   site: siteOrigin,
-  base,
-  // Astro serves redirect pages under the base but does not add it to their destinations.
   redirects: {
-    "/clients/kilo/": `${base}/clients/kilo-code/`,
-    "/clients/codex-cli/": `${base}/clients/codex-cli-desktop/`,
-    "/reference/endpoint-routing/": `${base}/reference/runtime-routes/`,
+    "/docs/clients/kilo/": "/docs/clients/kilo-code/",
+    "/docs/clients/codex-cli/": "/docs/clients/codex-cli-desktop/",
+    "/docs/reference/endpoint-routing/": "/docs/reference/runtime-routes/",
   },
   integrations: [
     starlight({
       title: "Codex Pooler",
       description: siteDescription,
+      favicon: "/icon.svg",
       head: [
+        {
+          tag: "link",
+          attrs: { rel: "icon", href: "/favicon-32.png", sizes: "32x32", type: "image/png" },
+        },
+        {
+          tag: "link",
+          attrs: { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
+        },
         {
           tag: "meta",
           attrs: {
@@ -68,7 +75,7 @@ export default defineConfig({
         },
         {
           tag: "link",
-          attrs: { rel: "alternate", type: "text/plain", title: "llms.txt", href: `${base}/llms.txt` },
+          attrs: { rel: "alternate", type: "text/plain", title: "llms.txt", href: "/llms.txt" },
         },
         {
           tag: "link",
@@ -76,7 +83,7 @@ export default defineConfig({
             rel: "alternate",
             type: "text/markdown",
             title: "Codex Pooler answer reference",
-            href: `${base}/answers.md`,
+            href: "/answers.md",
           },
         },
         {
@@ -85,7 +92,7 @@ export default defineConfig({
             rel: "alternate",
             type: "text/markdown",
             title: "Codex Pooler pricing and availability",
-            href: `${base}/pricing.md`,
+            href: "/pricing.md",
           },
         },
         {
@@ -142,8 +149,9 @@ export default defineConfig({
         {
           label: "Getting Started",
           items: [
-            { slug: "getting-started/quick-start" },
-            { slug: "getting-started/configuration" },
+            { label: "Overview", slug: "docs" },
+            { slug: "docs/getting-started/quick-start" },
+            { slug: "docs/getting-started/configuration" },
           ],
         },
         autogenerateGroup("Clients", "clients"),
@@ -153,7 +161,7 @@ export default defineConfig({
         autogenerateGroup("Monitoring", "monitoring"),
       ],
     }),
-    baseLinks({ base }),
+    docsLinks({ prefix: "/docs" }),
     removePrivateMarkdownAssets(),
   ],
 });

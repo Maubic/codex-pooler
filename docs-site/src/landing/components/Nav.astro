@@ -1,6 +1,6 @@
 ---
 import { DOCS_URL, QUICKSTART_URL, REPO_URL } from "../data/site";
-import { formatStars, getStars } from "../data/github";
+import { formatStars, getStars } from "../data/release";
 import GitHubIcon from "./icons/GitHubIcon.astro";
 
 const stars = await getStars();
@@ -18,7 +18,7 @@ const links = [
 <header class="nav" data-nav>
   <div class="wrap nav-in">
     <a class="brand" href="/" aria-label="Codex Pooler home">
-      <img src="/favicon.svg" width="34" height="34" alt="" />
+      <img src="/icon.svg" width="34" height="34" alt="" />
       <span class="wordmark">Codex Pooler</span>
     </a>
 

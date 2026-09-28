@@ -6,8 +6,8 @@ pagefind: false
 head:
   - tag: script
     content: |
-      // This page is also the site-wide 404. Docs links from before the move under /docs land here: send them on.
-      if (!/^\/docs(\/|$)/.test(location.pathname)) location.replace("/docs" + location.pathname + location.search + location.hash);
+      // This page is also the site-wide 404. Docs page links from before the move under /docs land here: send them on.
+      if (!/^\/docs(\/|$)/.test(location.pathname) && !/\.[a-z0-9]+$/i.test(location.pathname)) location.replace("/docs" + location.pathname + location.search + location.hash);
 hero:
   tagline: Page not found. Check the URL or search the docs.
   actions:

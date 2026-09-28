@@ -1,6 +1,8 @@
 ---
 import { docs } from "../data/site";
-import { CHART_VERSION, RELEASE_VERSION } from "../data/github";
+import { RELEASE_VERSION, getChartVersion } from "../data/release";
+
+const chartVersion = await getChartVersion();
 
 type Line = { kind: "cmd" | "note" | "cont"; text: string };
 
@@ -28,7 +30,7 @@ const setups: { id: string; label: string; lines: Line[]; guide: { href: string;
       { kind: "cmd", text: "helm repo update" },
       { kind: "cmd", text: "helm upgrade --install codex-pooler icoretech/codex-pooler \\" },
       { kind: "cont", text: "--namespace codex-pooler --create-namespace \\" },
-      { kind: "cont", text: `--version ${CHART_VERSION} \\` },
+      { kind: "cont", text: `--version ${chartVersion} \\` },
       { kind: "cont", text: "--values ./values.production.yaml" },
       { kind: "note", text: "# values: host, ingress, secrets and database" },
     ],

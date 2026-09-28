@@ -68,11 +68,6 @@ npm-debug.log
 docs-site/node_modules/
 docs-site/dist/
 docs-site/.astro/
-
-# Generated site artifacts.
-site/node_modules/
-site/dist/
-site/.astro/
 # macOS Finder metadata.
 .DS_Store
 

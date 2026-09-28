@@ -3,9 +3,10 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const docsSiteRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-// The docs are served under /docs of the product site.
+// Pages are served under /docs; llms.txt, the answer references and the
+// sitemap files sit at the site root.
 const canonicalOrigin = "https://www.codex-pooler.com";
-const canonicalBase = `${canonicalOrigin}/docs`;
+const canonicalDocs = `${canonicalOrigin}/docs`;
 const inventoryScopeMarker =
   "Inventory scope: curated primary and discovery pages listed below; this index intentionally excludes other rendered pages.";
 const llmsPath = resolve(process.env.LLMS_PATH ?? join(docsSiteRoot, "public/llms.txt"));
@@ -58,13 +59,13 @@ const expectedInventory = {
   ],
 };
 
-const expectedHeaderUrls = ["/", "/llms.txt", "/answers.md", "/pricing.md"];
+const expectedHeaderUrls = [`${canonicalDocs}/`, `${canonicalOrigin}/llms.txt`, `${canonicalOrigin}/answers.md`, `${canonicalOrigin}/pricing.md`];
 
 const fail = (message) => {
   throw new Error(`llms inventory: ${message}`);
 };
 
-const canonicalUrl = (path) => `${canonicalBase}${path}`;
+const canonicalUrl = (path) => `${canonicalDocs}${path}`;
 
 const read = (path) => readFile(path, "utf8");
 
@@ -106,8 +107,7 @@ const sourceRoutes = async (directory = docsRoot) => {
   return routes;
 };
 
-const assertExactList = (label, actual, expected) => {
-  const expectedUrls = expected.map(canonicalUrl);
+const assertExactList = (label, actual, expectedUrls) => {
   const missing = expectedUrls.filter((url) => !actual.includes(url));
   const extra = actual.filter((url) => !expectedUrls.includes(url));
 
@@ -128,7 +128,7 @@ const assertCanonicalInventoryUrls = (urls) => {
   const malformed = urls.filter((url) => {
     try {
       const parsed = new URL(url);
-      return parsed.origin !== canonicalOrigin || !parsed.pathname.startsWith("/docs/") || parsed.search || parsed.hash;
+      return parsed.origin !== canonicalOrigin || parsed.search || parsed.hash;
     } catch {
       return true;
     }
@@ -142,9 +142,9 @@ const assertCanonicalInventoryUrls = (urls) => {
   if (duplicates.length > 0) fail(`duplicate inventory URL(s): ${[...new Set(duplicates)].join(", ")}`);
 };
 
-const sitemapLastmodFor = (text, path) => {
+const sitemapLastmodFor = (text, url) => {
   const match = text.match(
-    new RegExp(`<loc>${canonicalUrl(path).replaceAll("/", "\\/")}<\\/loc>\\s*<lastmod>([^<]+)<\\/lastmod>`)
+    new RegExp(`<loc>${url.replaceAll("/", "\\/")}<\\/loc>\\s*<lastmod>([^<]+)<\\/lastmod>`)
   );
   return match?.[1] ?? null;
 };
@@ -153,7 +153,7 @@ const assertReviewDateRelationship = (llmsText, sitemapText) => {
   const reviewed = llmsText.match(/^Last reviewed:\s*(\d{4}-\d{2}-\d{2})$/m)?.[1];
   if (!reviewed) fail("Last reviewed must be a YYYY-MM-DD date");
 
-  const sitemapDate = sitemapLastmodFor(sitemapText, "/llms.txt");
+  const sitemapDate = sitemapLastmodFor(sitemapText, `${canonicalOrigin}/llms.txt`);
   if (!sitemapDate) fail("sitemap is missing the canonical /llms.txt entry or lastmod");
   if (sitemapDate !== reviewed) {
     fail(`sitemap /llms.txt lastmod ${sitemapDate} does not match Last reviewed ${reviewed}`);
@@ -176,8 +176,8 @@ const discoveryUrls = parseSection(llmsText, "AI search discovery pages");
 const inventoryUrls = [...headerUrls, ...primaryUrls, ...discoveryUrls];
 assertCanonicalInventoryUrls(inventoryUrls);
 assertExactList("header inventory", headerUrls, expectedHeaderUrls);
-assertExactList("primary inventory", primaryUrls, expectedInventory.primary);
-assertExactList("discovery inventory", discoveryUrls, expectedInventory.discovery);
+assertExactList("primary inventory", primaryUrls, expectedInventory.primary.map(canonicalUrl));
+assertExactList("discovery inventory", discoveryUrls, expectedInventory.discovery.map(canonicalUrl));
 
 const expectedRoutes = [...expectedInventory.primary, ...expectedInventory.discovery];
 const missingSourceRoutes = expectedRoutes.filter((route) => !routes.includes(route));

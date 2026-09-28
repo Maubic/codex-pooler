@@ -1,0 +1,40 @@
+---
+import Base from "../landing/layouts/Base.astro";
+import Nav from "../landing/components/Nav.astro";
+import Hero from "../landing/components/Hero.astro";
+import LogoStrip from "../landing/components/LogoStrip.astro";
+import Simulator from "../landing/components/Simulator.astro";
+import Pools from "../landing/components/Pools.astro";
+import Compat from "../landing/components/Compat.astro";
+import Features from "../landing/components/Features.astro";
+import AllFeatures from "../landing/components/AllFeatures.astro";
+import Dashboard from "../landing/components/Dashboard.astro";
+import GetStarted from "../landing/components/GetStarted.astro";
+import Trust from "../landing/components/Trust.astro";
+import Faq from "../landing/components/Faq.astro";
+import FinalCta from "../landing/components/FinalCta.astro";
+import Footer from "../landing/components/Footer.astro";
+---
+
+<Base>
+  <Nav />
+  <main id="main">
+    <Hero />
+    <LogoStrip />
+    <Simulator />
+    <Pools />
+    <Compat />
+    <Features />
+    <AllFeatures />
+    <Dashboard />
+    <GetStarted />
+    <Trust />
+    <Faq />
+    <FinalCta />
+  </main>
+  <Footer />
+</Base>
+
+<script>
+  import "../landing/scripts/reveal";
+</script>

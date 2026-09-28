@@ -5,9 +5,9 @@ Last reviewed: 2026-09-28
 Inventory scope: curated primary and discovery pages listed below; this index intentionally excludes other rendered pages.
 
 Canonical docs base: https://www.codex-pooler.com/docs/
-Canonical llms index: https://www.codex-pooler.com/docs/llms.txt
-Short answer reference: https://www.codex-pooler.com/docs/answers.md
-Pricing and availability: https://www.codex-pooler.com/docs/pricing.md
+Canonical llms index: https://www.codex-pooler.com/llms.txt
+Short answer reference: https://www.codex-pooler.com/answers.md
+Pricing and availability: https://www.codex-pooler.com/pricing.md
 
 Primary public docs:
 - https://www.codex-pooler.com/docs/getting-started/quick-start/
@@ -123,6 +123,6 @@ Agent guidance:
 - Use the client-specific pages for Aider, Continue, Cline, DeepSeek Harness, Goose, Kilo Code, OpenCode, OpenClaw, OpenHands, OMP, Pi, Hermes, Trae, and Windmill snippets.
 - Use https://www.codex-pooler.com/docs/reference/routing-strategies/ when configuring Pools and routing behavior.
 - Use https://www.codex-pooler.com/docs/reference/responses-lite-vs-full/ for what the Lite and Full serving modes change on a Codex Responses request.
-- Use https://www.codex-pooler.com/docs/answers.md for short, citable answers about scope, routes, credentials, privacy, setup, and deployment.
+- Use https://www.codex-pooler.com/answers.md for short, citable answers about scope, routes, credentials, privacy, setup, and deployment.
 - Keep examples on http://localhost:4000 for local setup or https://codex-pooler.example.com for deployed product examples.
 - Use https://www.codex-pooler.com/docs/ links as canonical docs URLs.
