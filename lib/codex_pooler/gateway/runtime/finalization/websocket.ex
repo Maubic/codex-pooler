@@ -788,7 +788,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
   # carries no guard metadata and keeps the unknown usage of a request the
   # provider received.
   defp terminal_failure_usage(_finalization, _body, continuation_guard) when map_size(continuation_guard) > 0,
-    do: undispatched_usage()
+    do: ResponseUsage.undispatched()
 
   defp terminal_failure_usage(finalization, body, _continuation_guard), do: response_usage(finalization, body)
 
@@ -1163,7 +1163,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
     case AttemptSettlement.finalize_partial_stream_failure(
            reserved.request,
            attempt,
-           undispatched_usage(),
+           ResponseUsage.undispatched(),
            SettlementAttrs.partial_stream_failure(context, status, code, code, metadata, started: started),
            request_options.runtime.session_owner_witness
          ) do
@@ -1377,10 +1377,6 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
   # A retained body from an older owner may have lost intermediate events.
   # It can still supply legacy usage/first-model facts, never collection provenance.
   defp response_usage(_finalization, body), do: Map.delete(ResponseUsage.from_websocket_body(body), :model_observation)
-
-  # A refusal the Pooler answered before sending anything upstream did no
-  # provider work, so no usage applies to its settlement.
-  defp undispatched_usage, do: %{status: "not_applicable", source: "undispatched_refusal"}
 
   defp disconnected_model_usage(finalization) do
     %{status: "usage_unknown", source: "websocket_usage_missing"}

@@ -25,6 +25,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketBridge do
   alias CodexPooler.Gateway.Routing.ModelMetadata
   alias CodexPooler.Gateway.Runtime.Dispatch.PreparedContext
   alias CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream
+  alias CodexPooler.Gateway.Transports.TransportFailureReason
   alias CodexPooler.Gateway.Transports.UpstreamDispatch
   alias CodexPooler.Gateway.Transports.UpstreamDispatch.Request, as: DispatchRequest
   alias CodexPooler.Gateway.Websocket
@@ -190,17 +191,19 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketBridge do
   # request over HTTP, so the standard finalization answers the public client
   # with the same status and error body and records the same rejection fields
   # (findings#225). Taking the relay's metadata reaps it and its submit task.
+  # The connection-bound guard answers an anchor its fresh connection cannot
+  # resolve with that same refusal before sending anything (findings#232 row
+  # 232-277); its exact metadata goes along as the proof that the provider
+  # never received the request.
   defp rejection_response(%WebsocketBridgeStream{} = stream, status, body, headers \\ []) do
     %{upstream_websocket_connection: connection} =
-      WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream)
+      metadata = WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream)
 
     response_headers = Enum.reduce(headers, %{"content-type" => ["application/json"]}, fn {name, value}, acc -> Map.put_new(acc, name, [value]) end)
 
-    Req.Response.put_private(
-      %Req.Response{status: status, headers: response_headers, body: body},
-      :upstream_websocket_connection,
-      connection
-    )
+    %Req.Response{status: status, headers: response_headers, body: body}
+    |> Req.Response.put_private(:upstream_websocket_connection, connection)
+    |> Req.Response.put_private(:transport_failure, TransportFailureReason.sanitize_continuation_generation_guard_metadata(metadata.transport_failure))
   end
 
   defp put_bridged_options(%PreparedContext{context: context} = prepared_context, options) do

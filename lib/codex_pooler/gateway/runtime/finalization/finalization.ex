@@ -592,7 +592,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
         |> Map.merge(ValidationRejection.attempt_metadata(validation_rejection))
         |> Map.merge(relayed_usage_limit_metadata(relayed_usage_limit)),
         latency_ms: elapsed_ms(context.started),
-        usage: %{status: "usage_unknown", source: "upstream_status"}
+        usage: upstream_status_usage(response)
       )
 
     attrs =
@@ -621,6 +621,16 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
       {:error, gateway_error} ->
         {:error, gateway_error}
     end
+  end
+
+  # A bridged `/v1` anchor refused by the connection-bound guard reaches here
+  # as the provider's refusal of the same request, but nothing reached the
+  # provider, so no usage applies; every other refused request may have been
+  # received and keeps its unknown usage.
+  defp upstream_status_usage(response) do
+    if Metadata.undispatched_refusal?(response),
+      do: ResponseUsage.undispatched(),
+      else: %{status: "usage_unknown", source: "upstream_status"}
   end
 
   defp relayed_failure_result(response, %SelectedCandidateContext{} = context, body, error_code, validation_rejection, opts) do

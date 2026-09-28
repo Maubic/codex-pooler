@@ -12,6 +12,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.UpstreamErrorParam
+  alias CodexPooler.Gateway.Transports.TransportFailureReason
   alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
   alias CodexPooler.Quotas.Evidence.CodexParsers.RateLimitReachedType
 
@@ -102,6 +103,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
     metadata =
       Map.merge(metadata, upstream_websocket_connection_attempt_metadata(Req.Response.get_private(response, :upstream_websocket_connection)))
 
+    metadata = Map.merge(metadata, continuation_guard_attempt_metadata(response))
+
     opts
     |> route_attempt_metadata()
     |> Map.merge(gateway_debug_attempt_metadata(opts))
@@ -188,6 +191,26 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
     |> rejection_body()
     |> decode_rejection_error()
   end
+
+  @doc """
+  True for a bridged `/v1` refusal that the connection-bound guard answered
+  before anything was sent upstream: the response carries the guard's exact
+  metadata (`WebsocketBridge.rejection_response/4`), the only proof that the
+  provider never received the request. The provider's own refusal of the same
+  anchor carries none.
+  """
+  @spec undispatched_refusal?(Req.Response.t()) :: boolean()
+  def undispatched_refusal?(%Req.Response{} = response), do: map_size(continuation_guard(response)) > 0
+
+  defp continuation_guard_attempt_metadata(response) do
+    case continuation_guard(response) do
+      guard when map_size(guard) > 0 -> %{"transport_failure" => guard}
+      _none -> %{}
+    end
+  end
+
+  defp continuation_guard(response),
+    do: TransportFailureReason.sanitize_continuation_generation_guard_metadata(Req.Response.get_private(response, :transport_failure))
 
   defp upstream_websocket_bridge_attempt_metadata(%RequestOptions{
          transport: %{upstream_websocket_bridge?: true}

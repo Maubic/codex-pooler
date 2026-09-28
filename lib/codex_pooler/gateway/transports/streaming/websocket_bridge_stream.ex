@@ -1050,6 +1050,13 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
       is_boolean(Map.get(connection, reconnected_key))
   end
 
+  # The connection-bound guard's metadata is its proof that nothing reached the
+  # provider (`upstream_committed=false`); the relay committing to the refusal
+  # it answered with does not change that, so the exact guard map, the only
+  # one sanitizing keeps with that `termination_source`, is kept as it is.
+  defp committed_transport_failure(%{"termination_source" => "continuation_generation_guard"} = metadata, _upstream_committed),
+    do: metadata
+
   defp committed_transport_failure(metadata, true) when map_size(metadata) > 0,
     do: Map.put(metadata, "upstream_committed", true)
 

@@ -112,6 +112,12 @@ defmodule CodexPoolerWeb.V1.ResponsesPreviousResponseConnectionTest do
       assert [%Attempt{upstream_status_code: 400} = attempt] = attempts(request)
       assert attempt.response_metadata["rejection_message_class"] == "invalid_previous_response_id"
       refute inspect(attempt.response_metadata) =~ "Invalid"
+      # The provider received this anchored request and refused it: its usage
+      # stays unknown and the reservation estimate stays provisional.
+      refute Map.has_key?(attempt.response_metadata, "transport_failure")
+      assert [reservation] = Repo.all(from(entry in LedgerEntry, where: entry.request_id == ^request.id and entry.entry_kind == "reservation"))
+      assert {request.usage_status, attempt.usage_status} == {"usage_unknown", "usage_unknown"}
+      assert key_usage_events(request.id) == %{known: 0, provisional: reservation.total_tokens, admissions: 1}
     end
   end
 
@@ -151,6 +157,15 @@ defmodule CodexPoolerWeb.V1.ResponsesPreviousResponseConnectionTest do
     assert attempt.response_metadata["upstream_websocket_bridge"] == true
     assert attempt.response_metadata["rejection_message_class"] == "invalid_previous_response_id"
     assert attempt.response_metadata["rejection_error_type"] == "invalid_request_error"
+
+    # The guard refused it before the response.create: its exact metadata is
+    # the proof, and no usage applies.
+    assert %{"reason" => "previous_response_generation_mismatch", "connection_use" => "fresh", "termination_source" => "continuation_generation_guard", "upstream_committed" => false} =
+             attempt.response_metadata["transport_failure"]
+
+    assert [settlement] = Repo.all(from(entry in LedgerEntry, where: entry.request_id == ^request.id and entry.entry_kind == "settlement"))
+    assert {request.usage_status, attempt.usage_status, settlement.usage_status, settlement.total_tokens} == {"not_applicable", "not_applicable", "not_applicable", nil}
+    assert key_usage_events(request.id) == %{known: 0, provisional: 0, admissions: 1}
   end
 
   defp assert_refused_before_dispatch!(response, upstream, setup) do

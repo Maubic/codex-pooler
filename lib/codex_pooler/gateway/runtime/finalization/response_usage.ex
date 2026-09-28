@@ -114,6 +114,13 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
     end
   end
 
+  @doc """
+  The usage of a request the Pooler refused before anything was sent upstream:
+  none applies, so its settlement keeps no tokens and no reservation estimate.
+  """
+  @spec undispatched() :: usage()
+  def undispatched, do: %{status: "not_applicable", source: "undispatched_refusal"}
+
   @spec from_websocket_body(binary()) :: usage()
   def from_websocket_body(body) when is_binary(body),
     do: decode_stream_body(body, "websocket_usage_missing", true)
