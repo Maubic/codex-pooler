@@ -2070,6 +2070,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
         correlation_id: "req-translated-origin",
         endpoint: "/backend-api/codex/responses",
         transport: "http_sse",
+        user_agent: "litellm/1.93.0",
         request_metadata: %{
           "openai_compatibility" => %{
             "surface" => "openai_v1",
@@ -2081,6 +2082,9 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
       })
 
     {:ok, view, _html} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}")
+
+    assert has_element?(view, "#request-log-row-#{translated_request.id} [data-role='route-context-line'] [data-role='route-origin']", "/v1/chat/completions")
+    assert has_element?(view, "#request-log-row-#{translated_request.id} [data-role='route-context-line'] [data-role='user-agent']", "litellm 1.93.0")
 
     assert has_element?(
              view,
@@ -2138,12 +2142,14 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
       "Model · Effort · Tier",
       "Upstream · Pool · Key",
       "Endpoint · Transport · Client",
-      "Errors · Warnings",
       "Tokens · Cached",
       "Cost"
     ]
 
     assert header_texts == expected_headers
+    refute has_element?(view, "#request-log-issues-heading")
+    refute has_element?(view, ".request-log-issues-column")
+    refute has_element?(view, "[data-role='request-issues-cell']")
 
     assert has_element?(view, "#admin-request-logs thead th", "Time · Status")
     assert has_element?(view, "#admin-request-logs thead th", "Upstream · Pool · Key")

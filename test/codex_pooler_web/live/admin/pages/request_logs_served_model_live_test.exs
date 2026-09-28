@@ -112,6 +112,48 @@ defmodule CodexPoolerWeb.Admin.RequestLogsServedModelLiveTest do
     assert has_element?(view, "#request-log-detail-attempt-1-model-conflict", "Model name changed within response")
   end
 
+  test "issues column follows the filtered rows, including warnings on successful requests", %{conn: conn, scope: scope} do
+    pool = create_pool!(scope, "conditional-request-issues")
+    %{request: clean} = request_log_fixture(pool, %{correlation_id: "req-no-issues", upstream_model_id: "sample-model", served_model: "sample-model"})
+
+    affected =
+      for {name, issue} <- [
+            {"retry", %{network_error_code: "upstream_network_error"}},
+            {"mismatch", %{served_model: "sample-alternative"}},
+            {"conflict", %{model_observation: %{"version" => 1, "coverage" => "full", "conflict" => true, "first_conflicting_model" => "sample-alternative", "terminal_status" => "completed"}}}
+          ] do
+        %{request: request} = request_log_fixture(pool, Map.merge(%{correlation_id: "req-issue-#{name}", upstream_model_id: "sample-model", served_model: "sample-model"}, issue))
+        request
+      end
+
+    {:ok, view, _html} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}&request_id=#{clean.id}")
+    refute has_element?(view, "#request-log-issues-heading")
+    refute has_element?(view, ".request-log-issues-column")
+    refute has_element?(view, "[data-role='request-issues-cell']")
+
+    for request <- affected do
+      view |> element("#request-log-filter-form") |> render_submit(%{"filters" => %{"pool_id" => pool.id, "request_id" => request.id}})
+      _ = assert_patch(view)
+      _ = await_request_logs(view)
+
+      assert has_element?(view, ".admin-request-explorer[data-has-issues='true']")
+      assert has_element?(view, "#request-log-issues-heading", "Errors · Warnings")
+      assert has_element?(view, ".request-log-issues-column")
+      assert has_element?(view, "#request-log-row-#{request.id} [data-role='request-issues']")
+      assert has_element?(view, "#request-log-row-#{request.id} [data-role='status-text']", "Succeeded")
+    end
+
+    view |> element("#request-log-filter-form") |> render_submit(%{"filters" => %{"pool_id" => pool.id, "request_id" => clean.id}})
+    _ = assert_patch(view)
+    _ = await_request_logs(view)
+
+    assert has_element?(view, ".admin-request-explorer[data-has-issues='false']")
+    assert has_element?(view, "#request-log-row-#{clean.id} [data-role='cost']")
+    refute has_element?(view, "#request-log-issues-heading")
+    refute has_element?(view, ".request-log-issues-column")
+    refute has_element?(view, "[data-role='request-issues-cell']")
+  end
+
   @tag model_provenance: true
   test "historical public failure keeps its error but does not claim a different provider model", %{conn: conn, scope: scope} do
     pool = create_pool!(scope, "projected-model-history")

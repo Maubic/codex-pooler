@@ -5,21 +5,16 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Issues do
 
   import CodexPoolerWeb.Admin.RequestLogsDisplay, only: [format_errors: 2, format_served_model_detail: 1]
 
+  @spec has_issues?(map(), map()) :: boolean()
+  def has_issues?(request_log, datetime_preferences),
+    do: issue_details(request_log, datetime_preferences).has_issues?
+
   attr :request_log, :map, required: true
   attr :datetime_preferences, :map, required: true
   attr :prefix, :string, required: true
 
   def request_log_issues_cell(assigns) do
-    errors = assigns.request_log |> format_errors(assigns.datetime_preferences) |> Enum.reject(&(&1 == "—"))
-    model_mismatch? = not is_nil(format_served_model_detail(assigns.request_log))
-    conflict_attempts = Map.get(assigns.request_log, :model_conflict_attempts, [])
-
-    assigns =
-      assigns
-      |> assign(:errors, errors)
-      |> assign(:model_mismatch?, model_mismatch?)
-      |> assign(:conflict_attempts, conflict_attempts)
-      |> assign(:has_issues?, errors != [] or model_mismatch? or conflict_attempts != [])
+    assigns = assign(assigns, issue_details(assigns.request_log, assigns.datetime_preferences))
 
     ~H"""
     <td data-role="request-issues-cell" class={["min-w-0 align-middle max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-5 max-lg:sm:col-span-3 max-lg:sm:row-start-3", !@has_issues? && "max-lg:hidden"]}>
@@ -50,6 +45,19 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Issues do
       <span :if={!@has_issues?} data-role="no-request-issues" class="text-base-content/45">—</span>
     </td>
     """
+  end
+
+  defp issue_details(request_log, datetime_preferences) do
+    errors = request_log |> format_errors(datetime_preferences) |> Enum.reject(&(&1 == "—"))
+    model_mismatch? = not is_nil(format_served_model_detail(request_log))
+    conflict_attempts = Map.get(request_log, :model_conflict_attempts, [])
+
+    %{
+      errors: errors,
+      model_mismatch?: model_mismatch?,
+      conflict_attempts: conflict_attempts,
+      has_issues?: errors != [] or model_mismatch? or conflict_attempts != []
+    }
   end
 
   defp error_text_class(status) when status in ["failed", "rejected"], do: "text-error"

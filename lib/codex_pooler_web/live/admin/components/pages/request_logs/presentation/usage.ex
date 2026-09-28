@@ -39,7 +39,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Usage do
       <%= if usage_line_applicable?(@request_log) do %>
         <span
           data-role="usage-token-line"
-          class="flex min-w-0 items-center gap-2 whitespace-nowrap tabular-nums text-base-content max-lg:justify-end"
+          class="flex min-w-0 items-center gap-1 whitespace-nowrap tabular-nums text-base-content max-lg:justify-end"
           title={token_totals_title(@request_log)}
         >
           <span :if={@composition} data-role="token-bar" role="img" aria-label={@composition.title} title={@composition.title} class="hidden h-2 min-w-6 flex-1 overflow-hidden rounded-xs lg:flex">
@@ -50,7 +50,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Usage do
           </span>
           <span
             data-role="token-totals"
-            class="min-w-0 truncate lg:w-10 lg:shrink-0"
+            class="min-w-0 truncate lg:w-9 lg:shrink-0 lg:text-left"
           >{@token_amount}<span :if={@token_suffix} class="text-base-content/60">{@token_suffix}</span></span>
         </span>
         <span

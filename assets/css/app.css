@@ -1535,30 +1535,35 @@ body {
 .admin-request-explorer.table {
   --request-log-half-gap: 0.4375rem;
   --request-log-edge: 0.875rem;
+  --request-log-min-width: 58.4375rem;
   table-layout: fixed;
+}
+
+.admin-request-explorer.table[data-has-issues="true"] {
+  --request-log-min-width: 69.8125rem;
 }
 
 .admin-request-explorer .request-log-time-column {
   width: 9.3125rem;
 }
 .admin-request-explorer .request-log-model-column {
-  width: calc(9.375rem + max(0px, 100cqw - 69rem) * 0.2);
+  width: 9.375rem;
 }
 .admin-request-explorer .request-log-attribution-column {
-  width: calc(8.75rem + max(0px, 100cqw - 69rem) * 0.25);
+  width: 8.75rem;
 }
 .admin-request-explorer .request-log-issues-column {
-  width: calc(11.375rem + max(0px, 100cqw - 69rem) * 0.25);
+  width: calc(
+    11.375rem +
+    max(0px, 100cqw - var(--request-log-min-width)) *
+    0.25
+  );
 }
 .admin-request-explorer .request-log-tokens-column {
-  width: 11.5rem;
+  width: 11rem;
 }
 .admin-request-explorer .request-log-cost-column {
-  width: clamp(
-    8.3125rem,
-    calc(8.3125rem + max(0px, 100cqw - 69rem) * 0.1),
-    11.3125rem
-  );
+  width: 4.75rem;
 }
 
 .admin-request-explorer.table > thead > tr > th {
@@ -1578,6 +1583,10 @@ body {
 }
 
 @media (width >= 64rem) {
+  .admin-request-explorer.table {
+    min-width: var(--request-log-min-width);
+  }
+
   .request-log-table-scroll {
     container-type: inline-size;
   }

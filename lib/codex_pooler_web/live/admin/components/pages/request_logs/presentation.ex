@@ -50,7 +50,10 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
   attr :newer_count_exact?, :boolean, default: true
 
   def request_logs_table(assigns) do
-    assigns = assign(assigns, :page, LogPagination.metadata(assigns.request_logs))
+    assigns =
+      assigns
+      |> assign(:page, LogPagination.metadata(assigns.request_logs))
+      |> assign(:has_issues?, Enum.any?(assigns.request_logs.items, &Issues.has_issues?(&1, assigns.datetime_preferences)))
 
     ~H"""
     <div id="admin-request-logs" class="grid min-w-0 gap-3">
@@ -91,7 +94,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
         <div class="request-log-table-scroll lg:overflow-x-auto">
           <table
             data-ledger-dense
-            class="admin-request-explorer admin-ledger-table table table-sm admin-log-table font-sans lg:min-w-[69rem]"
+            data-has-issues={to_string(@has_issues?)}
+            class="admin-request-explorer admin-ledger-table table table-sm admin-log-table font-sans"
           >
             <%!-- The count is the footer's job; the caption repeats it only for
           assistive tech, which reads it before the rows. --%>
@@ -99,14 +103,14 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
               Request logs, {format_total(@request_logs.total)}{if Map.get(@request_logs, :total_exact?) == false,
                 do: " or more"} matching sanitized request logs
             </caption>
-            <%!-- Model, attribution, issues and endpoint share spare width. The table's floor preserves the
-          seven groups on desktop; below lg the same cells reflow as a ledger. --%>
+            <%!-- Omit the entire issues track when this page has no signals;
+          the same cells reflow as a ledger below lg. --%>
             <colgroup>
               <col class="request-log-time-column" />
               <col class="request-log-model-column" />
               <col class="request-log-attribution-column" />
               <col />
-              <col class="request-log-issues-column" />
+              <col :if={@has_issues?} class="request-log-issues-column" />
               <col class="request-log-tokens-column" />
               <col class="request-log-cost-column" />
             </colgroup>
@@ -116,7 +120,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
                 <th scope="col" class="whitespace-nowrap">Model · Effort · Tier</th>
                 <th scope="col" class="whitespace-nowrap">Upstream · Pool · Key</th>
                 <th scope="col" class="whitespace-nowrap">Endpoint · Transport · Client</th>
-                <th scope="col" class="whitespace-nowrap">Errors · Warnings</th>
+                <th :if={@has_issues?} id="request-log-issues-heading" scope="col" class="whitespace-nowrap">Errors · Warnings</th>
                 <th scope="col" class="whitespace-nowrap" title="Each bar shows this request's token composition; cache percentage is calculated over input tokens">Tokens · Cached</th>
                 <th scope="col" class="whitespace-nowrap text-right">Cost</th>
               </tr>
@@ -153,7 +157,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
                   <td class="min-w-0 align-middle max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-4 max-lg:sm:col-span-1 max-lg:sm:col-start-2 max-lg:sm:row-start-2">
                     <.request_log_route_cell request_log={request_log} prefix="request-log" />
                   </td>
-                  <Issues.request_log_issues_cell request_log={request_log} datetime_preferences={@datetime_preferences} prefix="request-log" />
+                  <Issues.request_log_issues_cell :if={@has_issues?} request_log={request_log} datetime_preferences={@datetime_preferences} prefix="request-log" />
                   <td class="align-middle max-lg:col-start-2 max-lg:row-start-1 max-lg:sm:col-start-3">
                     <Usage.request_log_token_lines request_log={request_log} prefix="request-log" />
                   </td>
@@ -350,7 +354,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
         <span :if={@model_known?} data-role="model-swatch" aria-hidden="true" class="size-2 shrink-0 self-center rounded-xs" style={"background-color: #{Metrics.model_color(format_model_name(@request_log))}"}></span>
         <span
           data-role="model-name"
-          class="min-w-0 truncate whitespace-nowrap text-base-content"
+          class={["min-w-0 truncate whitespace-nowrap", if(@model_known?, do: "text-base-content", else: "text-base-content/45")]}
         >
           {if @model_known?, do: format_model_name(@request_log), else: "— no model"}
         </span>
@@ -431,13 +435,13 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
           {format_transport_route(@request_log)}
         </span>
       </span>
-      <span class="flex min-w-0 items-center gap-1.5 text-[11px]">
+      <span data-role="route-context-line" class="flex min-w-0 items-center gap-1.5 whitespace-nowrap text-[11px]">
         <.request_log_protocol_badge request_log={@request_log} prefix={@prefix} />
         <span
           :if={origin = translated_origin(@request_log)}
           id={"#{@prefix}-#{@request_log.id}-route-origin"}
           data-role="route-origin"
-          class="flex min-w-0 shrink-[2] items-center gap-1 whitespace-nowrap text-base-content/55"
+          class="flex min-w-0 items-center gap-1 whitespace-nowrap text-base-content/55"
           title={"translated from #{origin}"}
         >
           <.icon name="hero-arrows-right-left" class="size-3 shrink-0" />
@@ -458,7 +462,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
           :if={route_metadata = format_route_metadata(@request_log)}
           id={"#{@prefix}-#{@request_log.id}-route-metadata"}
           data-role="route-metadata"
-          class="min-w-0 truncate whitespace-nowrap text-base-content/40"
+          class="min-w-0 max-w-full truncate whitespace-nowrap text-base-content/40"
           title={route_metadata}
         >
           {route_metadata}
