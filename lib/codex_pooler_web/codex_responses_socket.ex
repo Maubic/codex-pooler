@@ -5798,9 +5798,15 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp websocket_turn_error_code(%{code: code}) when is_binary(code), do: code
   defp websocket_turn_error_code(_reason), do: ErrorCodes.websocket_request_failed_code()
 
-  defp direct_turn_visible_output?(state, pid, task_local_visible_output?) do
+  # What the client was shown before the turn failed, read from the socket's
+  # own state for both routes: a public turn's committed output (the field an
+  # owner-forwarded public turn reports too) and a native turn's pushed
+  # output. The flag a caller reports is not consulted: with owner forwarding
+  # off the response task's writer runs in its upstream websocket session's
+  # process, so the flag the task carries stays false (findings#271).
+  defp direct_turn_visible_output?(state, pid, _reported_visible_output?) do
     if active_public_turn?(state, pid) do
-      task_local_visible_output?
+      Map.get(state, :public_turn_output_committed?, false)
     else
       state
       |> Map.get(:native_turn_output_task_pids, MapSet.new())
