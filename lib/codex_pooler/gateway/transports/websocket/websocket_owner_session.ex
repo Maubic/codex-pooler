@@ -894,9 +894,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   # connection it names. The session answers which connection is open now,
   # so a close the owner has not heard of yet counts too (findings#275). A
   # session that cannot answer, or names another lifecycle, keeps today's
-  # checks.
+  # checks. The session serves a request inside its call handler, so it is
+  # read only while the owner runs no turn: a reservation that reaches the
+  # owner during one (a reconnected socket inheriting a running turn) keeps
+  # today's checks instead of stalling the owner on its session (findings#270
+  # row 270-199).
+  defp require_live_admission_connection(%{active_turn: active_turn}, _admission) when not is_nil(active_turn), do: :ok
+
   defp require_live_admission_connection(state, %NativeCompactionAdmission{binding: %NativeCompactionAdmission.Binding{lifecycle_id: lifecycle_id, generation: generation}}) do
-    case UpstreamWebsocketSession.live_connection(state.upstream_pid) do
+    case state.callbacks.connection_reader.(state.upstream_pid) do
       {:ok, %{lifecycle_id: ^lifecycle_id, generation: ^generation}} -> :ok
       {:ok, %{lifecycle_id: ^lifecycle_id}} -> {:error, :connection_closed}
       _unknown -> :ok
@@ -1272,6 +1278,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
            upstream_sender: upstream.send,
            upstream_closer: upstream.close,
            upstream_invalidator: Map.get(upstream, :invalidate, &invalidate_owner_upstream/1),
+           connection_reader: Map.get(upstream, :live_connection, &unknown_live_connection/1),
            downstream_sender: Keyword.get(opts, :downstream_sender, &send_downstream_message/2),
            monotonic_now_ms: monotonic_now_ms,
            replay_suspender: Keyword.get(opts, :replay_suspender, &CodexPooler.Accounting.arm_request_replay/1),
@@ -3074,8 +3081,26 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
   defp upstream_close_gate(state, signal) do
     case upstream_close_skip_reason(state, signal, nil) do
-      nil -> active_turn_upstream_close_gate(state.active_turn, state.downstream)
+      nil -> state.active_turn |> active_turn_upstream_close_gate(state.downstream) |> unless_superseded(state, signal)
       reason -> {:skip, reason}
+    end
+  end
+
+  # A close the owner hears only after its session opened a newer connection
+  # names a connection nothing depends on any more: the anchor of the
+  # downstream's last response lives on the open one (findings#270 row
+  # 270-199). Read only when the instruction would go out, with no turn
+  # running, so the idle session answers at once; a session that cannot
+  # answer counts as not superseded.
+  defp unless_superseded(:forward, state, signal),
+    do: if(superseded_connection?(state, signal), do: {:skip, :superseded_connection}, else: :forward)
+
+  defp unless_superseded(decision, _state, _signal), do: decision
+
+  defp superseded_connection?(state, %{lifecycle_id: lifecycle_id, generation: closed_generation}) do
+    case state.callbacks.connection_reader.(state.upstream_pid) do
+      {:ok, %{lifecycle_id: ^lifecycle_id, generation: open_generation}} when is_integer(open_generation) -> open_generation > closed_generation
+      _unknown -> false
     end
   end
 
@@ -3201,7 +3226,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp apply_deferred_upstream_close(state, nil), do: state
 
   defp apply_deferred_upstream_close(state, %{downstream: deferred_for, signal: signal}) do
-    case upstream_close_skip_reason(state, signal, deferred_for) do
+    case upstream_close_skip_reason(state, signal, deferred_for) || if(superseded_connection?(state, signal), do: :superseded_connection) do
       nil ->
         forward_upstream_close(state, signal)
 
@@ -5510,10 +5535,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
         send: fn upstream_pid, upstream_payload, writer ->
           send_owner_upstream(upstream_pid, upstream_payload, writer)
         end,
-        close: &UpstreamWebsocketSession.close/1
+        close: &UpstreamWebsocketSession.close/1,
+        live_connection: &UpstreamWebsocketSession.live_connection/1
       }
     end)
   end
+
+  # A boundary without a live connection reader (a test double that is no
+  # upstream session) answers as a session that cannot tell: every check that
+  # reads the open connection keeps its previous behaviour.
+  defp unknown_live_connection(_upstream_pid), do: {:error, :unavailable}
 
   defp persistence_boundary(opts) do
     Keyword.get_lazy(opts, :persistence, fn ->

@@ -1091,7 +1091,7 @@ defmodule CodexPooler.CompatibilityMatrix do
         message: :websocket_owner_upstream_closed,
         sent_to: :attached_downstream,
         deferred_until: :complete_of_the_relayed_turn,
-        skip_reasons: ~w(owner_invalidation draining no_downstream downstream_replaced downstream_closing handoff replay_armed compaction public_turn turn_active)
+        skip_reasons: ~w(owner_invalidation draining no_downstream downstream_replaced downstream_closing handoff replay_armed compaction public_turn turn_active superseded_connection)
       },
       client_frame_before_close: :keeps_socket_open,
       client_frame_crossing_close: :starts_nothing,

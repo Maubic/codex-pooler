@@ -6716,6 +6716,107 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     end
   end
 
+  # A close the owner hears only after its session opened a newer connection
+  # names a connection the downstream's anchor no longer lives on (findings#270
+  # row 270-199): the owner keeps the downstream open with its own skip reason.
+  # The session's open connection is read through the boundary; a boundary
+  # that cannot tell keeps the instruction.
+  describe "upstream connection close superseded by a newer connection" do
+    test "keeps the downstream open for a close older than the open connection", context do
+      lifecycle_id = Ecto.UUID.generate()
+      %{owner: owner} = superseding_owner!(context, "superseded-close", fn -> {:ok, %{lifecycle_id: lifecycle_id, generation: 2}} end)
+      signal = %{upstream_close_signal(:peer_close_frame) | lifecycle_id: lifecycle_id}
+
+      log = capture_info_log(fn -> send_upstream_close(owner, signal) end)
+
+      assert_upstream_close_skipped!(log, signal, :superseded_connection, context.codex_session_id)
+    end
+
+    for {label, open_connection} <- [
+          {"the open connection", :same_generation},
+          {"a connection with none open after it", :between_connections},
+          {"a session of another lifecycle", :other_lifecycle},
+          {"a session that cannot tell", :unreadable}
+        ] do
+      test "tells the downstream about the close of #{label}", context do
+        lifecycle_id = Ecto.UUID.generate()
+        reader = superseding_reader(unquote(open_connection), lifecycle_id)
+        %{owner: owner} = superseding_owner!(context, "superseding-#{unquote(open_connection)}", reader)
+        signal = %{upstream_close_signal(:peer_close_frame) | lifecycle_id: lifecycle_id}
+
+        log = capture_info_log(fn -> send_upstream_close(owner, signal) end)
+
+        instruction = upstream_close_instruction("superseding-#{unquote(open_connection)}", 1, signal)
+        assert_received ^instruction
+        assert upstream_close_skip_lines(log) == []
+      end
+    end
+  end
+
+  # The admission's use-time check of findings#275 reads the session only
+  # while the owner runs no turn (findings#270 row 270-199): the session serves
+  # a request inside its call handler, so a read during a turn would stall the
+  # owner. A reservation during a turn keeps the admission's own checks.
+  describe "admission use-time check during a running turn" do
+    test "reads the session's open connection only while no turn runs", context do
+      test_pid = self()
+
+      reader = fn _session ->
+        send(test_pid, :live_connection_read)
+        {:ok, %{lifecycle_id: Ecto.UUID.generate(), generation: nil}}
+      end
+
+      armed = armed_admission!(context, upstream_extra: %{live_connection: reader})
+      :sys.replace_state(armed.owner, &%{&1 | active_turn: %{injected_turn: true}})
+      now_ms = System.system_time(:millisecond)
+      reserve = admission_control(:reserve, armed.downstream, binding: armed.binding, phase: :compact, control_ref: make_ref(), now_ms: now_ms)
+
+      assert {:ok, _capability} = WebsocketOwnerSession.admission_control(armed.owner, reserve)
+      refute_received :live_connection_read
+
+      :sys.replace_state(armed.owner, &%{&1 | active_turn: nil, native_compaction_admission: %{&1.native_compaction_admission | phase: :pending_compact, capability: nil}})
+      assert {:ok, _capability} = WebsocketOwnerSession.admission_control(armed.owner, %{reserve | control_ref: make_ref()})
+      assert_received :live_connection_read
+    end
+  end
+
+  # The deferred instruction is checked again when its turn ended: a session
+  # that opened a newer connection in the meantime supersedes the close.
+  describe "deferred upstream connection close superseded by a newer connection" do
+    test "is dropped with superseded_connection once its turn ended", context do
+      lifecycle_id = Ecto.UUID.generate()
+      reader = fn _session -> {:ok, %{lifecycle_id: lifecycle_id, generation: 2}} end
+      signal = %{upstream_close_signal(:peer_close_frame) | lifecycle_id: lifecycle_id}
+      deferred = deferred_upstream_close!(context, "upstream-close-deferred-superseded", %{live_connection: reader}, signal)
+      submitter = deferred.submitter
+
+      log =
+        capture_info_log(fn ->
+          release_controlled(deferred.barriers, deferred.controls, :task_result)
+          assert_receive {:upstream_close_submitter_outcome, ^submitter, {:return, _result}}, @detection_timeout_ms
+          assert %{active_turn: nil} = :sys.get_state(deferred.owner)
+        end)
+
+      assert next_owner_message("upstream-close-deferred-superseded") == {:websocket_owner_frame, "upstream-close-deferred-superseded", 1, :complete}
+      assert_upstream_close_skipped!(log, signal, :superseded_connection, context.codex_session_id)
+    end
+  end
+
+  defp superseding_reader(:same_generation, lifecycle_id), do: fn -> {:ok, %{lifecycle_id: lifecycle_id, generation: 1}} end
+  defp superseding_reader(:between_connections, lifecycle_id), do: fn -> {:ok, %{lifecycle_id: lifecycle_id, generation: nil}} end
+  defp superseding_reader(:other_lifecycle, _lifecycle_id), do: fn -> {:ok, %{lifecycle_id: Ecto.UUID.generate(), generation: 2}} end
+  defp superseding_reader(:unreadable, _lifecycle_id), do: fn -> {:error, :unavailable} end
+
+  # An idle owner whose boundary reads the session's open connection through
+  # `reader`; the harness upstream is no session, so the reader stands in.
+  defp superseding_owner!(context, label, reader) do
+    upstream = Map.put(WebsocketOwnerNodeHarness.fake_upstream_boundary(self()), :live_connection, fn _upstream_pid -> reader.() end)
+    {:ok, owner} = start_owner(context, upstream: upstream)
+    assert_receive {:websocket_owner_harness_upstream_started, _upstream_pid}
+    {:ok, downstream} = WebsocketOwnerSession.attach_downstream(owner, downstream_target(label))
+    %{owner: owner, downstream: downstream}
+  end
+
   # The owner drops an admission bound to the connection its session closed,
   # as the direct session drops its own with the connection (findings#274):
   # nothing can use it any more, and a stale one failed the final (502) or
@@ -6869,15 +6970,17 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
   # A native relayed turn whose terminal already reached the attached
   # downstream (this test process) while its task result is held, with a
   # connection close signal deferred on it.
-  defp deferred_upstream_close!(context, label) do
+  defp deferred_upstream_close!(context, label, upstream_extra \\ %{}, signal \\ upstream_close_signal(:peer_close_frame)) do
     terminal = terminal_frame("response.completed", "resp_#{label}")
     controls = WebsocketOwnerNodeHarness.two_sender_controls()
 
     upstream =
-      WebsocketOwnerNodeHarness.two_sender_upstream_boundary(self(), controls,
+      self()
+      |> WebsocketOwnerNodeHarness.two_sender_upstream_boundary(controls,
         terminal_frames: [terminal],
         task_result: terminal_result(terminal, "response.completed")
       )
+      |> Map.merge(upstream_extra)
 
     {:ok, owner} = start_owner(context, upstream: upstream)
     assert_receive {:websocket_owner_harness_upstream_started, _upstream_pid}
@@ -6889,7 +6992,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     release_controlled(terminal_barrier, controls, :terminal_frames)
     assert_receive {:websocket_owner_frame, ^label, 1, {:data, ^terminal}}, @detection_timeout_ms
 
-    signal = upstream_close_signal(:peer_close_frame)
     deferred = %{downstream: %{pid: self(), epoch: 1, correlation_id: label}, signal: Map.take(signal, [:cause, :lifecycle_id, :generation])}
     assert %{active_turn: %{terminal_forwarded?: true, upstream_close: ^deferred}} = send_upstream_close(owner, signal)
     refute_received {:websocket_owner_upstream_closed, _correlation_id, _epoch, _signal}
@@ -7544,7 +7646,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
   defp start_seeded_owner(context, upstream, opts \\ []) do
     {boundary, url} = OrdinarySuccessTestSeed.boundary(upstream)
-    assert {:ok, owner} = start_owner(context, Keyword.put(opts, :upstream, boundary))
+    {extra, opts} = Keyword.pop(opts, :upstream_extra, %{})
+    assert {:ok, owner} = start_owner(context, Keyword.put(opts, :upstream, Map.merge(boundary, extra)))
     {owner, url}
   end
 

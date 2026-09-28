@@ -149,7 +149,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger 
     :replay_armed,
     :compaction,
     :public_turn,
-    :turn_active
+    :turn_active,
+    :superseded_connection
   ]
 
   @doc false

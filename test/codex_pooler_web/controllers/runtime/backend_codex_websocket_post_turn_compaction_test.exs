@@ -8,7 +8,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
 
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport,
-    only: [receive_frames_until_close!: 3, hold_settled_websocket_turn!: 0, release_settled_websocket_turn: 2, set_model_serving_mode!: 3, model_serving_scope: 0]
+    only: [
+      receive_frames_until_close!: 3,
+      hold_settled_websocket_turn!: 0,
+      release_settled_websocket_turn: 2,
+      set_model_serving_mode!: 3,
+      model_serving_scope: 0,
+      kept_open_line: 5,
+      with_info_log: 1
+    ]
 
   import CodexPooler.AccountingTestSupport, only: [key_usage_events: 1]
 
@@ -763,8 +771,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
   # (findings#270 row 270-182). The owner checks the session's open connection
   # when it reserves, so the final still runs as an ordinary turn. The order is
   # made deterministic by taking the session's close signal away from the
-  # owner and handing it over only after the final was served; the socket,
-  # idle by then, closes 1001 on the late signal as it does on a timely one.
+  # owner and handing it over only after the final was served. The final
+  # opened the next connection, so the late signal names a connection nothing
+  # depends on any more and the owner keeps the socket open
+  # (`superseded_connection`, findings#270 row 270-199).
   test "owner_forwarded final reaching the owner before its session's close signal runs as an ordinary turn" do
     put_owner_forwarding!(true)
     attach_admission_lifecycle!()
@@ -807,14 +817,86 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
       assert {clear.reason, clear.lifecycle_id, clear.generation} == {:connection_closed, pending_final.lifecycle_id, pending_final.generation}
       refute Enum.any?(drain_lifecycle([]), &(&1.to == :reserved_final))
 
-      send(owner, {:upstream_websocket_connection_closed, session, signal})
-      assert {:websocket_owner_upstream_closed, _correlation_id, _epoch, _signal} = word = receive_owner_word!()
-      assert {:stop, :normal, {1001, "upstream connection closed"}, stopped} = CodexResponsesSocket.handle_info(word, state)
-      Process.put(:crossing_socket_state, stopped)
+      {_owner_state, log} =
+        with_info_log(fn ->
+          send(owner, {:upstream_websocket_connection_closed, session, signal})
+          :sys.get_state(owner)
+        end)
+
+      assert log =~ kept_open_line("peer_close_frame", "superseded_connection", signal.lifecycle_id, 1, "on")
+      refute_received {:websocket_owner_upstream_closed, _correlation_id, _epoch, _signal}
+      _state = state
 
       assert_window_accounting!(setup, [@anchor_usage, @compact_usage, @resumed_usage])
       assert [final_request] = Enum.drop(FakeUpstream.requests(upstream), 2)
       assert compact_item in final_request.json["input"]
+      assert :ok = FakeUpstream.verify!(upstream)
+    after
+      CodexResponsesSocket.terminate(:closed, Process.delete(:crossing_socket_state))
+    end
+  end
+
+  # A close signal the owner hears only after its session opened the next
+  # connection names a connection nothing depends on any more (findings#270
+  # row 270-199): the socket's last response, and so the anchor of its next
+  # request, lives on the open one. The owner keeps the socket open with
+  # `skip_reason=superseded_connection`, and the next request rides its anchor
+  # on the new connection with no guard refusal. The signal is made late by
+  # taking it away from the owner and handing it over after the turn on the
+  # next connection completed.
+  test "owner_forwarded late close signal of a superseded connection keeps the socket open for an anchor on the open one" do
+    put_owner_forwarding!(true)
+    turn_id = "superseded-close-turn"
+
+    upstream =
+      start_upstream(
+        # provenance: synthetic_adversarial (the provider's close of an idle connection as attributed in findings#270, its signal delivered after the next connection opened)
+        FakeUpstream.strict_sequence([
+          window_request(1, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_superseded_first", @anchor_usage)])),
+          window_request(2, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_superseded_second", @compact_usage)])),
+          window_request(2, [equals: %{"previous_response_id" => "resp_superseded_second"}], event_frames([completed_event("resp_superseded_third", @resumed_usage)]))
+        ])
+      )
+
+    setup = gateway_setup(upstream, compact?: true)
+    state = callback_socket!(setup, "superseded-close")
+
+    try do
+      state = run_turn!(state, mid_turn_payload(setup, [window_message("synthetic first turn")], turn_id, "turn", 1))
+      [owner] = live_owners(setup)
+      %{upstream_pid: session} = :sys.get_state(owner)
+      test_pid = self()
+      :sys.replace_state(session, &Map.put(&1, :connection_close_subscriber, test_pid))
+      close_ref = make_ref()
+      assert :ok = FakeUpstream.close_websocket_connection(upstream, 1, close_ref: close_ref, notify: self(), code: 1000, reason: "synthetic age limit")
+      assert_receive {:fake_upstream_websocket_peer_closed, 1, ^close_ref}, 15_000
+      assert_receive {:upstream_websocket_connection_closed, ^session, %{generation: 1} = signal}, 15_000
+      :sys.replace_state(session, &Map.put(&1, :connection_close_subscriber, owner))
+
+      # The client's next request carries its whole history and opens the
+      # next connection.
+      {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [window_message("synthetic first turn"), window_message("synthetic second turn")], turn_id, "turn", 1))
+      assert [%{"type" => "response.completed", "response" => %{"id" => "resp_superseded_second"}}] = frames
+
+      {_owner_state, log} =
+        with_info_log(fn ->
+          send(owner, {:upstream_websocket_connection_closed, session, signal})
+          :sys.get_state(owner)
+        end)
+
+      assert log =~ kept_open_line("peer_close_frame", "superseded_connection", signal.lifecycle_id, 1, "on")
+      refute_received {:websocket_owner_upstream_closed, _correlation_id, _epoch, _signal}
+
+      anchored =
+        setup
+        |> mid_turn_payload([window_message("synthetic third turn")], turn_id, "turn", 1)
+        |> CodexPooler.JSON.decode!()
+        |> Map.put("previous_response_id", "resp_superseded_second")
+        |> CodexPooler.JSON.encode!()
+
+      {_state, frames} = run_turn_frames!(state, anchored)
+      assert [%{"type" => "response.completed", "response" => %{"id" => "resp_superseded_third"}}] = frames
+      assert Enum.all?(await_settled_rows!(setup), &match?({_endpoint, "websocket", "succeeded"}, &1))
       assert :ok = FakeUpstream.verify!(upstream)
     after
       CodexResponsesSocket.terminate(:closed, Process.delete(:crossing_socket_state))
