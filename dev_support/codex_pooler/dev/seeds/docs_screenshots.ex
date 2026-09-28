@@ -3,6 +3,7 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots do
 
   alias CodexPooler.Access.APIKey
   alias CodexPooler.Catalog.{Model, SyncRun}
+  alias CodexPooler.Dev.Seeds.DocsScreenshots.{Inventory, Traffic}
   alias CodexPooler.Dev.Seeds.Full
   alias CodexPooler.Pools.{ModelServingOverride, Pool}
   alias CodexPooler.Repo
@@ -42,7 +43,15 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots do
 
   @spec run(map()) :: map()
   def run(context) do
-    result = Full.run(context)
+    :ok = Inventory.reset!()
+    # Full updates instance settings and synchronously refreshes their cache.
+    # Finish that shared-process work before opening the fixture transaction.
+    base = Full.run(context)
+    {:ok, result} = Repo.transaction(fn -> seed!(base) end)
+    result
+  end
+
+  defp seed!(result) do
     pools = update_pools!(result.pools)
     api_keys = update_api_keys!(result.api_keys)
     {screenshot_identities, extra_identities} = Enum.split(result.upstream_identities, 8)
@@ -51,7 +60,6 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots do
     assignments = update_assignments!(screenshot_assignments)
     remove_extra_rows!(extra_assignments, extra_identities)
     models = update_models!(result.models, pools)
-    catalog_sync_runs = seed_catalog_sync_runs!(pools, models)
     model_serving_overrides = seed_model_serving_overrides!(pools)
 
     request_logs =
@@ -63,16 +71,22 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots do
 
     audit_events = update_audit_events!(result.audit_events, List.first(api_keys))
 
+    result =
+      Map.merge(result, %{
+        pools: pools,
+        api_keys: api_keys,
+        upstream_identities: upstream_identities,
+        assignments: assignments,
+        models: models,
+        model_serving_overrides: model_serving_overrides,
+        request_logs: request_logs,
+        audit_events: audit_events
+      })
+      |> Inventory.expand!()
+
     Map.merge(result, %{
-      pools: pools,
-      api_keys: api_keys,
-      upstream_identities: upstream_identities,
-      assignments: assignments,
-      models: models,
-      catalog_sync_runs: catalog_sync_runs,
-      model_serving_overrides: model_serving_overrides,
-      request_logs: request_logs,
-      audit_events: audit_events
+      request_logs: Traffic.seed!(result),
+      catalog_sync_runs: seed_catalog_sync_runs!(result.pools, result.models)
     })
   end
 

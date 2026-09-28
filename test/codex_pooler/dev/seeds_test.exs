@@ -2,10 +2,12 @@ defmodule CodexPooler.Dev.SeedsTest do
   use CodexPooler.DataCase, async: false
 
   alias CodexPooler.Access.{APIKey, Invite}
+  alias CodexPooler.Accounting
   alias CodexPooler.Accounting.Request
   alias CodexPooler.Accounts.{Scope, User}
 
   alias CodexPooler.Admin.{
+    Stats,
     UpstreamCircuitReadiness,
     UpstreamQuotaReadiness,
     UpstreamRoutingReadiness
@@ -27,6 +29,7 @@ defmodule CodexPooler.Dev.SeedsTest do
   alias CodexPooler.Quotas.Evidence
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
+  alias CodexPooler.Upstreams.SavedResets
   alias CodexPooler.Upstreams.Schemas.{EncryptedSecret, PoolUpstreamAssignment, UpstreamIdentity}
   alias CodexPooler.Upstreams.Secrets
   alias CodexPoolerWeb.Admin.PoolForm
@@ -565,6 +568,105 @@ defmodule CodexPooler.Dev.SeedsTest do
     end
   end
 
+  test "documentation screenshots include reset banks and varied traffic across every Pool" do
+    result = Seeds.docs_screenshots()
+    assert length(result.pools) == 6
+    assert length(result.upstream_identities) == 12
+
+    scope = Scope.for_user(result.owner, ["instance_owner"])
+    accounts = UpstreamAccountsReadModel.list_visible_accounts(scope, result.pools)
+    banks = Enum.filter(accounts, & &1.saved_resets.available?)
+    assert length(banks) >= 8
+    assert length(Enum.uniq(Enum.map(banks, & &1.saved_resets.available_count))) >= 3
+
+    for account <- banks do
+      snapshot = SavedResets.snapshot(account.identity)
+      assert length(snapshot.available_expires_at) == snapshot.available_count
+      assert snapshot.next_expires_at == Enum.min(snapshot.available_expires_at)
+      {:ok, expires_at, _offset} = DateTime.from_iso8601(snapshot.next_expires_at)
+      assert DateTime.after?(expires_at, DateTime.utc_now())
+    end
+
+    metrics = Stats.pool_usage_metrics_by_pool_ids(Enum.map(result.pools, & &1.id), traffic_window: "24h")
+
+    for pool <- result.pools do
+      usage = Map.fetch!(metrics, pool.id)
+      assert usage.request_count > 24
+      assert Enum.count(usage.token_histogram, &(&1.total_tokens > 0)) >= 22
+      assert length(Enum.uniq(Enum.map(usage.token_histogram, & &1.total_tokens))) > 12
+      assert length(Enum.uniq(Enum.map(usage.request_histogram, & &1.requests))) > 1
+      assert Enum.sum_by(usage.token_histogram, & &1.total_tokens) == usage.total_tokens
+      assert Enum.sum_by(usage.request_histogram, & &1.requests) == usage.request_count
+      assert usage.token_usage.input_tokens + usage.token_usage.output_tokens == usage.total_tokens
+
+      %{items: logs} = Accounting.list_request_logs(pool)
+      settled = Enum.filter(logs, &(&1.usage_status == "usage_known"))
+      assert settled != []
+
+      for log <- settled do
+        assert log.token_counts.input_tokens + log.token_counts.output_tokens == log.token_counts.total_tokens
+        assert log.cost.status == "priced"
+        assert log.latency_ms > 0
+      end
+    end
+  end
+
+  test "documentation screenshot seed refuses an operator Pool using its expansion slug" do
+    %{owner: owner} = Seeds.compact()
+    scope = Scope.for_user(owner, ["instance_owner"])
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "dev-docs-research", name: "Operator Pool"})
+
+    assert_raise RuntimeError, ~r/not owned by the screenshot seed/, fn -> Seeds.docs_screenshots() end
+    assert Repo.get!(Pool, pool.id).name == "Operator Pool"
+    assert Repo.aggregate(UpstreamIdentity, :count) == 0
+  end
+
+  test "documentation upstreams expose varied current access-token expiry states" do
+    result = Seeds.docs_screenshots()
+    scope = Scope.for_user(result.owner, ["instance_owner"])
+    accounts = UpstreamAccountsReadModel.list_visible_accounts(scope, result.pools)
+    expiries = Enum.map(accounts, & &1.identity_observability.credential_expiry)
+
+    assert Enum.count(expiries, &(&1.state == "known_future")) == 11
+    assert Enum.count(expiries, &(&1.state == "known_past")) == 1
+    assert Enum.all?(expiries, &match?(%DateTime{}, &1.expires_at))
+    assert Enum.uniq_by(expiries, & &1.expires_at) |> length() == 12
+
+    visible = accounts |> Enum.sort_by(& &1.identity.account_label) |> Enum.take(6)
+    assert Enum.all?(visible, &(&1.identity_observability.credential_expiry.state == "known_future"))
+    remaining = Enum.map(visible, &DateTime.diff(&1.identity_observability.credential_expiry.expires_at, DateTime.utc_now(), :minute))
+    assert Enum.any?(remaining, &(&1 > 0 and &1 < 60))
+    assert Enum.any?(remaining, &(&1 > 3 * 24 * 60))
+
+    # Expiry UI needs only metadata, never live or placeholder auth secrets.
+    identity_ids = Enum.map(result.upstream_identities, & &1.id)
+    assert Repo.aggregate(from(secret in EncryptedSecret, where: secret.upstream_identity_id in ^identity_ids), :count) == 0
+  end
+
+  test "documentation previews show model diversity, warm caches and broad traffic waves" do
+    result = Seeds.docs_screenshots()
+    scope = Scope.for_user(result.owner, ["instance_owner"])
+    %{items: logs} = Accounting.list_request_logs_for_scope(scope, limit: 12)
+
+    assert logs |> Enum.map(& &1.requested_model) |> Enum.uniq() |> length() >= 3
+    assert Enum.all?(logs, &(&1.token_counts.cached_input_tokens / &1.token_counts.input_tokens >= 0.95))
+
+    metrics = Stats.pool_usage_metrics_by_pool_ids(Enum.map(result.pools, & &1.id), traffic_window: "24h")
+
+    for pool <- result.pools, key <- [:token_histogram, :request_histogram] do
+      field = if key == :token_histogram, do: :total_tokens, else: :requests
+      values = metrics |> Map.fetch!(pool.id) |> Map.fetch!(key) |> Enum.map(&Map.fetch!(&1, field))
+      range = Enum.max(values) - Enum.min(values)
+      variation = values |> Enum.chunk_every(2, 1, :discard) |> Enum.sum_by(fn [left, right] -> abs(left - right) end)
+
+      # A few broad rises/falls fit within five full ranges; the earlier
+      # repeating hourly sawtooth used more than twice that variation.
+      assert range > 0
+      assert variation / range <= 5.0
+    end
+  end
+
+  @tag slow: "rebuilds the complete screenshot inventory and day-long ledger twice in Postgres"
   test "documentation screenshot seed is public-safe and idempotent" do
     first = Seeds.docs_screenshots()
     result = Seeds.docs_screenshots()
@@ -572,20 +674,31 @@ defmodule CodexPooler.Dev.SeedsTest do
     assert first.pools |> Enum.map(& &1.name) == [
              "Example Production",
              "Example Secondary",
-             "Example Standby"
+             "Example Standby",
+             "Example Automation",
+             "Example Research",
+             "Example Staging"
            ]
 
     assert result.pools |> Enum.map(& &1.name) == [
              "Example Production",
              "Example Secondary",
-             "Example Standby"
+             "Example Standby",
+             "Example Automation",
+             "Example Research",
+             "Example Staging"
            ]
 
     assert Enum.map(result.api_keys, &{&1.display_name, &1.key_prefix}) == [
              {"Build automation", "sk-cxp-docs00000001"},
              {"Release assistant", "sk-cxp-docs00000002"},
              {"Paused client", "sk-cxp-docs00000003"},
-             {"Retired client", "sk-cxp-docs00000004"}
+             {"Retired client", "sk-cxp-docs00000004"},
+             {"Example Secondary client", "sk-cxp-docs00000005"},
+             {"Example Standby client", "sk-cxp-docs00000006"},
+             {"Example Automation client", "sk-cxp-docs00000007"},
+             {"Example Research client", "sk-cxp-docs00000008"},
+             {"Example Staging client", "sk-cxp-docs00000009"}
            ]
 
     assert Enum.all?(result.api_keys, fn api_key ->
@@ -601,7 +714,11 @@ defmodule CodexPooler.Dev.SeedsTest do
              "Example Reauthentication",
              "Example Paused Account",
              "Example Circuit Clear",
-             "Example Circuit Absent"
+             "Example Circuit Absent",
+             "Example Build Agents",
+             "Example Code Review",
+             "Example Research Pro",
+             "Example Staging Pro"
            ]
 
     assert Enum.map(result.upstream_identities, & &1.chatgpt_account_id) == [
@@ -612,10 +729,14 @@ defmodule CodexPooler.Dev.SeedsTest do
              "sample-account-05",
              "sample-account-06",
              "sample-account-07",
-             "sample-account-08"
+             "sample-account-08",
+             "sample-account-09",
+             "sample-account-10",
+             "sample-account-11",
+             "sample-account-12"
            ]
 
-    assert Enum.map(result.assignments, & &1.assignment_label) == [
+    assert result.assignments |> Enum.take(9) |> Enum.map(& &1.assignment_label) == [
              "Example Primary Assignment",
              "Example Ready Assignment",
              "Example Exhausted Assignment",
@@ -627,10 +748,10 @@ defmodule CodexPooler.Dev.SeedsTest do
              "Example Circuit Absent Assignment"
            ]
 
-    assert {length(result.upstream_identities), length(result.assignments)} == {8, 9}
+    assert {length(result.upstream_identities), length(result.assignments)} == {12, 22}
 
     assert {Repo.aggregate(UpstreamIdentity, :count), Repo.aggregate(PoolUpstreamAssignment, :count)} ==
-             {8, 9}
+             {12, 22}
 
     refute Enum.any?(result.upstream_identities, &String.starts_with?(&1.account_label, "Dev "))
     refute Enum.any?(result.assignments, &String.starts_with?(&1.assignment_label, "Dev "))
@@ -666,12 +787,16 @@ defmodule CodexPooler.Dev.SeedsTest do
              {"gpt-5.5-pro", "lite", "lite", false}
            ]
 
-    assert Repo.aggregate(Pool, :count) == 3
-    assert Repo.aggregate(APIKey, :count) == 4
-    assert Repo.aggregate(SyncRun, :count) == 3
+    assert Repo.aggregate(Pool, :count) == 6
+    assert Repo.aggregate(APIKey, :count) == 9
+    assert Repo.aggregate(SyncRun, :count) == 6
     assert Repo.aggregate(ModelServingOverride, :count) == 2
+    assert Enum.map(first.pools, & &1.id) == Enum.map(result.pools, & &1.id)
+    assert length(first.request_logs) == length(result.request_logs)
+    assert Repo.aggregate(Request, :count) == length(result.request_logs)
   end
 
+  @tag slow: "rebuilds both seed profiles twice to verify their Postgres inventories remain independent"
   test "full and documentation screenshot seeds preserve their existing ordered shapes" do
     Seeds.full()
     full = Seeds.full()
@@ -722,10 +847,10 @@ defmodule CodexPooler.Dev.SeedsTest do
              "Example Secondary Assignment"
            ]
 
-    assert {length(docs.upstream_identities), length(docs.assignments)} == {8, 9}
+    assert {length(docs.upstream_identities), length(docs.assignments)} == {12, 22}
 
     assert {Repo.aggregate(UpstreamIdentity, :count), Repo.aggregate(PoolUpstreamAssignment, :count)} ==
-             {8, 9}
+             {12, 22}
   end
 
   test "full seed exposes distinct stable circuit visibility states" do
