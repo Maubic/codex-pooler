@@ -10,19 +10,25 @@ defmodule CodexPoolerWeb.Runtime.OwnerCallHold do
   # `{ref, :held, pid}` to `test` and waits for `{ref, :release}`, or releases
   # itself after the detection budget.
 
+  alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission.FirstCompactCollection
 
   @detection_timeout_ms 15_000
 
-  @doc "Holds `server` right after its next reply that authorizes a first full-history compaction."
+  @doc """
+  Holds `server` right after its next reply of the kind `reply` names: the
+  authorization of a first full-history compaction (the default), or an
+  owner's native compaction admission snapshot.
+  """
   # The hook's state is a map: `:sys` reads an installed `{func, state}` whose
   # state is a two-tuple as `{func_id, {func, state}}`, and silently drops it.
-  def install(server, ref, test) when is_reference(ref) and is_pid(test),
-    do: :sys.install(server, {&__MODULE__.hook/3, %{ref: ref, test: test}})
+  def install(server, ref, test, reply \\ :first_compact_authorization)
+      when is_reference(ref) and is_pid(test) and reply in [:first_compact_authorization, :admission_snapshot],
+      do: :sys.install(server, {&__MODULE__.hook/3, %{ref: ref, test: test, reply: reply}})
 
   @doc false
-  def hook(%{ref: ref, test: test} = hold, event, _process_name) do
-    if authorization_reply?(event) do
+  def hook(%{ref: ref, test: test, reply: reply} = hold, event, _process_name) do
+    if held_reply?(reply, event) do
       send(test, {ref, :held, self()})
 
       receive do
@@ -37,7 +43,9 @@ defmodule CodexPoolerWeb.Runtime.OwnerCallHold do
     end
   end
 
-  defp authorization_reply?({:out, {:ok, %FirstCompactCollection{}}, _to}), do: true
-  defp authorization_reply?({:out, {:ok, %FirstCompactCollection{}}, _to, _state}), do: true
-  defp authorization_reply?(_event), do: false
+  defp held_reply?(:first_compact_authorization, {:out, {:ok, %FirstCompactCollection{}}, _to}), do: true
+  defp held_reply?(:first_compact_authorization, {:out, {:ok, %FirstCompactCollection{}}, _to, _state}), do: true
+  defp held_reply?(:admission_snapshot, {:out, {:ok, %NativeCompactionAdmission{}}, _to}), do: true
+  defp held_reply?(:admission_snapshot, {:out, {:ok, %NativeCompactionAdmission{}}, _to, _state}), do: true
+  defp held_reply?(_reply, _event), do: false
 end

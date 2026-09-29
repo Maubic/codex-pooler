@@ -299,6 +299,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
   # `collected_unconfirmed` for as long as the socket was attached, and the
   # resend was served, billed and refused `502 invalid_compaction_response`.
   # The bound is shortened for the lost compaction only, on the owner's node.
+  # The released client retries on a new connection instead, and the closed
+  # socket's detach ends the admission; the resend on the same socket is a
+  # path another client can take.
   for topology <- [:remote, :local, :direct] do
     @tag topology: topology
     test "#{topology}: a compaction whose acknowledgement is lost does not hold the admission past its bound", ctx do
@@ -336,7 +339,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
   # owner's stall read `502 owner_crashed` (the owner call timed out inside the
   # erpc worker, whose exit fell to the crash default), and a local owner's
   # closed the socket `1011 websocket control unavailable` (the exit reached
-  # the socket's control path).
+  # the socket's control path). The released client retries on a new
+  # connection instead; the resend on the same socket is a path another client
+  # can take.
   for topology <- [:remote, :local] do
     @tag topology: topology
     test "#{topology}: an ordinary turn whose owner answers its preflight too late is refused 504 with the timeout, and the socket serves the resend", ctx do
@@ -430,6 +435,49 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     assert FakeUpstream.count(compaction.upstream) == 2
   end
 
+  # The released client never resends on the connection that answered an
+  # error: it closes that connection and retries on a new one with the full
+  # request, never anchored (0.158 and 0.159: 757 of 757 retries in the
+  # release-client receipts; `responses_websocket.rs` drops the connection
+  # before it surfaces the error). A compaction's or a final's reservation that
+  # its owner answers only after the socket gave up on it arms a capability
+  # nobody holds (findings#270 row 270-259): the owner is held right after it
+  # answers the reservation's snapshot, so the reservation itself meets the
+  # held owner and is refused with the timeout. The closed socket's detach
+  # clears that reservation before the new socket's request reaches the
+  # admission, so the retry is served and the next compaction is armed again.
+  # The owner keeping a late reservation on a socket that stays open is covered
+  # by no arm: no released client resends there.
+  for topology <- [:remote, :local], phase <- [:compact, :final] do
+    @tag topology: topology, phase: phase
+    test "#{topology}: a #{phase} reservation its owner answers too late is cleared by the socket's close, and the released client's retry on a new socket is served", ctx do
+      compaction = open_compaction_session!(ctx)
+      {frame, retry_frame, reserved, served_id} = reservation_frames!(compaction, ctx.phase)
+      hold = slow_owner_at!(compaction, :reservation)
+      {conn, websocket} = public_websocket_send_text!(compaction.client.conn, compaction.client.websocket, compaction.client.ref, frame)
+      {conn, websocket, refusal} = receive_native_terminal!(conn, websocket, compaction.client.ref)
+      assert %{"type" => "error", "error" => %{"code" => code}} = refusal
+      assert code in ["owner_unavailable", "owner_forward_timeout"]
+
+      # Answering again, the owner applies the reservation nobody holds.
+      :ok = release_slow_owner!(compaction, hold)
+      :ok = await_admission_phase!(compaction.owner, reserved)
+
+      # The client drops the connection; its detach clears the reservation.
+      Scenario.close!(%{compaction.client | conn: conn, websocket: websocket})
+      :ok = await_admission_phase!(compaction.owner, nil)
+
+      retry = Scenario.connect!(compaction.port, compaction.setup, Scenario.native_route(), compaction.window)
+      {conn, websocket} = public_websocket_send_text!(retry.conn, retry.websocket, retry.ref, retry_frame)
+      {conn, websocket, served} = receive_native_terminal!(conn, websocket, retry.ref)
+      assert %{"type" => "response.completed", "response" => %{"id" => ^served_id}} = served
+      assert socket_connection_state!(retry.socket).websocket_owner_pid == compaction.owner
+      :ok = await_admission_phase!(compaction.owner, if(ctx.phase == :compact, do: :pending_final, else: :pending_compact))
+      Scenario.close!(%{retry | conn: conn, websocket: websocket})
+      assert Scenario.settled_statuses!(compaction.setup, 2 + if(ctx.phase == :final, do: 1, else: 0)) |> Enum.all?(&(&1 == "succeeded"))
+    end
+  end
+
   # A socket on the session's window with its owner (on the peer for
   # `:remote`) and one anchor turn it served, settled unless `settle?` is
   # false (its task is then held after its settlement).
@@ -480,14 +528,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     :suspended
   end
 
-  defp slow_owner_at!(compaction, :collect) do
+  defp slow_owner_at!(compaction, :collect), do: hold_owner_after!(compaction, :first_compact_authorization)
+
+  # Held right after it answers a reservation's admission snapshot: the
+  # reservation that follows meets it.
+  defp slow_owner_at!(compaction, :reservation), do: hold_owner_after!(compaction, :admission_snapshot)
+
+  defp hold_owner_after!(compaction, reply) do
     ref = make_ref()
     owner = compaction.owner
 
     :ok =
       if node(owner) == node(),
-        do: OwnerCallHold.install(owner, ref, self()),
-        else: :erpc.call(node(owner), OwnerCallHold, :install, [owner, ref, self()])
+        do: OwnerCallHold.install(owner, ref, self(), reply),
+        else: :erpc.call(node(owner), OwnerCallHold, :install, [owner, ref, self(), reply])
 
     ref
   end
@@ -534,6 +588,24 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     {conn, websocket, delta} = public_websocket_receive_text!(conn, websocket, compaction.client.ref)
     assert %{"type" => "response.output_text.delta"} = CodexPooler.JSON.decode!(delta)
     {conn, websocket}
+  end
+
+  # The frame whose reservation meets the held owner, the released client's
+  # retry of it on a new socket (the full request, never anchored), the phase
+  # the late reservation arms, and the response the retry is served: the
+  # compaction itself, or the final after a compaction the socket received.
+  defp reservation_frames!(compaction, :compact) do
+    frame = compaction_frame(compaction, "compaction", trigger(compaction), "resp_slow_owner_anchor")
+    {frame, compaction_frame(compaction, "compaction", compaction.history ++ trigger(compaction), nil), :reserved_compact, "resp_slow_owner_compact"}
+  end
+
+  defp reservation_frames!(compaction, :final) do
+    assert %{"type" => "response.completed", "response" => %{"output" => [item]}} =
+             send_frame!(compaction, compaction_frame(compaction, "compaction", trigger(compaction), "resp_slow_owner_anchor"))
+
+    :ok = await_admission_phase!(compaction.owner, :pending_final)
+    frame = final_after_compaction_frame(compaction, item)
+    {frame, frame, :reserved_final, "resp_slow_owner_final"}
   end
 
   defp with_client(compaction, conn, websocket), do: %{compaction | client: Scenario.settle!(%{compaction.client | conn: conn, websocket: websocket})}
