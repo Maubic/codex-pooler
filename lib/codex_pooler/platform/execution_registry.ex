@@ -41,6 +41,14 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
           [ExecutionTerminalProofs.terminal()] | :unknown
   def pending_proofs(ids, server \\ __MODULE__) when is_list(ids), do: call(server, {:pending_proofs, ids})
 
+  # Retires, as `process_down`, every execution whose process has exited
+  # while its `:DOWN` still waits in this registry's mailbox. The shutdown
+  # flush reads the pending proofs right after this: the drain that ended an
+  # execution saw its process go down, but nothing orders that signal before
+  # the one this registry receives (findings#270 row 270-371).
+  @spec retire_ended(GenServer.server()) :: :ok | :unknown
+  def retire_ended(server \\ __MODULE__), do: call(server, :retire_ended)
+
   defp call(server, request) do
     GenServer.call(server, request, 1_000)
   catch
@@ -127,6 +135,19 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
 
   def handle_call({:pending_proofs, ids}, _from, state) when is_list(ids),
     do: {:reply, state.pending |> Map.take(ids) |> Map.values(), state}
+
+  def handle_call(:retire_ended, _from, state) do
+    state =
+      Enum.reduce(state.entries, state, fn
+        {id, {pid, ref}}, state when is_reference(ref) ->
+          if Process.alive?(pid), do: state, else: retire(state, id, pid, ref, "process_down")
+
+        _retired, state ->
+          state
+      end)
+
+    {:reply, :ok, state}
+  end
 
   def handle_call({:acknowledge, ids}, _from, state) do
     {:reply, :ok, %{state | pending: Map.drop(state.pending, ids), overflow: false, expired_warning: false}}

@@ -6,6 +6,10 @@ defmodule CodexPooler.Platform.ExecutionProofPublisher do
   alias CodexPooler.Platform.{ExecutionRegistry, ExecutionTerminalProofs}
   @interval_ms 1_000
   @early_ms 100
+  # The longest a shutdown flush waits for the database, inside the caller's
+  # own budget: a stalled database must not hold the VM's exit longer.
+  @flush_timeout_ms 2_000
+  @flush_limit 10_000
 
   @spec start_link(keyword()) :: GenServer.on_start() | :ignore
   def start_link(opts) do
@@ -15,6 +19,33 @@ defmodule CodexPooler.Platform.ExecutionProofPublisher do
       do: GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__)),
       else: :ignore
   end
+
+  @doc """
+  Publishes the proof of every execution that has ended, before the VM exits.
+
+  The shutdown's drain ends the executions it cuts `process_down`, and a
+  client's resend on another node is admitted only once their proofs exist.
+  The application stops this process right after its `prep_stop/1`, before
+  the early publication (`@early_ms`) or the next tick: the proofs died with
+  the VM (findings#270 row 270-371). Waits at most `budget_ms`, and never
+  more than `@flush_timeout_ms`; with nothing pending it touches no
+  database.
+  """
+  @spec flush(non_neg_integer(), GenServer.server()) :: :ok | :error | :timeout | :no_budget | :not_running
+  def flush(budget_ms, server \\ __MODULE__)
+
+  def flush(budget_ms, server) when is_integer(budget_ms) and budget_ms > 0 do
+    GenServer.call(server, :flush, min(budget_ms, @flush_timeout_ms))
+  catch
+    :exit, {:timeout, _call} ->
+      Logger.warning("execution terminal proof flush timed out before the VM exit; pending proofs retained")
+      :timeout
+
+    :exit, _not_running ->
+      :not_running
+  end
+
+  def flush(_budget_ms, _server), do: :no_budget
 
   @impl true
   def init(opts) do
@@ -32,6 +63,13 @@ defmodule CodexPooler.Platform.ExecutionProofPublisher do
 
   @impl true
   def handle_continue(:publish, state), do: {:noreply, publish(state)}
+
+  @impl true
+  def handle_call(:flush, _from, state) do
+    _retired = ExecutionRegistry.retire_ended(state.registry)
+    result = publish_proofs(state.registry, fn -> ExecutionRegistry.pending(@flush_limit, state.registry) end)
+    {:reply, result, note_result(state, result)}
+  end
 
   @impl true
   def handle_info(:publish, state), do: {:noreply, publish(state)}

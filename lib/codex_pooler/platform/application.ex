@@ -4,6 +4,7 @@ defmodule CodexPooler.Application do
   use Application
 
   alias CodexPooler.Gateway.Transports.Websocket.{ActivityRegistry, RolloutDrain}
+  alias CodexPooler.Platform.ExecutionProofPublisher
   alias CodexPooler.Platform.InstancePresence.Identity
   alias CodexPooler.Telemetry.RelayRuntime
 
@@ -20,7 +21,7 @@ defmodule CodexPooler.Application do
       CodexPooler.Platform.Readiness,
       CodexPoolerWeb.Telemetry,
       CodexPooler.Repo,
-      CodexPooler.Platform.ExecutionProofPublisher,
+      ExecutionProofPublisher,
       CodexPooler.Telemetry.RelayRuntime,
       CodexPooler.Platform.InstanceHeartbeat,
       CodexPooler.Jobs.UpstreamEnqueue.GatewayReconciliationGate,
@@ -51,6 +52,12 @@ defmodule CodexPooler.Application do
   def prep_stop(state) do
     :ok = RelayRuntime.quiesce()
     _summary = RolloutDrain.drain_for_shutdown()
+    # The drain ended the executions it cut `process_down`, and their turns'
+    # resends, on the other node, wait for those proofs. The children stop
+    # right after this returns, before the publisher's early publication, so
+    # the proofs are written here, within what is left of the drain's budget
+    # (findings#270 row 270-371).
+    _published = ExecutionProofPublisher.flush(RolloutDrain.shutdown_budget_remaining_ms())
     state
   end
 

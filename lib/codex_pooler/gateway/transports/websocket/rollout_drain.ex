@@ -108,6 +108,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
     )
   end
 
+  @doc """
+  What is left, in milliseconds, of the budget the node's shutdown drain
+  started: 0 once it is spent, or while no shutdown drain has started it.
+  """
+  @spec shutdown_budget_remaining_ms([option()]) :: non_neg_integer()
+  def shutdown_budget_remaining_ms(opts \\ []) do
+    opts
+    |> configured_server_name()
+    |> call_if_started(:shutdown_budget_remaining_ms, 0)
+  catch
+    :exit, _reason -> 0
+  end
+
   @spec configured_timeout_ms() :: pos_integer()
   def configured_timeout_ms do
     @timeout_env
@@ -159,6 +172,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
   @impl GenServer
   def handle_call(:draining?, _from, state) do
     {:reply, state.draining?, state}
+  end
+
+  def handle_call(:shutdown_budget_remaining_ms, _from, state) do
+    remaining_ms =
+      case shutdown_timeout_budget(state) do
+        {:remaining, remaining_ms} -> remaining_ms
+        _not_started_or_exhausted -> 0
+      end
+
+    {:reply, remaining_ms, state}
   end
 
   def handle_call(

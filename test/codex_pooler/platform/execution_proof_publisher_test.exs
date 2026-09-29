@@ -131,6 +131,71 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
     :ok = await_published!(execution.identity)
   end
 
+  # findings#270 row 270-371: the application stops the publisher right after
+  # its shutdown drain, before an early publication could run, so
+  # `prep_stop/1` flushes: the proof is written when the flush returns.
+  test "a flush writes the proof of an ended execution before it returns" do
+    {registry, publisher} = start_pair!()
+    execution = start_execution!(registry)
+    monitor = Process.monitor(execution.pid)
+    Process.exit(execution.pid, :kill)
+    assert_receive {:DOWN, ^monitor, :process, _pid, :killed}
+
+    assert :ok = ExecutionProofPublisher.flush(@detection_timeout_ms, publisher)
+    assert %ExecutionTerminalProof{end_kind: "process_down"} = Repo.get!(ExecutionTerminalProof, execution.identity.owner_execution_id)
+  end
+
+  # The drain that ended an execution saw its process go down, but nothing
+  # orders that signal before the one the registry receives. Here the
+  # registry's monitor is dropped, so its `:DOWN` never comes: the flush
+  # retires the execution from its process being gone.
+  test "a flush publishes an execution whose end the registry has not heard of" do
+    {registry, publisher} = start_pair!()
+    execution = start_execution!(registry)
+    id = execution.identity.owner_execution_id
+
+    :sys.replace_state(registry, fn state ->
+      {_pid, ref} = Map.fetch!(state.entries, id)
+      true = Process.demonitor(ref, [:flush])
+      state
+    end)
+
+    monitor = Process.monitor(execution.pid)
+    Process.exit(execution.pid, :kill)
+    assert_receive {:DOWN, ^monitor, :process, _pid, :killed}
+    assert %{entries: %{^id => {_pid, ref}}} = :sys.get_state(registry)
+    assert is_reference(ref)
+
+    assert :ok = ExecutionProofPublisher.flush(@detection_timeout_ms, publisher)
+    assert %ExecutionTerminalProof{end_kind: "process_down"} = Repo.get!(ExecutionTerminalProof, id)
+  end
+
+  test "a flush with nothing pending touches no database" do
+    {_registry, publisher} = start_pair!()
+    queries = count_queries(publisher)
+
+    assert :ok = ExecutionProofPublisher.flush(@detection_timeout_ms, publisher)
+    assert queries.() == 0
+  end
+
+  # A publisher that cannot answer, as behind a stalled database, holds the
+  # VM's exit only for the budget the flush was given; none is none.
+  test "a flush returns within its budget when the publisher cannot answer" do
+    {_registry, publisher} = start_pair!()
+    :ok = :sys.suspend(publisher)
+
+    assert :no_budget = ExecutionProofPublisher.flush(0, publisher)
+
+    log =
+      capture_log(fn ->
+        flush = Task.async(fn -> ExecutionProofPublisher.flush(100, publisher) end)
+        assert {:ok, :timeout} = Task.yield(flush, @detection_timeout_ms)
+      end)
+
+    assert log =~ "execution terminal proof flush timed out before the VM exit; pending proofs retained"
+    :ok = :sys.resume(publisher)
+  end
+
   defp await_restarted!(previous, deadline) do
     case Process.whereis(@registry) do
       pid when is_pid(pid) and pid != previous ->
@@ -221,6 +286,29 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
       do: send(config.test_pid, {:proof_insert, config.handler})
 
   def observe_query(_event, _measurements, _metadata, _config), do: :ok
+
+  # Every query the publisher runs, whatever it reads or writes.
+  defp count_queries(publisher) do
+    handler = {__MODULE__, make_ref()}
+    config = %{publisher: publisher, test_pid: self(), handler: handler}
+    :ok = :telemetry.attach(handler, [:codex_pooler, :repo, :query], &__MODULE__.observe_any_query/4, config)
+    on_exit(fn -> :telemetry.detach(handler) end)
+    fn -> drain_query_count(handler, 0) end
+  end
+
+  @doc false
+  def observe_any_query(_event, _measurements, _metadata, %{publisher: publisher} = config) when self() == publisher,
+    do: send(config.test_pid, {:publisher_query, config.handler})
+
+  def observe_any_query(_event, _measurements, _metadata, _config), do: :ok
+
+  defp drain_query_count(handler, count) do
+    receive do
+      {:publisher_query, ^handler} -> drain_query_count(handler, count + 1)
+    after
+      0 -> count
+    end
+  end
 
   defp drain_count(handler, count) do
     receive do
