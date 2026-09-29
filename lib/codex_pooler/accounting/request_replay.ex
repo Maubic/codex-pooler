@@ -376,10 +376,12 @@ defmodule CodexPooler.Accounting.RequestReplay do
   `in_progress`: the state `preflight_snapshot/1` refuses a same-turn
   post-visible resend for as `lifecycle_conflict`. A socket that took over the
   turn it inherited waits on this before its request is judged (findings#206
-  row 206-362). The request row settles before its turn row, and a resend
-  judged in between closed that turn as orphaned instead of the
+  row 206-362). The request row used to settle before its turn row, and a
+  resend judged in between closed that turn as orphaned instead of the
   `client_disconnected` interruption a compaction's successor is chained to
-  (row 206-436), so the wait lasts until the turn row itself settled.
+  (row 206-436), so the wait lasts until the turn row itself settled. A
+  settlement now writes both in one transaction (findings#288); a node on an
+  older release still writes them apart during a rolling update.
   """
   @spec semantic_turn_in_flight?(%{
           required(:pool_id) => Ecto.UUID.t(),
