@@ -79,6 +79,19 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.AccountingReservation do
     )
   end
 
+  # The owner did not answer within its call budget: the client gets the answer
+  # an owner that could not be asked gets, and the reason stays in the log.
+  def pre_attempt_failure(:owner_forward_timeout, %RequestOptions{} = request_options) do
+    pre_attempt_failure_response(
+      :owner_forward_timeout,
+      request_options,
+      503,
+      false,
+      "owner_unavailable",
+      "session owner lease is unavailable"
+    )
+  end
+
   def pre_attempt_failure(reason, %RequestOptions{} = request_options) do
     pre_attempt_failure_response(reason, request_options, 500, false)
   end

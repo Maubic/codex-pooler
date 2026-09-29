@@ -708,7 +708,12 @@ defmodule CodexPooler.Gateway.Runtime.Service do
     end
   end
 
-  defp reject_pre_attempt_failure(context, reason) when reason in [:owner_unavailable, :stale_owner],
+  # An owner that did not answer a control within its call budget
+  # (`owner_forward_timeout`, a native compaction's accounting start) is
+  # refused as an owner that could not be asked, whichever node it runs on: a
+  # local stall answered this `503 owner_unavailable`, a remote one a
+  # non-retryable `500 gateway_reservation_failed` (findings#270 row 270-245).
+  defp reject_pre_attempt_failure(context, reason) when reason in [:owner_unavailable, :stale_owner, :owner_forward_timeout],
     do: reject_owner_lease_refusal(context, reason, "reservation")
 
   defp reject_pre_attempt_failure(context, reason) do
@@ -2679,7 +2684,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
         "denial_family" => "session_owner_lease",
         "internal_reason" => Atom.to_string(reason),
         "failure_phase" => phase,
-        "operator_action" => "none needed; the session changed owner before this request could run, and a resend attaches to the current owner"
+        "operator_action" => owner_lease_refusal_action(reason)
       })
 
     try do
@@ -2691,6 +2696,12 @@ defmodule CodexPooler.Gateway.Runtime.Service do
         {:error, error}
     end
   end
+
+  defp owner_lease_refusal_action(:owner_forward_timeout),
+    do: "none needed; the session's owner did not answer within its call budget, and a resend is served once it answers"
+
+  defp owner_lease_refusal_action(_reason),
+    do: "none needed; the session changed owner before this request could run, and a resend attaches to the current owner"
 
   defp wrap_deferred_session_lease_stream({:ok, %{stream: stream} = result}, heartbeat)
        when is_function(stream, 1) do

@@ -766,11 +766,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   # an owner already gone. The caller is a response task confirming a
   # compaction it collected, or a socket reserving one; the exit crashed a
   # local owner's caller, which logged a task failure for a compaction already
-  # settled (findings#270 row 270-170). A remote owner's caller already read
-  # such an exit as `owner_unavailable` through its erpc.
+  # settled (findings#270 row 270-170). An owner that is alive but did not
+  # answer within the owner call budget answers `owner_forward_timeout`, the
+  # cause a remote owner's caller reads when its erpc deadline passes first:
+  # folded into `owner_unavailable`, a slow owner on the caller's node read as
+  # one already gone (findings#270 row 270-245).
   defp call_admission_control(owner_pid, control) do
     WebsocketOwnerSession.admission_control(owner_pid, control)
   catch
+    :exit, {:timeout, _call} -> {:error, :owner_forward_timeout}
     :exit, _reason -> {:error, :owner_unavailable}
   end
 

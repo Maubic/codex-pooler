@@ -1378,6 +1378,15 @@ defmodule CodexPooler.Gateway.Runtime.AccountingReservationTest do
              code: "owner_unavailable",
              message: "session owner lease is unavailable",
              retryable: false
+           }},
+          # An owner that did not answer within its call budget gets the answer
+          # of one that could not be asked (findings#270 row 270-245).
+          {:owner_forward_timeout,
+           %{
+             status: 503,
+             code: "owner_unavailable",
+             message: "session owner lease is unavailable",
+             retryable: false
            }}
         ] do
       assert ^expected = AccountingReservation.pre_attempt_failure(reason, request_options)

@@ -3751,13 +3751,17 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     do: phase == :final and not admission_owner_unreachable?(cause, state)
 
   # Whether a reservation failed because its owner could not be asked at all.
-  # The forwarder folds every owner resolution and transport failure into
-  # `owner_unavailable` (an owner that answers without an admission says
-  # `no_admission` or its own reason); a direct upstream session answers
-  # `owner_unavailable` itself when nothing is armed, and only a session that
-  # is gone yields `unavailable`.
+  # The forwarder answers `owner_unavailable` for an owner it could not resolve
+  # or reach and `owner_forward_timeout` for one that did not answer within
+  # the owner call budget, wherever it runs (an owner that answers without an
+  # admission says `no_admission` or its own reason). A timeout used to count
+  # as an owner that was asked, so a remote owner's stall ran the final turn as
+  # the ordinary turn against that owner, while the same stall on a local owner
+  # was refused (findings#270 row 270-245). A direct upstream session answers
+  # `owner_unavailable` itself when nothing is armed, and only a session that is
+  # gone yields `unavailable`.
   defp admission_owner_unreachable?(cause, state) do
-    if owner_forwarded_socket?(state), do: cause == :owner_unavailable, else: cause == :unavailable
+    if owner_forwarded_socket?(state), do: cause in [:owner_unavailable, :owner_forward_timeout], else: cause == :unavailable
   end
 
   defp start_tracked_response_task(%PreparedWebsocketFrame{} = prepared, state) do
