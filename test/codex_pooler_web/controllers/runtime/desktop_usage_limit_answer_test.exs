@@ -34,9 +34,14 @@ defmodule CodexPoolerWeb.Runtime.DesktopUsageLimitAnswerTest do
   import ExUnit.CaptureLog
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
 
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport,
+    only: [enter_peer_owner_topology!: 0, start_peer_window_owner!: 2]
+
   alias CodexPooler.Accounting.{Attempt, Request}
   alias CodexPooler.FakeUpstream
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
   alias CodexPooler.Repo
+  alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
 
   @moduletag capture_log: true
 
@@ -219,12 +224,114 @@ defmodule CodexPoolerWeb.Runtime.DesktopUsageLimitAnswerTest do
         setup = gateway_setup(upstream)
         port = start_public_endpoint!()
 
-        assert %{"type" => "error", "status" => 400, "error" => error} = event = websocket_turn!(port, setup, @turn_path, @desktop)
+        {event, log} =
+          with_log([level: :info], fn ->
+            event = websocket_turn!(port, setup, @turn_path, @desktop)
+            _rows = settled_rows!(setup)
+            event
+          end)
+
+        assert %{"type" => "error", "status" => 400, "error" => error} = event
         refute Map.has_key?(event, "headers")
-        assert_desktop_answer!(error, resets_at, "1 h")
+        seconds = assert_desktop_answer!(error, resets_at, "1 h")
         refute CodexPooler.JSON.encode!(event) =~ "synthetic provider text"
         assert [row] = settled_rows!(setup)
         assert row.response_status_code == 429
+        # The answered line keeps the refusal's status, which the row records,
+        # and names the status the socket sent (findings#270 row 270-261).
+        assert log =~ ~r/websocket usage limit answered .*status=429 .*advice=pool resets_at=#{resets_at} resets_in_seconds=#{seconds} answered_status=400\n/
+      end
+    end
+
+    test "/v1/responses over websocket: Codex Desktop keeps the wrapped 429 for the provider's frame, and the answered line says so" do
+      put_owner_forwarding!(false)
+      resets_at = DateTime.to_unix(DateTime.utc_now()) + @provider_reset_seconds
+      setup = gateway_setup(start_upstream(FakeUpstream.websocket_text_frames([provider_usage_limit_frame(resets_at)])))
+      port = start_public_endpoint!()
+      frame = %{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => "synthetic prompt", "stream" => true}
+
+      {event, log} =
+        with_log([level: :info], fn ->
+          event = websocket_turn!(port, setup, "/v1/responses", @desktop, frame)
+          _rows = settled_rows!(setup)
+          event
+        end)
+
+      assert %{"type" => "error", "status" => 429, "error" => error} = event
+      seconds = assert_pool_answer!(error, resets_at)
+      assert log =~ ~r/websocket usage limit answered .*status=429 .*advice=pool resets_at=#{resets_at} resets_in_seconds=#{seconds} answered_status=429\n/
+    end
+
+    test "native websocket: codex-tui's answered line names the 429 it was sent" do
+      put_owner_forwarding!(false)
+      resets_at = DateTime.to_unix(DateTime.utc_now()) + @provider_reset_seconds
+      setup = gateway_setup(start_upstream(FakeUpstream.websocket_text_frames([provider_usage_limit_frame(resets_at)])))
+      port = start_public_endpoint!()
+
+      {event, log} =
+        with_log([level: :info], fn ->
+          event = websocket_turn!(port, setup, @turn_path, "codex-tui")
+          _rows = settled_rows!(setup)
+          event
+        end)
+
+      assert %{"type" => "error", "status" => 429, "error" => %{"resets_in_seconds" => seconds}} = event
+      assert log =~ ~r/websocket usage limit answered .*status=429 .*advice=pool resets_at=#{resets_at} resets_in_seconds=#{seconds} answered_status=429\n/
+    end
+
+    # A sibling taken out by an open circuit has no known return, so the Pool
+    # advice is withheld and the refusal is relayed as the classified 429 to
+    # every client, the Codex Desktop app included.
+    test "native websocket: a withheld-advice relay stays the classified 429 for Codex Desktop, and its line says so" do
+      put_owner_forwarding!(false)
+      resets_at = DateTime.to_unix(DateTime.utc_now()) + @provider_reset_seconds
+      setup = gateway_setup(start_upstream(FakeUpstream.websocket_text_frames([provider_usage_limit_frame(resets_at)])))
+      sibling = gateway_upstream(setup.pool, start_upstream(FakeUpstream.json_response(%{"output" => []})), "upstream-token-desktop-sibling", compact?: false)
+      setup = %{setup | model: put_model_source_assignments!(setup.model, [setup.assignment, sibling.assignment])}
+      open_circuit!(setup, sibling)
+      port = start_public_endpoint!()
+
+      {event, log} =
+        with_log([level: :info], fn ->
+          event = websocket_turn!(port, setup, @turn_path, @desktop)
+          _rows = settled_rows!(setup)
+          event
+        end)
+
+      assert %{"type" => "error", "status" => 429, "error" => %{"type" => "usage_limit_reached"}} = event
+      assert log =~ ~r/websocket usage limit answered .*status=429 .*advice=withheld answered_status=429\n/
+    end
+  end
+
+  # The originator is read on the socket's node only: by the socket, and by
+  # its response task, which runs the dispatch attempt. Nothing that node
+  # sends the session's owner on another VM carries it, so an owner of an
+  # earlier release, which checks what it receives field by field, never meets
+  # it in either direction of a rolling deploy (findings#270 row 270-261).
+  describe "the originator across nodes" do
+    @tag slow: "boots a second VM that owns the session and shares the committed database"
+    test "never leaves the socket's node for the session's owner on another VM" do
+      put_owner_forwarding!(true)
+      enter_peer_owner_topology!()
+      setup = gateway_setup(start_upstream(FakeUpstream.websocket_text_frames(served_turn_events())))
+      thread = Ecto.UUID.generate()
+      peer_owner = start_peer_window_owner!(setup, "#{thread}:0")
+      port = start_public_endpoint!()
+      marker = "synthetic-originator-" <> Base.encode16(:crypto.strong_rand_bytes(6), case: :lower)
+
+      {terminal, crossings} = with_crossing_trace(fn -> traced_turn!(port, setup, thread, marker) end)
+
+      assert %{"type" => "response.completed", "response" => %{"id" => "resp_desktop_served"}} = terminal
+      assert node(peer_owner.owner_pid) != node()
+      assert Enum.any?(crossings, &match?({:call, [_node, WebsocketOwnerForwarder, :remote_attach_downstream | _rest]}, &1))
+
+      # The turn's submission leaves from the socket's response task, a
+      # sensitive process no trace can observe here, so it is read where it
+      # arrives: the peer traces its forwarder's entry (`start_bridge_peer!/3`).
+      assert_receive {:remote_forwarder_v1_call, _pid, [_session_id, _downstream, _owner_request] = submission}, 15_000
+
+      for crossing <- [{:received, :remote_submit_request_v1, submission} | crossings] do
+        assert :binary.match(:erlang.term_to_binary(crossing), marker) == :nomatch, "the originator crossed: #{inspect(crossing, limit: 8)}"
       end
     end
   end
@@ -264,6 +371,30 @@ defmodule CodexPoolerWeb.Runtime.DesktopUsageLimitAnswerTest do
     setup = gateway_setup(start_upstream(FakeUpstream.json_response(%{"output" => []})), quota?: false)
     prime_resetless_routing_quota!(setup.identity)
     setup
+  end
+
+  defp open_circuit!(setup, sibling) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    for route_class <- ["proxy_websocket", "proxy_stream", "proxy_http"] do
+      Repo.insert!(%CodexPooler.Gateway.Persistence.RoutingCircuitState{
+        pool_id: setup.pool.id,
+        pool_upstream_assignment_id: sibling.assignment.id,
+        upstream_identity_id: sibling.identity.id,
+        model_identifier: setup.model.exposed_model_id,
+        route_class: route_class,
+        status: "open",
+        reason_code: "upstream_5xx",
+        failure_count: 3,
+        success_count: 0,
+        opened_at: now,
+        last_failure_at: now,
+        next_probe_at: DateTime.add(now, 60, :second),
+        metadata: %{"probe_in_flight_count" => 0},
+        created_at: now,
+        updated_at: now
+      })
+    end
   end
 
   defp provider_usage_limit_frame(resets_at) do
@@ -317,7 +448,7 @@ defmodule CodexPoolerWeb.Runtime.DesktopUsageLimitAnswerTest do
   # The Codex session headers, and the client's own `originator` and
   # `user-agent` (a client with neither sends only an agent of its own).
   defp client_headers(originator, thread) do
-    session = [{"session-id", thread}, {"thread-id", thread}, {"x-client-request-id", thread}, {"x-codex-window-id", "#{thread}:0"}]
+    session = session_headers(thread)
 
     case originator do
       nil -> [{"user-agent", "synthetic-sdk/1.0"} | session]
@@ -325,6 +456,8 @@ defmodule CodexPoolerWeb.Runtime.DesktopUsageLimitAnswerTest do
       originator -> [{"originator", originator}, {"user-agent", "#{originator}/0.158.0 (Mac OS 27.0.0; arm64) unknown (#{originator}; 0.158.0)"} | session]
     end
   end
+
+  defp session_headers(thread), do: [{"session-id", thread}, {"thread-id", thread}, {"x-client-request-id", thread}, {"x-codex-window-id", "#{thread}:0"}]
 
   # A compaction request carries its model and input only.
   defp native_http_body(path, setup) do
@@ -359,6 +492,77 @@ defmodule CodexPoolerWeb.Runtime.DesktopUsageLimitAnswerTest do
         true -> Process.sleep(10) && {:cont, nil}
       end
     end)
+  end
+
+  # Every call a process of this node makes to another node (`:erpc.call/5`)
+  # and every message it sends a process there, until `fun` returned and its
+  # socket was cleaned up; the trace is removed afterwards. A sensitive
+  # process (the response task, the upstream and owner sessions) is not
+  # traced.
+  defp with_crossing_trace(fun) do
+    remote_receiver = [
+      {[:"$1", :_], [{:is_pid, :"$1"}, {:"=/=", {:node, :"$1"}, {:node}}], []},
+      {[{:_, :"$1"}, :_], [{:is_atom, :"$1"}, {:"=/=", :"$1", {:node}}], []}
+    ]
+
+    _count = :erlang.trace_pattern({:erpc, :call, 5}, true, [:global])
+    _count = :erlang.trace_pattern(:send, remote_receiver, [])
+    _count = :erlang.trace(:processes, true, [:call, :send, {:tracer, self()}])
+
+    result =
+      try do
+        fun.()
+      after
+        _count = :erlang.trace(:processes, false, [:call, :send])
+        _count = :erlang.trace_pattern({:erpc, :call, 5}, false, [:global])
+        _count = :erlang.trace_pattern(:send, true, [])
+      end
+
+    ref = :erlang.trace_delivered(:all)
+    assert_receive {:trace_delivered, :all, ^ref}, 15_000
+    {result, drain_crossings([])}
+  end
+
+  defp drain_crossings(crossings) do
+    receive do
+      {:trace, _pid, :call, {:erpc, :call, args}} -> drain_crossings([{:call, args} | crossings])
+      {:trace, _pid, :send, message, to} when is_pid(to) and node(to) != node() -> drain_crossings([{:send, to, message} | crossings])
+      {:trace, _pid, :send, message, {_name, to_node} = to} when to_node != node() -> drain_crossings([{:send, to, message} | crossings])
+      {:trace, _pid, :send, _message, _local} -> drain_crossings(crossings)
+    after
+      0 -> Enum.reverse(crossings)
+    end
+  end
+
+  # One served native turn on its own socket, waited for until the socket's
+  # cleanup (and its owner detach) is done.
+  defp traced_turn!(port, setup, thread, originator) do
+    before = WebsocketCleanupFence.listener_sockets()
+    {:ok, conn} = Mint.HTTP.connect(:http, "127.0.0.1", port, protocols: [:http1])
+    headers = [{"authorization", setup.authorization}, {"openai-beta", "responses_websockets=2026-02-06"}, {"originator", originator}, {"user-agent", "synthetic-client/1.0"} | session_headers(thread)]
+    {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, @turn_path, headers)
+    {:ok, conn, status, response_headers} = await_public_websocket_upgrade(conn, ref)
+    {conn, websocket} = mint_websocket_new!(conn, ref, status, response_headers)
+    socket = WebsocketCleanupFence.await_new_listener_socket!(before)
+    {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(Map.put(native_body(setup, thread), "type", "response.create")))
+    terminal = receive_terminal!(conn, websocket, ref)
+    _rows = settled_rows!(setup)
+    Mint.HTTP.close(conn)
+    :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(socket)
+    terminal
+  end
+
+  defp served_turn_events do
+    item = %{"type" => "message", "id" => "msg_desktop_served", "role" => "assistant", "status" => "completed", "content" => [%{"type" => "output_text", "text" => "synthetic answer"}]}
+
+    Enum.map(
+      [
+        %{"type" => "response.created", "response" => %{"id" => "resp_desktop_served", "status" => "in_progress", "output" => []}},
+        %{"type" => "response.output_item.done", "output_index" => 0, "item" => item},
+        %{"type" => "response.completed", "response" => %{"id" => "resp_desktop_served", "status" => "completed", "output" => [item], "usage" => %{"input_tokens" => 5, "output_tokens" => 2, "total_tokens" => 7}}}
+      ],
+      &CodexPooler.JSON.encode!/1
+    )
   end
 
   defp put_owner_forwarding!(enabled?) do

@@ -3808,7 +3808,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   # The upgrade's `originator` on a native socket; a public `/v1` socket keeps
   # the answer every client gets.
-  defp usage_limit_originator(state), do: if(Adapter.public_responses_stream?(state), do: nil, else: Map.get(state, :client_originator))
+  defp usage_limit_originator(state), do: RequestOptions.native_originator(Map.get(state, :opts))
 
   defp sole_account_check(state, task_pid) do
     model = state |> Map.get(:response_task_models, %{}) |> Map.get(task_pid)

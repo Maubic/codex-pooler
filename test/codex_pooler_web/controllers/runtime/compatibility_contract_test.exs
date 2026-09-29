@@ -709,7 +709,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
         assert Contracts.native_usage_limit_answer(refusal, originator) == refusal
       end
 
-      assert fixture.recorded == %{status: terminal.status, code: terminal.code, usage_limit: :advised_reset, http_request_line_status: 400}
+      assert fixture.recorded == %{status: terminal.status, code: terminal.code, usage_limit: :advised_reset, http_request_line_status: 400, websocket_answered_line: %{status: terminal.status, answered_status: answer.status}}
       assert Contracts.usage_limit_record(answer) == Contracts.usage_limit_record(refusal)
       assert fixture.topologies == [:owner_forwarding_off, :owner_on_this_node]
     end

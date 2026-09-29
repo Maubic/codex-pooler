@@ -438,7 +438,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
         &ProviderUsageLimit.pool_frame(&1, fn -> other_candidates_return(context) end, fn -> other_candidates_circuit_seconds(context) end)
       )
 
-    answer = delivered |> List.last() |> usage_limit_answer()
+    answer = delivered |> List.last() |> usage_limit_answer(RequestOptions.native_originator(context.request_options))
     log_usage_limit_answer(answer, dispatch_request, failure)
 
     response_context = context |> retryable_websocket_response_context(response) |> record_usage_limit_answer(answer)
@@ -752,43 +752,58 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
   # What the socket answers a pre-output usage-limit refusal with, read the way
   # the socket projects the delivered frame (`ProviderUsageLimit.frame_projection/2`):
   # the terminal usage limit and the reset it advises, or the classified relay
-  # whose Pool advice was withheld (findings#206 row 206-596).
-  defp usage_limit_answer(frame) when is_binary(frame) do
+  # whose Pool advice was withheld (findings#206 row 206-596), each with the
+  # status the socket sends. The terminal goes out as the client's originator
+  # reads it (`Contracts.native_usage_limit_answer/2`: `400` to the Codex
+  # Desktop app on a native route, findings#279 point 2); the relay is `429`
+  # to every client.
+  defp usage_limit_answer(frame, originator) when is_binary(frame) do
     case CodexPooler.JSON.decode(frame) do
-      {:ok, %{} = decoded} -> decoded |> ProviderUsageLimit.frame_projection() |> projected_usage_limit_answer()
+      {:ok, %{} = decoded} -> decoded |> ProviderUsageLimit.frame_projection() |> projected_usage_limit_answer(originator)
       _other -> nil
     end
   end
 
-  defp usage_limit_answer(_frame), do: nil
+  defp usage_limit_answer(_frame, _originator), do: nil
 
-  defp projected_usage_limit_answer({:terminal, error}), do: {:terminal, Contracts.usage_limit_record(error)}
-  defp projected_usage_limit_answer({:relay, _provider_error}), do: :withheld
-  defp projected_usage_limit_answer(:canonical), do: nil
+  defp projected_usage_limit_answer({:terminal, error}, originator),
+    do: {:terminal, Contracts.usage_limit_record(error), Contracts.native_usage_limit_answer(error, originator).status}
 
-  # The row records the 429 the client was answered, and the attempt the reset
-  # a terminal answer advised, like the HTTP twin (rows 206-553, 206-596).
-  defp record_usage_limit_answer(%ResponseContext{response: response} = response_context, {:terminal, record}),
+  defp projected_usage_limit_answer({:relay, _provider_error}, _originator), do: {:withheld, 429}
+  defp projected_usage_limit_answer(:canonical, _originator), do: nil
+
+  # The row records the 429 refusal, and the attempt the reset a terminal
+  # answer advised, like the HTTP twin (rows 206-553, 206-596); the Codex
+  # Desktop app's `400` rendering of it is recorded as the refusal too.
+  defp record_usage_limit_answer(%ResponseContext{response: response} = response_context, {:terminal, record, _answered_status}),
     do: %{response_context | response: response |> Map.put(:status, 429) |> Req.Response.put_private(:usage_limit_record, record)}
 
-  defp record_usage_limit_answer(%ResponseContext{response: response} = response_context, :withheld),
+  defp record_usage_limit_answer(%ResponseContext{response: response} = response_context, {:withheld, _answered_status}),
     do: %{response_context | response: %{response | status: 429}}
 
   defp record_usage_limit_answer(response_context, nil), do: response_context
 
   defp log_usage_limit_answer(nil, _dispatch_request, _failure), do: :ok
 
+  # `status` is the refusal's, which the row records, and `answered_status`
+  # the status the socket sends: `400` for the Codex Desktop app's rendering
+  # of the terminal answer, `429` otherwise (findings#270 row 270-261).
   defp log_usage_limit_answer(answer, dispatch_request, failure) do
-    advice =
+    {advice, answered_status} =
       case answer do
-        {:terminal, %{"resets_at" => resets_at, "resets_in_seconds" => seconds}} -> "advice=pool resets_at=#{resets_at} resets_in_seconds=#{seconds}"
-        {:terminal, _record} -> "advice=pool"
-        :withheld -> "advice=withheld"
+        {:terminal, %{"resets_at" => resets_at, "resets_in_seconds" => seconds}, answered_status} ->
+          {"advice=pool resets_at=#{resets_at} resets_in_seconds=#{seconds}", answered_status}
+
+        {:terminal, _record, answered_status} ->
+          {"advice=pool", answered_status}
+
+        {:withheld, answered_status} ->
+          {"advice=withheld", answered_status}
       end
 
     Logger.info(
       "websocket usage limit answered request_id=#{accounting_request_id(dispatch_request)} " <>
-        "status=429 error_code=#{DiagnosticTaxonomy.identifier(to_string(Map.get(failure, :code)))} " <> advice
+        "status=429 error_code=#{DiagnosticTaxonomy.identifier(to_string(Map.get(failure, :code)))} " <> advice <> " answered_status=#{answered_status}"
     )
   end
 

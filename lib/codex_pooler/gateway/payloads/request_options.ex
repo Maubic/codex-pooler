@@ -721,6 +721,22 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
     end
   end
 
+  @doc """
+  The client's own `originator` header on a native Codex route, which decides
+  how the Pool-exhausted refusal reads to that client
+  (`Contracts.native_usage_limit_answer/2`, findings#279 point 2); `nil` on a
+  public `/v1` route or a route translated from one, whose answers never
+  depend on it.
+  """
+  @spec native_originator(t() | term()) :: String.t() | nil
+  def native_originator(%__MODULE__{
+        openai_compatibility: %OpenAICompatibility{public_openai_responses_stream: false, source_endpoint: nil},
+        request_metadata: %RequestMetadata{originator: originator}
+      }),
+      do: originator
+
+  def native_originator(_options), do: nil
+
   @spec client_request_metadata(t()) :: map()
   def client_request_metadata(%__MODULE__{} = options) do
     case safe_client_request_id(options.request_metadata.client_request_id) do
@@ -955,6 +971,7 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
       idempotency_key: Map.get(opts, :idempotency_key),
       client_ip: Map.get(opts, :client_ip),
       user_agent: Map.get(opts, :user_agent),
+      originator: Map.get(opts, :originator),
       request_bytes: Map.get(opts, :request_bytes) || json_request_bytes(payload),
       upload_bytes: Map.get(opts, :upload_bytes),
       request_content_type: Map.get(opts, :request_content_type)

@@ -2701,6 +2701,23 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptionsTest do
     end
   end
 
+  # findings#279 point 2, findings#270 row 270-261: the originator decides the
+  # Pool-exhausted answer only on a native Codex route.
+  describe "native_originator/1" do
+    test "carries the client's originator on a native route only" do
+      native = RequestOptions.build(%{originator: "Codex Desktop"}, "/backend-api/codex/responses", %{})
+      assert RequestOptions.native_originator(native) == "Codex Desktop"
+      assert RequestOptions.native_originator(RequestOptions.build(%{}, "/backend-api/codex/responses", %{})) == nil
+
+      public_socket = RequestOptions.put_openai_compatibility(native, public_openai_responses_stream: true)
+      translated = RequestOptions.mark_openai_compatibility_origin(native, "/v1/responses", "/backend-api/codex/responses")
+
+      for options <- [public_socket, translated, nil, %{}] do
+        assert RequestOptions.native_originator(options) == nil
+      end
+    end
+  end
+
   describe "json_request_bytes/1" do
     test "returns nil for payloads that cannot be encoded as JSON" do
       assert RequestOptions.json_request_bytes(%{"callback" => fn -> :ok end}) == nil

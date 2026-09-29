@@ -155,6 +155,7 @@ defmodule CodexPoolerWeb.GatewayControllerHelpers do
       session_header: session_header,
       session_header_source: session_header_source,
       user_agent: get_req_header(conn, "user-agent") |> List.first(),
+      originator: client_originator(conn),
       request_content_type: get_req_header(conn, "content-type") |> List.first(),
       forwarded_headers: forwarded_headers(conn),
       client_ip: conn.remote_ip |> :inet.ntoa() |> to_string()
@@ -218,7 +219,7 @@ defmodule CodexPoolerWeb.GatewayControllerHelpers do
         |> put_resp_header("x-codex-turn-state", turn_state)
         |> WebSockAdapter.upgrade(
           CodexPoolerWeb.CodexResponsesSocket,
-          %{auth: auth, opts: request_options, firewall_client_ip: conn.remote_ip, client_originator: client_originator(conn)},
+          %{auth: auth, opts: request_options, firewall_client_ip: conn.remote_ip},
           websocket_upgrade_opts()
         )
         |> halt()
