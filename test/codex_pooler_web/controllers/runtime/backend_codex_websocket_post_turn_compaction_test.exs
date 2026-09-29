@@ -1023,9 +1023,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
   # the `previous_response_not_found` event of the guard's refusal, and its
   # full-history retry is served in both topologies (findings#270 row 270-238).
   # The refused request reached the provider, so it keeps its unknown usage.
-  for topology <- [:direct, :owner_forwarded] do
-    @tag topology: topology
-    test "#{topology} provider refusal of a compaction's anchor reaches the client as previous_response_not_found and the full-history retry is served", %{topology: topology} do
+  # The `past_old_bound` arm is the path an armed compaction has relied on
+  # since it has no time bound (findings#270 row 270-317): reserved long after
+  # the turn that armed it, it is refused by a provider that no longer
+  # resolves the anchor on its connection, and the client still gets the
+  # retry signal. The arming bound is shortened to a millisecond on this node,
+  # which computes it, for the anchor turn only.
+  for topology <- [:direct, :owner_forwarded], pause <- [:none, :past_old_bound] do
+    @tag topology: topology, pause: pause
+    test "#{topology} provider refusal of a compaction's anchor#{if pause == :past_old_bound, do: " after a pause past the old admission bound"} reaches the client as previous_response_not_found and the full-history retry is served", %{topology: topology, pause: pause} do
       put_owner_forwarding!(topology == :owner_forwarded)
       turn_id = "provider-refusal-#{topology}"
       history = [window_message("synthetic provider-refusal anchor")]
@@ -1047,9 +1053,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
       state = callback_socket!(setup, "provider-refusal-#{topology}")
 
       try do
+        if pause == :past_old_bound, do: put_reservation_ttl!(1)
         state = run_turn!(state, mid_turn_payload(setup, history, turn_id, "turn", 1))
+        if pause == :past_old_bound, do: pass_old_bound!()
         {{state, frames}, log} = with_log(fn -> run_turn_frames!(state, window_compaction_frame(setup, turn_id, "resp_provider_refusal_anchor")) end)
         assert frames == [native_previous_response_retry_event()]
+        refute log =~ "native compaction refused before dispatch"
         assert log =~ "compact terminal decision source_stage=provider_terminal code=stream_incomplete status=400 terminal_type=error reason_code=previous_response_not_found"
 
         {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1))
@@ -1073,6 +1082,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
         refute Map.has_key?(metadata, "transport_failure")
         [refused_estimate] = Repo.all(from(entry in LedgerEntry, where: entry.request_id == ^refused.id and entry.entry_kind == "reservation", select: entry.total_tokens))
         assert key_usage_events(refused.id) == %{known: 0, provisional: refused_estimate, admissions: 1}
+        # Nothing is billed: the provider refused before any work, so every
+        # ledger entry of the refused request settles at no cost; its
+        # reservation estimate is held only as the unknown usage above.
+        assert refused.usage_status == "usage_unknown"
+        assert [_ | _] = costs = Repo.all(from(entry in LedgerEntry, where: entry.request_id == ^refused.id, select: entry.settled_cost_micros))
+        assert Enum.all?(costs, &Decimal.eq?(&1, 0))
         assert key_usage_events(retry.id) == %{known: @compact_usage["total_tokens"], provisional: 0, admissions: 1}
         assert :ok = FakeUpstream.verify!(upstream)
       after
@@ -1775,6 +1790,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
 
   defp bound_to?(%NativeCompactionAdmission{binding: %{lifecycle_id: lifecycle_id, generation: generation}}, %{lifecycle_id: lifecycle_id, generation: generation}), do: true
   defp bound_to?(_admission, _connection), do: false
+
+  # The bound an ordinary success arms a compaction with is computed on this
+  # node; the compaction's own reservation is bounded from the default,
+  # restored before it.
+  defp put_reservation_ttl!(ttl_ms) do
+    CodexPooler.TestAppEnv.restore_on_exit(NativeCompactionAdmission)
+    Application.put_env(:codex_pooler, NativeCompactionAdmission, reservation_ttl_ms: ttl_ms)
+  end
+
+  defp pass_old_bound! do
+    Application.put_env(:codex_pooler, NativeCompactionAdmission, [])
+    Process.sleep(10)
+  end
 
   defp put_owner_forwarding!(enabled?) do
     previous = Application.fetch_env(:codex_pooler, :websocket_owner_forwarding_enabled)
