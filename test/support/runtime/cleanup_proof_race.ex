@@ -105,6 +105,63 @@ defmodule CodexPoolerWeb.Runtime.CleanupProofRace do
     attempt_id
   end
 
+  @doc """
+  The window a resend can be claimed in (findings#270 row 270-364): holds the
+  closing socket's cleanup at the first transaction it begins once `task` is
+  dead, which is its interrupt of the stopped task's request, right after that
+  transaction's `begin`, before it read or locked anything. Rows must be
+  committed (the test runs the Sandbox in `:auto` mode, each process on its own
+  connection), so a resend claimed on a new connection meanwhile reads what the
+  cleanup committed before its interrupt, with the request still in progress.
+  Only statements of processes started by `socket` are matched (the cleanup
+  runs in a task the socket started, `$callers`). `await_interrupt_held!/1`
+  answers the held process; it waits for `release_interrupt/2`, or releases
+  itself after the detection budget.
+  """
+  @spec hold_interrupt_after_stop!(pid(), pid()) :: reference()
+  def hold_interrupt_after_stop!(socket, task) do
+    ref = make_ref()
+    handler_id = {__MODULE__, ref}
+    ExUnit.Callbacks.on_exit(fn -> :telemetry.detach(handler_id) end)
+    config = %{ref: ref, test: self(), socket: socket, task: task, claimed: :atomics.new(1, [])}
+    :ok = :telemetry.attach(handler_id, [:codex_pooler, :repo, :query], &__MODULE__.handle_query/4, config)
+    ref
+  end
+
+  @spec await_interrupt_held!(reference()) :: pid()
+  def await_interrupt_held!(ref) do
+    receive do
+      {^ref, :held, cleanup} ->
+        ExUnit.Callbacks.on_exit(fn -> send(cleanup, {ref, :release}) end)
+        cleanup
+    after
+      @detection_timeout_ms -> flunk("the closing socket's cleanup never began its interrupt after the stop")
+    end
+  end
+
+  @spec release_interrupt(reference(), pid()) :: :ok
+  def release_interrupt(ref, cleanup) do
+    send(cleanup, {ref, :release})
+    :ok
+  end
+
+  @doc false
+  def handle_query(_event, _measurements, %{query: "begin"}, %{ref: ref, test: test, socket: socket, task: task, claimed: claimed}) do
+    if socket in Process.get(:"$callers", []) and not Process.alive?(task) and :atomics.add_get(claimed, 1, 1) == 1 do
+      send(test, {ref, :held, self()})
+
+      receive do
+        {^ref, :release} -> :ok
+      after
+        @detection_timeout_ms -> :ok
+      end
+    end
+
+    :ok
+  end
+
+  def handle_query(_event, _measurements, _metadata, _config), do: :ok
+
   @doc false
   def hook(%{ref: ref, prover: prover}, {:in, {:"$gen_call", _from, {:direct_await, _context}}}, _name) do
     send(prover, {ref, :held, self()})

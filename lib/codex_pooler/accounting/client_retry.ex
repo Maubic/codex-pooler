@@ -50,6 +50,10 @@ defmodule CodexPooler.Accounting.ClientRetry do
   # `DeliveryReceipt.resendable_frame_classes/0`, kept literal: accounting does
   # not reference the gateway receipt module at compile time.
   @resendable_frame_classes ~w(lifecycle item_added part_added delta)
+  # The classes `DeliveryReceipt.frame_classes/0` ranks above those and below a
+  # terminal: a completed item the released client keeps, and the frames the
+  # ranking does not know, which keep the fence with it. Kept literal too.
+  @kept_frame_classes ~w(other item_done)
   # `DeliveryReceipt.write_failures/0`, kept literal for the same reason.
   @write_failures ~w(timeout closed other)
   # How long after the provider's completion a failed downstream write may
@@ -1547,14 +1551,16 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   # Local execution failures carry no provider terminal. Compaction still
   # requires an unseen compact response; ordinary turn retries allow visible
-  # output and must not broaden this policy through their shared matchers.
+  # output and must not broaden this policy through their shared matchers. The
+  # compaction policy judges the dead execution's settlement on its own terms,
+  # not by the turn policy's delivery receipt (`verified_dead_execution?/3`).
   defp verified_compaction_execution_failure?(
          %CodexTurn{first_visible_output_at: nil} = turn,
          %Request{endpoint: "/backend-api/codex/responses/compact"} = request,
          %Attempt{usage_status: "usage_unknown"} = attempt
        ) do
     verified_task_exception?(turn, request, attempt) or
-      verified_dead_execution?(turn, request, attempt)
+      dead_execution_settlement?(turn, request, attempt)
   end
 
   defp verified_compaction_execution_failure?(_turn, _request, _attempt), do: false
@@ -1758,43 +1764,73 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   defp verified_task_exception?(_turn, _request, _attempt), do: false
 
-  @doc false
+  @doc """
+  A turn whose executor was proven dead (`dead_execution_recovered`, or
+  `absent_instance_recovered` for an instance gone), whose client's resend is
+  admitted as its successor, unless the client was shown something that resend
+  would generate a second time: a delivered `response.completed`, or a frame the
+  released client keeps (a completed item, and the frames the receipt ranks
+  with it). Such a turn is never generated again, whichever path closed it, as
+  the undelivered-output and completed-item fences hold for a turn settled
+  `client_disconnected`. The socket's delivery receipt is the evidence, and a
+  resend can be claimed before the request is settled, as soon as the proof
+  landed, so the socket commits it before it kills a task it stopped
+  (findings#270 rows 270-364 and 270-369). A turn without a receipt keeps the
+  recovery: an executor lost with its instance (a restart, a database outage)
+  never had one recorded. Compactions keep their own policy
+  (`compaction_resend_shape/3`).
+  """
   @spec verified_dead_execution?(term(), term(), term()) :: boolean()
-  def verified_dead_execution?(
-        %CodexTurn{
-          status: "interrupted",
-          error_code: recovery_code,
-          final_attempt_id: attempt_id,
-          transport_kind: "websocket",
-          completed_at: %DateTime{}
-        },
-        %Request{
-          status: "failed",
-          response_status_code: 499,
-          last_error_code: recovery_code,
-          usage_status: "usage_unknown",
-          completed_at: %DateTime{}
-        },
-        %Attempt{
-          id: attempt_id,
-          status: "failed",
-          network_error_code: recovery_code,
-          transport: "websocket",
-          replay_generation: 0,
-          usage_status: "usage_unknown",
-          owner_instance_id: owner,
-          owner_instance_boot_id: boot,
-          owner_process_id: pid,
-          owner_execution_id: execution,
-          completed_at: %DateTime{}
-        }
-      )
-      when recovery_code in ["dead_execution_recovered", "absent_instance_recovered"] and
-             is_binary(attempt_id) and is_binary(owner) and is_binary(boot) and is_binary(pid) and
-             is_binary(execution),
-      do: true
+  def verified_dead_execution?(turn, request, attempt),
+    do: dead_execution_settlement?(turn, request, attempt) and not kept_output_delivered?(attempt)
 
-  def verified_dead_execution?(_turn, _request, _attempt), do: false
+  defp dead_execution_settlement?(
+         %CodexTurn{
+           status: "interrupted",
+           error_code: recovery_code,
+           final_attempt_id: attempt_id,
+           transport_kind: "websocket",
+           completed_at: %DateTime{}
+         },
+         %Request{
+           status: "failed",
+           response_status_code: 499,
+           last_error_code: recovery_code,
+           usage_status: "usage_unknown",
+           completed_at: %DateTime{}
+         },
+         %Attempt{
+           id: attempt_id,
+           status: "failed",
+           network_error_code: recovery_code,
+           transport: "websocket",
+           replay_generation: 0,
+           usage_status: "usage_unknown",
+           owner_instance_id: owner,
+           owner_instance_boot_id: boot,
+           owner_process_id: pid,
+           owner_execution_id: execution,
+           completed_at: %DateTime{}
+         }
+       )
+       when recovery_code in ["dead_execution_recovered", "absent_instance_recovered"] and
+              is_binary(attempt_id) and is_binary(owner) and is_binary(boot) and is_binary(pid) and
+              is_binary(execution),
+       do: true
+
+  defp dead_execution_settlement?(_turn, _request, _attempt), do: false
+
+  # A completed item stays counted when a terminal of another class followed it.
+  defp kept_output_delivered?(%Attempt{response_metadata: %{"downstream_delivery" => %{} = receipt}}) do
+    delivered_completion?(receipt) or receipt["highest_frame_class"] in @kept_frame_classes or
+      match?(%{"completed_items" => count} when is_integer(count) and count > 0, receipt)
+  end
+
+  defp kept_output_delivered?(_attempt), do: false
+
+  defp delivered_completion?(%{"terminal_class" => "response.completed", "highest_frame_class" => "terminal"}), do: true
+  defp delivered_completion?(%{"terminal_class" => "response.completed", "outcome" => "delivered"}), do: true
+  defp delivered_completion?(_receipt), do: false
 
   # Owner-forwarded cleanup can commit milliseconds before the one-second
   # terminal-proof publisher reaches PostgreSQL. The row then carries the

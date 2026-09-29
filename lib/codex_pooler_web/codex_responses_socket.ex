@@ -6033,17 +6033,24 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # 206-110: under load the stop landed inside a query, a commit or the task's
   # own settlement). A task busy anywhere else keeps the ordinary cancel; if the
   # provider then answers, its settlement is the correction of the interrupt's.
+  #
+  # The stopped task never hands its result to the drain, which is where a
+  # running task's delivery receipt is recorded (findings#225 row 225-100), so
+  # its single aborted receipt is recorded here, committed before the kill.
+  # The kill is what lets the executor's terminal proof land, and a resend
+  # claimed between the proof and this cleanup's interrupt recovers the request
+  # as a dead execution: it must find what the client was shown. Recorded after
+  # the interrupt, an identical resend after a completed item was served as
+  # that dead execution's successor and generated the turn a second time
+  # (findings#270 row 270-364, `ClientRetry.verified_dead_execution?/3`).
   defp stop_previsible_direct_task(state, pid, context) do
-    case DirectCleanup.stop_upstream_wait(context, "client_disconnected") do
+    case DirectCleanup.grant_upstream_stop(context) do
       :busy ->
         cancel_direct_response(state, pid, context)
 
-      result ->
-        # The stopped task never hands its result to the drain, which is where
-        # a running task's delivery receipt is recorded (findings#225 row
-        # 225-100), so its single aborted receipt is recorded here.
+      :stop ->
         record_downstream_delivery_receipt(state, pid, :aborted)
-        result
+        DirectCleanup.terminate_admission(context, "client_disconnected")
     end
   end
 

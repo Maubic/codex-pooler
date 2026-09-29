@@ -177,22 +177,22 @@ defmodule CodexPooler.Gateway.Websocket.DirectCleanup do
   end
 
   @doc """
-  Stops a direct task only while it is blocked on its upstream request, then
-  interrupts its request (`terminate_admission/2`). A task doing anything else,
-  database work above all, is left running and answers `:busy`: killing a
-  process inside a query or a commit drops its connection and can leave its
-  own settlement half done (findings#206 row 206-110, measured under load).
+  Grants the stop of a direct task only while it is blocked on its upstream
+  request (`:stop`); the caller then kills it and interrupts its request with
+  `terminate_admission/2`. A task doing anything else, database work above
+  all, is left running and answers `:busy`: killing a process inside a query or
+  a commit drops its connection and can leave its own settlement half done
+  (findings#206 row 206-110, measured under load). A granted task settles
+  nothing any more (`upstream_wait/2`), so what must be durable before its end
+  can be proven goes between the grant and the kill: the socket's delivery
+  receipt, which a resend claimed once the executor's terminal proof landed
+  reads before it recovers the request (findings#270 row 270-364).
   """
-  @spec stop_upstream_wait(t(), String.t()) :: cleanup_result() | :busy
-  def stop_upstream_wait(context, reason) do
-    case ActivityRegistry.stop_direct_upstream_wait(context) do
-      :stop -> terminate_admission(context, reason)
-      :busy -> :busy
-    end
-  end
+  @spec grant_upstream_stop(t()) :: :stop | :busy
+  def grant_upstream_stop(context), do: ActivityRegistry.stop_direct_upstream_wait(context)
 
   @doc """
-  Runs the direct task's upstream request inside the span `stop_upstream_wait/2`
+  Runs the direct task's upstream request inside the span `grant_upstream_stop/1`
   may stop it in. A stop granted while the request was running makes the task
   exit before it settles anything; the socket settles the request instead.
   """
