@@ -633,7 +633,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   def remote_consume_replay_reserve(codex_session_id, proof)
       when is_binary(codex_session_id) and is_map(proof) do
     with {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id) do
-      WebsocketOwnerSession.consume_reserve_receipt(owner_pid, proof)
+      replay_reserve_call(fn -> WebsocketOwnerSession.consume_reserve_receipt(owner_pid, proof) end)
     end
   end
 
@@ -682,7 +682,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   def remote_validate_replay_reserve(codex_session_id, proof, consume_fence)
       when is_binary(codex_session_id) and is_map(proof) and is_reference(consume_fence) do
     with {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id) do
-      WebsocketOwnerSession.validate_consumed_reserve_receipt(owner_pid, proof, consume_fence)
+      replay_reserve_call(fn -> WebsocketOwnerSession.validate_consumed_reserve_receipt(owner_pid, proof, consume_fence) end)
     end
   end
 
@@ -731,12 +731,23 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   def remote_release_replay_reserve(codex_session_id, proof, consume_fence)
       when is_binary(codex_session_id) and is_map(proof) and is_reference(consume_fence) do
     with {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id) do
-      WebsocketOwnerSession.release_consumed_reserve_receipt(owner_pid, proof, consume_fence)
+      replay_reserve_call(fn -> WebsocketOwnerSession.release_consumed_reserve_receipt(owner_pid, proof, consume_fence) end)
     end
   end
 
   def remote_release_replay_reserve(_codex_session_id, _proof, _consume_fence),
     do: {:error, :owner_unavailable}
+
+  # A replay reserve receipt call its owner does not answer within the owner
+  # call budget, or makes while it exits, answers `owner_unavailable`, the
+  # answer a remote caller already reads for any failure of these calls
+  # (`call_remote_replay_reserve/4`): on the owner's node the call's exit
+  # reached the caller (findings#270 row 270-284).
+  defp replay_reserve_call(call) do
+    call.()
+  catch
+    :exit, _reason -> {:error, :owner_unavailable}
+  end
 
   @spec reconnect_control_v2(
           CodexSession.t(),
@@ -796,10 +807,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   end
 
   @doc false
+  # Answers a timeout, or an owner gone under the call, as the remote caller
+  # already reads them, instead of the call's exit reaching the turn's task on
+  # the owner's node (findings#270 row 270-284).
   def remote_prepare_next_replay_descriptor(session_id, downstream, descriptor) do
     with {:ok, owner_pid} <- WebsocketOwnerSession.lookup(session_id) do
       WebsocketOwnerSession.prepare_next_replay_descriptor(owner_pid, downstream, descriptor)
     end
+  catch
+    :exit, reason -> reconnect_control_exit(reason)
   end
 
   @doc false

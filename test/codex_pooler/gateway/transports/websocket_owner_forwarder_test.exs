@@ -18,6 +18,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   alias CodexPooler.Gateway.Transports.Websocket.AbandonedSubmissions
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.NativeReplayAdmission
+  alias CodexPooler.Gateway.Transports.Websocket.OwnerDefaults
   alias CodexPooler.Gateway.Transports.Websocket.RemoteReconnectControlV2
   alias CodexPooler.Gateway.Transports.Websocket.RolloutDrain
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
@@ -379,6 +380,30 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     assert %{downstream: nil, downstream_monitor: nil} = :sys.get_state(owner)
     refute AbandonedSubmissions.recorded?(key)
     assert Process.alive?(abandoned.pid)
+    assert :ok = WebsocketOwnerSession.drain_owner(owner)
+  end
+
+  # A replay-path call an owner on the caller's node does not answer within
+  # the owner call budget answers as the same call to a remote owner does,
+  # instead of exiting into its caller (findings#270 row 270-284): the next
+  # turn's replay descriptor answers the timeout, a replay reserve receipt call
+  # `owner_unavailable`.
+  test "replay-path calls to a local owner that does not answer within its budget answer as a remote owner's do", %{auth: auth} do
+    %{session: session, token: token} = owner_session_fixture(auth, Atom.to_string(node()), "slow-replay-owner")
+    upstream = WebsocketOwnerNodeHarness.fake_upstream_boundary(self(), messages: [])
+    {:ok, owner} = start_owner(session, upstream)
+    downstream = attach_downstream(session.id, "slow-replay-owner")
+    original = CodexPooler.TestAppEnv.restore_on_exit(OwnerDefaults)
+    Application.put_env(:codex_pooler, OwnerDefaults, Keyword.merge(original, owner_call_timeout_ms: 200))
+    :ok = :sys.suspend(owner)
+    proof = %{owner_lease_token: token}
+
+    assert {:error, :owner_forward_timeout} = WebsocketOwnerForwarder.prepare_next_replay_descriptor(session, token, downstream, %{kind: :native}, [])
+    assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.consume_replay_reserve(session, token, proof, [])
+    assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.validate_replay_reserve(session, token, proof, make_ref(), [])
+    assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.release_replay_reserve(session, token, proof, make_ref(), [])
+
+    :ok = :sys.resume(owner)
     assert :ok = WebsocketOwnerSession.drain_owner(owner)
   end
 

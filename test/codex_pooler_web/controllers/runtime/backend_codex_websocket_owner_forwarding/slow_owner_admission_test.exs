@@ -59,6 +59,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Runtime.OwnerCallHold
   alias CodexPoolerWeb.Runtime.OwnerLossScenario, as: Scenario
+  alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
 
   @moduletag capture_log: true
 
@@ -475,6 +476,81 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
       :ok = await_admission_phase!(compaction.owner, if(ctx.phase == :compact, do: :pending_final, else: :pending_compact))
       Scenario.close!(%{retry | conn: conn, websocket: websocket})
       assert Scenario.settled_statuses!(compaction.setup, 2 + if(ctx.phase == :final, do: 1, else: 0)) |> Enum.all?(&(&1 == "succeeded"))
+    end
+  end
+
+  # An owner on the socket's node that does not answer a socket's attach or
+  # detach within the owner call budget answers the timeout, as an owner on
+  # another node does (findings#270 row 270-284). The call's exit reached the
+  # socket's control path: a second socket's init closed `1011 websocket
+  # initialization unavailable` and the owner took its attach late in place of
+  # the live socket (row 270-248); a closing socket's cleanup ended as a
+  # control path failure instead of leaving the turn to the owner (row
+  # 270-257); a pre-visible detach failed the same way before the drain. The
+  # owner is held right after it answers the second socket's reuse check
+  # (`:owner_status`), so the attach that follows meets it: suspended from the
+  # start, the reuse check itself times out first (row 270-247).
+  @tag topology: :local
+  test "local: a second socket's attach its owner answers too late is refused with the timeout, and the live socket keeps its owner", ctx do
+    compaction = open_compaction_session!(ctx, true, [:anchor, :final])
+    owner = compaction.owner
+    hold = hold_owner_after!(compaction, :owner_status)
+
+    {closed, log} =
+      with_info_log(fn ->
+        second = Scenario.connect!(compaction.port, compaction.setup, Scenario.native_route(), compaction.window)
+        {conn, websocket} = public_websocket_send_text!(second.conn, second.websocket, second.ref, next_turn_frame(compaction, "first turn of a second socket"))
+        {_conn, _websocket, closed} = receive_frames_until_close!(conn, websocket, second.ref)
+        :ok = release_slow_owner!(compaction, hold)
+        closed
+      end)
+
+    assert closed == [{:close, 1011, "websocket owner forwarding timed out"}]
+    assert log =~ "phase=init reason_class=owner_forward_timeout"
+    refute log =~ "websocket control path failed"
+    assert %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_final"}} = send_frame!(compaction, next_turn_frame(compaction, "next turn of the live socket"))
+    assert socket_connection_state!(compaction.client.socket).websocket_owner_pid == owner
+    assert Scenario.settled_statuses!(compaction.setup, 2) == ["succeeded", "succeeded"]
+  end
+
+  for turn <- [:idle, :previsible] do
+    @tag topology: :local, turn: turn
+    test "local: a closing socket's #{turn} detach its owner answers too late is left to the owner", ctx do
+      ref = make_ref()
+      compaction = open_compaction_session!(ctx, true, [:anchor, {:held, self(), ref}])
+      owner = compaction.owner
+      client = compaction.client
+
+      client =
+        if ctx.turn == :previsible do
+          {conn, websocket} = public_websocket_send_text!(client.conn, client.websocket, client.ref, next_turn_frame(compaction, "turn closed before its first output"))
+          assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^ref}, @detection_timeout_ms
+          %{client | conn: conn, websocket: websocket}
+        else
+          client
+        end
+
+      :ok = :sys.suspend(owner)
+
+      {_resumed, log} =
+        with_info_log(fn ->
+          Scenario.close!(client)
+          :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(client.socket)
+          :sys.resume(owner)
+        end)
+
+      assert log =~ "websocket owner detach left to the owner after its call budget"
+      refute log =~ "reason=process_exit"
+
+      # Answering again, the owner runs what the socket sent it: the downstream
+      # is gone, and a pre-visible turn's replay is armed for the resend.
+      state = :sys.get_state(owner)
+      assert state.downstream == nil
+
+      if ctx.turn == :previsible do
+        assert %{provisional_status: :armed} = state.suspended_replay
+        :ok = FakeUpstream.release_remaining_frames(compaction.upstream, ref)
+      end
     end
   end
 

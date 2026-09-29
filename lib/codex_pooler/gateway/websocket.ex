@@ -1242,13 +1242,20 @@ defmodule CodexPooler.Gateway.Websocket do
 
   defp owner_downstream_target(_opts), do: %{pid: self(), correlation_id: Ecto.UUID.generate()}
 
+  # An owner on this node that does not answer an attach within the owner call
+  # budget answers the timeout, as a remote one does, and the attach is
+  # abandoned the same way (findings#270 rows 270-284 and 270-248): the call's
+  # exit used to reach the socket's control path, which closed the socket
+  # `1011 websocket initialization unavailable`, and the owner that took the
+  # attach late made the socket that gave up its downstream in place of the
+  # live one.
   defp attach_owner({:local, owner_instance_id}, codex_session_id, downstream, opts) do
     with {:ok, pid} <-
            WebsocketOwnerSession.lookup(
              codex_session_id,
              owner_lookup_metadata(owner_instance_id, opts)
            ) do
-      WebsocketOwnerSession.attach_downstream(pid, downstream, owner_attach_opts(opts))
+      attach_local_owner(pid, codex_session_id, downstream, opts)
     end
   end
 
@@ -1277,13 +1284,17 @@ defmodule CodexPooler.Gateway.Websocket do
     end
   end
 
+  # A detach an owner on this node does not answer within the owner call
+  # budget answers the timeout a remote owner's does, and the turn is left to
+  # the owner (findings#270 rows 270-284 and 270-257): the call's exit used to
+  # end the socket's cleanup as a control path failure.
   defp detach_owner({:local, owner_instance_id}, codex_session_id, downstream, opts) do
     with {:ok, pid} <-
            WebsocketOwnerSession.lookup(
              codex_session_id,
              owner_lookup_metadata(owner_instance_id, opts)
            ) do
-      WebsocketOwnerSession.detach_downstream(pid, downstream)
+      local_owner_call(fn -> WebsocketOwnerSession.detach_downstream(pid, downstream) end)
     end
   end
 
@@ -1309,13 +1320,16 @@ defmodule CodexPooler.Gateway.Websocket do
     )
   end
 
+  # Read as the remote call's failures are: the downstream stays attached for
+  # the socket's ordinary detach after its drain, which queues behind this call
+  # at the owner (findings#270 row 270-284).
   defp detach_previsible_owner({:local, owner_instance_id}, codex_session_id, downstream, opts) do
     with {:ok, pid} <-
            WebsocketOwnerSession.lookup(
              codex_session_id,
              owner_lookup_metadata(owner_instance_id, opts)
            ) do
-      WebsocketOwnerSession.detach_previsible_downstream(pid, downstream)
+      local_owner_call(fn -> WebsocketOwnerSession.detach_previsible_downstream(pid, downstream) end)
     end
   end
 
@@ -1326,6 +1340,24 @@ defmodule CodexPooler.Gateway.Websocket do
       downstream,
       owner_forwarder_opts(opts)
     )
+  end
+
+  defp attach_local_owner(pid, codex_session_id, downstream, opts) do
+    case local_owner_call(fn -> WebsocketOwnerSession.attach_downstream(pid, downstream, owner_attach_opts(opts)) end) do
+      {:error, :owner_forward_timeout} = timeout ->
+        :ok = WebsocketOwnerForwarder.remote_abandon_attach_v1(codex_session_id, Map.take(downstream, [:pid, :correlation_id]))
+        timeout
+
+      result ->
+        result
+    end
+  end
+
+  defp local_owner_call(call) do
+    call.()
+  catch
+    :exit, {:timeout, _call} -> {:error, :owner_forward_timeout}
+    :exit, _reason -> {:error, :owner_unavailable}
   end
 
   defp cancel_owner_turn({:local, owner_instance_id}, codex_session_id, downstream, reason, opts) do
