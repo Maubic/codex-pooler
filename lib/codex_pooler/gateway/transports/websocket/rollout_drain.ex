@@ -138,6 +138,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
     # The registry whose local owners a drain enumerates. Only a test passes its own, so owners
     # another test leaves in the application registry cannot join its drain.
     owner_registry = Keyword.get(opts, :owner_registry, @registry)
+    drain_policy = drain_policy(opts)
+    :ok = warn_when_budget_leaves_no_turn_window(configured_timeout_ms(), drain_policy)
 
     {:ok,
      %{
@@ -146,7 +148,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
        deadline_ms: nil,
        shutdown_started_at_ms: nil,
        shutdown_timeout_ms: nil,
-       drain_policy: drain_policy(opts),
+       drain_policy: drain_policy,
        activity_registry: activity_registry,
        stream_registry: stream_registry,
        owner_registry: owner_registry,
@@ -583,7 +585,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
         deadline: %{at: deadline_ms, now_ms: drain_policy.now_ms}
       )
 
-    log_drain_started(timeout_ms, already_draining?)
+    log_drain_started(timeout_ms, already_draining?, max(0, deadline_ms - drain_policy.now_ms.()))
 
     {:ok, _pid} =
       Task.start(fn ->
@@ -708,12 +710,37 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
   defp poll_deadline_ms(timeout_ms, started_at, drain_policy) do
     elapsed_ms = max(0, drain_policy.now_ms.() - started_at)
     remaining_budget_ms = max(0, timeout_ms - elapsed_ms)
-    wait_budget_ms = max(remaining_budget_ms - drain_policy.margin_ms, drain_policy.floor_ms)
-    drain_policy.now_ms.() + wait_budget_ms
+    drain_policy.now_ms.() + turn_window_ms(remaining_budget_ms, drain_policy)
+  end
+
+  # How long a drain given `budget_ms` lets an active turn run before it is cut: the budget less the
+  # margin the drain keeps for its own owner calls, poll and finish (10.7 s by default), never less
+  # than the floor.
+  defp turn_window_ms(budget_ms, drain_policy),
+    do: max(budget_ms - drain_policy.margin_ms, drain_policy.floor_ms)
+
+  # The release takes its budget from the environment with no lower bound, and a budget at or under
+  # the margin leaves an active turn only the floor: every drain then cuts every turn in flight at
+  # once (`owner_drained`) without saying why. Said once, when the drain server starts
+  # (findings#270 row 270-222). A shutdown can first spend up to 5 s of the same budget quiescing the
+  # relay, so a window above the floor may still be shorter in practice; each drain's
+  # `websocket rollout drain started` line names the window it actually gave.
+  defp warn_when_budget_leaves_no_turn_window(budget_ms, drain_policy) do
+    window_ms = turn_window_ms(budget_ms, drain_policy)
+
+    if window_ms <= drain_policy.floor_ms do
+      Logger.warning(
+        "websocket rollout drain budget leaves active turns no time " <>
+          "timeout_ms=#{budget_ms} margin_ms=#{drain_policy.margin_ms} " <>
+          "turn_window_ms=#{window_ms} setting=#{@timeout_env}"
+      )
+    end
+
+    :ok
   end
 
   defp owner_task_timeout_ms(timeout_ms, drain_policy) do
-    poll_budget_ms = max(timeout_ms - drain_policy.margin_ms, drain_policy.floor_ms)
+    poll_budget_ms = turn_window_ms(timeout_ms, drain_policy)
 
     max(
       timeout_ms,
@@ -750,10 +777,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
 
   defp parse_timeout_ms(_value), do: @default_timeout_ms
 
-  defp log_drain_started(timeout_ms, already_draining?) do
+  defp log_drain_started(timeout_ms, already_draining?, window_ms) do
     Logger.info(
       "websocket rollout drain started " <>
-        "timeout_ms=#{timeout_ms} already_draining=#{already_draining?}"
+        "timeout_ms=#{timeout_ms} already_draining=#{already_draining?} " <>
+        "turn_window_ms=#{window_ms}"
     )
   end
 

@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrainTest do
   use CodexPooler.DataCase, async: false
 
   import CodexPooler.Gateway.Transports.WebsocketRolloutDrainSupport
+  import ExUnit.CaptureLog
 
   alias CodexPooler.Gateway.Transports.Streaming.DeferredStreamRegistry
   alias CodexPooler.Gateway.Transports.Websocket.{ActivityRegistry, RolloutDrain}
@@ -317,6 +318,55 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrainTest do
              timeout_ms: 50_000,
              already_draining?: false
            } = RolloutDrain.drain_for_shutdown()
+  end
+
+  # A drain keeps 10.7 s of its budget for its own owner calls, poll and finish, so a budget at or
+  # under that margin leaves an active turn only the 10 ms floor and every drain cuts every turn in
+  # flight at once: the instance-termination lane's 5 s did (findings#270 row 270-222). The server
+  # says so when it starts, and only then.
+  test "warns at start when the configured budget leaves active turns only the floor" do
+    for {budget, warned?} <- [{"5000", true}, {"10710", true}, {"10711", false}, {"15000", false}] do
+      System.put_env("CODEX_POOLER_WEBSOCKET_DRAIN_TIMEOUT_MS", budget)
+      drain_name = :"rollout-drain-budget-warning-#{System.unique_integer([:positive])}"
+
+      log = capture_log(fn -> start_isolated_rollout_drain!(drain_name, []) end)
+
+      if warned? do
+        assert log =~
+                 "websocket rollout drain budget leaves active turns no time " <>
+                   "timeout_ms=#{budget} margin_ms=10700 turn_window_ms=10 " <>
+                   "setting=CODEX_POOLER_WEBSOCKET_DRAIN_TIMEOUT_MS",
+               budget
+      else
+        refute log =~ "websocket rollout drain budget", budget
+      end
+    end
+  end
+
+  # Each drain names the window it gives active turns, from the deadline it actually set.
+  test "names on its start line the window a drain gives active turns" do
+    frozen = %{
+      now_ms: fn -> 0 end,
+      schedule_wait: fn recipient, wait_token, wait_ms ->
+        Process.send_after(recipient, {:rollout_drain_wait_elapsed, wait_token}, wait_ms)
+      end,
+      cancel_wait: fn wait_ref, _wait_token -> Process.cancel_timer(wait_ref) end
+    }
+
+    for {timeout_ms, window_ms} <- [{15_000, 4_300}, {5_000, 10}] do
+      drain_name = :"rollout-drain-turn-window-#{System.unique_integer([:positive])}"
+      start_isolated_rollout_drain!(drain_name, deadline: frozen)
+
+      log =
+        capture_info_log(fn ->
+          assert %{result: :ok, owners_seen: 0, timeout_ms: ^timeout_ms} =
+                   RolloutDrain.start_drain(name: drain_name, timeout_ms: timeout_ms, deadline: frozen)
+        end)
+
+      assert log =~
+               "websocket rollout drain started timeout_ms=#{timeout_ms} " <>
+                 "already_draining=false turn_window_ms=#{window_ms}"
+    end
   end
 
   test "owner post-deadline call budget defaults to two owner calls and stays per server",
@@ -1049,6 +1099,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrainTest do
     refute_received {:DOWN, ^owner_ref, :process, ^owner, _reason}
     assert Process.alive?(owner)
     assert is_pid(GenServer.whereis(drain_name))
+  end
+
+  defp capture_info_log(fun) when is_function(fun, 0) do
+    previous_level = Logger.level()
+    # Also on_exit: a linked crash or the ExUnit timeout kills the test before `after` runs.
+    on_exit(fn -> Logger.configure(level: previous_level) end)
+    Logger.configure(level: :info)
+
+    try do
+      capture_log([level: :info], fun)
+    after
+      Logger.configure(level: previous_level)
+    end
   end
 
   defp start_isolated_rollout_drain!(drain_name, opts) do
