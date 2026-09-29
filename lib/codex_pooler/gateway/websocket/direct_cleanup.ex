@@ -185,8 +185,8 @@ defmodule CodexPooler.Gateway.Websocket.DirectCleanup do
   (findings#206 row 206-110, measured under load). A granted task settles
   nothing any more (`upstream_wait/2`), so what must be durable before its end
   can be proven goes between the grant and the kill: the socket's delivery
-  receipt, which a resend claimed once the executor's terminal proof landed
-  reads before it recovers the request (findings#270 row 270-364).
+  receipt, which must exist by the time a resend can be claimed, as soon as
+  the executor's terminal proof landed (findings#270 row 270-364).
   """
   @spec grant_upstream_stop(t()) :: :stop | :busy
   def grant_upstream_stop(context), do: ActivityRegistry.stop_direct_upstream_wait(context)

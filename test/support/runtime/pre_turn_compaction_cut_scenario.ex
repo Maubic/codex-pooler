@@ -82,6 +82,16 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
     %{expected(:before_output) | rows: [turn, {@compact_endpoint, "websocket", "failed", code, false}, successor, resume]}
   end
 
+  # The provider's stream died after the Pooler collected the compaction item
+  # and before its terminal: the client read the Pooler's error and nothing of
+  # the compaction, and its first resend is the cut request's successor
+  # (findings#270 row 270-365). It used to be refused twice and bought again,
+  # unchained, over HTTPS, and the client's session left the websocket.
+  def expected(:provider_cut_after_output, _topology) do
+    [turn, _cut, successor, resume] = expected(:before_output).rows
+    %{expected(:before_output) | rows: [turn, {@compact_endpoint, "websocket", "failed", "upstream_stream_error", false}, successor, resume]}
+  end
+
   def expected(cut, _topology), do: expected(cut)
 
   defp expected(:no_cut),
@@ -274,6 +284,18 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
     retries = released_client_retries!(ctx, port, fn -> :ok end)
     release_held_compaction!(upstream, release_ref, if(cut == :drain_after_output, do: 3, else: 1))
     retries
+  end
+
+  # The provider sends `response.created` and the compaction item, which the
+  # Pooler collects, and its connection dies before the terminal. The client
+  # reads the error the Pooler writes for the cut and retries on a new
+  # connection.
+  defp cut_and_resend(:provider_cut_after_output, ctx, client, port, _upstream, _release_ref) do
+    {client, frames} = receive_until_terminal(client, [])
+    assert frames == ["error"]
+    Mint.HTTP.close(client.conn)
+    await_compaction_settled!(ctx.setup.pool.id, ["failed"])
+    released_client_retries!(ctx, port, fn -> :ok end)
   end
 
   defp cut_and_resend(:unobserved_cut, ctx, client, port, upstream, release_ref) do
@@ -670,10 +692,11 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
         websocket_connection_ordinal: 1,
         json: [valid: true, equals: lite_marker_expectation(%{"type" => "response.create", "previous_response_id" => @anchor}, ctx.mode)],
         respond:
-          if(cut == :no_cut,
-            do: compaction_frames(compaction_item("served"), @cut_response),
-            else: FakeUpstream.barrier_websocket_frames(held_compaction_messages(), notify: self(), release_ref: release_ref)
-          )
+          case cut do
+            :no_cut -> compaction_frames(compaction_item("served"), @cut_response)
+            :provider_cut_after_output -> FakeUpstream.websocket_text_frames_then_abrupt_close(Enum.take(held_compaction_messages(), 2))
+            _held -> FakeUpstream.barrier_websocket_frames(held_compaction_messages(), notify: self(), release_ref: release_ref)
+          end
       )
 
     resume = FakeUpstream.expect_request(method: "WEBSOCKET", json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]], respond: completed_frames(@final_response, []))

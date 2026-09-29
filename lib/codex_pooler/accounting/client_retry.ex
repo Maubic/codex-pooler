@@ -1530,7 +1530,8 @@ defmodule CodexPooler.Accounting.ClientRetry do
   while forwarding on admitted only the verified shapes below; the two now
   share them. The shape names the admission for its log line:
   `unreceived_compaction` (served or disconnected before its client read
-  it, or cut by the Pooler after it started collecting it),
+  it, or cut by the Pooler or the provider stream after it started
+  collecting it),
   `task_exception` (the Pooler's own execution died), `anchor_refusal`
   (an anchor refused before any execution, by the connection-bound guard or
   by the provider), `compaction_cut` (cut, disconnected or drained before
@@ -2129,18 +2130,20 @@ defmodule CodexPooler.Accounting.ClientRetry do
   compaction of a turn derived the same claim, and a later compaction was
   taken for the resend of the first one.
 
-  On a websocket the Pooler's own cut of a compaction it had started
-  collecting counts too: a rollout drain (`owner_drained`) or an executor
-  proven dead (`dead_execution_recovered`), with the only terminal the client
-  was written the cut's error, or none. The released client reads that error
+  On a websocket a cut of a compaction the Pooler had started collecting
+  counts too, with the only terminal the client was written the cut's error,
+  or none: the Pooler's own cut, a rollout drain (`owner_drained`) or an
+  executor proven dead (`dead_execution_recovered`), or the provider
+  stream's (`upstream_stream_error`). The released client reads that error
   as its compaction's failure and resends the compaction; it used to be
-  refused twice and then bought again over HTTPS (findings#270 row 270-352).
-  Here the receipt is read, because it admits a predecessor that failed: a
-  `response.completed` written before the cut, or no receipt at all, keeps
-  the fence. That is the conservative choice for a drain that cut right after
-  the terminal went out, when the orderly close that follows (1001) makes a
-  lost terminal unlikely. A cut before the collection started keeps its own
-  shapes (`compaction_resend_shape/3`).
+  refused twice and then bought again over HTTPS (findings#270 rows 270-352
+  and 270-365). Here the receipt is read, because it admits a predecessor
+  that failed, cut by the Pooler or by the provider's stream after the
+  collection started: a `response.completed` written before the cut, or no
+  receipt at all, keeps the fence. That is the conservative choice for a
+  drain that cut right after the terminal went out, when the orderly close
+  that follows (1001) makes a lost terminal unlikely. A cut before the
+  collection started keeps its own shapes (`compaction_resend_shape/3`).
   """
   @spec verified_unreceived_compaction?(term(), term(), term()) :: boolean()
   def verified_unreceived_compaction?(
@@ -2149,7 +2152,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
         %Attempt{id: attempt_id, transport: "websocket", replay_generation: 0, completed_at: %DateTime{}} = attempt
       )
       when is_binary(attempt_id),
-      do: unreceived_compaction_settlement?(turn, request, attempt) or pooler_cut_collected_compaction?(turn, request, attempt)
+      do: unreceived_compaction_settlement?(turn, request, attempt) or collected_compaction_cut?(turn, request, attempt)
 
   # The same compaction over native HTTP, which the released client uses for the
   # rest of a session once a websocket request fell back to HTTPS: it retries a
@@ -2186,15 +2189,17 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   defp unreceived_compaction_settlement?(_turn, _request, _attempt), do: false
 
-  defp pooler_cut_collected_compaction?(
-         %CodexTurn{status: "interrupted", error_code: code, first_visible_output_at: %DateTime{}},
+  defp collected_compaction_cut?(
+         %CodexTurn{status: turn_status, error_code: code, first_visible_output_at: %DateTime{}},
          %Request{status: "failed", last_error_code: code},
          %Attempt{status: "failed", network_error_code: code, response_metadata: %{"downstream_delivery" => %{"terminal_class" => terminal_class}}}
        )
-       when code in ["owner_drained", "dead_execution_recovered"] and terminal_class in ["error", "none"],
+       when terminal_class in ["error", "none"] and
+              ((code in ["owner_drained", "dead_execution_recovered"] and turn_status == "interrupted") or
+                 (code == "upstream_stream_error" and turn_status in ["failed", "interrupted"])),
        do: true
 
-  defp pooler_cut_collected_compaction?(_turn, _request, _attempt), do: false
+  defp collected_compaction_cut?(_turn, _request, _attempt), do: false
 
   @doc """
   A native websocket turn the provider completed while its client was already

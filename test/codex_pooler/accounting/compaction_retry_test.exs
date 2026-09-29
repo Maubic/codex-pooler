@@ -111,14 +111,15 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
     end
   end
 
-  # A rollout drain (`owner_drained`) or an executor proven dead
-  # (`dead_execution_recovered`) cut a compaction the Pooler had started
+  # A rollout drain (`owner_drained`), an executor proven dead
+  # (`dead_execution_recovered`) or the provider's stream
+  # (`upstream_stream_error`) cut a compaction the Pooler had started
   # collecting. A native compaction reaches the client only with its terminal,
   # so a receipt with only the cut's error, or nothing, proves the client got
-  # none of it and resends it (findings#270 row 270-352).
-  for code <- ["owner_drained", "dead_execution_recovered"], terminal_class <- ["error", "none"] do
-    test "claims one successor for a compaction the Pooler cut after it began collecting: #{code}, client written #{terminal_class}" do
-      {setup, predecessor, opts} = pooler_cut_predecessor!(unquote(code), unquote(terminal_class))
+  # none of it and resends it (findings#270 rows 270-352 and 270-365).
+  for code <- ["owner_drained", "dead_execution_recovered", "upstream_stream_error"], terminal_class <- ["error", "none"] do
+    test "claims one successor for a compaction cut after the Pooler began collecting it: #{code}, client written #{terminal_class}" do
+      {setup, predecessor, opts} = collected_cut_predecessor!(unquote(code), unquote(terminal_class))
       assert compaction_resend_shape(predecessor) == {:ok, :unreceived_compaction}
 
       assert {:ok, claim} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
@@ -129,9 +130,9 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
 
   # The same cut after the socket wrote the compaction's completion, or with
   # no receipt at all, is not proof the client lacks it: the fence stays.
-  for code <- ["owner_drained", "dead_execution_recovered"], receipt <- ["response.completed", :absent] do
-    test "keeps the fence for a compaction the Pooler cut after it began collecting: #{code}, receipt #{receipt}" do
-      {setup, predecessor, opts} = pooler_cut_predecessor!(unquote(code), unquote(receipt))
+  for code <- ["owner_drained", "dead_execution_recovered", "upstream_stream_error"], receipt <- ["response.completed", :absent] do
+    test "keeps the fence for a compaction cut after the Pooler began collecting it: #{code}, receipt #{receipt}" do
+      {setup, predecessor, opts} = collected_cut_predecessor!(unquote(code), unquote(receipt))
       assert compaction_resend_shape(predecessor) == {:error, :terminal_predecessor}
       before = row_counts()
 
@@ -1123,19 +1124,20 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
      }}
   end
 
-  # The cut request as the drain or the dead-execution recovery settles it:
-  # the turn interrupted and stamped visible when the collection started, the
-  # request and its attempt failed with the same code, and the socket's
-  # delivery receipt naming the terminal class the client was written.
-  defp pooler_cut_predecessor!(code, receipt) do
+  # The cut request as the drain, the dead-execution recovery or the stream
+  # cut settles it: the turn interrupted (failed for the stream cut) and
+  # stamped visible when the collection started, the request and its attempt
+  # failed with the same code, and the socket's delivery receipt naming the
+  # terminal class the client was written.
+  defp collected_cut_predecessor!(code, receipt) do
     {setup, predecessor, opts} =
       case code do
-        "owner_drained" -> predecessor!("owner_drained", 0)
         "dead_execution_recovered" -> local_failure_predecessor!(:dead_execution)
+        code -> predecessor!(code, 0)
       end
 
     turn = Repo.get_by!(CodexTurn, request_id: predecessor.id)
-    update!(turn, status: "interrupted", first_visible_output_at: turn.completed_at)
+    update!(turn, status: if(code == "upstream_stream_error", do: "failed", else: "interrupted"), first_visible_output_at: turn.completed_at)
     attempt = Repo.get!(Attempt, turn.final_attempt_id)
 
     case receipt do

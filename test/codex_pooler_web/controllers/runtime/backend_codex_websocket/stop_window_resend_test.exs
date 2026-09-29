@@ -6,26 +6,24 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StopWindowResendTest do
   # transaction of its own: a resend claimed between the proof and the
   # interrupt finds the request still in progress with its executor proven
   # dead, and its claim recovers the request as a dead execution's predecessor
-  # (`FailedPredecessorResend.resolve_execution/3`). That admission read
-  # nothing of what the client had been shown, and the socket recorded its
-  # delivery receipt only after the interrupt: an identical resend after a
-  # completed item was served as the dead execution's successor, a second
-  # generation of a turn the client already holds an item of, past the
-  # completed-item fence (findings#270 row 270-364, observed with this hold).
-  # The socket now commits the receipt between the grant of the stop and the
-  # kill, and the admission refuses a resend after a delivered completion or a
-  # frame the released client keeps (`ClientRetry.verified_dead_execution?/3`).
-  # A turn the client was shown nothing of is still served as the dead
-  # execution's successor, and the released client's grown resend after a
-  # completed item is still served once the interrupt settled the turn.
+  # (`FailedPredecessorResend.resolve_execution/3`). The socket used to record
+  # the task's delivery receipt only after its interrupt, so nothing of what
+  # the client had been shown was durable inside that window (findings#270 row
+  # 270-364). It now commits the receipt between the grant of the stop and the
+  # kill, and these arms pin that receipt inside the window.
+  #
+  # Whether the dead-execution admission refuses a resend after output the
+  # client keeps is decided by findings#270 row 270-375; until then the arms
+  # pin today's outcome: the resend is served as the dead execution's one
+  # successor, after a completed item as before any output.
   #
   # The cleanup is held right after its interrupt's `begin`, the first
   # transaction it begins once the task is dead
-  # (`CleanupProofRace.hold_interrupt_after_stop!/2`), with committed rows so
-  # the resend's claim, on a new connection, reads what the cleanup committed
-  # before it. One node, owner forwarding off, native websocket
-  # `/backend-api/codex/responses`, the Pool's model forced to Full and to
-  # Lite, FakeUpstream holding the stream at a frame barrier. Frame and
+  # (`CodexPoolerWeb.Runtime.CleanupProofRace.hold_interrupt_after_stop!/2`),
+  # with committed rows so the resend's claim, on a new connection, reads what
+  # the cleanup committed before it. One node, owner forwarding off, native
+  # websocket `/backend-api/codex/responses`, the Pool's model forced to Full
+  # and to Lite, FakeUpstream holding the stream at a frame barrier. Frame and
   # metadata shapes are the released client's; text and identifiers synthetic.
   # The released client's HTTPS fallback is not judged here: inside this window
   # the native HTTP chain walk steps over a predecessor still in progress and
@@ -39,7 +37,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StopWindowResendTest do
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink}
   alias CodexPooler.ExecutionProofSupport
   alias CodexPooler.FakeUpstream
-  alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Platform.{ExecutionProofPublisher, ExecutionTerminalProof, ExecutionTerminalProofs}
   alias CodexPooler.Repo
   alias CodexPooler.UnboxedFixture
@@ -62,40 +59,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StopWindowResendTest do
 
   for mode <- ["full", "lite"] do
     @tag serving_mode: mode
-    test "#{mode}: the resend identical to a turn cut after a completed item stays a duplicate when it is claimed between the stopped task's proven end and its cleanup's interrupt", ctx do
+    test "#{mode}: the resend identical to a turn cut after a completed item, claimed between the stopped task's proven end and its cleanup's interrupt, finds the receipt and is served as the dead execution's one successor", ctx do
       window = cut_and_hold!(ctx.serving_mode, :item_done)
       resend = resend!(window, window.payload)
       :ok = release!(window)
 
       assert window.request_status == "in_progress"
       assert %{"outcome" => "aborted", "terminal_class" => "none", "highest_frame_class" => "item_done", "completed_items" => 1} = window.receipt
-      assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = resend
-      assert [%Request{id: request_id, status: "failed", response_status_code: 499, last_error_code: "client_disconnected"}] = pool_requests(window.setup.pool.id)
-      assert request_id == window.request_id
-      assert %CodexTurn{status: "interrupted", error_code: "client_disconnected"} = Repo.get_by!(CodexTurn, request_id: request_id)
-      assert Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^request_id)) == []
-      assert FakeUpstream.count(window.upstream) == 1
-    end
-
-    # The released client resends a turn cut after a completed item with that
-    # item appended (findings#232 row 232-232). Inside the window the turn is
-    # still in progress and the grown resend is refused like any resend of a
-    # live turn; the client's retry after the interrupt is its one successor.
-    @tag serving_mode: mode
-    test "#{mode}: the released client's grown resend of a turn cut after a completed item is refused inside that window and served as its one successor once the cleanup interrupted it", ctx do
-      window = cut_and_hold!(ctx.serving_mode, :item_done)
-      grown = grown_payload(window.payload)
-
-      inside = resend!(window, grown)
-      :ok = release!(window)
-      assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = inside
-
-      assert %{"type" => "response.completed"} = resend!(window, grown)
+      assert %{"type" => "response.completed"} = resend
       :ok = await_all_settled!(window.setup.pool.id)
-      assert [%Request{id: request_id, status: "failed", last_error_code: "client_disconnected"}, %Request{id: successor_id, status: "succeeded"}] = pool_requests(window.setup.pool.id)
+      assert [%Request{id: request_id, status: "failed", response_status_code: 499, last_error_code: "dead_execution_recovered"}, %Request{id: successor_id, status: "succeeded"}] = pool_requests(window.setup.pool.id)
       assert request_id == window.request_id
       assert [%RequestClientRetryLink{successor_request_id: ^successor_id}] = Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^request_id))
-      assert_one_settlement_each!([request_id, successor_id])
+      assert_one_settlement_each!([successor_id])
       assert FakeUpstream.count(window.upstream) == 2
     end
   end
@@ -233,10 +209,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StopWindowResendTest do
     _closed = Mint.HTTP.close(conn)
     frame
   end
-
-  # The released client appends the item it recorded from
-  # `response.output_item.done` and resends (findings#232 row 232-232).
-  defp grown_payload(payload), do: Map.update!(payload, "input", &(&1 ++ [completed_item("resp_stop_window_original")]))
 
   defp completed_item(response_id),
     do: %{"id" => "msg_" <> response_id, "type" => "message", "role" => "assistant", "status" => "completed", "content" => [%{"type" => "output_text", "text" => "completed answer", "annotations" => []}]}

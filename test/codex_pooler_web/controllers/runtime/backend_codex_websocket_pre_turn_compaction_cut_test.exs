@@ -52,15 +52,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionCutTest d
   # The rollout drain of the socket's node cuts an admitted compaction the
   # provider is still generating, before any output or after the Pooler
   # collected the compaction item, which it writes the client only with its
-  # terminal. The client reads the drain's `owner_drained` error and resends
-  # the compaction as full history on a new connection. The first resend is
-  # the cut request's successor (findings#270 row 270-352): after output it
-  # used to be refused twice, then bought again over HTTPS unchained. Full,
-  # owner forwarding on (the owner on the drained node, drained with it) and
-  # off; the owner on another node is in the peer module.
-  for topology <- [:forwarded, :direct], cut <- [:drain_before_output, :drain_after_output] do
+  # terminal; or the provider's stream dies after that collection. The client
+  # reads the Pooler's error and resends the compaction as full history on a
+  # new connection. The first resend is the cut request's successor
+  # (findings#270 rows 270-352 and 270-365): after output it used to be
+  # refused twice, then bought again over HTTPS unchained. Full, owner
+  # forwarding on (the owner on the drained node, drained with it) and off;
+  # the owner on another node is in the peer module.
+  for topology <- [:forwarded, :direct], cut <- [:drain_before_output, :drain_after_output, :provider_cut_after_output] do
     @tag mode: "full", shape: :pre_turn, topology: topology, cut: cut
-    test "full pre_turn #{topology} admitted compaction cut by the socket node's drain #{cut}: the released client's first websocket retry is its successor",
+    test "full pre_turn #{topology} admitted compaction #{cut}: the released client's first websocket retry is its successor",
          %{mode: mode, shape: shape, topology: topology, cut: cut} do
       assert Scenario.run_scenario(mode, shape, topology, cut) == Scenario.expected(cut, topology)
     end

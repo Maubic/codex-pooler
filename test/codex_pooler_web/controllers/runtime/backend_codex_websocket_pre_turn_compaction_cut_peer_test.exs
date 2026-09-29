@@ -59,9 +59,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionCutPeerTe
   # recovers it and is its successor. It used to meet the dead request as a
   # live turn the owner no longer held and was refused `409 duplicate_turn`
   # twice, after which the HTTPS fallback bought the compaction again.
-  for cut <- [:drain_before_output, :drain_after_output] do
+  # And the provider's stream dying after the Pooler collected the compaction
+  # item, with the owner and its provider connection on the peer (row
+  # 270-365).
+  for cut <- [:drain_before_output, :drain_after_output, :provider_cut_after_output] do
     @tag mode: "full", shape: :pre_turn, topology: :peer, cut: cut
-    test "full pre_turn peer admitted compaction cut by the socket node's drain #{cut}: the released client's first websocket retry is its successor",
+    test "full pre_turn peer admitted compaction #{cut}: the released client's first websocket retry is its successor",
          %{mode: mode, shape: shape, topology: topology, cut: cut, peer_node: peer_node} do
       assert Scenario.run_scenario(mode, shape, topology, cut, :on_arrival, peer_node: peer_node) == Scenario.expected(cut, topology)
     end

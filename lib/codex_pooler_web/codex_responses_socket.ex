@@ -6039,10 +6039,9 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # its single aborted receipt is recorded here, committed before the kill.
   # The kill is what lets the executor's terminal proof land, and a resend
   # claimed between the proof and this cleanup's interrupt recovers the request
-  # as a dead execution: it must find what the client was shown. Recorded after
-  # the interrupt, an identical resend after a completed item was served as
-  # that dead execution's successor and generated the turn a second time
-  # (findings#270 row 270-364, `ClientRetry.verified_dead_execution?/3`).
+  # as a dead execution's predecessor: the receipt of what the client was shown
+  # is durable by then, where it used to be written only after the interrupt
+  # (findings#270 row 270-364).
   defp stop_previsible_direct_task(state, pid, context) do
     case DirectCleanup.grant_upstream_stop(context) do
       :busy ->
