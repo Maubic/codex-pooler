@@ -687,7 +687,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ReplayTest do
            ) == 1
 
     assert %CodexTurn{status: "interrupted", final_attempt_id: final_attempt_id} =
-             Repo.get!(CodexTurn, turn.id)
+             await_turn_settled!(turn.id)
 
     assert final_attempt_id == attempt_n_plus_one.id
     {:ok, connections} = ThousandIsland.connection_pids(server)
@@ -1430,7 +1430,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ReplayTest do
     assert %Request{status: "succeeded"} = Repo.get!(Request, request.id)
 
     assert %CodexTurn{status: "succeeded", final_attempt_id: replay_attempt_id} =
-             Repo.get!(CodexTurn, turn.id)
+             await_turn_settled!(turn.id)
 
     assert %Attempt{replay_generation: 1, status: "succeeded"} =
              Repo.get!(Attempt, replay_attempt_id)
@@ -1540,6 +1540,31 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ReplayTest do
            ) == 2
 
     {conn, websocket}
+  end
+
+  # The settlement commits the request and its attempt, publishes
+  # `request_finalized`, and only then completes the turn, in a second
+  # transaction that first locks the session. A turn read right after the
+  # event can still be `in_progress` (Drone 1718, partition 2 under load; the
+  # turn completes about 6 ms after the event on an idle machine), so its final
+  # state is read once it has settled, within the detection budget.
+  defp await_turn_settled!(turn_id, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + @detection_timeout_ms
+    turn = Repo.get!(CodexTurn, turn_id)
+
+    cond do
+      turn.status != "in_progress" and not is_nil(turn.completed_at) ->
+        turn
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("the turn never settled: #{inspect(Map.take(turn, [:status, :final_attempt_id, :completed_at]))}")
+
+      true ->
+        receive do
+        after
+          5 -> await_turn_settled!(turn_id, deadline)
+        end
+    end
   end
 
   defp replay_boundary_counts(pool_id, session_id, request_id) do
