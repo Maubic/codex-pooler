@@ -394,6 +394,42 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     assert FakeUpstream.count(compaction.upstream) == 2
   end
 
+  # The same late attach took a turn the live socket was still receiving
+  # after its first output (findings#270 row 270-285): the owner handed the
+  # turn to the socket that gave up, whose exit then left it without a
+  # downstream, so the live socket never received the rest of it while its
+  # request settled succeeded. The refused attach leaves the turn with the live
+  # socket, which receives its terminal. An owner that takes the attach after
+  # the socket's timeout but before the abandon's record, a window of about
+  # one erpc round trip, still hands it the turn (a decision).
+  @tag topology: :remote
+  test "remote: a second socket's attach its owner answers too late leaves the live socket its running turn", ctx do
+    ref = make_ref()
+    compaction = open_compaction_session!(ctx, true, [:anchor, {:held, self(), ref}])
+    client = compaction.client
+    {conn, websocket} = public_websocket_send_text!(client.conn, client.websocket, client.ref, next_turn_frame(compaction, "turn the live socket is receiving"))
+    {conn, websocket} = receive_first_output!(compaction, ref, conn, websocket)
+    :ok = :sys.suspend(compaction.owner)
+
+    {closed, log} =
+      with_info_log(fn ->
+        second = Scenario.connect!(compaction.port, compaction.setup, Scenario.native_route(), compaction.window)
+        {conn, websocket} = public_websocket_send_text!(second.conn, second.websocket, second.ref, next_turn_frame(compaction, "first turn of a second socket"))
+        {_conn, _websocket, closed} = receive_frames_until_close!(conn, websocket, second.ref)
+        :ok = :sys.resume(compaction.owner)
+        closed
+      end)
+
+    assert closed == [{:close, 1011, "websocket owner forwarding timed out"}]
+    assert log =~ "phase=init reason_class=owner_forward_timeout"
+    :ok = FakeUpstream.release_remaining_frames(compaction.upstream, ref)
+    assert {_conn, _websocket, %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_final"}}} = receive_native_terminal!(conn, websocket, client.ref)
+    assert_receive {:fake_upstream_frame_barrier, 3, _handler, ^ref}, @detection_timeout_ms
+    assert_owner_kept_session!(compaction, log)
+    assert Scenario.settled_statuses!(compaction.setup, 2) == ["succeeded", "succeeded"]
+    assert FakeUpstream.count(compaction.upstream) == 2
+  end
+
   # A socket on the session's window with its owner (on the peer for
   # `:remote`) and one anchor turn it served, settled unless `settle?` is
   # false (its task is then held after its settlement).
@@ -483,6 +519,23 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     end
   end
 
+  # The live socket's turn shows its first output: the provider's
+  # `response.created` and a text delta reach the client, and the provider
+  # holds the rest of the turn.
+  defp receive_first_output!(compaction, ref, conn, websocket) do
+    for barrier <- 0..1 do
+      assert_receive {:fake_upstream_frame_barrier, ^barrier, _handler, ^ref}, @detection_timeout_ms
+      :ok = FakeUpstream.release_frame(compaction.upstream, ref)
+    end
+
+    assert_receive {:fake_upstream_frame_barrier, 2, _handler, ^ref}, @detection_timeout_ms
+    {conn, websocket, created} = public_websocket_receive_text!(conn, websocket, compaction.client.ref)
+    assert %{"type" => "response.created"} = CodexPooler.JSON.decode!(created)
+    {conn, websocket, delta} = public_websocket_receive_text!(conn, websocket, compaction.client.ref)
+    assert %{"type" => "response.output_text.delta"} = CodexPooler.JSON.decode!(delta)
+    {conn, websocket}
+  end
+
   defp with_client(compaction, conn, websocket), do: %{compaction | client: Scenario.settle!(%{compaction.client | conn: conn, websocket: websocket})}
 
   # The owner's compaction admission phase (the socket's own upstream session's
@@ -566,6 +619,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
   defp upstream_answer(:anchor, _item), do: FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(anchor_event())])
   defp upstream_answer(:compaction, item), do: FakeUpstream.websocket_text_frames(Enum.map(compaction_events(item), &CodexPooler.JSON.encode!/1))
   defp upstream_answer(:final, _item), do: FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(final_event())])
+
+  # A turn whose frames the provider sends one at a time, each after the test
+  # releases its barrier (`0` to `2`); barrier `3` follows the last frame.
+  defp upstream_answer({:held, notify, ref}, _item) do
+    created = %{"type" => "response.created", "response" => %{"id" => "resp_slow_owner_final", "status" => "in_progress", "output" => []}}
+    delta = %{"type" => "response.output_text.delta", "item_id" => "msg_slow_owner", "output_index" => 0, "content_index" => 0, "delta" => "partial"}
+    FakeUpstream.barrier_websocket_frames(Enum.map([created, delta, final_event()], &CodexPooler.JSON.encode!/1), notify: notify, release_ref: ref)
+  end
 
   # The admission bound (`NativeCompactionAdmission.reservation_ttl_ms/0`) on
   # the node that collects the compaction: the peer's owner, this node's owner,
