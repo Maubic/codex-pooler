@@ -28,17 +28,16 @@ defmodule CodexPooler.Platform.ForwardedGenerationEnds do
   alias CodexPooler.Repo
 
   @reasons ~w(unreachable_downstream_cancelled lost_turn_cancelled_at_output terminal_delivered_to_reattached)
-  # Past this window the six-hour stale-reservation sweep settles the attempt
-  # whatever the evidence, which is why execution terminal proofs keep it too.
-  @retention_seconds ExecutionTerminalProofs.retention_seconds()
-  # One lease-row sized write, with the budget the code gives such a write.
-  @write_budget_ms InstancePresence.heartbeat_write_budget_ms()
 
   @spec reasons() :: [String.t()]
   def reasons, do: @reasons
 
+  # Past this window the six-hour stale-reservation sweep settles the attempt
+  # whatever the evidence, which is why execution terminal proofs keep it too.
+  # Both budgets are read at run time: a module attribute evaluated from
+  # another module would be a compile-connected dependency.
   @spec retention_seconds() :: pos_integer()
-  def retention_seconds, do: @retention_seconds
+  def retention_seconds, do: ExecutionTerminalProofs.retention_seconds()
 
   @doc """
   Records, as this instance, that the generation of `attempt_id` ended for
@@ -50,7 +49,8 @@ defmodule CodexPooler.Platform.ForwardedGenerationEnds do
       {:ok, attempt_id} ->
         identity = InstancePresence.local_identity()
         row = %{attempt_id: attempt_id, owner_instance_id: identity.node_name, owner_instance_boot_id: identity.boot_id, reason: reason}
-        {_count, _rows} = Repo.insert_all(ForwardedGenerationEnd, [row], on_conflict: :nothing, conflict_target: :attempt_id, timeout: @write_budget_ms)
+        # One lease-row sized write, with the budget the code gives such a write.
+        {_count, _rows} = Repo.insert_all(ForwardedGenerationEnd, [row], on_conflict: :nothing, conflict_target: :attempt_id, timeout: InstancePresence.heartbeat_write_budget_ms())
         :ok
 
       :error ->
@@ -78,7 +78,7 @@ defmodule CodexPooler.Platform.ForwardedGenerationEnds do
   def prune(_now) do
     expired =
       from ending in ForwardedGenerationEnd,
-        where: ending.ended_at < fragment("(statement_timestamp() AT TIME ZONE 'UTC') - (? * interval '1 second')", ^@retention_seconds),
+        where: ending.ended_at < fragment("(statement_timestamp() AT TIME ZONE 'UTC') - (? * interval '1 second')", ^retention_seconds()),
         order_by: [asc: ending.ended_at, asc: ending.attempt_id],
         limit: 1_000,
         select: ending.attempt_id
