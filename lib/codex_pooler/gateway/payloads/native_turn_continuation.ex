@@ -100,6 +100,13 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuation do
   @progress_domain "native_turn_user_progress_v1"
   @pivot_domain "native_turn_progress_pivot_v1"
 
+  # The context window a request names, standing in for the compaction pivot a
+  # local compaction does not leave (see `progress_state/2`). A tuple can never
+  # equal a pivot item, which is always a JSON object. A window number past
+  # 2^32 - 1 is malformed and reads as none.
+  @window_pivot_tag :native_turn_context_window_v1
+  @max_window_number 4_294_967_295
+
   @type turn_role :: :opening | :tool_continuation | {:post_compaction_resume, <<_::256>>}
 
   @max_request_kind_bytes 128
@@ -311,19 +318,26 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuation do
   keeps this digest; a steered request moves it (one more user message, or a new
   pivot). That is the whole discriminator; the digest carries nothing else of
   the body and is identical across rebuilt retries (findings#206 row 206-403).
-  """
-  @spec turn_progress(map()) :: <<_::256>>
-  def turn_progress(%{"input" => input}) when is_list(input), do: input |> progress_state() |> progress_digest()
 
-  def turn_progress(_payload), do: progress_digest({nil, 0})
+  `window` is the context window the request's turn metadata names
+  (`window_number/1`): after a local compaction it stands in for the pivot the
+  compaction did not leave (`progress_state/2`, findings#282).
+  """
+  @spec turn_progress(map(), non_neg_integer() | nil) :: <<_::256>>
+  def turn_progress(payload, window \\ nil)
+
+  def turn_progress(%{"input" => input}, window) when is_list(input), do: input |> progress_state(window) |> progress_digest()
+
+  def turn_progress(_payload, _window), do: progress_digest({nil, 0})
 
   @typedoc """
-  What `turn_progress/1` digests, kept in the clear so it can be carried
-  forward: the latest compaction pivot item (or `nil`) and the number of user
-  messages after it. It holds the pivot item itself, so it lives only in the
-  process that saw the frame and is never persisted or sent anywhere.
+  What `turn_progress/2` digests, kept in the clear so it can be carried
+  forward: the latest compaction pivot item (or the context window standing in
+  for it, or `nil`) and the number of user messages after it. It holds the
+  pivot item itself, so it lives only in the process that saw the frame and is
+  never persisted or sent anywhere.
   """
-  @type progress_state :: {map() | nil, non_neg_integer()}
+  @type progress_state :: {map() | {atom(), pos_integer()} | nil, non_neg_integer()}
 
   @doc """
   The progress a native websocket frame stands for in full-history terms, or
@@ -338,19 +352,22 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuation do
   exactly that response. Model output items are never user messages, and a
   compaction replaces the history, after which the client sends full history
   again (findings#206 row 206-412). Anything else is `:unknown`, which leaves
-  the frame's claim as it was.
+  the frame's claim as it was. `window` is the frame's context window, read as
+  `turn_progress/2` reads it.
   """
-  @spec websocket_frame_progress(map(), map() | nil) :: {:ok, progress_state()} | :unknown
-  def websocket_frame_progress(%{"input" => input} = payload, base) when is_list(input) do
+  @spec websocket_frame_progress(map(), map() | nil, non_neg_integer() | nil) :: {:ok, progress_state()} | :unknown
+  def websocket_frame_progress(payload, base, window \\ nil)
+
+  def websocket_frame_progress(%{"input" => input} = payload, base, window) when is_list(input) do
     case Map.get(payload, "previous_response_id") do
-      anchor when is_binary(anchor) and anchor != "" -> extend_anchored_progress(input, anchor, base)
-      _unanchored -> {:ok, progress_state(input)}
+      anchor when is_binary(anchor) and anchor != "" -> extend_anchored_progress(input, anchor, base, window)
+      _unanchored -> {:ok, progress_state(input, window)}
     end
   end
 
-  def websocket_frame_progress(_payload, _base), do: :unknown
+  def websocket_frame_progress(_payload, _base, _window), do: :unknown
 
-  @doc "The opaque digest of a `progress_state/0`, identical to `turn_progress/1` of the full history."
+  @doc "The opaque digest of a `progress_state/0`, identical to `turn_progress/2` of the full history."
   @spec progress_digest(progress_state()) :: <<_::256>>
   def progress_digest({pivot, user_messages}) when is_integer(user_messages) and user_messages >= 0,
     do: :crypto.hash(:sha256, :erlang.term_to_binary({@progress_domain, pivot, user_messages}, [:deterministic]))
@@ -381,32 +398,80 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuation do
   def progress_position({pivot, user_messages}) when is_integer(user_messages) and user_messages >= 0,
     do: {:crypto.hash(:sha256, :erlang.term_to_binary({@pivot_domain, pivot}, [:deterministic])), user_messages}
 
-  @doc "The `progress_position/0` of a full-history request, the position `turn_progress/1` digests."
-  @spec turn_position(map()) :: progress_position()
-  def turn_position(%{"input" => input}) when is_list(input), do: input |> progress_state() |> progress_position()
+  @doc "The `progress_position/0` of a full-history request, the position `turn_progress/2` digests."
+  @spec turn_position(map(), non_neg_integer() | nil) :: progress_position()
+  def turn_position(payload, window \\ nil)
 
-  def turn_position(_payload), do: {nil, 0}
+  def turn_position(%{"input" => input}, window) when is_list(input), do: input |> progress_state(window) |> progress_position()
 
-  defp extend_anchored_progress(increment, anchor, %{response_digest: response_digest, progress: {pivot, user_messages}})
+  def turn_position(_payload, _window), do: {nil, 0}
+
+  @doc """
+  The context window a canonical turn document names: `window_number`, 0
+  until the thread's first compaction and one more after each compaction the
+  client completes, local or remote (`compact.rs`, `compact_remote_v2.rs`:
+  `advance_auto_compact_window`). `nil` when the document carries none (a
+  client that sends no turn identity), which leaves the request's progress as
+  it was before windows were read.
+  """
+  @spec window_number(term()) :: non_neg_integer() | nil
+  def window_number(document) do
+    case canonical_metadata_map(document) do
+      %{"window_number" => number} when is_integer(number) and number >= 0 and number <= @max_window_number -> number
+      _absent -> nil
+    end
+  end
+
+  @doc "The context window of a request, resolved like `request_kind/2` from the body document or the header copy."
+  @spec window_number(map(), RequestOptions.t()) :: non_neg_integer() | nil
+  def window_number(payload, %RequestOptions{} = options), do: payload |> canonical_document(options) |> window_number()
+
+  defp extend_anchored_progress(increment, anchor, %{response_digest: response_digest, progress: {pivot, user_messages}}, window)
        when is_binary(response_digest) do
     if NativeCodexTurnMetadata.response_id_digest(anchor) == response_digest do
       case last_compaction_index(increment) do
-        nil -> {:ok, {pivot, user_messages + Enum.count(increment, &user_message?/1)}}
-        _index -> {:ok, progress_state(increment)}
+        nil -> {:ok, {carried_pivot(pivot, window), user_messages + Enum.count(increment, &user_message?/1)}}
+        _index -> {:ok, progress_state(increment, window)}
       end
     else
       :unknown
     end
   end
 
-  defp extend_anchored_progress(_increment, _anchor, _base), do: :unknown
+  defp extend_anchored_progress(_increment, _anchor, _base, _window), do: :unknown
 
-  defp progress_state(input) do
+  # The pivot of the full history an increment extends: the compaction item
+  # its base ended on, or else the window the increment names, as
+  # `progress_state/2` reads the same history resent whole.
+  defp carried_pivot(pivot, _window) when is_map(pivot), do: pivot
+  defp carried_pivot(_pivot, window), do: window_pivot(window)
+
+  # A local compaction (`compact.rs`: the client summarizes the thread itself
+  # when its provider is not named `OpenAI`) leaves no pivot item: it rebuilds
+  # the history from the thread's most recent user messages (as many as fit its
+  # budget) and the summary as one more user message, and moves the thread to
+  # its next context window. Counted alone, the resume on that window stood no
+  # further along than a request of the turn before it: the previous resume,
+  # whose steered claim it derived again, or the next turn's opener, which
+  # already carries the previous summary. From a thread's second local
+  # compaction on, the resume was refused `duplicate_turn` on every try and the
+  # turn failed (findings#282, findings#270 row 270-286); so was a first one
+  # that dropped older user messages. The window stands in for the pivot the
+  # compaction did not leave: a request on another window stands at a
+  # compaction point its turn's holder did not end on, and a resend on its own
+  # window still stands where it stood. A pivot item keeps its place (a remote
+  # compaction's history ends on its item), and window 0, before any
+  # compaction, has no pivot, so a thread that never compacted keeps every
+  # progress it had.
+  defp progress_state(input, window) do
     case last_compaction_index(input) do
-      nil -> {nil, Enum.count(input, &user_message?/1)}
+      nil -> {window_pivot(window), Enum.count(input, &user_message?/1)}
       index -> {Enum.at(input, index), input |> Enum.drop(index + 1) |> Enum.count(&user_message?/1)}
     end
   end
+
+  defp window_pivot(window) when is_integer(window) and window > 0, do: {@window_pivot_tag, window}
+  defp window_pivot(_window), do: nil
 
   defp compacted_turn_role(input, index) do
     tail = Enum.drop(input, index + 1)

@@ -81,16 +81,29 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
 
   # After a remote compaction the released client advances its window
   # (`compact_remote_v2.rs:323`), and `x-codex-window-id` is minted as
-  # `"{thread_id}:{window_number}"` (`session/mod.rs:4449-4459`). The resend of
-  # the very turn that compacted therefore carries a NEW window while the
-  # `session-id`, the thread, the `turn_id` and the authorized history are
-  # unchanged -- the certified wire capture of the post-compaction lane shows
-  # exactly that (`windowOrdinal` 1 -> 2, one `sessionOrdinal`, one `turnId`,
-  # `inputEqual: true`). The session key prefers the window since `6441e83d`, so
-  # the resend opened a SECOND codex session and a claim named after the session
-  # UUID could not meet its own predecessor: the fence stayed green while the
-  # provider was asked the same history twice
+  # `"{thread_id}:{window_number}"` (`session/mod.rs:4572-4578` at
+  # rust-v0.159.0). The certified wire capture of the post-compaction lane
+  # shows the resend of the first post-compaction turn with the same
+  # `session-id`, thread, `turn_id` and authorized history and a rotated
+  # `x-codex-window-id` (`windowOrdinal` 1 -> 2, one `sessionOrdinal`, one
+  # `turnId`, `inputEqual: true`). The session key prefers the window since
+  # `6441e83d`, so the resend opened a SECOND codex session and a claim named
+  # after the session UUID could not meet its own predecessor: the fence stayed
+  # green while the provider was asked the same history twice
   # (icoretech/codex-pooler-findings#250).
+  #
+  # That rotation is websocket-only. Over HTTP the released client's header
+  # window and metadata window always agree: one `ResponsesMetadata` writes
+  # the `x-codex-window-id` header (`responses_metadata.rs:333` and `:379` at
+  # rust-v0.159.0) and the turn metadata's `window_id` and `window_number`
+  # (`:425-426`). On a websocket the upgrade names the window the connection
+  # was opened on, while each frame names the window its request was built
+  # in. So the first post-compaction turn rode a connection of the old window,
+  # and its resend went out on a new connection naming the new window in both.
+  # This test rotates the header only to rotate the session key: every request
+  # names the post-compaction window in its metadata. The metadata window is
+  # the request's own and decides whether a request stands on a new window
+  # (findings#282); the header never does.
   test "an identical resend of the first post-compaction turn is fenced across a window rotation",
        %{conn: conn} do
     upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_window_rotation"}))
@@ -2091,17 +2104,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
 
   defp thread_id, do: "codex-thread-" <> unique_suffix()
 
-  # One turn of a Codex thread, sent the way the released client sends it after
-  # `window_number` compactions: the stable `session-id`, the window the client
-  # currently holds, and the canonical document naming the thread the window
-  # belongs to.
-  defp post_window_turn(conn, setup, session, thread, window_number, turn_id) do
+  # One turn of a Codex thread after its compaction: the stable `session-id`,
+  # the session key's window in `x-codex-window-id`, and the canonical document
+  # naming the thread and the window the request was built in (the
+  # post-compaction window; see the window-rotation test for why the two
+  # differ here).
+  @post_compaction_window 2
+
+  defp post_window_turn(conn, setup, session, thread, header_window, turn_id) do
     document =
       CodexPooler.JSON.encode!(%{
         "turn_id" => turn_id,
         "thread_id" => thread,
-        "window_id" => window_id(thread, window_number),
-        "window_number" => window_number,
+        "window_id" => window_id(thread, @post_compaction_window),
+        "window_number" => @post_compaction_window,
         "request_kind" => "turn"
       })
 
@@ -2109,7 +2125,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
     |> recycle()
     |> auth(setup)
     |> put_req_header(@session_header, session)
-    |> put_req_header("x-codex-window-id", window_id(thread, window_number))
+    |> put_req_header("x-codex-window-id", window_id(thread, header_window))
     |> put_req_header(@metadata_header, document)
     |> post("/backend-api/codex/responses", turn_payload(setup))
   end

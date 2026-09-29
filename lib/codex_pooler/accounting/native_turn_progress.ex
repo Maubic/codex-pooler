@@ -2,15 +2,16 @@ defmodule CodexPooler.Accounting.NativeTurnProgress do
   @moduledoc false
 
   # The full-history progress digest a native Codex request recorded on its row
-  # (`NativeTurnContinuation.turn_progress/1`): the latest compaction pivot and
-  # the number of user messages after it, hashed. A native HTTP request records
-  # it as `native_http_turn_progress` (findings#206 row 206-403); a websocket
-  # request as `native_turn_progress` when its socket knew its history
-  # (row 206-412). Both are the same digest, so a later request of a turn is
-  # compared with the turn's opener whatever transport either used. Only the
-  # digest is ever stored; a row without one (written before these releases, or
-  # by a socket that could not know the history) answers `nil`, and its turn
-  # keeps the bare claim.
+  # (`NativeTurnContinuation.turn_progress/2`): the latest compaction pivot
+  # (after a local compaction, which leaves none, the context window standing
+  # in for it, findings#282) and the number of user messages after it, hashed.
+  # A native HTTP request records it as `native_http_turn_progress` (findings#206
+  # row 206-403); a websocket request as `native_turn_progress` when its socket
+  # knew its history (row 206-412). Both are the same digest, so a later request
+  # of a turn is compared with the turn's opener whatever transport either used.
+  # Only the digest is ever stored; a row without one (written before these
+  # releases, or by a socket that could not know the history) answers `nil`, and
+  # its turn keeps the bare claim.
   #
   # A different digest is not enough to call a request a later one (findings#206
   # row 206-423): a resend of the holder with trimmed history differs too. Rows
@@ -77,9 +78,10 @@ defmodule CodexPooler.Accounting.NativeTurnProgress do
   point (or none) and strictly more user messages after it (the user steered
   input in), or a compaction point the holder did not end on (a remote
   compaction replaced the history, keeping only messages and appending its
-  item last). A retry of the holder only appends model output, so it stands
-  where the holder stood; a resend with trimmed history stands behind it. Both
-  answer false, and so does a holder that recorded no position.
+  item last; a local compaction moved the thread to another context window).
+  A retry of the holder only appends model output, so it stands where the
+  holder stood; a resend with trimmed history stands behind it. Both answer
+  false, and so does a holder that recorded no position.
   """
   @spec advances?(position() | nil, position() | nil) :: boolean()
   def advances?({pivot, held}, {pivot, count}) when is_integer(held) and is_integer(count), do: count > held

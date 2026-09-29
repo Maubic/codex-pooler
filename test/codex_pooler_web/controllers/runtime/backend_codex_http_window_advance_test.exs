@@ -228,11 +228,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpWindowAdvanceTest do
 
   # Turn, compaction and resume on window 0 and 1, then the resume on window 2.
   # A local compaction's resume is the turn's retained user messages plus the
-  # summary as one more user message. The second resume here also carries a
-  # user message steered into the turn: without one it has no more user
-  # messages than the first resume and is refused `duplicate_turn` as a retry of
-  # it, with or without this change (reported separately), which is not what
-  # this test is about.
+  # summary as one more user message, so the second resume has no more user
+  # messages than the first: its window tells it apart (findings#282).
   defp window_advance_requests(:local) do
     open = history()
 
@@ -241,7 +238,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpWindowAdvanceTest do
       {"compaction", open ++ [assistant("working"), user(@compaction_prompt)], 0},
       {"turn", open ++ [user("synthetic summary one")], 1},
       {"compaction", open ++ [user("synthetic summary one"), assistant("more work"), user(@compaction_prompt)], 1},
-      {"turn", open ++ [user("synthetic summary two"), user("synthetic steer")], 2}
+      {"turn", open ++ [user("synthetic summary two")], 2}
     ]
   end
 

@@ -10,6 +10,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
   # summarization request as a resend of the turn's opening request and refused
   # it `409 duplicate_turn`, six times, and the turn failed.
   #
+  # From a thread's second local compaction on, in the same turn or in a later
+  # one, the resume itself was refused the same way (findings#270 row 270-286):
+  # a local compaction leaves no compaction item, so the resume stood no
+  # further along its turn than the previous resume or the next turn's opener.
+  # Its context window now stands in for the missing compaction point.
+  #
   # Frames: the shape `codex exec` 0.158.0 sends with provider `name = "Codex
   # Pooler"` and `model_auto_compact_token_limit = 200` against a local fake
   # provider (field set, turn metadata, upgrade headers, input item kinds and
@@ -51,6 +57,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
   @compaction_prompt "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary (synthetic)."
   @summary_text "Another language model started to solve this problem and produced a summary (synthetic)."
   @peer_thread "019a0000-0000-7000-8000-00000000f282"
+  @next_task "local compaction sample: the next task"
 
   for forwarding <- [:off, :on], mode <- ["full", "lite"] do
     @tag forwarding: forwarding, serving_mode: mode
@@ -64,6 +71,45 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
       {_server, port} = start_public_endpoint_with_server!()
 
       assert_local_compaction_served!(upstream, setup, port, new_turn(setup, ctx.serving_mode), summary_hold, owner_reader(ctx.forwarding))
+    end
+  end
+
+  # The released client 0.159.0 against a provider that answers the first
+  # resume with one more tool round (`same_turn`), or that ends the turn and
+  # compacts again in the thread's next turn (`next_turn`): each summary on a
+  # websocket of its own, each resume on the turn's first websocket, on the
+  # next window. Before, the second resume was refused `duplicate_turn` six
+  # times, then the client fell back to HTTPS and failed the turn.
+  for forwarding <- [:off, :on], mode <- ["full", "lite"], shape <- [:same_turn, :next_turn] do
+    @tag forwarding: forwarding, serving_mode: mode, shape: shape
+    test "a #{mode} thread's resume after its second local compaction (#{shape}) with owner forwarding #{forwarding} is served", ctx do
+      put_owner_forwarding!(ctx.forwarding == :on)
+      upstream = start_upstream(second_compaction_upstream(ctx.shape))
+      setup = gateway_setup(upstream)
+      set_model_serving_mode!(model_serving_scope(), setup, ctx.serving_mode)
+      assert :ok = CodexPooler.Events.subscribe_pool(setup.pool)
+      {_server, port} = start_public_endpoint_with_server!()
+      turn = new_turn(setup, ctx.serving_mode)
+
+      first = connect!(port, setup, turn, "prewarm")
+      {first, prewarm_id} = prewarm!(first, turn)
+      {first, resume} = serve_second_compaction!(ctx.shape, first, port, setup, turn, prewarm_id)
+
+      # One row per request, each served once under a claim of its own: the
+      # openers under their turn's claim, the summaries under compaction
+      # claims, each resume under the claim of a later request of its turn.
+      rows = pool_requests(setup)
+      assert Enum.map(rows, & &1.status) == List.duplicate("succeeded", length(rows))
+      assert Enum.map(rows, &(&1.correlation_id |> String.split(":") |> hd())) == expected_claim_classes(ctx.shape)
+      assert Enum.uniq_by(rows, & &1.correlation_id) == rows
+
+      # A true resend of the last resume meets it and never reaches the provider.
+      {first, resent} = send_turn!(first, resume)
+      assert [%{"type" => "error", "status" => 409, "error" => %{"code" => "duplicate_turn"}}] = resent
+      assert length(pool_requests(setup)) == length(rows)
+      assert :ok = FakeUpstream.verify!(upstream)
+
+      drop!(first)
     end
   end
 
@@ -215,14 +261,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
     FakeUpstream.expect_request(method: "WEBSOCKET", path: @turn_path, websocket_connection_ordinal: connection_ordinal, json: [valid: true, equals: %{"type" => "response.create"}], respond: respond)
   end
 
-  defp tool_call_events do
-    item = %{"type" => "function_call", "id" => "fc_local_compaction_sample", "status" => "completed", "call_id" => @call_id, "name" => "exec_command", "arguments" => ~s({"cmd":"printf sample"})}
+  defp tool_call_events(response_id \\ "resp_local_compaction_opener", call_id \\ @call_id) do
+    item = %{"type" => "function_call", "id" => "fc_" <> String.replace_prefix(call_id, "call_", ""), "status" => "completed", "call_id" => call_id, "name" => "exec_command", "arguments" => ~s({"cmd":"printf sample"})}
 
     Enum.map(
       [
-        %{"type" => "response.created", "response" => %{"id" => "resp_local_compaction_opener", "status" => "in_progress", "output" => []}},
+        %{"type" => "response.created", "response" => %{"id" => response_id, "status" => "in_progress", "output" => []}},
         %{"type" => "response.output_item.done", "output_index" => 0, "item" => item},
-        %{"type" => "response.completed", "response" => %{"id" => "resp_local_compaction_opener", "status" => "completed", "output" => [item], "usage" => %{"input_tokens" => 499, "output_tokens" => 1, "total_tokens" => 500}}}
+        %{"type" => "response.completed", "response" => %{"id" => response_id, "status" => "completed", "output" => [item], "usage" => %{"input_tokens" => 499, "output_tokens" => 1, "total_tokens" => 500}}}
       ],
       &CodexPooler.JSON.encode!/1
     )
@@ -240,6 +286,88 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
       &CodexPooler.JSON.encode!/1
     )
   end
+
+  defp serve_second_compaction!(:same_turn, first, port, setup, turn, prewarm_id) do
+    first = serve_turn!(first, opener_frame(turn, prewarm_id), "resp_local_compaction_opener")
+    :ok = serve_summary!(port, setup, turn, 0, history(turn), "one")
+    first = serve_turn!(first, frame(turn, "turn", 1, history(turn) ++ [summary_message("one")], %{}), "resp_local_compaction_resumed_one")
+    :ok = serve_summary!(port, setup, turn, 1, history(turn) ++ [summary_message("one")], "two")
+    resume = frame(turn, "turn", 2, history(turn) ++ [summary_message("two")], %{})
+    {serve_turn!(first, resume, "resp_local_compaction_resumed_two"), resume}
+  end
+
+  # The next turn opens on the same websocket, anchored on the first turn's
+  # last response, and already carries the first summary.
+  defp serve_second_compaction!(:next_turn, first, port, setup, turn, prewarm_id) do
+    first = serve_turn!(first, opener_frame(turn, prewarm_id), "resp_local_compaction_opener")
+    :ok = serve_summary!(port, setup, turn, 0, history(turn), "one")
+    first = serve_turn!(first, frame(turn, "turn", 1, history(turn) ++ [summary_message("one")], %{}), "resp_local_compaction_resumed_one")
+
+    next = %{turn | turn_id: Ecto.UUID.generate(), started_at: System.system_time(:millisecond)}
+    first = serve_turn!(first, frame(next, "turn", 1, [user_message(@next_task)], %{"previous_response_id" => "resp_local_compaction_resumed_one"}), "resp_local_compaction_next_opener")
+    before_summary = history(turn) ++ [summary_message("one"), assistant_message(answer_text("resp_local_compaction_resumed_one")), user_message(@next_task)]
+    :ok = serve_summary!(port, setup, next, 1, before_summary, "two")
+    resume = frame(next, "turn", 2, history(turn) ++ [user_message(@next_task), summary_message("two")], %{})
+    {serve_turn!(first, resume, "resp_local_compaction_resumed_two"), resume}
+  end
+
+  defp expected_claim_classes(:same_turn), do: ["codex-turn", "codex-request", "codex-resume", "codex-request", "codex-resume"]
+  defp expected_claim_classes(:next_turn), do: ["codex-turn", "codex-request", "codex-resume", "codex-turn", "codex-request", "codex-resume"]
+
+  defp serve_turn!(client, frame, response_id) do
+    {client, events} = send_turn!(client, frame)
+    assert %{"type" => "response.completed", "response" => %{"id" => ^response_id}} = List.last(events)
+    assert_receive {CodexPooler.Events, %{reason: "request_finalized", payload: %{"status" => "succeeded"}}}, @detection_timeout_ms
+    client
+  end
+
+  # The summarization request on a websocket of its own, which the client
+  # drops once it has the summary.
+  defp serve_summary!(port, setup, turn, window, before, label) do
+    input = before ++ tool_round(label) ++ [user_message(@compaction_prompt)]
+    client = connect!(port, setup, turn, "compaction", window)
+    client = serve_turn!(client, frame(turn, "compaction", window, input, %{"parallel_tool_calls" => false}, tools: []), "resp_local_compaction_summary_#{label}")
+    drop!(client)
+  end
+
+  # Opener, summary, resume on the turn's connection, and so on: every summary
+  # on an upstream connection of its own.
+  defp second_compaction_upstream(:same_turn) do
+    # provenance: observed codex 0.159.0 `codex exec` local compactions against a local fake provider (smoke arm compact-local-twice: opener, summary, resume answered with one more tool round, summary, resume); ids and text synthetic
+    FakeUpstream.strict_sequence([
+      turn_request(1, FakeUpstream.websocket_text_frames(tool_call_events())),
+      turn_request(2, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_summary_one", @summary_text))),
+      turn_request(1, FakeUpstream.websocket_text_frames(tool_call_events("resp_local_compaction_resumed_one", "call_local_compaction_two"))),
+      turn_request(3, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_summary_two", @summary_text))),
+      turn_request(1, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_resumed_two", answer_text("resp_local_compaction_resumed_two"))))
+    ])
+  end
+
+  defp second_compaction_upstream(:next_turn) do
+    # provenance: observed codex 0.159.0 `codex exec` local compactions against a local fake provider (smoke arm compact-local-next: the first turn compacts and ends, the next turn compacts again); ids and text synthetic
+    FakeUpstream.strict_sequence([
+      turn_request(1, FakeUpstream.websocket_text_frames(tool_call_events())),
+      turn_request(2, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_summary_one", @summary_text))),
+      turn_request(1, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_resumed_one", answer_text("resp_local_compaction_resumed_one")))),
+      turn_request(1, FakeUpstream.websocket_text_frames(tool_call_events("resp_local_compaction_next_opener", "call_local_compaction_two"))),
+      turn_request(3, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_summary_two", @summary_text))),
+      turn_request(1, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_resumed_two", answer_text("resp_local_compaction_resumed_two"))))
+    ])
+  end
+
+  defp answer_text(response_id), do: "synthetic final answer of #{response_id}"
+
+  # One tool round the client ran before it compacted, as its history carries it.
+  defp tool_round(label) do
+    call_id = "call_local_compaction_#{label}"
+
+    [
+      %{"type" => "function_call", "id" => "fc_local_compaction_#{label}", "name" => "exec_command", "arguments" => ~s({"cmd":"printf sample"}), "call_id" => call_id},
+      %{"type" => "function_call_output", "id" => "fco_local_compaction_#{label}", "call_id" => call_id, "output" => "sample"}
+    ]
+  end
+
+  defp summary_message(label), do: user_message("#{@summary_text}\nsynthetic summary #{label}")
 
   # What serves the turn's socket: the session's owner lease on the row, and
   # the owner's lease and downstream binding. Nil without owner forwarding.
@@ -293,8 +421,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
     refute Map.get(state, :websocket_owner_lost?, false)
   end
 
-  # The released client's identity of one turn: its thread, the turn id, the
-  # two context windows (before and after the compaction), and the serving
+  # The released client's identity of one turn: its thread, the turn id, its
+  # context windows (before and after each compaction), and the serving
   # mode the Pool's catalog told it (Lite moves the tools and instructions into
   # the input and marks every frame).
   defp new_turn(setup, mode) do
@@ -302,7 +430,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
       model: setup.model.exposed_model_id,
       thread: Ecto.UUID.generate(),
       turn_id: Ecto.UUID.generate(),
-      contexts: {Ecto.UUID.generate(), Ecto.UUID.generate()},
+      contexts: Enum.map(0..2, fn _window -> Ecto.UUID.generate() end),
       mode: mode,
       started_at: System.system_time(:millisecond)
     }
@@ -310,8 +438,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
 
   # The handshake carries the turn metadata of the request the client opens
   # the connection for: the prewarm on the turn's socket, the summarization
-  # request on the compaction's socket.
-  defp connect!(port, setup, turn, request_kind) do
+  # request on the compaction's socket, in the window it summarizes.
+  defp connect!(port, setup, turn, request_kind, window \\ 0) do
     before = WebsocketCleanupFence.listener_sockets()
     turn_id = if request_kind == "prewarm", do: "", else: turn.turn_id
 
@@ -319,8 +447,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
       {"session-id", turn.thread},
       {"thread-id", turn.thread},
       {"x-client-request-id", turn.thread},
-      {"x-codex-window-id", "#{turn.thread}:0"},
-      {"x-codex-turn-metadata", CodexPooler.JSON.encode!(turn_metadata(turn, request_kind, 0, turn_id))},
+      {"x-codex-window-id", "#{turn.thread}:#{window}"},
+      {"x-codex-turn-metadata", CodexPooler.JSON.encode!(turn_metadata(turn, request_kind, window, turn_id))},
       {"x-codex-beta-features", "remote_compaction_v2"},
       {"openai-beta", "responses_websockets=2026-02-06"},
       {"originator", "codex_exec"}
@@ -419,7 +547,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
   end
 
   defp turn_metadata(turn, request_kind, window_number, turn_id) do
-    context_window_id = if window_number == 0, do: elem(turn.contexts, 0), else: elem(turn.contexts, 1)
+    context_window_id = Enum.at(turn.contexts, window_number)
 
     base = %{
       "installation_id" => @installation_id,
@@ -464,6 +592,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
 
   defp developer_message(text), do: %{"type" => "message", "role" => "developer", "content" => [%{"type" => "input_text", "text" => text}]}
   defp user_message(text), do: %{"type" => "message", "role" => "user", "content" => [%{"type" => "input_text", "text" => text}]}
+  defp assistant_message(text), do: %{"type" => "message", "role" => "assistant", "content" => [%{"type" => "output_text", "text" => text}]}
 
   defp send_turn!(client, frame), do: client |> send_frame!(frame) |> receive_turn!()
 

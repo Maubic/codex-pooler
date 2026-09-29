@@ -7,6 +7,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuationTest do
   # `test/codex_pooler_web/controllers/runtime/backend_codex_http_duplicate_turn_test.exs`.
   use ExUnit.Case, async: true
 
+  alias CodexPooler.Accounting.NativeTurnProgress
   alias CodexPooler.Gateway.Payloads.NativeCodexTurnMetadata
   alias CodexPooler.Gateway.Payloads.NativeTurnContinuation
   alias CodexPooler.Gateway.Payloads.RequestOptions
@@ -471,6 +472,105 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuationTest do
     end
   end
 
+  # findings#282, findings#270 row 270-286: a local compaction (`compact.rs`)
+  # leaves no pivot item. It rebuilds the history from the thread's initial
+  # context, its most recent user messages (as many as fit the compaction's
+  # budget) and the summary as one more user message, and the client moves to
+  # its next context window, which every later request names in its turn
+  # metadata (`window_number`). The window stands in for the missing pivot.
+  describe "the context window after a local compaction" do
+    test "the window is read from the body document or the header copy, and a malformed one is none" do
+      for source <- [:body, :header] do
+        metadata = %{"request_kind" => "turn", "window_number" => 3}
+        assert NativeTurnContinuation.window_number(payload_for(source, metadata), options_for(source, metadata)) == 3
+      end
+
+      for value <- [-1, 1.5, "1", 4_294_967_296, nil] do
+        assert NativeTurnContinuation.window_number(document(%{"request_kind" => "turn", "window_number" => value})) == nil
+      end
+
+      assert NativeTurnContinuation.window_number(%{"window_number" => 0}) == 0
+      assert NativeTurnContinuation.window_number(document(%{"request_kind" => "turn"})) == nil
+      assert NativeTurnContinuation.window_number("not a document") == nil
+      assert NativeTurnContinuation.window_number(nil) == nil
+    end
+
+    test "window 0, or none, leaves every progress as it was" do
+      payload = %{"input" => [user_message("one"), assistant_message("a"), user_message("two")]}
+
+      for window <- [nil, 0] do
+        assert NativeTurnContinuation.turn_progress(payload, window) == NativeTurnContinuation.turn_progress(payload)
+        assert NativeTurnContinuation.turn_position(payload, window) == {nil, 2}
+      end
+    end
+
+    test "each later window is a compaction point of its own, which a compaction item still overrides" do
+      payload = %{"input" => [user_message("task"), user_message("summary")]}
+      assert {<<_::256>> = window_one, 2} = NativeTurnContinuation.turn_position(payload, 1)
+      assert {<<_::256>> = window_two, 2} = NativeTurnContinuation.turn_position(payload, 2)
+      refute window_one == window_two
+
+      progress = Enum.map([nil, 1, 2], &NativeTurnContinuation.turn_progress(payload, &1))
+      assert progress == Enum.uniq(progress)
+
+      pivot = %{"type" => "compaction", "encrypted_content" => "synthetic-pivot"}
+      remote = %{"input" => [user_message("x"), pivot, user_message("after")]}
+
+      for window <- [0, 1, 7] do
+        assert NativeTurnContinuation.turn_progress(remote, window) == NativeTurnContinuation.turn_progress(remote)
+        assert NativeTurnContinuation.turn_position(remote, window) == NativeTurnContinuation.turn_position(remote)
+      end
+    end
+
+    # The requests of a thread that compacts locally, in the released client's
+    # shape (initial context, retained user messages, the summary), against
+    # the request whose claim each one meets.
+    test "every resume after a local compaction is further along than the request whose claim it meets, and a resend is not" do
+      context = [developer_message("instructions"), user_message("environment")]
+      opener = NativeTurnContinuation.turn_position(%{"input" => context ++ [user_message("task")]}, 0)
+      first_resume = %{"input" => context ++ [user_message("task"), user_message("summary one")]}
+      second_resume = %{"input" => context ++ [user_message("task"), user_message("summary two")]}
+
+      # The second compaction of one turn: the resume stands where the first
+      # did in user messages, on the next window, under a claim of its own.
+      assert NativeTurnProgress.advances?(opener, NativeTurnContinuation.turn_position(first_resume, 1))
+      assert NativeTurnProgress.advances?(opener, NativeTurnContinuation.turn_position(second_resume, 2))
+      refute NativeTurnContinuation.turn_progress(second_resume, 2) == NativeTurnContinuation.turn_progress(first_resume, 1)
+
+      # A compaction in the thread's next turn: that turn's opener already
+      # carries the previous summary, as many user messages as its resume.
+      next_opener = NativeTurnContinuation.turn_position(%{"input" => context ++ [user_message("task"), user_message("summary one"), assistant_message("done"), user_message("next task")]}, 1)
+      next_resume = NativeTurnContinuation.turn_position(%{"input" => context ++ [user_message("task"), user_message("next task"), user_message("summary two")]}, 2)
+      assert elem(next_opener, 1) == elem(next_resume, 1)
+      assert NativeTurnProgress.advances?(next_opener, next_resume)
+
+      # A compaction that dropped older user messages to fit its budget.
+      long_opener = NativeTurnContinuation.turn_position(%{"input" => context ++ Enum.map(1..5, &user_message("message #{&1}"))}, 0)
+      trimmed_resume = NativeTurnContinuation.turn_position(%{"input" => context ++ [user_message("message 5"), user_message("summary one")]}, 1)
+      assert NativeTurnProgress.advances?(long_opener, trimmed_resume)
+
+      # A true resend, or a rebuilt retry, stands where its holder stood.
+      retried = %{"input" => first_resume["input"] ++ [assistant_message("partial")]}
+      assert NativeTurnContinuation.turn_progress(retried, 1) == NativeTurnContinuation.turn_progress(first_resume, 1)
+      refute NativeTurnProgress.advances?(NativeTurnContinuation.turn_position(first_resume, 1), NativeTurnContinuation.turn_position(retried, 1))
+      refute NativeTurnProgress.advances?(next_opener, next_opener)
+    end
+
+    test "an anchored increment stands on the window its full history names" do
+      window_one = %{"input" => [user_message("task"), user_message("summary one")]}
+      {:ok, base_progress} = NativeTurnContinuation.websocket_frame_progress(window_one, nil, 1)
+      base = %{semantic_turn_key: @turn_key, response_digest: NativeCodexTurnMetadata.response_id_digest("resp_window_one"), progress: base_progress}
+      increment = %{"previous_response_id" => "resp_window_one", "input" => [user_message("steered")]}
+      full_history = %{"input" => [user_message("task"), user_message("summary one"), assistant_message("a"), user_message("steered")]}
+
+      for window <- [1, 2, nil] do
+        assert {:ok, progress} = NativeTurnContinuation.websocket_frame_progress(increment, base, window)
+        assert NativeTurnContinuation.progress_digest(progress) == NativeTurnContinuation.turn_progress(full_history, window)
+        assert NativeTurnContinuation.progress_position(progress) == NativeTurnContinuation.turn_position(full_history, window)
+      end
+    end
+  end
+
   defp steer_payload(anchor),
     do: %{
       "previous_response_id" => anchor,
@@ -522,6 +622,13 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuationTest do
     do: %{
       "type" => "message",
       "role" => "user",
+      "content" => [%{"type" => "input_text", "text" => text}]
+    }
+
+  defp developer_message(text),
+    do: %{
+      "type" => "message",
+      "role" => "developer",
       "content" => [%{"type" => "input_text", "text" => text}]
     }
 

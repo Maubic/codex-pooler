@@ -1711,13 +1711,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
   # The same fence, across the one thing that used to move underneath it. After
   # a remote compaction the released client advances its window
   # (`compact_remote_v2.rs:323`) and `x-codex-window-id` is
-  # `"{thread_id}:{window_number}"` (`session/mod.rs:4449-4459`), so the resend
-  # of the turn that compacted carries a new window while the thread, the
-  # `turn_id` and the authorized history are unchanged. The session key prefers
-  # the window since `6441e83d`, so that resend landed in a SECOND codex session
-  # where a claim named after the session UUID could not meet its predecessor,
-  # and the provider was asked the same history twice
-  # (icoretech/codex-pooler-findings#250).
+  # `"{thread_id}:{window_number}"` (`session/mod.rs:4572-4578` at
+  # rust-v0.159.0). A websocket's upgrade names the window its connection was
+  # opened on, while each frame names the window its request was built in: the
+  # first post-compaction turn rode a connection of the old window and named
+  # the new one, and its resend went out on a new connection naming the new
+  # window in both, with the thread, the `turn_id` and the authorized history
+  # unchanged. The session key prefers the window since `6441e83d`, so that
+  # resend landed in a SECOND codex session where a claim named after the
+  # session UUID could not meet its predecessor, and the provider was asked the
+  # same history twice (icoretech/codex-pooler-findings#250).
   @tag :post_compaction_window_rotation
   test "an identical native resend after a window rotation is fenced and buys no second dispatch" do
     upstream =
@@ -1735,7 +1738,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
     refute window_one.id == window_two.id
 
     turn_id = "post-compaction-window-rotation-turn"
-    opening = post_compaction_turn_payload(setup, thread, 1, turn_id)
+    opening = post_compaction_turn_payload(setup, thread, 2, turn_id)
 
     assert :ok =
              execute_websocket_response(

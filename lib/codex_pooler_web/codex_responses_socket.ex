@@ -2244,11 +2244,15 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   # Only a model request of a turn carries its turn's progress forward: a
   # compaction's response replaces the history, and the client sends full
-  # history after it.
+  # history after it. The frame's context window counts as its pivot after a
+  # local compaction (findings#282).
   defp native_turn_frame_progress(payload, %RequestOptions{} = options, state) do
-    if NativeTurnContinuation.request_kind(payload, options) == "turn",
-      do: NativeTurnContinuation.websocket_frame_progress(payload, Map.get(state, :last_completed_native_response)),
-      else: :unknown
+    if NativeTurnContinuation.request_kind(payload, options) == "turn" do
+      window = NativeTurnContinuation.window_number(payload, options)
+      NativeTurnContinuation.websocket_frame_progress(payload, Map.get(state, :last_completed_native_response), window)
+    else
+      :unknown
+    end
   end
 
   defp maybe_put_native_turn_metadata(%RequestOptions{} = options, decoded) do

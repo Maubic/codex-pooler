@@ -194,7 +194,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
        )
        |> Map.put(:input_count, input_count(payload, claim.arm))
        |> Map.put(:semantic_turn_key, identity.semantic_turn_key)
-       |> put_steered_claim(identity, payload)}
+       |> put_steered_claim(identity, payload, NativeTurnContinuation.window_number(metadata))}
     else
       _fail_open -> :none
     end
@@ -270,17 +270,18 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
   # along the turn than that holder (its position, row 206-423). The steered
   # claim is named by the turn and that digest alone, so a rebuilt retry of the
   # steered request (model output appended) derives it again and meets its own
-  # predecessor.
-  defp put_steered_claim(%{arm: :opening} = claim, identity, payload) do
-    progress = NativeTurnContinuation.turn_progress(payload)
+  # predecessor. The request's context window counts as its pivot after a
+  # local compaction (`NativeTurnContinuation.turn_progress/2`, findings#282).
+  defp put_steered_claim(%{arm: :opening} = claim, identity, payload, window) do
+    progress = NativeTurnContinuation.turn_progress(payload, window)
 
     claim
     |> Map.put(:turn_progress, progress)
-    |> Map.put(:turn_position, NativeTurnContinuation.turn_position(payload))
+    |> Map.put(:turn_position, NativeTurnContinuation.turn_position(payload, window))
     |> Map.put(:steered_claim, WebsocketTurnIdentity.steered_claim_key(identity.semantic_turn_key, progress))
   end
 
-  defp put_steered_claim(claim, _identity, _payload), do: claim
+  defp put_steered_claim(claim, _identity, _payload, _window), do: claim
 
   defp kind_claim(identity, request_options, payload) do
     case NativeTurnContinuation.request_kind(payload, request_options) do
