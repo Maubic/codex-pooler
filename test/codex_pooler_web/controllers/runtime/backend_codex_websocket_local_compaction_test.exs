@@ -92,8 +92,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
       turn = new_turn(setup, ctx.serving_mode)
 
       first = connect!(port, setup, turn, "prewarm")
-      {first, prewarm_id} = prewarm!(first, turn)
-      {first, resume} = serve_second_compaction!(ctx.shape, first, port, setup, turn, prewarm_id)
+      first = prewarm!(first, turn)
+      {first, resume} = serve_second_compaction!(ctx.shape, first, port, setup, turn)
 
       # One row per request, each served once under a claim of its own: the
       # openers under their turn's claim, the summaries under compaction
@@ -160,8 +160,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
     turn = new_turn(setup, "full")
 
     first = connect!(port, setup, turn, "prewarm")
-    {first, prewarm_id} = prewarm!(first, turn)
-    {first, opener} = send_turn!(first, opener_frame(turn, prewarm_id))
+    first = prewarm!(first, turn)
+    {first, opener} = send_turn!(first, opener_frame(turn))
     assert %{"type" => "response.completed", "response" => %{"id" => "resp_local_compaction_opener"}} = List.last(opener)
     assert_receive {CodexPooler.Events, %{reason: "request_finalized", payload: %{"status" => "succeeded"}}}, @detection_timeout_ms
 
@@ -193,8 +193,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
 
   defp assert_local_compaction_served!(upstream, setup, port, turn, summary_hold, owner_reader) do
     first = connect!(port, setup, turn, "prewarm")
-    {first, prewarm_id} = prewarm!(first, turn)
-    {first, opener} = send_turn!(first, opener_frame(turn, prewarm_id))
+    first = prewarm!(first, turn)
+    {first, opener} = send_turn!(first, opener_frame(turn))
     assert %{"type" => "response.completed"} = List.last(opener)
     assert_receive {CodexPooler.Events, %{reason: "request_finalized", payload: %{"status" => "succeeded"}}}, @detection_timeout_ms
     binding = owner_binding(first, owner_reader)
@@ -287,8 +287,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
     )
   end
 
-  defp serve_second_compaction!(:same_turn, first, port, setup, turn, prewarm_id) do
-    first = serve_turn!(first, opener_frame(turn, prewarm_id), "resp_local_compaction_opener")
+  defp serve_second_compaction!(:same_turn, first, port, setup, turn) do
+    first = serve_turn!(first, opener_frame(turn), "resp_local_compaction_opener")
     :ok = serve_summary!(port, setup, turn, 0, history(turn), "one")
     first = serve_turn!(first, frame(turn, "turn", 1, history(turn) ++ [summary_message("one")], %{}), "resp_local_compaction_resumed_one")
     :ok = serve_summary!(port, setup, turn, 1, history(turn) ++ [summary_message("one")], "two")
@@ -298,8 +298,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
 
   # The next turn opens on the same websocket, anchored on the first turn's
   # last response, and already carries the first summary.
-  defp serve_second_compaction!(:next_turn, first, port, setup, turn, prewarm_id) do
-    first = serve_turn!(first, opener_frame(turn, prewarm_id), "resp_local_compaction_opener")
+  defp serve_second_compaction!(:next_turn, first, port, setup, turn) do
+    first = serve_turn!(first, opener_frame(turn), "resp_local_compaction_opener")
     :ok = serve_summary!(port, setup, turn, 0, history(turn), "one")
     first = serve_turn!(first, frame(turn, "turn", 1, history(turn) ++ [summary_message("one")], %{}), "resp_local_compaction_resumed_one")
 
@@ -467,13 +467,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
   defp prewarm!(client, turn) do
     frame = frame(turn, "prewarm", 0, [developer_message("synthetic developer instructions"), user_message("synthetic environment context")], %{"generate" => false})
     {client, events} = send_turn!(client, frame)
-    assert %{"type" => "response.completed", "response" => %{"id" => prewarm_id}} = List.last(events)
-    {client, prewarm_id}
+    assert %{"type" => "response.completed", "response" => %{"id" => ""}} = List.last(events)
+    client
   end
 
-  defp opener_frame(turn, prewarm_id) do
-    frame(turn, "turn", 0, [user_message("local compaction sample: run the tool, then answer")], %{"previous_response_id" => prewarm_id})
-  end
+  # The Pooler answers the prewarm itself, with an empty response id
+  # (`WebsocketCodec.warmup_result/0`), and the released client sends its next
+  # request whole when the last response id is empty (`client.rs`
+  # `prepare_websocket_request` at rust-v0.158.0 and rust-v0.159.0): the
+  # turn's opener carries the full history and no anchor.
+  defp opener_frame(turn), do: frame(turn, "turn", 0, history(turn), %{})
 
   # The summarization request: the whole history, the tool round included,
   # then the client's compaction prompt; no tools and no parallel tool calls.
