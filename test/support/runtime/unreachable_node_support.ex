@@ -18,8 +18,9 @@ defmodule CodexPoolerWeb.Runtime.UnreachableNodeSupport do
   #     way a crashed pod goes, without running any cleanup there.
   #   * `start_pacer!/1`: releases a FakeUpstream reply held by
   #     `FakeUpstream.barrier_websocket_frames/2` (whose `notify:` is the pacer)
-  #     one frame per interval once told to, monitors the connection handler,
-  #     and reports what that connection consumed.
+  #     one frame per interval once told to, or one frame per `step!/1`,
+  #     monitors the connection handler, and reports what that connection
+  #     consumed.
 
   import ExUnit.Assertions
   import ExUnit.Callbacks, only: [on_exit: 1]
@@ -122,7 +123,7 @@ defmodule CodexPoolerWeb.Runtime.UnreachableNodeSupport do
   @spec start_pacer!(reference()) :: pid()
   def start_pacer!(release_ref) do
     test = self()
-    pacer = spawn_link(fn -> pacer_loop(%{test: test, ref: release_ref, upstream: nil, mode: :hold, interval_ms: nil, handler: nil, waiting: nil, t0: nil, events: []}) end)
+    pacer = spawn_link(fn -> pacer_loop(%{test: test, ref: release_ref, upstream: nil, mode: :hold, interval_ms: nil, handler: nil, waiting: nil, t0: nil, events: [], stepper: nil}) end)
     on_exit(fn -> if Process.alive?(pacer), do: Process.exit(pacer, :kill) end)
     pacer
   end
@@ -158,6 +159,18 @@ defmodule CodexPoolerWeb.Runtime.UnreachableNodeSupport do
     :ok
   end
 
+  # Releases the one frame the held reply waits at, counted as `pace!/2`
+  # counts from the first step on, and returns once the reply reached its
+  # next frame barrier or its connection went down. No frame follows until
+  # the test steps again: the provider's pace follows the test's events
+  # instead of a clock.
+  @spec step!(pid()) :: :ok
+  def step!(pacer) do
+    send(pacer, {:step, System.monotonic_time(:millisecond), self()})
+    assert_receive :pacer_stepped, @detection_timeout_ms
+    :ok
+  end
+
   # The frames the held connection consumed since `pace!/2` and when its
   # handler (the last one that held a reply) went down, in ms since
   # `pace!/2` (nil while it is alive).
@@ -177,12 +190,13 @@ defmodule CodexPoolerWeb.Runtime.UnreachableNodeSupport do
 
       # A held reply whose connection went down no longer waits at its barrier.
       {:DOWN, _monitor, :process, handler, _reason} when handler == state.handler ->
-        pacer_loop(%{state | waiting: nil, events: [{:connection_down, handler, since(state)} | state.events]})
+        state = %{state | waiting: nil, events: [{:connection_down, handler, since(state)} | state.events]}
+        pacer_loop(answer_stepper(state))
 
       {:fake_upstream_frame_barrier, ordinal, handler, ref} when ref == state.ref ->
         if handler != state.handler, do: Process.monitor(handler)
         state = %{state | handler: handler, waiting: ordinal, events: [{:barrier, ordinal, since(state)} | state.events]}
-        state = notify_waiter(state, ordinal)
+        state = state |> notify_waiter(ordinal) |> answer_stepper()
 
         if state.mode == :pace do
           Process.send_after(self(), :release_waiting, state.interval_ms)
@@ -204,6 +218,11 @@ defmodule CodexPoolerWeb.Runtime.UnreachableNodeSupport do
         if is_integer(state.waiting), do: send(self(), :release_waiting)
         pacer_loop(state)
 
+      # A step sent before the reply reached its barrier waits in the mailbox.
+      {:step, now, from} when is_integer(state.waiting) ->
+        state = %{state | mode: :step, t0: state.t0 || now, stepper: from}
+        pacer_loop(release_waiting(state))
+
       :release_waiting ->
         pacer_loop(release_waiting(state))
 
@@ -223,6 +242,14 @@ defmodule CodexPoolerWeb.Runtime.UnreachableNodeSupport do
         state
     end
   end
+
+  # A step waits for the next barrier or the connection's end.
+  defp answer_stepper(%{stepper: from} = state) when is_pid(from) do
+    send(from, :pacer_stepped)
+    %{state | stepper: nil}
+  end
+
+  defp answer_stepper(state), do: state
 
   defp release_waiting(%{waiting: ordinal} = state) when is_integer(ordinal) do
     case FakeUpstream.release_frame(state.upstream, state.ref) do

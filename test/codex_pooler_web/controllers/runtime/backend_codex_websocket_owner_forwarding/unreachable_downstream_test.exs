@@ -45,6 +45,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   alias CodexPooler.Accounting.{Attempt, Request, RequestLifecycle}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn}
+  alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Platform.{ForwardedGenerationEnd, InstanceHeartbeat, InstancePresence}
   alias CodexPooler.Repo
@@ -290,7 +291,23 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
           :ok = halt!(turn.app_peer.peer, turn.app_peer.node)
           _lost = await_owner_state!(turn.owner, &lost_turn?/1, "the owner did not keep the turn for a resend")
 
-          # No resend comes before the turn's output (created, then its first delta).
+          # No resend comes before the turn's output (created, then its first
+          # delta). The provider sends the two, then waits for the owner to
+          # handle that first output: it went on at a fixed pace while the
+          # owner committed the turn's visibility, and a loaded run released a
+          # fourth frame first (findings#270 row 270-343). Once the owner
+          # cancelled the turn and its upstream session closed the connection,
+          # the provider's next frame finds the connection closed; a turn the
+          # owner kept goes on at the provider's pace.
+          :ok = step!(turn.pacer)
+          :ok = step!(turn.pacer)
+          handled = await_owner_state!(turn.owner, &first_output_handled?/1, "the owner never handled the turn's first output")
+
+          if is_nil(handled.active_turn) do
+            :ok = await_upstream_connection_closed!(handled.upstream_pid)
+            :ok = step!(turn.pacer)
+          end
+
           :ok = pace!(turn.pacer, @pace_ms)
           assert_turn_cancelled_at_once!(turn.pacer)
         end)
@@ -521,6 +538,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   end
 
   defp lost_turn?(state), do: match?(%{downstream: nil, active_turn: %{descriptor: %{downstream_status: :lost}}}, state)
+
+  # The owner handled a turn's first output: it cancelled the turn, or it
+  # committed the turn's visibility and went on.
+  defp first_output_handled?(state), do: match?(%{active_turn: nil}, state) or match?(%{active_turn: %{visible_output?: true}}, state)
+
+  # The upstream session closed the turn's provider connection: a cancelled
+  # request's caller exit closes it (`request_caller_down`). The session
+  # answers only once the request it serves has ended.
+  defp await_upstream_connection_closed!(upstream) do
+    deadline = System.monotonic_time(:millisecond) + @detection_timeout_ms
+    _closed = await_state!(fn -> UpstreamWebsocketSession.live_connection(upstream) end, &match?({:ok, %{generation: nil}}, &1), "the owner's upstream session kept the turn's connection open", deadline)
+    :ok
+  end
 
   # The owner's state, or `:stopped` once its lease check stopped it.
   defp peer_owner_state(peer, owner) do
