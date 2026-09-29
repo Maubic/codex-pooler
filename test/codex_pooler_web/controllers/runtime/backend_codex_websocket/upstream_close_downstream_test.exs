@@ -137,6 +137,49 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.UpstreamCloseDownstreamTe
     assert :ok = FakeUpstream.verify!(upstream)
   end
 
+  # With owner forwarding off the socket hears of a closed upstream connection
+  # from the session that held it, and the same session writes every response
+  # chunk to the socket: the socket's writer runs in the session process. One
+  # sender for both is what orders the close of one connection before any
+  # chunk served on the next, so the socket never takes an earlier close for
+  # the connection its latest response rode on (findings#270 rows 270-199 and
+  # 270-205). The session's sends and the socket's receives are traced (the
+  # session's sensitivity is lifted from inside it first) and must match,
+  # message for message.
+  test "the session is the one sender of the socket's response chunks and of its close signal" do
+    upstream =
+      start_upstream(
+        # provenance: synthetic_adversarial (one turn, then the provider's close, 1000)
+        FakeUpstream.strict_sequence([anchorless_request(1, completed_response_frames("resp_ws_single_sender", [@tool_call], 2, 1))])
+      )
+
+    setup = upstream_close_setup(upstream, nil)
+    {_server, port} = start_public_endpoint_with_server!()
+    thread = "ws-single-sender-#{System.unique_integer([:positive])}"
+    client = connect!(port, setup, thread, @turn_path)
+    session = socket_connection_state!(client.socket).upstream_websocket_session
+    tracer = trace_socket_deliveries!(session, client.socket)
+    frame = released_client_frame(setup, thread)
+
+    {conn, websocket} = public_websocket_send_text!(client.conn, client.websocket, client.ref, frame.(native_text_input("single sender"), Ecto.UUID.generate(), %{}))
+    {conn, websocket, terminal} = receive_native_terminal!(conn, websocket, client.ref)
+    assert %{"type" => "response.completed"} = terminal
+    _state = await_socket_connection_state!(client.socket, &(MapSet.size(&1.tasks) == 0))
+    close_ref = make_ref()
+    assert :ok = FakeUpstream.close_websocket_connection(upstream, 1, close_ref: close_ref, notify: self(), code: 1000, reason: "synthetic age limit")
+    assert_receive {:fake_upstream_websocket_peer_closed, 1, ^close_ref}, @detection_timeout_ms
+    {conn, _websocket, frames} = receive_frames_until_close!(conn, websocket, client.ref)
+    Mint.HTTP.close(conn)
+    :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(client.socket)
+    assert frames == [@upstream_close]
+
+    {sent, received} = socket_deliveries!(tracer)
+    assert [{:upstream_websocket_connection_closed, ^session, %{cause: :peer_close_frame}} | chunks] = Enum.reverse(received)
+    assert chunks != [] and Enum.all?(chunks, &match?({:codex_response_chunk, _task_pid, _data}, &1))
+    assert sent == received
+    assert :ok = FakeUpstream.verify!(upstream)
+  end
+
   # The provider's close arrives while the turn's response task is still
   # settling (the socket stops tracking a task only after its settlement,
   # 100 ms to over a second under load, while a provider close can come less
@@ -541,6 +584,58 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.UpstreamCloseDownstreamTe
   # Opens a native socket keyed by `thread` as its turn state and returns the
   # client connection with the socket's connection process and its upstream
   # session's lifecycle id.
+  # Traces the session's sends and the socket's receives of the two kinds of
+  # message the session delivers to the socket. A sensitive process emits no
+  # trace events, so the session lifts its sensitivity from inside itself.
+  defp trace_socket_deliveries!(session, socket) do
+    tracer = spawn_link(fn -> collect_socket_deliveries(session, socket, [], []) end)
+    :sys.replace_state(session, fn state -> tap(state, fn _state -> Process.flag(:sensitive, false) end) end)
+    1 = :erlang.trace(session, true, [:send, {:tracer, tracer}])
+    1 = :erlang.trace(socket, true, [:receive, {:tracer, tracer}])
+    tracer
+  end
+
+  # Every trace event emitted so far reaches the tracer before it answers.
+  defp socket_deliveries!(tracer) do
+    ref = :erlang.trace_delivered(:all)
+
+    receive do
+      {:trace_delivered, :all, ^ref} -> :ok
+    after
+      @detection_timeout_ms -> flunk("trace events were not delivered")
+    end
+
+    send(tracer, {:deliveries, self()})
+
+    receive do
+      {:socket_deliveries, sent, received} -> {sent, received}
+    after
+      @detection_timeout_ms -> flunk("the tracer did not answer")
+    end
+  end
+
+  defp collect_socket_deliveries(session, socket, sent, received) do
+    receive do
+      {:trace, ^session, :send, message, ^socket} ->
+        sent = if socket_delivery?(message), do: [message | sent], else: sent
+        collect_socket_deliveries(session, socket, sent, received)
+
+      {:trace, ^socket, :receive, message} ->
+        received = if socket_delivery?(message), do: [message | received], else: received
+        collect_socket_deliveries(session, socket, sent, received)
+
+      {:deliveries, caller} ->
+        send(caller, {:socket_deliveries, Enum.reverse(sent), Enum.reverse(received)})
+
+      _other_trace_event ->
+        collect_socket_deliveries(session, socket, sent, received)
+    end
+  end
+
+  defp socket_delivery?({:codex_response_chunk, task_pid, data}) when is_pid(task_pid) and is_binary(data), do: true
+  defp socket_delivery?({:upstream_websocket_connection_closed, session, signal}) when is_pid(session) and is_map(signal), do: true
+  defp socket_delivery?(_message), do: false
+
   defp connect!(port, setup, thread, path) do
     before = WebsocketCleanupFence.listener_sockets()
     {conn, websocket, ref} = public_websocket_connect!(port, setup, thread, path)
