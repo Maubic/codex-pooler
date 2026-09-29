@@ -256,6 +256,8 @@ Use `http://localhost:4000/mcp` only for local setup.
 
 ## Troubleshooting
 
+Codex CLI 0.158.0 keeps its app server running in the background after you quit, with the environment and sign-in state it started with. After you change `CODEX_POOLER_API_KEY` or sign in, run `codex app-server daemon restart` from a terminal that has the new value, or `codex app-server daemon stop` to let the next `codex` start a fresh one; changes to the provider block in `config.toml`, such as `base_url`, apply to the next session without a restart.
+
 If Codex repeatedly enters a broken login/account state with a Pooler provider, advanced users can change the provider to `requires_openai_auth = false`. That makes Codex treat the provider as gateway-only and use only `env_key` for runtime auth, but Codex will no longer appear signed in for that provider and account-dependent features, including mobile/app-server features, may be unavailable.
 
 <a id="route-boundaries"></a>
