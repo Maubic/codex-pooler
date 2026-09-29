@@ -13,6 +13,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrainTest do
   alias CodexPooler.Gateway.Transports.WebsocketRolloutDrainSupport.{
     ActiveShutdownProbeOwner,
     DrainProbeOwner,
+    FinishingStartingOwner,
     SlowFinalStatusOwner,
     UnresponsiveOwner,
     VirtualDeadline,
@@ -367,6 +368,31 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrainTest do
                "websocket rollout drain started timeout_ms=#{timeout_ms} " <>
                  "already_draining=false turn_window_ms=#{window_ms}"
     end
+  end
+
+  # The drain asks a starting owner whether its queued turn is active, then asks
+  # again once it drains the owner after that turn. A turn that ended between
+  # the two looks was counted as an idle owner (Drone 1708 and the boundary
+  # test's `owners_idle: 1, turns_completed: 0`); the drain saw it active, so
+  # it is a completed turn.
+  test "a starting owner's turn that ends between the drain's two looks counts as completed",
+       %{drain_name: drain_name} do
+    owner_key = owner_key()
+    _owner = start_probe_owner!({FinishingStartingOwner, key: owner_key, parent: self()})
+
+    assert %{
+             result: :ok,
+             owners_seen: 1,
+             owners_drained: 1,
+             owners_idle: 0,
+             owners_failed: 0,
+             turns_completed: 1,
+             turns_aborted: 0
+           } = RolloutDrain.start_drain(name: drain_name, timeout_ms: @drain_timeout_ms)
+
+    assert_receive {:rollout_drain_status_call, ^owner_key, 1}
+    assert_receive {:rollout_drain_status_call, ^owner_key, 2}
+    assert_receive {:rollout_drain_owner_stopped, ^owner_key, 2}
   end
 
   test "owner post-deadline call budget defaults to two owner calls and stays per server",

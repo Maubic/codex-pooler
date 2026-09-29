@@ -321,7 +321,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
 
     try do
       case GenServer.call(owner, :owner_status, remaining_ms) do
-        {:ok, %{active_turn?: true}} -> drain_owner_after_turn(owner, deadline_ms, drain_policy)
+        {:ok, %{active_turn?: true}} -> drain_owner_after_turn(owner, deadline_ms, drain_policy, :active)
         {:ok, %{active_turn?: false}} -> drain_settled_owner(:idle, owner)
       end
     catch
@@ -333,20 +333,28 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
     end
   end
 
-  defp drain_owner_after_turn(owner, deadline_ms, drain_policy) do
+  # `observed` is what the drain already knows of the owner's turn. A starting
+  # owner was asked once before this (`drain_starting_owner_after_turn/3`); a
+  # turn it reported active and that ended before the next look is a completed
+  # turn, never an idle owner (Drone 1708 counted it `owners_idle: 1,
+  # turns_completed: 0`).
+  defp drain_owner_after_turn(owner, deadline_ms, drain_policy, observed \\ :unobserved) do
     :ok = WebsocketOwnerSession.begin_drain(owner)
     owner_ref = Process.monitor(owner)
 
     outcome =
       owner
-      |> await_turn_outcome(owner_ref, deadline_ms, drain_policy)
+      |> await_turn_outcome(owner_ref, deadline_ms, drain_policy, observed)
       |> drain_settled_owner(owner)
 
     Process.demonitor(owner_ref, [:flush])
     outcome
   end
 
-  defp await_turn_outcome(owner, owner_ref, deadline_ms, drain_policy) do
+  defp await_turn_outcome(owner, owner_ref, deadline_ms, drain_policy, :active),
+    do: poll_owner_status(owner, owner_ref, deadline_ms, drain_policy)
+
+  defp await_turn_outcome(owner, owner_ref, deadline_ms, drain_policy, :unobserved) do
     case owner_status(owner, owner_ref) do
       {:ok, %{active_turn?: false}} ->
         :idle

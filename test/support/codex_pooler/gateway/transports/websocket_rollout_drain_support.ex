@@ -326,6 +326,53 @@ defmodule CodexPooler.Gateway.Transports.WebsocketRolloutDrainSupport do
     end
   end
 
+  # A starting owner whose queued turn is active when the drain first asks and
+  # has finished by the drain's next look (the turn completes between the two
+  # status calls of the starting-owner path).
+  defmodule FinishingStartingOwner do
+    @moduledoc false
+
+    use GenServer
+
+    @spec child_spec(keyword()) :: Supervisor.child_spec()
+    def child_spec(opts) do
+      key = Keyword.fetch!(opts, :key)
+
+      %{
+        id: {__MODULE__, key},
+        start: {__MODULE__, :start_link, [opts]},
+        restart: :temporary
+      }
+    end
+
+    @spec start_link(keyword()) :: GenServer.on_start()
+    def start_link(opts) do
+      key = Keyword.fetch!(opts, :key)
+
+      registry = Keyword.get(opts, :registry, CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Registry)
+
+      GenServer.start_link(__MODULE__, opts, name: {:via, Registry, {registry, key, :starting}})
+    end
+
+    @impl GenServer
+    def init(opts), do: {:ok, %{key: Keyword.fetch!(opts, :key), parent: Keyword.fetch!(opts, :parent), status_calls: 0}}
+
+    @impl GenServer
+    def handle_cast(:begin_drain, state), do: {:noreply, state}
+
+    @impl GenServer
+    def handle_call(:owner_status, _from, state) do
+      status_calls = state.status_calls + 1
+      send(state.parent, {:rollout_drain_status_call, state.key, status_calls})
+      {:reply, {:ok, %{active_turn?: status_calls == 1, draining?: true}}, %{state | status_calls: status_calls}}
+    end
+
+    def handle_call(:drain, _from, state) do
+      send(state.parent, {:rollout_drain_owner_stopped, state.key, state.status_calls})
+      {:stop, :normal, :ok, state}
+    end
+  end
+
   defmodule SlowFinalStatusOwner do
     @moduledoc false
 
