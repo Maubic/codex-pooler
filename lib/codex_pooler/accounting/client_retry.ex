@@ -1132,6 +1132,34 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   def verified_lifecycle_cut?(_turn, _request, _attempt), do: false
 
+  @doc "A settled native websocket receive timeout before any response output or terminal."
+  @spec verified_previsible_idle_timeout?(term(), term(), term()) :: boolean()
+  def verified_previsible_idle_timeout?(
+        %CodexTurn{status: "failed", error_code: "stream_idle_timeout", final_attempt_id: attempt_id, first_visible_output_at: nil, transport_kind: "websocket", completed_at: %DateTime{}},
+        %Request{status: "failed", last_error_code: "stream_idle_timeout", endpoint: "/backend-api/codex/responses", transport: "websocket", completed_at: %DateTime{}},
+        %Attempt{
+          id: attempt_id,
+          status: "failed",
+          network_error_code: "stream_idle_timeout",
+          transport: "websocket",
+          replay_generation: 0,
+          completed_at: %DateTime{},
+          response_metadata: %{
+            "transport_failure" => %{
+              "phase" => "receive_timeout",
+              "termination_source" => "pooler_receive_timeout",
+              "pre_visible_output" => true,
+              "upstream_committed" => true,
+              "terminal_seen" => false,
+              "terminal_candidate_seen" => false
+            }
+          }
+        }
+      )
+      when is_binary(attempt_id), do: true
+
+  def verified_previsible_idle_timeout?(_turn, _request, _attempt), do: false
+
   # The postvisible stream cut the client retry contract has always admitted:
   # visible output that was only partial reasoning, no completed output item,
   # no terminal, an authority-complete observation, and close evidence.
@@ -1714,6 +1742,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
         &verified_provider_terminal_failure?/3,
         &verified_latest_quota_rejection?/3,
         &verified_lifecycle_cut?/3,
+        &verified_previsible_idle_timeout?/3,
         &verified_previsible_disconnect?/3,
         &verified_undelivered_completion?/3,
         &verified_undelivered_partial_output?/3

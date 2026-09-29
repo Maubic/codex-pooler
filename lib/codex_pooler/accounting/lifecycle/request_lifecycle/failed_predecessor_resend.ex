@@ -78,6 +78,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           :provider_terminal
           | :quota_rejection
           | :task_exception
+          | :previsible_idle_timeout
           | :lifecycle_cut
           | :partial_reasoning_cut
           | :partial_http_tool_cut
@@ -349,7 +350,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
              ClientRetry.verified_quota_rejection?(turn, request, attempt) or
              ClientRetry.verified_previous_response_miss?(turn, request, attempt) or
              ClientRetry.verified_provider_terminal_failure?(turn, request, attempt) or
-             shape in [:previsible_disconnect, :lifecycle_cut, :partial_reasoning_cut, :undelivered_completion, :undelivered_partial_output, :completed_item_resend, :unreceived_compaction] do
+             shape in [:previsible_idle_timeout, :previsible_disconnect, :lifecycle_cut, :partial_reasoning_cut, :undelivered_completion, :undelivered_partial_output, :completed_item_resend, :unreceived_compaction] do
       :ok
     else
       _invalid -> {:error, :terminal_predecessor}
@@ -568,6 +569,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   defp failure_family("dead_execution_recovered"), do: :dead_execution
   defp failure_family("absent_instance_recovered"), do: :dead_execution
   defp failure_family(@stream_error_code), do: :stream_cut
+  defp failure_family("stream_idle_timeout"), do: :idle_timeout
   defp failure_family("client_disconnected"), do: :client_disconnect
 
   defp failure_family(code) when code in ["usage_limit_reached", "usage_limit_exceeded"],
@@ -598,6 +600,15 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
 
     if ClientRetry.verified_quota_rejection?(turn, request, attempt),
       do: {:ok, :quota_rejection},
+      else: {:error, :terminal_predecessor}
+  end
+
+  defp predecessor_shape(%Request{} = request, :idle_timeout, _scope) do
+    turn = lock_turn(request.id)
+    attempt = lock_final_attempt(turn, request.id)
+
+    if ClientRetry.verified_previsible_idle_timeout?(turn, request, attempt),
+      do: {:ok, :previsible_idle_timeout},
       else: {:error, :terminal_predecessor}
   end
 

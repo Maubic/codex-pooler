@@ -96,6 +96,49 @@ defmodule CodexPooler.Accounting.FailedPredecessorResendTest do
       assert Repo.aggregate(from(r in Request, where: r.pool_id == ^setup.pool.id), :count) == 3
     end
 
+    for mutation <- [:none, :visible, :generation, :attempt, :source, :phase, :terminal, :candidate, :committed, :output, :expired, :active] do
+      test "previsible idle timeout #{mutation} preserves its exact admission boundary", %{setup: setup, session: session, opts: opts} do
+        {:ok, %{request: request}} = Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
+        failure = %{"phase" => "receive_timeout", "termination_source" => "pooler_receive_timeout", "pre_visible_output" => true, "upstream_committed" => true, "terminal_seen" => false, "terminal_candidate_seen" => false}
+        %{request: request, attempt: attempt, turn: turn} = fail_predecessor!(setup, session, request, "stream_idle_timeout", response_metadata: %{"transport_failure" => failure}, first_visible_output_at: nil)
+
+        case unquote(mutation) do
+          :none ->
+            :ok
+
+          :visible ->
+            Repo.update!(Ecto.Changeset.change(turn, first_visible_output_at: db_now()))
+
+          :generation ->
+            Repo.update!(Ecto.Changeset.change(attempt, replay_generation: 1))
+
+          :attempt ->
+            Repo.update!(Ecto.Changeset.change(turn, final_attempt_id: nil))
+
+          :expired ->
+            Repo.update!(Ecto.Changeset.change(request, completed_at: DateTime.add(db_now(), -31, :second)))
+
+          :active ->
+            Repo.update!(Ecto.Changeset.change(turn, status: "in_progress", completed_at: nil))
+
+          mutation ->
+            {key, value} = Map.fetch!(%{source: {"termination_source", "peer_close_frame"}, phase: {"phase", "receive"}, terminal: {"terminal_seen", true}, candidate: {"terminal_candidate_seen", true}, committed: {"upstream_committed", false}, output: {"pre_visible_output", false}}, mutation)
+            Repo.update!(Ecto.Changeset.change(attempt, response_metadata: %{"transport_failure" => Map.put(failure, key, value)}))
+        end
+
+        before = Repo.aggregate(Request, :count)
+
+        if unquote(mutation) == :none do
+          assert {:ok, %{request: successor, client_resend: %{predecessor_shape: :previsible_idle_timeout}}} = Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
+          assert successor.id != request.id
+          assert Repo.exists?(from(link in CodexPooler.Accounting.RequestClientRetryLink, where: link.predecessor_request_id == ^request.id and link.successor_request_id == ^successor.id))
+        else
+          assert {:error, %{code: :duplicate_request}} = Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
+          assert Repo.aggregate(Request, :count) == before
+        end
+      end
+    end
+
     test "keeps the duplicate fence while the predecessor is accepted or in progress",
          %{setup: setup, opts: opts} do
       {:ok, %{request: predecessor}} =
