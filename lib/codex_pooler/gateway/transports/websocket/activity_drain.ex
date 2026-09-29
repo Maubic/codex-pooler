@@ -46,13 +46,36 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ActivityDrain do
   end
 
   defp cancel(token, monitor, policy, registry) do
-    :ok = ActivityRegistry.cancel(token, :owner_drained, name: registry)
+    budget_ms = policy.owner_post_deadline_call_budget_ms
+
+    case ActivityRegistry.cancel(token, :owner_drained, name: registry) do
+      :ok -> await_cancelled(token, monitor, budget_ms, registry)
+      :terminal_delivered -> await_delivered_settlement(token, monitor, budget_ms, registry)
+    end
+  end
+
+  # The socket already pushed this turn's terminal, so only its settlement is
+  # left (findings#287): the task gets half the post-deadline budget to settle
+  # and finish, and counts as the turn it settled. One still running then is
+  # cut as the deadline cuts a live turn, with the other half left for it to
+  # stop before it is killed, so the budget as a whole is unchanged.
+  defp await_delivered_settlement(token, monitor, budget_ms, registry) do
+    settle_ms = div(budget_ms, 2)
 
     receive do
       {:DOWN, ^monitor, :process, _pid, _reason} -> activity_outcome(token, registry)
     after
-      policy.owner_post_deadline_call_budget_ms ->
-        force_cancel(token, registry)
+      settle_ms ->
+        :ok = ActivityRegistry.cancel(token, :owner_drained, name: registry, force: true)
+        await_cancelled(token, monitor, budget_ms - settle_ms, registry)
+    end
+  end
+
+  defp await_cancelled(token, monitor, wait_ms, registry) do
+    receive do
+      {:DOWN, ^monitor, :process, _pid, _reason} -> activity_outcome(token, registry)
+    after
+      wait_ms -> force_cancel(token, registry)
     end
   end
 

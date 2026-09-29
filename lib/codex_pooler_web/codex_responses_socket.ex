@@ -5099,6 +5099,10 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
           outcome: terminal_outcome(data)
         })
 
+      # From here the client holds this turn's outcome: a drain leaves the
+      # task to settle instead of cancelling it (findings#287).
+      :ok = ActivityRegistry.mark_terminal_delivered(pid, name: response_task_activity_registry(state))
+
       state
       |> Map.update(:response_task_terminals_accepted, MapSet.new([pid]), &MapSet.put(&1, pid))
       |> maybe_mark_completed_response_task_terminal(pid, terminal_outcome(data))

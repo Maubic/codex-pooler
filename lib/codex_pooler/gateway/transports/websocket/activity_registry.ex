@@ -124,10 +124,28 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ActivityRegistry do
     GenServer.call(server(opts), {:complete_drain, epoch})
   end
 
-  @spec cancel(token(), :owner_drained, keyword()) :: :ok
+  @doc """
+  Cancels an admitted activity for a drain. An activity whose terminal the
+  socket already pushed (`mark_terminal_delivered/2`) is left alone and
+  answered `:terminal_delivered`, unless `force: true`: the drain's cut once
+  the task had its time to settle.
+  """
+  @spec cancel(token(), :owner_drained, keyword()) :: :ok | :terminal_delivered
   def cancel(token, :owner_drained = reason, opts \\ []) when is_reference(token) do
-    GenServer.call(server(opts), {:cancel, token, reason})
+    GenServer.call(server(opts), {:cancel, token, reason, Keyword.get(opts, :force, false)})
   end
+
+  @doc """
+  The socket is pushing the terminal of the turn `pid` runs (findings#287):
+  from now on the client holds the turn's outcome and only its settlement is
+  left, so a drain's `cancel/3` leaves that activity to settle
+  (`ActivityDrain`); cancelling it had recorded a turn the client completed as
+  `owner_drained` and put an error frame after its terminal. An unknown `pid`
+  is a no-op.
+  """
+  @spec mark_terminal_delivered(pid(), keyword()) :: :ok
+  def mark_terminal_delivered(pid, opts \\ []) when is_pid(pid),
+    do: GenServer.call(server(opts), {:mark_terminal_delivered, pid})
 
   @spec status(token(), keyword()) ::
           {:active, :registered | :admitted | :cancelling}
@@ -405,8 +423,21 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ActivityRegistry do
 
   def handle_call({:complete_drain, _epoch}, _from, state), do: {:reply, :ok, state}
 
-  def handle_call({:cancel, token, reason}, _from, state) do
+  def handle_call({:mark_terminal_delivered, pid}, _from, state) do
+    activities =
+      Map.new(state.activities, fn
+        {token, %{pid: ^pid} = entry} -> {token, Map.put(entry, :terminal_delivered?, true)}
+        other -> other
+      end)
+
+    {:reply, :ok, %{state | activities: activities}}
+  end
+
+  def handle_call({:cancel, token, reason, force?}, _from, state) do
     case Map.get(state.activities, token) do
+      %{terminal_delivered?: true, status: status} when status in [:registered, :admitted] and not force? ->
+        {:reply, :terminal_delivered, state}
+
       %{status: status} = entry when status in [:registered, :admitted] ->
         {cancel_pid, entry} = Entry.cancel(entry, reason)
         send(cancel_pid, {:websocket_activity_cancel, token, reason})
