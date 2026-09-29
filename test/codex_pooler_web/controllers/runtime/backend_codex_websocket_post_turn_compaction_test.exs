@@ -766,6 +766,77 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
     end
   end
 
+  # An anchored compaction the provider fails with a retryable error
+  # (`response.failed` `server_error`). The released client retries it as the
+  # full history, and the resend policy admits that retry as one successor.
+  # The failure used to count as a collected compaction, so the admission
+  # stayed `collected_unconfirmed` and the retry, which the provider served and
+  # billed, was refused its first-compact authorization: the client got `502
+  # invalid_compaction_response` (findings#281).
+  for topology <- [:direct, :owner_forwarded] do
+    @tag topology: topology
+    test "#{topology} full-history retry of an anchored compaction the provider failed is delivered and billed once", %{topology: topology} do
+      put_owner_forwarding!(topology == :owner_forwarded)
+      turn_id = "failed-compaction-#{topology}"
+      history = [window_message("synthetic failed-compaction anchor")]
+      compact_item = %{"type" => "compaction", "encrypted_content" => "synthetic-failed-compaction-#{topology}"}
+      failure = %{"type" => "response.failed", "response" => %{"id" => "resp_failed_compaction", "status" => "failed", "error" => %{"code" => "server_error", "message" => "synthetic server error"}}}
+
+      upstream =
+        start_upstream(
+          # provenance: synthetic_adversarial (compaction v2-shaped mid-turn frames on one connection; a provider response.failed server_error on the anchored compaction, findings#281)
+          FakeUpstream.strict_sequence([
+            window_request(1, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_failed_compaction_anchor", @anchor_usage)])),
+            window_request(1, [equals: %{"previous_response_id" => "resp_failed_compaction_anchor"}], event_frames([failure])),
+            window_request(1, [forbidden: ["previous_response_id"]], event_frames(compaction_events(compact_item, "resp_failed_compaction_retry"))),
+            window_request(1, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_failed_compaction_final", @resumed_usage)]))
+          ])
+        )
+
+      setup = gateway_setup(upstream, compact?: true)
+      state = callback_socket!(setup, "failed-compaction-#{topology}")
+
+      try do
+        state = run_turn!(state, mid_turn_payload(setup, history, turn_id, "turn", 1))
+        {state, frames} = run_turn_frames!(state, window_compaction_frame(setup, turn_id, "resp_failed_compaction_anchor"))
+        assert [%{"type" => "response.failed", "response" => %{"error" => %{"code" => "server_error"}}}] = frames
+
+        {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1))
+        assert [%{"type" => "response.output_item.done", "item" => ^compact_item}, %{"type" => "response.completed", "response" => %{"id" => "resp_failed_compaction_retry", "output" => [^compact_item]}}] = frames
+
+        {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+        assert [%{"type" => "response.completed", "response" => %{"id" => "resp_failed_compaction_final"}}] = frames
+        Process.put(:crossing_socket_state, state)
+
+        rows = [_anchor_row, failed, _retry, _final] = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: request.admitted_at))
+
+        assert Enum.map(rows, &{&1.endpoint, &1.status, &1.last_error_code, &1.usage_status}) == [
+                 {"/backend-api/codex/responses", "succeeded", nil, "usage_known"},
+                 {"/backend-api/codex/responses/compact", "failed", "server_error", "usage_unknown"},
+                 {"/backend-api/codex/responses/compact", "succeeded", nil, "usage_known"},
+                 {"/backend-api/codex/responses", "succeeded", nil, "usage_known"}
+               ]
+
+        # Each request is billed once, as its row says: the failure's unknown
+        # usage keeps its reservation estimate provisional, and the retry is
+        # billed its own usage and nothing more.
+        [failed_estimate] = Repo.all(from(entry in LedgerEntry, where: entry.request_id == ^failed.id and entry.entry_kind == "reservation", select: entry.total_tokens))
+        assert Enum.map(rows, &ledger_entry_kinds/1) == List.duplicate(["release", "reservation", "settlement"], 4)
+
+        assert Enum.map(rows, &key_usage_events(&1.id)) == [
+                 %{known: @anchor_usage["total_tokens"], provisional: 0, admissions: 1},
+                 %{known: 0, provisional: failed_estimate, admissions: 1},
+                 %{known: @compact_usage["total_tokens"], provisional: 0, admissions: 1},
+                 %{known: @resumed_usage["total_tokens"], provisional: 0, admissions: 1}
+               ]
+
+        assert :ok = FakeUpstream.verify!(upstream)
+      after
+        CodexResponsesSocket.terminate(:closed, Process.delete(:crossing_socket_state))
+      end
+    end
+  end
+
   # With owner forwarding on, the client's final can reach the owner before
   # the owner hears that its session closed the connection the admission names
   # (findings#270 row 270-182). The owner checks the session's open connection

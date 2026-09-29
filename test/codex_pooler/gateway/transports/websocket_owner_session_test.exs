@@ -528,7 +528,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
   test "forwarded admission preserves the current capability after a stale reserve control",
        context do
-    upstream = WebsocketOwnerNodeHarness.fake_upstream_boundary(self())
+    upstream = WebsocketOwnerNodeHarness.fake_upstream_boundary(self(), return_request_result?: true)
     {owner, seed_url} = start_seeded_owner(context, upstream)
     assert_receive {:websocket_owner_harness_upstream_started, upstream_pid}
 
@@ -593,6 +593,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
                )
              )
 
+    # An anchored compaction is collected, and the session answers it with its
+    # terminal result: only a completed one is a collected compaction
+    # (findings#281).
     request = %UpstreamWebsocketSession.Request{
       websocket_request()
       | native_compaction_capability: capability,
@@ -600,10 +603,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
           lifecycle_id: binding.lifecycle_id,
           generation: binding.generation
         },
-        effective_serving_mode: "full"
+        effective_serving_mode: "full",
+        websocket_delivery_mode: :collect_compaction,
+        writer: nil
     }
 
-    assert :ok = WebsocketOwnerSession.submit_request(owner, downstream, request)
+    assert {:ok, %{terminal: "response.completed"}} = WebsocketOwnerSession.submit_request(owner, downstream, request)
     assert_receive {:websocket_owner_harness_upstream_sent, ^upstream_pid}, 15_000
     assert [forwarded_request] = WebsocketOwnerNodeHarness.fake_upstream_frames(upstream_pid)
     assert %ForwardedOwnerRequestHandoff{} = forwarded_request.forwarded_owner_send_handoff
@@ -870,7 +875,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
       start: fn -> Agent.start_link(fn -> :ready end) end,
       send: fn _upstream_pid, request, _writer ->
         send(parent, {:forwarded_handoff_request, request})
-        :ok
+        {:ok, %{body: "", terminal: "response.completed", status: 200, headers: [], websocket_frame_headers: %{}}}
       end,
       close: fn pid -> if Process.alive?(pid), do: Agent.stop(pid) end
     }
@@ -895,6 +900,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
     capability = reserve_accounted_capability(owner, downstream, binding, receipt, now)
 
+    # An anchored compaction is collected, and the session answers it with its
+    # terminal result: only a completed one is a collected compaction
+    # (findings#281).
     request = %UpstreamWebsocketSession.Request{
       websocket_request()
       | native_compaction_capability: capability,
@@ -902,10 +910,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
           lifecycle_id: binding.lifecycle_id,
           generation: binding.generation
         },
-        effective_serving_mode: "full"
+        effective_serving_mode: "full",
+        websocket_delivery_mode: :collect_compaction,
+        writer: nil
     }
 
-    assert :ok = WebsocketOwnerSession.submit_request(owner, downstream, request)
+    assert {:ok, %{terminal: "response.completed"}} = WebsocketOwnerSession.submit_request(owner, downstream, request)
 
     assert_receive {:forwarded_handoff_request, forwarded_request}
     assert %ForwardedOwnerRequestHandoff{} = forwarded_request.forwarded_owner_send_handoff

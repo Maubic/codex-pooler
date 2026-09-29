@@ -50,6 +50,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
                                 false
                               )
   @connection_lifecycle_keys [:lifecycle_id, :generation]
+  # The terminals of a response the provider completed. Only these record a
+  # response id, a serving mode, or a collected compaction.
+  @completed_terminals ["response.completed", "response.done"]
   @five_seconds_ms :timer.seconds(5)
   @thirty_seconds_ms :timer.seconds(30)
   @one_minute_ms :timer.minutes(1)
@@ -1296,7 +1299,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp normalized_forwarded_serving_mode(:lite), do: {:ok, :lite}
   defp normalized_forwarded_serving_mode(_mode), do: {:error, :invalid_serving_mode}
 
-  defp finalize_consumed_request(state, {:ok, _result}, :compact, request) do
+  # A consumed compaction is collected only when the provider completed it. A
+  # provider failure (`response.failed`, an error frame) ends the request with a
+  # terminal result as well, and counting it as collected left the admission
+  # `collected_unconfirmed`: the released client's full-history retry of the
+  # failed compaction was then served and billed, and refused its first-compact
+  # authorization with `502 invalid_compaction_response` (findings#281). It ends
+  # the admission as any failed compaction does.
+  defp finalize_consumed_request(state, {:ok, %{terminal: terminal}}, :compact, request) when terminal in @completed_terminals do
     case NativeCompactionAdmission.record_compact_collected(admission_state(state)) do
       {:ok, admission} -> put_admission(state, admission)
       {:error, reason} -> state |> clear_admission(reason) |> collect_closed_connection_compaction(request)
@@ -1318,10 +1328,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   defp finalize_consumed_request(
          state,
-         {:ok, _result},
+         {:ok, %{terminal: terminal}},
          {:first_full_history_compact, %FirstCompactCollection{} = provenance},
          _request
-       ) do
+       )
+       when terminal in @completed_terminals do
     case NativeCompactionAdmission.record_first_compact_collected(
            admission_state(state),
            provenance
@@ -1332,7 +1343,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     end
   end
 
-  defp finalize_consumed_request(state, {:error, _result}, :compact, _request),
+  defp finalize_consumed_request(state, _result, :compact, _request),
     do: clear_admission(state, :compact_failure)
 
   defp finalize_consumed_request(state, {:error, _result}, :final, _request),
@@ -1340,7 +1351,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   defp finalize_consumed_request(
          state,
-         {:error, _result},
+         _result,
          {:first_full_history_compact, %FirstCompactCollection{}},
          _request
        ),
@@ -1356,7 +1367,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
          {:ok, %{terminal: terminal}},
          %ReceiveState{delivery: %Delivery{effective_serving_mode: mode}}
        )
-       when terminal in ["response.completed", "response.done"] and mode in ["full", "lite"] do
+       when terminal in @completed_terminals and mode in ["full", "lite"] do
     Map.put(state, :last_successful_effective_serving_mode, mode)
   end
 
@@ -2548,7 +2559,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     do: receive_state
 
   defp maybe_put_success_response_id(result, terminal, response_id)
-       when terminal in ["response.completed", "response.done"] and is_binary(response_id),
+       when terminal in @completed_terminals and is_binary(response_id),
        do: Map.put(result, :response_id, response_id)
 
   defp maybe_put_success_response_id(result, _terminal, _response_id), do: result

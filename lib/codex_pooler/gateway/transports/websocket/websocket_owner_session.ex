@@ -3410,11 +3410,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
   defp clear_terminal_replay_state(state, _result), do: state
 
+  # A compaction is collected only on the provider's completion, the terminals
+  # the upstream session records a response by. A provider failure or the
+  # connection-bound guard's refusal, which the owner consumed the capability
+  # for before the session refused it, is a terminal result as well; counted as
+  # collected, it left the admission `collected_unconfirmed`, and the released
+  # client's full-history retry was served, billed and refused its
+  # first-compact authorization (findings#281).
   defp settle_owner_admission_transport(
          %{active_turn: %{admission_phase: :compact}} = state,
          result
        ) do
-    if successful_upstream_result?(result) do
+    if completed_compaction_result?(result) do
       case NativeCompactionAdmission.record_compact_collected(state.native_compaction_admission) do
         {:ok, admission} -> put_admission(state, admission)
         {:error, reason} -> clear_native_compaction_admission(state, reason)
@@ -3428,7 +3435,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
          %{active_turn: %{admission_phase: {:first_full_history_compact, provenance}}} = state,
          result
        ) do
-    if successful_upstream_result?(result) do
+    if completed_compaction_result?(result) do
       case NativeCompactionAdmission.record_first_compact_collected(
              state.native_compaction_admission,
              provenance
@@ -3544,6 +3551,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp successful_upstream_result?(:ok), do: true
   defp successful_upstream_result?({:ok, _result}), do: true
   defp successful_upstream_result?(_result), do: false
+
+  defp completed_compaction_result?({:ok, %{terminal: terminal}}) when terminal in ["response.completed", "response.done"], do: true
+  defp completed_compaction_result?(_result), do: false
 
   defp finish_relay_active_turn(state, downstream, result) do
     case result do
