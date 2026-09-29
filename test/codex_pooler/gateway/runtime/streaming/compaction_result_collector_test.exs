@@ -172,6 +172,24 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollectorTest do
     end
   end
 
+  # findings#270 row 270-272: the released client (0.159.0) reads a relayed
+  # `interrupted` as a response completed without its end of turn, which for a
+  # compaction with no item fails the turn for good. The collected failure
+  # keeps the provider's reason; the event the client gets names a reason it
+  # retries.
+  test "a compaction the provider ended interrupted is answered with a reason the client retries" do
+    assert {:provider_failure, %{event_type: "response.incomplete", code: "interrupted", upstream_code: "interrupted"} = failure} =
+             CompactionResultCollector.collect_websocket_body(websocket_body([incomplete_event("interrupted")]))
+
+    assert %{"type" => "response.incomplete", "response" => %{"incomplete_details" => %{"reason" => "upstream_terminal_failure"}}} =
+             CompactionResultCollector.provider_failure_websocket_event(failure)
+
+    assert {:provider_failure, other} = CompactionResultCollector.collect_websocket_body(websocket_body([incomplete_event("max_output_tokens")]))
+
+    assert %{"response" => %{"incomplete_details" => %{"reason" => "max_output_tokens"}}} =
+             CompactionResultCollector.provider_failure_websocket_event(other)
+  end
+
   test "websocket body collection keeps provider failure state request-local" do
     provider = provider_failure_event("response.failed", "server_error", "input", "private")
 

@@ -733,6 +733,18 @@ defmodule CodexPooler.CompatibilityMatrix do
       contract: "with owner forwarding off or on, the session's owner on this node or on another, and the Pool serving the model Full or Lite, a native backend websocket never sends its client the provider's codex.rate_limits frame: the frame carries the windows of the one upstream account that served the turn, which the released Codex client shows as the user's own limits, so the socket drops it once the Pooler's quota observer has recorded it as that account's quota evidence, as native HTTP never relays the provider's rate-limit headers; the drop leaves the turn's other frames, their order and its terminal unchanged and marks no output; the provider's codex.response.metadata is still relayed after the Pooler's own metadata event with its headers projected as backend_responses_etag states, and an unknown codex.* control is relayed byte for byte; the public /v1/responses websocket keeps relaying no codex.* control, and native HTTP SSE keeps its byte-exact relay of the event"
     },
     %{
+      slug: :native_websocket_response_interrupt,
+      status: :supported,
+      current: :relayed_to_the_running_turn,
+      categories: [:streaming, :ownership],
+      routes: [
+        %{method: :get, path: "/backend-api/codex/responses", transport: :websocket}
+      ],
+      future_routes: [],
+      fixture: :native_websocket_response_interrupt,
+      contract: "with owner forwarding off or on, the session's owner on this node or on another, and the Pool serving the model Full or Lite, a native backend websocket hands the released Codex client's response.interrupt (a provider response id and a bounded mode, rebuilt from those two fields alone) to the upstream session that carries the running turn, which writes it only while the response it names runs there as a relayed turn; the provider's answer (response.interrupt.accepted, response.output_item.interrupted for an item it had open, the terminal response.incomplete with reason interrupted) reaches the client unchanged, the interrupted request settles succeeded with the usage it generated and a delivery receipt naming incomplete_reason interrupted, and the follow-up the client anchors on the interrupted response is a later request of its turn on the same connection, in the serving mode the interrupted request was served in; every interrupt the provider cannot apply (a malformed frame, no running turn, another response, a response already ended, a collected compaction, another downstream's turn, an owner node of an earlier release) is dropped with one line naming where and no frame, since an error frame would end the client's turn; a compaction the provider itself ends interrupted is answered with a reason the client retries; the public /v1 websocket keeps refusing the frame type"
+    },
+    %{
       slug: :firewall,
       status: :supported,
       current: :explicit_forwarded_client_policy,
@@ -1160,6 +1172,32 @@ defmodule CodexPooler.CompatibilityMatrix do
       public_v1_websocket: :relays_no_codex_control,
       native_http_sse: :event_bytes_relayed,
       observability: %{line: :none, metric: :none}
+    },
+    native_websocket_response_interrupt: %{
+      topologies: [:owner_forwarding_off, :owner_on_this_node, :owner_on_another_node],
+      serving_modes: ~w(full lite),
+      frame: %{"type" => "response.interrupt", "response_id" => "resp_fixture_interrupt", "mode" => "discard_partial_items"},
+      written: :while_the_named_response_runs_as_a_relayed_turn,
+      provider_answer: ~w(response.interrupt.accepted response.output_item.interrupted response.incomplete),
+      settlement: %{status: "succeeded", usage: :provider_reported, incomplete_reason: "interrupted"},
+      follow_up: :later_request_of_the_turn_on_the_same_connection,
+      dropped: [
+        :malformed,
+        :no_running_turn,
+        :session_unavailable,
+        :session_idle,
+        :not_relay,
+        :response_mismatch,
+        :terminal_seen,
+        :owner_unavailable,
+        :owner_not_downstream,
+        :owner_turn_not_relay,
+        :owner_protocol_unsupported
+      ],
+      dropped_answer: :none,
+      compaction_interrupted_reason: "upstream_terminal_failure",
+      public_v1_websocket: :refused_unsupported_type,
+      observability: %{line: "native websocket response interrupt outcome=", metric: :none}
     },
     responses_access_programs: %{
       surfaces: ~w(http_json http_sse responses_websocket),

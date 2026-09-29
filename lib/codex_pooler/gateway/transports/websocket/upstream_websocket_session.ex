@@ -32,6 +32,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionTrace
   alias CodexPooler.Gateway.Transports.Websocket.NativeReplayAdmission
   alias CodexPooler.Gateway.Transports.Websocket.OrdinarySuccessResult
+  alias CodexPooler.Gateway.Transports.Websocket.ResponseInterrupt
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.CloseDiagnostics
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.ConnectionUpgrade
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.ReceiveState
@@ -51,7 +52,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
                               )
   @connection_lifecycle_keys [:lifecycle_id, :generation]
   # The terminals of a response the provider completed. Only these record a
-  # response id, a serving mode, or a collected compaction.
+  # response id or a collected compaction; they, and a response the client
+  # interrupted (`context_kept_terminal?/2`), record a serving mode.
   @completed_terminals ["response.completed", "response.done"]
   # The budget of a caller's call to the session's compaction admission.
   @admission_call_timeout_ms 1_000
@@ -171,6 +173,21 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     GenServer.call(pid, {:send_text, payload}, :infinity)
   catch
     :exit, _reason -> {:error, :upstream_websocket_session_unavailable}
+  end
+
+  @doc """
+  Hands the session a client's `response.interrupt` for the response it names
+  (`ResponseInterrupt`, findings#270 row 270-272). The session writes it only
+  while that response is in flight on its connection as a relayed turn and no
+  terminal of it has been read; otherwise it drops it. Either way it logs the
+  one line the interrupt leaves. The call never waits: a session serving a
+  turn reads the message inside that turn's receive loop.
+  """
+  @spec interrupt(pid(), ResponseInterrupt.t()) :: :ok
+  def interrupt(pid, %{response_id: response_id, mode: mode} = interrupt)
+      when is_pid(pid) and is_binary(response_id) and is_binary(mode) do
+    send(pid, {:upstream_websocket_interrupt, interrupt})
+    :ok
   end
 
   @spec connection_lifecycle_snapshot(pid()) ::
@@ -779,6 +796,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     end
   end
 
+  # An interrupt that reaches a session with no turn in flight names a response
+  # that already ended, or one that never ran here.
+  def handle_info({:upstream_websocket_interrupt, _interrupt}, state) do
+    :ok = ResponseInterrupt.log(:session_idle, interrupt_topology(state))
+    {:noreply, state}
+  end
+
   def handle_info(message, %{conn: conn} = state) do
     case Mint.WebSocket.stream(conn, message) do
       {:ok, conn, responses} ->
@@ -1310,11 +1334,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   defp maybe_record_successful_serving_mode(
          %{conn: _conn} = state,
-         {:ok, %{terminal: terminal}},
+         {:ok, %{terminal: terminal} = result},
          %ReceiveState{delivery: %Delivery{effective_serving_mode: mode}}
        )
-       when terminal in @completed_terminals and mode in ["full", "lite"] do
-    Map.put(state, :last_successful_effective_serving_mode, mode)
+       when mode in ["full", "lite"] do
+    if context_kept_terminal?(terminal, Map.get(result, :upstream_error_code)),
+      do: Map.put(state, :last_successful_effective_serving_mode, mode),
+      else: state
   end
 
   defp maybe_record_successful_serving_mode(state, _result, %ReceiveState{}), do: state
@@ -1566,6 +1592,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
       {:upstream_websocket_keepalive, ^keepalive_token} when is_reference(keepalive_token) ->
         send_in_flight_keepalive(state, receive_state)
+
+      {:upstream_websocket_interrupt, interrupt} ->
+        handle_interrupt_message(state, receive_state, interrupt)
     after
       max(receive_state.receive_deadline_ms - System.monotonic_time(:millisecond), 0) ->
         result =
@@ -1606,6 +1635,48 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
         finish_receive_result({:failure, state, receive_state, {:websocket_control_send_failed, reason}})
     end
   end
+
+  # The provider resolves an interrupt only on the connection that carries the
+  # response it names, and only while that response runs: it answers with
+  # `response.interrupt.accepted`, `response.output_item.interrupted` for an
+  # item it had open and the terminal `response.incomplete` (reason
+  # `interrupted`), which this loop reads and relays like any other frame. A
+  # collected turn (a compaction) is never interrupted: the released client
+  # sends no interrupt for one, and its result is not relayed as it arrives.
+  # An interrupt that cannot be written does what a ping that cannot be
+  # written does: the connection is gone, and the turn fails with it.
+  defp handle_interrupt_message(state, %ReceiveState{} = receive_state, interrupt) do
+    case interrupt_disposition(receive_state, interrupt) do
+      :write ->
+        case send_text(state, ResponseInterrupt.frame(interrupt)) do
+          {:ok, state} ->
+            :ok = ResponseInterrupt.log(:written, interrupt_topology(state))
+            receive_events(state, receive_state)
+
+          {:error, reason, state} ->
+            :ok = ResponseInterrupt.log(:session_unavailable, interrupt_topology(state))
+            receive_state = %{receive_state | termination_source: :websocket_control_send_error}
+            finish_receive_result({:failure, state, receive_state, {:websocket_control_send_failed, reason}})
+        end
+
+      outcome ->
+        :ok = ResponseInterrupt.log(outcome, interrupt_topology(state))
+        receive_events(state, receive_state)
+    end
+  end
+
+  defp interrupt_disposition(%ReceiveState{delivery: %Delivery{mode: mode}}, _interrupt) when mode != :relay, do: :not_relay
+
+  defp interrupt_disposition(%ReceiveState{message_mapper: mapper} = receive_state, interrupt) do
+    cond do
+      public_openai_responses_mapper?(mapper) -> :not_relay
+      receive_state.terminal_seen? -> :terminal_seen
+      is_binary(receive_state.response_id) and receive_state.response_id == interrupt.response_id -> :write
+      true -> :response_mismatch
+    end
+  end
+
+  defp interrupt_topology(state), do: if(Map.get(state, :admission_topology) == :forwarded, do: :owner, else: :direct)
 
   defp request_caller_down?(%ReceiveState{
          request_caller_pid: request_caller_pid,
@@ -2509,6 +2580,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
        do: Map.put(result, :response_id, response_id)
 
   defp maybe_put_success_response_id(result, _terminal, _response_id), do: result
+
+  # A response whose provider context stays on its connection for the next
+  # request anchored on it: one the provider completed, and one the client
+  # interrupted, whose follow-up the provider resolves on the same connection
+  # (findings#270 row 270-272). Every other terminal ends the response for good.
+  defp context_kept_terminal?(terminal, _upstream_error_code) when terminal in @completed_terminals, do: true
+  defp context_kept_terminal?("response.incomplete", "interrupted"), do: true
+  defp context_kept_terminal?(_terminal, _upstream_error_code), do: false
 
   @response_identity_event_types [
     "response.created",

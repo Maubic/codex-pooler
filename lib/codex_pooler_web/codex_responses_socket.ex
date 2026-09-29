@@ -23,10 +23,12 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionTrace
   alias CodexPooler.Gateway.Transports.Websocket.RemoteReconnectControlV2
+  alias CodexPooler.Gateway.Transports.Websocket.ResponseInterrupt
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.CloseDiagnostics
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerAdmissionControlV1
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Websocket
   alias CodexPooler.Gateway.Websocket.Adapter
   alias CodexPooler.Gateway.Websocket.DeliveryReceipt
@@ -143,12 +145,78 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         frame_text: payload
       })
 
-    prepare_and_dispatch_response(payload, state)
+    case native_response_interrupt(payload, state) do
+      :not_interrupt -> prepare_and_dispatch_response(payload, state)
+      interrupt -> {:ok, relay_response_interrupt(interrupt, state)}
+    end
   end
 
   defp handle_unrevoked_in({_payload, [opcode: :binary]}, state) do
     {:stop, :unsupported_binary_frame, {1003, "binary frames are not supported"}, state}
   end
+
+  # The released client (0.159.0) stops a running Lite turn with
+  # `response.interrupt` on the websocket that carries it (findings#270 row
+  # 270-272). It is not a request: it goes to the upstream session that carries
+  # the turn, the socket's own or its owner's, which writes it only while the
+  # response it names runs there, and it never earns an error frame, which
+  # would end the client's turn (`ResponseInterrupt`). The public `/v1` socket
+  # keeps refusing the frame type.
+  defp native_response_interrupt(payload, state) do
+    with false <- Adapter.public_responses_stream?(state),
+         {:ok, decoded} <- WebsocketCodec.decode_payload(payload) do
+      ResponseInterrupt.parse(decoded)
+    else
+      _public_or_not_an_object -> :not_interrupt
+    end
+  end
+
+  defp relay_response_interrupt(:malformed, state) do
+    :ok = ResponseInterrupt.log(:malformed, response_interrupt_topology(state))
+    state
+  end
+
+  defp relay_response_interrupt({:ok, interrupt}, state) do
+    cond do
+      not active_response_task?(state) ->
+        :ok = ResponseInterrupt.log(:no_running_turn, response_interrupt_topology(state))
+
+      owner_forwarded_socket?(state) ->
+        relay_owner_response_interrupt(interrupt, state)
+
+      is_pid(Map.get(state, :upstream_websocket_session)) ->
+        :ok = UpstreamWebsocketSession.interrupt(state.upstream_websocket_session, interrupt)
+
+      true ->
+        :ok = ResponseInterrupt.log(:session_unavailable, :direct)
+    end
+
+    state
+  end
+
+  # The owner may run on another node, so the socket does not wait for it: the
+  # provider's answer to the interrupt comes back through the turn's own relay.
+  defp relay_owner_response_interrupt(interrupt, state) do
+    session = Map.get(state, :codex_session)
+    owner_lease_token = Map.get(state, :websocket_owner_lease_token)
+    downstream = Map.get(state, :websocket_owner_downstream)
+    opts = Map.get(state, :opts, %{})
+
+    relay = fn ->
+      case Websocket.interrupt_websocket_owner_turn(session, owner_lease_token, downstream, interrupt, opts) do
+        :ok -> :ok
+        {:error, :remote_interrupt_v1_unsupported} -> ResponseInterrupt.log(:owner_protocol_unsupported, :owner)
+        {:error, _reason} -> ResponseInterrupt.log(:owner_unavailable, :owner)
+      end
+    end
+
+    case Task.Supervisor.start_child(WebsocketOwnerSession.TaskSupervisor, relay) do
+      {:ok, _pid} -> :ok
+      {:error, _reason} -> ResponseInterrupt.log(:owner_unavailable, :owner)
+    end
+  end
+
+  defp response_interrupt_topology(state), do: if(owner_forwarded_socket?(state), do: :owner, else: :direct)
 
   @impl WebSock
   def handle_info(_message, %{socket_stopped?: true} = state), do: {:ok, state}
@@ -3871,7 +3939,8 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # 206-409). Only the last response counts, because the client anchors only on
   # the last one; any other terminal forgets it.
   defp record_completed_native_response(state, pid, data) do
-    with {:ok, %{kind: :completed}} <- StreamProtocol.terminal_outcome(data),
+    with {:ok, outcome} <- StreamProtocol.terminal_outcome(data),
+         true <- anchorable_native_outcome?(outcome),
          <<_::256>> = key <- state |> Map.get(:response_task_turns, %{}) |> Map.get(pid),
          {:ok, %{"response" => %{"id" => id}}} when is_binary(id) and id != "" <- CodexPooler.JSON.decode(data) do
       record = %{semantic_turn_key: key, response_digest: NativeCodexTurnMetadata.response_id_digest(id)}
@@ -3889,6 +3958,14 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       _not_a_completed_native_turn_response -> Map.delete(state, :last_completed_native_response)
     end
   end
+
+  # A response the client may anchor its next request on: one the provider
+  # completed, and one the client interrupted, whose follow-up the provider
+  # resolves on the same connection and the released client sends anchored on
+  # it right away (findings#270 row 270-272).
+  defp anchorable_native_outcome?(%{kind: :completed}), do: true
+  defp anchorable_native_outcome?(%{kind: :incomplete, incomplete_reason: "interrupted"}), do: true
+  defp anchorable_native_outcome?(_outcome), do: false
 
   defp put_prepared_public_context(%PreparedWebsocketFrame{} = prepared, state) do
     if prepared.variant == :public_response_create do
@@ -4602,7 +4679,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         highest_frame_class: highest_pushed_frame_class(evidence)
       }
       |> Map.merge(pushed_completed_items(evidence))
-      |> Map.merge(Map.take(evidence, [:write_failure, :write_failed_at]))
+      |> Map.merge(Map.take(evidence, [:write_failure, :write_failed_at, :incomplete_reason]))
       |> DeliveryReceipt.build()
     )
   end
@@ -5112,10 +5189,21 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       |> maybe_mark_completed_response_task_terminal(pid, terminal_outcome(data))
       |> record_completed_native_response(pid, data)
       |> record_downstream_terminal(pid, DeliveryReceipt.terminal_class_from_outcome(outcome))
+      |> record_downstream_incomplete_reason(pid, outcome)
     else
       _not_terminal -> state
     end
   end
+
+  # Why the pushed `response.incomplete` ended the response, for the receipt:
+  # `interrupted` names a response the client stopped (findings#270 row 270-272).
+  defp record_downstream_incomplete_reason(state, pid, %{event_type: "response.incomplete", incomplete_reason: reason}) when is_binary(reason) do
+    if response_task_delivery_candidate?(state, pid),
+      do: update_downstream_delivery_evidence(state, pid, &Map.put_new(&1, :incomplete_reason, reason)),
+      else: state
+  end
+
+  defp record_downstream_incomplete_reason(state, _pid, _outcome), do: state
 
   defp maybe_mark_completed_response_task_terminal(state, pid, :ok) do
     Map.update(state, :response_task_completed_terminals, MapSet.new([pid]), &MapSet.put(&1, pid))

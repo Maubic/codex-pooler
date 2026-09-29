@@ -18,6 +18,7 @@ defmodule CodexPooler.Gateway.Websocket do
 
   alias CodexPooler.Gateway.Transports.Websocket.{
     OwnerErrorDiagnostics,
+    ResponseInterrupt,
     UpstreamWebsocketSession,
     WebsocketOwnerContract,
     WebsocketOwnerForwarder,
@@ -1023,6 +1024,36 @@ defmodule CodexPooler.Gateway.Websocket do
   end
 
   def cancel_websocket_owner_turn(_session, _token, _downstream, _reason, _opts), do: :ok
+
+  @doc """
+  Hands a client's `response.interrupt` to the owner that runs the socket's
+  turn (`WebsocketOwnerForwarder.interrupt_turn/5`, findings#270 row 270-272).
+  `:ok` once the owner took it, which then logs its one line itself;
+  otherwise the reason it could not be reached.
+  """
+  @spec interrupt_websocket_owner_turn(
+          CodexSession.t() | nil,
+          String.t() | nil,
+          WebsocketOwnerSession.downstream() | nil,
+          ResponseInterrupt.t(),
+          opts()
+        ) :: :ok | {:error, WebsocketOwnerContract.owner_error() | :remote_interrupt_v1_unsupported | :stale_owner}
+  def interrupt_websocket_owner_turn(%CodexSession{} = session, owner_lease_token, downstream, interrupt, opts)
+      when is_binary(owner_lease_token) and is_map(downstream) and is_map(interrupt) do
+    opts = websocket_request_options(opts)
+
+    WebsocketOwnerForwarder.interrupt_turn(
+      session,
+      owner_lease_token,
+      downstream,
+      interrupt,
+      opts
+      |> owner_forwarder_opts()
+      |> Keyword.put_new(:timeout, WebsocketOwnerContract.default_downstream_send_timeout_ms())
+    )
+  end
+
+  def interrupt_websocket_owner_turn(_session, _token, _downstream, _interrupt, _opts), do: {:error, :owner_unavailable}
 
   @spec preflight_websocket_owner_reconnect(
           CodexSession.t(),

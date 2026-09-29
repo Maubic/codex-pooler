@@ -18,11 +18,15 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
   alias CodexPooler.Gateway.Payloads.TransportEnvelope
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
   alias CodexPooler.Gateway.Runtime.RateLimitObserver
+  alias CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector
+  alias CodexPooler.Gateway.Transports.Websocket.ResponseInterrupt
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.CloseDiagnostics
+  alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.EventTaxonomy
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger, as: WebsocketOwnerLogger
   alias CodexPooler.Gateway.Websocket, as: GatewayWebsocket
   alias CodexPooler.Gateway.Websocket.Adapter, as: WebsocketAdapter
+  alias CodexPooler.Gateway.Websocket.DeliveryReceipt
   alias CodexPooler.Quotas
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
@@ -64,6 +68,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     native_websocket_upstream_close: [:streaming, :ownership],
     native_websocket_owner_exit: [:streaming, :ownership],
     native_websocket_provider_controls: [:streaming, :ownership],
+    native_websocket_response_interrupt: [:streaming, :ownership],
     firewall: [:route, :auth, :error, :ownership],
     pruned_runtime_helper_firewall: [:route, :error],
     decompression: [:route, :error, :overload],
@@ -95,7 +100,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     {:delete, "/v1/responses/:response_id"} => ~w(v1_unsupported_public_surface)a,
     {:get, "/api/codex/usage"} => ~w(firewall usage_alias_meter_identity)a,
     {:get, "/backend-api/codex/models"} => ~w(api_key_reasoning_availability backend_models_etag database_unavailable firewall pool_model_serving_modes)a,
-    {:get, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable desktop_pool_usage_limit_answer duplicate_turn_fence exhausted_pool_usage_limit firewall function_tool_schema_lowering multi_agent_product_certification native_websocket_owner_exit native_websocket_provider_controls native_websocket_upstream_close pool_model_serving_modes pooler_authored_error_type rejection_metadata terminal_failure_diagnostics tool_output_preservation upstream_error_param websocket_continuity)a,
+    {:get, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable desktop_pool_usage_limit_answer duplicate_turn_fence exhausted_pool_usage_limit firewall function_tool_schema_lowering multi_agent_product_certification native_websocket_owner_exit native_websocket_provider_controls native_websocket_response_interrupt native_websocket_upstream_close pool_model_serving_modes pooler_authored_error_type rejection_metadata terminal_failure_diagnostics tool_output_preservation upstream_error_param websocket_continuity)a,
     {:get, "/backend-api/codex/v1/models"} => ~w(backend_models_etag backend_v1_alias_surface pool_model_serving_modes)a,
     {:get, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface desktop_pool_usage_limit_answer duplicate_turn_fence function_tool_schema_lowering multi_agent_product_certification native_websocket_owner_exit native_websocket_provider_controls native_websocket_upstream_close pool_model_serving_modes tool_output_preservation)a,
     {:get, "/backend-api/wham/usage"} => ~w(firewall usage_alias_meter_identity)a,
@@ -669,6 +674,39 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       assert fixture.public_v1_websocket == :relays_no_codex_control
       assert CompatibilityMatrix.fixture!(fixture.provider_metadata).provider_metadata_event.x_models_etag == :removed
       assert fixture.observability == %{line: :none, metric: :none}
+    end
+
+    # findings#270 row 270-272: the fixture's frame is the one the parser reads
+    # and the upstream session writes, its dropped outcomes are every line the
+    # interrupt can end on, and the reasons it names are the ones the receipt
+    # and the compaction collector give.
+    test "locks the native websocket response interrupt" do
+      feature = CompatibilityMatrix.by_slug!(:native_websocket_response_interrupt)
+      fixture = CompatibilityMatrix.fixture!(:native_websocket_response_interrupt)
+
+      assert feature.current == :relayed_to_the_running_turn
+      assert feature.future_routes == []
+      assert feature.routes == [%{method: :get, path: "/backend-api/codex/responses", transport: :websocket}]
+      assert fixture.topologies == [:owner_forwarding_off, :owner_on_this_node, :owner_on_another_node]
+      assert fixture.serving_modes == ~w(full lite)
+
+      assert {:ok, interrupt} = ResponseInterrupt.parse(fixture.frame)
+      assert CodexPooler.JSON.decode!(ResponseInterrupt.frame(interrupt)) == fixture.frame
+      assert ResponseInterrupt.outcomes() == [:written | fixture.dropped]
+      assert fixture.dropped_answer == :none
+
+      for type <- fixture.provider_answer do
+        assert {_family, class} = EventTaxonomy.classify(type)
+        refute class == "response_unknown_event"
+      end
+
+      assert fixture.settlement.incomplete_reason in DeliveryReceipt.incomplete_reason_values()
+
+      assert %{"response" => %{"incomplete_details" => %{"reason" => reason}}} =
+               CompactionResultCollector.provider_failure_websocket_event(%{event_type: "response.incomplete", code: "interrupted", upstream_code: "interrupted"})
+
+      assert reason == fixture.compaction_interrupted_reason
+      assert fixture.observability.metric == :none
     end
 
     # findings#279 point 2: the fixture's answer is the one the gateway renders

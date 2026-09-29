@@ -19,6 +19,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.RemoteReconnectControlV2
+  alias CodexPooler.Gateway.Transports.Websocket.ResponseInterrupt
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerAdmissionControlV1
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
@@ -1215,6 +1216,73 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
 
       {:error, :remote_take_over_v1_unsupported} = unsupported ->
         log_take_over_protocol_incompatibility()
+        unsupported
+
+      {:error, reason} when is_atom(reason) ->
+        if WebsocketOwnerContract.owner_error?(reason), do: {:error, reason}, else: {:error, :owner_crashed}
+
+      _unsafe_result ->
+        {:error, :owner_crashed}
+    end
+  end
+
+  @doc """
+  Hands a client's `response.interrupt` to the session's owner, wherever the
+  owner runs (`WebsocketOwnerSession.interrupt_turn/3`, findings#270 row
+  270-272). The owner answers `:ok` whether it relayed the interrupt or dropped
+  it, and logs which. An owner node of an earlier release has no
+  `remote_interrupt_turn_v1` and answers `{:error,
+  :remote_interrupt_v1_unsupported}`: the interrupt is dropped, and the turn
+  runs to its end as it would have on that release.
+  """
+  @spec interrupt_turn(CodexSession.t(), binary(), WebsocketOwnerSession.downstream(), ResponseInterrupt.t(), submit_opts()) ::
+          :ok | {:error, WebsocketOwnerContract.owner_error() | :remote_interrupt_v1_unsupported}
+  def interrupt_turn(%CodexSession{} = session, token, downstream, interrupt, opts \\ [])
+      when is_binary(token) and is_map(downstream) and is_map(interrupt) and is_list(opts) do
+    downstream = Map.take(downstream, [:pid, :epoch, :correlation_id])
+    interrupt = Map.take(interrupt, [:response_id, :mode])
+
+    with :ok <- SessionContinuity.validate_owner_token(session, token),
+         {:ok, owner} <- resolve_owner(session, opts) do
+      case owner do
+        {:local, _instance} -> remote_interrupt_turn_v1(session.id, downstream, interrupt)
+        {:remote, node, _instance} -> interrupt_remote_turn(node, session.id, downstream, interrupt, opts)
+      end
+    end
+  end
+
+  @doc false
+  @spec interrupt_remote_turn(node(), binary(), WebsocketOwnerSession.downstream(), ResponseInterrupt.t(), submit_opts()) ::
+          :ok | {:error, WebsocketOwnerContract.owner_error() | :remote_interrupt_v1_unsupported}
+  def interrupt_remote_turn(node, codex_session_id, downstream, interrupt, opts)
+      when is_atom(node) and is_binary(codex_session_id) and is_map(downstream) and is_map(interrupt) and is_list(opts) do
+    args = [codex_session_id, Map.take(downstream, [:pid, :epoch, :correlation_id]), Map.take(interrupt, [:response_id, :mode])]
+    call_remote_interrupt(node, args, opts)
+  end
+
+  @doc false
+  @spec remote_interrupt_turn_v1(binary(), WebsocketOwnerSession.downstream(), ResponseInterrupt.t()) ::
+          :ok | {:error, WebsocketOwnerContract.owner_error()}
+  def remote_interrupt_turn_v1(codex_session_id, downstream, interrupt)
+      when is_binary(codex_session_id) and is_map(downstream) and is_map(interrupt) do
+    with {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id) do
+      WebsocketOwnerSession.interrupt_turn(owner_pid, downstream, interrupt)
+    end
+  catch
+    :exit, _reason -> {:error, :owner_crashed}
+  end
+
+  defp call_remote_interrupt(node, args, opts) do
+    timeout = Keyword.get(opts, :timeout, WebsocketOwnerContract.default_forward_timeout_ms())
+
+    opts
+    |> node_client()
+    |> safe_remote_call(node, __MODULE__, :remote_interrupt_turn_v1, args, timeout)
+    |> case do
+      :ok ->
+        :ok
+
+      {:error, :remote_interrupt_v1_unsupported} = unsupported ->
         unsupported
 
       {:error, reason} when is_atom(reason) ->
@@ -2658,6 +2726,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
           | :remote_cancel_v1_unsupported
           | :remote_abandon_v1_unsupported
           | :remote_take_over_v1_unsupported
+          | :remote_interrupt_v1_unsupported
   def normalize_remote_failure(kind, reason, module, function, args) do
     case normalize_protocol_failure(kind, reason, module, function, args) do
       nil -> normalize_remote_transport_failure(reason)
@@ -2845,6 +2914,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
       missing_remote_cancel_v1?(reason, module, function, args) -> :remote_cancel_v1_unsupported
       missing_remote_abandon_v1?(reason, module, function, args) -> :remote_abandon_v1_unsupported
       missing_remote_take_over_v1?(reason, module, function, args) -> :remote_take_over_v1_unsupported
+      missing_remote_interrupt_v1?(reason, module, function, args) -> :remote_interrupt_v1_unsupported
       true -> nil
     end
   end
@@ -2878,6 +2948,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
        do: remote_args == args and length(remote_args) == 2
 
   defp missing_remote_take_over_v1?(_reason, _module, _function, _args), do: false
+
+  defp missing_remote_interrupt_v1?(
+         {:exception, :undef, [{module, :remote_interrupt_turn_v1, remote_args, _location} | _stack]},
+         module,
+         :remote_interrupt_turn_v1,
+         args
+       ),
+       do: remote_args == args and length(remote_args) == 3
+
+  defp missing_remote_interrupt_v1?(_reason, _module, _function, _args), do: false
 
   defp missing_remote_reconnect_control_v1?(
          {:exception, :undef, [{module, :remote_reconnect_control_v1, remote_args, _location} | _stack]},

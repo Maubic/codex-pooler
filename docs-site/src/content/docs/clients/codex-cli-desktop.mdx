@@ -270,4 +270,6 @@ If Codex repeatedly enters a broken login/account state with a Pooler provider, 
 
 The backend route family includes `GET /backend-api/codex/models`, `POST /backend-api/codex/responses`, backend websocket response-stream compatibility on `GET /backend-api/codex/responses`, and `POST /backend-api/codex/responses/compact`. The public `POST /v1/responses/compact` route remains unsupported.
 
+Codex 0.159.0 and later can stop a response while the model is still generating it, for example when you send new input during a turn: it sends `response.interrupt` on the websocket that carries the turn. Codex Pooler hands it to the upstream connection serving that turn. The response ends as interrupted, the tokens it generated until then are recorded and billed like any served request, and your input continues the turn on the same connection. A request to stop a response that has already ended is ignored.
+
 Codex Pooler supports Codex model-provider traffic only. Do not point `chatgpt_base_url` at Codex Pooler for account, realtime, identity, or other app-server helper calls.

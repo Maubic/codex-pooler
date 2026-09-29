@@ -25,6 +25,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   alias CodexPooler.Gateway.Transports.Websocket.NativeReplayAdmission
   alias CodexPooler.Gateway.Transports.Websocket.OrdinarySuccessResult
   alias CodexPooler.Gateway.Transports.Websocket.RemoteReconnectControlV2
+  alias CodexPooler.Gateway.Transports.Websocket.ResponseInterrupt
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator
 
@@ -500,6 +501,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   def take_over_inherited_turn(owner, %{pid: pid, epoch: epoch, correlation_id: correlation_id})
       when is_pid(pid) and is_integer(epoch) and epoch > 0 and is_binary(correlation_id) do
     GenServer.call(owner, {:take_over_inherited_turn, pid, epoch, correlation_id}, owner_call_timeout())
+  end
+
+  @doc """
+  Hands a client's `response.interrupt` (`ResponseInterrupt`, findings#270 row
+  270-272) to the upstream session of the running turn, when that turn belongs
+  to `downstream` and its frames are relayed as they come; that session writes
+  it only while the response it names runs there. Any other interrupt is
+  dropped with its one line: no running turn, another downstream's turn, or a
+  collected one (a compaction). The owner answers `:ok` in every case.
+  """
+  @spec interrupt_turn(GenServer.server(), downstream(), ResponseInterrupt.t()) :: :ok
+  def interrupt_turn(owner, %{pid: pid, epoch: epoch, correlation_id: correlation_id}, %{response_id: response_id, mode: mode} = interrupt)
+      when is_pid(pid) and is_integer(epoch) and epoch > 0 and is_binary(correlation_id) and is_binary(response_id) and is_binary(mode) do
+    GenServer.call(owner, {:interrupt_turn, pid, epoch, correlation_id, interrupt}, owner_call_timeout())
   end
 
   @type reconnect_preflight_result ::
@@ -1936,6 +1951,24 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
           :error -> {:reply, {:error, reason}, state}
         end
     end
+  end
+
+  def handle_call({:interrupt_turn, pid, epoch, correlation_id, interrupt}, _from, state) do
+    case state.active_turn do
+      %{downstream: %{pid: ^pid, epoch: ^epoch, correlation_id: ^correlation_id}, collect?: false, upstream_pid: upstream_pid} when is_pid(upstream_pid) ->
+        :ok = UpstreamWebsocketSession.interrupt(upstream_pid, interrupt)
+
+      %{downstream: %{pid: ^pid, epoch: ^epoch, correlation_id: ^correlation_id}} ->
+        :ok = ResponseInterrupt.log(:owner_turn_not_relay, :owner)
+
+      %{} ->
+        :ok = ResponseInterrupt.log(:owner_not_downstream, :owner)
+
+      nil ->
+        :ok = ResponseInterrupt.log(:no_running_turn, :owner)
+    end
+
+    {:reply, :ok, state}
   end
 
   def handle_call({:submit_upstream, _downstream, _payload}, _from, %{draining?: true} = state) do

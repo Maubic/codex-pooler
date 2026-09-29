@@ -69,6 +69,7 @@ defmodule CodexPooler.FakeUpstream do
           | {:websocket_close_without_terminal_barrier, non_neg_integer(), String.t(), pid(), reference()}
           | {:websocket_init_barrier, mode(), pid(), reference()}
           | {:websocket_frame_barrier, [String.t()], pid(), reference()}
+          | {:websocket_interruptible, [String.t()], map()}
           | {:sequence, [mode()]}
           | {:strict_sequence, [mode()]}
           | {:repeat_last, [mode()]}
@@ -465,6 +466,58 @@ defmodule CodexPooler.FakeUpstream do
   def release_remaining_frames(%__MODULE__{pid: pid}, release_ref)
       when is_reference(release_ref) do
     release_frame_barrier(pid, release_ref, true)
+  end
+
+  @doc """
+  A native response the provider stops when its client interrupts it (Codex
+  0.159.0 `response.interrupt`, findings#270 row 270-272). Pushes `opening`,
+  then holds the response open until the first of:
+
+    * a `response.interrupt` text frame naming `:response_id` on this
+      connection, answered with `:interrupted` (the provider sends
+      `response.interrupt.accepted`, `response.output_item.interrupted` for an
+      item it had open, and the terminal `response.incomplete` with reason
+      `interrupted`);
+    * `release_interruptible/2`, answered with `:completion` (nobody
+      interrupted it).
+
+  Before holding, the handler sends `{:fake_upstream_interruptible_open,
+  handler_pid, release_ref}` to `:notify`, and `{:fake_upstream_interrupted,
+  handler_pid, release_ref}` once it answered an interrupt. Every
+  `response.interrupt` frame is recorded (`websocket_interrupts/1`) and
+  consumes no expectation; one that names no open response is answered, as
+  the provider answers it, with a `response.interrupt.failed`
+  (`response_not_in_progress`), which is not a terminal.
+  """
+  @spec interruptible_websocket_frames([iodata()], keyword()) :: mode()
+  def interruptible_websocket_frames(opening, opts) when is_list(opening) and is_list(opts) do
+    {:websocket_interruptible, Enum.map(opening, &IO.iodata_to_binary/1),
+     %{
+       response_id: Keyword.fetch!(opts, :response_id),
+       interrupted: Enum.map(Keyword.fetch!(opts, :interrupted), &IO.iodata_to_binary/1),
+       completion: Enum.map(Keyword.fetch!(opts, :completion), &IO.iodata_to_binary/1),
+       notify: Keyword.fetch!(opts, :notify),
+       release_ref: Keyword.fetch!(opts, :release_ref)
+     }}
+  end
+
+  @doc "Completes the interruptible response held for `release_ref` as nobody interrupted it."
+  @spec release_interruptible(t(), reference()) :: :ok | {:error, :no_interruptible_response}
+  def release_interruptible(%__MODULE__{pid: pid}, release_ref) when is_reference(release_ref) do
+    case Agent.get(pid, &get_in(&1, [Access.key(:interruptible_handlers, %{}), release_ref])) do
+      handler when is_pid(handler) ->
+        send(handler, {:fake_upstream_release_interruptible, release_ref})
+        :ok
+
+      nil ->
+        {:error, :no_interruptible_response}
+    end
+  end
+
+  @doc "Every `response.interrupt` frame the fake received, in order, with its connection."
+  @spec websocket_interrupts(t()) :: [%{websocket_connection_id: pos_integer(), json: map() | nil}]
+  def websocket_interrupts(%__MODULE__{pid: pid}) do
+    Agent.get(pid, fn state -> state |> Map.get(:websocket_interrupts, []) |> Enum.reverse() end)
   end
 
   defp release_frame_barrier(pid, release_ref, remaining?) do
@@ -1272,6 +1325,7 @@ defmodule CodexPooler.FakeUpstream do
   defp native_websocket_mode?({:websocket_text, _messages}), do: true
   defp native_websocket_mode?({:websocket_text_then_abrupt_close, _messages}), do: true
   defp native_websocket_mode?({:websocket_frame_barrier, _, _, _}), do: true
+  defp native_websocket_mode?({:websocket_interruptible, _opening, _spec}), do: true
   defp native_websocket_mode?({:websocket_sse_then_close, _chunks, _code, _reason}), do: true
   defp native_websocket_mode?({:websocket_terminal_then_close_barrier, _, _, _, _, _}), do: true
   defp native_websocket_mode?({:websocket_connection_limit_terminal_barrier, _, _, _}), do: true
@@ -2080,6 +2134,13 @@ defmodule CodexPooler.FakeUpstream do
       continue_frame_barriers(barrier, state)
     end
 
+    def handle_info(
+          {:fake_upstream_release_interruptible, release_ref},
+          %{interruptible: %{release_ref: release_ref, completion: completion}} = state
+        ) do
+      {:push, Enum.map(completion, &{:text, &1}), Map.delete(state, :interruptible)}
+    end
+
     def handle_info(_message, state), do: {:ok, state}
 
     @impl WebSock
@@ -2144,7 +2205,41 @@ defmodule CodexPooler.FakeUpstream do
     end
 
     @impl WebSock
-    def handle_in({payload, [opcode: :text]}, %{pid: pid} = state) do
+    def handle_in({payload, [opcode: :text]}, state) do
+      case decode_json(payload) do
+        %{"type" => "response.interrupt"} = interrupt -> handle_interrupt(interrupt, state)
+        _request -> handle_request_frame(payload, state)
+      end
+    end
+
+    def handle_in({_payload, [opcode: :binary]}, state), do: {:stop, :unsupported_binary, state}
+
+    # The provider answers an interrupt only on the connection that carries the
+    # response it names, and only while that response runs.
+    defp handle_interrupt(interrupt, %{pid: pid} = state) do
+      Agent.update(pid, fn agent_state ->
+        Map.update(agent_state, :websocket_interrupts, [%{websocket_connection_id: state.connection_id, json: interrupt}], &[%{websocket_connection_id: state.connection_id, json: interrupt} | &1])
+      end)
+
+      requested = Map.get(interrupt, "response_id")
+
+      case Map.get(state, :interruptible) do
+        %{response_id: ^requested, interrupted: interrupted, notify: notify, release_ref: release_ref} ->
+          send(notify, {:fake_upstream_interrupted, self(), release_ref})
+          {:push, Enum.map(interrupted, &{:text, &1}), Map.delete(state, :interruptible)}
+
+        _not_running ->
+          failed = %{
+            "type" => "response.interrupt.failed",
+            "response_id" => requested,
+            "error" => %{"code" => "response_not_in_progress", "param" => "response_id", "type" => "invalid_request_error"}
+          }
+
+          {:push, {:text, CodexPooler.JSON.encode!(failed)}, state}
+      end
+    end
+
+    defp handle_request_frame(payload, %{pid: pid} = state) do
       request = %{
         method: "WEBSOCKET",
         path: "/backend-api/codex/responses",
@@ -2159,8 +2254,6 @@ defmodule CodexPooler.FakeUpstream do
 
       handle_websocket_message(websocket_messages(mode, request), state)
     end
-
-    def handle_in({_payload, [opcode: :binary]}, state), do: {:stop, :unsupported_binary, state}
 
     defp handle_websocket_message({:close, code, reason}, state),
       do: {:stop, reason, {code, reason}, state}
@@ -2223,6 +2316,17 @@ defmodule CodexPooler.FakeUpstream do
         Map.put(state, :delayed_terminal, %{release_ref: release_ref, messages: terminal})
 
       {:push, Enum.map(messages, &{:text, &1}), next_state}
+    end
+
+    defp handle_websocket_message({:interruptible, opening, spec}, %{pid: pid} = state) do
+      handler = self()
+
+      Agent.update(pid, fn agent_state ->
+        Map.update(agent_state, :interruptible_handlers, %{spec.release_ref => handler}, &Map.put(&1, spec.release_ref, handler))
+      end)
+
+      send(spec.notify, {:fake_upstream_interruptible_open, self(), spec.release_ref})
+      {:push, Enum.map(opening, &{:text, &1}), Map.put(state, :interruptible, spec)}
     end
 
     defp handle_websocket_message(messages, state),
@@ -2307,6 +2411,9 @@ defmodule CodexPooler.FakeUpstream do
 
     defp websocket_messages({:websocket_frame_barrier, frames, notify, release_ref}, _request),
       do: {:frame_barriers, frames, notify, release_ref}
+
+    defp websocket_messages({:websocket_interruptible, opening, spec}, _request),
+      do: {:interruptible, opening, spec}
 
     defp websocket_messages({:websocket_sse_then_close, chunks, code, reason}, _request) do
       {:push_then_close, messages_from_sse_chunk(Enum.join(chunks)), code, reason}

@@ -11,7 +11,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Even
        response.output_text.done
        response.output_text.annotation.added
      )},
-    {"response.output_item", ~w(response.output_item.added response.output_item.done)},
+    {"response.output_item", ~w(response.output_item.added response.output_item.done response.output_item.interrupted)},
     {"response.content_part", ~w(response.content_part.added response.content_part.done)},
     {"response.reasoning", ~w(
        response.reasoning
@@ -69,6 +69,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Even
        response.mcp_list_tools.failed
      )},
     {"response.metadata", ~w(response.metadata)},
+    # The provider's answers to a client's `response.interrupt` (findings#270
+    # row 270-272); neither is a terminal.
+    {"response.interrupt", ~w(response.interrupt.accepted response.interrupt.failed)},
     {"response.moderation", ~w(response.moderation.started response.moderation.completed)}
   ]
   @known_response_event_family_by_type @known_response_event_families

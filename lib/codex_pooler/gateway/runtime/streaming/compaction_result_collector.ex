@@ -111,7 +111,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
         code: code,
         upstream_code: upstream_code
       }) do
-    reason = DiagnosticTaxonomy.identifier(upstream_code || code) || "upstream_terminal_failure"
+    reason = client_incomplete_reason(DiagnosticTaxonomy.identifier(upstream_code || code))
 
     %{
       "type" => "response.incomplete",
@@ -147,6 +147,17 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
       nil -> error
     end
   end
+
+  # A compaction the provider ended `interrupted` has no summary to hand over.
+  # The released client (0.159.0) reads a relayed `interrupted` as a response
+  # that completed without its end of turn, and a compaction that completed
+  # with no item fails its turn for good; any other reason is an error it
+  # retries by resending the compaction, as it did before it read the reason
+  # (findings#270 row 270-272). The Pooler never relays an interrupt to a
+  # compaction, so only the provider can end one this way.
+  defp client_incomplete_reason("interrupted"), do: "upstream_terminal_failure"
+  defp client_incomplete_reason(nil), do: "upstream_terminal_failure"
+  defp client_incomplete_reason(reason), do: reason
 
   defp new_state(item_mode) do
     %{

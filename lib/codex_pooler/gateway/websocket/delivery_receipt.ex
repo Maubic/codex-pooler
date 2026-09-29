@@ -58,6 +58,12 @@ defmodule CodexPooler.Gateway.Websocket.DeliveryReceipt do
   # client-retry window of the cut turn starts there instead of at the
   # provider's completion (row 232-261, `ClientRetry.retry_window_start/3`).
   @write_failures ~w(timeout closed other)
+  # Why a pushed `response.incomplete` ended its response, for the reasons the
+  # provider names in `incomplete_details.reason`: `interrupted` is a response
+  # the client stopped with `response.interrupt` (findings#270 row 270-272), a
+  # served request billed for what it generated. Any other reason reads
+  # `other`; a receipt of another terminal has no field.
+  @incomplete_reasons ~w(interrupted max_output_tokens content_filter)
 
   @type outcome :: String.t()
   @type terminal_class :: String.t() | nil
@@ -167,7 +173,17 @@ defmodule CodexPooler.Gateway.Websocket.DeliveryReceipt do
     |> maybe_put_highest_frame_class(fields)
     |> maybe_put_completed_items(fields)
     |> maybe_put_write_failure(fields)
+    |> maybe_put_incomplete_reason(fields)
   end
+
+  @doc "Every value `build/1` can persist under `incomplete_reason`."
+  @spec incomplete_reason_values() :: [String.t()]
+  def incomplete_reason_values, do: @incomplete_reasons ++ ["other"]
+
+  defp maybe_put_incomplete_reason(%{"terminal_class" => "response.incomplete"} = receipt, %{incomplete_reason: reason}) when is_binary(reason),
+    do: Map.put(receipt, "incomplete_reason", vocabulary(reason, @incomplete_reasons, "other"))
+
+  defp maybe_put_incomplete_reason(receipt, _fields), do: receipt
 
   # Only a receipt whose connection failed a write before the turn's terminal
   # was written carries the fields; the time only with the class.
@@ -292,7 +308,8 @@ defmodule CodexPooler.Gateway.Websocket.DeliveryReceipt do
         "outcome=#{receipt["outcome"]} " <>
         "terminal_class=#{receipt["terminal_class"]} " <>
         "frames_after_visible=#{receipt["frames_after_visible"]}" <>
-        write_failure_field(receipt)
+        write_failure_field(receipt) <>
+        incomplete_reason_field(receipt)
     )
 
     case Map.get(context, :attempt_id) do
@@ -342,6 +359,9 @@ defmodule CodexPooler.Gateway.Websocket.DeliveryReceipt do
 
   defp write_failure_field(%{"write_failure" => failure}) when is_binary(failure), do: " write_failure=#{failure}"
   defp write_failure_field(_receipt), do: ""
+
+  defp incomplete_reason_field(%{"incomplete_reason" => reason}) when is_binary(reason), do: " incomplete_reason=#{reason}"
+  defp incomplete_reason_field(_receipt), do: ""
 
   defp log_persist_failure(:ok, _transport, _request_id, _session_id), do: :ok
 
