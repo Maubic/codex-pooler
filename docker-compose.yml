@@ -52,6 +52,13 @@ services:
   app:
     image: ${CODEX_POOLER_IMAGE:-ghcr.io/icoretech/codex-pooler}:${CODEX_POOLER_IMAGE_TAG:-latest}
     restart: unless-stopped
+    # A stop sends SIGTERM and the app shuts down gracefully: up to 5 s of relay
+    # quiesce, then the drain, which lets in-flight turns finish within the
+    # drain budget (CODEX_POOLER_WEBSOCKET_DRAIN_TIMEOUT_MS, 50 s unless set in
+    # .env), then up to 10 s for the listener and 55 s for running jobs. Docker
+    # kills the container stop_grace_period after SIGTERM, 10 s unless set,
+    # which would cut the drain. Raise this with the drain budget.
+    stop_grace_period: 135s
     depends_on:
       migrate:
         condition: service_completed_successfully

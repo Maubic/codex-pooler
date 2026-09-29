@@ -175,6 +175,17 @@ docker compose exec db sh -c 'vacuumdb --username="$POSTGRES_USER" --dbname="$PO
 docker compose up -d
 ```
 
+## Graceful stop
+
+When the app container stops, for an upgrade, a restart or `docker compose
+down`, it drains first: it refuses new work and lets in-flight turns finish
+within the drain budget, `CODEX_POOLER_WEBSOCKET_DRAIN_TIMEOUT_MS` (50 seconds
+unless set in `.env`). Turns get about the budget minus 10.7 seconds. The
+Compose file sets `stop_grace_period: 135s` on the app, so Docker waits for the
+drain and the rest of the shutdown instead of killing the container after its
+short default timeout. If you raise the drain budget, raise the app's
+`stop_grace_period` by the same amount in a Compose override file.
+
 ## Stop or reset
 
 Stop the stack while keeping the database volume:
