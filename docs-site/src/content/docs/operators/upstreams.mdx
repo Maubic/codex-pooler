@@ -449,6 +449,8 @@ For each current reset expiration, the bank shows `banked` only when the upstrea
 
 Use it when the card says an account is degraded, stale, exhausted, or needs recovery. The detail page provides more space for assignment posture, quota health, recent events, and related links without exposing raw account secrets.
 
+Request health covers the traffic routed through the account over the last seven days. The facts row shows the last 24 hours: requests, failed requests, requests cancelled by the client, and the failure rate. Requests the client cancelled are counted on their own: they are not failures of the account and are not part of the failure rate, which is computed over the other requests. Request posture turns degraded when that rate exceeds 5%, and failed when every request that was not cancelled by the client failed. The daily chart shows succeeded, failed and cancelled requests as separate bars, and the error breakdown lists the five most frequent failure codes without client cancellations. Recent activity lists failed and retried requests; a request the client cancelled appears there only when it was retried. See [Request logs](/operators/request-logs/#client-cancelled) for what counts as a client cancellation.
+
 ## Operational Checklist
 
 When an upstream is not routing as expected, check it in this order:

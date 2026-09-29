@@ -9,7 +9,7 @@ Use this page when you need to answer:
 
 1. whether a client request reached Codex Pooler
 2. which Pool, upstream account, model, API key, and transport were involved
-3. whether the request succeeded, failed, retried, or is still in progress
+3. whether the request succeeded, failed, was cancelled by the client, retried, or is still in progress
 4. how long routing and upstream work took
 5. which token and cost metadata was recorded
 6. whether errors were safe operational errors, quota issues, or upstream failures
@@ -55,7 +55,7 @@ Primary filters are:
     </tr>
     <tr>
       <td>Status</td>
-      <td>Limits rows by request outcome, such as completed, failed, rejected, or in-progress states.</td>
+      <td>Limits rows by the status each row shows: in progress, succeeded, failed, client cancelled, rejected, or cancelled. <code>Failed</code> leaves out the requests the client cancelled, and the menu says so; choose <code>Client cancelled</code> to list those, or <code>Any status</code> to see both.</td>
     </tr>
     <tr>
       <td>Upstream account</td>
@@ -90,7 +90,7 @@ The table shows the latest matching rows, with a hard page size limit.
   <tbody>
     <tr>
       <td>Time · Status</td>
-      <td>Admission date and time in the operator's selected timezone and format, followed by the status icon, outcome and recorded upstream attempt duration. Open the row to inspect its identifiers and attempts.</td>
+      <td>Admission date and time in the operator's selected timezone and format, followed by the status icon, outcome and recorded upstream attempt duration. A request the client cancelled shows <code>Client cancelled</code> in amber instead of a red <code>Failed</code>. Open the row to inspect its identifiers and attempts.</td>
     </tr>
     <tr>
       <td>Model · Effort · Tier</td>
@@ -106,7 +106,7 @@ The table shows the latest matching rows, with a hard page size limit.
     </tr>
     <tr>
       <td>Errors · Warnings</td>
-      <td>Sanitized request and attempt errors use red triangles; model-name warnings use amber. This column appears only when at least one row on the current page has a signal. A successful retry can retain an earlier attempt's error.</td>
+      <td>Sanitized request and attempt errors use red triangles; model-name warnings and the code of a request the client cancelled use amber. This column appears only when at least one row on the current page has a signal. A successful retry can retain an earlier attempt's error.</td>
     </tr>
     <tr>
       <td>Tokens · Cached</td>
@@ -125,7 +125,17 @@ The table keeps endpoint details to two lines and uses an ellipsis when text exc
 
 Use status and errors together. A completed row with token usage usually means the request reached an upstream and settled successfully. A failed row may still show route, latency, or partial attempt metadata. A rejected row usually means admission or policy failed before upstream work.
 
-OpenAI Responses `response.incomplete` can be a successful delivered terminal response. For example, an upstream may stop at `max_output_tokens` or a content filter and still return safe usage metadata. Those rows stay `succeeded` and should not be treated as upstream health failures. Error-coded incomplete terminals, stale continuation anchors, stream truncation, and client disconnects still appear as failures or interruptions with sanitized error codes.
+OpenAI Responses `response.incomplete` can be a successful delivered terminal response. For example, an upstream may stop at `max_output_tokens` or a content filter and still return safe usage metadata. Those rows stay `succeeded` and should not be treated as upstream health failures. Error-coded incomplete terminals, stale continuation anchors, and stream truncation still appear as failures with sanitized error codes.
+
+### Client cancelled
+
+A request whose client closed the connection before the response finished is recorded as failed with the error code `client_disconnected` and shown as `Client cancelled`. It is a display class, not a recorded status: the request keeps its recorded status `failed`, and the separate `Cancelled` status filter is unrelated. Clients do this on purpose: Codex interrupts a stream to send the next request when new input is waiting, and agents cancel parallel calls they no longer need. A proxy or network path that closes the connection between the client and Codex Pooler looks the same. None of it says anything about the upstream account, so the class is kept apart everywhere failures are counted:
+
+1. the upstream cockpit counts it on its own, outside the failed requests, the failure rate and the degraded state
+2. the Stats page shows it next to the succeeded and failed counts and leaves it out of the success rate
+3. the request-log MCP tools return it as `display_status: client_cancelled` on each row and accept `client_cancelled` as a `status` filter; their `status` field and filter keep the recorded status, so `failed` there still includes these rows
+
+The status code alone does not identify a client cancellation. A websocket request the client left carries `499`, and an HTTP stream the client left keeps the `200` it had already sent. Codex Pooler also answers `499` when it stops a request on its own side, for example during a rollout drain or the recovery of a lost execution; those requests keep their own error codes and stay failures. A request the client left before any output, whose resend never arrived within the replay window, also stays a failure (`websocket_replay_expired`), because the record cannot tell which side lost the connection.
 
 Common causes to inspect are:
 
