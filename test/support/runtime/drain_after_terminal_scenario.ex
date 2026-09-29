@@ -166,9 +166,13 @@ defmodule CodexPoolerWeb.Runtime.DrainAfterTerminalScenario do
     assert {row.status, row.last_error_code, row.response_status_code, row.usage_status} == {"succeeded", nil, 200, "usage_known"}
     assert [%Attempt{status: "succeeded"}] = Repo.all(from(attempt in Attempt, where: attempt.request_id == ^row.id))
 
-    # One settlement, with the provider's usage, between the reservation and its release.
+    # The reservation, then one settlement with the provider's usage and the
+    # reservation's release. The settlement and the release carry one
+    # timestamp (`LedgerEntries` writes both with the settlement's), so their
+    # order is not asserted.
     entries = Repo.all(from(entry in LedgerEntry, where: entry.request_id == ^row.id, order_by: [asc: entry.created_at], select: {entry.entry_kind, entry.usage_status, entry.input_tokens, entry.output_tokens, entry.total_tokens}))
-    assert Enum.map(entries, &elem(&1, 0)) == ["reservation", "settlement", "release"]
+    assert [{"reservation", _usage, _input, _output, _total} | settled] = entries
+    assert Enum.sort(Enum.map(settled, &elem(&1, 0))) == ["release", "settlement"]
     assert Enum.filter(entries, &(elem(&1, 0) == "settlement")) == [{"settlement", "usage_known", 20, 5, 25}]
   end
 
