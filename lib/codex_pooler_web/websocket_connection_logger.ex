@@ -51,9 +51,12 @@ defmodule CodexPoolerWeb.WebsocketConnectionLogger do
   # owner's word that reached a socket bound to the owner anew since.
   @downstream_closed_after_upstream_close_message "websocket downstream closed after upstream connection close"
   @downstream_kept_open_after_upstream_close_message "websocket downstream kept open after upstream connection close"
-  @upstream_close_metadata_keys [:reason_code, :skip_reason, :lifecycle_id, :generation, :forwarding, :codex_session_id]
+  @upstream_close_metadata_keys [:reason_code, :skip_reason, :lifecycle_id, :generation, :forwarding, :codex_session_id, :queued_request]
   @upstream_close_skip_reasons ~w(client_frame busy queued public_route revoked handoff reconnect no_completed_response stale_downstream)
   @upstream_close_forwarding ~w(off on)
+  # A close that answered requests queued behind the settling turn, each anchored
+  # on the closed connection's response (findings#270 row 270-302).
+  @upstream_close_queued_requests ~w(closed_anchor)
 
   # A socket whose websocket owner exited closes, or says why it stays open
   # (findings#276): `reason_code` is how the owner went (`owner_crashed` closes
@@ -95,6 +98,9 @@ defmodule CodexPoolerWeb.WebsocketConnectionLogger do
   @doc "Why a native socket keeps its connection open after its upstream connection closed."
   @spec upstream_close_skip_reasons() :: [String.t()]
   def upstream_close_skip_reasons, do: @upstream_close_skip_reasons
+
+  @spec upstream_close_queued_requests() :: [String.t()]
+  def upstream_close_queued_requests, do: @upstream_close_queued_requests
 
   @spec downstream_closed_after_owner_exit_message() :: String.t()
   def downstream_closed_after_owner_exit_message, do: @downstream_closed_after_owner_exit_message
@@ -376,6 +382,9 @@ defmodule CodexPoolerWeb.WebsocketConnectionLogger do
 
   defp allowed_metadata_value(:forwarding, value),
     do: fixed_vocabulary(value, @upstream_close_forwarding)
+
+  defp allowed_metadata_value(:queued_request, value),
+    do: fixed_vocabulary(value, @upstream_close_queued_requests)
 
   defp allowed_metadata_value(:owner, value),
     do: fixed_vocabulary(value, @owner_exit_owners)

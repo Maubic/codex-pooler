@@ -116,9 +116,9 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     end
   end
 
-  defp handle_socket_frame({_payload, [opcode: opcode]} = frame, state)
+  defp handle_socket_frame({payload, [opcode: opcode]} = frame, state)
        when opcode in [:text, :binary] do
-    state = state |> cancel_upstream_close() |> cancel_owner_exit_close()
+    state = state |> cancel_upstream_close(payload) |> cancel_owner_exit_close()
 
     if socket_revoked?(state) do
       {:ok, state}
@@ -1425,19 +1425,42 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   # A client frame after the signal shows the client is still using the
   # socket: its request meets the fresh upstream connection as it did before
-  # this close existed, and the socket stays open.
-  defp cancel_upstream_close(%{upstream_close_pending: %{} = upstream_close} = state),
-    do: drop_upstream_close(state, upstream_close, :client_frame)
+  # this close existed, and the socket stays open. A request anchored on the
+  # closed connection's response is the exception (findings#270 row 270-302):
+  # the continuation guard can only refuse it, so the close stays pending, the
+  # request waits behind the settling turn, and the close takes its place.
+  defp cancel_upstream_close(%{upstream_close_pending: %{} = upstream_close} = state, payload) do
+    if closed_anchor_frame?(payload, state),
+      do: state,
+      else: drop_upstream_close(state, upstream_close, :client_frame)
+  end
 
-  defp cancel_upstream_close(state), do: state
+  defp cancel_upstream_close(state, _payload), do: state
+
+  # The released client anchors only on the socket's last completed response
+  # (`record_completed_native_response/3`), and the close is latched only while
+  # that response is the socket's last: it came from the closed connection.
+  defp closed_anchor_frame?(payload, state) when is_binary(payload) do
+    case CodexPooler.JSON.decode(payload) do
+      {:ok, %{} = decoded} -> closed_anchor_payload?(decoded, state)
+      _not_an_object -> false
+    end
+  end
+
+  defp closed_anchor_payload?(%{"previous_response_id" => response_id}, %{last_completed_native_response: %{response_digest: digest}})
+       when is_binary(response_id) and response_id != "",
+       do: NativeCodexTurnMetadata.response_id_digest(response_id) == digest
+
+  defp closed_anchor_payload?(_payload, _state), do: false
 
   # Unchanged when nothing is latched: every socket result passes here, and
   # socket tests compare whole states. A stop passes through untouched, so a
-  # revocation's 1008 always wins.
+  # revocation's 1008 always wins. A dropped close lets the queue move again:
+  # the queue waits while a close is pending.
   defp close_upstream_closed_socket_result({:ok, %{upstream_close_pending: %{} = upstream_close} = state}) do
     case upstream_close_decision(state) do
       :wait -> {:ok, state}
-      {:skip, skip_reason} -> {:ok, drop_upstream_close(state, upstream_close, skip_reason)}
+      {:skip, skip_reason} -> {:ok, state |> drop_upstream_close(upstream_close, skip_reason) |> maybe_start_queued_response_task()}
       :close -> {:stop, :normal, Adapter.close_detail(:upstream_connection_closed), close_after_upstream_close(state, upstream_close)}
     end
   end
@@ -1448,7 +1471,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         {:push, messages, state}
 
       {:skip, skip_reason} ->
-        {:push, messages, drop_upstream_close(state, upstream_close, skip_reason)}
+        {:push, messages, state |> drop_upstream_close(upstream_close, skip_reason) |> maybe_start_queued_response_task()}
 
       :close ->
         {:stop, :normal, Adapter.close_detail(:upstream_connection_closed), List.wrap(messages), close_after_upstream_close(state, upstream_close)}
@@ -1580,17 +1603,29 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # `busy`: a tracked task whose terminal the socket has not accepted is a
   # newer request (or one that failed before any terminal), while tasks whose
   # terminals were all accepted are turns that ended before the close and are
-  # still settling, which the close waits for.
+  # still settling, which the close waits for. `queued`: a request waits behind
+  # them that the close would not replace, one not anchored on the closed
+  # connection's response; the close takes the place of those that are.
   defp upstream_close_work_skip_reason(state) do
     tasks = Map.get(state, :tasks, MapSet.new())
 
     cond do
-      not :queue.is_empty(Map.get(state, :queued_response_payloads, :queue.new())) -> :queued
+      queued_request_outlives_close?(state) -> :queued
       not MapSet.subset?(tasks, Map.get(state, :response_task_terminals_accepted, MapSet.new())) -> :busy
       not is_map(Map.get(state, :last_completed_native_response)) -> :no_completed_response
       true -> nil
     end
   end
+
+  defp queued_request_outlives_close?(state) do
+    state
+    |> Map.get(:queued_response_payloads, :queue.new())
+    |> :queue.to_list()
+    |> Enum.any?(&(not closed_anchor_request?(&1, state)))
+  end
+
+  defp closed_anchor_request?(%PreparedWebsocketFrame{payload: payload}, state), do: closed_anchor_payload?(payload, state)
+  defp closed_anchor_request?(_entry, _state), do: false
 
   defp upstream_close_idle?(state) do
     MapSet.size(Map.get(state, :tasks, MapSet.new())) == 0 and
@@ -1602,9 +1637,18 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     Map.delete(state, :upstream_close_pending)
   end
 
+  # The requests still queued are anchored on the closed connection's response
+  # (`queued_request_outlives_close?/1`): the close answers them, and the
+  # client resends them whole on its next socket.
   defp close_after_upstream_close(state, upstream_close) do
-    :ok = WebsocketConnectionLogger.log_downstream_closed_after_upstream_close(upstream_close_log_metadata(state, upstream_close))
-    Map.delete(state, :upstream_close_pending)
+    queued? = not :queue.is_empty(Map.get(state, :queued_response_payloads, :queue.new()))
+    metadata = upstream_close_log_metadata(state, upstream_close)
+    metadata = if queued?, do: Map.put(metadata, :queued_request, :closed_anchor), else: metadata
+    :ok = WebsocketConnectionLogger.log_downstream_closed_after_upstream_close(metadata)
+
+    state
+    |> Map.delete(:upstream_close_pending)
+    |> drop_queued_responses()
   end
 
   defp log_upstream_close_kept_open(state, upstream_close, skip_reason) do
@@ -3727,9 +3771,12 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       (active_response_task?(state) and continuity_ordered_prepared?(prepared))
   end
 
+  # While an upstream close is pending, every queued request is anchored on
+  # the closed connection's response and waits for the close to take its
+  # place (`cancel_upstream_close/2`, findings#270 row 270-302).
   defp maybe_start_queued_response_task(state) do
     if Map.get(state, :firewall_revoked?, false) or active_response_task?(state) or
-         public_turn_open?(state) do
+         public_turn_open?(state) or is_map(Map.get(state, :upstream_close_pending)) do
       state
     else
       # `queue_prepared_response/2` is the only function that adds queue entries

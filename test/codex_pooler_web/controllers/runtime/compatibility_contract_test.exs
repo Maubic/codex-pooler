@@ -604,6 +604,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       assert WebsocketOwnerContract.upstream_closed_message?({fixture.owner.message, "corr-compat", 1, %{cause: hd(fixture.causes), lifecycle_id: Ecto.UUID.generate(), generation: 1}})
       assert fixture.observability.closed == WebsocketConnectionLogger.downstream_closed_after_upstream_close_message()
       assert fixture.observability.kept_open == WebsocketConnectionLogger.downstream_kept_open_after_upstream_close_message()
+      assert fixture.observability.queued_request == WebsocketConnectionLogger.upstream_close_queued_requests()
       assert fixture.observability.metric == :none
     end
 

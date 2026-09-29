@@ -272,19 +272,21 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.UpstreamCl
   end
 
   # The client's next request reaches the socket after it latched the close
-  # but before it closed: the client is not idle, the socket stays open and
-  # the anchored request meets the owner's fresh connection as before (the
-  # guard answers `previous_response_not_found` with nothing sent, settled
-  # with no usage). The whole resend on a new socket is then served on that
-  # fresh connection, which the owner keeps.
-  test "a client frame that arrives before the close is decided keeps the socket open" do
+  # but before it closed. A request anchored on the closed connection's
+  # response can only meet the continuation guard's refusal, so the close
+  # stays pending, the request waits behind the settling turn, and the close
+  # takes its place (findings#270 row 270-302): no owner submission and no
+  # row. The whole resend on a new socket is served on the owner's next
+  # connection. The socket used to drop the close for any client frame, and
+  # the guard answered `previous_response_not_found` on the owner's fresh
+  # connection.
+  test "a client frame anchored on the closed connection's response is answered by the close" do
     hold = hold_settled_websocket_turn!()
     first_input = native_text_input("owner frame before decision")
 
     upstream =
       start_upstream(
-        # provenance: synthetic_adversarial (close 1000 right after the terminal; the
-        # guard's fresh connection carries nothing and serves the resend)
+        # provenance: synthetic_adversarial (close 1000 right after the terminal)
         FakeUpstream.strict_sequence([
           anchorless_request(1, closing_turn("resp_owner_frame_before_decision", 1000)),
           anchorless_request(2, completed_response_frames("resp_owner_frame_before_decision_resend", [], 4, 3))
@@ -298,7 +300,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.UpstreamCl
     frame = released_client_frame(setup, thread)
     turn_id = Ecto.UUID.generate()
 
-    {refusal, log} =
+    {frames, log} =
       with_info_log(fn ->
         {conn, websocket} = public_websocket_send_text!(client.conn, client.websocket, client.ref, frame.(first_input, turn_id, %{}))
         {conn, websocket, terminal} = receive_native_terminal!(conn, websocket, client.ref)
@@ -308,21 +310,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.UpstreamCl
 
         {conn, websocket} = public_websocket_send_text!(conn, websocket, client.ref, frame.([@tool_output], turn_id, %{"previous_response_id" => "resp_owner_frame_before_decision"}))
         {conn, websocket} = socket_transport_barrier!(conn, websocket, client.ref)
-        refute Map.has_key?(socket_connection_state!(client.socket), :upstream_close_pending)
+        assert Map.has_key?(socket_connection_state!(client.socket), :upstream_close_pending)
 
         :ok = release_settled_websocket_turn(hold, task)
-        {conn, websocket, refusal} = receive_native_terminal!(conn, websocket, client.ref)
-        assert_receive {CodexPooler.Events, %{reason: "request_finalized", payload: %{"status" => "failed"}}}, @detection_timeout_ms
-
-        # Still open after the refusal.
-        {conn, _websocket} = socket_transport_barrier!(conn, websocket, client.ref)
+        {conn, _websocket, frames} = receive_frames_until_close!(conn, websocket, client.ref)
         Mint.HTTP.close(conn)
         :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(client.socket)
-        refusal
+        frames
       end)
 
-    assert refusal == native_previous_response_retry_event()
-    assert_upstream_close_lines!(log, [kept_open_line("peer_close_frame", "client_frame", client.lifecycle_id, 1, "on")])
+    assert frames == [@upstream_close]
+    assert_upstream_close_lines!(log, [downstream_closed_line("peer_close_frame", client.lifecycle_id, 1, "on")])
+    assert log =~ "queued_request=closed_anchor"
     assert [_opener] = FakeUpstream.requests(upstream)
 
     retry = connect!(port, setup, thread)
@@ -332,9 +331,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.UpstreamCl
     assert_receive {CodexPooler.Events, %{reason: "request_finalized", payload: %{"status" => "succeeded"}}}, @detection_timeout_ms
     Mint.HTTP.close(conn)
 
-    assert [opener, refused, _resend] = pool_requests(setup)
-    assert {opener.status, refused.status, refused.last_error_code} == {"succeeded", "failed", "stream_incomplete"}
-    assert key_usage_events(refused.id) == %{known: 0, provisional: 0, admissions: 1}
+    assert [opener, resend] = await_settled_pool_requests!(setup, 2)
+    assert {opener.status, resend.status} == {"succeeded", "succeeded"}
     assert :ok = FakeUpstream.verify!(upstream)
   end
 
@@ -817,6 +815,27 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.UpstreamCl
 
   defp pool_requests(setup),
     do: Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: [asc: request.admitted_at]))
+
+  # The Pool's requests once `count` of them exist and none is still open: a
+  # request settles after its terminal reached the client.
+  defp await_settled_pool_requests!(setup, count, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + @detection_timeout_ms
+    requests = pool_requests(setup)
+
+    cond do
+      length(requests) == count and Enum.all?(requests, &(&1.status not in ["accepted", "in_progress"])) ->
+        requests
+
+      System.monotonic_time(:millisecond) < deadline ->
+        receive do
+        after
+          10 -> await_settled_pool_requests!(setup, count, deadline)
+        end
+
+      true ->
+        flunk("the Pool's requests did not settle: #{inspect(Enum.map(requests, &{&1.status, &1.last_error_code}))}")
+    end
+  end
 
   # Polls the owner's state until `predicate` holds: no message marks the
   # owner's handling of its upstream session's signal.

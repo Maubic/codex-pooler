@@ -9,7 +9,8 @@ defmodule CodexPoolerWeb.CodexResponsesSocketUpstreamCloseTest do
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [with_info_log: 1]
 
   alias CodexPooler.Events
-  alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.Gateway.Payloads.{NativeCodexTurnMetadata, RequestOptions}
+  alias CodexPooler.Gateway.Transports.Streaming.PreparedWebsocketFrame
   alias CodexPoolerWeb.CodexResponsesSocket
 
   @upstream_close_detail {1001, "upstream connection closed"}
@@ -126,6 +127,44 @@ defmodule CodexPoolerWeb.CodexResponsesSocketUpstreamCloseTest do
     refute Map.has_key?(stopped, :upstream_close_pending)
     assert [line] = upstream_close_lines(log)
     assert line =~ "websocket downstream kept open after upstream connection close reason_code=peer_close_frame skip_reason=client_frame lifecycle_id=#{ctx.lifecycle_id} generation=3 forwarding=off"
+  end
+
+  # A request queued behind the settling turn and anchored on the closed
+  # connection's response can only meet the continuation guard's refusal
+  # (findings#270 row 270-302): the signal latches the close, the queue does
+  # not move while it is pending, and the close takes the request's place
+  # once the socket's last task is gone.
+  test "a queued request anchored on the closed connection's response latches the close, which takes its place", ctx do
+    anchor = "resp_upstream_close_unit_anchor"
+    state = ctx |> settling_state() |> anchored_on(anchor) |> Map.put(:queued_response_payloads, :queue.from_list([queued_request(anchor)]))
+
+    assert {{:ok, latched}, log} = with_info_log(fn -> CodexResponsesSocket.handle_info(ctx.signal, state) end)
+
+    assert latched == Map.put(state, :upstream_close_pending, %{cause: :peer_close_frame, lifecycle_id: ctx.lifecycle_id, generation: 3, forwarding: :off})
+    assert upstream_close_lines(log) == []
+
+    monitor = latched.task_monitors[ctx.task]
+
+    assert {{:stop, :normal, @upstream_close_detail, stopped}, log} = with_info_log(fn -> CodexResponsesSocket.handle_info({:DOWN, monitor, :process, ctx.task, :normal}, latched) end)
+
+    assert :queue.is_empty(stopped.queued_response_payloads)
+    refute Map.has_key?(stopped, :upstream_close_pending)
+    assert [line] = upstream_close_lines(log)
+
+    assert line =~
+             "websocket downstream closed after upstream connection close reason_code=peer_close_frame lifecycle_id=#{ctx.lifecycle_id} generation=3 forwarding=off codex_session_id=#{@codex_session_id} queued_request=closed_anchor"
+  end
+
+  # A queued request anchored elsewhere can be served on a fresh connection, so
+  # it keeps the socket open, as any queued request did.
+  test "a queued request anchored on another response keeps the socket open with skip_reason=queued", ctx do
+    state = ctx |> settling_state() |> anchored_on("resp_upstream_close_unit_anchor") |> Map.put(:queued_response_payloads, :queue.from_list([queued_request("resp_upstream_close_unit_other")]))
+
+    assert {{:ok, unchanged}, log} = with_info_log(fn -> CodexResponsesSocket.handle_info(ctx.signal, state) end)
+
+    assert unchanged == state
+    assert [line] = upstream_close_lines(log)
+    assert line =~ "websocket downstream kept open after upstream connection close reason_code=peer_close_frame skip_reason=queued lifecycle_id=#{ctx.lifecycle_id} generation=3 forwarding=off"
   end
 
   # A key revoked after the latch: the revocation drops the latch and closes
@@ -381,6 +420,21 @@ defmodule CodexPoolerWeb.CodexResponsesSocketUpstreamCloseTest do
   defp change_state(state, :active_turn_reconnect, _ctx), do: Map.put(state, :websocket_owner_active_turn_reconnect?, true)
   defp change_state(state, :no_completed_response, _ctx), do: Map.delete(state, :last_completed_native_response)
   defp change_state(state, :revoked, _ctx), do: Map.merge(state, %{api_key_revoked?: true, api_key_close_sent?: false})
+
+  # The socket's last completed response, the one the released client anchors on.
+  defp anchored_on(state, response_id),
+    do: %{state | last_completed_native_response: %{semantic_turn_key: <<1::256>>, response_digest: NativeCodexTurnMetadata.response_id_digest(response_id)}}
+
+  # A prepared request queued behind the settling turn, anchored on `response_id`
+  # (no capability: the drop's release answers `:invalid` and is ignored).
+  defp queued_request(response_id) do
+    %PreparedWebsocketFrame{
+      variant: :native_response_create,
+      endpoint: "/backend-api/codex/responses",
+      payload: %{"type" => "response.create", "previous_response_id" => response_id},
+      request_options: RequestOptions.for_websocket(%{})
+    }
+  end
 
   # One line per decision: a signal the socket does not act on is logged once,
   # and a close once.
