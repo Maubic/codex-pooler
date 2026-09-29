@@ -3062,6 +3062,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # the reservation's own check answers with the retryable 503 (findings#275,
   # findings#284). The step now says `connection_closed`, and the runtime's
   # clear of that capability finds nothing left to clear.
+  #
+  # `Capability.t()` narrows the binding to a `Binding`, so Dialyzer marks the
+  # fallback unreachable, but a malformed capability (no binding) still reaches
+  # this step at runtime and must keep the session alive.
+  @dialyzer {:no_match, closed_under_capability?: 2}
   defp closed_under_capability?(state, %Capability{binding: %Binding{lifecycle_id: lifecycle_id, generation: generation}} = capability),
     do: not NativeCompactionAdmission.owns_capability?(admission_state(state), capability) and live_connection_state(state) != %{lifecycle_id: lifecycle_id, generation: generation}
 
