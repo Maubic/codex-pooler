@@ -13,6 +13,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDetac
   alias CodexPooler.Accounting
   alias CodexPooler.Accounting.Attempt
   alias CodexPooler.Accounting.Request
+  alias CodexPooler.ExecutionProofSupport
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.CodexSession
@@ -21,6 +22,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDetac
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
+  alias CodexPooler.Platform.ExecutionProofPublisher
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport.ReplayRemoteNodeClient
@@ -260,6 +262,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDetac
     end
   end
 
+  # Both arms stop the turn's response task before the socket terminates, so
+  # the cleanup that follows the failed detach finds a turn whose execution
+  # has ended. In production the node's proof publisher records that end
+  # within about 100 ms of the task's exit (a `process_down` asks for an early
+  # publication), before the cleanup reaches the turn after its 250 ms wait on
+  # the socket's tasks. The cleanup then settles the turn as a proven dead
+  # execution, `dead_execution_recovered`, while the failed detach is still
+  # logged. `config/test.exs` disables the publisher: without it these arms
+  # recorded the `owner_unavailable` interruption instead (findings#270 row
+  # 270-350). The proof is awaited, so the order does not depend on load.
   @tag :owner_detach_failure_recovery
   test "owner detach unavailable during socket terminate is observable and interrupts active turn" do
     upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_owner_detach"}))
@@ -299,7 +311,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDetac
           )
     }
 
+    publisher = start_proof_publisher!()
     stop_parked_response_tasks!(remote_state)
+    :ok = ExecutionProofSupport.await_terminal!(Repo.get!(Attempt, attempt.id), publisher)
 
     try do
       logs =
@@ -314,7 +328,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDetac
         attempt: attempt,
         turn: turn,
         session: state.codex_session,
-        error_code: "owner_unavailable"
+        error_code: "dead_execution_recovered"
       })
 
       reloaded_session = Repo.get!(CodexSession, state.codex_session.id)
@@ -383,7 +397,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDetac
         opts: typed_opts
     }
 
+    publisher = start_proof_publisher!()
     stop_parked_response_tasks!(remote_state)
+    :ok = ExecutionProofSupport.await_terminal!(Repo.get!(Attempt, attempt.id), publisher)
 
     try do
       assert %RequestOptions{} = remote_state.opts
@@ -403,7 +419,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDetac
         attempt: attempt,
         turn: turn,
         session: state.codex_session,
-        error_code: "owner_unavailable"
+        error_code: "dead_execution_recovered"
       })
     after
       CodexResponsesSocket.terminate(:closed, Map.delete(state, :websocket_owner_downstream))
@@ -666,6 +682,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDetac
     after
       CodexResponsesSocket.terminate(:closed, second_state)
     end
+  end
+
+  defp start_proof_publisher! do
+    start_supervised!({ExecutionProofPublisher, enabled: true, name: :owner_detach_proof_publisher, interval_ms: 60_000})
   end
 
   defp owner_lifecycle_request_options(request_id, turn_state, extra_opts \\ []) do
