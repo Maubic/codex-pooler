@@ -110,7 +110,8 @@ defmodule CodexPooler.Accounting.ObservatoryTest do
              total: 3,
              succeeded: 1,
              failed: 1,
-             in_progress: 1
+             in_progress: 1,
+             client_cancelled: 0
            }
 
     assert projection.totals.tokens == %{

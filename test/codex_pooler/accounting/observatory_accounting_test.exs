@@ -89,7 +89,8 @@ defmodule CodexPooler.Accounting.ObservatoryAccountingTest do
              total: 3,
              succeeded: 1,
              failed: 1,
-             in_progress: 1
+             in_progress: 1,
+             client_cancelled: 0
            }
 
     assert projection.totals.tokens.total == 25
@@ -182,7 +183,7 @@ defmodule CodexPooler.Accounting.ObservatoryAccountingTest do
 
     assert {:ok, projection} = Observatory.read(principal(pool, api_key), "1h", as_of: upper_bound)
 
-    assert projection.totals.requests == %{total: 2, succeeded: 0, failed: 2, in_progress: 0}
+    assert projection.totals.requests == %{total: 2, succeeded: 0, failed: 2, in_progress: 0, client_cancelled: 0}
     assert projection.totals.tokens.total == 0
     assert projection.totals.cost.estimated == %{status: "estimated", micros: 250}
 

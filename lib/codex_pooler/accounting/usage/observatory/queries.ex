@@ -27,6 +27,7 @@ defmodule CodexPooler.Accounting.Usage.Observatory.Queries do
             request_count: count(fact.request_id),
             succeeded: sum(fact.succeeded),
             failed: sum(fact.failed),
+            client_cancelled: sum(fact.client_cancelled),
             in_progress: sum(fact.in_progress),
             settlement_count: sum(fact.has_settlement),
             unknown_usage_count: sum(fact.unknown_usage),

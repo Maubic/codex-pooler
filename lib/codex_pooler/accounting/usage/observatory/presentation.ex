@@ -38,12 +38,16 @@ defmodule CodexPooler.Accounting.Usage.Observatory.Presentation do
     }
   end
 
+  # `failed` leaves out the requests the client cancelled (`RequestOutcome`),
+  # which are counted apart in `client_cancelled` and are neither a success nor
+  # a failure; `total` counts every request.
   defp request_counts(row) do
     %{
       total: integer(row.request_count),
       succeeded: integer(row.succeeded),
       failed: integer(row.failed),
-      in_progress: integer(row.in_progress)
+      in_progress: integer(row.in_progress),
+      client_cancelled: integer(row.client_cancelled)
     }
   end
 
@@ -117,12 +121,14 @@ defmodule CodexPooler.Accounting.Usage.Observatory.Presentation do
     end
   end
 
+  # The success rate is taken over the requests the client did not cancel, as
+  # the holder's headline rate is, so the trend and the rate never disagree.
   defp trends(rows) do
     {previous, current} = half_windows(rows)
 
     %{
-      success_rate: ratio_trend(previous, current, [:requests, :succeeded], [:requests, :total]),
-      cache_rate: ratio_trend(previous, current, [:tokens, :cached_input], [:tokens, :input])
+      success_rate: ratio_trend(previous, current, &sum_path(&1, [:requests, :succeeded]), &not_cancelled_requests/1),
+      cache_rate: ratio_trend(previous, current, &sum_path(&1, [:tokens, :cached_input]), &sum_path(&1, [:tokens, :input]))
     }
   end
 
@@ -136,12 +142,9 @@ defmodule CodexPooler.Accounting.Usage.Observatory.Presentation do
     end
   end
 
-  defp ratio_trend(previous, current, numerator_path, denominator_path) do
-    previous_rate =
-      percentage(sum_path(previous, numerator_path), sum_path(previous, denominator_path))
-
-    current_rate =
-      percentage(sum_path(current, numerator_path), sum_path(current, denominator_path))
+  defp ratio_trend(previous, current, numerator, denominator) do
+    previous_rate = percentage(numerator.(previous), denominator.(previous))
+    current_rate = percentage(numerator.(current), denominator.(current))
 
     %{
       current: current_rate,
@@ -152,6 +155,9 @@ defmodule CodexPooler.Accounting.Usage.Observatory.Presentation do
 
   defp sum_path(rows, path),
     do: Enum.reduce(rows, 0, fn row, total -> total + integer(get_in(row, path)) end)
+
+  defp not_cancelled_requests(rows),
+    do: sum_path(rows, [:requests, :total]) - sum_path(rows, [:requests, :client_cancelled])
 
   defp difference(current, previous) when is_number(current) and is_number(previous),
     do: Float.round(current - previous, 1)
@@ -202,6 +208,7 @@ defmodule CodexPooler.Accounting.Usage.Observatory.Presentation do
       request_count: 0,
       succeeded: 0,
       failed: 0,
+      client_cancelled: 0,
       in_progress: 0,
       settlement_count: 0,
       unknown_usage_count: 0,

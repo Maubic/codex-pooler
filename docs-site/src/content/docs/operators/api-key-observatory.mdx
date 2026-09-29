@@ -30,6 +30,8 @@ Choose one of the fixed windows: `1h`, `5h`, `24h`, or `7d`. The page can show:
 - interval or cumulative chart views
 - at most 12 recent outcomes with time, model, sanitized endpoint class, status, latency, tokens, and cost
 
+A request whose client closed the connection before the response finished, for example a client that interrupts a stream to send its next request, is shown as `Client cancelled` instead of a failure. The success rate leaves these requests out of both its counts, and its detail line says how many there were.
+
 The page refreshes while visible. You can pause and resume refresh, and a hidden or disconnected browser stops periodic refreshes until it becomes visible or connected again. The dashboard displays explicit loading, empty, partial-accounting, stale, disconnected, and temporary-error states instead of filling gaps with invented values.
 
 ## Key-local and sanitized by design

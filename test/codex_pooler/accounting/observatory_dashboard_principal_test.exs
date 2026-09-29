@@ -28,7 +28,7 @@ defmodule CodexPooler.Accounting.ObservatoryDashboardPrincipalTest do
     assert {:ok, report} = Observatory.read(principal, "1h", as_of: Fixture.as_of())
     assert report == baseline
 
-    assert report.totals.requests == %{total: 3, succeeded: 1, failed: 1, in_progress: 1}
+    assert report.totals.requests == %{total: 3, succeeded: 1, failed: 1, in_progress: 1, client_cancelled: 0}
 
     assert report.totals.tokens == %{
              input: 12,

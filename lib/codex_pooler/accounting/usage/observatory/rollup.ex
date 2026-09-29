@@ -11,6 +11,7 @@ defmodule CodexPooler.Accounting.Usage.Observatory.Rollup do
     :request_count,
     :succeeded,
     :failed,
+    :client_cancelled,
     :in_progress,
     :settlement_count,
     :unknown_usage_count,

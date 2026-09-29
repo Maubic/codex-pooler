@@ -3,9 +3,10 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
 
   import Ecto.Query
 
-  alias CodexPooler.Accounting.{Request, RequestLogFact}
+  alias CodexPooler.Accounting.{Request, RequestLogFact, RequestOutcome}
   alias CodexPooler.Catalog.Model
 
+  @failed_statuses ~w(failed rejected)
   @usage_known "usage_known"
   @usage_not_applicable "not_applicable"
   @safe_model_pattern "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$"
@@ -169,7 +170,8 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
   stored ungated and gated here to non-priced rows.
   """
   def scoped_facts(identity, window) do
-    from request in Request,
+    from(request in Request,
+      as: :request,
       left_join: fact in RequestLogFact,
       on: fact.request_id == request.id,
       left_join: model in Model,
@@ -187,11 +189,6 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
         bucket_index: bucket_index(request.admitted_at, ^window.started_at, ^window.bucket_seconds),
         model_label: model_label(model.exposed_model_id),
         succeeded: fragment("CASE WHEN ? = 'succeeded' THEN 1 ELSE 0 END", request.status),
-        failed:
-          fragment(
-            "CASE WHEN ? IN ('failed', 'rejected', 'cancelled') THEN 1 ELSE 0 END",
-            request.status
-          ),
         in_progress:
           fragment(
             "CASE WHEN ? IN ('accepted', 'in_progress') THEN 1 ELSE 0 END",
@@ -243,6 +240,8 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
             fact.latest_estimated_cost_micros
           )
       }
+    )
+    |> select_merge(^outcome_flags())
   end
 
   @doc """
@@ -255,7 +254,8 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
   stops early and the fact/model joins are twelve primary-key lookups.
   """
   def recent_outcomes(identity, window) do
-    from request in Request,
+    from(request in Request,
+      as: :request,
       left_join: fact in RequestLogFact,
       on: fact.request_id == request.id,
       left_join: model in Model,
@@ -274,8 +274,6 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
         timestamp: request.admitted_at,
         model: model_label(model.exposed_model_id),
         endpoint_class: endpoint_class(request.endpoint),
-        status: request.status,
-        code: safe_code(request.last_error_code),
         response_status_code: request.response_status_code,
         total_tokens: known_usage(fact.latest_settlement_usage_status, fact.latest_total_tokens),
         settled_cost_micros:
@@ -302,5 +300,32 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
             fact.latest_estimated_cost_micros
           )
       }
+    )
+    |> select_merge(^outcome_columns())
+  end
+
+  # A request the client cancelled (`RequestOutcome`) is counted apart and is
+  # not a failure, so it leaves `failed` and the success rate's base.
+  defp outcome_flags do
+    %{
+      failed: dynamic(fragment("CASE WHEN ? THEN 1 ELSE 0 END", ^failure_condition())),
+      client_cancelled: dynamic(fragment("CASE WHEN ? THEN 1 ELSE 0 END", ^RequestOutcome.client_cancelled_condition(:request)))
+    }
+  end
+
+  # The status a holder is shown is the outcome class, and only a failure carries
+  # a reason: a client cancellation is not one (its `client_disconnected` code
+  # would read as a service failure to the regex families of `safe_code/1`), and
+  # a late answer that corrected an interrupt to a success keeps its old code.
+  defp outcome_columns do
+    %{
+      status: dynamic([request: request], fragment("CASE WHEN ? THEN ? ELSE ? END", ^RequestOutcome.client_cancelled_condition(:request), ^RequestOutcome.client_cancelled(), request.status)),
+      code: dynamic([request: request], fragment("CASE WHEN ? THEN ? END", ^failure_condition(), safe_code(request.last_error_code)))
+    }
+  end
+
+  defp failure_condition do
+    not_client_cancelled = RequestOutcome.not_client_cancelled_condition(:request)
+    dynamic([request: request], request.status in ^@failed_statuses and ^not_client_cancelled)
   end
 end

@@ -182,7 +182,7 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
       {"succeeded", "ok", :success, "Succeeded", nil},
       {"failed", "err", :error, "Failed · Rate limited", "rate_limited"},
       {"in_progress", "warn", :warning, "In progress", nil},
-      {"cancelled", "neutral", :neutral, "Cancelled", nil},
+      {"client_cancelled", "warn", :warning, "Client cancelled", nil},
       {"unexpected", "neutral", :neutral, "Unknown", nil}
     ]
 
@@ -316,7 +316,7 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
       timestamp: DateTime.add(~U[2026-07-17 11:59:00Z], -index, :second),
       model: "model-#{index}",
       endpoint_class: "responses",
-      status: if(index == 2, do: "failed", else: "cancelled"),
+      status: if(index == 2, do: "failed", else: "in_progress"),
       response_status_code: if(index == 2, do: 429, else: nil),
       code: if(index == 2, do: "rate_limited", else: nil),
       metadata: if(index == 2, do: %{"raw" => "raw-outcome-metadata"}, else: nil),

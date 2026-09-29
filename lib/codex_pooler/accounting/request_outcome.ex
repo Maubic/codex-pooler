@@ -27,8 +27,9 @@ defmodule CodexPooler.Accounting.RequestOutcome do
   The class changes presentation and health counting only. The row stays
   `failed`, and accounting, settlement, retries and the wire are unchanged.
   Request logs (row status, filter, detail), the upstream cockpit (request
-  health, recent activity), the stats page and the MCP request-log tool all
-  read the class from here.
+  health, recent activity), the stats page, the MCP request-log tool and the
+  API Key Observatory (the holder's counts, success rate and recent outcomes)
+  all read the class from here.
   """
 
   import Ecto.Query
