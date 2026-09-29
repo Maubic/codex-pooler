@@ -20,7 +20,7 @@ defmodule CodexPooler.Accounting.RequestLogs do
   import Ecto.Query
 
   alias CodexPooler.Accounting
-  alias CodexPooler.Accounting.{Attempt, LedgerEntry, ModelObservation, Request, RequestLogFact}
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, ModelObservation, Request, RequestLogFact, RequestOutcome}
 
   alias CodexPooler.Accounting.RequestLogs.{
     CompactionBridgeProjection,
@@ -200,6 +200,7 @@ defmodule CodexPooler.Accounting.RequestLogs do
 
   defp request_log_query do
     from r in Request,
+      as: :request,
       join: pool in Pool,
       on: pool.id == r.pool_id,
       left_join: key in CodexPooler.Access.APIKey,
@@ -281,6 +282,7 @@ defmodule CodexPooler.Accounting.RequestLogs do
       transport: request.transport,
       user_agent: request.user_agent,
       status: request.status,
+      display_status: RequestOutcome.display_status(request.status, request.last_error_code),
       usage_status: request.usage_status,
       correlation_id: request.correlation_id,
       response_status_code: request.response_status_code,
@@ -488,6 +490,7 @@ defmodule CodexPooler.Accounting.RequestLogs do
 
     query
     |> maybe_filter_request_log_status(Map.get(filters, :status))
+    |> maybe_filter_request_log_client_cancelled(Map.get(filters, :client_cancelled))
     |> maybe_filter_request_log_upstream(Map.get(filters, :upstream_identity_id))
     |> maybe_filter_request_log_model(Map.get(filters, :model))
     |> maybe_filter_request_log_request_id(Map.get(filters, :request_id))
@@ -523,6 +526,18 @@ defmodule CodexPooler.Accounting.RequestLogs do
 
   defp maybe_filter_request_log_status(query, status),
     do: from([request, ...] in query, where: request.status == ^status)
+
+  # `true` keeps only client cancellations, `false` drops them and keeps every
+  # other row, failed rows without an error code included.
+  # `:status` stays the recorded status: a reader that wants failures without
+  # client cancellations combines `status: "failed"` with `client_cancelled: false`.
+  defp maybe_filter_request_log_client_cancelled(query, nil), do: query
+
+  defp maybe_filter_request_log_client_cancelled(query, true),
+    do: where(query, ^RequestOutcome.client_cancelled_condition(:request))
+
+  defp maybe_filter_request_log_client_cancelled(query, false),
+    do: where(query, ^RequestOutcome.not_client_cancelled_condition(:request))
 
   defp maybe_filter_request_log_upstream(query, nil), do: query
 
