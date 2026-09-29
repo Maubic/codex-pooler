@@ -187,7 +187,11 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
 
   # An execution that ended without delivering its result: a client's resend
   # of its turn waits for this proof (findings#283). A completed execution
-  # stays on the publisher's tick.
+  # stays on the publisher's tick. The owner-crash case gets here only because
+  # its response task ends `process_down`: its socket closes 1011 before the
+  # task hears that its error was delivered. Were the socket to confirm that
+  # delivery first, the task would complete and its proof would wait for the
+  # tick again.
   defp request_early_publication(subscribers),
     do: Enum.each(subscribers, fn {_ref, subscriber} -> send(subscriber, :publish_early) end)
 end

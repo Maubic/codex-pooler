@@ -5,7 +5,7 @@ defmodule CodexPooler.Platform.ExecutionProofPublisher do
 
   alias CodexPooler.Platform.{ExecutionRegistry, ExecutionTerminalProofs}
   @interval_ms 1_000
-  @early_ms 20
+  @early_ms 100
 
   @spec start_link(keyword()) :: GenServer.on_start() | :ignore
   def start_link(opts) do
@@ -40,9 +40,13 @@ defmodule CodexPooler.Platform.ExecutionProofPublisher do
   # for its proof: `ClientRetry` admits the resend of an owner-crashed turn
   # only once the proof exists, and at the one-second tick the released
   # client's first resend met `409 duplicate_turn` in about half the cases
-  # (findings#283). Requests within `@early_ms` share one publication, and
-  # none brings publication forward while it is failing, which the tick keeps
-  # retrying on its own cadence.
+  # (findings#283). Requests within `@early_ms` share one publication. The
+  # window still writes the proof before that first resend (the executor
+  # ended within about 230 ms of the owner's crash and the resend came about
+  # 490 ms after it), and it bounds a node whose sockets drop one after
+  # another to about ten publications a second. None brings publication
+  # forward while it is failing, which the tick keeps retrying on its own
+  # cadence.
   def handle_info(:publish_early, %{early: nil, failed: false} = state),
     do: {:noreply, %{state | early: Process.send_after(self(), :publish, @early_ms)}}
 

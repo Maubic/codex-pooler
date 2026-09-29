@@ -1,10 +1,10 @@
 defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
   # findings#283: an execution that ends `process_down`, without delivering its
   # result, is the executor a client's resend of its turn waits on, so its
-  # registry asks the publisher to write its proof at once instead of at the
-  # next tick. Each test pairs its own registry with its own publisher, whose
-  # tick is far beyond the test: only an early publication can write a proof,
-  # and the global registry other tests use is left alone.
+  # registry asks the publisher to write its proof within 100 ms instead of
+  # at the next tick. Each test pairs its own registry with its own publisher,
+  # whose tick is far beyond the test: only an early publication can write a
+  # proof, and the global registry other tests use is left alone.
   use CodexPooler.DataCase, async: false
 
   import ExUnit.CaptureLog
@@ -14,9 +14,11 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
   alias CodexPooler.Platform.InstancePresence.Identity
 
   @tick_ms 60_000
+  # One fixed name: the file is synchronous, so no two tests hold it at once.
+  @registry :execution_proof_publisher_test_registry
   @detection_timeout_ms 2_000
 
-  test "an execution that ends without delivering is published at once" do
+  test "an execution that ends without delivering is published without waiting for the tick" do
     {registry, _publisher} = start_pair!()
     execution = start_execution!(registry)
 
@@ -44,7 +46,8 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
 
   # A burst of ends shares publications: each execution here ends only after
   # the publisher has read the previous end's request, which without the
-  # shared window would cost one transaction per execution.
+  # shared window would cost one transaction per execution. The fifty ends
+  # take a few milliseconds, well inside one window.
   test "executions ending one after another share a publication" do
     {registry, publisher} = start_pair!()
     executions = for _ <- 1..50, do: start_execution!(registry)
@@ -57,7 +60,7 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
     end
 
     Enum.each(executions, &(:ok = await_published!(&1.identity)))
-    assert publications.() in 1..5
+    assert publications.() in 1..2
   end
 
   test "an end brings no publication forward while publication is failing" do
@@ -82,6 +85,42 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
     Process.exit(execution.pid, :kill)
     assert :dead = ExecutionRegistry.status(execution.identity.owner_execution_id, execution.pid, registry)
     assert %{early: nil, failed: true} = :sys.get_state(publisher)
+  end
+
+  # The publisher renews its subscription at every publication, so a registry
+  # its supervisor restarted, which knows no subscriber, asks for early
+  # publications again after the publisher's next tick.
+  test "a restarted registry asks for early publications again after the next tick" do
+    registry = start_supervised!({ExecutionRegistry, name: @registry})
+    publisher = start_supervised!({ExecutionProofPublisher, enabled: true, name: nil, registry: @registry, interval_ms: @tick_ms})
+    :sys.get_state(publisher)
+
+    ref = Process.monitor(registry)
+    Process.exit(registry, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^registry, :killed}
+    :ok = await_restarted!(registry, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+
+    send(publisher, :publish)
+    :sys.get_state(publisher)
+    execution = start_execution!(@registry)
+    Process.exit(execution.pid, :kill)
+
+    :ok = await_published!(execution.identity)
+  end
+
+  defp await_restarted!(previous, deadline) do
+    case Process.whereis(@registry) do
+      pid when is_pid(pid) and pid != previous ->
+        :ok
+
+      _absent_or_previous ->
+        if System.monotonic_time(:millisecond) >= deadline, do: flunk("the registry was not restarted")
+
+        receive do
+        after
+          5 -> await_restarted!(previous, deadline)
+        end
+    end
   end
 
   defp start_pair! do

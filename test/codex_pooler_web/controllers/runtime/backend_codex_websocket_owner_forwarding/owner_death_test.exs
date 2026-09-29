@@ -1202,14 +1202,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
   # publisher wrote proofs only at its one-second tick, so the client's first
   # resend, about half a second after the owner went, met `409 duplicate_turn`
   # in about half the cases. The executor ends `process_down` once its socket
-  # closes, and its registry now asks the publisher to write that proof at
-  # once. The publisher here is the production one paired with this VM's
-  # registry, with a tick far beyond the test, so only that early publication
-  # can write the proof. One node, owner forwarding on, native, the Pool's
+  # closes, and its registry now asks the publisher to write that proof
+  # within 100 ms, ahead of that first resend. The publisher here is the
+  # production one paired with this VM's registry, with a tick far beyond the
+  # test, so only that early publication can write the proof. One node, owner forwarding on, native, the Pool's
   # default serving mode, the real public listener, FakeUpstream holding the
   # turn before any event.
   describe "the released client's resend after the owner's upstream connection dies before any output" do
-    test "is admitted once the executor that ended without delivering is published at once" do
+    test "is admitted once the executor that ended without delivering is published ahead of the tick" do
       start_supervised!({ExecutionProofPublisher, enabled: true, name: :owner_death_resend_publisher, interval_ms: 60_000})
       release_ref = make_ref()
       created = CodexPooler.JSON.encode!(%{"type" => "response.created", "response" => %{"id" => "resp_owner_death_resend", "status" => "in_progress"}})
