@@ -67,7 +67,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay do
     end
   end
 
-  def speed_tier_label(:fast), do: "Priced at priority tier"
+  def speed_tier_label(%{cost: %{status: "priced", pricing_availability: "priced"}}), do: "Priced at priority tier"
+  def speed_tier_label(%{}), do: "Priority tier"
 
   def protocol_label("websocket"), do: "WebSocket"
   def protocol_label("http_sse"), do: "HTTP SSE"
@@ -509,6 +510,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay do
       _cost_label -> true
     end
   end
+
+  defp effective_service_tier(%{status: status, actual_service_tier: nil, service_tier: nil}) when status in ["accepted", "in_progress"], do: "—"
 
   defp effective_service_tier(log) do
     log.actual_service_tier || log.service_tier || "default"

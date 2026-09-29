@@ -1405,7 +1405,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
     assert has_element?(
              view,
              "#request-log-#{in_progress_request.id}-model-details",
-             "gpt-6-sol · high tier default"
+             "gpt-6-sol · high tier —"
            )
   end
 

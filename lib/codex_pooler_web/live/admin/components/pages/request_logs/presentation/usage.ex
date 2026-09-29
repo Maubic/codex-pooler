@@ -166,7 +166,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Usage do
       class="ml-1 inline-flex items-center"
     >
       <.icon name="hero-bolt" class="size-3.5" />
-      <span class="sr-only">{speed_tier_label(@mode)}</span>
+      <span class="sr-only">{speed_tier_label(@request_log)}</span>
     </span>
     """
   end

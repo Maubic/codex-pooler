@@ -190,6 +190,41 @@ defmodule CodexPoolerWeb.Admin.RequestLogsServiceTierLiveTest do
     refute has_element?(view, "#request-log-detail-priced-tier")
   end
 
+  test "a claimed priority request shows an unknown tier until reservation and a priced badge only after settlement", %{conn: conn, scope: scope} do
+    pool = create_pool!(scope, "tier-lifecycle")
+    %{api_key: key} = active_api_key_fixture(pool)
+    %{assignment: assignment} = upstream_assignment_fixture(pool)
+    identifier = "tier-transition-#{System.unique_integer([:positive])}"
+    model = model_fixture(pool, %{upstream_model_id: identifier, exposed_model_id: identifier, pricing_ref: identifier})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    CodexPooler.Repo.insert!(%CodexPooler.Catalog.PricingSnapshot{model_identifier: identifier, price_version: "tier-transition", currency_code: "USD", billing_unit: "token", input_token_micros: Decimal.new(100), output_token_micros: Decimal.new(200), effective_at: DateTime.add(now, -60, :second), captured_at: now, config: %{"service_tier" => "priority", "price_bucket" => "default", "pricing_type" => "per_1m_tokens", "availability" => "priced"}})
+    auth = %{pool: pool, api_key: key}
+    correlation = Ecto.UUID.generate()
+    assert {:ok, %{request: claim}} = CodexPooler.Accounting.claim_websocket_turn(auth, model, %{endpoint: "/backend-api/codex/responses", correlation_id: correlation})
+    {:ok, view, _} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}")
+    tier = "#request-log-#{claim.id}-model-details [data-role='model-service-tier']"
+    protocol = "#request-log-#{claim.id}-protocol"
+    assert has_element?(view, tier, "tier —")
+    refute has_element?(view, tier, "tier default")
+    refute has_element?(view, "#{protocol} [data-role='fast-mode-indicator']")
+
+    payload = %{"model" => identifier, "service_tier" => "priority", "max_output_tokens" => 1}
+    assert {:ok, reserved} = CodexPooler.Accounting.reserve(auth, model, payload, %{endpoint: "/backend-api/codex/responses", transport: "websocket", correlation_id: correlation, turn_claim: claim})
+    send(view.pid, :refresh_request_logs_from_events)
+    await_request_logs(view)
+    assert has_element?(view, tier, "tier priority")
+    assert has_element?(view, "#{protocol} [data-role='fast-mode-indicator']", "Priority tier")
+    refute render(element(view, protocol)) =~ "Priced at priority tier"
+
+    assert {:ok, attempt} = CodexPooler.Accounting.create_attempt(reserved.request, assignment)
+    assert {:ok, _} = CodexPooler.Accounting.finalize_success(reserved.request, attempt, %{status: "usage_known", input_tokens: 2, output_tokens: 1, total_tokens: 3}, %{response_status_code: 200, attempt_metadata: %{"service_tier" => "default"}})
+    send(view.pid, :refresh_request_logs_from_events)
+    await_request_logs(view)
+    assert has_element?(view, tier, "tier default")
+    assert has_element?(view, "#request-log-#{claim.id}-requested-tier", "priority requested")
+    assert has_element?(view, "#{protocol} [data-role='fast-mode-indicator']", "Priced at priority tier")
+  end
+
   defp create_pool!(scope, slug) do
     {:ok, pool} = Pools.create_pool(scope, %{slug: slug, name: slug})
     pool
