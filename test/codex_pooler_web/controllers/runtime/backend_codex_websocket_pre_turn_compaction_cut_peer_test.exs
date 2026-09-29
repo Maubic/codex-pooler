@@ -52,6 +52,21 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionCutPeerTe
     end
   end
 
+  # The production shape of findings#270 row 270-352: the rollout drain of the
+  # socket's node cuts the compaction while its owner, on the other node, is
+  # not draining. Nothing settles the cut request until the end of its
+  # executor, the socket node's response task, is proven; the first resend
+  # recovers it and is its successor. It used to meet the dead request as a
+  # live turn the owner no longer held and was refused `409 duplicate_turn`
+  # twice, after which the HTTPS fallback bought the compaction again.
+  for cut <- [:drain_before_output, :drain_after_output] do
+    @tag mode: "full", shape: :pre_turn, topology: :peer, cut: cut
+    test "full pre_turn peer admitted compaction cut by the socket node's drain #{cut}: the released client's first websocket retry is its successor",
+         %{mode: mode, shape: shape, topology: topology, cut: cut, peer_node: peer_node} do
+      assert Scenario.run_scenario(mode, shape, topology, cut, :on_arrival, peer_node: peer_node) == Scenario.expected(cut, topology)
+    end
+  end
+
   for mode <- ["full", "lite"], cut <- [:no_cut, :before_output, :after_output, :after_completion, :unobserved_cut] do
     @tag mode: mode, shape: :pre_turn, topology: :peer, cut: cut
     test "#{mode} pre_turn peer admitted compaction #{cut}: the released client's retries buy the compaction once per request and the turn completes",

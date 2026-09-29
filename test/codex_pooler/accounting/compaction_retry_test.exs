@@ -111,6 +111,35 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
     end
   end
 
+  # A rollout drain (`owner_drained`) or an executor proven dead
+  # (`dead_execution_recovered`) cut a compaction the Pooler had started
+  # collecting. A native compaction reaches the client only with its terminal,
+  # so a receipt with only the cut's error, or nothing, proves the client got
+  # none of it and resends it (findings#270 row 270-352).
+  for code <- ["owner_drained", "dead_execution_recovered"], terminal_class <- ["error", "none"] do
+    test "claims one successor for a compaction the Pooler cut after it began collecting: #{code}, client written #{terminal_class}" do
+      {setup, predecessor, opts} = pooler_cut_predecessor!(unquote(code), unquote(terminal_class))
+      assert compaction_resend_shape(predecessor) == {:ok, :unreceived_compaction}
+
+      assert {:ok, claim} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+      assert claim.predecessor_request_id == predecessor.id
+      assert Repo.aggregate(RequestClientRetryLink, :count) == 1
+    end
+  end
+
+  # The same cut after the socket wrote the compaction's completion, or with
+  # no receipt at all, is not proof the client lacks it: the fence stays.
+  for code <- ["owner_drained", "dead_execution_recovered"], receipt <- ["response.completed", :absent] do
+    test "keeps the fence for a compaction the Pooler cut after it began collecting: #{code}, receipt #{receipt}" do
+      {setup, predecessor, opts} = pooler_cut_predecessor!(unquote(code), unquote(receipt))
+      assert compaction_resend_shape(predecessor) == {:error, :terminal_predecessor}
+      before = row_counts()
+
+      assert {:error, _} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+      assert row_counts() == before
+    end
+  end
+
   test "rejects recovered compact evidence without its execution identity" do
     for field <- [
           :owner_instance_id,
@@ -1041,6 +1070,29 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
        semantic_turn_digest: semantic,
        replay_claim_digest: digest
      }}
+  end
+
+  # The cut request as the drain or the dead-execution recovery settles it:
+  # the turn interrupted and stamped visible when the collection started, the
+  # request and its attempt failed with the same code, and the socket's
+  # delivery receipt naming the terminal class the client was written.
+  defp pooler_cut_predecessor!(code, receipt) do
+    {setup, predecessor, opts} =
+      case code do
+        "owner_drained" -> predecessor!("owner_drained", 0)
+        "dead_execution_recovered" -> local_failure_predecessor!(:dead_execution)
+      end
+
+    turn = Repo.get_by!(CodexTurn, request_id: predecessor.id)
+    update!(turn, status: "interrupted", first_visible_output_at: turn.completed_at)
+    attempt = Repo.get!(Attempt, turn.final_attempt_id)
+
+    case receipt do
+      :absent -> :ok
+      terminal_class -> update!(attempt, response_metadata: Map.put(attempt.response_metadata || %{}, "downstream_delivery", %{"outcome" => "aborted", "terminal_class" => terminal_class, "highest_frame_class" => "terminal", "frames_after_visible" => 0, "transport" => "websocket"}))
+    end
+
+    {setup, Repo.reload!(predecessor), opts}
   end
 
   defp alter_local_failure!(:entitlement, setup, request, turn, attempt, opts) do

@@ -1458,7 +1458,8 @@ defmodule CodexPooler.Accounting.ClientRetry do
   while forwarding on admitted only the verified shapes below; the two now
   share them. The shape names the admission for its log line:
   `unreceived_compaction` (served or disconnected before its client read
-  it), `task_exception` (the Pooler's own execution died), `anchor_refusal`
+  it, or cut by the Pooler after it started collecting it),
+  `task_exception` (the Pooler's own execution died), `anchor_refusal`
   (an anchor refused before any execution, by the connection-bound guard or
   by the provider), `compaction_cut` (cut, disconnected or drained before
   any output), `provider_terminal` (a terminal the released client
@@ -2008,6 +2009,15 @@ defmodule CodexPooler.Accounting.ClientRetry do
   fallback; it is admitted as one successor with its own single settlement,
   like an undelivered completion (findings#206 rows 206-330 and 206-332,
   precedent row 232-201). Only the compact route, generation zero.
+
+  On a websocket the Pooler's own cut of a compaction it had started
+  collecting counts too: a rollout drain (`owner_drained`) or an executor
+  proven dead (`dead_execution_recovered`), with the only terminal the client
+  was written the cut's error, or none. The released client reads that error
+  as its compaction's failure and resends the compaction; it used to be
+  refused twice and then bought again over HTTPS (findings#270 row 270-352).
+  A cut before the collection started keeps its own shapes
+  (`compaction_resend_shape/3`).
   """
   @spec verified_unreceived_compaction?(term(), term(), term()) :: boolean()
   def verified_unreceived_compaction?(
@@ -2016,7 +2026,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
         %Attempt{id: attempt_id, transport: "websocket", replay_generation: 0, completed_at: %DateTime{}} = attempt
       )
       when is_binary(attempt_id),
-      do: unreceived_compaction_settlement?(turn, request, attempt)
+      do: unreceived_compaction_settlement?(turn, request, attempt) or pooler_cut_collected_compaction?(turn, request, attempt)
 
   # The same compaction over native HTTP, which the released client uses for the
   # rest of a session once a websocket request fell back to HTTPS: it retries a
@@ -2052,6 +2062,16 @@ defmodule CodexPooler.Accounting.ClientRetry do
        do: true
 
   defp unreceived_compaction_settlement?(_turn, _request, _attempt), do: false
+
+  defp pooler_cut_collected_compaction?(
+         %CodexTurn{status: "interrupted", error_code: code, first_visible_output_at: %DateTime{}},
+         %Request{status: "failed", last_error_code: code},
+         %Attempt{status: "failed", network_error_code: code, response_metadata: %{"downstream_delivery" => %{"terminal_class" => terminal_class}}}
+       )
+       when code in ["owner_drained", "dead_execution_recovered"] and terminal_class in ["error", "none"],
+       do: true
+
+  defp pooler_cut_collected_compaction?(_turn, _request, _attempt), do: false
 
   @doc """
   A native websocket turn the provider completed while its client was already

@@ -2,7 +2,8 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
   @moduledoc false
 
   # The released client's cut, resend and HTTPS fallback of an admitted native
-  # compaction (findings#206 rows 206-310, 206-330, 206-332, 206-436, 206-455),
+  # compaction (findings#206 rows 206-310, 206-330, 206-332, 206-436, 206-455;
+  # the rollout drain's cut, findings#270 row 270-352),
   # shared by `backend_codex_websocket_pre_turn_compaction_cut_test.exs` (one
   # node, owner forwarding on and off) and
   # `backend_codex_websocket_pre_turn_compaction_cut_peer_test.exs` (the
@@ -12,18 +13,19 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
 
   import Ecto.Query
   import ExUnit.Assertions
-  import ExUnit.Callbacks, only: [on_exit: 1]
+  import ExUnit.Callbacks, only: [on_exit: 1, start_supervised!: 1]
   import Phoenix.ConnTest, only: [build_conn: 0, post: 3]
   import Plug.Conn, only: [put_req_header: 3]
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
-  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3, with_info_log: 1]
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [await_socket_connection_state!: 2, model_serving_scope: 0, set_model_serving_mode!: 3, with_info_log: 1]
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [enter_peer_owner_topology!: 0, start_shared_peer_window_owner!: 3]
 
-  alias CodexPooler.Accounting.{LedgerEntry, Request, RequestClientRetryLink}
-  alias CodexPooler.FakeUpstream
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink}
+  alias CodexPooler.{ExecutionProofSupport, FakeUpstream, UnboxedFixture}
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
   alias CodexPooler.Gateway.Persistence.{CodexSession, CodexTurn}
-  alias CodexPooler.Gateway.Transports.Websocket.{NativeCompactionAdmission, WebsocketOwnerSession}
+  alias CodexPooler.Gateway.Transports.Websocket.{ActivityDrain, ActivityRegistry, NativeCompactionAdmission, WebsocketOwnerSession}
+  alias CodexPooler.Platform.{ExecutionProofPublisher, ExecutionTerminalProof}
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
 
@@ -63,6 +65,22 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
   # retry is served as the successor, one generation per request.
   def expected(:observed_cut_settlement_held, _topology),
     do: %{expected(:before_output) | retries: [{409, "duplicate_turn", :inherited_turn_unsettled}, :served]}
+
+  # The rollout drain of the socket's node cut the compaction while the
+  # provider was still generating it, before any output or after the Pooler
+  # collected the compaction item; a native compaction reaches the client only
+  # with its terminal. The client read the drain's `owner_drained` error and
+  # nothing of the compaction, and resends it as full history on a new
+  # connection: the first resend is the cut request's successor (findings#270
+  # row 270-352). With the owner on the socket's node its own drain settles
+  # the cut request `owner_drained`; with the owner on another node nothing
+  # settles it, and the resend recovers it once the end of its executor, the
+  # socket node's response task, is proven.
+  def expected(cut, topology) when cut in [:drain_before_output, :drain_after_output] do
+    code = if topology == :peer, do: "dead_execution_recovered", else: "owner_drained"
+    [turn, _cut, successor, resume] = expected(:before_output).rows
+    %{expected(:before_output) | rows: [turn, {@compact_endpoint, "websocket", "failed", code, false}, successor, resume]}
+  end
 
   def expected(cut, _topology), do: expected(cut)
 
@@ -233,6 +251,31 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
     nil
   end
 
+  defp cut_and_resend(cut, ctx, client, port, upstream, release_ref) when cut in [:drain_before_output, :drain_after_output] do
+    await_barrier!(0, release_ref)
+
+    # `response.created` and the compaction item reach the Pooler, which
+    # collects a native compaction before it shows the client anything.
+    if cut == :drain_after_output do
+      for barrier <- [1, 2] do
+        :ok = FakeUpstream.release_frame(upstream, release_ref)
+        await_barrier!(barrier, release_ref)
+      end
+    end
+
+    publisher = if ctx.topology == :peer, do: start_proof_publisher!()
+    drains = drain_socket_node!(ctx, client)
+    {client, frame} = receive_frame!(client)
+    assert %{"type" => "error", "status" => 503, "error" => %{"code" => "owner_drained"}} = frame
+    # The released client drops the connection its compaction failed on.
+    Mint.HTTP.close(client.conn)
+    Enum.each(drains, &Task.await(&1, @detection_timeout_ms))
+    if publisher, do: await_cut_execution_proof!(ctx, publisher)
+    retries = released_client_retries!(ctx, port, fn -> :ok end)
+    release_held_compaction!(upstream, release_ref, if(cut == :drain_after_output, do: 3, else: 1))
+    retries
+  end
+
   defp cut_and_resend(:unobserved_cut, ctx, client, port, upstream, release_ref) do
     await_barrier!(0, release_ref)
     # The client gave up on the connection but the Pooler has not seen it close
@@ -305,6 +348,51 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
     retries = released_client_retries!(ctx, port, fn -> :ok end)
     if next_barrier, do: release_held_compaction!(upstream, release_ref, next_barrier)
     retries
+  end
+
+  # The socket node's rollout drain past its deadline, as `RolloutDrain` runs
+  # it: it cancels the compaction's response task, whose terminal has not gone
+  # out, and with the session's owner on this node it drains the owner too.
+  # The owner on another node is left running, as when only the socket's pod
+  # is replaced. `ActivityDrain.drain/4` without a drain snapshot leaves the
+  # application's registry open for later tests.
+  defp drain_socket_node!(ctx, client) do
+    state = await_socket_connection_state!(client.cleanup_socket, &(MapSet.size(Map.get(&1, :tasks, MapSet.new())) == 1))
+    [task] = MapSet.to_list(state.tasks)
+    entry = Enum.find(ActivityRegistry.activities(), &(&1.pid == task))
+    refute Map.get(entry, :terminal_delivered?, false), "the compaction's terminal went out before the drain"
+    policy = %{now_ms: fn -> System.monotonic_time(:millisecond) end, schedule_wait: &schedule_drain_wait/3, cancel_wait: &cancel_drain_wait/2, owner_post_deadline_call_budget_ms: 5_000}
+    task_drain = Task.async(fn -> ActivityDrain.drain(entry, System.monotonic_time(:millisecond) - 1, policy, ActivityRegistry) end)
+
+    if ctx.topology == :forwarded do
+      owner = owner_pid!(ctx.setup)
+      [task_drain, Task.async(fn -> WebsocketOwnerSession.drain_owner(owner) end)]
+    else
+      [task_drain]
+    end
+  end
+
+  defp schedule_drain_wait(recipient, token, wait_ms), do: Process.send_after(recipient, {:rollout_drain_wait_elapsed, token}, wait_ms)
+
+  defp cancel_drain_wait(timer, _token) do
+    _remaining = Process.cancel_timer(timer)
+    :ok
+  end
+
+  # The production publisher, which `config/test.exs` disables, proves the end
+  # of an execution about 100 ms after its process exits, before the released
+  # client's first retry about 200 ms after the failure. The peer shares the
+  # committed database, so the proofs it writes are removed at exit.
+  defp start_proof_publisher! do
+    proofs_before = Repo.all(from(proof in ExecutionTerminalProof, select: proof.execution_id))
+    UnboxedFixture.register_unboxed_cleanup!(fn -> Repo.delete_all(from(proof in ExecutionTerminalProof, where: proof.execution_id not in ^proofs_before)) end)
+    start_supervised!({ExecutionProofPublisher, enabled: true, name: :compaction_drain_cut_proof_publisher, interval_ms: 60_000})
+  end
+
+  defp await_cut_execution_proof!(ctx, publisher) do
+    [cut] = Enum.filter(pool_requests(ctx.setup.pool.id), &(&1.endpoint == @compact_endpoint))
+    attempt = Repo.one!(from(attempt in Attempt, where: attempt.request_id == ^cut.id, order_by: [desc: attempt.attempt_number], limit: 1))
+    :ok = ExecutionProofSupport.await_terminal!(attempt, publisher)
   end
 
   # The socket the owner streams the running compaction to, before its client

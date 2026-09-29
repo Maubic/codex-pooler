@@ -1042,7 +1042,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
       semantic_turn_digest: context.semantic_turn_digest,
       replay_claim_digest: context.replay_claim_digest,
       replay_claim_alternates: context.replay_claim_alternates,
-      allow_execution_recovery?: context.endpoint == "/backend-api/codex/responses" and is_nil(context.request_options.continuity.previous_response_id)
+      allow_execution_recovery?: execution_recovery_endpoint?(context.endpoint) and is_nil(context.request_options.continuity.previous_response_id)
     }
 
     if final_native_compaction_admission?(context.request_options) do
@@ -1106,6 +1106,17 @@ defmodule CodexPooler.Gateway.Runtime.Service do
         reject_replay_intent(context, locked_session, reason)
     end
   end
+
+  # An unanchored resend may meet a predecessor whose executor is proven dead:
+  # the preflight lets the claim recover it and take its place instead of
+  # treating it as a running turn. That holds for an ordinary turn and for a
+  # native compaction the released client resends as full history after its
+  # compaction stream failed. With the owner on another node a drain of the
+  # socket's node leaves the cut compaction `in_progress` behind an executor
+  # that is gone, and its resend used to be sent to reattach to a turn the
+  # owner no longer held and was refused `409 duplicate_turn` (findings#270 row
+  # 270-352); the claim's resend policy still decides whether it is admitted.
+  defp execution_recovery_endpoint?(endpoint), do: endpoint in ["/backend-api/codex/responses", "/backend-api/codex/responses/compact"]
 
   defp final_native_compaction_admission?(%RequestOptions{
          native_compaction_admission: %RequestOptions.NativeCompactionAdmission{capability: %{phase: :final}} = admission
