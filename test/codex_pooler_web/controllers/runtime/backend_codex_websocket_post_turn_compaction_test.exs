@@ -964,7 +964,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
         Process.put(:crossing_socket_state, state)
         refute log =~ "[error]"
         refute log =~ "reservation cleanup failed"
-        assert_accounting_close_refusal!(topology, frames)
+        assert_accounting_close_refusal!(topology, frames, log)
         assert [_anchor_request] = FakeUpstream.requests(upstream)
 
         {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1))
@@ -983,12 +983,22 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
   end
 
   # With forwarding off the refusal happens before anything is reserved and
-  # leaves no row; with forwarding on the owner kept the reservation, so the
-  # guard's refusal settles the compaction's row as failed (findings#278).
-  defp assert_accounting_close_refusal!(:direct, frames),
-    do: assert([%{"type" => "error", "status" => 503, "error" => %{"code" => "owner_unavailable"}}] = frames)
+  # leaves no row; it writes the warning every route writes for a compaction
+  # refused before dispatch, naming its own route (findings#270 row 270-246).
+  # With forwarding on the owner kept the reservation, so the guard's refusal
+  # settles the compaction's row as failed (findings#278) and that warning is
+  # not written.
+  defp assert_accounting_close_refusal!(:direct, frames, log) do
+    assert [%{"type" => "error", "status" => 503, "error" => %{"code" => "owner_unavailable"}}] = frames
 
-  defp assert_accounting_close_refusal!(:owner_forwarded, frames), do: assert(frames == [native_previous_response_retry_event()])
+    assert log =~
+             "native compaction refused before dispatch reason=admission_unavailable cause=connection_closed code=owner_unavailable status=503 compaction_phase=mid_turn topology=direct decided_at=accounting_start reservation_phase=compact codex_session_id="
+  end
+
+  defp assert_accounting_close_refusal!(:owner_forwarded, frames, log) do
+    assert frames == [native_previous_response_retry_event()]
+    refute log =~ "native compaction refused before dispatch"
+  end
 
   defp accounting_close_rows(:direct),
     do: [{"/backend-api/codex/responses", "succeeded"}, {"/backend-api/codex/responses/compact", "succeeded"}, {"/backend-api/codex/responses", "succeeded"}]

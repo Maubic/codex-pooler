@@ -52,6 +52,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
   alias CodexPooler.Gateway.Websocket.Adapter
   alias CodexPooler.Gateway.Websocket.DirectCleanup
+  alias CodexPooler.Gateway.Websocket.NativeCompactionRefusalLog
   alias CodexPooler.Platform.TransientDatabaseError
   alias CodexPooler.Pools
   alias CodexPooler.Pools.{ModelServingMode, ModelServingOverride, Pool}
@@ -2368,12 +2369,39 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   defp start_native_compaction_accounting(%RequestOptions{} = request_options) do
     case RequestOptions.mark_native_compaction_accounting_started(request_options, System.system_time(:millisecond)) do
       {:error, :connection_closed} ->
-        {:error, error(503, "owner_unavailable", "websocket owner admission is unavailable", nil, %{accounting_disposition: :zero_work})}
+        refusal = error(503, "owner_unavailable", "websocket owner admission is unavailable", nil, %{accounting_disposition: :zero_work})
+        :ok = log_accounting_start_refusal(request_options, refusal)
+        {:error, refusal}
 
       result ->
         result
     end
   end
+
+  # The same warning the socket writes for a compaction it refused before
+  # dispatch, so a count of that line includes this route (findings#270 row
+  # 270-246).
+  defp log_accounting_start_refusal(%RequestOptions{} = request_options, refusal) do
+    {reservation_phase, topology} =
+      case RequestOptions.native_compaction_admission(request_options) do
+        {:ok, capability, {:forwarded, _session, _lease, _downstream, _opts}, _lifecycle} -> {capability.phase, :forwarded}
+        {:ok, capability, _direct, _lifecycle} -> {capability.phase, :direct}
+        _no_admission -> {:unknown, :direct}
+      end
+
+    NativeCompactionRefusalLog.warn(%{
+      refusal: refusal,
+      metadata: request_options.payload_context.native_codex_turn_metadata,
+      reservation_phase: reservation_phase,
+      cause: :connection_closed,
+      decided_at: :accounting_start,
+      topology: topology,
+      codex_session_id: accounting_start_session_id(request_options)
+    })
+  end
+
+  defp accounting_start_session_id(%RequestOptions{continuity: %{codex_session: %CodexSession{id: id}}}) when is_binary(id), do: id
+  defp accounting_start_session_id(%RequestOptions{}), do: "none"
 
   defp reserve_and_start_turn(
          auth,

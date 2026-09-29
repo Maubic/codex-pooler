@@ -31,6 +31,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   alias CodexPooler.Gateway.Websocket.DeliveryReceipt
   alias CodexPooler.Gateway.Websocket.DirectCleanup
   alias CodexPooler.Gateway.Websocket.DownstreamSession
+  alias CodexPooler.Gateway.Websocket.NativeCompactionRefusalLog
   alias CodexPooler.Gateway.Websocket.ResponseTask
   alias CodexPooler.InstanceSettings
   alias CodexPooler.InstanceSettings.Cache, as: InstanceSettingsCache
@@ -2481,33 +2482,24 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     {:error, refusal}
   end
 
-  # One line for every refusal of a native compaction reservation that found
-  # no admission, whichever route decided it: on arrival (nothing tracked), at
-  # dequeue behind a tracked task, or on the active-turn reconnect route from
-  # the cause the frame met on arrival. The deferral routes used to log only
-  # the info-level replay rejection, with no cause, next to the generic
-  # failed-turn warning, so a query for this line undercounted the refusals
-  # decided after a deferral (findings#206 row 206-394). `decided_at` names
-  # the route and `reservation_phase` the reservation (`final` is the turn
-  # that continues on a compacted history, whose metadata names no compaction
-  # phase).
+  # The refusal line of the socket's three routes: on arrival (nothing
+  # tracked), at dequeue behind a tracked task, or on the active-turn reconnect
+  # route from the cause the frame met on arrival. The deferral routes used to
+  # log only the info-level replay rejection, with no cause, next to the
+  # generic failed-turn warning, so a query for this line undercounted the
+  # refusals decided after a deferral (findings#206 row 206-394). The runtime
+  # writes the same line for its own route (`NativeCompactionRefusalLog`).
   defp log_native_compaction_refusal(state, refusal, metadata, reservation_phase, cause, decided_at) do
-    Logger.warning(fn ->
-      "native compaction refused before dispatch " <>
-        "reason=admission_unavailable " <>
-        "cause=#{DiagnosticTaxonomy.identifier(cause) || "unknown"} " <>
-        "code=#{refusal.code} " <>
-        "status=#{refusal.status} " <>
-        "compaction_phase=#{native_compaction_metadata_phase(metadata)} " <>
-        "topology=#{if owner_forwarded_socket?(state), do: "forwarded", else: "direct"} " <>
-        "decided_at=#{decided_at} " <>
-        "reservation_phase=#{reservation_phase} " <>
-        "codex_session_id=#{codex_session_id(state)}"
-    end)
+    NativeCompactionRefusalLog.warn(%{
+      refusal: refusal,
+      metadata: metadata,
+      reservation_phase: reservation_phase,
+      cause: cause,
+      decided_at: decided_at,
+      topology: if(owner_forwarded_socket?(state), do: :forwarded, else: :direct),
+      codex_session_id: codex_session_id(state)
+    })
   end
-
-  defp native_compaction_metadata_phase(%NativeCodexTurnMetadata{compaction: %NativeCodexTurnMetadata.Compaction{phase: phase}}), do: phase
-  defp native_compaction_metadata_phase(%NativeCodexTurnMetadata{}), do: "none"
 
   # Why no admission was granted, for the refusal line: the owner's own reason,
   # or `no_admission` when nothing was armed for this socket.
