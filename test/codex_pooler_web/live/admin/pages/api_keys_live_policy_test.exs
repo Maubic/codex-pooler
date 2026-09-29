@@ -226,6 +226,18 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLivePolicyTest do
     assert {:error, :api_key_disabled} = Access.normalize_api_key_policy(edited)
   end
 
+  test "policy form saves enforced ultrafast and retains it when reopened", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "ultrafast-form", name: "Ultrafast form"})
+    {:ok, view, _html} = live(conn, ~p"/admin/api-keys")
+    open_create_dialog(view)
+    assert has_element?(view, "#api_key_enforced_service_tier option[value='ultrafast']", "Ultrafast mode")
+    view |> element("#api-key-form") |> render_submit(%{"api_key" => api_key_payload(%{"display_name" => "Ultrafast key", "pool_id" => pool.id, "enforced_service_tier" => "ultrafast"})})
+    api_key = Repo.one!(APIKey)
+    assert api_key.enforced_service_tier == "ultrafast"
+    assert ApiKeyPolicyForm.params_for(api_key, [])["enforced_service_tier"] == "ultrafast"
+    assert {:ok, %{enforced_service_tier: "ultrafast"}} = Access.normalize_api_key_policy(api_key)
+  end
+
   test "service tier form retains one canonical Fast/Priority option and preserves invalid types",
        %{
          scope: scope
@@ -234,6 +246,8 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLivePolicyTest do
 
     assert Enum.count(options, fn {_label, value} -> value == "priority" end) == 1
     assert {"Fast/Priority mode", "priority"} in options
+    assert {"Ultrafast mode", "ultrafast"} in options
+    assert %{enforced_service_tier: "ultrafast"} = ApiKeyPolicyForm.attrs(%{"enforced_service_tier" => " ULTRAFAST "})
     refute Enum.any?(options, fn {_label, value} -> value == "fast" end)
 
     assert %{enforced_service_tier: "priority"} =

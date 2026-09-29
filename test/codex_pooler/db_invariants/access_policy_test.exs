@@ -158,6 +158,18 @@ defmodule CodexPooler.DBInvariants.AccessPolicyTest do
     end)
   end
 
+  test "database accepts enforced ultrafast and rejects unknown tiers" do
+    user_id = create_user!("ultrafast-policy@example.com")
+    pool_id = create_pool!(user_id, "ultrafast-policy", "Ultrafast policy")
+    key_id = create_api_key!(pool_id, user_id, "sk_ultrafast_policy")
+    assert %{num_rows: 1} = Repo.query!("UPDATE api_keys SET enforced_service_tier = 'ultrafast' WHERE id = $1", [key_id])
+    assert [["ultrafast"]] = Repo.query!("SELECT enforced_service_tier FROM api_keys WHERE id = $1", [key_id]).rows
+
+    assert_db_constraint("api_keys_enforced_service_tier_check", fn ->
+      Repo.query!("UPDATE api_keys SET enforced_service_tier = 'ultrafaster' WHERE id = $1", [key_id])
+    end)
+  end
+
   test "database accepts empty API key model allow list as deny-all model policy" do
     user_id = create_user!("owner-api-key-empty-policy@example.com")
     pool_id = create_pool!(user_id, "api-key-empty-policy", "API Key Empty Policy")

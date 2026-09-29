@@ -352,6 +352,8 @@ defmodule CodexPooler.CompatibilityMatrixTest do
       assert fixture.service_tier_boundary == %{
                ultrafast: %{
                  accepted_surfaces: [
+                   %{method: :post, path: "/backend-api/codex/responses", transport: "http_sse"},
+                   %{method: :get, path: "/backend-api/codex/responses", transport: "websocket"},
                    %{method: :post, path: "/v1/responses", transport: "http_json"},
                    %{method: :post, path: "/v1/responses", transport: "http_sse"},
                    %{method: :get, path: "/v1/responses", transport: "responses_websocket"}
@@ -362,6 +364,9 @@ defmodule CodexPooler.CompatibilityMatrixTest do
                    required_literal: "ultrafast",
                    eligible_candidates: "only_exact_ultrafast_advertisements"
                  },
+                 api_key_enforcement: true,
+                 mixed_pool_routing: "compatible_service_tier_variants_only",
+                 catalog_tier_source: "pristine_routable_superset_with_unchanged_default",
                  literal_vocabulary: %{
                    returned_service_tier: "ultrafast",
                    accounting_fields: [

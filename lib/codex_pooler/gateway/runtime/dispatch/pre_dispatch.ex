@@ -5,6 +5,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Gateway.Contracts, as: GatewayContracts
   alias CodexPooler.Gateway.Denials
+  alias CodexPooler.Gateway.Metadata.CanonicalModelSource
   alias CodexPooler.Gateway.Metadata.CatalogRepresentation
   alias CodexPooler.Gateway.Metadata.CodexCatalog
   alias CodexPooler.Gateway.OperationalSettings
@@ -27,6 +28,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
   alias CodexPooler.Pools.ModelServingOverride
   alias CodexPooler.Pools.Routing, as: PoolRouting
   alias CodexPooler.RouteClass
+  alias CodexPooler.ServiceTier
 
   @type candidate :: CandidateEligibility.FilterInput.candidate()
   @type visible_model_context :: CandidateEligibility.visible_model_context()
@@ -182,7 +184,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
            SessionContinuity.attach_codex_session(auth, payload, request_options),
          canonical_filter_input_candidates = candidates,
          allowed_canonical_assignment_ids =
-           allowed_canonical_assignment_ids(visible_model_context, request_options),
+           allowed_canonical_assignment_ids(visible_model_context, request_options, model, payload, candidates),
+         request_options = put_tier_variant_counts(request_options, visible_model_context, allowed_canonical_assignment_ids),
          {:ok, candidates} <-
            CandidateEligibility.filter_allowed_canonical_candidates(
              candidates,
@@ -427,13 +430,53 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
 
   defp allowed_canonical_assignment_ids(
          visible_model_context,
-         %RequestOptions{openai_compatibility: compatibility}
+         %RequestOptions{openai_compatibility: compatibility} = request_options,
+         model,
+         payload,
+         compatible_candidates
        ) do
-    if OpenAICompatibility.translated_responses_surface?(compatibility) do
-      visible_model_context.valid_canonical_assignment_ids
-    else
-      visible_model_context.selected_partition_assignment_ids
+    selected_ids = visible_model_context.selected_partition_assignment_ids
+
+    cond do
+      OpenAICompatibility.translated_responses_surface?(compatibility) ->
+        visible_model_context.valid_canonical_assignment_ids
+
+      explicit_service_tier?(payload, request_options) ->
+        selected_ids ++ service_tier_variant_ids(model, selected_ids, compatible_candidates)
+
+      true ->
+        selected_ids
     end
+  end
+
+  defp put_tier_variant_counts(request_options, visible_model_context, allowed_ids) do
+    case request_options.routing.canonical_partition do
+      %{} = summary ->
+        count = allowed_ids |> Enum.uniq() |> length()
+        valid_count = length(visible_model_context.valid_canonical_assignment_ids)
+        RequestOptions.put_routing(request_options, canonical_partition: Map.merge(summary, %{"selected_count" => count, "filtered_count" => max(valid_count - count, 0)}))
+
+      nil ->
+        request_options
+    end
+  end
+
+  defp explicit_service_tier?(payload, request_options) do
+    policy = request_options.routing.api_key_policy || %{}
+    tier = Map.get(policy, :enforced_service_tier) || Map.get(payload, "service_tier")
+    ServiceTier.canonicalize(tier) not in [nil, "auto", "default"]
+  end
+
+  # Runtime compatibility has already required each account's own exact tier
+  # advertisement. A tier-only variant can satisfy an explicit request without
+  # widening the catalog's context, tool or transport capability family.
+  defp service_tier_variant_ids(model, selected_ids, compatible_candidates) do
+    sources = Map.get(model.metadata || %{}, "source_assignment_models", %{})
+    selected = Enum.map(selected_ids, &Map.get(sources, &1))
+
+    for {assignment, _identity} <- compatible_candidates,
+        Enum.any?(selected, &CanonicalModelSource.same_service_tier_family?(&1, Map.get(sources, assignment.id))),
+        do: assignment.id
   end
 
   # Advice describes runtime-compatible Pool capacity before the connection pin.

@@ -227,6 +227,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
       {"Default - standard capacity", "default"},
       {"Flex - flexible capacity", "flex"},
       {"Fast/Priority mode", "priority"},
+      {"Ultrafast mode", "ultrafast"},
       {"Scale - scale capacity", "scale"}
     ]
   end

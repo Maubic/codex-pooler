@@ -202,7 +202,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLiveTest do
     assert has_element?(view, "#api_key_enforced_service_tier option", "Scale - scale capacity")
 
     refute has_element?(view, "#api_key_enforced_service_tier option[value='fast']")
-    refute has_element?(view, "#api_key_enforced_service_tier option[value='ultrafast']")
+    assert has_element?(view, "#api_key_enforced_service_tier option[value='ultrafast']", "Ultrafast mode")
 
     select_api_key_section(view, :limits)
     assert_api_key_section(view, :limits)

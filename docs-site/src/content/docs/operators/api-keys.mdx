@@ -193,6 +193,16 @@ Enforced request fields let the key override selected client request values:
 2. reasoning policy
 3. enforced service tier
 
+The enforced service tier can be `auto`, `default`, `flex`, `priority`, `scale`, or
+`ultrafast`. Enforcement does not grant an upstream capability: an ultrafast
+Responses request still needs an eligible account whose model advertises that
+tier. A Pool with no matching account refuses the request before dispatch.
+
+Finish the rolling upgrade before configuring an enforced `ultrafast` key:
+older application versions reject that policy. Before downgrading to such a
+version, change affected keys to a tier it supports; database rollback refuses
+to discard an existing ultrafast policy.
+
 The reasoning policy offers three modes:
 
 1. **Unrestricted** leaves omission absent and preserves any effort the route already accepts. This is the default for keys with neither reasoning value configured.

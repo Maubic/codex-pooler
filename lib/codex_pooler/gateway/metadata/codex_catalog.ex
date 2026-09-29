@@ -319,15 +319,58 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalog do
     baseline_members = select_partition(capability_families, nil)
     members = select_partition(capability_families, routable_assignment_ids)
     anchor = partition_anchor(members)
+    presentation_anchor = tier_superset_anchor(anchor, pairs, routable_assignment_ids)
 
     %{
       assignment_ids: members |> Enum.map(& &1.assignment_id) |> Enum.sort(),
-      digest: anchor.digest,
+      digest: presentation_anchor.digest,
       model: model,
       partition_count: length(capability_families),
       routable_selection?: members != baseline_members,
-      source: reasoning_union_source(anchor, members, routable_assignment_ids)
+      source: tier_presentation_source(presentation_anchor, reasoning_union_source(anchor, members, routable_assignment_ids))
     }
+  end
+
+  # Tier selection must not replace the baseline reasoning contract, including
+  # the absence of fields. Neutral requests still use the baseline members.
+  defp tier_presentation_source(presentation_anchor, reasoning_source) do
+    keys = ["default_reasoning_level" | @reasoning_level_keys]
+
+    presentation_anchor.source
+    |> Map.drop(keys)
+    |> Map.merge(Map.take(reasoning_source, keys))
+  end
+
+  # Tier presentation may use a richer pristine source in the same execution
+  # family. Keep the default tier unchanged: clients apply it without a user
+  # selecting a tier. An incomparable set has no honest single-source union.
+  defp tier_superset_anchor(anchor, pairs, routable_ids) do
+    eligible = Enum.filter(pairs, &tier_anchor_eligible?(&1, anchor, routable_ids))
+    required = Enum.reduce(eligible, MapSet.new(), &MapSet.union(tier_tokens(&1.source), &2))
+
+    eligible
+    |> Enum.filter(&(MapSet.subset?(required, tier_tokens(&1.source)) and MapSet.size(tier_tokens(&1.source)) > MapSet.size(tier_tokens(anchor.source))))
+    |> Enum.min_by(&partition_pair_key/1, fn -> anchor end)
+  end
+
+  defp tier_anchor_eligible?(pair, anchor, routable_ids) do
+    (is_nil(routable_ids) or MapSet.member?(routable_ids, pair.assignment_id)) and
+      Map.get(pair.source, "default_service_tier") == Map.get(anchor.source, "default_service_tier") and
+      CanonicalModelSource.same_service_tier_family?(anchor.source, pair.source)
+  end
+
+  defp tier_tokens(source) do
+    services =
+      source
+      |> ModelMetadata.list_metadata("service_tiers")
+      |> Enum.flat_map(fn
+        %{"id" => id} when is_binary(id) -> [{:service, id}]
+        id when is_binary(id) -> [{:service, id}]
+        _invalid -> []
+      end)
+
+    speeds = for tier <- ModelMetadata.list_metadata(source, "additional_speed_tiers"), is_binary(tier), do: {:speed, tier}
+    MapSet.new(services ++ speeds)
   end
 
   defp select_partition(partitions, routable_assignment_ids) do

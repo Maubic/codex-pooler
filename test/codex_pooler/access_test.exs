@@ -843,6 +843,22 @@ defmodule CodexPooler.AccessTest do
     end
 
     @tag :api_key_policy_contract
+    test "persists and authorizes enforced ultrafast without granting account eligibility" do
+      {scope, pool} = owner_scope_and_pool()
+      assert {:ok, %{api_key: api_key}} = Access.create_api_key(scope, pool, %{display_name: "Ultrafast policy", enforced_service_tier: " ULTRAFAST "})
+      assert Repo.get!(APIKey, api_key.id).enforced_service_tier == "ultrafast"
+      assert {:ok, policy} = Access.normalize_api_key_policy(api_key)
+      assert {:ok, %{enforced_service_tier: "ultrafast"}} = Access.authorize_api_key_policy(policy, %{model: "sample-model"})
+      assert {:ok, %{api_key: updated}} = Access.update_api_key_with_policy(scope, api_key, %{enforced_service_tier: "default"})
+      assert updated.enforced_service_tier == "default"
+      assert {:ok, %{api_key: restored}} = Access.update_api_key_with_policy(scope, updated, %{enforced_service_tier: "ultrafast"})
+      assert restored.enforced_service_tier == "ultrafast"
+      assert Repo.get_by!(AuditEvent, action: "api_key.create", target_id: api_key.id).details["enforced_service_tier"] == "ultrafast"
+      assert {:error, %{code: :invalid_policy}} = Access.update_api_key_with_policy(scope, restored, %{enforced_service_tier: "ultrafaster"})
+      assert Repo.get!(APIKey, api_key.id).enforced_service_tier == "ultrafast"
+    end
+
+    @tag :api_key_policy_contract
     test "canonicalizes fast service tiers before persistence and authorization" do
       {scope, pool} = owner_scope_and_pool()
 

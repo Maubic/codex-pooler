@@ -8,7 +8,7 @@ defmodule CodexPooler.Access.APIKey do
 
   @derive {Inspect, except: [:key_hash]}
   @reasoning_efforts ~w(none minimal low medium high xhigh max ultra)
-  @service_tiers ~w(auto default flex priority scale)
+  @service_tiers ~w(auto default flex priority scale ultrafast)
 
   @type reasoning_effort :: String.t()
   @type t :: %__MODULE__{

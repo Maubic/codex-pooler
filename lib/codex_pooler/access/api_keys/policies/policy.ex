@@ -9,7 +9,7 @@ defmodule CodexPooler.Access.APIKeys.Policy do
   @status_paused "paused"
   @status_revoked "revoked"
   @reasoning_efforts ~w(none minimal low medium high xhigh max ultra)
-  @service_tiers ~w(auto default flex priority scale)
+  @service_tiers ~w(auto default flex priority scale ultrafast)
 
   # Each group is one unit of an update: an omitted group keeps the stored
   # value, a submitted one replaces it whole. The allow list and the reasoning

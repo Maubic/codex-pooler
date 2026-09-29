@@ -595,8 +595,8 @@ defmodule CodexPooler.Access.APIKeyCreationTest do
           enforced_service_tier: "ultrafast"
         })
 
-      refute ultrafast_api_key_changeset.valid?
-      assert "is invalid" in errors_on(ultrafast_api_key_changeset).enforced_service_tier
+      assert ultrafast_api_key_changeset.valid?
+      assert Ecto.Changeset.get_change(ultrafast_api_key_changeset, :enforced_service_tier) == "ultrafast"
 
       blank_service_tier_changeset =
         APIKey.changeset(%APIKey{}, %{

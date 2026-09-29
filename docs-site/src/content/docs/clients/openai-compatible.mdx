@@ -61,9 +61,11 @@ vocabulary unchanged. The ChatGPT Codex backend reports
 `service_tier: "default"` on completed responses even when the request asked
 for `priority`, and Codex Pooler relays that value as reported.
 
-`ultrafast` is a separate tier, not an alias for `fast` or `priority`. Use
-`service_tier: "ultrafast"` only with direct `/v1/responses` requests when the
-selected model metadata advertises it:
+`ultrafast` is a separate tier, not an alias for `fast` or `priority`. Native
+Codex Responses and `/v1/responses` can use `service_tier: "ultrafast"` when
+the selected account's model metadata advertises it. A Pool with mixed
+capabilities routes the request only to matching accounts; a Pro plan label
+alone does not grant access:
 
 ```python
 response = client.responses.create(
@@ -77,6 +79,13 @@ JSON, SSE, and narrow Responses WebSocket requests preserve a returned
 `ultrafast` tier literally. `POST /v1/chat/completions` rejects `ultrafast`.
 Provider availability, access, and price control whether the tier can be used;
 model metadata advertisement is not an entitlement or price promise.
+
+The Codex model catalog can expose a compatible account's richer tier list
+when that list includes every available tier and keeps the same default.
+Incompatible context or tool capabilities are not combined. When no account
+advertises every choice, the catalog keeps its existing selection. An anchored
+continuation stays on its original account; changing tier cannot transfer its
+upstream context to another account.
 
 ## Tool-specific setup pages
 

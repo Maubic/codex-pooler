@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalogTest do
   use ExUnit.Case, async: false
 
   alias CodexPooler.Catalog.Model
+  alias CodexPooler.Gateway.Metadata.CanonicalModelSource
   alias CodexPooler.Gateway.Metadata.CodexCatalog
   alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
 
@@ -1057,6 +1058,87 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalogTest do
   end
 
   defp policy(overrides), do: Map.merge(unrestricted_policy(), Map.new(overrides))
+
+  test "a routable tier superset is advertised verbatim without widening neutral dispatch membership" do
+    {a, b, c} = assignment_ids()
+    source = pristine_source("gpt-tier-fixture")
+    richer = source |> Map.put("service_tiers", source["service_tiers"] ++ [%{"id" => "ultrafast", "name" => "Ultrafast"}]) |> Map.put("additional_speed_tiers", ["ultrafast"])
+    model = model("gpt-tier-fixture", %{}) |> put_source_models(%{a => source, b => source, c => richer})
+    candidates = partition_candidates(model, [a, b, c])
+    opts = [routable_assignment_ids_by_model_id: fn -> %{model.id => MapSet.new([a, b, c])} end]
+    [partition] = CodexCatalog.select_canonical_sources([model], candidates, opts)
+    assert partition.assignment_ids == [a, b]
+    assert partition.source == richer
+    assert {:ok, canonical} = CanonicalModelSource.canonical_source(richer)
+    assert partition.digest == canonical.digest
+    reversed = Map.update!(candidates, model.id, &Enum.reverse/1)
+    assert CodexCatalog.select_canonical_sources([model], reversed, opts) == [partition]
+
+    [blocked] = CodexCatalog.select_canonical_sources([model], candidates, routable_assignment_ids_by_model_id: fn -> %{model.id => MapSet.new([a, b])} end)
+    assert blocked.source == source
+  end
+
+  for variant <- [:narrower, :disjoint, :default, :absent] do
+    test "tier presentation preserves baseline reasoning fields for #{variant} source metadata" do
+      {a, b, c} = assignment_ids()
+      source = pristine_source("gpt-tier-reasoning")
+      baseline = if unquote(variant) == :absent, do: Map.drop(source, ["default_reasoning_level", "supported_reasoning_levels", "reasoning_efforts"]), else: source
+      richer = Map.put(source, "service_tiers", source["service_tiers"] ++ [%{"id" => "ultrafast"}])
+
+      richer =
+        case unquote(variant) do
+          :narrower -> Map.put(richer, "supported_reasoning_levels", [%{"effort" => "high", "description" => "high"}])
+          :disjoint -> richer |> Map.put("supported_reasoning_levels", [%{"effort" => "max", "description" => "max"}]) |> Map.put("default_reasoning_level", "max")
+          :default -> Map.put(richer, "default_reasoning_level", "low")
+          :absent -> Map.put(richer, "reasoning_efforts", ["max"])
+        end
+
+      model = model("gpt-tier-reasoning", %{}) |> put_source_models(%{a => baseline, b => baseline, c => richer})
+      [partition] = CodexCatalog.select_canonical_sources([model], partition_candidates(model, [a, b, c]))
+      keys = ["default_reasoning_level", "supported_reasoning_levels", "reasoning_efforts"]
+      assert Map.take(partition.source, keys) == Map.take(baseline, keys)
+      assert partition.source["service_tiers"] == richer["service_tiers"]
+      assert Map.drop(partition.source, keys) == Map.drop(richer, keys)
+      assert partition.assignment_ids == [a, b]
+    end
+  end
+
+  test "tier presentation retains the existing union of baseline reasoning variants" do
+    {a, b, c} = assignment_ids()
+    source = pristine_source("gpt-tier-reasoning-union")
+    first = Map.put(source, "supported_reasoning_levels", [%{"effort" => "low", "description" => "low"}])
+    second = Map.put(source, "supported_reasoning_levels", [%{"effort" => "high", "description" => "high"}])
+    richer = source |> Map.put("service_tiers", source["service_tiers"] ++ [%{"id" => "ultrafast"}]) |> Map.put("supported_reasoning_levels", [%{"effort" => "max", "description" => "max"}]) |> Map.put("default_reasoning_level", "max")
+    base_model = model("gpt-tier-reasoning-union", %{}) |> put_source_models(%{a => first, b => second})
+    [baseline] = CodexCatalog.select_canonical_sources([base_model], partition_candidates(base_model, [a, b]))
+    model = put_source_models(base_model, %{a => first, b => second, c => richer})
+    [partition] = CodexCatalog.select_canonical_sources([model], partition_candidates(model, [a, b, c]))
+    keys = ["default_reasoning_level", "supported_reasoning_levels", "reasoning_efforts"]
+    assert Map.take(partition.source, keys) == Map.take(baseline.source, keys)
+    assert partition.source["service_tiers"] == richer["service_tiers"]
+    assert partition.assignment_ids == baseline.assignment_ids
+  end
+
+  test "incomparable tier capabilities and changed defaults cannot synthesize a catalog superset" do
+    {a, b, c} = assignment_ids()
+    source = pristine_source("gpt-tier-fixture")
+
+    for change <- [:incomparable, :default, :context, :unknown] do
+      richer = Map.put(source, "service_tiers", source["service_tiers"] ++ [%{"id" => "ultrafast"}])
+
+      {base, richer} =
+        case change do
+          :incomparable -> {Map.put(source, "additional_speed_tiers", ["fast"]), Map.put(richer, "additional_speed_tiers", ["ultrafast"])}
+          :default -> {source, Map.put(richer, "default_service_tier", "ultrafast")}
+          :context -> {source, Map.put(richer, "context_window", 111_111)}
+          :unknown -> {source, Map.put(richer, "future_execution_mode", true)}
+        end
+
+      model = model("gpt-tier-fixture", %{}) |> put_source_models(%{a => base, b => base, c => richer})
+      [partition] = CodexCatalog.select_canonical_sources([model], partition_candidates(model, [a, b, c]))
+      assert partition.source == base
+    end
+  end
 
   defp selected(sources),
     do: CodexCatalog.build_selected_sources(sources, unrestricted_policy(), %{}, %{})

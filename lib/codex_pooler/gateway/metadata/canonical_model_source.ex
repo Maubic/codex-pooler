@@ -83,6 +83,21 @@ defmodule CodexPooler.Gateway.Metadata.CanonicalModelSource do
 
   def canonical_source(_source), do: {:error, :invalid_model_metadata}
 
+  @doc "Compares tier variants without changing either advertised source. Other behavioral differences remain fenced."
+  @spec same_service_tier_family?(term(), term()) :: boolean()
+  def same_service_tier_family?(left, right) when is_map(left) and is_map(right) do
+    fields = ~w(service_tiers additional_speed_tiers)
+
+    with {:ok, left} <- canonical_source(Map.drop(left, fields)),
+         {:ok, right} <- canonical_source(Map.drop(right, fields)) do
+      left.reasoning_agnostic_digest == right.reasoning_agnostic_digest
+    else
+      _invalid -> false
+    end
+  end
+
+  def same_service_tier_family?(_left, _right), do: false
+
   @spec project(
           map(),
           Model.t(),
