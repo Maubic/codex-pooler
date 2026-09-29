@@ -114,16 +114,39 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
     assert {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed, @now + 5)
     assert {collected.phase, collected.expires_at_ms} == {:collected_unconfirmed, @now + 5 + ttl_ms}
 
-    assert {:active, ^collected} = NativeCompactionAdmission.expire_collection(collected, @now + 5 + ttl_ms)
-    assert {:expired, %NativeCompactionAdmission{phase: :cleared}} = NativeCompactionAdmission.expire_collection(collected, @now + 6 + ttl_ms)
+    assert {:active, ^collected} = NativeCompactionAdmission.expire_unconsumed(collected, @now + 5 + ttl_ms)
+    assert {:expired, %NativeCompactionAdmission{phase: :cleared}} = NativeCompactionAdmission.expire_unconsumed(collected, @now + 6 + ttl_ms)
 
-    # Only a collection ends here; an armed phase keeps its own expiry checks.
-    assert {:active, ^pending_compact} = NativeCompactionAdmission.expire_collection(pending_compact, @now + 10 * ttl_ms)
+    # An armed compaction keeps its own expiry checks: the next ordinary success
+    # arms it again.
+    assert {:active, ^pending_compact} = NativeCompactionAdmission.expire_unconsumed(pending_compact, @now + 10 * ttl_ms)
 
     assert {:ok, first, provenance} = NativeCompactionAdmission.authorize_first_compact_collection(ordinary, make_ref())
     assert {:ok, first_collected} = NativeCompactionAdmission.record_first_compact_collected(first, provenance, @now)
     assert {first_collected.phase, first_collected.expires_at_ms} == {:collected_unconfirmed, @now + ttl_ms}
-    assert {:expired, %NativeCompactionAdmission{phase: :cleared}} = NativeCompactionAdmission.expire_collection(first_collected, @now + ttl_ms + 1)
+    assert {:expired, %NativeCompactionAdmission{phase: :cleared}} = NativeCompactionAdmission.expire_unconsumed(first_collected, @now + ttl_ms + 1)
+  end
+
+  # findings#270 row 270-289: a final that did not come within its bound
+  # ends, as a collection does, instead of refusing every later ordinary
+  # success on the connection.
+  test "a pending final ends past its bound" do
+    binding = direct_binding()
+    ttl_ms = NativeCompactionAdmission.reservation_ttl_ms()
+    digest = <<91::256>>
+    control_ref = make_ref()
+    assert {:ok, ordinary} = NativeCompactionAdmission.ordinary_success(binding)
+    assert {:ok, pending_compact} = NativeCompactionAdmission.arm_compact(ordinary, @now + ttl_ms)
+    assert {:ok, reserved, capability} = NativeCompactionAdmission.reserve(pending_compact, :compact, binding, control_ref, @now)
+    assert {:ok, accounting} = NativeCompactionAdmission.mark_accounting_started(reserved, capability, @now)
+    assert {:ok, consumed} = NativeCompactionAdmission.consume(accounting, capability, @now)
+    assert {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed, @now)
+    confirmation = %Confirmation{source_phase: :compact, source_control_ref: control_ref, binding: %{binding | compaction_item_digest: digest}}
+    assert {:ok, pending_final} = NativeCompactionAdmission.confirm_compact(collected, digest, confirmation, @now + ttl_ms)
+    assert {pending_final.phase, pending_final.expires_at_ms} == {:pending_final, @now + ttl_ms}
+
+    assert {:active, ^pending_final} = NativeCompactionAdmission.expire_unconsumed(pending_final, @now + ttl_ms)
+    assert {:expired, %NativeCompactionAdmission{phase: :cleared}} = NativeCompactionAdmission.expire_unconsumed(pending_final, @now + ttl_ms + 1)
   end
 
   test "final reservation requires exact compact item digest and next window number" do

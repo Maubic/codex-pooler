@@ -583,7 +583,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
   # its caller left `collected_unconfirmed` for as long as the socket stayed
   # attached, and every later ordinary success and first full-history
   # compaction was refused after the provider had served and billed it
-  # (findings#270 row 270-249). `expire_collection/2` ends a collection past
+  # (findings#270 row 270-249). `expire_unconsumed/2` ends a collection past
   # its bound.
   @spec record_compact_collected(t(), non_neg_integer()) :: {:ok, t()} | {:error, :invalid_transition}
   def record_compact_collected(%__MODULE__{phase: :consumed_compact} = state, now_ms) when is_integer(now_ms) and now_ms >= 0 do
@@ -793,13 +793,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
   def owns_capability?(_state, _capability), do: false
 
   @doc """
-  Ends a `collected_unconfirmed` admission past its bound
-  (`record_compact_collected/2`, `record_first_compact_collected/3`); any other
-  admission is left as it is.
+  Ends an admission past its bound that nothing can use any more: a
+  `collected_unconfirmed` whose acknowledgement never came
+  (`record_compact_collected/2`, `record_first_compact_collected/3`), or a
+  `pending_final` whose final never came in time (findings#270 row 270-289).
+  A final that arrives after the bound is refused `expired` by its
+  reservation and runs as an ordinary turn; kept, the expired `pending_final`
+  also refused that turn's ordinary success and every later one, so no
+  compaction on the connection was armed again. Any other admission is left
+  as it is.
   """
-  @spec expire_collection(t(), non_neg_integer()) :: {:active, t()} | {:expired, t()}
-  def expire_collection(%__MODULE__{phase: :collected_unconfirmed} = state, now_ms), do: expire(state, now_ms)
-  def expire_collection(%__MODULE__{} = state, _now_ms), do: {:active, state}
+  @spec expire_unconsumed(t(), non_neg_integer()) :: {:active, t()} | {:expired, t()}
+  def expire_unconsumed(%__MODULE__{phase: phase} = state, now_ms) when phase in [:collected_unconfirmed, :pending_final], do: expire(state, now_ms)
+  def expire_unconsumed(%__MODULE__{} = state, _now_ms), do: {:active, state}
 
   @spec expire(t(), non_neg_integer()) :: {:active, t()} | {:expired, t()}
   def expire(%__MODULE__{expires_at_ms: expires_at_ms}, now_ms)

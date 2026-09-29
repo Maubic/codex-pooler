@@ -2919,12 +2919,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # A collection that no acknowledgement confirmed within its bound reads as
   # ended, so an acknowledgement lost with its caller no longer refuses the
   # connection's next ordinary success and first full-history compaction after
-  # the provider served and billed them (findings#270 row 270-249); the next
-  # admission written replaces it.
+  # the provider served and billed them (findings#270 row 270-249). A final
+  # that did not come within its bound reads as ended too, so the ordinary
+  # turn a late final runs as arms the next compaction again (row 270-289).
+  # The next admission written replaces it.
   defp admission_state(state) do
     admission = Map.get(state, :native_compaction_admission, %NativeCompactionAdmission{phase: :cleared})
 
-    case NativeCompactionAdmission.expire_collection(admission, System.system_time(:millisecond)) do
+    case NativeCompactionAdmission.expire_unconsumed(admission, System.system_time(:millisecond)) do
       {:expired, cleared} -> cleared
       {:active, admission} -> admission
     end

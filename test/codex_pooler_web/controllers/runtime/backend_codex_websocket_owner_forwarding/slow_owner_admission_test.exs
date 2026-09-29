@@ -554,6 +554,39 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     end
   end
 
+  # A final that comes after its bound (findings#270 row 270-289). The
+  # released client also compacts after a turn, and then sends the final with
+  # the user's next message, which can come long after. The late final ran as
+  # an ordinary turn, but the admission stayed `pending_final`, which refused
+  # that turn's ordinary success and every later one: each compaction on the
+  # connection was refused `503 owner_unavailable` before dispatch
+  # (`cause=invalid_transition`), and the client retried it with its full
+  # history on a new connection. The final's bound now ends it as a
+  # collection's does, so the late final's success arms the next compaction
+  # (`pending_compact`), which the connection's next incremental compaction
+  # reserves. The bound is shortened to a millisecond for the compaction's
+  # confirmation only, on the node that computes it.
+  for topology <- [:remote, :local, :direct] do
+    @tag topology: topology
+    test "#{topology}: a final that comes after its bound runs as an ordinary turn and arms the next compaction", ctx do
+      compaction = open_compaction_session!(ctx, true, [:anchor, :compaction, :final])
+      hold = hold_settled_websocket_turn!()
+      {conn, websocket} = public_websocket_send_text!(compaction.client.conn, compaction.client.websocket, compaction.client.ref, compaction_frame(compaction, "compaction", trigger(compaction), "resp_slow_owner_anchor"))
+      assert_receive {^hold, :held, task}, @detection_timeout_ms
+      Application.put_env(:codex_pooler, NativeCompactionAdmission, reservation_ttl_ms: 1)
+      :ok = release_settled_websocket_turn(hold, task)
+      {conn, websocket, served} = receive_native_terminal!(conn, websocket, compaction.client.ref)
+      Application.put_env(:codex_pooler, NativeCompactionAdmission, [])
+      assert %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_compact", "output" => [item]}} = served
+      compaction = with_client(compaction, conn, websocket)
+
+      assert %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_final"}} = send_frame!(compaction, final_after_compaction_frame(compaction, item))
+      :ok = await_admission_phase!(compaction.owner, :pending_compact)
+      assert Scenario.settled_statuses!(compaction.setup, 3) == ["succeeded", "succeeded", "succeeded"]
+      assert FakeUpstream.count(compaction.upstream) == 3
+    end
+  end
+
   # A socket on the session's window with its owner (on the peer for
   # `:remote`) and one anchor turn it served, settled unless `settle?` is
   # false (its task is then held after its settlement).
