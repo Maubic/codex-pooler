@@ -131,9 +131,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ValidationRejectionHealth
   end
 
   # The provider's websocket refusal of an unknown input item id carries no
-  # code and no param (254-60, iCoreTech rev 23, where native attempts
-  # recorded no rejection field before 254-30). Compact and multi-line frames
-  # both record the type and message presence the HTTP path records.
+  # code and no param (254-60, an observed production image, where native
+  # attempts recorded no rejection field before 254-30). Compact and
+  # multi-line frames both record the type and message presence the HTTP path
+  # records.
   for topology <- [:direct, :local_owner], pretty <- [false, true] do
     @tag topology: topology, pretty: pretty
     test "native websocket #{topology} codeless provider 400 records its rejection fields (multi-line: #{pretty})", %{topology: topology, pretty: pretty} do

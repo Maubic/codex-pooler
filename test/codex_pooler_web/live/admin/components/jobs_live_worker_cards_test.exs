@@ -597,14 +597,14 @@ defmodule CodexPoolerWeb.Admin.JobsLiveWorkerCardsTest do
 
     %{assignment: first_assignment} =
       upstream_assignment_fixture(pool, %{
-        account_label: "codex01@example.com",
-        assignment_label: "codex01@example.com"
+        account_label: "account-a@example.com",
+        assignment_label: "account-a@example.com"
       })
 
     %{assignment: second_assignment} =
       upstream_assignment_fixture(pool, %{
-        account_label: "codex02@example.com",
-        assignment_label: "codex02@example.com"
+        account_label: "account-b@example.com",
+        assignment_label: "account-b@example.com"
       })
 
     first_job =
@@ -649,22 +649,22 @@ defmodule CodexPoolerWeb.Admin.JobsLiveWorkerCardsTest do
 
     assert has_element?(
              view,
-             "#{card} #job-activity-#{first_job.id}[aria-label*='codex01@example.com']"
+             "#{card} #job-activity-#{first_job.id}[aria-label*='account-a@example.com']"
            )
 
     assert has_element?(
              view,
-             "#{card} #job-activity-#{second_job.id}[aria-label*='codex02@example.com']"
+             "#{card} #job-activity-#{second_job.id}[aria-label*='account-b@example.com']"
            )
 
     assert has_element?(
              view,
-             "#{card} #job-activity-#{first_job.id}[data-has-avatar='true'].avatar img[src='#{AvatarComponents.gravatar_url("codex01@example.com", size: 64)}']"
+             "#{card} #job-activity-#{first_job.id}[data-has-avatar='true'].avatar img[src='#{AvatarComponents.gravatar_url("account-a@example.com", size: 64)}']"
            )
 
     assert has_element?(
              view,
-             "#{card} #job-activity-#{second_job.id}[data-has-avatar='true'].avatar img[src='#{AvatarComponents.gravatar_url("codex02@example.com", size: 64)}']"
+             "#{card} #job-activity-#{second_job.id}[data-has-avatar='true'].avatar img[src='#{AvatarComponents.gravatar_url("account-b@example.com", size: 64)}']"
            )
 
     refute has_element?(view, "#{card} #job-activity-#{first_job.id} > img")
@@ -681,8 +681,8 @@ defmodule CodexPoolerWeb.Admin.JobsLiveWorkerCardsTest do
 
     refute has_element?(view, "#{card} [data-role='worker-activity-strip'] .loading-spinner")
     refute has_element?(view, "#{card} #job-activity-#{first_job.id}", "AccountReconciliation")
-    refute has_element?(view, "#{card} #job-activity-#{first_job.id}", "codex01@example.com")
-    refute has_element?(view, "#{card} #job-activity-#{second_job.id}", "codex02@example.com")
+    refute has_element?(view, "#{card} #job-activity-#{first_job.id}", "account-a@example.com")
+    refute has_element?(view, "#{card} #job-activity-#{second_job.id}", "account-b@example.com")
   end
 
   test "account reconciliation failure markers use operator avatar status styling", %{conn: conn} do

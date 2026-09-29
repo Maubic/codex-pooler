@@ -452,7 +452,7 @@ defmodule CodexPooler.CatalogTest do
                 },
                 "capabilities" => %{"responses" => true, "streaming" => true}
               },
-              %{"id" => "gpt-masterkain-only"}
+              %{"id" => "gpt-free-only"}
             ]
           })
         )
@@ -483,10 +483,10 @@ defmodule CodexPooler.CatalogTest do
 
       pool = pool_fixture()
 
-      {_pool, masterkain_assignment} =
+      {_pool, free_assignment} =
         active_assignment_fixture(pool, %{"base_url" => FakeUpstream.url(shared_upstream)}, %{
-          account_label: "masterkain@gmail.com",
-          assignment_label: "Masterkain Free"
+          account_label: "free-account@example.com",
+          assignment_label: "Codex Free"
         })
 
       {_pool, pro_assignment} =
@@ -500,14 +500,14 @@ defmodule CodexPooler.CatalogTest do
 
       shared = Catalog.get_model_by_exposed_id(pool, "gpt-shared")
       pro_only = Catalog.get_model_by_exposed_id(pool, "gpt-6-sol")
-      masterkain_only = Catalog.get_model_by_exposed_id(pool, "gpt-masterkain-only")
+      free_only = Catalog.get_model_by_exposed_id(pool, "gpt-free-only")
 
       assert shared.source_assignment_count == 2
 
       assert shared.metadata["source_assignment_ids"] ==
-               Enum.sort([masterkain_assignment.id, pro_assignment.id])
+               Enum.sort([free_assignment.id, pro_assignment.id])
 
-      assert shared.metadata["source_assignment_models"][masterkain_assignment.id][
+      assert shared.metadata["source_assignment_models"][free_assignment.id][
                "service_tiers"
              ] == []
 
@@ -519,12 +519,12 @@ defmodule CodexPooler.CatalogTest do
                }
              ]
 
-      assert shared.metadata["source_assignment_models"][masterkain_assignment.id]["visibility"] ==
+      assert shared.metadata["source_assignment_models"][free_assignment.id]["visibility"] ==
                "hide"
 
       assert get_in(shared.metadata, [
                "source_assignment_models",
-               masterkain_assignment.id,
+               free_assignment.id,
                "upgrade",
                "model"
              ]) == "gpt-source-a-replacement"
@@ -556,8 +556,8 @@ defmodule CodexPooler.CatalogTest do
       assert pro_only.source_assignment_count == 1
       assert pro_only.metadata["source_assignment_ids"] == [pro_assignment.id]
 
-      assert masterkain_only.source_assignment_count == 1
-      assert masterkain_only.metadata["source_assignment_ids"] == [masterkain_assignment.id]
+      assert free_only.source_assignment_count == 1
+      assert free_only.metadata["source_assignment_ids"] == [free_assignment.id]
     end
 
     test "persists successful assignment results when another assignment fails" do

@@ -616,7 +616,7 @@ defmodule CodexPoolerWeb.OnboardingLive.InviteTest do
 
     assert {:ok, first_identity} =
              first_completed.identity
-             |> Ecto.Changeset.change(account_label: "codex01")
+             |> Ecto.Changeset.change(account_label: "account-a")
              |> Repo.update()
 
     scope =
@@ -640,8 +640,8 @@ defmodule CodexPoolerWeb.OnboardingLive.InviteTest do
     assert second_completed.identity.metadata["credential_epoch"] == first_epoch + 1
     assert second_completed.assignment.id == first_completed.assignment.id
     assert second_completed.identity.account_email == "codex-user@example.com"
-    assert second_completed.identity.account_label == "codex01"
-    assert Repo.get!(UpstreamIdentity, first_identity.id).account_label == "codex01"
+    assert second_completed.identity.account_label == "account-a"
+    assert Repo.get!(UpstreamIdentity, first_identity.id).account_label == "account-a"
 
     assert Repo.aggregate(UpstreamIdentity, :count) == 1
     assert Repo.aggregate(PoolUpstreamAssignment, :count) == 1

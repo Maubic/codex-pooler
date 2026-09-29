@@ -7,7 +7,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ReplayPreflightPolicyDeni
   # (`invalid_model`) inside its transaction and rolled back with the refusal
   # and nothing else: the client got the right frame, but no request row and
   # no log line were written, while forwarding off and HTTP recorded `rejected
-  # 400` (production rev 50, Codex 0.156.1, S18 2026-09-24). A stored policy
+  # 400` (an observed production image, Codex 0.156.1). A stored policy
   # that fails normalization was also answered `model_not_allowed` there
   # instead of its own `403 api_key_policy_malformed`. Each refusal is now
   # recorded after the rollback, as forwarding off records it, and logged on

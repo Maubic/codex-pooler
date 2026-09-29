@@ -1,8 +1,8 @@
 defmodule CodexPoolerWeb.V1.ResponsesValidationParamIndexTest do
   # Lite puts the tool manifest (and the instructions message) in front of the
   # client's input, so the provider names an item by its upstream position:
-  # iCoreTech rev 23 answered a Lite client `input[2].id` for the item it sent
-  # as `input[1]` (findings#254 row 254-61). The relayed param must name the
+  # an observed production image answered a Lite client `input[2].id` for the
+  # item it sent as `input[1]` (findings#254 row 254-61). The relayed param must name the
   # client's own position, or drop the index when no client item sits there;
   # the attempt keeps the provider's path. Each case asserts that the item the
   # provider names really sits at that upstream position, so the fixture's

@@ -1,7 +1,7 @@
 defmodule CodexPooler.Dev.UpstreamAccountBundleAccessOnlyTest do
   # A bundle import makes a copy of an account whose tokens stay live where the
   # account really lives. A copy that refreshes rotates the shared refresh token
-  # and revokes the original (the 2026-09-23 replica incident), so a default
+  # and revokes the original (an observed replica incident), so a default
   # import carries only the access token. Every refresh path here starts from an
   # identity the real bundle import created and counts the provider token
   # endpoint on a loopback fake that also answers it, so a stored refresh token

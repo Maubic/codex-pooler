@@ -12,7 +12,7 @@ defmodule CodexPooler.Dev.ResponsesToolCompatSmokeTest do
   import CodexPooler.AccountsFixtures
 
   @owner_id "11111111-1111-4111-8111-111111111111"
-  @labels ~w(codex01 codex02 codex03)
+  @labels ~w(account-a account-b account-c)
 
   setup do
     run_id = "20260803T120000Z-#{random_hex(6)}"
@@ -43,11 +43,11 @@ defmodule CodexPooler.Dev.ResponsesToolCompatSmokeTest do
                  "--owner-id",
                  @owner_id,
                  "--identity-label",
-                 "codex01",
+                 "account-a",
                  "--identity-label",
-                 "codex02",
+                 "account-b",
                  "--identity-label",
-                 "codex03",
+                 "account-c",
                  "--dry-run"
                ])
     end
@@ -71,11 +71,11 @@ defmodule CodexPooler.Dev.ResponsesToolCompatSmokeTest do
         "--owner-id",
         @owner_id,
         "--identity-label",
-        "codex01",
+        "account-a",
         "--identity-label",
-        "codex02",
+        "account-b",
         "--identity-label",
-        "codex03"
+        "account-c"
       ]
 
       assert {:error, "base URL must be an origin-only HTTP loopback URL"} =
@@ -100,11 +100,11 @@ defmodule CodexPooler.Dev.ResponsesToolCompatSmokeTest do
                  "--owner-id",
                  @owner_id,
                  "--identity-label",
-                 "codex01",
+                 "account-a",
                  "--identity-label",
-                 "codex01",
+                 "account-a",
                  "--identity-label",
-                 "codex03"
+                 "account-c"
                ])
 
       assert {:error, "exactly three --identity-label values are required"} =

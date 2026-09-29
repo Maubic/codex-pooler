@@ -11,9 +11,9 @@ defmodule Mix.Tasks.Dev.ResponsesToolCompatSmoke do
       mix dev.responses_tool_compat_smoke \
         --base-url http://localhost:4000 \
         --owner-id OWNER_UUID \
-        --identity-label codex01 \
-        --identity-label codex02 \
-        --identity-label codex03
+        --identity-label account-a \
+        --identity-label account-b \
+        --identity-label account-c
 
   Add `--dry-run` to perform argument, isolation, owner, and identity checks
   without booting the application, writing database rows, or sending requests.

@@ -3213,9 +3213,10 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
     )
   end
 
-  # The exact sanitized wire shape captured on 2026-09-09 19:39 CEST from an
-  # affected account: weekly window in the primary slot, null secondary, blocked
-  # permission, one available banked reset, an unrelated Spark meter at 0%.
+  # The exact sanitized wire shape captured during the provider's usage-limit
+  # incident from an affected account: weekly window in the primary slot, null
+  # secondary, blocked permission, one available banked reset, an unrelated
+  # Spark meter at 0%.
   defp incident_fake(reset_at, observed_at) do
     payload = %{
       "plan_type" => "pro",

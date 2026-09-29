@@ -253,7 +253,7 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
 
   # The upsert's implicit FK checks lock the assignment row before the identity
   # row, inverting the canonical identity-first order used by credential
-  # fencing and reconciliation guards (production 40P01, 2026-07-22). Taking
+  # fencing and reconciliation guards (an observed production 40P01). Taking
   # the canonical reference locks first removes the cycle; lock or ownership
   # failures degrade to a logged skip because routing bookkeeping must never
   # fail an already-finalized turn. Standalone, a residual deadlock first

@@ -1,6 +1,6 @@
 defmodule CodexPooler.Gateway.Routing.BridgeRingLockingTest do
-  # Reproduces the 2026-07-22 production 40P01 schedule proven by the CNPG
-  # deadlock DETAIL and Oban job 449798: reconciliation-style guards take the
+  # Reproduces an observed production 40P01 schedule proven by the database's
+  # deadlock DETAIL and an Oban job: reconciliation-style guards take the
   # identity row FOR UPDATE and then every assignment FOR UPDATE
   # (CredentialFencing.lock_credential_replacement), while post-turn routing
   # side effects insert rows whose FK checks lock the same pair through

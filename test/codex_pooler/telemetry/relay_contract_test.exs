@@ -557,7 +557,7 @@ defmodule CodexPooler.Telemetry.RelayContractTest do
 
   describe "who the heartbeat is about" do
     test "no fresh consumer never stops a producer; the backlog is bounded by counted expiry" do
-      # The ticket's 14:57Z entry read the heartbeat as consumer liveness. It
+      # An earlier ticket entry read the heartbeat as consumer liveness. It
       # is not: `Relay.insert/5` gates on the *producer's own* freshness, so a
       # cluster with no draining reporter keeps producing. What bounds that
       # backlog is the one-hour counted expiry, and what makes the situation

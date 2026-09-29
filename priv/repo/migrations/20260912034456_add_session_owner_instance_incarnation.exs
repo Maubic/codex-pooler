@@ -6,10 +6,10 @@ defmodule CodexPooler.Repo.Migrations.AddSessionOwnerInstanceIncarnation do
   # container that restarts in place comes back under it and the successor was
   # accepted as the same owner: it renewed its predecessor's still-active lease
   # and refreshed the session heartbeat of a VM that no longer existed. Measured
-  # in production on 2026-09-12, a session whose owner was halted at 03:19:34
-  # carried `last_heartbeat_at` 03:30:01 and a lease renewed to 03:35:01, and
-  # the liveness guard then read that lease as proof of live work and skipped
-  # the orphan behind it.
+  # in production, a session whose owner had been halted carried a
+  # `last_heartbeat_at` about ten minutes after the halt and a lease renewed
+  # five minutes past that, and the liveness guard then read that lease as
+  # proof of live work and skipped the orphan behind it.
   #
   # The node name stays exactly where it is. It is also the address owner
   # forwarding routes e-RPC to, and the value durable request metadata, owner

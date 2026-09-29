@@ -1619,7 +1619,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
     # fixture.
     upstream =
       start_upstream(
-        # provenance: observed runbook terminal-failure resend (2026-09-09 23:43 UTC response.failed server_error)
+        # provenance: observed runbook terminal-failure resend (response.failed server_error)
         FakeUpstream.strict_sequence([
           strict_native_request_any_connection(provider_terminal_failure_frames("concurrent")),
           strict_native_request_any_connection(completed_response_frames("resp_after_concurrent_resend", 3, 1))
@@ -1875,7 +1875,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
   test "byte-identical resend after the client retry window keeps the duplicate turn fence" do
     upstream =
       start_upstream(
-        # provenance: observed runbook terminal-failure resend (2026-09-09 23:43 UTC response.failed server_error)
+        # provenance: observed runbook terminal-failure resend (response.failed server_error)
         FakeUpstream.strict_sequence([
           strict_native_request_any_connection(provider_terminal_failure_frames("expired"))
         ])
@@ -1939,7 +1939,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
 
     upstream =
       start_upstream(
-        # provenance: observed runbook terminal-failure resend (2026-09-09 23:43 UTC response.failed server_error)
+        # provenance: observed runbook terminal-failure resend (response.failed server_error)
         FakeUpstream.strict_sequence([
           strict_native_request(1, provider_terminal_failure_frames(label)),
           strict_native_request(1, completed_response_frames(completed_response_id, 3, 1))

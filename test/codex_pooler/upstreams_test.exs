@@ -1333,9 +1333,9 @@ defmodule CodexPooler.UpstreamsTest do
       initial_epoch = identity.metadata["credential_epoch"]
 
       assert {:ok, renamed_identity} =
-               IdentityLifecycle.update_upstream_identity(identity, %{account_label: "codex01"})
+               IdentityLifecycle.update_upstream_identity(identity, %{account_label: "account-a"})
 
-      assert renamed_identity.account_label == "codex01"
+      assert renamed_identity.account_label == "account-a"
 
       assert {:ok,
               %{
@@ -1347,13 +1347,13 @@ defmodule CodexPooler.UpstreamsTest do
 
       assert reimported_identity.id == identity.id
       assert reimported_identity.metadata["credential_epoch"] == initial_epoch + 1
-      assert reimported_identity.account_label == "codex01"
+      assert reimported_identity.account_label == "account-a"
       assert reimported_identity.account_email == account_email
       assert reimported_identity.metadata["account_email"] == account_email
       assert reimported_assignment.id == assignment.id
-      assert reimported_assignment.assignment_label == "codex01"
+      assert reimported_assignment.assignment_label == "account-a"
 
-      assert Repo.get!(UpstreamIdentity, identity.id).account_label == "codex01"
+      assert Repo.get!(UpstreamIdentity, identity.id).account_label == "account-a"
     end
 
     test "auth parsers prefer nested workspace claims over conflicting top-level claims" do

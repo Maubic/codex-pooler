@@ -5,7 +5,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ExhaustedPinCompactionHis
   # that request to the exhausted account (`503 pinned_continuation_unavailable`,
   # then `409 duplicate_turn` on every identical resend), and the client finished
   # the turn over HTTPS on another account with the same compaction item
-  # (production 2026-09-21 19:46 and 2026-09-22 07:43, findings#206 row 206-357).
+  # (observed twice in production, findings#206 row 206-357).
   # The websocket request now moves like the HTTPS one.
   use CodexPoolerWeb.ConnCase, async: false
 

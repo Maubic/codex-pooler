@@ -41,9 +41,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.TerminalPolicyDenialStatu
   # `released_turn` is the frame the released client sends for every turn:
   # its `x-codex-turn-metadata` makes it replay-eligible, so with owner
   # forwarding on the owner's replay preflight refuses it, a path the bare
-  # frame never reaches (the replay preflight recorded no row, findings#206,
-  # S18 2026-09-24; pinned per refusal in
-  # `replay_preflight_policy_denial_record_test.exs`).
+  # frame never reaches (the replay preflight recorded no row, findings#206;
+  # pinned per refusal in `replay_preflight_policy_denial_record_test.exs`).
   for forwarding <- [:forwarded, :direct], shape <- [:bare, :released_turn] do
     @tag forwarding: forwarding, shape: shape
     test "websocket #{forwarding} #{shape}: a model the key may not use is refused 400 and recorded 400", %{forwarding: forwarding, shape: shape} do

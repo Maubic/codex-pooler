@@ -127,7 +127,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
 
   It was narrower still: `explicit_full_ordinary_responses?/1` also gates on
   `ordinary_responses_route?/1`, so a Full-override rejection on the compact
-  route never earned the code either. Over 30 days on the icoretech
+  route never earned the code either. Over 30 days on one production
   installation the code covered 62 of 496 non-429 4xx failures; the 434 it
   missed were Full-mode compact rejections, not Lite ones.
 

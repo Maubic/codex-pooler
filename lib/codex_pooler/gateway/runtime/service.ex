@@ -994,8 +994,8 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   # and logged as the fresh path records the same refusal, once the preflight
   # transaction has rolled back, so the record outlives it. Forwarding on, the
   # released client's turn (its turn metadata makes the frame replay-eligible)
-  # met this refusal here and left no row and no log line (production rev 50,
-  # Codex 0.156.1).
+  # met this refusal here and left no row and no log line (an observed
+  # production image, Codex 0.156.1).
   #
   # The record carries the routing the fresh path has put on its request
   # options by the same refusal: the requested model always, and once the

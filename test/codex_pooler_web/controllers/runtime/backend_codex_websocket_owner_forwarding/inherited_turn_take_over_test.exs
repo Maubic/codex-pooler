@@ -137,7 +137,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.InheritedT
 
     upstream =
       start_upstream(
-        # provenance: observed findings#206 row 206-359 (kain Desktop: a post-visible anchored tool continuation, then the same turn's unanchored full-history request on a new socket)
+        # provenance: observed findings#206 row 206-359 (a Desktop client: a post-visible anchored tool continuation, then the same turn's unanchored full-history request on a new socket)
         FakeUpstream.strict_sequence(
           [
             native_request(FakeUpstream.websocket_text_frames(opening_frames())),

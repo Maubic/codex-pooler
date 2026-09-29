@@ -46,10 +46,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionBookkeepingRefus
   @compact_response "resp_bookkeeping_refusal_compact"
   @final_response "resp_bookkeeping_refusal_final01"
 
-  # Production `ab3c4d98` (icoretech, 2026-09-22 14:27Z, findings#206 row
-  # 206-288): the released client's pre-turn compaction on the socket that had
-  # served the previous turn 34 s earlier (turn completed 14:26:52.583,
-  # compaction admitted 14:27:26.892, both on one socket per the owner log).
+  # An observed production image (findings#206 row 206-288): the released
+  # client's pre-turn compaction on the socket that had served the previous
+  # turn 34 s earlier (both on one socket per the owner log).
   # The compaction carries the NEW turn's id, so its binding never matched the
   # admission the previous turn's success armed (`binding_mismatch`). Since
   # findings#206 row 206-304 the owner admits it when its anchor is exactly the

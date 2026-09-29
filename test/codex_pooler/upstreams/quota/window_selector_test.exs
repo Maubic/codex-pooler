@@ -336,7 +336,7 @@ defmodule CodexPooler.Upstreams.Quota.WindowSelectorTest do
            ]
   end
 
-  test "codex02 and codex03 floating Spark evidence remains selected without an anchored row" do
+  test "two accounts' floating Spark evidence remains selected without an anchored row" do
     for reset_at <- [~U[2026-07-28 12:10:00Z], ~U[2026-07-28 12:14:00Z]] do
       floating_usage =
         spark_window(

@@ -265,9 +265,9 @@ defmodule CodexPoolerWeb.V1.UpstreamValidationRejectionTest do
   test "POST /v1/responses returns one rejection body whichever serving mode resolved", %{
     conn: conn
   } do
-    # provenance: observed codex-pooler-findings#173 live probe on icoretech
-    # production. One API key, one surface, one provider, one rejection
-    # (status 400, invalid_request_error, invalid_value, include[0]); the
+    # provenance: observed codex-pooler-findings#173 live probe on a
+    # production installation. One API key, one surface, one provider, one
+    # rejection (status 400, invalid_request_error, invalid_value, include[0]); the
     # model's serving mode was the only variable, and the two arms disagreed
     # on both the persisted error code and the client-visible message. The
     # provider message text here is synthetic and carries no supported-values

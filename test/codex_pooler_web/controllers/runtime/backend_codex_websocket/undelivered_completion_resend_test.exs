@@ -28,7 +28,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.UndeliveredCompletionRese
   alias CodexPooler.Repo
 
   @timeout_ms 15_000
-  # provenance: observed findings#232 row 232-201 (production receipt of request fdc13999, rev 25)
+  # provenance: observed findings#232 row 232-201 (a production delivery receipt)
   @undelivered %{"outcome" => "aborted", "terminal_class" => "none", "frames_after_visible" => 0, "pushed_at" => nil, "transport" => "websocket"}
 
   for forwarding <- [true, false] do

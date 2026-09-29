@@ -34,7 +34,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ProviderTerminalTurnResen
         start_upstream(
           # The opening request fails at the provider; its resend completes.
           # Nothing else reaches the provider.
-          # provenance: observed runbook terminal-failure resend (2026-09-09 23:43 UTC response.failed server_error); reply frames synthetic
+          # provenance: observed runbook terminal-failure resend (response.failed server_error); reply frames synthetic
           FakeUpstream.strict_sequence([
             FakeUpstream.expect_request(
               method: "WEBSOCKET",
