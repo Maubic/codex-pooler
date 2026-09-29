@@ -1744,6 +1744,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
         &verified_lifecycle_cut?/3,
         &verified_previsible_idle_timeout?/3,
         &verified_previsible_disconnect?/3,
+        &verified_identical_resend?/3,
         &verified_undelivered_completion?/3,
         &verified_undelivered_partial_output?/3
       ],
@@ -2123,20 +2124,12 @@ defmodule CodexPooler.Accounting.ClientRetry do
   compaction of a turn derived the same claim, and a later compaction was
   taken for the resend of the first one.
 
-  On a websocket a cut of a compaction the Pooler had started collecting
-  counts too, with the only terminal the client was written the cut's error,
-  or none: the Pooler's own cut, a rollout drain (`owner_drained`) or an
-  executor proven dead (`dead_execution_recovered`), or the provider
-  stream's (`upstream_stream_error`). The released client reads that error
-  as its compaction's failure and resends the compaction; it used to be
-  refused twice and then bought again over HTTPS (findings#270 rows 270-352
-  and 270-365). Here the receipt is read, because it admits a predecessor
-  that failed, cut by the Pooler or by the provider's stream after the
-  collection started: a `response.completed` written before the cut, or no
-  receipt at all, keeps the fence. That is the conservative choice for a
-  drain that cut right after the terminal went out, when the orderly close
-  that follows (1001) makes a lost terminal unlikely. A cut before the
-  collection started keeps its own shapes (`compaction_resend_shape/3`).
+  A settled websocket compaction cut after collection started also qualifies
+  under its matching interruption or stream-error settlement. The server's
+  terminal receipt remains diagnostic: an identical resend within the bound
+  is evidence that the client still needs the response, even when the server
+  wrote a completion. A later request of the turn remains the proof that the
+  client progressed beyond this compaction.
   """
   @spec verified_unreceived_compaction?(term(), term(), term()) :: boolean()
   def verified_unreceived_compaction?(
@@ -2185,14 +2178,42 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defp collected_compaction_cut?(
          %CodexTurn{status: turn_status, error_code: code, first_visible_output_at: %DateTime{}},
          %Request{status: "failed", last_error_code: code},
-         %Attempt{status: "failed", network_error_code: code, response_metadata: %{"downstream_delivery" => %{"terminal_class" => terminal_class}}}
+         %Attempt{status: "failed", network_error_code: code}
        )
-       when terminal_class in ["error", "none"] and
-              ((code in ["owner_drained", "dead_execution_recovered"] and turn_status == "interrupted") or
-                 (code == "upstream_stream_error" and turn_status in ["failed", "interrupted"])),
+       when (code in ["owner_drained", "dead_execution_recovered"] and turn_status == "interrupted") or
+              (code == "upstream_stream_error" and turn_status in ["failed", "interrupted"]),
        do: true
 
   defp collected_compaction_cut?(_turn, _request, _attempt), do: false
+
+  @doc """
+  A settled native response eligible for an identical client resend. A server
+  write receipt does not acknowledge client receipt; the caller must still
+  verify the same payload witness, authorization, retry window and lineage.
+  """
+  @spec verified_identical_resend?(term(), term(), term()) :: boolean()
+  def verified_identical_resend?(
+        %CodexTurn{final_attempt_id: attempt_id, transport_kind: transport, completed_at: %DateTime{}} = turn,
+        %Request{transport: transport, endpoint: "/backend-api/codex/responses", completed_at: %DateTime{}} = request,
+        %Attempt{id: attempt_id, transport: transport, replay_generation: 0, completed_at: %DateTime{}} = attempt
+      )
+      when is_binary(attempt_id) and transport in ["websocket", "http_sse", "http_json"],
+      do: resend_settlement?(turn, request, attempt)
+
+  def verified_identical_resend?(_turn, _request, _attempt), do: false
+
+  defp resend_settlement?(%CodexTurn{status: "succeeded"}, %Request{status: "succeeded"}, %Attempt{status: "succeeded"}), do: true
+
+  defp resend_settlement?(
+         %CodexTurn{status: status, error_code: code},
+         %Request{status: "failed", last_error_code: code},
+         %Attempt{status: "failed", network_error_code: code}
+       )
+       when (status == "interrupted" and code in ["client_disconnected", "owner_drained"]) or
+              (status in ["failed", "interrupted"] and code == "upstream_stream_error"),
+       do: true
+
+  defp resend_settlement?(_turn, _request, _attempt), do: false
 
   @doc """
   A native websocket turn the provider completed while its client was already
@@ -2310,21 +2331,12 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defp grown_candidate_matches?(_stored, _candidate), do: false
 
   @doc """
-  A native websocket turn whose socket pushed the client completed items and
-  nothing that ended the turn before the client left, resent by the released
-  Codex client as the same request with exactly those items appended
-  (findings#232 row 232-232, measured with Codex 0.156.1: the client records
-  every `response.output_item.done` item and its retry rebuilds the request from
-  that history; a direct provider serves it). `candidates` are the grown-resend
-  candidates whose witness already matched this predecessor
-  (`grown_witness_candidates/2`); one of them must carry exactly the digests the
-  receipt names, in order, and the receipt must name every item it counted. The
-  receipt is otherwise the partial-output one with the class `item_done`: outcome
-  `aborted`, no terminal. The turn settled `client_disconnected` after its
-  output became visible (the owner, or the closing socket, stopped it) or the
-  provider completed it after the client left; either way the resend is one
-  successor, a new dispatch with its own single settlement. Only the ordinary
-  Responses route, generation zero.
+  A grown resend retaining a nonempty ordered prefix of the completed items
+  written by the socket. The witness must match the predecessor and the
+  receipt must contain every counted item digest. The client may have read
+  fewer items than the server wrote, including when a completion was written
+  before the connection was lost. Unrelated, reordered and extra items remain
+  refused. Each admitted successor keeps its own single settlement.
   """
   @spec verified_completed_item_resend?(term(), term(), term(), term()) :: boolean()
   def verified_completed_item_resend?(
@@ -2337,9 +2349,9 @@ defmodule CodexPooler.Accounting.ClientRetry do
           completed_at: %DateTime{},
           response_metadata: %{
             "downstream_delivery" => %{
-              "outcome" => "aborted",
-              "terminal_class" => "none",
-              "highest_frame_class" => "item_done",
+              "outcome" => outcome,
+              "terminal_class" => terminal,
+              "highest_frame_class" => class,
               "completed_items" => count,
               "completed_item_digests" => [_first | _rest] = digests
             }
@@ -2347,9 +2359,14 @@ defmodule CodexPooler.Accounting.ClientRetry do
         } = attempt,
         candidates
       )
-      when is_binary(attempt_id) and is_integer(count) and is_list(candidates) do
-    length(digests) == count and Enum.any?(candidates, &match?(%{items: ^digests}, &1)) and
-      undelivered_partial_output_settlement?(turn, request, attempt)
+      when is_binary(attempt_id) and is_integer(count) and is_list(candidates) and
+             outcome in ["aborted", "delivered"] and terminal in ["none", "response.completed", "error"] and class in ["item_done", "terminal"] do
+    length(digests) == count and
+      Enum.any?(candidates, fn
+        %{items: [_first | _rest] = items} -> Enum.take(digests, length(items)) == items
+        _invalid -> false
+      end) and
+      (resend_settlement?(turn, request, attempt) or verified_dead_execution?(turn, request, attempt))
   end
 
   def verified_completed_item_resend?(_turn, _request, _attempt, _candidates), do: false

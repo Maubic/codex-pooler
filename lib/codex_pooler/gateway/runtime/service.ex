@@ -2081,14 +2081,10 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   # would fence the client's retry. An anchored request never takes the
   # failed-predecessor resend path, so claiming it first would add nothing.
   #
-  # The resume of a turn after its mid-turn compaction is admitted by the
-  # runtime proof, yet the same resume sent again on another socket or over
-  # HTTP derives the durable `codex-resume:` claim and would find it free, so
-  # the provider would be paid for the same history twice (findings#225, row
-  # 225-87; the fence of findings#250). The admitted resume therefore takes that
-  # claim itself, through the same claim path and resend policy as any native
-  # turn; the reservation keeps the claimed row, and the runtime-proof
-  # correlation still marks the final admission for its window alias.
+  # A final admitted by the compaction runtime proof also claims the identity
+  # that its resend derives: codex-turn for an opening after pre-turn
+  # compaction, codex-resume for a mid-turn resume. The shared claim policy
+  # links a qualifying resend to that predecessor and preserves its window.
   defp claim_admitted_compaction_resume(auth, model, payload, endpoint, request_options, route_state, correlation_id) do
     case WebsocketCodec.post_compaction_resume_claim(payload, request_options) do
       resume_claim when is_binary(resume_claim) ->

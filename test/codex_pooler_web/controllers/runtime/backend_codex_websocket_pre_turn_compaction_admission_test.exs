@@ -59,6 +59,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionAdmission
 
   for topology <- [:forwarded, :direct, :peer], pause <- [:none, :past_old_bound] do
     @tag topology: topology, pause: pause
+    @tag slow: "remote compaction, final and reconnect over real sockets with optional peer owner"
     test "#{topology} released pre-turn compaction anchored on the admitted response#{if pause == :past_old_bound, do: " after a pause past the old admission bound"} is served on its first send, billed once, and its turn continues on the same connection",
          %{topology: topology, pause: pause} do
       put_owner_forwarding!(topology != :direct)
@@ -72,16 +73,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionAdmission
           # compacted turn. A refusal, a reconnect or a full-history resend
           # would not match.
           # provenance: released-client frame shapes (P61 probe); reply frames synthetic
-          FakeUpstream.strict_sequence([
-            FakeUpstream.expect_request(method: "WEBSOCKET", websocket_connection_ordinal: 1, json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]], respond: completed_frames(@anchor)),
-            FakeUpstream.expect_request(
-              method: "WEBSOCKET",
-              websocket_connection_ordinal: 1,
-              json: [valid: true, equals: %{"type" => "response.create", "previous_response_id" => @anchor, "input.0.type" => "compaction_trigger"}, forbidden: ["input.1"]],
-              respond: compaction_frames(item, @compact_response)
-            ),
-            FakeUpstream.expect_request(method: "WEBSOCKET", websocket_connection_ordinal: 1, json: [valid: true, equals: %{"type" => "response.create", "input.0.type" => "compaction"}, forbidden: ["previous_response_id"]], respond: completed_frames(@final_response))
-          ])
+          FakeUpstream.strict_sequence(
+            [
+              FakeUpstream.expect_request(method: "WEBSOCKET", websocket_connection_ordinal: 1, json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]], respond: completed_frames(@anchor)),
+              FakeUpstream.expect_request(
+                method: "WEBSOCKET",
+                websocket_connection_ordinal: 1,
+                json: [valid: true, equals: %{"type" => "response.create", "previous_response_id" => @anchor, "input.0.type" => "compaction_trigger"}, forbidden: ["input.1"]],
+                respond: compaction_frames(item, @compact_response)
+              ),
+              FakeUpstream.expect_request(method: "WEBSOCKET", websocket_connection_ordinal: 1, json: [valid: true, equals: %{"type" => "response.create", "input.0.type" => "compaction"}, forbidden: ["previous_response_id"]], respond: completed_frames(@final_response))
+            ] ++ if(pause == :none, do: [FakeUpstream.expect_request(method: "WEBSOCKET", json: [valid: true, equals: %{"type" => "response.create", "input.0.type" => "compaction"}, forbidden: ["previous_response_id"]], respond: completed_frames("resp_preturn_resend"))], else: [])
+          )
         )
 
       setup = topology_setup!(topology, upstream)
@@ -129,11 +132,32 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionAdmission
                  {"/backend-api/codex/responses", "websocket", "succeeded"}
                ]
 
+        assert String.starts_with?(List.last(rows).correlation_id, "codex-turn:")
+
         for row <- rows do
           assert Repo.aggregate(from(entry in LedgerEntry, where: entry.request_id == ^row.id and entry.entry_kind == "settlement"), :count) == 1
         end
 
         assert length(FakeUpstream.requests(upstream)) == 3
+
+        if pause == :none do
+          Mint.HTTP.close(client.conn)
+          resend_client = connect!(port, setup, @resumed_window_id)
+
+          try do
+            resend_client = send_frame!(resend_client, resume_frame(setup, item, @next_turn_id))
+            {resend_client, %{"type" => "response.created"}} = receive_frame!(resend_client)
+            {_resend_client, %{"type" => "response.completed"}} = receive_frame!(resend_client)
+            repeated = settled_pool_requests!(setup.pool.id, 4)
+            previous_id = List.last(rows).id
+            successor_id = List.last(repeated).id
+            assert Repo.exists?(from(link in CodexPooler.Accounting.RequestClientRetryLink, where: link.predecessor_request_id == ^previous_id and link.successor_request_id == ^successor_id))
+            assert length(FakeUpstream.requests(upstream)) == 4
+          after
+            Mint.HTTP.close(resend_client.conn)
+          end
+        end
+
         assert FakeUpstream.http_request_count(upstream) == 0
         assert :ok = FakeUpstream.verify!(upstream)
         _client = client

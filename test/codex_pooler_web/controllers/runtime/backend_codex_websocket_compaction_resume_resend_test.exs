@@ -12,7 +12,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionResumeResendTest
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [released_client_connect!: 4]
 
   alias CodexPooler.Accounting.Request
-  alias CodexPooler.CompatibilityMatrix
   alias CodexPooler.Dev.NativeCompactionAuthorizationObserver
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Repo
@@ -21,7 +20,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionResumeResendTest
 
   for topology <- [:direct, :forwarded], resend_via <- [:same_socket, :new_socket, :http] do
     @tag slow: "drives an anchor turn, a mid-turn compaction, its resume and a resend through the real public listener (0.3-0.5 s alone, over 1 s under partition load)"
-    test "an identical resend of a runtime-proof-admitted resume is refused without a second dispatch (#{topology}, #{resend_via})", %{conn: conn} do
+    test "a runtime-proof-admitted resume is durably claimed for its resend (#{topology}, #{resend_via})", %{conn: conn} do
       put_owner_forwarding!(unquote(topology) == :forwarded)
       assert_resume_resend_refused(conn, unquote(resend_via))
     end
@@ -123,20 +122,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionResumeResendTest
       CodexPooler.TestDiagnostics.puts("225-87 resend_via=#{resend_via} outcome=#{inspect(outcome)} dispatched_after=#{FakeUpstream.count(upstream)} rows=#{length(pool_requests(setup))}")
 
       case resend_via do
-        # A resend on the very socket that just finished the resume races that
-        # resume's own task and is refused before any claim; the released
-        # client never does this (it drops the socket after an error frame), so
-        # only the absence of a dispatch is pinned for it.
-        :same_socket -> assert outcome in [{409, "duplicate_turn"}, {503, "owner_unavailable"}]
-        _other_carrier -> assert outcome == {409, "duplicate_turn"}
-      end
+        :http ->
+          # This probe omits the original frame's non-input fields, so its
+          # payload witness differs and it remains refused.
+          assert outcome == {409, "duplicate_turn"}
+          assert FakeUpstream.count(upstream) == dispatched
 
-      assert FakeUpstream.count(upstream) == dispatched
-      assert length(pool_requests(setup)) == 3
-      # What fences it: the resume admitted by the runtime proof holds the
-      # durable resume claim the resend derives, as the matrix states.
-      assert CompatibilityMatrix.fixture!(:websocket_turn).native_compaction_admission.mid_turn_transitions.final_resume_claim ==
-               "durable_codex_resume_claim_so_an_identical_resend_is_refused"
+        _websocket ->
+          assert {:admitted, "response.created"} = outcome
+          rows = settled_pool_requests!(setup.pool.id, 4)
+          successor = List.last(rows)
+          assert Repo.exists?(from(link in CodexPooler.Accounting.RequestClientRetryLink, where: link.predecessor_request_id == ^resume_row.id and link.successor_request_id == ^successor.id))
+          assert FakeUpstream.count(upstream) == dispatched + 1
+      end
 
       assert String.starts_with?(resume_row.correlation_id, "codex-resume:")
     after

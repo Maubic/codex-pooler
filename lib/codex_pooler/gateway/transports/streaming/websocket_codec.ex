@@ -1034,13 +1034,10 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
     do: turn_claim_scope(payload, opts)
 
   @doc """
-  The durable `codex-resume:` claim of a frame that resumes its turn after a
-  compaction, or nil for any other frame.
-
-  A resume admitted through the native compaction runtime proof is reserved
-  under that proof, but it must still hold this claim: otherwise an identical
-  resend on another socket or over HTTP derives the same claim, finds it free
-  and buys the same history a second time (findings#225, row 225-87).
+  The durable claim of a turn opening or resume admitted after compaction.
+  The runtime proof must not replace this identity: an identical resend on
+  another connection derives the same claim and is judged by the durable
+  successor policy instead of dispatching under an unrelated generated id.
   """
   @spec post_compaction_resume_claim(map(), RequestOptions.t()) :: String.t() | nil
   def post_compaction_resume_claim(
@@ -1048,9 +1045,18 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
         %RequestOptions{continuity: %{semantic_turn_key: semantic_turn_key}} = options
       )
       when is_map(payload) and is_binary(semantic_turn_key) do
-    if post_compaction_resume?(payload, options) do
-      {:post_compaction_resume, anchor} = NativeTurnContinuation.turn_role(payload)
-      WebsocketTurnIdentity.resume_claim_key(semantic_turn_key, anchor)
+    case NativeTurnContinuation.turn_role(payload) do
+      :opening ->
+        # Runtime dispatch may already have projected client metadata away.
+        # Reuse the identity sealed from the original frame before coercion.
+        options.continuity.turn_claim_key
+
+      {:post_compaction_resume, anchor} ->
+        if post_compaction_resume?(payload, options),
+          do: WebsocketTurnIdentity.resume_claim_key(semantic_turn_key, anchor)
+
+      _other ->
+        nil
     end
   end
 

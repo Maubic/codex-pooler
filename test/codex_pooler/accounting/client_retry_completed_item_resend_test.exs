@@ -45,10 +45,9 @@ defmodule CodexPooler.Accounting.ClientRetryCompletedItemResendTest do
     for change <- [
           %{"completed_items" => 2},
           %{"completed_item_digests" => []},
-          %{"terminal_class" => "response.completed"},
-          %{"highest_frame_class" => "terminal"},
+          %{"terminal_class" => "response.failed"},
           %{"highest_frame_class" => "delta"},
-          %{"outcome" => "delivered"}
+          %{"outcome" => "unknown"}
         ] do
       changed = update_in(attempt.response_metadata["downstream_delivery"], &Map.merge(&1, change))
       refute ClientRetry.verified_completed_item_resend?(turn, request, changed, [candidate]), inspect(change)
@@ -57,6 +56,25 @@ defmodule CodexPooler.Accounting.ClientRetryCompletedItemResendTest do
     refute ClientRetry.verified_completed_item_resend?(turn, request, %{attempt | replay_generation: 1}, [candidate])
     refute ClientRetry.verified_completed_item_resend?(turn, %{request | endpoint: "/backend-api/codex/responses/compact"}, attempt, [candidate])
     refute ClientRetry.verified_completed_item_resend?(turn, %{request | last_error_code: "upstream_stream_error"}, attempt, [candidate])
+  end
+
+  test "a grown resend retains a prefix even when the server wrote more items and the terminal" do
+    {turn, request, attempt} = predecessor(:succeeded)
+    candidate = %{items: [@digest], digest: @stored, alternates: []}
+    receipt = %{"outcome" => "delivered", "terminal_class" => "response.completed", "highest_frame_class" => "terminal", "completed_items" => 2, "completed_item_digests" => [@digest, "ba9876543210"]}
+    attempt = %{attempt | response_metadata: %{"downstream_delivery" => receipt}}
+    assert ClientRetry.verified_completed_item_resend?(turn, request, attempt, [candidate])
+    refute ClientRetry.verified_completed_item_resend?(turn, request, attempt, [%{candidate | items: ["ba9876543210"]}])
+    refute ClientRetry.verified_completed_item_resend?(turn, request, attempt, [%{candidate | items: []}])
+  end
+
+  test "a grown resend retains its items after a matching owner-drained settlement" do
+    {turn, request, attempt} = predecessor()
+    candidate = %{items: [@digest], digest: @stored, alternates: []}
+    turn = %{turn | error_code: "owner_drained"}
+    request = %{request | last_error_code: "owner_drained"}
+    attempt = %{attempt | network_error_code: "owner_drained"}
+    assert ClientRetry.verified_completed_item_resend?(turn, request, attempt, [candidate])
   end
 
   defp predecessor(settlement \\ :client_disconnected) do

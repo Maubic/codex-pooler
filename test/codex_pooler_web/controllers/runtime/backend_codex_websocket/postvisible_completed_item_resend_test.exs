@@ -74,15 +74,47 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
         assert original_claim != continuation_claim
         assert FakeUpstream.count(upstream) == 2
 
-        case resend!(transport, port, setup, turn_state, payload) do
+        changed = update_in(payload["input"], fn input -> input ++ [%{"type" => "message", "role" => "assistant", "content" => "changed history"}] end)
+
+        case resend!(transport, port, setup, turn_state, changed) do
           %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} -> :ok
           {409, body} -> assert %{"error" => %{"code" => "duplicate_turn"}} = CodexPooler.JSON.decode!(body)
-          _unexpected -> flunk("the identical mailbox continuation was not fenced")
+          _unexpected -> flunk("the changed mailbox continuation was not fenced")
         end
 
         assert length(pool_requests(setup.pool.id)) == 2
         assert FakeUpstream.count(upstream) == 2
       end
+    end
+  end
+
+  for forwarding <- [true, false], transport <- [:websocket, :https] do
+    @tag forwarding: forwarding, transport: transport
+    @tag slow: "real item-done cut followed by a second socket or HTTPS resend"
+    test "an identical resend after an unread completed item is chained (#{forwarding}, #{transport})", %{forwarding: forwarding, transport: transport} do
+      %{setup: setup, upstream: upstream, request_id: request_id, resend: resend} = scenario!(forwarding, :held, :identical, transport)
+
+      case transport do
+        :websocket -> assert resend["type"] == "response.completed"
+        :https -> assert {200, _body} = resend
+      end
+
+      assert [%Request{id: ^request_id}, %Request{id: successor_id, status: "succeeded"}] = pool_requests(setup.pool.id)
+      assert [%RequestClientRetryLink{predecessor_request_id: ^request_id, successor_request_id: ^successor_id}] = Repo.all(RequestClientRetryLink)
+      assert_one_settlement_each!([request_id, successor_id])
+      assert FakeUpstream.count(upstream) == 2
+    end
+  end
+
+  for forwarding <- [true, false], code <- ["owner_drained", "dead_execution_recovered"] do
+    @tag forwarding: forwarding, code: code
+    @tag slow: "real item-done socket cut with a metadata-only terminal settlement variant and grown resend"
+    test "a grown resend keeps retained items after #{code} (#{forwarding})", %{forwarding: forwarding, code: code} do
+      %{setup: setup, upstream: upstream, request_id: request_id, resend: resend} = scenario!(forwarding, :held, :grown, :websocket, settlement_variant: code)
+      assert resend["type"] == "response.completed"
+      assert [%Request{id: ^request_id, last_error_code: ^code}, %Request{id: successor_id, status: "succeeded"}] = pool_requests(setup.pool.id)
+      assert [%RequestClientRetryLink{predecessor_request_id: ^request_id, successor_request_id: ^successor_id}] = Repo.all(RequestClientRetryLink)
+      assert FakeUpstream.count(upstream) == 2
     end
   end
 
@@ -205,7 +237,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, forwarding != false)
     release_ref = make_ref()
-    served? = resend_shape in [:grown, :mailbox]
+    served? = resend_shape in [:identical, :grown, :mailbox]
     mailbox? = resend_shape == :mailbox
     frames = if mailbox?, do: reasoning_stream_frames(), else: stream_frames("resp_completed_item_original")
     hold_at = length(frames) - 1
@@ -246,6 +278,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
     {receipt, proven_attempt_id} = CleanupProofRace.around_cut(opts, request_id, fn -> close_and_await_receipt!(conn, request_id, provider, upstream, release_ref) end)
     _settled = await_settled!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
 
+    if code = Keyword.get(opts, :settlement_variant) do
+      {1, _} = Repo.update_all(from(r in Request, where: r.id == ^request_id), set: [last_error_code: code])
+      {1, _} = Repo.update_all(from(t in CodexTurn, where: t.request_id == ^request_id), set: [error_code: code])
+      {1, _} = Repo.update_all(from(a in Attempt, where: a.request_id == ^request_id), set: [network_error_code: code])
+    end
+
     resend_payload = resend_payload(payload, resend_shape)
     resend = resend!(resend_transport, port, setup, turn_state, resend_payload)
 
@@ -275,6 +313,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
     |> put_in(["client_metadata", "x-codex-ws-stream-request-start-ms"], 2_000)
   end
 
+  defp appended_items(:identical), do: []
   defp appended_items(:grown), do: [client_recorded_item(@item_text)]
   defp appended_items(:mismatched), do: [client_recorded_item(@item_text <> " altered")]
   defp appended_items(:extra), do: [client_recorded_item(@item_text), client_recorded_item(@item_text)]

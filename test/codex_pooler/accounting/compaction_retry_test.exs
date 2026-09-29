@@ -102,11 +102,13 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
         opts = alter_local_failure!(unquote(mutation), setup, predecessor, turn, attempt, opts)
         before = row_counts()
 
-        assert {:error, _} =
-                 Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts),
-               "unexpected successor for #{unquote(failure)} with #{unquote(mutation)}"
-
-        assert row_counts() == before
+        if unquote(failure) == :dead_execution and unquote(mutation) == :visible do
+          assert {:ok, claim} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+          assert claim.predecessor_request_id == predecessor.id
+        else
+          assert {:error, _} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+          assert row_counts() == before
+        end
       end
     end
   end
@@ -128,16 +130,13 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
     end
   end
 
-  # The same cut after the socket wrote the compaction's completion, or with
-  # no receipt at all, is not proof the client lacks it: the fence stays.
   for code <- ["owner_drained", "dead_execution_recovered", "upstream_stream_error"], receipt <- ["response.completed", :absent] do
-    test "keeps the fence for a compaction cut after the Pooler began collecting it: #{code}, receipt #{receipt}" do
+    test "chains a compaction resend independently of server receipt: #{code}, receipt #{receipt}" do
       {setup, predecessor, opts} = collected_cut_predecessor!(unquote(code), unquote(receipt))
-      assert compaction_resend_shape(predecessor) == {:error, :terminal_predecessor}
-      before = row_counts()
-
-      assert {:error, _} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
-      assert row_counts() == before
+      assert compaction_resend_shape(predecessor) == {:ok, :unreceived_compaction}
+      assert {:ok, claim} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+      assert claim.predecessor_request_id == predecessor.id
+      assert Repo.aggregate(RequestClientRetryLink, :count) == 1
     end
   end
 
@@ -522,7 +521,6 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
   test "rejects expired, visible, mismatched and unauthorized predecessors without side effects" do
     for mutation <- [
           :expired,
-          :visible,
           :full_history,
           :bridge,
           :anchor,
@@ -542,10 +540,6 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
         case mutation do
           :expired ->
             update!(predecessor, completed_at: DateTime.add(DateTime.utc_now(), -331, :second))
-            opts
-
-          :visible ->
-            update!(turn, first_visible_output_at: DateTime.utc_now())
             opts
 
           :full_history ->

@@ -12,8 +12,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.UndeliveredCompletionRese
   #
   # The first turn runs through the real listener; only its receipt is rewritten
   # to the production shape, because which side wins that race is timing on the
-  # real path. The unrewritten receipt is the control: a turn the socket pushed
-  # stays refused.
+  # real path. The unrewritten receipt is served too: a successful server
+  # write does not acknowledge the client's receipt.
   use CodexPoolerWeb.ConnCase, async: false
 
   import Ecto.Query
@@ -51,12 +51,25 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.UndeliveredCompletionRese
 
     @tag :websocket_direct
     @tag forwarding: forwarding
-    test "owner forwarding #{forwarding}: the resend of a completed turn the socket pushed stays a duplicate", %{forwarding: forwarding} do
+    test "owner forwarding #{forwarding}: the identical resend of a completed turn the socket wrote is served as one successor", %{forwarding: forwarding} do
       %{setup: setup, upstream: upstream, request_id: request_id, resend: resend} = scenario!(forwarding, :delivered)
 
-      assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = resend
-      assert [%Request{id: ^request_id, status: "succeeded"}] = pool_requests(setup.pool.id)
-      assert FakeUpstream.count(upstream) == 1
+      assert %{"type" => "response.completed"} = resend
+      assert [%Request{id: ^request_id, status: "succeeded"}, %Request{id: successor_id, status: "succeeded"}] = pool_requests(setup.pool.id)
+      assert [%RequestClientRetryLink{predecessor_request_id: ^request_id, successor_request_id: ^successor_id}] = Repo.all(RequestClientRetryLink)
+      assert FakeUpstream.count(upstream) == 2
+    end
+  end
+
+  for forwarding <- [true, false] do
+    @tag :websocket_direct
+    @tag forwarding: forwarding
+    test "owner forwarding #{forwarding}: an identical tool-result resend is served as one successor", %{forwarding: forwarding} do
+      %{setup: setup, upstream: upstream, request_id: request_id, resend: resend} = scenario!(forwarding, :tool_result)
+      assert resend["type"] == "response.completed"
+      assert [%Request{id: ^request_id}, %Request{id: successor_id, status: "succeeded"}] = pool_requests(setup.pool.id)
+      assert [%RequestClientRetryLink{predecessor_request_id: ^request_id, successor_request_id: ^successor_id}] = Repo.all(RequestClientRetryLink)
+      assert FakeUpstream.count(upstream) == 2
     end
   end
 
@@ -76,7 +89,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.UndeliveredCompletionRese
     setup = gateway_setup(upstream)
     _revision = set_model_serving_mode!(model_serving_scope(), setup, "lite")
     turn_state = Ecto.UUID.generate()
-    raw_payload = CodexPooler.JSON.encode!(native_turn_payload(Ecto.UUID.generate(), setup.model.exposed_model_id))
+    payload = native_turn_payload(Ecto.UUID.generate(), setup.model.exposed_model_id)
+    payload = if receipt == :tool_result, do: Map.update!(payload, "input", &(&1 ++ [%{"type" => "function_call_output", "call_id" => "synthetic-call", "output" => "synthetic result"}])), else: payload
+    raw_payload = CodexPooler.JSON.encode!(payload)
     port = start_public_endpoint!()
 
     assert %{"type" => "response.completed"} = send_and_receive_terminal!(port, setup, turn_state, raw_payload)

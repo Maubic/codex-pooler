@@ -59,7 +59,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementExecutorKillTes
     hold = SettlementTransactionHold.inside_transaction!()
 
     {conn, websocket, ref} = connect!(port, setup, session_id)
-    {conn, _websocket} = public_websocket_send_text!(conn, websocket, ref, payload)
+    {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, payload)
     {settler, %{backend: settler_backend}} = SettlementTransactionHold.await_held!(hold)
 
     request = Repo.one!(from(r in Request, where: r.pool_id == ^setup.pool.id))
@@ -97,6 +97,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementExecutorKillTes
     assert %CodexTurn{status: "interrupted", error_code: "dead_execution_recovered"} = Repo.reload!(turn)
     assert ledger_kinds(request) == ["release", "reservation", "settlement"]
 
+    {conn, _websocket, terminal_frames} = receive_until_terminal(conn, websocket, ref, [])
+    assert %{"type" => "response.completed"} = List.last(terminal_frames)
+    assert %{"terminal_class" => "response.completed", "highest_frame_class" => "terminal"} = await_receipt!(attempt)
+
     socket_monitor = Process.monitor(socket)
     Mint.HTTP.close(conn)
     assert_receive {:DOWN, ^socket_monitor, :process, ^socket, _}, @detection_timeout_ms
@@ -111,6 +115,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementExecutorKillTes
     assert [_recovered, %Request{id: successor_id}] = await_settled!(setup)
     assert Repo.exists?(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^request.id and link.successor_request_id == ^successor_id))
     assert FakeUpstream.count(upstream) == 2
+  end
+
+  defp await_receipt!(attempt, remaining \\ 100)
+  defp await_receipt!(_attempt, 0), do: flunk("the socket recorded no delivery receipt")
+
+  defp await_receipt!(attempt, remaining) do
+    case Repo.reload!(attempt).response_metadata do
+      %{"downstream_delivery" => %{} = receipt} -> receipt
+      _pending -> Process.sleep(10) && await_receipt!(attempt, remaining - 1)
+    end
   end
 
   # The killed task's connection goes with it: PostgreSQL ends the backend and

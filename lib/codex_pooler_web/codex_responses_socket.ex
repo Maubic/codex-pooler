@@ -5534,8 +5534,18 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
       finalize_response_task_exception(opts, state)
     else
+      :ok = record_unreported_task_receipt(state, pid)
       DirectCleanup.cancel(context, "client_disconnected")
     end
+  end
+
+  # Preserve the server write observation even when a response task exits
+  # without handing over its settlement result. This is not a client ack.
+  defp record_unreported_task_receipt(state, pid) do
+    unless Map.has_key?(Map.get(state, :response_task_cleanup_results, %{}), pid),
+      do: record_downstream_delivery_receipt(state, pid, termination_receipt_outcome(state, pid, :aborted))
+
+    :ok
   end
 
   defp clear_direct_cleanup(state, pid) do

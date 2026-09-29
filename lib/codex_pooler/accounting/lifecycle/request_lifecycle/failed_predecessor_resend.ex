@@ -86,6 +86,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           | :previsible_disconnect
           | :undelivered_completion
           | :undelivered_partial_output
+          | :identical_resend
           | :completed_item_resend
           | :unreceived_compaction
           | :mailbox_continuation
@@ -174,10 +175,11 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
          attempt <- lock_final_attempt(turn, request.id),
          true <- ClientRetry.verified_dead_execution?(turn, request, attempt),
          {:ok, previous} <- execution_predecessor(request, turn, scope),
-         :ok <- validate_semantic_retry(request, :task_exception, Map.put(scope, :semantic_claim?, true), {previous, nil}),
+         shape <- if(completed_item_resend?(turn, request, attempt, scope), do: :completed_item_resend, else: :task_exception),
+         :ok <- validate_semantic_retry(request, shape, Map.put(scope, :semantic_claim?, true), {previous, nil}),
          :ok <- validate_retry_window(request, attempt, db_now(), scope),
          {:ok, resolved_claim} <- execution_successor_claim(claim, request) do
-      {:ok, %{claim: resolved_claim, predecessor: request, predecessor_shape: :task_exception, recovery_markers: if(marker, do: [marker], else: []), execution_recovery?: true}}
+      {:ok, %{claim: resolved_claim, predecessor: request, predecessor_shape: shape, recovery_markers: if(marker, do: [marker], else: []), execution_recovery?: true}}
     else
       {:error, _reason} = error -> error
       _invalid -> {:error, :terminal_predecessor}
@@ -334,6 +336,9 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     if chain_edges_only?(request, chain_edges), do: :ok, else: {:error, :terminal_predecessor}
   end
 
+  defp validate_semantic_retry(request, :identical_resend, %{semantic_claim?: false} = scope, chain_edges),
+    do: validate_semantic_retry(request, :identical_resend, Map.put(scope, :semantic_claim?, true), chain_edges)
+
   defp validate_semantic_retry(request, shape, %{semantic_claim?: true} = scope, chain_edges) do
     turn = lock_turn(request.id)
     attempt = lock_final_attempt(turn, request.id)
@@ -350,7 +355,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
              ClientRetry.verified_quota_rejection?(turn, request, attempt) or
              ClientRetry.verified_previous_response_miss?(turn, request, attempt) or
              ClientRetry.verified_provider_terminal_failure?(turn, request, attempt) or
-             shape in [:previsible_idle_timeout, :previsible_disconnect, :lifecycle_cut, :partial_reasoning_cut, :undelivered_completion, :undelivered_partial_output, :completed_item_resend, :unreceived_compaction] do
+             shape in [:previsible_idle_timeout, :identical_resend, :previsible_disconnect, :lifecycle_cut, :partial_reasoning_cut, :undelivered_completion, :undelivered_partial_output, :completed_item_resend, :unreceived_compaction] do
       :ok
     else
       _invalid -> {:error, :terminal_predecessor}
@@ -418,6 +423,9 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
 
       request.status in @live_request_statuses or is_nil(request.completed_at) ->
         {:error, :active_predecessor}
+
+      identical_resend?(request, scope) or completed_item_resend?(request, scope) ->
+        undelivered_completion(request, scope, now)
 
       request.status == "succeeded" ->
         undelivered_completion(request, scope, now)
@@ -513,13 +521,18 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     shape = undelivered_completion_shape(turn, request, attempt, scope)
 
     cond do
-      Map.get(scope, :semantic_claim?) != true and shape != :unreceived_compaction -> {:error, :terminal_predecessor}
+      not resend_claim_scope?(scope, shape) -> {:error, :terminal_predecessor}
       is_nil(shape) -> {:error, :terminal_predecessor}
       live_turn?(request.id) or live_attempt?(request.id) -> {:error, :active_predecessor}
       entitlement?(request.id) -> {:error, :entitlement_present}
       true -> with :ok <- validate_retry_window(request, attempt, now, scope, shape_retry_window_seconds(shape)), do: {:ok, shape}
     end
   end
+
+  defp resend_claim_scope?(_scope, :unreceived_compaction), do: true
+  defp resend_claim_scope?(%{semantic_claim?: true}, _shape), do: true
+  defp resend_claim_scope?(_scope, :identical_resend), do: true
+  defp resend_claim_scope?(_scope, _shape), do: false
 
   # A compaction the client never read is resent after the client's stream
   # idle timeout when its reply was lost silently, so it keeps the compaction
@@ -530,11 +543,26 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
 
   defp undelivered_completion_shape(turn, request, attempt, scope) do
     cond do
+      identical_resend?(turn, request, attempt, scope) -> :identical_resend
       ClientRetry.verified_unreceived_compaction?(turn, request, attempt) -> :unreceived_compaction
       ClientRetry.verified_undelivered_completion?(turn, request, attempt) -> :undelivered_completion
       ClientRetry.verified_undelivered_partial_output?(turn, request, attempt) -> :undelivered_partial_output
       completed_item_resend?(turn, request, attempt, scope) -> :completed_item_resend
       true -> nil
+    end
+  end
+
+  defp identical_resend?(request, scope) do
+    turn = lock_turn(request.id)
+    identical_resend?(turn, request, lock_final_attempt(turn, request.id), scope)
+  end
+
+  defp identical_resend?(turn, request, attempt, scope) do
+    with %ClientRetry.OriginalWitness{version: 1, digest: digest, alternates: alternates} <- Map.get(scope, :native_client_retry_witness),
+         true <- ClientRetry.witness_matches?(request.native_client_retry_digest, digest, alternates) do
+      ClientRetry.verified_identical_resend?(turn, request, attempt)
+    else
+      _mismatch -> false
     end
   end
 

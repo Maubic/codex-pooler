@@ -53,29 +53,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
   end
 
   for carrier <- [:header, :body] do
-    test "an identical native HTTP resend is refused and buys no second upstream dispatch (#{carrier})",
-         %{conn: conn} do
+    test "an identical native HTTP resend is served as a chained successor (#{carrier})", %{conn: conn} do
       upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_duplicate_turn"}))
       setup = gateway_setup(upstream)
       session = session_id()
-
       first = post_turn(conn, setup, session, @turn_id, where: unquote(carrier))
       assert %{"id" => "resp_duplicate_turn"} = json_response(first, 200)
-      assert FakeUpstream.count(upstream) == 1
-
       second = post_turn(conn, setup, session, @turn_id, where: unquote(carrier))
-
-      assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(second, 409)
-
-      # The whole point of the row: the provider is not paid a second time, and
-      # nothing was reserved, attempted or recorded for the refused resend.
-      assert FakeUpstream.count(upstream) == 1
-      assert [request] = pool_requests(setup)
-      assert Repo.aggregate(from(a in Attempt, where: a.request_id == ^request.id), :count) == 1
-
-      # A turn's opening request is named by the turn alone, exactly as the
-      # websocket path names it, so the claim survives a rebuilt retry body.
-      assert String.starts_with?(request.correlation_id, "codex-turn:")
+      assert %{"id" => "resp_duplicate_turn"} = json_response(second, 200)
+      assert FakeUpstream.count(upstream) == 2
+      assert [predecessor, successor] = pool_requests(setup)
+      assert Repo.exists?(from(link in CodexPooler.Accounting.RequestClientRetryLink, where: link.predecessor_request_id == ^predecessor.id and link.successor_request_id == ^successor.id))
+      assert String.starts_with?(predecessor.correlation_id, "codex-turn:")
     end
   end
 
@@ -104,7 +93,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
   # names the post-compaction window in its metadata. The metadata window is
   # the request's own and decides whether a request stands on a new window
   # (findings#282); the header never does.
-  test "an identical resend of the first post-compaction turn is fenced across a window rotation",
+  test "an identical resend of the first post-compaction turn is chained across a window rotation",
        %{conn: conn} do
     upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_window_rotation"}))
     setup = gateway_setup(upstream)
@@ -116,25 +105,25 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
     assert FakeUpstream.count(upstream) == 1
 
     resend = post_window_turn(conn, setup, session, thread, 2, @turn_id)
-    assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(resend, 409)
+    assert json_response(resend, 200)
 
     # The provider is not paid a second time and the refused resend records
     # nothing, exactly as a resend inside one window already did.
-    assert FakeUpstream.count(upstream) == 1
-    assert [opening_request] = pool_requests(setup)
+    assert FakeUpstream.count(upstream) == 2
+    assert [opening_request, retry_request] = pool_requests(setup)
     assert Repo.aggregate(from(a in Attempt, where: a.request_id == ^opening_request.id), :count) == 1
 
     # A genuinely new turn of the rotated window is still ordinary work.
     successor_turn_id = @turn_id <> "_successor"
     successor = post_window_turn(conn, setup, session, thread, 2, successor_turn_id)
     assert %{"id" => "resp_window_rotation"} = json_response(successor, 200)
-    assert FakeUpstream.count(upstream) == 2
+    assert FakeUpstream.count(upstream) == 3
 
     # And it continues the thread's session: a window whose own session is
     # missing follows the live session of the window right before it
     # (findings#289), which keeps the key of the window that opened it, while
     # the claim follows the thread.
-    assert [^opening_request, successor_request] = pool_requests(setup)
+    assert [^opening_request, ^retry_request, successor_request] = pool_requests(setup)
 
     assert opening_request.request_metadata["codex_session_key"] ==
              window_session_key(thread, 1)
@@ -173,7 +162,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
     %{status: status, code: code} = feature.duplicate_turn.public_error
 
     assert %{"error" => %{"code" => ^code}} =
-             json_response(post_turn(conn, setup, session, @turn_id), status)
+             json_response(post_turn(conn, setup, session, @turn_id, input: native_text_input("changed request")), status)
 
     assert [request] = pool_requests(setup)
     assert String.starts_with?(request.correlation_id, fixture.claim_prefixes.turn)
@@ -237,8 +226,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
              successor_prefix: "codex-request-retry:",
              requires_input_prefix_match: true,
              requires_delivered_output_receipt_match: true,
-             identical_retry_refused: true
+             identical_retry_refused: false
            }
+
+    assert contract.mailbox_resume.identical_retry_refused == false
   end
 
   test "the compatibility matrix claim shapes are the ones this route produces", %{conn: conn} do
@@ -351,7 +342,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
   # `http_sse`, which is exactly the transport that got a fresh UUID and a
   # second dispatch. The refusal lands before any upstream work, so the resend
   # is answered with the pre-dispatch JSON error rather than an event stream.
-  test "a streaming native HTTP turn is fenced on the http_sse transport", %{conn: conn} do
+  test "a streaming native HTTP turn is chained on the http_sse transport", %{conn: conn} do
     upstream = start_upstream(stream_success_sse())
     setup = gateway_setup(upstream)
     session = session_id()
@@ -361,10 +352,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
     assert FakeUpstream.count(upstream) == 1
 
     second = post_turn(conn, setup, session, @turn_id, stream: true)
-    assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(second, 409)
+    assert response(second, 200)
 
-    assert FakeUpstream.count(upstream) == 1
-    assert [%Request{transport: "http_sse"} = request] = pool_requests(setup)
+    assert FakeUpstream.count(upstream) == 2
+    assert [%Request{transport: "http_sse"} = request, %Request{}] = pool_requests(setup)
     assert Repo.aggregate(from(a in Attempt, where: a.request_id == ^request.id), :count) == 1
   end
 
@@ -535,13 +526,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
   # nothing is served; if a LATER attempt of that same turn delivers output and
   # is then resent, the fence must still be there to refuse it. With a fresh
   # UUID on fall-open it would not be.
-  test "a turn served past a zero-output failure is still fenced once it delivers output", %{
+  test "a turn served past a zero-output failure chains an identical resend after it delivers output", %{
     conn: conn
   } do
     upstream =
       start_upstream(
         FakeUpstream.strict_sequence([
           first_event_terminal_sse("response.failed", "server_error"),
+          stream_success_sse(),
           stream_success_sse()
         ])
       )
@@ -560,11 +552,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
     dispatched = FakeUpstream.count(upstream)
 
     # Attempt 3 would be the second dispatch of work already delivered.
-    assert %{"error" => %{"code" => "duplicate_turn"}} =
-             json_response(post_turn(conn, setup, session, @turn_id, stream: true), 409)
+    assert response(post_turn(conn, setup, session, @turn_id, stream: true), 200) =~ "response.completed"
 
-    assert FakeUpstream.count(upstream) == dispatched
-    assert length(pool_requests(setup)) == 2
+    assert FakeUpstream.count(upstream) == dispatched + 1
+    assert [^zero_output, ^delivered, successor] = pool_requests(setup)
+    assert_linked!(delivered, successor)
   end
 
   # The chain is bounded, and at the bound it stops DERIVING rather than
@@ -636,7 +628,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
   # The released client sends the canonical turn metadata in the request body's
   # `client_metadata` (`codex-rs/core/src/client.rs:893`); the header is a
   # bounded copy. A client that sends only the body must still be fenced.
-  test "the real client body shape is fenced without any turn metadata header", %{conn: conn} do
+  test "the real client body shape is chained without any turn metadata header", %{conn: conn} do
     upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_body_metadata"}))
     setup = gateway_setup(upstream)
     session = session_id()
@@ -662,10 +654,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
     end
 
     assert json_response(post_body.(), 200)
-    assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(post_body.(), 409)
+    assert json_response(post_body.(), 200)
 
-    assert FakeUpstream.count(upstream) == 1
-    assert [request] = pool_requests(setup)
+    assert FakeUpstream.count(upstream) == 2
+    assert [request, successor] = pool_requests(setup)
+    assert_linked!(request, successor)
     assert String.starts_with?(request.correlation_id, "codex-turn:")
     assert request.request_metadata["native_http_claim_arm"] == "opening"
   end
@@ -882,7 +875,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
       start_upstream(
         FakeUpstream.strict_sequence([
           FakeUpstream.json_response(%{"id" => "resp_reused_turn_id"}),
-          FakeUpstream.json_response(%{"id" => "resp_steered_turn_id"})
+          FakeUpstream.json_response(%{"id" => "resp_steered_turn_id"}),
+          FakeUpstream.json_response(%{"id" => "resp_steered_retry"})
         ])
       )
 
@@ -899,10 +893,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
     end
 
     assert json_response(steered.(), 200)
-    assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(steered.(), 409)
+    assert json_response(steered.(), 200)
 
-    assert FakeUpstream.count(upstream) == 2
-    assert [opener, steer] = pool_requests(setup)
+    assert FakeUpstream.count(upstream) == 3
+    assert [opener, steer, successor] = pool_requests(setup)
+    assert_linked!(steer, successor)
     assert String.starts_with?(opener.correlation_id, "codex-turn:")
     assert String.starts_with?(steer.correlation_id, "codex-resume:")
     assert steer.request_metadata["native_http_claim_arm"] == "steered_continuation"
@@ -1052,12 +1047,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
 
   # The other direction of the same change: serving the resume must not stop the
   # fence catching a genuine duplicate of it.
-  test "an identical post-compaction resume is still refused", %{conn: conn} do
+  test "an identical post-compaction resume is chained", %{conn: conn} do
     upstream =
       start_upstream(
         FakeUpstream.strict_sequence([
           FakeUpstream.json_response(%{"id" => "resp_resume_open"}),
-          FakeUpstream.json_response(%{"id" => "resp_resume_once"})
+          FakeUpstream.json_response(%{"id" => "resp_resume_once"}),
+          FakeUpstream.json_response(%{"id" => "resp_resume_again"})
         ])
       )
 
@@ -1072,13 +1068,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
 
     assert json_response(resume.(), 200)
 
-    before = pool_accounting_counts(setup)
-    dispatched = FakeUpstream.count(upstream)
-
-    assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(resume.(), 409)
-
-    assert FakeUpstream.count(upstream) == dispatched
-    assert pool_accounting_counts(setup) == before
+    assert json_response(resume.(), 200)
+    assert FakeUpstream.count(upstream) == 3
+    assert [_opening, previous, successor] = pool_requests(setup)
+    assert_linked!(previous, successor)
   end
 
   @tag mailbox_http_source: true
@@ -1091,6 +1084,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
         FakeUpstream.strict_sequence([
           FakeUpstream.json_response(%{"id" => "resp_mailbox_http_open"}),
           FakeUpstream.sse_stream([{"response.output_item.done", event}, {"response.reasoning_text.delta", %{"type" => "response.reasoning_text.delta", "delta" => "not delivered"}}], done: false),
+          stream_success_sse(),
           stream_success_sse()
         ])
       )
@@ -1114,9 +1108,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
 
     assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(post_continuation.(put_in(continuation, ["input", Elixir.Access.at(-2), "encrypted_content"], "changed")), 409)
     assert response(post_continuation.(continuation), 200) =~ "response.completed"
-    assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(post_continuation.(continuation), 409)
-    assert [_opener, %Request{transport: "http_sse", status: "failed", last_error_code: "client_disconnected"}, %Request{transport: "http_sse", status: "succeeded"}] = pool_requests(setup)
-    assert FakeUpstream.count(upstream) == 3
+    assert response(post_continuation.(continuation), 200) =~ "response.completed"
+    assert [_opener, %Request{transport: "http_sse", status: "failed", last_error_code: "client_disconnected"}, %Request{transport: "http_sse", status: "succeeded"} = previous, successor] = pool_requests(setup)
+    assert_linked!(previous, successor)
+    assert FakeUpstream.count(upstream) == 4
   end
 
   test "a post-compaction retry advanced by delivered output is served once", %{conn: conn} do
@@ -1151,6 +1146,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
             ],
             done: false
           ),
+          stream_success_sse(),
           stream_success_sse()
         ])
       )
@@ -1278,19 +1274,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
              200
            ) =~ "response.completed"
 
-    assert %{"error" => %{"code" => "duplicate_turn"}} =
-             json_response(
-               post_turn(conn, setup, session, @turn_id,
-                 where: :body,
-                 input: completed_input,
-                 stream: true
-               ),
-               409
-             )
+    assert response(post_turn(conn, setup, session, @turn_id, where: :body, input: completed_input, stream: true), 200) =~ "response.completed"
 
-    assert FakeUpstream.count(upstream) == 4
+    assert FakeUpstream.count(upstream) == 5
 
-    assert [open, first_resume, second_resume, completed_resume] = pool_requests(setup)
+    assert [open, first_resume, second_resume, completed_resume, successor] = pool_requests(setup)
+    assert_linked!(completed_resume, successor)
     assert open.request_metadata["native_http_claim_arm"] == "opening"
     assert first_resume.request_metadata["native_http_claim_arm"] == "post_compaction_resume"
     assert second_resume.request_metadata["native_http_claim_arm"] == "post_compaction_resume"
@@ -1479,7 +1468,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
   # the lowercase literal, but any intermediary that normalises the document
   # would otherwise disable the whole thing with a case change or a stray space.
   for {label, kind} <- [{"upper case", "TURN"}, {"a trailing space", "turn "}] do
-    test "a request_kind differing only by #{label} is still fenced", %{conn: conn} do
+    test "a request_kind differing only by #{label} is still chained", %{conn: conn} do
       upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_kind_case"}))
       setup = gateway_setup(upstream)
       session = session_id()
@@ -1489,11 +1478,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
 
       assert json_response(post_turn(conn, setup, session, @turn_id, document: document), 200)
 
-      assert %{"error" => %{"code" => "duplicate_turn"}} =
-               json_response(post_turn(conn, setup, session, @turn_id, document: document), 409)
+      assert json_response(post_turn(conn, setup, session, @turn_id, document: document), 200)
 
-      assert FakeUpstream.count(upstream) == 1
-      assert [request] = pool_requests(setup)
+      assert FakeUpstream.count(upstream) == 2
+      assert [request, successor] = pool_requests(setup)
+      assert_linked!(request, successor)
       assert String.starts_with?(request.correlation_id, "codex-turn:")
     end
   end
@@ -1570,7 +1559,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
   # The cut cohort retries up to the client's whole budget, and a transport
   # switch resets that counter, so one turn can reach double digits of
   # dispatches. One refusal is not the contract; every resend refusing is.
-  test "every further resend of one turn is refused, not only the second", %{conn: conn} do
+  test "every further identical resend chains onto its settled predecessor", %{conn: conn} do
     upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_repeated_resend"}))
     setup = gateway_setup(upstream)
     session = session_id()
@@ -1578,12 +1567,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
     assert json_response(post_turn(conn, setup, session, @turn_id), 200)
 
     for _resend <- 1..5 do
-      assert %{"error" => %{"code" => "duplicate_turn"}} =
-               json_response(post_turn(conn, setup, session, @turn_id), 409)
+      assert json_response(post_turn(conn, setup, session, @turn_id), 200)
     end
 
-    assert FakeUpstream.count(upstream) == 1
-    assert length(pool_requests(setup)) == 1
+    assert FakeUpstream.count(upstream) == 6
+    requests = pool_requests(setup)
+    assert length(requests) == 6
+    Enum.chunk_every(requests, 2, 1, :discard) |> Enum.each(fn [previous, successor] -> assert_linked!(previous, successor) end)
   end
 
   test "two genuinely different native HTTP turns both dispatch", %{conn: conn} do
@@ -1629,7 +1619,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
     logs =
       ExUnit.CaptureLog.capture_log([level: :info], fn ->
         assert %{"error" => %{"code" => "duplicate_turn"}} =
-                 json_response(post_turn(conn, setup, session, @turn_id), 409)
+                 json_response(post_turn(conn, setup, session, @turn_id, input: native_text_input("changed request")), 409)
       end)
 
     assert logs =~ "native http replay rejection"
@@ -1663,7 +1653,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
     refute_received {:duplicate_turn_refused, _measurements, _metadata}
 
     assert %{"error" => %{"code" => "duplicate_turn"}} =
-             json_response(post_turn(conn, setup, session, @turn_id), 409)
+             json_response(post_turn(conn, setup, session, @turn_id, input: native_text_input("changed request")), 409)
 
     assert_received {:duplicate_turn_refused, %{count: 1}, %{stage: "native_http_turn_claim", transport: "http"}}
     refute_received {:duplicate_turn_refused, _measurements, _metadata}
@@ -1899,6 +1889,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
     assert FakeUpstream.count(upstream) == 2
     assert length(pool_requests(setup)) == 2
     assert Repo.aggregate(CodexSession, :count) == 2
+  end
+
+  defp assert_linked!(previous, successor) do
+    assert Repo.exists?(from(link in CodexPooler.Accounting.RequestClientRetryLink, where: link.predecessor_request_id == ^previous.id and link.successor_request_id == ^successor.id))
   end
 
   defp assert_unfenced(conn, request) do

@@ -928,6 +928,19 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodecTest do
       end
     end
 
+    test "an opening after pre-turn compaction holds the claim its identical resend derives" do
+      input = [
+        %{"type" => "compaction", "encrypted_content" => "synthetic"},
+        %{"type" => "message", "role" => "user", "content" => "synthetic"}
+      ]
+
+      payload = native_request_claim_payload("turn-opening-after-compact", nil, input)
+      assert {:ok, prepared} = WebsocketCodec.prepare_frame(CodexPooler.JSON.encode!(payload), native_responses_options(payload), fn _ -> :ok end)
+      assert String.starts_with?(prepared.turn_claim_key, "codex-turn:")
+      assert WebsocketCodec.post_compaction_resume_claim(payload, prepared.request_options) == prepared.turn_claim_key
+      assert WebsocketCodec.post_compaction_resume_claim(Map.delete(payload, "client_metadata"), prepared.request_options) == prepared.turn_claim_key
+    end
+
     test "post-compaction resume uses the same payload-independent claim on HTTP and websocket" do
       turn_id = "turn-post-compaction-resume"
       session_id = "018f60df-713f-7ca8-b9a0-0d12c508a902"

@@ -59,12 +59,14 @@ defmodule CodexPooler.Accounting.ClientRetryChainTest do
     assert Repo.aggregate(RequestClientRetryLink, :count) == 3
   end
 
-  test "a served successor keeps the fence", ctx do
+  test "an identical resend chains onto a served successor", ctx do
     successor = claim_and_cut!(ctx)
     serve!(successor)
 
-    assert {:error, :successor_claimed} = preflight(ctx)
-    assert {:error, :successor_claimed} = Accounting.claim_client_retry_successor(ctx.setup.auth, ctx.setup.model, ctx.payload, ctx.opts)
+    assert {:ok, %{client_retry_predecessor_request_id: predecessor_id}} = preflight(ctx)
+    assert predecessor_id == successor.id
+    assert {:ok, claim} = Accounting.claim_client_retry_successor(ctx.setup.auth, ctx.setup.model, ctx.payload, ctx.opts)
+    assert claim.predecessor_request_id == successor.id
   end
 
   test "a successor holding a replay entitlement keeps the fence", ctx do

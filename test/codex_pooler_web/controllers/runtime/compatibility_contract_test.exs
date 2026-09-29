@@ -237,7 +237,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       compact: "owner_capability_plus_sealed_runtime_proof",
       final: "owner_capability_plus_sealed_runtime_proof",
       payload_shape_or_client_metadata_alone: "never_authoritative",
-      final_resume_claim: "durable_codex_resume_claim_so_an_identical_resend_is_refused"
+      final_resume_claim: "durable_codex_turn_or_resume_claim_so_a_verified_resend_is_chained"
     },
     binding: [
       "phase",
