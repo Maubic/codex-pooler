@@ -39,6 +39,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
   alias CodexPooler.Gateway.Websocket.DirectCleanup
   alias CodexPooler.Gateway.Websocket.OwnerCleanup
+  alias CodexPooler.Platform.InstancePresence
 
   defmodule ForwardedSendWitnessState do
     @moduledoc false
@@ -2533,7 +2534,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
           state
       end
 
-    continue_or_retire(state)
+    state
+    |> recheck_lease_after_unreachable_downstream(reason)
+    |> continue_or_retire()
   end
 
   def handle_info(
@@ -2613,22 +2616,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   end
 
   def handle_info(:renew_owner_lease, state) do
-    state = %{state | owner_renewal_ref: nil}
+    renew_owner_lease(%{state | owner_renewal_ref: nil}, &schedule_owner_renewal/1)
+  end
 
-    case Persistence.renew_owner_lease(state) do
-      {:ok, state} ->
-        state = touch_active_replay_liveness(state)
-        {:noreply, schedule_owner_renewal(state)}
+  # The early lease checks after a downstream became unreachable
+  # (`recheck_lease_after_unreachable_downstream/2`). A regular renewal that
+  # fired just before that DOWN may have scheduled its successor since, so the
+  # current timer is cancelled rather than forgotten: one renewal chain stays.
+  def handle_info({:renew_owner_lease, :unreachable_downstream, tries_left}, state) do
+    next =
+      if tries_left > 0,
+        do: &schedule_unreachable_downstream_lease_check(&1, tries_left - 1),
+        else: &schedule_owner_renewal/1
 
-      {:error, reason} when reason in [:stale_owner, :owner_unavailable] ->
-        Logger.owner_renewal_stale(reason, state)
-
-        {:stop, {:shutdown, :stale_owner}, state |> clear_native_compaction_admission(:stale_owner) |> Map.put(:draining?, true)}
-
-      {:error, reason} ->
-        Logger.owner_renewal_failed(reason, state)
-        {:noreply, schedule_owner_renewal(state)}
-    end
+    renew_owner_lease(cancel_owner_renewal(state), next)
   end
 
   def handle_info(
@@ -5496,6 +5497,55 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   end
 
   defp schedule_owner_renewal(state), do: state
+
+  defp renew_owner_lease(state, schedule_next) do
+    case Persistence.renew_owner_lease(state) do
+      {:ok, state} ->
+        state = touch_active_replay_liveness(state)
+        {:noreply, schedule_next.(state)}
+
+      {:error, reason} when reason in [:stale_owner, :owner_unavailable] ->
+        Logger.owner_renewal_stale(reason, state)
+
+        {:stop, {:shutdown, :stale_owner}, state |> clear_native_compaction_admission(:stale_owner) |> Map.put(:draining?, true)}
+
+      {:error, reason} ->
+        Logger.owner_renewal_failed(reason, state)
+        {:noreply, schedule_next.(state)}
+    end
+  end
+
+  # A downstream on a node this owner can no longer reach (DOWN
+  # `:noconnection`) is either a node that died or one cut off by a partition.
+  # After a partition, that node's socket closes, interrupts its turn and
+  # releases this owner's lease in the same leftovers, and the client's resend
+  # is served by a new owner there (findings#286). The owner used to learn
+  # that only at its next renewal, up to a renewal interval later, and a turn
+  # it kept `:lost` for a resend went on generating to nobody until then. It
+  # now checks its lease once that release, a single lease-row write, has had
+  # the budget the code gives such a write, and once more after another
+  # (`InstancePresence.heartbeat_write_budget_ms/0` each): a released lease
+  # stops it as a stale renewal always has. After a node death nobody
+  # releases the lease, both checks renew it, and a resend can still reattach
+  # to the `:lost` turn.
+  #
+  # Only the owner's own DOWN starts the checks. A silent partition is noticed
+  # on each side on its own, after the distribution tick timeout, so when this
+  # owner notices it before the other node has released the lease, the checks
+  # find the lease still its own and the regular renewal ends it later, as
+  # before.
+  defp recheck_lease_after_unreachable_downstream(%{owner_renewal_ref: ref} = state, :noconnection) when is_reference(ref) do
+    state
+    |> cancel_owner_renewal()
+    |> schedule_unreachable_downstream_lease_check(1)
+  end
+
+  defp recheck_lease_after_unreachable_downstream(state, _reason), do: state
+
+  defp schedule_unreachable_downstream_lease_check(state, tries_left) do
+    message = {:renew_owner_lease, :unreachable_downstream, tries_left}
+    %{state | owner_renewal_ref: Process.send_after(self(), message, InstancePresence.heartbeat_write_budget_ms())}
+  end
 
   defp forward_error_body?(%UpstreamWebsocketSession.Request{forward_error_body?: value}),
     do: value

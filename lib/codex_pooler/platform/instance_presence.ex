@@ -49,6 +49,12 @@ defmodule CodexPooler.Platform.InstancePresence do
   @spec heartbeat_interval_ms() :: pos_integer()
   def heartbeat_interval_ms, do: @heartbeat_interval_ms
 
+  @doc """
+  The budget one heartbeat write gets, checkout to commit.
+  """
+  @spec heartbeat_write_budget_ms() :: pos_integer()
+  def heartbeat_write_budget_ms, do: @heartbeat_write_budget_ms
+
   @spec liveness_window_seconds() :: pos_integer()
   def liveness_window_seconds, do: @liveness_window_seconds
 

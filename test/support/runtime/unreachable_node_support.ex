@@ -94,16 +94,19 @@ defmodule CodexPoolerWeb.Runtime.UnreachableNodeSupport do
     listener = %{id: :unreachable_node_listener, type: :supervisor, start: {Bandit, :start_link, [[plug: CodexPoolerWeb.Endpoint, port: 0, ip: {127, 0, 0, 1}, startup_log: false]]}}
     {:ok, server} = :erpc.call(peer_node, Supervisor, :start_child, [CodexPooler.Supervisor, listener])
     {:ok, {_ip, port}} = :erpc.call(peer_node, ThousandIsland, :listener_info, [server])
-    # The peer's telemetry relay commits its consumer heartbeat row; it goes
-    # once the peer is down, before the committed-write guard checks.
-    %{owner: relay_owner} = :erpc.call(peer_node, :sys, :get_state, [CodexPooler.Telemetry.RelayRuntime])
-
-    on_exit(fn ->
-      if Process.alive?(peer), do: :peer.stop(peer)
-      UnboxedFixture.run_unboxed(fn -> Repo.query!("DELETE FROM telemetry_relay_consumers WHERE owner = $1", [relay_owner]) end)
-    end)
-
+    :ok = stop_telemetry_relay!(peer_node)
     %{peer: peer, node: peer_node, port: port}
+  end
+
+  # The peer's telemetry relay, which runs on any node whose Repo is not the
+  # sandbox, commits a consumer heartbeat row at start and again every drain
+  # interval, and a heartbeat during a test fails the committed-write guard.
+  # Nothing here needs the relay: it is stopped and its row removed.
+  defp stop_telemetry_relay!(peer_node) do
+    %{owner: relay_owner} = :erpc.call(peer_node, :sys, :get_state, [CodexPooler.Telemetry.RelayRuntime])
+    :ok = :erpc.call(peer_node, Supervisor, :terminate_child, [CodexPooler.Supervisor, CodexPooler.Telemetry.RelayRuntime])
+    _deleted = UnboxedFixture.run_unboxed(fn -> Repo.query!("DELETE FROM telemetry_relay_consumers WHERE owner = $1", [relay_owner]) end)
+    :ok
   end
 
   # Halts the peer's VM: nothing runs there afterwards, its sockets and tasks
