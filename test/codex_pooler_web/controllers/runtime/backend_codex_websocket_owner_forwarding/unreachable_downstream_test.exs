@@ -20,7 +20,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   # turn, as for any other downstream loss. The owner then checks its lease a
   # write budget after the DOWN and once more after another: after a
   # partition the socket's node has released it, and the owner stops with
-  # the `:lost` turn; after a node death both checks renew it.
+  # the `:lost` turn; after a node death both checks renew it. A `:lost` turn
+  # that shows output with nobody reattached can no longer be rejoined, and
+  # the owner cancels it there (findings#290).
   #
   # Owner forwarding on, native route, the Pool's default serving mode, the
   # released client's frames. FakeUpstream on this node holds the turn at a
@@ -51,8 +53,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   @moduletag capture_log: true
 
   @deltas 10
-  # A turn that outlasts both lease checks.
-  @long_deltas 80
+  # A turn that outlasts both lease checks without showing anything: lifecycle
+  # events only, as a long pre-output phase, before its output.
+  @long_preamble 80
   @pace_ms 50
   @detection_timeout_ms 15_000
   # Frames the provider may still have sent before the owner heard of the cut
@@ -66,7 +69,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   setup_all do
     ensure_test_distribution_started!()
     {owner_peer, owner_node} = boot_tcp_owner_peer!()
-    %{owner_peer: owner_peer, owner_node: owner_node, app_peers: %{previsible: boot_app_peer!(), visible: boot_app_peer!()}}
+    %{owner_peer: owner_peer, owner_node: owner_node, app_peers: %{previsible: boot_app_peer!(), visible: boot_app_peer!(), late: boot_app_peer!(), reachable: boot_app_peer!()}}
   end
 
   setup do
@@ -106,7 +109,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
     @tag shown: :previsible
     @tag slow: "cuts a peer VM's owner off mid-turn and waits for its lease check to stop it"
     test "the owner keeps a turn that showed nothing until its lease check finds the lease released", ctx do
-      turn = start_turn!(ctx, :partition, deltas: @long_deltas)
+      turn = start_turn!(ctx, :partition, deltas: 2, preamble: @long_preamble)
 
       on_exit(fn -> heal!(ctx.owner_node) end)
       partition!(ctx.owner_node)
@@ -129,7 +132,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
     @tag shown: :previsible
     @tag slow: "cuts a peer VM's owner off mid-turn, delays the socket node's release past the first lease check and waits for the second"
     test "a lease the socket's node releases after the first check is found by the second", ctx do
-      turn = start_turn!(ctx, :partition, deltas: @long_deltas)
+      turn = start_turn!(ctx, :partition, deltas: 2, preamble: @long_preamble)
       [lease] = leases(turn.session_id)
 
       # The socket's node is slow to release: its socket takes the owner's
@@ -265,17 +268,70 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
       assert FakeUpstream.count(turn.upstream) == 2
       Scenario.close!(%{retry | conn: conn, websocket: websocket})
     end
+
+    @tag shown: :previsible, app_peer: :late
+    @tag slow: "halts the peer VM running the socket mid-turn and paces the provider to the turn's first output"
+    test "the owner stops a turn that showed nothing once it shows output with nobody reattached", ctx do
+      turn = start_turn!(ctx, :death)
+      lease_token = Repo.get!(CodexSession, turn.session_id).owner_lease_token
+
+      {_cancelled, log} =
+        with_info_log(fn ->
+          :ok = halt!(turn.app_peer.peer, turn.app_peer.node)
+          _lost = await_owner_state!(turn.owner, &lost_turn?/1, "the owner did not keep the turn for a resend")
+
+          # No resend comes before the turn's output (created, then its first delta).
+          :ok = pace!(turn.pacer, @pace_ms)
+          assert_turn_cancelled_at_once!(turn.pacer)
+        end)
+
+      assert log =~ "websocket owner cancelled a lost turn of an unreachable downstream at its first output"
+      assert %{active_turn: nil} = :sys.get_state(turn.owner)
+
+      # The turn showed output, so it waits for recovery under the owner's
+      # lease, and the client's late resend meets the refusal it met before.
+      assert {"in_progress", nil, nil} == request_outcome(turn.request_id)
+      assert %CodexTurn{status: "in_progress", first_visible_output_at: %DateTime{}} = Repo.get_by!(CodexTurn, request_id: turn.request_id)
+      assert [%BridgeOwnerLease{status: "active", lease_token: ^lease_token}] = leases(turn.session_id)
+      retry = Scenario.connect!(turn.port, turn.setup, Scenario.native_route(), turn.window)
+      {conn, websocket} = public_websocket_send_text!(retry.conn, retry.websocket, retry.ref, turn.frame)
+      {conn, websocket, refused} = receive_native_terminal!(conn, websocket, retry.ref)
+      assert %{"type" => "error", "status" => 409} = refused
+      assert FakeUpstream.count(turn.upstream) == 2
+      Scenario.close!(%{retry | conn: conn, websocket: websocket})
+    end
+  end
+
+  describe "the socket exits on a node the owner still reaches" do
+    @tag shown: :previsible, app_peer: :reachable
+    @tag slow: "kills the socket on a peer VM mid-turn and paces the provider past the turn's first output"
+    test "the owner keeps generating a turn that showed nothing past its first output", ctx do
+      turn = start_turn!(ctx, :death)
+      %{downstream: %{pid: socket}} = :sys.get_state(turn.owner)
+      assert node(socket) == turn.app_peer.node
+
+      Process.exit(socket, :kill)
+      _lost = await_owner_state!(turn.owner, &lost_turn?/1, "the owner did not keep the turn for a resend")
+      :ok = pace!(turn.pacer, @pace_ms)
+
+      # That node's task can still settle the turn: the owner goes on as
+      # before, output and all.
+      assert %{frames: frames, connection_down_at: nil} = await_frames!(turn.pacer, @frames_before_cancel + 3)
+      assert frames >= @frames_before_cancel + 3
+      assert %{active_turn: %{visible_output?: true}} = :sys.get_state(turn.owner)
+    end
   end
 
   # A socket whose turn the owner runs and FakeUpstream holds before any
   # frame (with `:visible`, after the created event and one delta the client
   # received). `:partition`: the owner on the TCP-controlled peer, the socket
-  # here. `:death`: the owner here, the socket on the application peer.
-  # `deltas:` sets the turn's length.
+  # here. `:death`: the owner here, the socket on the application peer (the
+  # test's `app_peer` tag, or its `shown` one). `deltas:` sets the turn's
+  # output, `preamble:` the lifecycle events before it.
   defp start_turn!(ctx, topology, opts \\ []) do
     release_ref = make_ref()
     pacer = start_pacer!(release_ref)
-    frames = turn_frames(Keyword.get(opts, :deltas, @deltas))
+    frames = turn_frames(Keyword.get(opts, :deltas, @deltas), Keyword.get(opts, :preamble, 0))
 
     upstream =
       start_upstream(
@@ -306,7 +362,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
           {first, _one} = Scenario.turn!(first, setup, "turn one")
           owner = socket_connection_state!(first.socket).websocket_owner_pid
           Scenario.close!(first)
-          app_peer = Map.fetch!(ctx.app_peers, ctx.shown)
+          app_peer = Map.fetch!(ctx.app_peers, Map.get(ctx, :app_peer, ctx.shown))
           {conn, websocket, ref, _headers} = public_websocket_connect_with_request_headers!(app_peer.port, setup, Ecto.UUID.generate(), Scenario.native_route(), [{"x-codex-window-id", window.id}])
           {%{conn: conn, websocket: websocket, ref: ref}, owner, app_peer}
       end
@@ -497,9 +553,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
 
   defp leases(session_id), do: Repo.all(from(l in BridgeOwnerLease, where: l.codex_session_id == ^session_id, order_by: [asc: l.created_at]))
 
-  defp turn_frames(count \\ @deltas) do
+  defp turn_frames(count \\ @deltas, preamble \\ 0) do
     created = %{"type" => "response.created", "response" => %{"id" => "resp_unreachable_turn", "status" => "in_progress"}}
-    deltas = for i <- 1..count, do: %{"type" => "response.output_text.delta", "delta" => "synthetic #{i} "}
+    in_progress = List.duplicate(%{"type" => "response.in_progress", "response" => %{"id" => "resp_unreachable_turn", "status" => "in_progress"}}, preamble)
+    deltas = in_progress ++ for i <- 1..count, do: %{"type" => "response.output_text.delta", "delta" => "synthetic #{i} "}
     completed = %{"type" => "response.completed", "response" => %{"id" => "resp_unreachable_turn", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 5, "output_tokens" => count, "total_tokens" => 5 + count}}}
     Enum.map([created | deltas] ++ [completed], &CodexPooler.JSON.encode!/1)
   end

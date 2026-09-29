@@ -136,6 +136,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger 
     )
   end
 
+  # A turn kept for a resend after its downstream's node became unreachable
+  # showed its first output with nobody reattached, and the owner cancelled
+  # it (findings#290).
+  @spec unreachable_lost_turn_cancelled(map()) :: :ok
+  def unreachable_lost_turn_cancelled(state) do
+    owner_event(:info, "websocket owner cancelled a lost turn of an unreachable downstream at its first output",
+      codex_session_id: state.codex_session_id,
+      owner_instance_id: state.owner_instance_id,
+      owner_pid: self()
+    )
+  end
+
   # The retry of a collected compaction whose socket had closed took it over
   # before that socket's own detach arrived, and was attached in its place
   # (findings#206 row 206-454).

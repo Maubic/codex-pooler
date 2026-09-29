@@ -2845,8 +2845,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
       {:forward, terminal?} ->
         case authorize_visible_delivery(state, payload) do
-          {:ok, state} -> relay_authorized_frame(state, payload, terminal?)
-          {:error, state} -> {:noreply, state}
+          {:ok, %{active_turn: %{visible_output?: true, lost_to_unreachable_node?: true, descriptor: %{downstream_status: :lost}}} = state} ->
+            cancel_unreachable_lost_turn(state)
+
+          {:ok, state} ->
+            relay_authorized_frame(state, payload, terminal?)
+
+          {:error, state} ->
+            {:noreply, state}
         end
     end
   end
@@ -5175,7 +5181,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     cond do
       replay_active?(state, state.downstream) ->
         case mark_active_downstream_lost(state, state.downstream) do
-          {:ok, lost} -> lost
+          {:ok, lost} -> remember_loss_reason(lost, reason)
           {:error, _reason} -> suspend_or_detach_downstream(state)
         end
 
@@ -5217,6 +5223,33 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp still_generating?(active_turn) do
     not Map.get(active_turn, :terminal_forwarded?, false) and is_nil(Map.get(active_turn, :pending_result)) and
       is_nil(Map.get(active_turn, :output_commit_probe))
+  end
+
+  # A `:lost` turn remembers whether its downstream's node became unreachable.
+  # Each loss sets it again, so a turn reattached and then lost to a socket
+  # that exits on a reachable node is not taken for one lost to a node.
+  defp remember_loss_reason(%{active_turn: active_turn} = state, reason) when is_map(active_turn),
+    do: %{state | active_turn: Map.put(active_turn, :lost_to_unreachable_node?, reason == :noconnection)}
+
+  defp remember_loss_reason(state, _reason), do: state
+
+  # A pre-visible turn kept `:lost` after its downstream's node became
+  # unreachable waits for a resend that rejoins it. Its first client-visible
+  # output ends that wait: the owner commits the turn's visibility, and from
+  # then on a resend meets `lifecycle_conflict` instead of reattaching. The
+  # owner used to generate the rest of the turn to nobody (findings#290). It
+  # now cancels it there, as it cancels a turn that had already shown output
+  # when its downstream's node went (`cancel_turn_of_unreachable_downstream/1`).
+  # A turn lost to a socket that exited on a reachable node keeps generating:
+  # that node's task can still settle it.
+  defp cancel_unreachable_lost_turn(%{active_turn: active_turn} = state) do
+    :ok = Logger.unreachable_lost_turn_cancelled(state)
+    terminate_predecessor_task(active_turn)
+    reply_active_turn(state, {:error, :client_disconnected})
+
+    state
+    |> finish_active_turn({:error, :client_disconnected})
+    |> continue_or_retire()
   end
 
   defp cancel_turn_of_unreachable_downstream(%{active_turn: active_turn, downstream: downstream} = state) do
