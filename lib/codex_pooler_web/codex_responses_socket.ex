@@ -1920,26 +1920,37 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
       match?({:response_task_failure, {:error, _reason}}, result) ->
         {:response_task_failure, {:error, reason}} = result
-        payload = encode_public_error(reason, state)
-        state = state |> record_downstream_terminal(pid, "error") |> finish_public_turn()
-        {:push, {:text, payload}, state}
+        public_turn_error_result(state, pid, {:unlogged, reason})
 
       match?({:response_task_result, {:error, _reason}}, result) ->
         {:response_task_result, {:error, reason}} = result
-        log_failed_native_websocket_turn(state, pid, reason)
-        payload = encode_public_error(reason, state)
-        state = state |> record_downstream_terminal(pid, "error") |> finish_public_turn()
-        {:push, {:text, payload}, state}
+        public_turn_error_result(state, pid, {:log, reason})
 
       match?({:error, _reason}, result) ->
         {:error, reason} = result
-        log_failed_native_websocket_turn(state, pid, reason)
-        payload = encode_public_error(reason, state)
-        state = state |> record_downstream_terminal(pid, "error") |> finish_public_turn()
-        {:push, {:text, payload}, state}
+        public_turn_error_result(state, pid, {:log, reason})
 
       true ->
         {:ok, finish_public_turn(state)}
+    end
+  end
+
+  # A public turn's own error is its terminal only while the client holds no
+  # terminal of that turn, the rule the owner-forwarded path already applies
+  # (`put_public_owner_turn_error/2`). An SDK that keeps the socket for its
+  # next response would otherwise read an error after the turn's
+  # `response.completed`, a task that failed in its settlement for instance
+  # (findings#270 row 270-346). The failure is logged and recorded on the
+  # rows; nothing more is sent.
+  defp public_turn_error_result(state, pid, {logging, reason}) do
+    if logging == :log, do: log_failed_native_websocket_turn(state, pid, reason)
+
+    if public_turn_terminal_sent?(state) do
+      log_turn_error_after_terminal(state, pid, downstream_delivery_evidence(state, pid), reason)
+      {:ok, finish_public_turn(state)}
+    else
+      payload = encode_public_error(reason, state)
+      {:push, {:text, payload}, state |> record_downstream_terminal(pid, "error") |> finish_public_turn()}
     end
   end
 
@@ -2074,7 +2085,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       "websocket turn error not sent after its terminal " <>
         "request_id=#{DiagnosticTaxonomy.safe_correlator(Adapter.request_id(response_task_opts(state, pid)))} " <>
         "codex_session_id=#{codex_session_id(state)} " <>
-        "terminal_class=#{evidence.terminal_class} " <>
+        "terminal_class=#{evidence.terminal_class || "none"} " <>
         "error_code=#{DiagnosticTaxonomy.reason_code(reason) || "none"}"
     )
   end
