@@ -86,8 +86,6 @@ api_key_model_discovery = true
 
 With a local Codex Pooler instance, change `base_url` to `http://localhost:4000/backend-api/codex` and `model_catalog_url` to `http://localhost:4000/backend-api/codex/models`. If your config file already has a `[features]` table, add `api_key_model_discovery = true` to it instead of starting a second one.
 
-When an interrupted Codex websocket turn reconnects, Pooler uses the current Codex turn identity to distinguish an exact retry from an edited replacement. An exact retry reconnects to the existing turn; an edited replacement waits only for a bounded safe cancellation handoff before it starts, rather than sitting until the client's idle watchdog expires.
-
 Leave `requires_openai_auth = true` unless you are deliberately running Codex Pooler as a gateway-only provider. With `true`, Codex still shows the local OpenAI/ChatGPT account as signed in, which keeps Codex Desktop and app-server features that depend on account state available. The Pool API key in `env_key` still authenticates requests to Codex Pooler.
 
 ### Model catalog discovery
