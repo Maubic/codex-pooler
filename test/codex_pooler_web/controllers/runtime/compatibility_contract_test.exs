@@ -2787,6 +2787,8 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       assert feature.contract =~
                "a failure of the turn's task after the turn's terminal reached the client, a success terminal followed by a settlement failure included, sends the client nothing more and is recorded on the turn's rows only"
 
+      assert feature.contract =~ "an error the turn's owner relays after that terminal is not sent either"
+
       assert feature.contract =~
                "every frame authored through the shared websocket error envelope classifies its error type from the same enumerated code vocabulary the HTTP relay uses instead of a catch-all default, so owner-lifecycle and overload codes carry error type server_error while a replaced or stale downstream carries invalid_request_error, and a code outside that vocabulary follows its status class alone, carrying rate_limit_error at 429 and server_error at any 5xx whatever the reason declares about its own retryability, defaulting independently to status 500 when its reason has no status and to wire code websocket_request_failed with error type server_error when its reason has no code and message"
 

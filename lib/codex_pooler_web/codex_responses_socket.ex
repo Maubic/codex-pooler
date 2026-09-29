@@ -1798,13 +1798,18 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   # An owner error on a native turn is that turn's terminal: the owner relays it
-  # only when it settles the turn, right before `:complete`. At most one error
-  # frame per turn reaches the client, and the first wins, whether it is this
-  # relayed error or one the socket already authored.
-  defp handle_non_public_owner_payload({:error, _reason, payload}, state) do
+  # only when it settles the turn, right before `:complete`. At most one
+  # terminal per turn reaches the client and the first wins: an owner error that
+  # comes after the turn's terminal went out (the provider's, or an error the
+  # socket authored) is logged and not sent, as the socket's own error is
+  # (`native_turn_error_result/3`, findings#270 rows 270-325 and 270-345).
+  defp handle_non_public_owner_payload({:error, reason, payload}, state) do
     case active_native_owner_turn_pid(state) do
       pid when is_pid(pid) ->
-        if downstream_error_terminal_pushed?(state, pid) do
+        evidence = downstream_delivery_evidence(state, pid)
+
+        if pushed_terminal_evidence?(evidence) do
+          log_turn_error_after_terminal(state, pid, evidence, reason)
           {:ok, state}
         else
           {:push, {:text, CodexPooler.JSON.encode!(client_error_event(payload, state))}, record_downstream_terminal(state, pid, "error")}
@@ -4567,12 +4572,6 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   defp clear_downstream_delivery_evidence(state, pid) do
     Map.update(state, :downstream_delivery_evidence, %{}, &Map.delete(&1, pid))
-  end
-
-  # An unskipped `error` terminal class is recorded only together with the push
-  # of an error frame for that turn.
-  defp downstream_error_terminal_pushed?(state, pid) when is_pid(pid) do
-    match?(%{terminal_class: "error", skipped?: false}, downstream_delivery_evidence(state, pid))
   end
 
   # Besides the count, the evidence keeps the highest class of frame pushed
