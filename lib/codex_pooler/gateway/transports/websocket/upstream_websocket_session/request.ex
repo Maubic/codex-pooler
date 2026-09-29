@@ -5,7 +5,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Requ
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl.TurnSnapshot
   alias CodexPooler.Gateway.Transports.Websocket.ForwardedOwnerRequestHandoff
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission.Capability
-  alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission.FirstCompactCollection
 
   defstruct [
     :url,
@@ -19,7 +18,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Requ
     :reset_probe,
     :native_codex_response_control,
     :native_compaction_capability,
-    :first_compact_collection,
     :native_compaction_metadata,
     :expected_connection_lifecycle,
     :forwarded_owner_send_handoff,
@@ -62,7 +60,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Requ
           reset_probe: ResetProbe.t() | nil,
           native_codex_response_control: TurnSnapshot.t() | nil,
           native_compaction_capability: Capability.t() | nil,
-          first_compact_collection: FirstCompactCollection.t() | nil,
           native_compaction_metadata: CodexPooler.Gateway.Payloads.NativeCodexTurnMetadata.t() | nil,
           expected_connection_lifecycle:
             CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.connection_lifecycle_state()

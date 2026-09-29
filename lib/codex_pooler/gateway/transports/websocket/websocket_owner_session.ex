@@ -2002,7 +2002,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
            },
            provisional_token: token,
            native_compaction_capability: nil,
-           first_compact_collection: nil,
            expected_connection_lifecycle: nil,
            forwarded_owner_send_handoff: nil
          } = request
@@ -2048,28 +2047,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
       {:error, _reason, next_state} ->
         {:error, :native_compaction_capability_rejected, next_state}
-    end
-  end
-
-  defp prepare_owner_admission_submission(
-         state,
-         _downstream,
-         %UpstreamWebsocketSession.Request{
-           native_compaction_capability: nil,
-           first_compact_collection:
-             %NativeCompactionAdmission.FirstCompactCollection{} =
-               provenance,
-           expected_connection_lifecycle: expected_lifecycle,
-           forwarded_owner_send_handoff: nil
-         } = request
-       ) do
-    if expected_lifecycle == %{
-         lifecycle_id: provenance.binding.lifecycle_id,
-         generation: provenance.binding.generation
-       } and NativeCompactionAdmission.FirstCompactCollection.valid?(provenance) do
-      {:ok, request, state, {:first_full_history_compact, provenance}}
-    else
-      {:error, :native_compaction_capability_rejected, clear_native_compaction_admission(state, :capability_rejected)}
     end
   end
 
@@ -3432,24 +3409,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   end
 
   defp settle_owner_admission_transport(
-         %{active_turn: %{admission_phase: {:first_full_history_compact, provenance}}} = state,
-         result
-       ) do
-    if completed_compaction_result?(result) do
-      case NativeCompactionAdmission.record_first_compact_collected(
-             state.native_compaction_admission,
-             provenance
-           ) do
-        {:ok, admission} -> put_admission(state, admission)
-        {:error, reason} -> clear_native_compaction_admission(state, reason)
-        {:error, _reason, admission} -> put_admission(state, admission)
-      end
-    else
-      clear_native_compaction_admission(state, :compact_failure)
-    end
-  end
-
-  defp settle_owner_admission_transport(
          %{active_turn: %{admission_phase: :final}} = state,
          result
        ) do
@@ -3987,12 +3946,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   # unqueued compaction.
   defp admission_turn_descriptor(%UpstreamWebsocketSession.Request{
          native_compaction_capability: %NativeCompactionAdmission.Capability{binding: %NativeCompactionAdmission.Binding{semantic_turn_key: key}}
-       })
-       when is_binary(key) and byte_size(key) == 32,
-       do: %{kind: :native, semantic_turn_key: key}
-
-  defp admission_turn_descriptor(%UpstreamWebsocketSession.Request{
-         first_compact_collection: %NativeCompactionAdmission.FirstCompactCollection{binding: %NativeCompactionAdmission.Binding{semantic_turn_key: key}}
        })
        when is_binary(key) and byte_size(key) == 32,
        do: %{kind: :native, semantic_turn_key: key}

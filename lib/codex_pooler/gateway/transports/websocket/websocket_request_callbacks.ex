@@ -89,8 +89,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks do
            Upstreams.get_upstream_identity(owner_request.upstream_identity_id),
          {:ok, message_mapper} <- mapper(owner_request.mapper) do
       capability = owner_request.owner_admission_capability
-      first_compact_collection = owner_request.first_compact_collection
-      binding = if capability, do: capability.binding, else: first_compact_collection.binding
+      binding = capability.binding
 
       {:ok,
        %Request{
@@ -108,7 +107,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks do
          attempt_id: owner_request.observation.attempt_id,
          native_client_retry_observation: native_client_retry_observation(owner_request.observation),
          native_compaction_capability: capability,
-         first_compact_collection: first_compact_collection,
          expected_connection_lifecycle: %{
            lifecycle_id: binding.lifecycle_id,
            generation: binding.generation

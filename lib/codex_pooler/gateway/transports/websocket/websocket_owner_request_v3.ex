@@ -2,7 +2,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV3 do
   @moduledoc false
 
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission.Capability
-  alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission.FirstCompactCollection
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequest
 
   @version 3
@@ -46,7 +45,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV3 do
           websocket_delivery_mode: :relay | :collect_compaction,
           effective_serving_mode: :full | :lite,
           owner_admission_capability: Capability.t() | nil,
-          first_compact_collection: FirstCompactCollection.t() | nil
+          first_compact_collection: nil
         }
   @type validation_error :: WebsocketOwnerRequest.validation_error()
 
@@ -95,15 +94,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV3 do
 
   defp validate_delivery(_request), do: {:error, {:invalid_field, :effective_serving_mode}}
 
+  # Only a reserved capability. Releases v0.6.13 to v0.6.15 also sent a first
+  # full-history compaction here with a provenance the owner had authorized
+  # before the send; since v0.7.0 the owner authorizes that collection after
+  # the exchange and never issues one before it, so such a request is refused
+  # as malformed, which the owner node answers `owner_unavailable` before any
+  # work (findings#270 row 270-204). The field stays, always `nil`, because
+  # every proxy since v0.7.0 sends it.
   defp validate_admission(%__MODULE__{
          owner_admission_capability: %Capability{},
          first_compact_collection: nil
-       }),
-       do: :ok
-
-  defp validate_admission(%__MODULE__{
-         owner_admission_capability: nil,
-         first_compact_collection: %FirstCompactCollection{}
        }),
        do: :ok
 

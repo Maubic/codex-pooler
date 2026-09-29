@@ -1172,12 +1172,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp emit_compact_acknowledged(nil),
     do: NativeCompactionAuthorizationObservation.emit(:compact_acknowledged, :direct)
 
-  @type consumed_admission_phase ::
-          :compact
-          | :final
-          | :native_replay
-          | {:first_full_history_compact, FirstCompactCollection.t()}
-          | nil
+  @type consumed_admission_phase :: :compact | :final | :native_replay | nil
 
   @spec consume_request_capability(map(), Request.t()) ::
           {:ok, map(), consumed_admission_phase()} | {:error, map()}
@@ -1187,7 +1182,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
            native_replay_binding: %NativeReplayAdmission.Binding{} = binding,
            native_replay_proof: %RuntimeAdmissionProof{} = proof,
            native_compaction_capability: nil,
-           first_compact_collection: nil,
            forwarded_owner_send_handoff: nil
          }
        ) do
@@ -1221,27 +1215,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       {:ok, put_admission(state, admission), capability.phase}
     else
       _rejected -> {:error, clear_admission(state, :stale_capability)}
-    end
-  end
-
-  defp consume_request_capability(
-         state,
-         %Request{
-           native_compaction_capability: nil,
-           first_compact_collection: %FirstCompactCollection{} = provenance,
-           expected_connection_lifecycle: expected_lifecycle,
-           forwarded_owner_send_handoff: nil
-         }
-       ) do
-    cond do
-      expected_lifecycle != connection_lifecycle_state(state) ->
-        {:error, clear_admission(state, :stale_capability)}
-
-      FirstCompactCollection.valid?(provenance) ->
-        {:ok, state, {:first_full_history_compact, provenance}}
-
-      true ->
-        {:error, clear_admission(state, :invalid_input)}
     end
   end
 
@@ -1313,41 +1286,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     state
   end
 
-  defp finalize_consumed_request(
-         state,
-         {:ok, %{terminal: terminal}},
-         {:first_full_history_compact, %FirstCompactCollection{} = provenance},
-         _request
-       )
-       when terminal in @completed_terminals do
-    case NativeCompactionAdmission.record_first_compact_collected(
-           admission_state(state),
-           provenance
-         ) do
-      {:ok, admission} -> put_admission(state, admission)
-      {:error, reason} -> clear_admission(state, collection_clear_reason(reason))
-      {:error, _reason, admission} -> put_admission(state, admission)
-    end
-  end
-
   defp finalize_consumed_request(state, _result, :compact, _request),
     do: clear_admission(state, :compact_failure)
 
   defp finalize_consumed_request(state, {:error, _result}, :final, _request),
     do: clear_admission(state, :final_failure)
 
-  defp finalize_consumed_request(
-         state,
-         _result,
-         {:first_full_history_compact, %FirstCompactCollection{}},
-         _request
-       ),
-       do: clear_admission(state, :compact_failure)
-
   defp finalize_consumed_request(state, _result, nil, _request), do: state
-
-  defp collection_clear_reason(:invalid_provenance), do: :invalid_input
-  defp collection_clear_reason(reason), do: reason
 
   defp maybe_record_successful_serving_mode(
          %{conn: _conn} = state,

@@ -25,7 +25,6 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.TransportFailureReason
   alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
-  alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.NativeReplayAdmission
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
@@ -92,7 +91,6 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
           required(:native_compaction_capability) =>
             CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission.Capability.t()
             | nil,
-          required(:first_compact_collection) => NativeCompactionAdmission.FirstCompactCollection.t() | nil,
           required(:expected_connection_lifecycle) => map() | nil,
           required(:forward_error_body?) => boolean(),
           required(:native_client_retry_observation) => ClientRetry.Observation.t() | nil,
@@ -554,7 +552,6 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       native_replay_binding: request_options.runtime.native_replay_binding,
       native_replay_proof: request_options.runtime.native_replay_proof,
       provisional_token: request_options.runtime.replay_provisional_token,
-      first_compact_collection: request_options.first_compact_collection,
       native_compaction_metadata:
         if(request_options.transport.websocket_delivery_mode == :collect_full_history,
           do: request_options.payload_context.native_codex_turn_metadata
@@ -944,13 +941,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
     case {request_data.websocket_delivery_mode, admission} do
       {delivery_mode, {:ok, capability, {:forwarded, _session, _lease, _downstream, _opts}, _lifecycle}}
       when delivery_mode in [:relay, :collect_compaction] ->
-        owner_request_v3(
-          attrs,
-          delivery_mode,
-          request_data.effective_serving_mode,
-          capability,
-          nil
-        )
+        owner_request_v3(attrs, delivery_mode, request_data.effective_serving_mode, capability)
 
       {:collect_full_history, :none} ->
         owner_full_history_envelope(attrs, request_data, request_options)
@@ -992,40 +983,32 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
     end
   end
 
+  # A collected compaction without an owner capability carries no admission:
+  # the owner authorizes a first full-history compaction's collection only
+  # after the exchange, from the upstream session's result receipt
+  # (findings#270 row 270-204).
   defp owner_collect_envelope(attrs, request_data, request_options) do
-    case request_options.first_compact_collection do
-      %NativeCompactionAdmission.FirstCompactCollection{} = collection ->
-        owner_request_v3(
-          attrs,
-          :collect_compaction,
-          request_data.effective_serving_mode,
-          nil,
-          collection
-        )
-
-      _no_collection ->
-        if collect_compaction_result?(request_options) do
-          attrs
-          |> Map.put(:version, 2)
-          |> Map.put(:websocket_delivery_mode, :collect_compaction)
-          |> Map.put(
-            :effective_serving_mode,
-            String.to_existing_atom(request_data.effective_serving_mode)
-          )
-          |> WebsocketOwnerRequestV2.new()
-        else
-          WebsocketOwnerRequest.new(Map.put(attrs, :version, 1))
-        end
+    if collect_compaction_result?(request_options) do
+      attrs
+      |> Map.put(:version, 2)
+      |> Map.put(:websocket_delivery_mode, :collect_compaction)
+      |> Map.put(
+        :effective_serving_mode,
+        String.to_existing_atom(request_data.effective_serving_mode)
+      )
+      |> WebsocketOwnerRequestV2.new()
+    else
+      WebsocketOwnerRequest.new(Map.put(attrs, :version, 1))
     end
   end
 
-  defp owner_request_v3(attrs, delivery_mode, serving_mode, capability, collection) do
+  defp owner_request_v3(attrs, delivery_mode, serving_mode, capability) do
     attrs
     |> Map.put(:version, 3)
     |> Map.put(:websocket_delivery_mode, delivery_mode)
     |> Map.put(:effective_serving_mode, String.to_existing_atom(serving_mode))
     |> Map.put(:owner_admission_capability, capability)
-    |> Map.put(:first_compact_collection, collection)
+    |> Map.put(:first_compact_collection, nil)
     |> WebsocketOwnerRequestV3.new()
   end
 
@@ -1052,13 +1035,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
         lifecycle
 
       _other ->
-        case request_options.first_compact_collection do
-          %NativeCompactionAdmission.FirstCompactCollection{binding: binding} ->
-            %{lifecycle_id: binding.lifecycle_id, generation: binding.generation}
-
-          nil ->
-            nil
-        end
+        nil
     end
   end
 
