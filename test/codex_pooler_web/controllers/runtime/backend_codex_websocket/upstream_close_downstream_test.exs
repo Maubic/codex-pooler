@@ -295,8 +295,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.UpstreamCloseDownstreamTe
 
   # A client frame that is not anchored on the closed connection's response
   # (here the turn resent whole) can be served on a fresh connection: it drops
-  # the close, waits behind the settling turn and is served, and the socket
-  # stays open.
+  # the close and is served, and the socket stays open. Nothing orders it
+  # behind the settling turn (it is no continuation), so its frames can reach
+  # the client before that turn settles: the test reads them up to the
+  # terminal before it checks that the socket still answers.
   test "a client frame not anchored on the closed connection's response keeps the socket open and is served" do
     hold = hold_settled_websocket_turn!()
     first_input = native_text_input("unanchored frame before decision")
@@ -326,8 +328,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.UpstreamCloseDownstreamTe
         _latched = await_socket_connection_state!(client.socket, &Map.has_key?(&1, :upstream_close_pending))
 
         {conn, websocket} = public_websocket_send_text!(conn, websocket, client.ref, frame.(first_input ++ [@tool_call, @tool_output], turn_id, %{}))
-        {conn, websocket} = socket_transport_barrier!(conn, websocket, client.ref)
-        refute Map.has_key?(socket_connection_state!(client.socket), :upstream_close_pending)
+        # The socket handled the frame: it dropped the close.
+        _dropped = await_socket_connection_state!(client.socket, &(not Map.has_key?(&1, :upstream_close_pending)))
 
         :ok = release_settled_websocket_turn(hold, task)
         {conn, websocket, served} = receive_native_terminal!(conn, websocket, client.ref)
