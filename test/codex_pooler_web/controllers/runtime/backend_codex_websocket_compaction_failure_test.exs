@@ -760,10 +760,17 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionFailureTest do
              Service.prepare_websocket_response(
                full_history_retry_payload,
                RequestOptions.capture_api_key_runtime_epoch(options, auth),
-               fn _frame -> flunk("a completed retry must not emit more compaction output") end
+               fn _frame -> flunk("preparing a resend must not emit compaction output") end
              )
 
-    assert {:error, %{code: "duplicate_turn"}} =
+    # A resend of the compaction under its claim is read as proof that the
+    # served retry's reply was lost, so it chains onto that retry, as with
+    # owner forwarding off (findings#270 row 270-237 (a)). It used to be
+    # refused `duplicate_turn`, which sent the released client to HTTPS for
+    # the rest of its session. Preparing it sends nothing.
+    [%RequestClientRetryLink{successor_request_id: served_retry}] = Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^request.id))
+
+    assert {:ok, %{intent: :fresh, lifecycle: %{client_retry_predecessor_request_id: ^served_retry}}} =
              Service.prepare_replay_intent(auth, repeated_retry)
 
     assert FakeUpstream.count(upstream) == 3

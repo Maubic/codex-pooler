@@ -5,7 +5,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
 
   import Ecto.Query
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
-  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [hold_settled_websocket_turn!: 0, model_serving_scope: 0, release_settled_websocket_turn: 2, set_model_serving_mode!: 3]
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [enter_peer_owner_topology!: 0, start_peer_window_owner!: 2]
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink, RequestReplayEntitlement}
@@ -44,6 +44,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
   @anchor "resp_fullhist_cut_anchor0000001"
   @cut_response "resp_fullhist_cut_compact_cut01"
   @resend_response "resp_fullhist_cut_compact_resnd"
+  @lost_resend_response "resp_fullhist_cut_compact_lost2"
   @final_response "resp_fullhist_cut_final00000001"
   @lite_marker "ws_request_header_x_openai_internal_codex_responses_lite"
   @compact_endpoint "/backend-api/codex/responses/compact"
@@ -83,6 +84,29 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
                successor_chained?: true,
                max_charges_per_request: 1,
                upstream_compactions: 2,
+               live_rows: 0
+             }
+    end
+  end
+
+  # The released client resends a remote compaction whose reply it did not
+  # read up to twice (findings#270 row 270-237 (a); the released Codex 0.159.0
+  # observed with owner forwarding on and off). Here the provider serves the
+  # compaction and its first resend, both settle succeeded, and neither reply
+  # reaches the client, who left before it; the second resend is the first
+  # resend's successor and is served on the websocket in both topologies. With
+  # owner forwarding on it used to be refused `409 duplicate_turn` (the first
+  # resend, itself a successor, counted as a spent retry), and the client fell
+  # back to HTTPS for the rest of its session.
+  for mode <- ["full", "lite"], topology <- [:forwarded, :direct] do
+    @tag mode: mode, topology: topology
+    test "#{mode} #{topology} full-history compaction whose reply is lost twice: the second resend chains onto the first", %{mode: mode, topology: topology} do
+      assert run_lost_twice(mode, topology) == %{
+               deliveries: [:lost, :lost, :served],
+               chain: :linked,
+               compactions: ["succeeded", "succeeded", "succeeded"],
+               max_charges_per_request: 1,
+               upstream_compactions: 3,
                live_rows: 0
              }
     end
@@ -150,6 +174,83 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
              }
     end
   end
+
+  defp run_lost_twice(mode, topology) do
+    put_owner_forwarding!(topology == :forwarded)
+    ctx = %{mode: mode}
+    compaction = [valid: true, equals: lite_marker_expectation(%{"type" => "response.create"}, mode), forbidden: ["previous_response_id"]]
+
+    upstream =
+      start_upstream(
+        FakeUpstream.strict_sequence([
+          FakeUpstream.expect_request(method: "WEBSOCKET", json: [valid: true, equals: %{"type" => "response.create"}], respond: completed_frames(@anchor, [answer()])),
+          FakeUpstream.expect_request(method: "WEBSOCKET", json: compaction, respond: compaction_frames(compaction_item("lost-first"), @cut_response)),
+          FakeUpstream.expect_request(method: "WEBSOCKET", json: compaction, respond: compaction_frames(compaction_item("lost-second"), @lost_resend_response)),
+          FakeUpstream.expect_request(method: "WEBSOCKET", json: compaction, respond: compaction_frames(compaction_item("resend"), @resend_response)),
+          FakeUpstream.expect_request(method: "WEBSOCKET", json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]], respond: completed_frames(@final_response, []))
+        ])
+      )
+
+    setup = gateway_setup(upstream, compact?: true)
+    if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    ctx = Map.put(ctx, :setup, setup)
+    port = start_public_endpoint!()
+
+    first = connect!(port, setup)
+    first = ordinary_turn!(first, turn_frame(ctx))
+    Mint.HTTP.close(first.conn)
+    await!(fn -> match?([%Request{status: "succeeded"}], pool_requests(setup.pool.id)) end, "the first turn never settled")
+
+    deliveries = [lose_compaction_reply!(ctx, port, 1), lose_compaction_reply!(ctx, port, 2), full_history_resend!(ctx, port)]
+    rows = await_no_live_requests(setup.pool.id)
+    compactions = Enum.filter(rows, &(&1.endpoint == @compact_endpoint))
+
+    measured = %{
+      deliveries: deliveries,
+      chain: chain_state(compactions),
+      compactions: Enum.map(compactions, & &1.status),
+      max_charges_per_request: compactions |> Enum.map(&charges/1) |> Enum.max(),
+      upstream_compactions: upstream |> FakeUpstream.requests() |> Enum.count(&compaction_request?/1),
+      live_rows: Enum.count(rows, &(&1.status in ["accepted", "in_progress"]))
+    }
+
+    CodexPooler.TestDiagnostics.puts(fn -> "270-237 #{mode} #{topology} lost twice: #{inspect(measured)}" end)
+    measured
+  end
+
+  # One compaction the provider serves whose reply its client never reads: its
+  # task is held right after its settlement while the client leaves, and the
+  # compaction has settled once its task is let go.
+  defp lose_compaction_reply!(ctx, port, served) do
+    client = connect!(port, ctx.setup)
+    hold = hold_settled_websocket_turn!()
+    _client = send_frame!(client, full_history_compaction_frame(ctx))
+    assert_receive {^hold, :held, task}, @settle_timeout_ms
+    Mint.HTTP.close(client.conn)
+    :ok = release_settled_websocket_turn(hold, task)
+
+    await!(
+      fn -> Enum.count(pool_requests(ctx.setup.pool.id), &(&1.endpoint == @compact_endpoint and &1.status == "succeeded")) == served end,
+      "the served compaction never settled"
+    )
+
+    :lost
+  end
+
+  # The compaction, its first resend and its second resend, each the successor
+  # of the one before.
+  defp chain_state([original, first, second]) do
+    if resend_predecessor(first) == original.id and resend_predecessor(second) == first.id,
+      do: :linked,
+      else: {:unlinked, resend_predecessor(first), resend_predecessor(second)}
+  end
+
+  defp chain_state(compactions), do: {:compactions, length(compactions)}
+
+  defp resend_predecessor(%Request{request_metadata: %{"client_resend" => %{"predecessor_request_id" => predecessor}}}) when is_binary(predecessor), do: predecessor
+
+  defp resend_predecessor(%Request{id: request_id}),
+    do: Repo.one(from(link in RequestClientRetryLink, where: link.successor_request_id == ^request_id, select: link.predecessor_request_id))
 
   defp run_turn_completion_window(mode) do
     put_owner_forwarding!(false)

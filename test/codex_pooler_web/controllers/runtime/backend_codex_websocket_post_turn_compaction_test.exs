@@ -897,7 +897,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
         retry_frame = mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1)
         {state, frames} = run_turn_frames!(state, retry_frame)
         assert [%{"type" => "response.output_item.done", "item" => ^compact_item}, %{"type" => "response.completed", "response" => %{"id" => "resp_guard_refusal_retry", "output" => [^compact_item]}}] = frames
-        state = second_resend_after_retry!(topology, state, retry_frame, upstream)
         {_state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
         assert [%{"type" => "response.completed", "response" => %{"id" => "resp_guard_refusal_final"}}] = frames
 
@@ -1081,20 +1080,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
       end
     end
   end
-
-  # One successor only: with owner forwarding on, a second full-history
-  # resend after the served retry is refused and reaches no provider. With
-  # forwarding off a resend of a served compaction is read as proof that its
-  # reply was lost and chains onto it (`FailedPredecessorResend`), a rule
-  # findings#278 does not change.
-  defp second_resend_after_retry!(:owner_forwarded, state, retry_frame, upstream) do
-    assert {:push, {:text, refusal}, state} = CodexResponsesSocket.handle_in({retry_frame, [opcode: :text]}, state)
-    assert %{"status" => 409, "error" => %{"code" => "duplicate_turn"}} = CodexPooler.JSON.decode!(refusal)
-    assert [_anchor_request, _retry_request] = FakeUpstream.requests(upstream)
-    state
-  end
-
-  defp second_resend_after_retry!(:direct, state, _retry_frame, _upstream), do: state
 
   # With owner forwarding on, the client's final can reach the owner before
   # the owner hears that its session closed the connection the admission names

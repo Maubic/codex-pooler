@@ -1324,6 +1324,15 @@ defmodule CodexPooler.Accounting.ClientRetry do
       Repo.one(from(turn in query, order_by: [desc: turn.turn_sequence]))
   end
 
+  # The newest compaction of the turn is the predecessor once it settled, a
+  # successor included: the resend chains onto it (findings#270 row 270-237
+  # (a)). A successor still unsettled (claimed and never attempted, or still
+  # running) is judged from its own predecessor, which reclaims it or answers
+  # `successor_claimed`.
+  defp resolve_predecessor_turn(%CodexTurn{status: status, completed_at: %DateTime{}} = turn, %{retry_policy: :native_compaction})
+       when status != "in_progress",
+       do: turn
+
   defp resolve_predecessor_turn(turn, %{retry_policy: :native_compaction}) do
     # A claimed successor may be reclaimed, but a newer unrelated turn must
     # never let this lookup revive an older eligible compaction.
@@ -1370,7 +1379,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
        ) do
     with :ok <- validate_authorization(session, api_key, model, request, input),
          {:ok, witness_match} <- validate_policy_witness(request, input),
-         :ok <- validate_original_claim(request),
+         :ok <- validate_predecessor_claim(session, turn, request, input),
          :ok <- maybe_validate_owner_idle(session, owner_lease, input, db_now),
          :ok <- validate_policy_lineage(lineage, request.id, input),
          :ok <- validate_no_entitlement(entitlement),
@@ -2260,6 +2269,41 @@ defmodule CodexPooler.Accounting.ClientRetry do
     if reserved_successor_claim?(correlation_id), do: {:error, :retry_exhausted}, else: :ok
   end
 
+  # A native compaction's resends chain (findings#270 row 270-237 (a)). The
+  # released client resends a remote compaction whose reply it did not read
+  # up to twice, so a successor whose own reply was lost is the predecessor of
+  # the next resend. With owner forwarding off `FailedPredecessorResend`
+  # chains it; this policy refused it `retry_exhausted`, and the client spent
+  # its last websocket retry on a `409 duplicate_turn` and fell back to HTTPS
+  # for the rest of its session (the released Codex 0.159.0, observed). Only a
+  # successor this policy admitted for the same resend qualifies: its claim is
+  # the one derived from the request its link names as its predecessor, in the
+  # same scope, session and semantic turn. Any other successor claim has spent
+  # its retry.
+  defp validate_predecessor_claim(session, turn, %Request{correlation_id: claim} = request, %{retry_policy: :native_compaction} = input) do
+    cond do
+      not reserved_successor_claim?(claim) -> :ok
+      compaction_chain_edge?(session, turn, request, input) -> :ok
+      true -> {:error, :retry_exhausted}
+    end
+  end
+
+  defp validate_predecessor_claim(_session, _turn, request, _input), do: validate_original_claim(request)
+
+  defp compaction_chain_edge?(session, %CodexTurn{} = turn, %Request{} = request, input) do
+    with %RequestClientRetryLink{predecessor_request_id: predecessor_id} <-
+           Repo.one(from(link in RequestClientRetryLink, where: link.successor_request_id == ^request.id)),
+         %Request{} = predecessor <- Repo.get(Request, predecessor_id),
+         true <- chain_node_scoped?(request, predecessor, turn, session, input),
+         {:ok, derived} <- deterministic_compaction_successor_claim(predecessor, turn, Map.get(input, :replay_claim_digest)) do
+      secure_compare(request.correlation_id, derived)
+    else
+      _not_this_policys_edge -> false
+    end
+  end
+
+  defp compaction_chain_edge?(_session, _turn, _request, _input), do: false
+
   defp lock_owner_lease(%CodexSession{owner_lease_token: nil}), do: nil
 
   defp lock_owner_lease(%CodexSession{} = session) do
@@ -2347,6 +2391,11 @@ defmodule CodexPooler.Accounting.ClientRetry do
     end
   end
 
+  # A compaction's lineage is its outgoing link: the successor it may reclaim,
+  # or one already claimed. The link naming it as a successor is its chain's
+  # own edge, which `validate_predecessor_claim/4` checks (findings#270 row
+  # 270-237 (a)); it used to decide instead, refusing every chained
+  # predecessor `retry_exhausted`.
   defp lock_lineage(request_id, %{retry_policy: :native_compaction}) do
     # Dispatch locks the successor request before its link. Preserve that order
     # when reclaiming; the caller already holds the session and predecessor.
@@ -2358,7 +2407,11 @@ defmodule CodexPooler.Accounting.ClientRetry do
       nil -> :ok
     end
 
-    lock_lineage(request_id, %{})
+    Repo.one(
+      from link in RequestClientRetryLink,
+        where: link.predecessor_request_id == ^request_id,
+        lock: "FOR UPDATE"
+    )
   end
 
   # A request carries at most one link on each side (both sides of

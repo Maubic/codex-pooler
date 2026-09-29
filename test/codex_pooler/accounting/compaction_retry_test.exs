@@ -790,6 +790,97 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
     end
   end
 
+  # The released client resends a remote compaction whose reply it did not
+  # read up to twice, so a successor whose own reply was lost is the next
+  # resend's predecessor, as with owner forwarding off
+  # (findings#270 row 270-237 (a)).
+  describe "a compaction's resend chain" do
+    test "chains the next resend onto a settled successor, under the claim derived from it" do
+      {setup, original, opts} = predecessor!("client_disconnected", 0)
+      assert {:ok, first} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+      assert first.predecessor_request_id == original.id
+      settle_successor!(setup, first, :disconnected)
+
+      assert {:ok, second} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+      assert second.predecessor_request_id == first.request.id
+      refute second.request.id in [original.id, first.request.id]
+      assert second.codex_turn.turn_sequence == 3
+
+      assert {:ok, derived} = ClientRetry.deterministic_compaction_successor_claim(Repo.get!(Request, first.request.id), second.codex_turn, opts.replay_claim_digest)
+      assert second.request.correlation_id == derived
+
+      assert Enum.sort(Repo.all(from(link in RequestClientRetryLink, select: {link.predecessor_request_id, link.successor_request_id}))) ==
+               Enum.sort([{original.id, first.request.id}, {first.request.id, second.request.id}])
+    end
+
+    test "refuses a settled successor this policy did not derive for the resend" do
+      {setup, _original, opts} = predecessor!("client_disconnected", 0)
+      assert {:ok, first} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+      settle_successor!(setup, first, :disconnected)
+      update!(Repo.get!(Request, first.request.id), correlation_id: "client-retry-v1:compaction:" <> Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false))
+      counts = row_counts()
+
+      assert {:error, :retry_exhausted} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+      assert row_counts() == counts
+    end
+
+    test "reclaims an unattempted successor of a settled successor" do
+      {setup, _original, opts} = predecessor!("client_disconnected", 0)
+      opts = live_owner!(setup, opts)
+      assert {:ok, first} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, forwarding_opts(opts, 1))
+      settle_successor!(setup, first, :disconnected)
+      assert {:ok, second} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, forwarding_opts(opts, 2))
+      counts = row_counts()
+
+      assert {:ok, reclaimed} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, forwarding_opts(opts, 3))
+      assert reclaimed.request.id == second.request.id
+      assert reclaimed.codex_turn.id == second.codex_turn.id
+      assert reclaimed.link == second.link
+      assert reclaimed.predecessor_request_id == first.request.id
+      assert row_counts() == counts
+    end
+
+    test "keeps a running successor of a settled successor, and chains onto it once it was served and its reply lost" do
+      {setup, _original, opts} = predecessor!("client_disconnected", 0)
+      opts = live_owner!(setup, opts)
+      assert {:ok, first} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, forwarding_opts(opts, 1))
+      settle_successor!(setup, first, :disconnected)
+      assert {:ok, second} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, forwarding_opts(opts, 2))
+      attempt = CodexPooler.PoolerFixtures.attempt_fixture(second.request, setup.assignment, %{transport: "websocket", replay_generation: 0})
+      counts = row_counts()
+
+      assert {:error, :successor_claimed} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, forwarding_opts(opts, 3))
+      assert row_counts() == counts
+
+      settle_successor!(setup, second, :served, attempt)
+      assert {:ok, third} = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, forwarding_opts(opts, 4))
+      assert third.predecessor_request_id == second.request.id
+      refute third.request.id == second.request.id
+    end
+  end
+
+  # A claimed successor as its settlement leaves it once it ran: its client left
+  # before the reply (`client_disconnected` everywhere), or the provider served
+  # it and its reply was lost (`succeeded`).
+  defp settle_successor!(setup, claim, outcome, attempt \\ nil) do
+    %{rows: [[now]]} = Repo.query!("SELECT clock_timestamp()")
+    attempt = attempt || CodexPooler.PoolerFixtures.attempt_fixture(claim.request, setup.assignment, %{transport: "websocket", replay_generation: 0})
+
+    {request_attrs, turn_attrs, attempt_attrs} =
+      case outcome do
+        :disconnected ->
+          {[status: "failed", last_error_code: "client_disconnected"], [status: "interrupted", error_code: "client_disconnected"], [status: "failed", network_error_code: "client_disconnected"]}
+
+        :served ->
+          {[status: "succeeded"], [status: "succeeded"], [status: "succeeded"]}
+      end
+
+    update!(Repo.get!(Attempt, attempt.id), attempt_attrs ++ [completed_at: now])
+    update!(Repo.get!(Request, claim.request.id), request_attrs ++ [completed_at: now])
+    update!(Repo.get!(CodexTurn, claim.codex_turn.id), turn_attrs ++ [final_attempt_id: attempt.id, completed_at: now])
+    :ok
+  end
+
   defp live_owner!(setup, opts) do
     now = DateTime.utc_now()
     expires_at = DateTime.add(now, 60, :second)
