@@ -11,7 +11,8 @@ defmodule CodexPoolerWeb.Runtime.NativeWebsocketRateLimitsTest do
   # an unknown control included, reaches the client unchanged.
   #
   # Topology: the real public listener, native websocket
-  # `/backend-api/codex/responses`, one node with owner forwarding off (the
+  # `/backend-api/codex/responses` (and its `/backend-api/codex/v1/responses`
+  # alias, forwarding off, Full), one node with owner forwarding off (the
   # socket's own upstream session) and on (the session's owner on this node),
   # the Pool's serving mode forced to Full and to Lite; and a second VM owning
   # the session (forwarding on, remote owner, the Pool's default mode, which
@@ -59,6 +60,26 @@ defmodule CodexPoolerWeb.Runtime.NativeWebsocketRateLimitsTest do
       assert_served_turn!(upstream, ctx.serving_mode)
       assert_recorded_window!(setup, reset_at)
     end
+  end
+
+  # The alias route runs the same native socket.
+  test "the /backend-api/codex/v1/responses alias keeps codex.rate_limits from the client the same way" do
+    put_owner_forwarding!(false)
+    reset_at = DateTime.utc_now() |> DateTime.add(3_600, :second) |> DateTime.truncate(:second)
+    upstream = start_turn_upstream!(reset_at)
+    setup = gateway_setup(upstream)
+    set_model_serving_mode!(model_serving_scope(), setup, "full")
+    assert :ok = CodexPooler.Events.subscribe_pool(setup.pool)
+    {_server, port} = start_public_endpoint_with_server!()
+    thread = "native-rate-limits-alias-#{System.unique_integer([:positive])}"
+    client = connect!(port, setup, thread, "/backend-api/codex/v1/responses")
+    assert_one_node_topology!(client, :off)
+
+    texts = turn_texts!(client, setup, thread)
+
+    assert_relayed_without_rate_limits!(texts, provider_frames(reset_at))
+    assert_served_turn!(upstream, "full")
+    assert_recorded_window!(setup, reset_at)
   end
 
   # The frame crosses nodes on the owner path: the owner's upstream session
@@ -114,9 +135,9 @@ defmodule CodexPoolerWeb.Runtime.NativeWebsocketRateLimitsTest do
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, enabled?)
   end
 
-  defp connect!(port, setup, thread) do
+  defp connect!(port, setup, thread, path \\ @turn_path) do
     before = WebsocketCleanupFence.listener_sockets()
-    {conn, websocket, ref} = public_websocket_connect!(port, setup, thread, @turn_path)
+    {conn, websocket, ref} = public_websocket_connect!(port, setup, thread, path)
     socket = WebsocketCleanupFence.await_new_listener_socket!(before)
     %{conn: conn, websocket: websocket, ref: ref, socket: socket}
   end

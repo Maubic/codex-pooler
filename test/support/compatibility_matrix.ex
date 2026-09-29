@@ -703,6 +703,19 @@ defmodule CodexPooler.CompatibilityMatrix do
       contract: "with owner forwarding on, a websocket monitors its session's websocket owner whether the owner runs on its node or another; when the owner exits without crashing (drained or stopped) a native backend websocket closes its client with the fixed 1001 websocket owner is draining once idle and sends no owner_drained event to the idle client, so the released client sends its next request whole on a new socket, which takes the session over; the close is latched when the exit is seen, waits for the socket to go idle and names every close it does not act on with a fixed skip reason (a client frame first, a queued frame, the public route, a revoked key, a pending handoff, an active-turn reconnect); a socket kept open, the public /v1/responses websocket among them, which is never closed this way, takes the session over before its next request reaches an owner by compare-and-set on the owner and lease it still holds, so a session another socket already took keeps the owner_unavailable refusal; an owner that crashed (killed, its upstream connection process gone, its node disconnected) closes the socket with the fixed 1011 websocket owner crashed at once; each close logs one fixed line naming how the owner went and whether it ran on this node or another"
     },
     %{
+      slug: :native_websocket_provider_controls,
+      status: :supported,
+      current: :served_account_rate_limits_dropped,
+      categories: [:streaming, :ownership],
+      routes: [
+        %{method: :get, path: "/backend-api/codex/responses", transport: :websocket},
+        %{method: :get, path: "/backend-api/codex/v1/responses", transport: :websocket}
+      ],
+      future_routes: [],
+      fixture: :native_websocket_provider_controls,
+      contract: "with owner forwarding off or on, the session's owner on this node or on another, and the Pool serving the model Full or Lite, a native backend websocket never sends its client the provider's codex.rate_limits frame: the frame carries the windows of the one upstream account that served the turn, which the released Codex client shows as the user's own limits, so the socket drops it once the Pooler's quota observer has recorded it as that account's quota evidence, as native HTTP never relays the provider's rate-limit headers; the drop leaves the turn's other frames, their order and its terminal unchanged and marks no output; the provider's codex.response.metadata is still relayed after the Pooler's own metadata event with its headers projected as backend_responses_etag states, and an unknown codex.* control is relayed byte for byte; the public /v1/responses websocket keeps relaying no codex.* control, and native HTTP SSE keeps its byte-exact relay of the event"
+    },
+    %{
       slug: :firewall,
       status: :supported,
       current: :explicit_forwarded_client_policy,
@@ -1118,6 +1131,18 @@ defmodule CodexPooler.CompatibilityMatrix do
         kept_open: "websocket downstream kept open after owner exit",
         metric: :none
       }
+    },
+    native_websocket_provider_controls: %{
+      topologies: [:owner_forwarding_off, :owner_on_this_node, :owner_on_another_node],
+      serving_modes: ~w(full lite),
+      dropped: ~w(codex.rate_limits),
+      relayed: ~w(codex.response.metadata),
+      unknown_controls: :relayed_unchanged,
+      dropped_frame: %{quota_evidence: "codex_rate_limit_event", recorded: :before_the_drop, turn_output: :none},
+      provider_metadata: :backend_responses_etag,
+      public_v1_websocket: :relays_no_codex_control,
+      native_http_sse: :event_bytes_relayed,
+      observability: %{line: :none, metric: :none}
     },
     responses_access_programs: %{
       surfaces: ~w(http_json http_sse responses_websocket),
