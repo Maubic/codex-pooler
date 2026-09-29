@@ -11,7 +11,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementTurnFaultTest d
   # connection is refused without owner forwarding, where the resend policy
   # reads the delivered receipt, and is admitted as the failed request's one
   # successor with it, where the owner's retry policy admits any failed task
-  # exception.
+  # exception. The released client does not resend a turn whose completion it
+  # read, though: its next request is the next turn on the same socket,
+  # anchored on that answer, and that is served in both modes.
   #
   # Before, the request and attempt had already committed `succeeded` when the
   # turn write failed: the turn stayed `in_progress` behind them without owner
@@ -52,6 +54,26 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementTurnFaultTest d
       assert measured.recovered == %{request: {"failed", "owner_task_exception"}, attempts: ["failed"], turn: {"failed", "owner_task_exception"}, ledger: ["release", "reservation", "settlement"]}
       assert {measured.retry, measured.rows, measured.upstream_requests} == resend_outcome(forwarding)
       assert measured.live_rows == 0
+    end
+  end
+
+  # The released client does not resend a turn whose `response.completed` it
+  # read: its next request is the next turn, on the same socket, anchored on
+  # that answer. The raising task's `500 websocket_response_task_failed`
+  # reaches the socket after the completion, as it did before (findings#270
+  # row 270-290).
+  for forwarding <- [:forwarded, :direct] do
+    @tag forwarding: forwarding
+    test "#{forwarding}: after a rolled-back delivered completion the client's next turn on the same socket is served and nothing is left open", %{forwarding: forwarding} do
+      measured = run_continuation(forwarding)
+      CodexPooler.TestDiagnostics.puts(fn -> "settlement turn fault continuation #{forwarding}: #{inspect(measured)}" end)
+
+      assert measured.first_frames == [{"response.created", "resp_turn_fault_first"}, {"response.output_item.done", nil}, {"response.completed", "resp_turn_fault_first"}]
+      assert measured.trailing == {"error", 500, "websocket_response_task_failed"}
+      assert measured.next_frames == [{"response.created", "resp_turn_fault_next"}, {"response.output_item.done", nil}, {"response.completed", "resp_turn_fault_next"}]
+      assert measured.upstream == [nil, "resp_turn_fault_first"]
+      assert measured.rows == [{"failed", "owner_task_exception", "usage_unknown"}, {"succeeded", nil, "usage_known"}]
+      assert measured.turns == [{"failed", "owner_task_exception"}, {"succeeded", nil}]
     end
   end
 
@@ -100,11 +122,104 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementTurnFaultTest d
       recovered: recovered,
       retry: outcome(retry),
       rows: Enum.map(rows, &{&1.status, &1.last_error_code, &1.usage_status}),
+      settlements: Enum.map(rows, &settlement_amounts/1),
       chained?: match?([_predecessor, _successor], rows) and chained?(List.last(rows), hd(rows)),
       live_rows: Enum.count(rows, &(&1.status in ["accepted", "in_progress"])),
       upstream_requests: FakeUpstream.count(upstream)
     }
   end
+
+  defp run_continuation(forwarding) do
+    put_owner_forwarding!(forwarding)
+    thread_id = Ecto.UUID.generate()
+
+    upstream =
+      start_upstream(
+        # provenance: synthetic_adversarial (a served turn whose settlement meets a fault in its turn write, then the released client's next turn on the same socket, anchored on the answer it received)
+        FakeUpstream.strict_sequence([
+          FakeUpstream.expect_request(method: "WEBSOCKET", json: [valid: true, equals: %{"type" => "response.create"}], respond: completed_frames("resp_turn_fault_first")),
+          FakeUpstream.expect_request(method: "WEBSOCKET", json: [valid: true, equals: %{"type" => "response.create"}], respond: completed_frames("resp_turn_fault_next"))
+        ])
+      )
+
+    setup = gateway_setup(upstream)
+    {_server, port} = start_public_endpoint_with_server!()
+    install_fault!()
+    {conn, websocket, ref} = connect!(port, setup, thread_id)
+
+    try do
+      {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, frame(setup, thread_id))
+      {conn, websocket, first_frames} = receive_until_terminal(conn, websocket, ref, [])
+      [first] = await_settled!(setup.pool.id)
+      recovered = row_state(first.id)
+      {conn, websocket, trailing_text} = public_websocket_receive_text!(conn, websocket, ref)
+      trailing = CodexPooler.JSON.decode!(trailing_text)
+
+      next = frame(setup, thread_id, turn_id: "#{thread_id}-next", input: [user_message("synthetic next prompt")], previous_response_id: "resp_turn_fault_first")
+      {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, next)
+      {_conn, _websocket, next_frames} = receive_until_terminal(conn, websocket, ref, [])
+      rows = await_settled!(setup.pool.id)
+
+      %{
+        first_frames: Enum.map(first_frames, &frame_summary/1),
+        trailing: {trailing["type"], trailing["status"], get_in(trailing, ["error", "code"])},
+        recovered: recovered,
+        next_frames: Enum.map(next_frames, &frame_summary/1),
+        rows: Enum.map(rows, &{&1.status, &1.last_error_code, &1.usage_status}),
+        turns: Enum.map(rows, &turn_outcome/1),
+        settlements: Enum.map(rows, &settlement_amounts/1),
+        upstream: Enum.map(FakeUpstream.requests(upstream), &(&1.json && &1.json["previous_response_id"]))
+      }
+    after
+      Mint.HTTP.close(conn)
+    end
+  end
+
+  defp connect!(port, setup, thread_id) do
+    {:ok, conn} = Mint.HTTP.connect(:http, "127.0.0.1", port, protocols: [:http1])
+
+    headers = [
+      {"authorization", setup.authorization},
+      {"session-id", thread_id},
+      {"thread-id", thread_id},
+      {"x-client-request-id", thread_id},
+      {"x-codex-window-id", "#{thread_id}:0"}
+    ]
+
+    {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, @turn_endpoint, headers)
+    {:ok, conn, status, response_headers} = await_public_websocket_upgrade(conn, ref)
+    {conn, websocket} = mint_websocket_new!(conn, ref, status, response_headers)
+    {conn, websocket, ref}
+  end
+
+  defp receive_until_terminal(conn, websocket, ref, frames) do
+    {conn, websocket, text} = public_websocket_receive_text!(conn, websocket, ref)
+    frame = CodexPooler.JSON.decode!(text)
+
+    if frame["type"] in ["response.completed", "response.failed", "error"],
+      do: {conn, websocket, Enum.reverse([frame | frames])},
+      else: receive_until_terminal(conn, websocket, ref, [frame | frames])
+  end
+
+  defp frame_summary(frame), do: {frame["type"], get_in(frame, ["response", "id"])}
+
+  defp turn_outcome(%Request{id: id}) do
+    turn = Repo.get_by!(CodexTurn, request_id: id)
+    {turn.status, turn.error_code}
+  end
+
+  # What each request was charged: its recorded settlement's usage status,
+  # tokens and cost.
+  defp settlement_amounts(%Request{id: id}) do
+    Repo.one(
+      from(entry in LedgerEntry,
+        where: entry.request_id == ^id and entry.entry_kind == "settlement" and entry.amount_status == "recorded",
+        select: {entry.usage_status, entry.total_tokens, entry.estimated_cost_micros, entry.settled_cost_micros}
+      )
+    )
+  end
+
+  defp user_message(text), do: %{"type" => "message", "role" => "user", "content" => [%{"type" => "input_text", "text" => text}]}
 
   defp row_state(request_id) do
     request = Repo.get!(Request, request_id)
@@ -178,14 +293,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementTurnFaultTest d
   defp outcome(%{"type" => "error", "status" => status, "error" => %{"code" => code}}), do: {status, code}
   defp outcome(other), do: {:unexpected, other["type"]}
 
-  defp frame(setup, thread_id) do
-    turn_id = "#{thread_id}-turn"
+  defp frame(setup, thread_id, opts \\ []) do
+    turn_id = Keyword.get(opts, :turn_id, "#{thread_id}-turn")
 
-    CodexPooler.JSON.encode!(%{
+    %{
       "type" => "response.create",
       "model" => setup.model.exposed_model_id,
       "instructions" => "synthetic instructions",
-      "input" => [%{"type" => "message", "role" => "user", "content" => [%{"type" => "input_text", "text" => "synthetic settlement fault prompt"}]}],
+      "input" => Keyword.get(opts, :input, [user_message("synthetic settlement fault prompt")]),
       "tools" => [],
       "tool_choice" => "auto",
       "parallel_tool_calls" => true,
@@ -217,7 +332,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementTurnFaultTest d
             "request_kind" => "turn"
           })
       }
-    })
+    }
+    |> then(fn body -> if anchor = Keyword.get(opts, :previous_response_id), do: Map.put(body, "previous_response_id", anchor), else: body end)
+    |> CodexPooler.JSON.encode!()
   end
 
   defp completed_frames(response_id) do
