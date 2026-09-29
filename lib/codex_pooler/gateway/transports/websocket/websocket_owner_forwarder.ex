@@ -517,18 +517,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
              byte_size(semantic_turn_key) == 32 and is_reference(control_ref) and
              map_size(control) == 6 do
     with {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id) do
-      case action do
-        :preflight ->
-          WebsocketOwnerSession.preflight_reconnect(
-            owner_pid,
-            downstream,
-            semantic_turn_key,
-            control_ref
-          )
-
-        :cancel ->
-          WebsocketOwnerSession.cancel_reconnect(owner_pid, downstream, control_ref)
-      end
+      call_reconnect_control(owner_pid, action, downstream, semantic_turn_key, control_ref)
     end
   end
 
@@ -539,7 +528,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   def remote_reconnect_control_v2(%RemoteReconnectControlV2{codex_session_id: session_id} = control) do
     with :ok <- RemoteReconnectControlV2.validate(control),
          {:ok, owner_pid} <- WebsocketOwnerSession.lookup(session_id) do
-      case WebsocketOwnerSession.reconnect_control_v2(owner_pid, control) do
+      case call_reconnect_control_v2(owner_pid, control) do
         {:error, :stale_owner} -> {:error, :owner_unavailable}
         result -> result
       end
@@ -549,6 +538,33 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   end
 
   def remote_reconnect_control_v2(_control), do: {:error, :owner_unavailable}
+
+  # A reconnect control an owner did not answer within the owner call budget
+  # answers `owner_forward_timeout`, and one it exited under answers
+  # `owner_unavailable`, wherever the socket runs (findings#270 row 270-250).
+  # The exit used to reach the caller: a socket on the owner's node lost its
+  # control path (`1011 websocket control unavailable`), and one on another
+  # node read the erpc worker's exit as `owner_crashed` (`502`).
+  defp call_reconnect_control(owner_pid, :preflight, downstream, semantic_turn_key, control_ref) do
+    WebsocketOwnerSession.preflight_reconnect(owner_pid, downstream, semantic_turn_key, control_ref)
+  catch
+    :exit, reason -> reconnect_control_exit(reason)
+  end
+
+  defp call_reconnect_control(owner_pid, :cancel, downstream, _semantic_turn_key, control_ref) do
+    WebsocketOwnerSession.cancel_reconnect(owner_pid, downstream, control_ref)
+  catch
+    :exit, reason -> reconnect_control_exit(reason)
+  end
+
+  defp call_reconnect_control_v2(owner_pid, control) do
+    WebsocketOwnerSession.reconnect_control_v2(owner_pid, control)
+  catch
+    :exit, reason -> reconnect_control_exit(reason)
+  end
+
+  defp reconnect_control_exit({:timeout, _call}), do: {:error, :owner_forward_timeout}
+  defp reconnect_control_exit(_reason), do: {:error, :owner_unavailable}
 
   @spec consume_replay_reserve(CodexSession.t(), binary(), map(), submit_opts()) ::
           {:ok, reference()} | {:error, :invalid | :owner_unavailable}
@@ -2634,6 +2650,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   end
 
   defp normalize_protocol_failure(_kind, _reason, _module, _function, _args), do: nil
+
+  # A remote function that calls its owner without catching exits hands the
+  # owner's exit to the erpc worker, which the caller reads as
+  # `{:exception, exit_reason}`: an owner call that timed out on the owner's
+  # node is the timeout it is, and one whose owner was gone is an owner that
+  # is unavailable. Both used to read `owner_crashed` (findings#270 row
+  # 270-250).
+  defp normalize_remote_transport_failure({:exception, {:timeout, {GenServer, :call, _call}}}), do: :owner_forward_timeout
+
+  defp normalize_remote_transport_failure({:exception, {reason, {GenServer, :call, _call}}})
+       when reason in [:noproc, :normal, :shutdown, :nodedown] or
+              (is_tuple(reason) and tuple_size(reason) == 2 and elem(reason, 0) in [:shutdown, :nodedown]),
+       do: :owner_unavailable
 
   defp normalize_remote_transport_failure(reason) do
     cond do

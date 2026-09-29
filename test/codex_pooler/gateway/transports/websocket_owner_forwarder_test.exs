@@ -2091,6 +2091,26 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     end
   end
 
+  # An owner call that timed out, or found its owner gone, inside the remote
+  # worker reaches the caller as the erpc exit `{:exception, exit_reason}`: it
+  # keeps its own cause instead of the crash default (findings#270 row 270-250).
+  test "normalize_remote_failure keeps an owner call's timeout and an owner gone inside the remote worker" do
+    call = {GenServer, :call, [self(), :any_owner_call, 1_000]}
+
+    for {reason, expected} <- [
+          {{:exception, {:timeout, call}}, :owner_forward_timeout},
+          {{:exception, {:noproc, call}}, :owner_unavailable},
+          {{:exception, {:normal, call}}, :owner_unavailable},
+          {{:exception, {:shutdown, call}}, :owner_unavailable},
+          {{:exception, {{:shutdown, :stale_owner}, call}}, :owner_unavailable},
+          {{:exception, {:killed, call}}, :owner_crashed},
+          {{:exception, :unrelated_exit}, :owner_crashed}
+        ] do
+      assert WebsocketOwnerForwarder.normalize_remote_failure(:exit, reason, WebsocketOwnerForwarder, :remote_reconnect_control_v1, [%{}]) == expected,
+             inspect(reason)
+    end
+  end
+
   # A local owner's admission control answer reaches the socket unchanged; a
   # remote one crosses `call_remote`, whose generic normalization folds every
   # reason outside the owner vocabulary into `owner_crashed`. Every refusal of

@@ -328,6 +328,40 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     end
   end
 
+  # An ordinary turn whose owner does not answer its preflight within the
+  # owner call budget is refused with the timeout's own retryable `504
+  # owner_forward_timeout`, whichever node the owner runs on, and the socket
+  # stays open for the client's resend (findings#270 row 270-250). A remote
+  # owner's stall read `502 owner_crashed` (the owner call timed out inside the
+  # erpc worker, whose exit fell to the crash default), and a local owner's
+  # closed the socket `1011 websocket control unavailable` (the exit reached
+  # the socket's control path).
+  for topology <- [:remote, :local] do
+    @tag topology: topology
+    test "#{topology}: an ordinary turn whose owner answers its preflight too late is refused 504 with the timeout, and the socket serves the resend", ctx do
+      compaction = open_compaction_session!(ctx, true, [:anchor, :final])
+      frame = compaction_frame(compaction, "turn", compaction.history ++ [%{"type" => "message", "role" => "user", "content" => "synthetic next turn"}], nil)
+      :ok = :sys.suspend(compaction.owner)
+
+      {refusal, log} =
+        with_info_log(fn ->
+          refusal = send_frame!(compaction, frame)
+          :ok = :sys.resume(compaction.owner)
+          refusal
+        end)
+
+      assert %{"type" => "error", "status" => 504, "error" => %{"code" => "owner_forward_timeout"}} = refusal
+      assert log =~ "phase=handoff reason_class=owner_forward_timeout reason_code=owner_forward_timeout"
+      refute log =~ "owner_crashed"
+      refute log =~ "websocket control path failed"
+      assert_owner_kept_session!(compaction, log)
+
+      assert %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_final"}} = send_frame!(compaction, frame)
+      assert Scenario.settled_statuses!(compaction.setup, 2) == ["succeeded", "succeeded"]
+      assert FakeUpstream.count(compaction.upstream) == 2
+    end
+  end
+
   # A socket on the session's window with its owner (on the peer for
   # `:remote`) and one anchor turn it served, settled unless `settle?` is
   # false (its task is then held after its settlement).
