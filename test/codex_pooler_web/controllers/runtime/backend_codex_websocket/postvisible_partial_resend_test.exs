@@ -28,8 +28,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisiblePartialResendT
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.CodexTurn
+  alias CodexPooler.Platform.ExecutionTerminalProofs
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
+  alias CodexPoolerWeb.Runtime.CleanupProofRace
 
   @timeout_ms 15_000
   @poll_ms 100
@@ -128,7 +130,32 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisiblePartialResendT
     end
   end
 
-  defp scenario!(forwarding, cut, provider, resend_transport \\ :websocket) do
+  # The closing socket stops the direct task that pushed the completed item,
+  # then interrupts its request `client_disconnected`. When the stopped task's
+  # terminal proof lands between the two (the production publisher, a few
+  # milliseconds, `CleanupProofRace`), the interrupt used to take the stop for
+  # a lost executor and settle `dead_execution_recovered`. The resend was then
+  # admitted as a dead execution's successor past the completed item's fence,
+  # a second generation of a turn the client already holds an item of
+  # (findings#270 row 270-353). The socket knows why the task ended, so the
+  # request keeps its reason and the fence holds.
+  for transport <- [:websocket, :https] do
+    @tag transport: transport
+    @tag slow: "a real socket cut after a completed item, the stopped task's proof published before the cleanup interrupts, and the resend"
+    test "owner forwarding false: the #{transport} resend after a completed item stays a duplicate when the stopped task's end is proven before the cleanup interrupts it", %{transport: transport} do
+      %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, proven_attempt_id: attempt_id} =
+        scenario!(false, :item_done, :held, transport, proof_before_cleanup: true)
+
+      assert ExecutionTerminalProofs.terminal?(Repo.get!(Attempt, attempt_id))
+      assert [%Request{id: ^request_id, status: "failed", response_status_code: 499, last_error_code: "client_disconnected"}] = pool_requests(setup.pool.id)
+      assert %CodexTurn{status: "interrupted", error_code: "client_disconnected"} = Repo.get_by!(CodexTurn, request_id: request_id)
+      assert_duplicate!(transport, resend)
+      assert Repo.all(RequestClientRetryLink) == []
+      assert FakeUpstream.count(upstream) == 1
+    end
+  end
+
+  defp scenario!(forwarding, cut, provider, resend_transport \\ :websocket, opts \\ []) do
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, forwarding)
     %{hold_at: hold_at, last: last} = Map.fetch!(@cuts, cut)
@@ -161,13 +188,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisiblePartialResendT
     assert_receive {:fake_upstream_frame_barrier, ^hold_at, _handler, ^release_ref}, @timeout_ms
     conn = receive_until!(conn, websocket, ref, last)
     assert [%Request{id: request_id}] = pool_requests(setup.pool.id)
-    receipt = close_and_await_receipt!(conn, request_id, cut, provider, upstream, release_ref)
+    {receipt, proven_attempt_id} = CleanupProofRace.around_cut(opts, request_id, fn -> close_and_await_receipt!(conn, request_id, cut, provider, upstream, release_ref) end)
     _settled = await_settled!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
 
     resend = resend!(resend_transport, port, setup, turn_state, raw_payload)
 
     await_all_settled!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
-    %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, receipt: receipt}
+    %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, receipt: receipt, proven_attempt_id: proven_attempt_id}
   end
 
   # The provider completes only once the closing socket entered `terminate`
@@ -332,6 +359,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisiblePartialResendT
     if frame["type"] in ["response.completed", "response.failed", "response.incomplete", "error"],
       do: {conn, frame},
       else: receive_terminal!(conn, websocket, ref)
+  end
+
+  defp assert_duplicate!(:websocket, resend), do: assert(%{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = resend)
+
+  defp assert_duplicate!(:https, resend) do
+    assert {409, body} = resend
+    assert %{"error" => %{"code" => "duplicate_turn"}} = CodexPooler.JSON.decode!(body)
   end
 
   defp pool_requests(pool_id), do: Repo.all(from(r in Request, where: r.pool_id == ^pool_id, order_by: [asc: r.admitted_at]))

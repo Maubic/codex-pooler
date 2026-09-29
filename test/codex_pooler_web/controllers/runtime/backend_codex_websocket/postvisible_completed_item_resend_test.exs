@@ -33,8 +33,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
   alias CodexPooler.CompatibilityMatrix
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.CodexTurn
+  alias CodexPooler.Platform.ExecutionTerminalProofs
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
+  alias CodexPoolerWeb.Runtime.CleanupProofRace
 
   @timeout_ms 15_000
   @poll_ms 100
@@ -169,7 +171,37 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
     end
   end
 
-  defp scenario!(forwarding, provider, resend_shape, resend_transport \\ :websocket) do
+  # The closing socket stops the direct task that pushed the completed item,
+  # then interrupts its request `client_disconnected`. When the stopped task's
+  # terminal proof lands between the two (the production publisher, a few
+  # milliseconds, `CleanupProofRace`), the interrupt used to take the stop for
+  # a lost executor and settle `dead_execution_recovered`. The continuation
+  # and the grown resend are admitted against the disconnect and its receipt,
+  # so they were refused `duplicate_turn` and the turn was lost (findings#270
+  # row 270-353). The socket knows why the task ended, so the request keeps
+  # its reason and the resend is served.
+  for shape <- [:mailbox, :grown], transport <- [:websocket, :https] do
+    @tag shape: shape, transport: transport
+    @tag slow: "a real socket cut after a completed item, the stopped task's proof published before the cleanup interrupts, and the resend"
+    test "owner forwarding false: the #{shape} #{transport} resend is served once when the stopped task's end is proven before the cleanup interrupts it", %{shape: shape, transport: transport} do
+      %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, proven_attempt_id: attempt_id} =
+        scenario!(false, :held, shape, transport, proof_before_cleanup: true)
+
+      assert ExecutionTerminalProofs.terminal?(Repo.get!(Attempt, attempt_id))
+
+      case transport do
+        :websocket -> assert resend["type"] == "response.completed"
+        :https -> assert {200, _body} = resend
+      end
+
+      assert [%Request{id: ^request_id, status: "failed", response_status_code: 499, last_error_code: "client_disconnected"}, %Request{id: successor_id, status: "succeeded"}] = pool_requests(setup.pool.id)
+      assert %CodexTurn{status: "interrupted", error_code: "client_disconnected"} = Repo.get_by!(CodexTurn, request_id: request_id)
+      if shape == :grown, do: assert([%RequestClientRetryLink{predecessor_request_id: ^request_id, successor_request_id: ^successor_id}] = Repo.all(RequestClientRetryLink))
+      assert FakeUpstream.count(upstream) == 2
+    end
+  end
+
+  defp scenario!(forwarding, provider, resend_shape, resend_transport \\ :websocket, opts \\ []) do
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, forwarding != false)
     release_ref = make_ref()
@@ -211,14 +243,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
 
     assert_peer_forwarding(original, peer)
 
-    receipt = close_and_await_receipt!(conn, request_id, provider, upstream, release_ref)
+    {receipt, proven_attempt_id} = CleanupProofRace.around_cut(opts, request_id, fn -> close_and_await_receipt!(conn, request_id, provider, upstream, release_ref) end)
     _settled = await_settled!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
 
     resend_payload = resend_payload(payload, resend_shape)
     resend = resend!(resend_transport, port, setup, turn_state, resend_payload)
 
     await_all_settled!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
-    %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, receipt: receipt, port: port, turn_state: turn_state, resend_payload: resend_payload}
+    %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, receipt: receipt, port: port, turn_state: turn_state, resend_payload: resend_payload, proven_attempt_id: proven_attempt_id}
   end
 
   defp topology_setup(upstream, :peer) do
