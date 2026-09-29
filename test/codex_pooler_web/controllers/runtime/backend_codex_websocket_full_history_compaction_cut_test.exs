@@ -8,8 +8,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [enter_peer_owner_topology!: 0, start_peer_window_owner!: 2]
 
-  alias CodexPooler.Accounting.{LedgerEntry, Request, RequestClientRetryLink, RequestReplayEntitlement}
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink, RequestReplayEntitlement}
   alias CodexPooler.FakeUpstream
+  alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Repo
 
   # A NON-admitted native compaction cut before the client saw anything
@@ -62,6 +63,26 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
                max_charges_per_request: 1,
                upstream_compactions: 2,
                replay_entitlements: [],
+               live_rows: 0
+             }
+    end
+  end
+
+  # The settlement's two commits, held apart: the provider served the cut
+  # compaction, its request and attempt are settled, and the task is held
+  # before it completes the turn. The compaction is not settled yet, and a
+  # resend in that window meets a live predecessor (`409 duplicate_turn`);
+  # once the turn completes, the resend is the successor. With owner
+  # forwarding off, the Drone 1709 failure of the first arm above.
+  for mode <- ["full", "lite"] do
+    @tag mode: mode
+    test "#{mode} direct full-history compaction cut whose turn is still completing: the resend in that window is refused, the next one is the successor", %{mode: mode} do
+      assert run_turn_completion_window(mode) == %{
+               settled_while_held?: false,
+               retries: [{409, "duplicate_turn"}, :served],
+               successor_chained?: true,
+               max_charges_per_request: 1,
+               upstream_compactions: 2,
                live_rows: 0
              }
     end
@@ -128,6 +149,104 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
                live_rows: 0
              }
     end
+  end
+
+  defp run_turn_completion_window(mode) do
+    put_owner_forwarding!(false)
+    release_ref = make_ref()
+    ctx = %{mode: mode}
+    held = FakeUpstream.barrier_websocket_frames(held_compaction_messages(), notify: self(), release_ref: release_ref)
+    compaction = [valid: true, equals: lite_marker_expectation(%{"type" => "response.create"}, mode), forbidden: ["previous_response_id"]]
+
+    upstream =
+      start_upstream(
+        FakeUpstream.strict_sequence([
+          FakeUpstream.expect_request(method: "WEBSOCKET", json: [valid: true, equals: %{"type" => "response.create"}], respond: completed_frames(@anchor, [answer()])),
+          FakeUpstream.expect_request(method: "WEBSOCKET", json: compaction, respond: held)
+          | resend_expectations(:before_output, compaction)
+        ])
+      )
+
+    setup = gateway_setup(upstream, compact?: true)
+    if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    ctx = Map.put(ctx, :setup, setup)
+    port = start_public_endpoint!()
+
+    first = connect!(port, setup)
+    first = ordinary_turn!(first, turn_frame(ctx))
+    Mint.HTTP.close(first.conn)
+    await!(fn -> match?([%Request{status: "succeeded"}], pool_requests(setup.pool.id)) end, "the first turn never settled")
+
+    second = connect!(port, setup)
+    second = send_frame!(second, full_history_compaction_frame(ctx))
+    await_barrier!(0, release_ref)
+
+    # The provider finishes the compaction; its task settles the request and
+    # the attempt and is held before the turn's own transaction, and the
+    # client leaves before anything reaches it.
+    hold = hold_turn_completion!()
+    _released = FakeUpstream.release_remaining_frames(upstream, release_ref)
+    assert_receive {^hold, :held, task}, @settle_timeout_ms
+    Mint.HTTP.close(second.conn)
+    assert [%Request{status: "succeeded"}] = Enum.filter(pool_requests(setup.pool.id), &(&1.endpoint == @compact_endpoint))
+    settled_while_held? = cut_compaction_settled?(setup.pool.id)
+    inside = full_history_resend!(ctx, port)
+
+    release_turn_completion!(hold, task)
+    true = settled_within?(setup.pool.id, @settle_timeout_ms)
+    after_completion = full_history_resend!(ctx, port)
+
+    rows = await_no_live_requests(setup.pool.id)
+    compactions = Enum.filter(rows, &(&1.endpoint == @compact_endpoint))
+
+    %{
+      settled_while_held?: settled_while_held?,
+      retries: [inside, after_completion],
+      successor_chained?: match?([_predecessor, successor] when is_struct(successor, Request), compactions) and chained?(List.last(compactions)),
+      max_charges_per_request: compactions |> Enum.map(&charges/1) |> Enum.max(),
+      upstream_compactions: upstream |> FakeUpstream.requests() |> Enum.count(&compaction_request?/1),
+      live_rows: Enum.count(rows, &(&1.status in ["accepted", "in_progress"]))
+    }
+  end
+
+  # Holds the first process that commits a settlement of a request row from
+  # here on, right after that commit and outside any transaction, before the
+  # turn's completion runs in its own transaction.
+  defp hold_turn_completion! do
+    hold = make_ref()
+    handler_id = {__MODULE__, :turn_completion_hold, hold}
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    config = %{hold: hold, test: self(), claimed: :atomics.new(1, [])}
+    :ok = :telemetry.attach(handler_id, [:codex_pooler, :repo, :query], &__MODULE__.hold_turn_completion_query/4, config)
+    hold
+  end
+
+  @doc false
+  def hold_turn_completion_query(_event, _measurements, metadata, %{hold: hold, test: test, claimed: claimed}) do
+    cond do
+      metadata[:source] == "requests" and Repo.in_transaction?() and String.starts_with?(to_string(metadata[:query]), "UPDATE") ->
+        Process.put({__MODULE__, :request_updated}, true)
+
+      metadata[:query] == "commit" and Process.get({__MODULE__, :request_updated}) == true and not Repo.in_transaction?() and :atomics.add_get(claimed, 1, 1) == 1 ->
+        send(test, {hold, :held, self()})
+
+        receive do
+          {^hold, :release} -> :ok
+        after
+          @settle_timeout_ms -> :ok
+        end
+
+      true ->
+        :ok
+    end
+
+    :ok
+  end
+
+  defp release_turn_completion!(hold, task) do
+    :telemetry.detach({__MODULE__, :turn_completion_hold, hold})
+    send(task, {hold, :release})
+    :ok
   end
 
   defp run_ordinary_replay(mode) do
@@ -311,7 +430,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
     settle = fn ->
       Mint.HTTP.close(client.conn)
       release_held_compaction!(upstream, release_ref)
-      await!(fn -> Enum.any?(pool_requests(ctx.setup.pool.id), &(&1.endpoint == @compact_endpoint and &1.status not in ["accepted", "in_progress"])) end, "the collection never settled")
+      await!(fn -> cut_compaction_settled?(ctx.setup.pool.id) end, "the collection never settled")
     end
 
     retries = released_client_retries!(ctx, port, settle)
@@ -399,19 +518,34 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
     :ok
   end
 
-  # No completion signal reaches the test: poll the compaction row within a
-  # bounded detection budget.
+  # No completion signal reaches the test: poll the cut compaction within a
+  # bounded detection budget until it has fully settled.
   defp settled_within?(pool_id, budget_ms) do
     deadline = System.monotonic_time(:millisecond) + budget_ms
 
-    Stream.repeatedly(fn -> Enum.find(pool_requests(pool_id), &(&1.endpoint == @compact_endpoint)) end)
-    |> Enum.reduce_while(false, fn request, _acc ->
+    Stream.repeatedly(fn -> cut_compaction_settled?(pool_id) end)
+    |> Enum.reduce_while(false, fn settled?, _acc ->
       cond do
-        match?(%Request{status: status} when status not in ["accepted", "in_progress"], request) -> {:halt, true}
+        settled? -> {:halt, true}
         System.monotonic_time(:millisecond) >= deadline -> {:halt, false}
         true -> Process.sleep(10) && {:cont, false}
       end
     end)
+  end
+
+  # The cut compaction has settled once its request, its attempts and its turn
+  # have. The settlement commits the request and its attempt first and
+  # completes the turn in a second transaction, and until then a resend meets
+  # a live predecessor and is refused `409 duplicate_turn`: waiting on the
+  # request row alone let the first resend land between the two (Drone 1709,
+  # a direct Lite arm under load; the window pinned by the arm below).
+  defp cut_compaction_settled?(pool_id) do
+    with %Request{status: status, completed_at: %DateTime{}} = request when status not in ["accepted", "in_progress"] <- Enum.find(pool_requests(pool_id), &(&1.endpoint == @compact_endpoint)),
+         %CodexTurn{status: turn_status, completed_at: %DateTime{}} when turn_status != "in_progress" <- Repo.one(from(turn in CodexTurn, where: turn.request_id == ^request.id)) do
+      not Repo.exists?(from(attempt in Attempt, where: attempt.request_id == ^request.id and is_nil(attempt.completed_at)))
+    else
+      _live -> false
+    end
   end
 
   # Every row the scenario counts must have settled before it is counted: poll
