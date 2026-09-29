@@ -121,7 +121,9 @@ defmodule CodexPoolerWeb.Runtime.DrainAfterTerminalScenario do
         cond do
           holding?.() -> :ok
           System.monotonic_time(:millisecond) > deadline -> flunk("the drain neither held for the settlement nor answered")
-          true -> Process.sleep(5) && await_drain_holding!(drain, holding?, deadline)
+          true ->
+            Process.sleep(5)
+            await_drain_holding!(drain, holding?, deadline)
         end
 
       answered ->
@@ -142,7 +144,10 @@ defmodule CodexPoolerWeb.Runtime.DrainAfterTerminalScenario do
       Stream.repeatedly(fn -> WebsocketOwnerSession.owner_status(owner) end)
       |> Enum.find(fn
         {:ok, %{active_turn?: false}} -> true
-        _active -> if System.monotonic_time(:millisecond) > deadline, do: flunk("the owner never finished the turn"), else: Process.sleep(5) && false
+        _active ->
+          if System.monotonic_time(:millisecond) > deadline, do: flunk("the owner never finished the turn")
+          Process.sleep(5)
+          false
       end)
 
     :ok = WebsocketOwnerSession.begin_drain(owner)
@@ -183,7 +188,9 @@ defmodule CodexPoolerWeb.Runtime.DrainAfterTerminalScenario do
       cond do
         rows != [] and Enum.all?(rows, &(&1.status not in ["accepted", "in_progress"])) -> true
         System.monotonic_time(:millisecond) > deadline -> flunk("the turn never settled: #{inspect(Enum.map(rows, & &1.status))}")
-        true -> Process.sleep(10) && false
+        true ->
+          Process.sleep(10)
+          false
       end
     end)
   end
