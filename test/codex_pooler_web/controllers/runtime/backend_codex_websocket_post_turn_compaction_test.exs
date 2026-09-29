@@ -879,12 +879,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
         assert {:ok, state} = CodexResponsesSocket.handle_in({window_compaction_frame(setup, turn_id, "resp_guard_refusal_anchor"), [opcode: :text]}, state)
         Process.put(:crossing_socket_state, state)
         assert_receive {^hold, :held, task_pid}, 15_000
-        close_connection_under_held_task!(upstream, hold, task_pid, setup, state)
 
-        {state, frames} = collect_until_idle!(state, [])
+        {{state, frames}, log} =
+          with_log(fn ->
+            close_connection_under_held_task!(upstream, hold, task_pid, setup, state)
+            collect_until_idle!(state, [])
+          end)
+
         Process.put(:crossing_socket_state, state)
         assert [_anchor_request] = FakeUpstream.requests(upstream)
         assert frames == [native_previous_response_retry_event()]
+        # The guard's refusal passes through the compaction collector as if the
+        # provider had sent it; its decision line names the guard
+        # (findings#270 row 270-238).
+        assert log =~ "compact terminal decision source_stage=continuation_guard code=stream_incomplete status=400 terminal_type=error reason_code=previous_response_not_found"
 
         retry_frame = mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1)
         {state, frames} = run_turn_frames!(state, retry_frame)
@@ -1005,6 +1013,74 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
 
   defp accounting_close_rows(:owner_forwarded),
     do: [{"/backend-api/codex/responses", "succeeded"}, {"/backend-api/codex/responses/compact", "failed"}, {"/backend-api/codex/responses/compact", "succeeded"}, {"/backend-api/codex/responses", "succeeded"}]
+
+  # The provider's own refusal of an anchored compaction, as the Codex backend
+  # sends it for an anchor its connection cannot resolve: a codeless wrapped
+  # `error` event, status 400 `invalid_request_error`, instead of a response
+  # (findings#232 row 232-277, live probe). The backend checks the anchor
+  # before the model (row 232-279), so the refusal precedes any execution. The
+  # client used to get the collected compaction's 400 `stream_incomplete`,
+  # which the released client reads as a fatal invalid request; it now gets
+  # the `previous_response_not_found` event of the guard's refusal, and its
+  # full-history retry is served in both topologies (findings#270 row 270-238).
+  # The refused request reached the provider, so it keeps its unknown usage.
+  for topology <- [:direct, :owner_forwarded] do
+    @tag topology: topology
+    test "#{topology} provider refusal of a compaction's anchor reaches the client as previous_response_not_found and the full-history retry is served", %{topology: topology} do
+      put_owner_forwarding!(topology == :owner_forwarded)
+      turn_id = "provider-refusal-#{topology}"
+      history = [window_message("synthetic provider-refusal anchor")]
+      compact_item = %{"type" => "compaction", "encrypted_content" => "synthetic-provider-refusal-#{topology}"}
+      refusal = %{"type" => "error", "status" => 400, "error" => %{"type" => "invalid_request_error", "message" => "Invalid `previous_response_id`."}}
+
+      upstream =
+        start_upstream(
+          # provenance: observed findings#232 row 232-277 (provider refusal frame, live probe 2026-09-23) on a compaction v2-shaped mid-turn frame; synthetic text
+          FakeUpstream.strict_sequence([
+            window_request(1, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_provider_refusal_anchor", @anchor_usage)])),
+            window_request(1, [equals: %{"previous_response_id" => "resp_provider_refusal_anchor"}], FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(refusal)])),
+            any_connection_request([forbidden: ["previous_response_id"]], event_frames(compaction_events(compact_item, "resp_provider_refusal_retry"))),
+            any_connection_request([forbidden: ["previous_response_id"]], event_frames([completed_event("resp_provider_refusal_final", @resumed_usage)]))
+          ])
+        )
+
+      setup = gateway_setup(upstream, compact?: true)
+      state = callback_socket!(setup, "provider-refusal-#{topology}")
+
+      try do
+        state = run_turn!(state, mid_turn_payload(setup, history, turn_id, "turn", 1))
+        {{state, frames}, log} = with_log(fn -> run_turn_frames!(state, window_compaction_frame(setup, turn_id, "resp_provider_refusal_anchor")) end)
+        assert frames == [native_previous_response_retry_event()]
+        assert log =~ "compact terminal decision source_stage=provider_terminal code=stream_incomplete status=400 terminal_type=error reason_code=previous_response_not_found"
+
+        {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1))
+        assert [%{"type" => "response.output_item.done", "item" => ^compact_item}, %{"type" => "response.completed", "response" => %{"id" => "resp_provider_refusal_retry", "output" => [^compact_item]}}] = frames
+
+        {_state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+        assert [%{"type" => "response.completed", "response" => %{"id" => "resp_provider_refusal_final"}}] = frames
+
+        rows = [_anchor_row, refused, retry, _final] = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: request.admitted_at))
+
+        assert Enum.map(rows, &{&1.endpoint, &1.status}) == [
+                 {"/backend-api/codex/responses", "succeeded"},
+                 {"/backend-api/codex/responses/compact", "failed"},
+                 {"/backend-api/codex/responses/compact", "succeeded"},
+                 {"/backend-api/codex/responses", "succeeded"}
+               ]
+
+        assert [%Attempt{status: "failed", response_metadata: %{"rejection_message_class" => "invalid_previous_response_id", "stream_terminal_type" => "error"} = metadata}] =
+                 Repo.all(from(attempt in Attempt, where: attempt.request_id == ^refused.id))
+
+        refute Map.has_key?(metadata, "transport_failure")
+        [refused_estimate] = Repo.all(from(entry in LedgerEntry, where: entry.request_id == ^refused.id and entry.entry_kind == "reservation", select: entry.total_tokens))
+        assert key_usage_events(refused.id) == %{known: 0, provisional: refused_estimate, admissions: 1}
+        assert key_usage_events(retry.id) == %{known: @compact_usage["total_tokens"], provisional: 0, admissions: 1}
+        assert :ok = FakeUpstream.verify!(upstream)
+      after
+        CodexResponsesSocket.terminate(:closed, Process.delete(:crossing_socket_state))
+      end
+    end
+  end
 
   # One successor only: with owner forwarding on, a second full-history
   # resend after the served retry is refused and reaches no provider. With
@@ -1569,6 +1645,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
     for session <- Repo.all(from(session in CodexSession, where: session.pool_id == ^setup.pool.id)),
         {:ok, owner} <- [WebsocketOwnerSession.lookup(session.id)],
         do: owner
+  end
+
+  defp any_connection_request(json, respond) do
+    json = Keyword.merge([valid: true, equals: %{"type" => "response.create"}], json)
+    FakeUpstream.expect_request(method: "WEBSOCKET", json: json, respond: respond)
   end
 
   defp window_request(connection_ordinal, json, respond) do

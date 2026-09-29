@@ -7,6 +7,7 @@ defmodule CodexPooler.Accounting.FailedPredecessorResendTest do
   alias CodexPooler.Accounting
   alias CodexPooler.Accounting.{ClientRetry, Request, RequestReplayEntitlement}
   alias CodexPooler.Gateway.Persistence.{CodexSession, CodexTurn}
+  alias CodexPooler.Gateway.Transports.TransportFailureReason
   alias CodexPooler.Repo
 
   @endpoint "/backend-api/codex/responses"
@@ -412,6 +413,104 @@ defmodule CodexPooler.Accounting.FailedPredecessorResendTest do
     end
   end
 
+  # A native websocket compaction is judged by the rule the owner's compaction
+  # retry policy applies with forwarding on (`ClientRetry.compaction_resend_shape/3`),
+  # failing closed (findings#270 rows 270-237 and 270-238).
+  describe "claim_websocket_turn after a failed native websocket compaction" do
+    setup do
+      setup = accounting_setup()
+      session = insert_session!(setup)
+
+      opts = %{
+        endpoint: "/backend-api/codex/responses/compact",
+        correlation_id: request_claim(),
+        codex_session: session,
+        request_metadata: %{"request_id" => "compaction-resend-#{System.unique_integer([:positive])}"}
+      }
+
+      %{setup: setup, session: session, opts: opts}
+    end
+
+    test "admits a compaction whose anchor was refused before any execution, by the guard or by the provider",
+         %{setup: setup, session: session, opts: opts} do
+      for metadata <- [anchor_refusal_metadata(:guard), anchor_refusal_metadata(:provider)] do
+        opts = %{opts | correlation_id: request_claim()}
+        {:ok, %{request: predecessor}} = Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
+        fail_predecessor!(setup, session, predecessor, "stream_incomplete", response_metadata: metadata)
+
+        assert {:ok, %{request: resend, client_resend: %{predecessor_request_id: predecessor_id, predecessor_shape: :anchor_refusal}}} =
+                 Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
+
+        assert predecessor_id == predecessor.id
+        assert String.starts_with?(resend.correlation_id, @retry_prefix)
+      end
+    end
+
+    # `stream_incomplete` is in the retryable first-event vocabulary, so every
+    # such compaction used to be admitted here as a provider terminal, whatever
+    # its shape: a provider 400 of another message class, the provider's
+    # anchor refusal without the receipt of its one pushed frame, one without
+    # any proof at all.
+    test "keeps the fence for a stream_incomplete compaction without a verified shape",
+         %{setup: setup, session: session, opts: opts} do
+      unproven = [
+        Map.delete(anchor_refusal_metadata(:provider), "rejection_message_class"),
+        Map.delete(anchor_refusal_metadata(:provider), "downstream_delivery"),
+        %{"stream_terminal_type" => "error", "error_kind" => "stream_incomplete"}
+      ]
+
+      for metadata <- unproven do
+        opts = %{opts | correlation_id: request_claim()}
+        {:ok, %{request: predecessor}} = Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
+        fail_predecessor!(setup, session, predecessor, "stream_incomplete", response_metadata: metadata)
+
+        assert {:error, %{code: :duplicate_request, resend_disposition: :terminal_predecessor}} =
+                 Accounting.claim_websocket_turn(setup.auth, setup.model, opts),
+               "admitted a compaction with #{inspect(metadata)}"
+      end
+    end
+
+    test "admits a compaction drained before any output and one the provider ended with a retryable terminal",
+         %{setup: setup, session: session, opts: opts} do
+      for {code, visible, metadata, shape} <- [
+            {"owner_drained", nil, %{"error_kind" => "owner_drained"}, :compaction_cut},
+            {"server_error", db_now(), %{"stream_terminal_type" => "response.failed", "error_kind" => "server_error"}, :provider_terminal}
+          ] do
+        opts = %{opts | correlation_id: request_claim()}
+        {:ok, %{request: predecessor}} = Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
+        fail_predecessor!(setup, session, predecessor, code, response_metadata: metadata, first_visible_output_at: visible)
+
+        assert {:ok, %{client_resend: %{predecessor_request_id: predecessor_id, predecessor_shape: ^shape}}} =
+                 Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
+
+        assert predecessor_id == predecessor.id
+      end
+    end
+  end
+
+  # One terminal error frame pushed and nothing before it, with the guard's
+  # metadata or the provider's refusal (findings#232 row 232-277).
+  defp anchor_refusal_metadata(refusal) do
+    base = %{
+      "stream_terminal_type" => "error",
+      "error_kind" => "stream_incomplete",
+      "upstream_error_code" => "previous_response_not_found",
+      "downstream_delivery" => %{"outcome" => "delivered", "terminal_class" => "error", "highest_frame_class" => "terminal", "frames_after_visible" => 1, "transport" => "websocket"}
+    }
+
+    case refusal do
+      :guard ->
+        Map.put(base, "transport_failure", TransportFailureReason.continuation_generation_guard_metadata(:fresh))
+
+      :provider ->
+        Map.merge(base, %{
+          "rejection_upstream_status" => 400,
+          "rejection_error_type" => "invalid_request_error",
+          "rejection_message_class" => "invalid_previous_response_id"
+        })
+    end
+  end
+
   defp request_claim,
     do: "codex-request:" <> Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
 
@@ -465,7 +564,7 @@ defmodule CodexPooler.Accounting.FailedPredecessorResendTest do
         status: "failed",
         error_code: code,
         final_attempt_id: attempt.id,
-        first_visible_output_at: now,
+        first_visible_output_at: Keyword.get(opts, :first_visible_output_at, now),
         started_at: now,
         completed_at: now,
         created_at: now,

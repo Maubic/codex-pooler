@@ -22,6 +22,16 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
 
   import CodexPooler.AccountingTestSupport
 
+  # What the attempt records for the Codex backend's websocket refusal of an
+  # anchor its connection cannot resolve (findings#232 row 232-277).
+  @provider_refusal_rejection %{
+    "rejection_upstream_status" => 400,
+    "rejection_error_type" => "invalid_request_error",
+    "rejection_message_class" => "invalid_previous_response_id",
+    "rejection_message_present" => true,
+    "rejection_message_bytes" => 31
+  }
+
   test "compact successor preserves capacity denial until a different reservation releases" do
     {setup, _predecessor, opts} = local_failure_predecessor!(:task_exception)
     update!(setup.api_key, max_active_requests: 1)
@@ -335,20 +345,28 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
   # it, and its client got `previous_response_not_found`, which the released
   # client retries as the full request without the anchor. With owner
   # forwarding on, that resend met `terminal_predecessor` here (findings#278).
-  test "claims one successor for a compaction whose anchor the continuation guard refused before sending" do
-    {setup, predecessor, opts} = guard_refused_predecessor!(:guard_refusal)
+  # The provider's own refusal of an anchor gets the same event when its shape
+  # proves it preceded any execution: the codeless wrapped `error` event,
+  # status 400 `invalid_request_error`, with the fixed `Invalid
+  # previous_response_id` message class (findings#270 row 270-238).
+  for refusal <- [:guard_refusal, :provider_refusal] do
+    test "claims one successor for a compaction whose anchor was refused before any execution: #{refusal}" do
+      {setup, predecessor, opts} = guard_refused_predecessor!(unquote(refusal))
 
-    assert {:ok, claim} =
-             Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+      assert {:ok, claim} =
+               Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
 
-    assert claim.predecessor_request_id == predecessor.id
-    assert Repo.aggregate(RequestClientRetryLink, :count) == 1
+      assert claim.predecessor_request_id == predecessor.id
+      assert Repo.aggregate(RequestClientRetryLink, :count) == 1
+      assert {:ok, :anchor_refusal} = compaction_resend_shape(predecessor)
+    end
   end
 
-  # The provider's own refusal of an anchor carries no guard metadata, and its
-  # client gets the collected compaction's 400, which it does not retry; a
-  # refusal recorded as sent upstream is not the guard's. Both keep the fence.
-  for mutation <- [:provider_refusal, :upstream_committed] do
+  # A refusal with neither the guard's metadata nor the provider's proven
+  # shape, a refusal recorded as sent upstream (not the guard's), and a
+  # provider 400 of another message class keep the fence: their client gets
+  # the collected compaction's 400, which it does not retry.
+  for mutation <- [:unproven_refusal, :upstream_committed, :other_refusal_class] do
     test "keeps the fence for a compaction anchor refusal: #{mutation}" do
       {setup, predecessor, opts} = guard_refused_predecessor!(unquote(mutation))
       counts = row_counts()
@@ -1090,9 +1108,17 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
 
     case mutation do
       :guard_refusal -> metadata
-      :provider_refusal -> Map.delete(metadata, "transport_failure")
+      :provider_refusal -> metadata |> Map.delete("transport_failure") |> Map.merge(@provider_refusal_rejection)
+      :unproven_refusal -> Map.delete(metadata, "transport_failure")
       :upstream_committed -> put_in(metadata, ["transport_failure", "upstream_committed"], true)
+      :other_refusal_class -> metadata |> Map.delete("transport_failure") |> Map.merge(@provider_refusal_rejection) |> Map.delete("rejection_message_class")
     end
+  end
+
+  defp compaction_resend_shape(%Request{} = request) do
+    turn = Repo.get_by!(CodexTurn, request_id: request.id)
+    attempt = Repo.get!(Attempt, turn.final_attempt_id)
+    ClientRetry.compaction_resend_shape(turn, Repo.get!(Request, request.id), attempt)
   end
 
   defp update!(row, attrs), do: row |> Ecto.Changeset.change(attrs) |> Repo.update!()

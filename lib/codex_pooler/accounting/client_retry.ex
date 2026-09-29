@@ -1427,10 +1427,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
   end
 
   defp validate_retry_lifecycle_for_policy(turn, request, attempt, %{retry_policy: :native_compaction}, _witness_match) do
-    if verified_compaction_execution_failure?(turn, request, attempt) or verified_unreceived_compaction?(turn, request, attempt) or
-         verified_compaction_anchor_refusal?(turn, request, attempt),
-       do: :ok,
-       else: validate_compaction_lifecycle(turn, request, attempt)
+    with {:ok, _shape} <- compaction_resend_shape(turn, request, attempt), do: :ok
   end
 
   defp validate_retry_lifecycle_for_policy(turn, request, attempt, _input, {:grown, candidates}) do
@@ -1441,6 +1438,34 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   defp validate_retry_lifecycle_for_policy(turn, request, attempt, _input, :exact),
     do: validate_retry_lifecycle(turn, request, attempt)
+
+  @doc """
+  The one rule by which the resend of a native compaction is admitted as a
+  successor of its predecessor, with owner forwarding off
+  (`FailedPredecessorResend`) and on (the `:native_compaction` policy)
+  alike, failing closed (findings#270 rows 270-237 and 270-238). With
+  forwarding off every failed compaction whose code the retryable
+  first-event vocabulary names used to be admitted, whatever its shape,
+  while forwarding on admitted only the verified shapes below; the two now
+  share them. The shape names the admission for its log line:
+  `unreceived_compaction` (served or disconnected before its client read
+  it), `task_exception` (the Pooler's own execution died), `anchor_refusal`
+  (an anchor refused before any execution, by the connection-bound guard or
+  by the provider), `compaction_cut` (cut, disconnected or drained before
+  any output), `provider_terminal` (a terminal the released client
+  retries).
+  """
+  @spec compaction_resend_shape(term(), term(), term()) ::
+          {:ok, :unreceived_compaction | :task_exception | :anchor_refusal | :compaction_cut | :provider_terminal}
+          | {:error, :terminal_predecessor}
+  def compaction_resend_shape(turn, request, attempt) do
+    cond do
+      verified_unreceived_compaction?(turn, request, attempt) -> {:ok, :unreceived_compaction}
+      verified_compaction_execution_failure?(turn, request, attempt) -> {:ok, :task_exception}
+      verified_compaction_anchor_refusal?(turn, request, attempt) -> {:ok, :anchor_refusal}
+      true -> compaction_lifecycle_shape(turn, request, attempt)
+    end
+  end
 
   # Local execution failures carry no provider terminal. Compaction still
   # requires an unseen compact response; ordinary turn retries allow visible
@@ -1456,18 +1481,20 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   defp verified_compaction_execution_failure?(_turn, _request, _attempt), do: false
 
-  # An anchored native compaction the connection-bound guard refused before
-  # sending it: the connection that produced its anchor had closed, and the
-  # provider resolves an anchor only on that connection (`transport_failure`
-  # from `continuation_generation_guard`, nothing committed upstream). Its
-  # client got the `previous_response_not_found` event an ordinary
-  # continuation gets for the same refusal, which the released client retries
-  # as the full request without the anchor. That resend met `409
-  # duplicate_turn` here while forwarding off served it (findings#278), so it
-  # is admitted as one successor. The provider's own refusal of an anchor
-  # carries no guard metadata and keeps the fence: its client gets the
-  # collected compaction's 400, which it does not retry. Generation zero, one
-  # terminal error frame pushed and nothing before it.
+  # An anchored native compaction refused before any execution because its
+  # anchor could not be resolved, whose client got the `previous_response_not_found`
+  # event an ordinary continuation gets for the same refusal and retries as
+  # the full request without the anchor. Two refusals qualify: the
+  # connection-bound guard's, before anything was sent (`transport_failure`
+  # from `continuation_generation_guard`, nothing committed upstream;
+  # findings#278), and the provider's own (findings#270 row 270-238), proven
+  # to precede any execution by its shape: the Codex backend's codeless
+  # wrapped `error` event, status 400 `invalid_request_error`, with the fixed
+  # `Invalid previous_response_id` message class, which it sends instead of a
+  # response (no `response.created`, so `stream_terminal_type` `error`, never
+  # `response.failed`), and which it checks before the model (findings#232
+  # rows 232-277 and 232-279). Generation zero, one terminal error frame pushed
+  # and nothing before it.
   defp verified_compaction_anchor_refusal?(
          %CodexTurn{status: "failed", error_code: code, final_attempt_id: attempt_id, transport_kind: "websocket", completed_at: %DateTime{}},
          %Request{status: "failed", last_error_code: code, transport: "websocket", endpoint: "/backend-api/codex/responses/compact", completed_at: %DateTime{}},
@@ -1478,19 +1505,36 @@ defmodule CodexPooler.Accounting.ClientRetry do
            transport: "websocket",
            replay_generation: 0,
            completed_at: %DateTime{},
-           response_metadata: %{
-             "upstream_error_code" => "previous_response_not_found",
-             "transport_failure" => %{"termination_source" => "continuation_generation_guard", "upstream_committed" => false, "text_frame_count" => 0},
-             "downstream_delivery" => %{"outcome" => outcome, "terminal_class" => "error", "highest_frame_class" => "terminal", "frames_after_visible" => 1}
-           }
+           response_metadata:
+             %{
+               "upstream_error_code" => "previous_response_not_found",
+               "downstream_delivery" => %{"outcome" => outcome, "terminal_class" => "error", "highest_frame_class" => "terminal", "frames_after_visible" => 1}
+             } = metadata
          }
        )
        when is_binary(attempt_id) and code == "stream_incomplete" and outcome in ["delivered", "aborted"],
-       do: true
+       do: guard_anchor_refusal?(metadata) or provider_anchor_refusal?(metadata)
 
   defp verified_compaction_anchor_refusal?(_turn, _request, _attempt), do: false
 
-  defp validate_compaction_lifecycle(
+  defp guard_anchor_refusal?(%{"transport_failure" => %{"termination_source" => "continuation_generation_guard", "upstream_committed" => false, "text_frame_count" => 0}}),
+    do: true
+
+  defp guard_anchor_refusal?(_metadata), do: false
+
+  defp provider_anchor_refusal?(
+         %{
+           "stream_terminal_type" => "error",
+           "rejection_upstream_status" => 400,
+           "rejection_error_type" => "invalid_request_error",
+           "rejection_message_class" => "invalid_previous_response_id"
+         } = metadata
+       ),
+       do: not Map.has_key?(metadata, "transport_failure")
+
+  defp provider_anchor_refusal?(_metadata), do: false
+
+  defp compaction_lifecycle_shape(
          %CodexTurn{
            status: turn_status,
            error_code: error,
@@ -1514,10 +1558,10 @@ defmodule CodexPooler.Accounting.ClientRetry do
        )
        when turn_status in ["failed", "interrupted"] and
               error in ["upstream_stream_error", "client_disconnected", "owner_drained"] do
-    :ok
+    {:ok, :compaction_cut}
   end
 
-  defp validate_compaction_lifecycle(
+  defp compaction_lifecycle_shape(
          %CodexTurn{
            status: "failed",
            error_code: error,
@@ -1540,11 +1584,11 @@ defmodule CodexPooler.Accounting.ClientRetry do
          }
        ) do
     if ErrorCodes.codex_compaction_terminal_retryable?(terminal_type, error),
-      do: :ok,
+      do: {:ok, :provider_terminal},
       else: {:error, :terminal_predecessor}
   end
 
-  defp validate_compaction_lifecycle(_turn, _request, _attempt),
+  defp compaction_lifecycle_shape(_turn, _request, _attempt),
     do: {:error, :terminal_predecessor}
 
   defp validate_retry_lifecycle(turn, request, %Attempt{} = attempt) do

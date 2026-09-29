@@ -93,13 +93,16 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
     end
   end
 
-  @spec collect_websocket_body(binary(), :native | :public) :: websocket_collection_result()
-  def collect_websocket_body(body, item_mode \\ :native)
+  # `terminal_source` names who sent the terminal on the decision line: the
+  # provider, or the Pooler's connection-bound guard, whose refusal passes
+  # through here as if the provider had sent it (findings#270 row 270-238).
+  @spec collect_websocket_body(binary(), :native | :public, :provider_terminal | :continuation_guard) :: websocket_collection_result()
+  def collect_websocket_body(body, item_mode \\ :native, terminal_source \\ :provider_terminal)
 
-  def collect_websocket_body(body, item_mode)
-      when is_binary(body) and item_mode in [:native, :public] do
+  def collect_websocket_body(body, item_mode, terminal_source)
+      when is_binary(body) and item_mode in [:native, :public] and terminal_source in [:provider_terminal, :continuation_guard] do
     {:ok, state} = collect_sse_data(new_state(item_mode), body)
-    state |> finalize_sse_state() |> websocket_compact_result()
+    state |> finalize_sse_state() |> websocket_compact_result(terminal_source)
   end
 
   @spec provider_failure_websocket_event(StreamProtocol.terminal_failure()) :: map()
@@ -187,12 +190,12 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
     invalid_compaction_error(collection.invalid_reason)
   end
 
-  defp websocket_compact_result(%{collection: %{provider_failure: %{} = failure} = collection}) do
-    log_provider_terminal(collection, failure, elapsed_ms(collection))
+  defp websocket_compact_result(%{collection: %{provider_failure: %{} = failure} = collection}, terminal_source) do
+    log_provider_terminal(collection, failure, elapsed_ms(collection), terminal_source)
     {:provider_failure, failure}
   end
 
-  defp websocket_compact_result(state), do: compact_result(state)
+  defp websocket_compact_result(state, _terminal_source), do: compact_result(state)
 
   defp compact_response(%{item: item, response: response, terminal?: true})
        when is_map(item) and is_map(response) do
@@ -657,12 +660,12 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
     end)
   end
 
-  defp log_provider_terminal(collection, failure, elapsed_ms) do
+  defp log_provider_terminal(collection, failure, elapsed_ms, terminal_source) do
     {param_state, param} = provider_param(failure, collection.provider_terminal_param_state)
 
     Logger.warning(fn ->
       "compact terminal decision " <>
-        "source_stage=provider_terminal " <>
+        "source_stage=#{terminal_source} " <>
         "code=#{DiagnosticTaxonomy.identifier(failure.code) || "upstream_terminal_failure"} " <>
         "status=#{provider_failure_status(failure)} " <>
         "terminal_type=#{failure.event_type || "provider_terminal"} " <>

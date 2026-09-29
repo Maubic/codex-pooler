@@ -44,6 +44,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy do
                                completed_item_resend
                                mailbox_continuation
                                unreceived_compaction
+                               anchor_refusal
+                               compaction_cut
                              )
   @handoff_outcomes ~w(
                         ready

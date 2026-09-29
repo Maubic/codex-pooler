@@ -64,7 +64,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
     if RequestOptions.connection_bound_compaction?(request_options) do
       item_mode = if mode == :public_websocket, do: :public, else: :native
 
-      case CompactionResultCollector.collect_websocket_body(body, item_mode) do
+      case CompactionResultCollector.collect_websocket_body(body, item_mode, terminal_source(finalization)) do
         {:ok,
          %{
            status: status,
@@ -178,7 +178,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
 
     finalization =
       cond do
-        continuation_guard_refusal?(context.request_options, finalization, failure) ->
+        anchor_refusal?(context.request_options, finalization, failure) ->
           Map.put(finalization, :collected_provider_failure_event, previous_response_retry_event())
 
         native_full_history_compaction?(context.request_options) or
@@ -196,17 +196,44 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
     finalize_terminal_failure(context, finalization)
   end
 
-  # The connection-bound guard refused the compaction's anchor before anything
-  # went upstream: the connection that produced the anchor closed after the
-  # compaction was admitted (findings#278). Only the guard's exact metadata
-  # proves that (`continuation_guard_metadata/2`). The client gets the event an
-  # ordinary continuation gets for the same refusal, `previous_response_not_found`,
-  # which the released client retries as a full request without the anchor;
-  # the collected-compaction answer to a provider's refusal, a 400 its client
-  # reads as a fatal invalid request, stays for requests the provider refused.
-  defp continuation_guard_refusal?(request_options, finalization, failure) do
+  # The compaction's anchor was refused before any execution. The client gets
+  # the event an ordinary continuation gets for the same refusal,
+  # `previous_response_not_found`, which the released client retries as a full
+  # request without the anchor; the collected-compaction answer to any other
+  # provider refusal, a 400 its client reads as a fatal invalid request, stays.
+  # Two refusals are proven to precede any execution:
+  # - the connection-bound guard's, before anything went upstream, after the
+  #   connection that produced the anchor closed (findings#278); only the
+  #   guard's exact metadata proves it (`continuation_guard_metadata/2`);
+  # - the provider's own (findings#270 row 270-238): the Codex backend's
+  #   codeless wrapped `error` event, status 400 `invalid_request_error`, with
+  #   the fixed `Invalid previous_response_id` message class, sent instead of a
+  #   response (no `response.created`; a `response.failed` with the same code
+  #   follows a created response and stays fatal), and checked before the
+  #   model (findings#232 rows 232-277 and 232-279).
+  # The resend policies admit the retry of both (`ClientRetry.compaction_resend_shape/3`).
+  defp anchor_refusal?(request_options, finalization, failure) do
     native_collected_compaction?(request_options) and
-      map_size(continuation_guard_metadata(failure.upstream_code, Map.get(finalization, :transport_failure))) > 0
+      (map_size(continuation_guard_metadata(failure.upstream_code, Map.get(finalization, :transport_failure))) > 0 or
+         provider_anchor_refusal?(request_options, finalization, failure))
+  end
+
+  defp provider_anchor_refusal?(request_options, %{body: body}, %{upstream_code: "previous_response_not_found", event_type: "error"}) when is_binary(body) do
+    match?(
+      %{"rejection_upstream_status" => 400, "rejection_error_type" => "invalid_request_error", "rejection_message_class" => "invalid_previous_response_id"},
+      provider_rejection_metadata(body, request_options)
+    )
+  end
+
+  defp provider_anchor_refusal?(_request_options, _finalization, _failure), do: false
+
+  # The guard's refusal passes through the collector as if the provider had
+  # sent it, so its terminal decision line names the guard instead
+  # (findings#270 row 270-238).
+  defp terminal_source(finalization) do
+    if map_size(TransportFailureReason.sanitize_continuation_generation_guard_metadata(Map.get(finalization, :transport_failure))) > 0,
+      do: :continuation_guard,
+      else: :provider_terminal
   end
 
   defp previous_response_retry_event do

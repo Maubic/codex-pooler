@@ -88,6 +88,8 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           | :completed_item_resend
           | :unreceived_compaction
           | :mailbox_continuation
+          | :anchor_refusal
+          | :compaction_cut
 
   @type resolution :: %{
           required(:claim) => String.t(),
@@ -401,7 +403,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
       not transport_scoped?(request, scope) ->
         {:error, :authorization_changed}
 
-      request.status != "failed" or is_nil(family) ->
+      request.status != "failed" or (is_nil(family) and not websocket_compaction?(request)) ->
         {:error, :terminal_predecessor}
 
       live_turn?(request.id) or live_attempt?(request.id) ->
@@ -410,9 +412,31 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
       entitlement?(request.id) ->
         {:error, :entitlement_present}
 
+      websocket_compaction?(request) ->
+        admit_compaction_predecessor(request, scope, now)
+
       true ->
         admit_predecessor(request, family, scope, now)
     end
+  end
+
+  # A failed native websocket compaction is judged by the rule the owner's
+  # compaction retry policy applies with forwarding on
+  # (`ClientRetry.compaction_resend_shape/3`), failing closed. The failure
+  # families below used to admit every compaction whose code the retryable
+  # first-event vocabulary names (`stream_incomplete` among them) whatever its
+  # shape, and to refuse a pre-visible drain the owner's policy admits
+  # (findings#270 rows 270-237 and 270-238).
+  defp websocket_compaction?(%Request{endpoint: "/backend-api/codex/responses/compact", transport: "websocket"}), do: true
+  defp websocket_compaction?(%Request{}), do: false
+
+  defp admit_compaction_predecessor(request, scope, now) do
+    turn = lock_turn(request.id)
+    attempt = lock_final_attempt(turn, request.id)
+
+    with {:ok, shape} <- ClientRetry.compaction_resend_shape(turn, request, attempt),
+         :ok <- validate_retry_window(request, attempt, now, scope),
+         do: {:ok, shape}
   end
 
   # A client-side tool is dispatched only once its output_item.done arrives.
