@@ -628,6 +628,39 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     end
   end
 
+  # An incremental compaction that meets a final past its bound is refused
+  # before dispatch with `expired` as its cause, whichever node the admission
+  # lives on (findings#270 row 270-334). The admission ended past its bound
+  # (row 270-289) and its snapshot answered an empty admission: the refusal
+  # line read `cause=no_admission` from an owner and `cause=owner_unavailable`
+  # from the socket's own upstream session. The client's answer is unchanged.
+  # The bound is shortened to a millisecond for the compaction's confirmation
+  # only, on the node that computes it.
+  for topology <- [:remote, :local, :direct] do
+    @tag topology: topology
+    test "#{topology}: a compaction that meets a final past its bound is refused with expired as its cause", ctx do
+      compaction = open_compaction_session!(ctx, true, [:anchor, :compaction, :compaction, :final])
+      hold = hold_settled_websocket_turn!()
+      {conn, websocket} = public_websocket_send_text!(compaction.client.conn, compaction.client.websocket, compaction.client.ref, compaction_frame(compaction, "compaction", trigger(compaction), "resp_slow_owner_anchor"))
+      assert_receive {^hold, :held, task}, @detection_timeout_ms
+      Application.put_env(:codex_pooler, NativeCompactionAdmission, reservation_ttl_ms: 1)
+      :ok = release_settled_websocket_turn(hold, task)
+      {conn, websocket, served} = receive_native_terminal!(conn, websocket, compaction.client.ref)
+      Application.put_env(:codex_pooler, NativeCompactionAdmission, [])
+      assert %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_compact"}} = served
+      compaction = with_client(compaction, conn, websocket)
+      _idle = await_socket_connection_state!(compaction.client.socket, &(MapSet.size(&1.tasks) == 0))
+      Process.sleep(10)
+
+      {refusal, log} = with_info_log(fn -> send_frame!(compaction, compaction_frame(compaction, "compaction", trigger(compaction), "resp_slow_owner_compact")) end)
+
+      assert %{"type" => "error", "status" => 503, "error" => %{"code" => "owner_unavailable"}} = refusal
+      topology = if ctx.topology == :direct, do: "direct", else: "forwarded"
+      assert log =~ "native compaction refused before dispatch reason=admission_unavailable cause=expired code=owner_unavailable status=503 compaction_phase=mid_turn topology=#{topology}"
+      assert FakeUpstream.count(compaction.upstream) == 2
+    end
+  end
+
   # An incremental compaction the client sends long after the ordinary turn
   # that armed it (findings#270 row 270-317). The armed compaction expired 60
   # s after that turn, and the compaction was refused `503 owner_unavailable`

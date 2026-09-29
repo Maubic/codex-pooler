@@ -475,6 +475,29 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     assert {:error, :invalid_transition} = finalization.(confirmation)
   end
 
+  # findings#270 row 270-334: a final past its bound answers the reservation
+  # snapshot `expired`, the reason the admission ended, where it answered the
+  # `owner_unavailable` of every other refusal and the socket logged the
+  # refused reservation `cause=owner_unavailable`. One node, direct topology,
+  # raw websocket peer, Full.
+  test "direct reservation snapshot answers expired for a final past its bound" do
+    %{session: session, peer: peer, binding: binding, lifecycle: lifecycle} = armed_direct_admission()
+    capability = reserve_and_start_direct(session, :compact, binding)
+
+    assert {:ok, %{terminal: "response.completed"}} =
+             UpstreamWebsocketSession.request(session, %{
+               raw_websocket_request(peer.url, self())
+               | native_compaction_capability: capability,
+                 expected_connection_lifecycle: lifecycle
+             })
+
+    digest = :crypto.hash(:sha256, "synthetic-expired-final-compaction-item")
+    confirmation = %Confirmation{source_phase: :compact, source_control_ref: capability.control_ref, binding: %{binding | compaction_item_digest: digest}}
+    assert :ok = UpstreamWebsocketSession.acknowledge_compact_finalization(session, {:success, digest, confirmation, System.system_time(:millisecond) - 1})
+
+    assert {:error, :expired} = UpstreamWebsocketSession.compaction_reservation_snapshot(session)
+  end
+
   describe "direct native compaction admission clear reasons" do
     @short_receive_timeouts %{connect_timeout_ms: 1_000, receive_timeout_ms: 150}
 

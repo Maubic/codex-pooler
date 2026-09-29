@@ -1122,6 +1122,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
   defp expire_stale_admission(state), do: state
 
+  defp expired_by_snapshot?(%WebsocketOwnerAdmissionControlV1{action: :snapshot}, %{native_compaction_admission: %NativeCompactionAdmission{}}, %{native_compaction_admission: nil}), do: true
+  defp expired_by_snapshot?(_control, _state, _unexpired), do: false
+
   # Every clear names why it happened, from the fixed lifecycle vocabulary
   # (findings#258 rows 258-23 and 258-50): a default made drains, stale owners,
   # upstream exits and capability rejections read as rejected requests.
@@ -1738,10 +1741,26 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     end
   end
 
+  # A snapshot that ends an admission past its bound answers `expired`, the
+  # reason it ended, not the empty admission it leaves: the socket logged the
+  # reservation it refused `cause=no_admission` (findings#270 row 270-334).
+  # The answer is in the refusal vocabulary a remote caller passes through,
+  # and a socket of an earlier release reads any error of the snapshot as a
+  # refusal.
   def handle_call({:admission_control_v1, control}, _from, state) do
-    case state |> expire_stale_admission() |> apply_admission_control(control) do
-      {:ok, reply, next_state} -> {:reply, {:ok, reply}, next_state}
-      {:error, reason, next_state} -> {:reply, {:error, reason}, next_state}
+    unexpired = expire_stale_admission(state)
+
+    case apply_admission_control(unexpired, control) do
+      {:ok, nil, next_state} ->
+        if expired_by_snapshot?(control, state, unexpired),
+          do: {:reply, {:error, :expired}, next_state},
+          else: {:reply, {:ok, nil}, next_state}
+
+      {:ok, reply, next_state} ->
+        {:reply, {:ok, reply}, next_state}
+
+      {:error, reason, next_state} ->
+        {:reply, {:error, reason}, next_state}
     end
   end
 

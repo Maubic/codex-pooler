@@ -466,18 +466,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   def handle_call(:live_connection, _from, state), do: {:reply, {:ok, live_connection_state(state)}, state}
 
-  # An armed compaction has no bound, and `admission_state/1` has already
-  # ended a final past its own (findings#270 rows 270-317 and 270-289).
+  # An armed compaction has no bound, and a final or a collection past its
+  # own has ended (findings#270 rows 270-317 and 270-289). A snapshot of one
+  # that ended answers `expired`, the reason it did: read through
+  # `admission_state/1` it was an empty admission, and the reservation it
+  # refused was logged `cause=owner_unavailable` like every other refusal
+  # (row 270-334).
   def handle_call(:compaction_reservation_snapshot, _from, state) do
+    stored = Map.get(state, :native_compaction_admission, %NativeCompactionAdmission{phase: :cleared})
+
     result =
-      with %{phase: phase, binding: %Binding{} = binding}
-           when phase in [:pending_compact, :pending_final] <-
-             admission_state(state),
-           :ok <- validate_direct_binding(state, binding),
-           true <- binding.serving_mode in [:full, :lite] do
-        {:ok, Map.take(binding, [:lifecycle_id, :generation, :serving_mode])}
-      else
-        _invalid -> {:error, :owner_unavailable}
+      case NativeCompactionAdmission.expire_unconsumed(stored, System.system_time(:millisecond)) do
+        {:expired, _cleared} -> {:error, :expired}
+        {:active, admission} -> reservation_snapshot(state, admission)
       end
 
     {:reply, result, state}
@@ -3240,6 +3241,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       })
 
     :ok
+  end
+
+  defp reservation_snapshot(state, admission) do
+    with %{phase: phase, binding: %Binding{} = binding} when phase in [:pending_compact, :pending_final] <- admission,
+         :ok <- validate_direct_binding(state, binding),
+         true <- binding.serving_mode in [:full, :lite] do
+      {:ok, Map.take(binding, [:lifecycle_id, :generation, :serving_mode])}
+    else
+      _invalid -> {:error, :owner_unavailable}
+    end
   end
 
   defp validate_direct_binding(state, %Binding{topology: %Direct{}} = binding) do
