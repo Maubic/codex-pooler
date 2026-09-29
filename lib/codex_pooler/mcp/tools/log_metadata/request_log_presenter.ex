@@ -42,6 +42,7 @@ defmodule CodexPooler.MCP.Tools.LogMetadata.RequestLogPresenter do
         model_conflict_attempts: Map.get(log, :model_conflict_attempts, []),
         transport: log.transport,
         status: log.status,
+        display_status: Map.get(log, :display_status) || log.status,
         usage_status: log.usage_status,
         correlation_id: log.correlation_id,
         response_status_code: log.response_status_code,
@@ -126,9 +127,12 @@ defmodule CodexPooler.MCP.Tools.LogMetadata.RequestLogPresenter do
 
   def detail_text(%{"status" => "not_found"}), do: ReadableText.not_found("request log")
 
+  # The text reads each row's displayed status: a client cancellation is
+  # recorded `failed` and shown as `client_cancelled` (`RequestOutcome`); the
+  # structured `status` keeps the recorded value.
   defp first_line(items, total, offset) do
     shown_count = min(length(items), 10)
-    status_text = tally_text(items, "status")
+    status_text = items |> Enum.map(&Map.put(&1, "status", text_status(&1))) |> tally_text("status")
 
     "#{shown_count} request logs returned; total #{total}; offset #{offset}; statuses #{status_text}"
   end
@@ -154,6 +158,7 @@ defmodule CodexPooler.MCP.Tools.LogMetadata.RequestLogPresenter do
       "usage_status",
       "latency_ms"
     ])
+    |> Map.put("status", text_status(item))
     |> Map.put("pool", pool_text(item))
     |> Map.put("model_conflict_attempts", Enum.join(Map.get(item, "model_conflict_attempts", []), ","))
     |> Map.put("retries", Map.get(item, "retry_count") || 0)
@@ -507,6 +512,8 @@ defmodule CodexPooler.MCP.Tools.LogMetadata.RequestLogPresenter do
       [_old_first_line] -> first_line
     end
   end
+
+  defp text_status(item), do: Map.get(item, "display_status") || Map.get(item, "status")
 
   defp tally_text([], _field), do: "none"
 

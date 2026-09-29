@@ -103,6 +103,7 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
         :model_conflict_attempts,
         :transport,
         :status,
+        :display_status,
         :usage_status,
         :correlation_id,
         :response_status_code,

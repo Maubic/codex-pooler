@@ -108,7 +108,7 @@ defmodule CodexPooler.MCP.Tools.LogMetadata do
           use_when: "an operator needs a bounded, read-only MCP summary of runtime request logs for visible Pools",
           returns: "concise metadata rows with pool, route, status, model, usage, timing, retry, safe routing, and sanitized metadata summaries",
           never_returns: "raw URLs with secrets, query strings, files, websocket frames, raw idempotency keys, upload URLs, raw API keys, or raw gateway debug payloads",
-          filters_limits: "accepts optional pool_id, status, model, request_id, upstream_identity_id, date_from, date_to, limit, and offset; limit is clamped to 1-50, offset must not exceed #{@max_offset} (refine filters for deeper history), and output is sorted newest first; total counts at most #{@count_window} rows past offset, and totalExact false means more than total rows match"
+          filters_limits: "accepts optional pool_id, status, model, request_id, upstream_identity_id, date_from, date_to, limit, and offset; status matches the recorded status, where a request the client cancelled is recorded failed, status client_cancelled lists only those, and each row's display_status is the status the admin pages show; limit is clamped to 1-50, offset must not exceed #{@max_offset} (refine filters for deeper history), and output is sorted newest first; total counts at most #{@count_window} rows past offset, and totalExact false means more than total rows match"
         ),
       input_schema: request_logs_input_schema(),
       output_schema: request_logs_page_output_schema(),
@@ -490,17 +490,22 @@ defmodule CodexPooler.MCP.Tools.LogMetadata do
     with {:ok, date_from} <- date_filter(arguments, "date_from", :start),
          {:ok, date_to} <- date_filter(arguments, "date_to", :end) do
       {:ok,
-       [
-         status: string_arg(arguments, "status"),
-         model: string_arg(arguments, "model"),
-         request_id: string_arg(arguments, "request_id"),
-         upstream_identity_id: string_arg(arguments, "upstream_identity_id"),
-         date_from: date_from,
-         date_to: date_to
-       ]
+       (request_status_filter(string_arg(arguments, "status")) ++
+          [
+            model: string_arg(arguments, "model"),
+            request_id: string_arg(arguments, "request_id"),
+            upstream_identity_id: string_arg(arguments, "upstream_identity_id"),
+            date_from: date_from,
+            date_to: date_to
+          ])
        |> reject_nil_values()}
     end
   end
+
+  # `status` matches the recorded status; `client_cancelled` is the class the
+  # admin pages show for a failed request the client cancelled (`RequestOutcome`).
+  defp request_status_filter("client_cancelled"), do: [client_cancelled: true]
+  defp request_status_filter(status), do: [status: status]
 
   defp audit_log_filters(arguments) do
     with {:ok, date_from} <- date_filter(arguments, "date_from", :start),
