@@ -17,6 +17,8 @@ defmodule CodexPooler.Accounting.DeadExecutionResendRecoveryTest do
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn}
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Persistence, as: OwnerPersistence
+  alias CodexPooler.Gateway.Websocket.OwnerCleanup
   alias CodexPooler.Platform.InstancePresence
   alias CodexPooler.Platform.InstancePresence.Identity
   alias CodexPooler.Repo
@@ -269,6 +271,31 @@ defmodule CodexPooler.Accounting.DeadExecutionResendRecoveryTest do
     assert_recovered!(fixture.request, fixture.attempt, fixture.turn)
   end
 
+  # The owner's own interruption of its active turn, as its exit or its drain
+  # cut writes it through its persistence, over an executor whose end is
+  # proven (findings#270 row 270-362). A drain cut settles the turn for its
+  # own reason; an owner crash says nothing about the executor, so the proof
+  # keeps the lost-executor recovery (rows 207 and 217).
+  test "an owner's drain cut of its active turn keeps owner_drained over the executor's proven end" do
+    fixture = owned_dead_execution_fixture!()
+    CodexPooler.ExecutionProofSupport.publish_terminal!(fixture.attempt)
+
+    assert :ok = OwnerPersistence.interrupt_codex_session(owner_state(fixture), :owner_drained)
+
+    assert %Request{status: "failed", response_status_code: 499, last_error_code: "owner_drained"} = Repo.reload!(fixture.request)
+    assert %Attempt{status: "failed", network_error_code: "owner_drained"} = Repo.reload!(fixture.attempt)
+    assert %CodexTurn{status: "interrupted", error_code: "owner_drained"} = Repo.reload!(fixture.turn)
+  end
+
+  test "an owner crash's interruption of its active turn keeps the executor's proven death" do
+    fixture = owned_dead_execution_fixture!()
+    CodexPooler.ExecutionProofSupport.publish_terminal!(fixture.attempt)
+
+    assert :ok = OwnerPersistence.interrupt_codex_session(owner_state(fixture), :owner_crashed)
+
+    assert_recovered!(fixture.request, fixture.attempt, fixture.turn)
+  end
+
   test "owner crash interruption keeps owner_crashed without a terminal proof" do
     fixture = active_dead_execution_fixture!()
 
@@ -440,6 +467,44 @@ defmodule CodexPooler.Accounting.DeadExecutionResendRecoveryTest do
       turn: insert_turn!(session, request, attempt),
       session: session,
       replay_claim_digest: witness.digest
+    }
+  end
+
+  # The active dead-execution fixture with the request forwarded to the
+  # session's owner (the metadata the owner's cleanup witness is checked
+  # against).
+  defp owned_dead_execution_fixture! do
+    fixture = active_dead_execution_fixture!()
+
+    request =
+      fixture.request
+      |> Ecto.Changeset.change(request_metadata: Map.put(fixture.request.request_metadata || %{}, "websocket_owner_forwarding", %{"owner_instance_id" => fixture.session.owner_instance_id, "downstream_epoch" => 1}))
+      |> Repo.update!()
+
+    %{fixture | request: request}
+  end
+
+  # The owner state its persistence reads: the session, the lease it holds and
+  # the cleanup witness of its active turn.
+  defp owner_state(fixture) do
+    witness =
+      %OwnerCleanup{
+        session_id: fixture.session.id,
+        owner_instance_id: fixture.session.owner_instance_id,
+        owner_lease_token: fixture.session.owner_lease_token,
+        request_id: fixture.request.id,
+        attempt_id: fixture.attempt.id,
+        replay_generation: 0,
+        downstream_epoch: 1
+      }
+
+    %{
+      codex_session_id: fixture.session.id,
+      owner_lease_token: fixture.session.owner_lease_token,
+      active_turn: %{cleanup_witness: witness},
+      suspended_replay: nil,
+      termination_cleanup_witness: nil,
+      persistence: %{interrupt_codex_session: &Interruption.interrupt_codex_session/2}
     }
   end
 

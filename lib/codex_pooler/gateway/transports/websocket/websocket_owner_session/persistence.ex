@@ -148,14 +148,32 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Persist
   end
 
   defp interrupt_options(reason, state) do
+    witness = OwnerCleanup.from_owner_state(state)
+
     %{
       interrupt_reason: Atom.to_string(reason),
       reconnect_window_seconds: 300,
       websocket_owner_lease_token: state.owner_lease_token
     }
     |> RequestOptions.for_websocket()
-    |> OwnerCleanup.put_options(OwnerCleanup.from_owner_state(state))
+    |> OwnerCleanup.put_options(witness)
+    |> hold_drain_reason(reason, witness)
   end
+
+  # A drain cut settles the owner's own active turn deliberately, for its own
+  # reason, as a closing socket's stop of its task does (findings#270 row
+  # 270-362). The turn's executor can have ended just before, exited without
+  # an acknowledged delivery, and its terminal proof land ahead of this
+  # interruption; the proven-dead recovery then recorded the cut
+  # `dead_execution_recovered`. Only `owner_drained`, and only the witness's
+  # request: an owner crash, and every other request of the session, keep the
+  # recovery for a lost executor (rows 207 and 217). The accepted cost: an
+  # executor that genuinely died just as the drain cut its turn is recorded
+  # `owner_drained`, the reason the turn ends for anyway.
+  defp hold_drain_reason(opts, :owner_drained, %OwnerCleanup{request_id: request_id}) when is_binary(request_id),
+    do: RequestOptions.put_runtime_context(opts, reason_held_request_id: request_id)
+
+  defp hold_drain_reason(opts, _reason, _witness), do: opts
 
   defp release_owner_lease(
          release_owner_lease,

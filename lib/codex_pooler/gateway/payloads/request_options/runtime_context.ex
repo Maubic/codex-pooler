@@ -11,7 +11,7 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions.RuntimeContext do
     :interrupt_reason,
     :owner_cleanup,
     :direct_cleanup,
-    :stopped_executor_request_id,
+    :reason_held_request_id,
     :gateway_debug_payload,
     :reasoning_effort_snapshot,
     :prompt_cache_controls_downgraded,
@@ -33,7 +33,7 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions.RuntimeContext do
           interrupt_reason: String.t() | nil,
           owner_cleanup: CodexPooler.Gateway.Websocket.OwnerCleanup.t() | nil,
           direct_cleanup: CodexPooler.Gateway.Websocket.DirectCleanup.t() | nil,
-          stopped_executor_request_id: Ecto.UUID.t() | nil,
+          reason_held_request_id: Ecto.UUID.t() | nil,
           gateway_debug_payload: map() | nil,
           reasoning_effort_snapshot: map() | nil,
           prompt_cache_controls_downgraded: boolean(),
@@ -57,11 +57,12 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions.RuntimeContext do
   @type upstream_input_index_map ::
           :identity | {:shift, non_neg_integer(), non_neg_integer()} | :unknown
 
-  # The request whose executor the interrupting caller stopped itself before
-  # interrupting it (`Interruption.interrupt_direct_request/2`, from the
-  # canceller's marked reason). The caller holds the reason that execution
-  # ended for, so its terminal proof is no evidence of a lost executor
-  # (findings#270 row 270-353). Only the interruption sets it, through
+  # The request whose end the interrupting caller decided itself, so its
+  # reason stands over a terminal proof of the request's executor: a direct
+  # task the caller stopped (`Interruption.interrupt_direct_request/2`, from
+  # the canceller's marked reason, findings#270 row 270-353), or the active
+  # turn an owner cuts for its drain (`WebsocketOwnerSession.Persistence`,
+  # `owner_drained` only, row 270-362). Only those two set it, through
   # `RequestOptions.put_runtime_context/2`; `build/1` never reads it.
 
   # Trusted Pool and API key ids of the authenticated runtime principal. Only

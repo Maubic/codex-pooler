@@ -69,7 +69,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
           String.t()
         ) :: :ok | {:ok, %{after_commit_markers: [map()]}} | {:error, term()}
   def interrupt_direct_request(receipt, reason) do
-    stopped_request_id = stopped_executor_request_id(receipt)
+    held_request_id = stopped_executor_request_id(receipt)
 
     Repo.transaction(fn ->
       session = codex_session_for_update(receipt.session_id)
@@ -87,12 +87,12 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
       case direct_interrupt_clause(session, request, receipt) do
         :matched ->
           request = mark_pre_attempt_owner_drain(request, receipt, reason)
-          interrupt_direct_locked(:session, session, request, reason, stopped_request_id)
+          interrupt_direct_locked(:session, session, request, reason, held_request_id)
 
         :matched_superseded ->
           log_direct_interrupt_superseded(receipt, reason)
           request = mark_pre_attempt_owner_drain(request, receipt, reason)
-          interrupt_direct_locked(:request, session, request, reason, stopped_request_id)
+          interrupt_direct_locked(:request, session, request, reason, held_request_id)
 
         {:not_matched, clause} ->
           log_direct_interrupt_not_matched(receipt, reason, clause)
@@ -315,35 +315,37 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
   # settled `dead_execution_recovered` instead of the caller's reason, and the
   # client's resend was admitted or refused as a dead execution's successor
   # (findings#270 row 270-353). The proven-dead recovery stays for every
-  # executor the caller did not stop (rows 217 and 207).
+  # executor the caller did not stop (rows 217 and 207). An owner's drain cut
+  # holds its reason for its active turn the same way (row 270-362,
+  # `reason_held_request_id` set by the owner's persistence).
   defp stopped_executor_request_id(%{cancel_reason: reason, request_id: request_id}) when is_binary(reason) and is_binary(request_id), do: request_id
   defp stopped_executor_request_id(_receipt), do: nil
 
-  defp interrupt_direct_locked(scope, session, request, reason, stopped_request_id) do
+  defp interrupt_direct_locked(scope, session, request, reason, held_request_id) do
     turn = Repo.get_by(CodexTurn, request_id: request.id)
     attempt = latest_attempt_for_update(request.id)
 
-    case recover_proven_dead_direct_request(request, attempt, stopped_request_id) do
+    case recover_proven_dead_direct_request(request, attempt, held_request_id) do
       {:recovered, marker} ->
         [marker]
 
       :not_recovered ->
-        do_interrupt_direct_locked(scope, session, request, turn, attempt, reason, stopped_request_id)
+        do_interrupt_direct_locked(scope, session, request, turn, attempt, reason, held_request_id)
     end
   end
 
   defp recover_proven_dead_direct_request(%Request{id: request_id}, _attempt, request_id), do: :not_recovered
 
-  defp recover_proven_dead_direct_request(request, %Attempt{}, _stopped_request_id) do
+  defp recover_proven_dead_direct_request(request, %Attempt{}, _held_request_id) do
     case recover_proven_dead_request(request, latest_attempt_for_update(request.id)) do
       %{kind: :stream_outcome} = marker -> {:recovered, marker}
       nil -> :not_recovered
     end
   end
 
-  defp recover_proven_dead_direct_request(_request, _attempt, _stopped_request_id), do: :not_recovered
+  defp recover_proven_dead_direct_request(_request, _attempt, _held_request_id), do: :not_recovered
 
-  defp do_interrupt_direct_locked(scope, session, request, turn, attempt, reason, stopped_request_id) do
+  defp do_interrupt_direct_locked(scope, session, request, turn, attempt, reason, held_request_id) do
     case {request.status, turn, attempt} do
       {"accepted", nil, _} ->
         close_claim_only_request!(
@@ -379,7 +381,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
         opts =
           %{request_id: request.correlation_id, reason: reason}
           |> RequestOptions.for_websocket()
-          |> RequestOptions.put_runtime_context(stopped_executor_request_id: stopped_request_id)
+          |> RequestOptions.put_runtime_context(reason_held_request_id: held_request_id)
 
         interrupt_direct_attempted_turn(scope, session, request, opts, reason)
     end
@@ -1130,7 +1132,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
     request = request_for_update(turn.request_id)
     attempt = latest_attempt_for_update(turn.request_id)
 
-    case recover_unstopped_dead_request(request, attempt, opts) do
+    case recover_unless_reason_held(request, attempt, opts) do
       %{kind: :stream_outcome} = marker ->
         [marker]
 
@@ -1235,10 +1237,11 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
 
   defp recover_proven_dead_request(_request, _attempt), do: nil
 
-  # The caller stopped this request's executor itself (see
-  # `stopped_executor_request_id/1`): its reason stands.
-  defp recover_unstopped_dead_request(%Request{id: request_id}, _attempt, %RequestOptions{runtime: %{stopped_executor_request_id: request_id}}), do: nil
-  defp recover_unstopped_dead_request(request, attempt, _opts), do: recover_proven_dead_request(request, attempt)
+  # The caller decided this request's end itself (`reason_held_request_id`:
+  # it stopped the executor, or it is the owner cutting its active turn for
+  # its drain), so its reason stands over the executor's proof.
+  defp recover_unless_reason_held(%Request{id: request_id}, _attempt, %RequestOptions{runtime: %{reason_held_request_id: request_id}}), do: nil
+  defp recover_unless_reason_held(request, attempt, _opts), do: recover_proven_dead_request(request, attempt)
 
   # A turn interrupted before any attempt existed still holds whatever the
   # reservation reserved, so the release is written for every reason this

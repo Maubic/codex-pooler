@@ -45,7 +45,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDrainAfterTerminalTest do
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Transports.Websocket.{ActivityDrain, ActivityRegistry, OwnerDefaults, RolloutDrain, WebsocketOwnerSession}
   alias CodexPooler.Gateway.Transports.WebsocketRolloutDrainSupport
+  alias CodexPooler.Platform.ExecutionTerminalProofs
   alias CodexPooler.Repo
+  alias CodexPoolerWeb.Runtime.CleanupProofRace
   alias Ecto.Adapters.SQL.Sandbox
 
   @moduletag capture_log: true
@@ -147,6 +149,38 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDrainAfterTerminalTest do
     Process.exit(turn.task, :kill)
     assert [error, @drained_close] = receive_frames_until_close!(turn.client.conn, turn.client.websocket, turn.client.ref) |> elem(2)
     assert_drained_error!(error)
+  end
+
+  # The drain's cut makes the socket stop its response task, the turn's
+  # executor, and the owner then interrupts its own active turn. When the
+  # stopped task's terminal proof lands between the two (the production
+  # publisher; `CleanupProofRace.hold_owner_interrupt!/2` makes the owner's
+  # interruption wait for it), the owner's interrupt used to take the end for
+  # a lost executor and record `dead_execution_recovered`. A drain cut settles
+  # its own turn for its own reason, so the request keeps `owner_drained`
+  # (findings#270 row 270-362). What the client receives does not depend on
+  # the record: after the terminal it already had, the drain's error frame and
+  # the drained close, in both (the frames are checked before the row).
+  # An owner crash keeps the recovery for a lost executor; its arm is in
+  # `dead_execution_resend_recovery_test.exs`.
+  test "owner on this node: a drain cut keeps owner_drained when the cut task's end is proven before the owner interrupts its turn" do
+    put_owner_forwarding!(true)
+    put_owner_call_timeout!(1_500)
+    turn = relayed_turn_held!(start_turn!())
+    owner = turn.state.websocket_owner_pid
+    :ok = await_owner_settling!(owner)
+    assert [%Request{id: request_id}] = pool_requests(turn.setup)
+    monitor = Process.monitor(owner)
+
+    hold = CleanupProofRace.hold_owner_interrupt!(owner, request_id)
+    assert :ok = WebsocketOwnerSession.drain_owner(owner)
+    assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}, @detection_timeout_ms
+    attempt_id = CleanupProofRace.assert_owner_interrupt_proven!(hold)
+
+    assert ExecutionTerminalProofs.terminal?(Repo.get!(CodexPooler.Accounting.Attempt, attempt_id))
+    assert [error, @drained_close] = receive_frames_until_close!(turn.client.conn, turn.client.websocket, turn.client.ref) |> elem(2)
+    assert_drained_error!(error)
+    assert [%Request{status: "failed", response_status_code: 499, last_error_code: "owner_drained"}] = pool_requests(turn.setup)
   end
 
   test "owner on this node: a forwarded turn whose result is still missing when the budget is spent is cut as it always was" do

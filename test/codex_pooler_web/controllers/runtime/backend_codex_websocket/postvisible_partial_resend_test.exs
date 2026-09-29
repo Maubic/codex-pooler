@@ -226,8 +226,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisiblePartialResendT
     receipt
   end
 
-  # A completed item keeps the direct task running with forwarding off, so the
-  # provider is released once the interrupt settled the request.
+  # After a completed item the closing cleanup stops the turn as after the
+  # other cuts: with forwarding off the socket stops its direct task and
+  # interrupts the request itself (findings#232 row 232-257). The provider is
+  # released once the interrupt settled the request, and the receipt is read
+  # after it.
   defp close_and_await_receipt!(conn, request_id, cut, :held, upstream, release_ref) do
     _closed = Mint.HTTP.close(conn)
     _settled = await_settled!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)

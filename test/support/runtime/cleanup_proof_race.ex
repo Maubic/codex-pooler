@@ -67,6 +67,44 @@ defmodule CodexPoolerWeb.Runtime.CleanupProofRace do
     attempt_id
   end
 
+  @doc """
+  The owner's side of the same race (findings#270 row 270-362): the owner
+  interrupts its own active turn through its persistence right after the
+  drain's cut made the socket stop the turn's executor. Wraps the owner's
+  interruption callback, in the owner's own state, so that it waits until the
+  production publisher proved the executor's end, then interrupts as before.
+  Call it from the test process once the owner runs the turn and before the
+  cut; `assert_owner_interrupt_proven!/1` then asserts the order held.
+  """
+  @spec hold_owner_interrupt!(pid(), Ecto.UUID.t()) :: reference()
+  def hold_owner_interrupt!(owner, request_id) do
+    publisher = ExUnit.Callbacks.start_supervised!({ExecutionProofPublisher, enabled: true, name: :cleanup_proof_race_owner_publisher, interval_ms: 60_000})
+    test = self()
+    ref = make_ref()
+
+    _state =
+      :sys.replace_state(owner, fn state ->
+        interrupt = state.persistence.interrupt_codex_session
+
+        proven_interrupt = fn session_id, opts ->
+          attempt = latest_attempt!(request_id)
+          :ok = ExecutionProofSupport.await_terminal!(attempt, publisher)
+          send(test, {ref, :proven, attempt.id})
+          interrupt.(session_id, opts)
+        end
+
+        %{state | persistence: %{state.persistence | interrupt_codex_session: proven_interrupt}}
+      end)
+
+    ref
+  end
+
+  @spec assert_owner_interrupt_proven!(reference()) :: Ecto.UUID.t()
+  def assert_owner_interrupt_proven!(ref) do
+    assert_receive {^ref, :proven, attempt_id}, @detection_timeout_ms
+    attempt_id
+  end
+
   @doc false
   def hook(%{ref: ref, prover: prover}, {:in, {:"$gen_call", _from, {:direct_await, _context}}}, _name) do
     send(prover, {ref, :held, self()})
@@ -85,7 +123,7 @@ defmodule CodexPoolerWeb.Runtime.CleanupProofRace do
   defp prove(ref, request_id, publisher, test) do
     receive do
       {^ref, :held, registry} ->
-        attempt = Repo.one!(from(a in Attempt, where: a.request_id == ^request_id, order_by: [desc: a.attempt_number], limit: 1))
+        attempt = latest_attempt!(request_id)
         :ok = ExecutionProofSupport.await_terminal!(attempt, publisher)
         send(registry, {ref, :release})
         send(test, {ref, :proven, attempt.id})
@@ -93,4 +131,6 @@ defmodule CodexPoolerWeb.Runtime.CleanupProofRace do
       @detection_timeout_ms -> flunk("the closing socket never awaited its stopped direct task's cleanup")
     end
   end
+
+  defp latest_attempt!(request_id), do: Repo.one!(from(a in Attempt, where: a.request_id == ^request_id, order_by: [desc: a.attempt_number], limit: 1))
 end
