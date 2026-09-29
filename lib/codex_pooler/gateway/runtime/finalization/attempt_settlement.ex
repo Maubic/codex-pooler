@@ -48,8 +48,12 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
   @spec finalize_success(Request.t(), Attempt.t(), usage(), attrs(), OwnerWitness.t() | nil) ::
           finalization_result()
   def finalize_success(request, attempt, usage, attrs, owner_witness) do
+    attrs =
+      attrs
+      |> Map.new()
+      |> complete_turn_before_commit(CodexTurn.succeeded_status(), nil, attempt, owner_witness)
+
     Accounting.finalize_success_with_disposition(request, attempt, usage, attrs)
-    |> complete_current_codex_turn(CodexTurn.succeeded_status(), nil, attempt, owner_witness)
     |> accounting_result(:finalize_success, request, attempt)
   end
 
@@ -62,13 +66,16 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
   def finalize_failure(request, attempt, attrs, owner_witness) do
     attrs = Map.new(attrs)
 
+    attrs =
+      complete_turn_before_commit(
+        attrs,
+        CodexTurn.failed_status(),
+        Map.get(attrs, :last_error_code),
+        attempt,
+        owner_witness
+      )
+
     Accounting.finalize_failure_with_disposition(request, attempt, attrs)
-    |> complete_current_codex_turn(
-      CodexTurn.failed_status(),
-      Map.get(attrs, :last_error_code),
-      attempt,
-      owner_witness
-    )
     |> accounting_result(:finalize_failure, request, attempt)
   end
 
@@ -88,13 +95,16 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
     attrs = Map.new(attrs)
     error_code = Map.get(attrs, :last_error_code)
 
+    attrs =
+      complete_turn_before_commit(
+        attrs,
+        partial_stream_turn_status(error_code),
+        error_code,
+        attempt,
+        owner_witness
+      )
+
     Accounting.finalize_partial_stream_failure_with_disposition(request, attempt, usage, attrs)
-    |> complete_current_codex_turn(
-      partial_stream_turn_status(error_code),
-      error_code,
-      attempt,
-      owner_witness
-    )
     |> accounting_result(:finalize_partial_stream_failure, request, attempt)
   end
 
@@ -108,33 +118,29 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
   @spec finalize_reservation_failure(Request.t(), attrs()) :: settlement_result()
   def finalize_reservation_failure(request, attrs) do
     attrs = Map.new(attrs)
+    error_code = Map.get(attrs, :last_error_code)
+
+    attrs =
+      Map.put(attrs, :before_commit, fn result ->
+        SessionContinuity.complete_codex_turn({:ok, result}, CodexTurn.failed_status(), error_code)
+        :ok
+      end)
 
     Accounting.finalize_reservation_failure(request, attrs)
-    |> SessionContinuity.complete_codex_turn(
-      CodexTurn.failed_status(),
-      Map.get(attrs, :last_error_code)
-    )
     |> accounting_result(:finalize_reservation_failure, request)
   end
 
-  defp complete_current_codex_turn(
-         {:ok, %{stale_generation?: true}} = result,
-         _status,
-         _error_code,
-         _attempt,
-         _owner_witness
-       ),
-       do: result
-
-  defp complete_current_codex_turn(result, status, error_code, attempt, owner_witness),
-    do:
-      SessionContinuity.complete_codex_turn(
-        result,
-        status,
-        error_code,
-        attempt,
-        owner_witness
-      )
+  # The request's codex turn completes inside the settlement transaction, as
+  # its last write, so no resend can observe the request terminal while its
+  # turn is still in progress (findings#288). Accounting runs the callback
+  # only for the current generation: a stale generation writes nothing, and
+  # its turn belongs to the generation that replaced it.
+  defp complete_turn_before_commit(attrs, status, error_code, attempt, owner_witness) do
+    Map.put(attrs, :before_commit, fn result ->
+      SessionContinuity.complete_codex_turn({:ok, result}, status, error_code, attempt, owner_witness)
+      :ok
+    end)
+  end
 
   defp accounting_result(result, operation, request, attempt \\ nil)
 

@@ -422,6 +422,13 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
         else: PreAttemptRelease.phase(Map.get(attrs, :pre_attempt_phase))
 
     Repo.transaction(fn ->
+      # A `:before_commit` callback writes the request's turn inside this
+      # transaction (see `run_before_commit!/2`), so the codex session, the
+      # API key reader lock and the turn are locked first, in the canonical
+      # order `finalize_request_with_disposition/3` takes: without them the
+      # turn write would follow the request lock below and invert it.
+      if before_commit?(attrs), do: :ok = lock_replay_prefix(request)
+
       request =
         Repo.one!(
           from locked_request in Request,
@@ -472,6 +479,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
         release: release,
         release_status: release_status
       }
+      |> run_before_commit!(attrs)
     end)
     |> unwrap_transaction()
     |> attach_pre_attempt_release_marker(pre_attempt_phase, last_error_code)
@@ -703,6 +711,8 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
         replay_finalization_authority(attempt, replay_entitlement, attrs)
 
       if replay_entitlement == :stale_generation do
+        # A stale generation writes nothing, so its `:before_commit` callback
+        # never runs either: the current generation owns the turn.
         %{
           request: Repo.reload!(request),
           attempt: Repo.reload!(attempt),
@@ -710,8 +720,8 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
           stale_generation?: true
         }
       else
-        finalize_current_generation(
-          request,
+        request
+        |> finalize_current_generation(
           attempt,
           reservation,
           existing_settlement,
@@ -720,6 +730,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
           attrs,
           finalization
         )
+        |> run_before_commit!(attrs)
       end
     end)
     |> unwrap_transaction()
@@ -1045,6 +1056,39 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
         end
     end
   end
+
+  # `:before_commit` receives the finalized result as the settlement
+  # transaction's last write, so whatever it writes commits or rolls back
+  # with the request, attempt and ledger rows. The gateway completes the
+  # request's codex turn here: completed in a later transaction of its own,
+  # the turn stayed in progress after the request was already terminal, and a
+  # resend arriving between the two commits was refused as an active
+  # predecessor or collided with the turn on its semantic digest
+  # (findings#288). An exception or `{:error, reason}` rolls the whole
+  # settlement back and leaves the request in progress for recovery.
+  #
+  # Lock order: the callback runs after the transaction locked the codex
+  # session, the API key (reader lock) and the turn (`lock_replay_prefix/1`),
+  # then the request and the rows settled under it (attempts, replay
+  # entitlement, ledger), in that canonical order. The turn completion
+  # re-locks only the session and turn already held, and adds the session's
+  # active owner lease last, where every session-first transaction (replay,
+  # client retry, owner binding) takes it.
+  defp run_before_commit!(result, attrs) do
+    case Map.get(attrs, :before_commit) do
+      nil ->
+        result
+
+      callback when is_function(callback, 1) ->
+        case callback.(result) do
+          :ok -> result
+          {:ok, _value} -> result
+          {:error, reason} -> Repo.rollback(reason)
+        end
+    end
+  end
+
+  defp before_commit?(attrs), do: is_function(Map.get(attrs, :before_commit), 1)
 
   defp settlement_to_replace({:replace, settlement}), do: settlement
   defp settlement_to_replace(:insert), do: nil

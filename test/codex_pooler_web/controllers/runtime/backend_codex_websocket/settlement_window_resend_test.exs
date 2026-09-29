@@ -1,28 +1,26 @@
 defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementWindowResendTest do
-  # A websocket turn's settlement writes the request, its attempt and its
-  # ledger entries in one transaction and completes the turn row in a second
-  # one. The released client (Codex 0.156.1) resends a turn the provider failed
-  # (`response.failed` `server_error`) on a new connection about 200 ms after
-  # the failure frame, and on a slow database that resend can arrive between
-  # the two commits: the request is already `failed`, the turn still
-  # `in_progress`.
+  # A websocket turn's settlement writes the request, its attempt, its ledger
+  # entries and the turn row in one transaction (findings#288). It used to
+  # complete the turn in a second transaction, and the released client (Codex
+  # 0.156.1), which resends a turn the provider failed (`response.failed`
+  # `server_error`) on a new connection about 200 ms after the failure frame,
+  # could land between the two commits on a slow database: the request already
+  # `failed`, the turn still `in_progress`. With owner forwarding on, the
+  # owner's replay preflight judged that turn orphaned and closed it
+  # `failed orphaned_turn_closed`, which no resend policy admits, so every
+  # resend met `409 duplicate_turn` (findings#206 row 206-609); with it off the
+  # claim waited, bounded, for the open turn.
   #
-  # With owner forwarding on, the owner's replay preflight met that turn,
-  # judged it orphaned (a terminal request behind an open turn) and closed it
-  # `failed orphaned_turn_closed`, which no resend policy admits: the resend
-  # and every later one met `409 duplicate_turn` and the client finished the
-  # turn over HTTPS, buying it again (findings#206 row 206-609). The preflight
-  # now completes such a turn the way its settlement would (the request's own
-  # outcome and error code), so the resend is admitted as the failed request's
-  # one successor. With owner forwarding off the turn claim sees the open turn
-  # as a live predecessor and waits, bounded, for its settlement.
-  #
-  # The settling process is held between its two commits (at the start of its
-  # turn transaction) until the resend has its answer, or, with forwarding off,
-  # until the resend's claim starts waiting for it. One node, committed rows,
-  # native websocket `/backend-api/codex/responses`, the Pool's model forced to
-  # Full and to Lite, FakeUpstream. Turn metadata and frame shapes are the
-  # released client's; text and identifiers synthetic.
+  # The settling process is held inside its settlement transaction, right after
+  # it wrote the turn's completion. Nothing of the settlement is visible yet:
+  # the request and its turn both still read `in_progress`. The resend, on a
+  # new connection, waits on the codex session row the held transaction locked
+  # (observed with `pg_blocking_pids` before the release), and once the
+  # settlement commits it is served as the failed request's one successor. One
+  # node, committed rows, native websocket `/backend-api/codex/responses`, owner
+  # forwarding on and off, the Pool's model forced to Full and to Lite,
+  # FakeUpstream. Turn metadata and frame shapes are the released client's;
+  # text and identifiers synthetic.
   use CodexPoolerWeb.ConnCase, async: false
 
   import Ecto.Query
@@ -33,6 +31,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementWindowResendTes
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Pools.ModelServingOverride
   alias CodexPooler.Repo
+  alias CodexPoolerWeb.Runtime.SettlementTransactionHold
   alias Ecto.Adapters.SQL.Sandbox
 
   @moduletag capture_log: true
@@ -40,11 +39,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementWindowResendTes
 
   for forwarding <- [:forwarded, :direct], mode <- ["full", "lite"] do
     @tag forwarding: forwarding, serving_mode: mode
-    test "websocket #{forwarding} #{mode}: a resend arriving between a provider-failed turn's request and turn commits is served as its one successor", ctx do
+    test "websocket #{forwarding} #{mode}: a resend arriving while a provider-failed turn's settlement is open waits for it and is served as its one successor", ctx do
       measured = run(ctx.forwarding, ctx.serving_mode)
       CodexPooler.TestDiagnostics.puts(fn -> "settlement window #{ctx.forwarding} #{ctx.serving_mode}: #{inspect(measured)}" end)
 
-      assert measured.window == {"failed", "in_progress"}
+      assert measured.window == {"in_progress", "in_progress"}
+      assert measured.resend_waited_on == "codex_sessions"
       assert measured.resend == {"response.completed", nil}
       assert measured.requests == [{"failed", "server_error"}, {"succeeded", nil}]
       assert measured.failed_turn == {"failed", "server_error"}
@@ -71,34 +71,37 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementWindowResendTes
     setup = gateway_setup(upstream)
     register_unboxed_pool_cleanup!(setup)
     put_serving_mode!(setup, mode)
+    watcher = SettlementTransactionHold.start_lock_watcher!()
     port = start_public_endpoint!()
     thread = "ws-settlement-window-#{System.unique_integer([:positive])}"
     frame = released_frame(setup, thread)
-    hold = hold_turn_completion!()
+    hold = SettlementTransactionHold.inside_transaction!()
 
-    # The provider fails the turn; the settling process stops between its
-    # request commit and its turn transaction.
+    # The provider fails the turn; the settling process stops inside its
+    # settlement transaction, right after it wrote the turn's completion.
     {conn, websocket, ref} = public_websocket_connect!(port, setup, thread)
     {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, frame)
     {conn, _websocket, failure} = receive_until_terminal(conn, websocket, ref)
     assert %{"type" => "response.failed"} = failure
-    assert_receive {^hold, :held, settler}, @detection_timeout_ms
+    {settler, %{backend: settler_backend}} = SettlementTransactionHold.await_held!(hold)
     [failed] = pool_requests(setup)
     window = {failed.status, Repo.get_by!(CodexTurn, request_id: failed.id).status}
     Mint.HTTP.close(conn)
 
-    # The resend, on a new connection, inside the window. With forwarding off
-    # its claim waits for the open turn, and the settler is released when it
-    # starts waiting; otherwise when the resend has its answer.
-    if forwarding == :direct, do: release_on_claim_wait!(hold, settler)
-    resend = resend!(port, setup, thread, frame)
-    send(settler, {hold, :release})
+    # The resend, on a new connection, while the settlement is still open: its
+    # socket's session lookup waits on the session row the held transaction
+    # locked, and the settler is released once that wait is observed.
+    resend_task = Task.async(fn -> resend!(port, setup, thread, frame) end)
+    resend_waited_on = SettlementTransactionHold.await_session_lookup_wait!(watcher, settler_backend)
+    :ok = SettlementTransactionHold.release(hold, settler)
+    resend = Task.await(resend_task, @detection_timeout_ms)
     await_settled!(setup)
     [failed | later] = requests = pool_requests(setup)
     failed_turn = Repo.get_by!(CodexTurn, request_id: failed.id)
 
     %{
       window: window,
+      resend_waited_on: resend_waited_on,
       resend: {resend["type"], get_in(resend, ["error", "code"])},
       requests: Enum.map(requests, &{&1.status, &1.last_error_code}),
       failed_turn: {failed_turn.status, failed_turn.error_code},
@@ -106,72 +109,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementWindowResendTes
       recorded_settlements: Enum.map(requests, &recorded_settlements/1),
       upstream_requests: FakeUpstream.count(upstream)
     }
-  end
-
-  # Holds the first process that commits a settlement ledger entry (the failed
-  # request's settlement) at the start of its next transaction, the one that
-  # completes the turn: the request and attempt are committed, the turn is
-  # still `in_progress`, and the held connection holds no row lock.
-  defp hold_turn_completion! do
-    hold = make_ref()
-    handler_id = {__MODULE__, :turn_completion_hold, hold}
-    on_exit(fn -> :telemetry.detach(handler_id) end)
-    config = %{hold: hold, test: self(), claimed: :atomics.new(1, [])}
-    :ok = :telemetry.attach(handler_id, [:codex_pooler, :repo, :query], &__MODULE__.hold_turn_completion_query/4, config)
-    hold
-  end
-
-  @doc false
-  def hold_turn_completion_query(_event, _measurements, %{query: query} = metadata, %{hold: hold} = config) do
-    key = {__MODULE__, hold}
-
-    case {settlement_step(query, metadata), Process.get(key)} do
-      {:settlement_insert, nil} -> Process.put(key, :settlement)
-      {:commit, :settlement} -> Process.put(key, :committed)
-      {:begin, :committed} -> maybe_hold_settler(key, config)
-      _other -> :ok
-    end
-  end
-
-  def hold_turn_completion_query(_event, _measurements, _metadata, _config), do: :ok
-
-  defp settlement_step(query, metadata) do
-    cond do
-      String.contains?(query, ~s(INSERT INTO "ledger_entries")) and "settlement" in List.wrap(metadata[:params]) -> :settlement_insert
-      String.downcase(query) == "commit" -> :commit
-      String.downcase(query) == "begin" -> :begin
-      true -> :other
-    end
-  end
-
-  defp maybe_hold_settler(key, %{hold: hold, test: test, claimed: claimed}) do
-    if :atomics.add_get(claimed, 1, 1) == 1 do
-      Process.put(key, :held)
-      send(test, {hold, :held, self()})
-
-      receive do
-        {^hold, :release} -> :ok
-      after
-        @detection_timeout_ms -> :ok
-      end
-    end
-
-    :ok
-  end
-
-  # With forwarding off the resend's claim waits for the live predecessor; the
-  # settler is released as soon as that wait starts.
-  defp release_on_claim_wait!(hold, settler) do
-    handler_id = {__MODULE__, :claim_wait_release, hold}
-    on_exit(fn -> :telemetry.detach(handler_id) end)
-
-    :ok =
-      :telemetry.attach(
-        handler_id,
-        [:codex_pooler, :accounting, :websocket_turn_claim, :live_predecessor_wait],
-        fn _event, _measurements, _metadata, _config -> send(settler, {hold, :release}) end,
-        nil
-      )
   end
 
   defp resend!(port, setup, thread, frame) do

@@ -26,10 +26,17 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.InheritedT
   # client's retry redeems the replay. That one retry is kept by decision (the
   # take-over only cancels a turn the requesting socket itself holds).
   #
+  # findings#288. A turn's settlement used to commit its request and complete
+  # its turn in two transactions; with owner forwarding off, the same-turn
+  # full-history resend landing between them was refused at its turn start by
+  # the active-turn index (`500 websocket_response_task_failed`). The turn now
+  # completes in the request's commit: the settling process is held right after
+  # that commit while the resend is sent, with forwarding off and on.
+  #
   # Topology: one VM, the real public listener, the released client's frames
   # with turn metadata, FakeUpstream holding the predecessor at a frame barrier.
   # 206-407 runs with owner forwarding off (Full and Lite), 206-408 with it on
-  # (Full).
+  # (Full), findings#288 with it off and on (Full and Lite).
   use CodexPoolerWeb.ConnCase, async: false
 
   @moduletag capture_log: true
@@ -47,6 +54,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.InheritedT
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Repo
+  alias CodexPoolerWeb.Runtime.SettlementTransactionHold
 
   @detection_timeout_ms 15_000
   @thread_id "019a0000-0000-7000-8000-00000000e407"
@@ -75,6 +83,35 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.InheritedT
         assert {predecessor.response_status_code, predecessor.last_error_code} == {499, "client_disconnected"}
         for request <- outcome.requests, do: assert(ledger_kinds(request.id) == %{"reservation" => 1, "settlement" => 1, "release" => 1})
         # The provider generated the opening, the cut predecessor and the resend once each.
+        assert outcome.upstream_count == 3
+      end
+    end
+
+    # findings#288. The turn's settlement used to commit its request and complete
+    # its turn in two transactions. A same-turn full-history resend landing right
+    # after the request's commit met the turn still open behind a terminal
+    # request: the claim waits only for a live request, so nothing held it, and
+    # the active-turn index refused its turn start (`500
+    # websocket_response_task_failed`, `unique_violation`; the released Codex
+    # 0.159.0 against a Pooler held there on the real path). The turn now
+    # completes in the request's own commit, so the resend landing right after
+    # it is served. The provider finishes the turn, its settling process is held
+    # right after that commit, and the client drops the socket and resends.
+    for mode <- ["full", "lite"] do
+      @tag serving_mode: mode
+      test "is served when it lands right after the dropped socket's turn settled (#{mode})", %{serving_mode: mode} do
+        {outcome, logs} = with_info_log(fn -> run_resend_after_settlement(mode) end)
+
+        assert outcome.first_answer == {"response.completed", "resp_edge_successor"}
+        refute logs =~ "websocket_response_task_failed"
+        refute logs =~ "unique_violation"
+        assert outcome.at_hold == {"succeeded", "succeeded"}
+        assert outcome.turn_in_commit? == true
+
+        assert [opening, predecessor, successor] = outcome.requests
+        assert {opening.status, predecessor.status, successor.status} == {"succeeded", "succeeded", "succeeded"}
+        for request <- outcome.requests, do: assert(ledger_kinds(request.id) == %{"reservation" => 1, "settlement" => 1, "release" => 1})
+        # The provider generated the opening, the settled predecessor and the resend once each.
         assert outcome.upstream_count == 3
       end
     end
@@ -117,6 +154,34 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.InheritedT
       assert [opening, predecessor] = outcome.requests
       assert {opening.status, predecessor.status} == {"succeeded", "succeeded"}
       assert outcome.upstream_count == 2
+    end
+  end
+
+  describe "owner forwarding on: a same-turn full-history resend landing right after the turn settled (findings#288)" do
+    setup do
+      put_owner_forwarding!(true)
+    end
+
+    # The owner's replay preflight already completed a turn left open behind a
+    # terminal request the way its settlement would (findings#206 row 206-609),
+    # so with forwarding on the resend was served before the turn completed in
+    # the request's commit too; it still is.
+    for mode <- ["full", "lite"] do
+      @tag serving_mode: mode
+      test "is served when it lands right after the turn settled (#{mode})", %{serving_mode: mode} do
+        {outcome, logs} = with_info_log(fn -> run_resend_after_settlement(mode) end)
+
+        assert outcome.first_answer == {"response.completed", "resp_edge_successor"}
+        refute logs =~ "websocket_response_task_failed"
+        refute logs =~ "unique_violation"
+        assert outcome.at_hold == {"succeeded", "succeeded"}
+        assert outcome.turn_in_commit? == true
+
+        assert [opening, predecessor, successor] = outcome.requests
+        assert {opening.status, predecessor.status, successor.status} == {"succeeded", "succeeded", "succeeded"}
+        for request <- outcome.requests, do: assert(ledger_kinds(request.id) == %{"reservation" => 1, "settlement" => 1, "release" => 1})
+        assert outcome.upstream_count == 3
+      end
     end
   end
 
@@ -191,6 +256,55 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.InheritedT
     %{
       first_answer: answer_summary(List.last(answer)),
       predecessor_at_answer: predecessor_at_answer,
+      requests: settled_requests!(setup.pool.id),
+      upstream_count: FakeUpstream.count(upstream)
+    }
+  end
+
+  defp run_resend_after_settlement(mode) do
+    release_ref = make_ref()
+
+    upstream =
+      start_upstream(
+        # provenance: observed findings#206 row 206-359 (a post-visible anchored tool continuation, then the same turn's unanchored full-history request on a new socket), with owner forwarding off; here the provider finishes the continuation before the socket drops (findings#288)
+        FakeUpstream.strict_sequence([
+          native_request(FakeUpstream.websocket_text_frames(opening_frames())),
+          native_request(FakeUpstream.barrier_websocket_frames(held_continuation_frames(), notify: self(), release_ref: release_ref)),
+          native_request(FakeUpstream.websocket_text_frames([completed_frame("resp_edge_successor", [])]))
+        ])
+      )
+
+    setup = gateway_setup(upstream)
+    if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    model = setup.model.exposed_model_id
+    user = synthetic_user_item("edge question")
+    port = start_public_endpoint!()
+
+    {conn_a, ws_a, ref_a} = open_continuation!(port, setup, model, user)
+    stream_until_visible!(upstream, release_ref, conn_a, ws_a, ref_a)
+    assert [_opening, %Request{id: predecessor_id, status: "in_progress"}] = request_logs(setup.pool.id)
+
+    # The provider finishes the turn; its task settles it and is held right
+    # after the settlement's commit, outside any transaction.
+    hold = SettlementTransactionHold.after_commit!(predecessor_id)
+    _released = FakeUpstream.release_remaining_frames(upstream, release_ref)
+    {settler, %{turn_in_commit?: turn_in_commit?}} = SettlementTransactionHold.await_held!(hold)
+    at_hold = {Repo.get!(Request, predecessor_id).status, Repo.get_by!(CodexTurn, request_id: predecessor_id).status}
+
+    # The client drops the socket and at once sends the same turn as full
+    # history on a new one.
+    Mint.HTTP.close(conn_a)
+    {conn_b, ws_b, ref_b} = connect!(port, setup)
+    resend = turn_payload(model, "turn-edge", [user, function_call_item(), tool_output_item()])
+    {conn_b, ws_b} = public_websocket_send_text!(conn_b, ws_b, ref_b, encode(resend))
+    {conn_b, _ws_b, answer} = receive_until_terminal!(conn_b, ws_b, ref_b)
+    :ok = SettlementTransactionHold.release(hold, settler)
+    _closed = Mint.HTTP.close(conn_b)
+
+    %{
+      turn_in_commit?: turn_in_commit?,
+      at_hold: at_hold,
+      first_answer: answer_summary(List.last(answer)),
       requests: settled_requests!(setup.pool.id),
       upstream_count: FakeUpstream.count(upstream)
     }
