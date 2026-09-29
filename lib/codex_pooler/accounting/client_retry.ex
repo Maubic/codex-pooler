@@ -31,6 +31,20 @@ defmodule CodexPooler.Accounting.ClientRetry do
   @pre_attempt_phase_key PreAttemptRelease.detail_key()
   @turn_interrupted_phase PreAttemptRelease.turn_interrupted()
   @stream_error_code "upstream_stream_error"
+  # How long after its predecessor settled a native compaction's resend is
+  # still chained onto it, on every path: the owner's compaction policy, the
+  # resend policy without forwarding (`FailedPredecessorResend`) and the HTTPS
+  # fallback's derived claim. The released client resends a remote compaction
+  # whose reply it never read, and a reply lost without a close it notices
+  # (a NAT or a proxy dropping the connection silently) only when its stream
+  # idle timeout fires, 300 s after the last event it read
+  # (`stream_idle_timeout_ms`, default 300_000); the 30 s of the ordinary
+  # client-retry window are added for its reconnect and retry backoff. The
+  # compaction claim binds the compaction's window, so the longer window
+  # cannot chain a different compaction (findings#270 rows 270-351 and
+  # 270-373). The ordinary window (`@retry_window_seconds`) does not apply:
+  # without forwarding and over HTTPS it refused a compaction resent after
+  # the idle timeout, and the client lost its websocket for the session.
   @compaction_retry_window_seconds 330
   @authority_poison_reasons [:malformed_event, :unknown_completed_item, :unknown_response_event]
   # `DeliveryReceipt.resendable_frame_classes/0`, kept literal: accounting does
@@ -286,6 +300,9 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   @spec retry_window_seconds() :: pos_integer()
   def retry_window_seconds, do: @retry_window_seconds
+
+  @spec compaction_retry_window_seconds() :: pos_integer()
+  def compaction_retry_window_seconds, do: @compaction_retry_window_seconds
 
   @doc """
   When the client-retry window of `request` starts, given its final attempt and

@@ -459,7 +459,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     attempt = lock_final_attempt(turn, request.id)
 
     with {:ok, shape} <- ClientRetry.compaction_resend_shape(turn, request, attempt),
-         :ok <- validate_retry_window(request, attempt, now, scope),
+         :ok <- validate_retry_window(request, attempt, now, scope, ClientRetry.compaction_retry_window_seconds()),
          do: {:ok, shape}
   end
 
@@ -516,9 +516,16 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
       is_nil(shape) -> {:error, :terminal_predecessor}
       live_turn?(request.id) or live_attempt?(request.id) -> {:error, :active_predecessor}
       entitlement?(request.id) -> {:error, :entitlement_present}
-      true -> with :ok <- validate_retry_window(request, attempt, now, scope), do: {:ok, shape}
+      true -> with :ok <- validate_retry_window(request, attempt, now, scope, shape_retry_window_seconds(shape)), do: {:ok, shape}
     end
   end
+
+  # A compaction the client never read is resent after the client's stream
+  # idle timeout when its reply was lost silently, so it keeps the compaction
+  # window (`ClientRetry.compaction_retry_window_seconds/0`, findings#270 row
+  # 270-373); every other shape keeps the ordinary one.
+  defp shape_retry_window_seconds(:unreceived_compaction), do: ClientRetry.compaction_retry_window_seconds()
+  defp shape_retry_window_seconds(_shape), do: ClientRetry.retry_window_seconds()
 
   defp undelivered_completion_shape(turn, request, attempt, scope) do
     cond do
@@ -837,24 +844,26 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   # how long each successor ran before it was cut, and with owner forwarding off
   # a chain of pre-visible cuts could outlast its first request's window and
   # meet `409 duplicate_turn` (findings#206 row 206-519).
-  defp validate_retry_window(_request, _attempt, _now, %{successor_admitted?: true}), do: :ok
-  defp validate_retry_window(request, attempt, now, _scope), do: validate_retry_window(request, attempt, now)
+  defp validate_retry_window(request, attempt, now, scope),
+    do: validate_retry_window(request, attempt, now, scope, ClientRetry.retry_window_seconds())
+
+  defp validate_retry_window(_request, _attempt, _now, %{successor_admitted?: true}, _window_seconds), do: :ok
 
   # From the predecessor's completion, or from the failed downstream write its
   # final attempt's receipt names (`ClientRetry.retry_window_start/3`,
   # findings#232 row 232-261).
-  defp validate_retry_window(%Request{} = request, attempt, %DateTime{} = now),
-    do: validate_retry_window(ClientRetry.retry_window_start(request, attempt, now), now)
+  defp validate_retry_window(%Request{} = request, attempt, %DateTime{} = now, _scope, window_seconds),
+    do: validate_window_age(ClientRetry.retry_window_start(request, attempt, now), now, window_seconds)
 
-  defp validate_retry_window(%DateTime{} = started_at, %DateTime{} = now) do
+  defp validate_window_age(%DateTime{} = started_at, %DateTime{} = now, window_seconds) do
     age = DateTime.diff(now, started_at, :millisecond)
 
-    if age in 0..(ClientRetry.retry_window_seconds() * 1_000),
+    if age in 0..(window_seconds * 1_000),
       do: :ok,
       else: {:error, :retry_expired}
   end
 
-  defp validate_retry_window(_completed_at, _now), do: {:error, :terminal_predecessor}
+  defp validate_window_age(_completed_at, _now, _window_seconds), do: {:error, :terminal_predecessor}
 
   defp db_now do
     %{rows: [[now]]} = Repo.query!("SELECT clock_timestamp()", [])

@@ -62,8 +62,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSecondRemoteCompactionTest
   @turn_endpoint "/backend-api/codex/responses"
   # Detection budget for a frame, a barrier or a row the test only observes.
   @detection_timeout_ms 15_000
-  # How far inside or outside its retry window a resend arrives: well above
-  # the time the resend takes to reach the window check after the backdate.
+  # A compaction resend's retry window on every path, and how far inside or
+  # outside it a resend arrives: well above the time the resend takes to reach
+  # the window check after the backdate, so inside is 325 s, past the
+  # released client's 300 s stream idle timeout.
+  @compaction_window_seconds 330
   @window_margin_seconds 5
 
   # The released client's own flow while its socket lives: both compactions
@@ -133,18 +136,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSecondRemoteCompactionTest
   # The second compaction's anchored send is admitted and its connection is
   # cut before the provider produced anything; the client resends the same
   # compaction, as full history on a new connection or over HTTPS. The resend
-  # meets the second compaction, not the first, while it is inside the retry
-  # window that applies to its path, and is served as that compaction's
-  # successor, one charge per request. Outside the window no chain is formed:
-  # the websocket resend is refused `409 duplicate_turn` (`retry_expired`),
-  # the released client's second websocket retry the same, and its HTTPS
-  # fallback is served as a new compaction, so the compaction is served once,
-  # not lost. The windows, from the code: the owner's compaction policy
-  # (forwarding on) holds the websocket resend to 330 s; the resend policy
-  # without forwarding and the HTTPS form's derived claim, in both
-  # topologies, to 30 s (`ClientRetry.retry_window_seconds/0`). The cut
-  # compaction's completion is moved back, so the resend lands a margin
-  # inside or outside its window whatever the machine's speed.
+  # meets the second compaction, not the first, while it is inside its retry
+  # window, and is served as that compaction's successor, one charge per
+  # request. The window is 330 s on every path
+  # (`ClientRetry.compaction_retry_window_seconds/0`): the released client
+  # resends a reply it lost silently only once its 300 s stream idle timeout
+  # fired. Without forwarding and over HTTPS it used to be the ordinary 30 s,
+  # and a resend after the idle timeout was refused twice, after which the
+  # client left its websocket for HTTPS for the rest of its session
+  # (findings#270 row 270-373). Outside the window no chain is formed: the
+  # websocket resend is refused `409 duplicate_turn` (`retry_expired`), the
+  # released client's second websocket retry the same, and its HTTPS fallback
+  # is served as a new compaction, so the compaction is served once more,
+  # not lost. The cut compaction's completion is moved back, so the resend
+  # lands a margin inside or outside the window whatever the machine's speed.
   for {forwarding, path} <- [{:off, :websocket}, {:on, :websocket}, {:off, :https}, {:on, :https}], side <- [:inside, :outside] do
     @tag mode: "full", forwarding: forwarding, path: path, side: side
     test "full forwarding #{forwarding}: the #{path} resend of the turn's cut second remote compaction #{side} its window", ctx do
@@ -157,7 +162,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSecondRemoteCompactionTest
       await_barrier!(0, release_ref)
       close!(first)
       await!(fn -> Enum.any?(requests(scenario), &(&1.endpoint == @compact_endpoint and &1.status == "failed")) end, "the cut compaction never settled")
-      backdate_cut_compaction!(scenario, window_seconds(ctx.forwarding, ctx.path) + if(ctx.side == :inside, do: -@window_margin_seconds, else: @window_margin_seconds))
+      backdate_cut_compaction!(scenario, @compaction_window_seconds + if(ctx.side == :inside, do: -@window_margin_seconds, else: @window_margin_seconds))
 
       assert resend!(scenario, ctx.path, ctx.side) == expected_client_outcomes(ctx.path, ctx.side)
       release_held_compaction!(scenario.upstream, release_ref)
@@ -190,9 +195,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSecondRemoteCompactionTest
       assert :ok = FakeUpstream.verify!(scenario.upstream)
     end
   end
-
-  defp window_seconds(:on, :websocket), do: 330
-  defp window_seconds(_forwarding, _path), do: 30
 
   defp resend_sequence(:websocket, :inside), do: [full_history_second_compaction(@resent_compaction_response), final_resume()]
   defp resend_sequence(_path, _side), do: [https_second_compaction(@resent_compaction_response), https_final_resume()]
