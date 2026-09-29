@@ -17,7 +17,9 @@ defmodule CodexPoolerWeb.Runtime.WebsocketUsageLimitFrameTest do
   # by `responses_websocket_bridge_usage_limit_test.exs` (row 206-582).
   #
   # The provider's message and plan never travel. One BEAM node, one
-  # assignment, FakeUpstream websocket; direct socket and local owner; Lite.
+  # assignment, FakeUpstream websocket; direct socket and local owner; the
+  # Pool's default mode, which serves this fixture's model Full (Auto, from a
+  # catalog source whose `use_responses_lite` is false).
   use CodexPoolerWeb.ConnCase, async: false
 
   import Ecto.Query

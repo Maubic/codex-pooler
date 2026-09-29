@@ -8,7 +8,9 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeUsageLimitTest do
   # `x-should-retry: false`. It used to answer HTTP 200 with an SSE `error`
   # "stream interrupted before terminal response event" and never moved on.
   #
-  # One BEAM node, owner forwarding on, FakeUpstream websocket, Lite.
+  # One BEAM node, owner forwarding on, FakeUpstream websocket, the Pool's
+  # default mode, which serves this fixture's model Full (Auto, from a catalog
+  # source whose `use_responses_lite` is false).
   use CodexPoolerWeb.ConnCase, async: false
 
   import Ecto.Query
