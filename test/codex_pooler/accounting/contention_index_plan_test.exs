@@ -32,7 +32,7 @@ defmodule CodexPooler.Accounting.ContentionIndexPlanTest do
       |> Repo.update!()
     end
 
-    Repo.query!("ANALYZE ledger_entries, requests, attempts")
+    CodexPooler.PlannerStatistics.analyze!(["ledger_entries", "requests", "attempts"])
     %{as_of: as_of, pool: pool, api_key: api_key}
   end
 

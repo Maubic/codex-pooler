@@ -35,7 +35,7 @@ defmodule CodexPooler.Accounting.ExecutionRecoveryQueryPlanTest do
       end
 
     Enum.each(Enum.chunk_every(turns, 1_000), &Repo.insert_all(CodexTurn, &1))
-    Repo.query!("ANALYZE codex_turns, requests")
+    CodexPooler.PlannerStatistics.analyze!(["codex_turns", "requests"])
 
     {sql, params} = capture_lookup!(%{pool_id: setup.pool.id, api_key_id: setup.api_key.id, semantic_turn_digest: digest})
     %{rows: [row]} = Repo.query!(sql, params)

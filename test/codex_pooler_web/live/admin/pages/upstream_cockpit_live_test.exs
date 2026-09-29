@@ -5395,8 +5395,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     # hundreds of pages), under which the walk timed out its connection on
     # Drone 1559; a running install analyzes a table within seconds of its
     # rows arriving (findings#206 row 206-500).
-    Repo.query!("ANALYZE requests")
-    Repo.query!("ANALYZE attempts")
+    CodexPooler.PlannerStatistics.analyze!(["requests", "attempts"])
     assert %{rows: [[true]]} = Repo.query!("SELECT bool_and(reltuples > 0) FROM pg_class WHERE oid IN ('public.requests'::regclass, 'public.attempts'::regclass)")
 
     assert {:ok, cockpit} = UpstreamCockpitReadModel.load_visible(scope, identity.id)

@@ -157,7 +157,7 @@ defmodule CodexPooler.Accounting.WindowUsagePendingTest do
   end
 
   defp put_statistics!(:fresh) do
-    for table <- @tables, do: Repo.query!("ANALYZE #{table}")
+    CodexPooler.PlannerStatistics.analyze!(@tables)
   end
 
   defp relations do

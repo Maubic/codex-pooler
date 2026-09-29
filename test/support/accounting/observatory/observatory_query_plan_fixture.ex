@@ -54,8 +54,7 @@ defmodule CodexPooler.Accounting.ObservatoryQueryPlanFixture do
   end
 
   def refresh_statistics do
-    Repo.query!("ANALYZE requests")
-    Repo.query!("ANALYZE request_log_facts")
+    CodexPooler.PlannerStatistics.analyze!(["requests", "request_log_facts"])
   end
 
   def insert_representative_rows! do

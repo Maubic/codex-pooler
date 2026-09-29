@@ -31,7 +31,7 @@ defmodule CodexPooler.Accounting.RequestLogModelsQueryPlanTest do
     bulk_history!(pool, api_key, @bulk_rows)
     bulk_history!(other_pool, other_api_key, @bulk_rows)
 
-    Repo.query!("ANALYZE requests")
+    CodexPooler.PlannerStatistics.analyze!(["requests"])
 
     assert [[reltuples]] = Repo.query!("SELECT reltuples FROM pg_class WHERE oid = 'public.requests'::regclass").rows
     assert reltuples >= 2 * @bulk_rows, "requests statistics are empty (#{reltuples} rows); the plan would be a coin toss"

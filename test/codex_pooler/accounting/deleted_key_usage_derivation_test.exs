@@ -7,7 +7,7 @@ defmodule CodexPooler.Accounting.DeletedKeyUsageDerivationTest do
     setup = active_api_key_fixture()
     seed!(setup, 100, 10)
     for _ <- 1..3, do: seed!(active_api_key_fixture(setup.pool), 100, 10)
-    Repo.query!("ANALYZE api_keys,ledger_entries,requests")
+    CodexPooler.PlannerStatistics.analyze!(["api_keys", "ledger_entries", "requests"])
     Repo.query!("SET LOCAL track_functions = 'all'")
     before_calls = event_calls()
     Repo.query!("DELETE FROM api_keys WHERE id=$1", [Ecto.UUID.dump!(setup.api_key.id)])

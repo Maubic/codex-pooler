@@ -19,7 +19,7 @@ defmodule CodexPooler.Accounting.ModelHistoryQueryPlanTest do
       end
 
     Repo.insert_all(Attempt, rows)
-    Repo.query!("ANALYZE attempts")
+    CodexPooler.PlannerStatistics.analyze!(["attempts"])
     query = ModelHistory.query([setup.pool.id], DateTime.add(now, -3600, :second), now, ModelHistory.normalize_filters(%{}))
     {sql, params} = SQL.to_sql(:all, Repo, query)
 

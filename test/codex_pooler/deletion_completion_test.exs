@@ -62,7 +62,7 @@ defmodule CodexPooler.DeletionCompletionTest do
     # index by that list (about 850 here against 22 once merged) and a seq scan
     # can win on table statistics alone, as it did on Drone 1709.
     Repo.query!("SELECT gin_clean_pending_list('oban_jobs_args_index')")
-    Repo.query!("ANALYZE oban_jobs")
+    CodexPooler.PlannerStatistics.analyze!(["oban_jobs"])
     capture = {__MODULE__, make_ref()}
     on_exit(fn -> :telemetry.detach(capture) end)
     :telemetry.attach(capture, [:codex_pooler, :repo, :query], &__MODULE__.capture_state_query/4, self())

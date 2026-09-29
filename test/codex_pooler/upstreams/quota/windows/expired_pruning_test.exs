@@ -154,7 +154,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.ExpiredPruningTest do
         end
 
       rows |> Enum.chunk_every(1_000) |> Enum.each(&Repo.insert_all(AccountQuotaWindow, &1))
-      Repo.query!("ANALYZE account_quota_windows")
+      CodexPooler.PlannerStatistics.analyze!(["account_quota_windows"])
       ref = {__MODULE__, make_ref()}
       on_exit(fn -> :telemetry.detach(ref) end)
       :telemetry.attach(ref, [:codex_pooler, :repo, :query], &__MODULE__.capture_candidate_query/4, self())

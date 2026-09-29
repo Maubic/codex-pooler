@@ -428,8 +428,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetricsTest do
   end
 
   defp put_statistics!(:fresh) do
-    Repo.query!("ANALYZE requests")
-    Repo.query!("ANALYZE attempts")
+    CodexPooler.PlannerStatistics.analyze!(["requests", "attempts"])
   end
 
   # Every row each plan node handled: the rows it returned and the rows its filters removed, over all its loops.

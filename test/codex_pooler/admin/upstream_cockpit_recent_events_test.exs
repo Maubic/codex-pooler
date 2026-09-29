@@ -413,8 +413,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitRecentEventsTest do
   # row 206-500). The fixture is analyzed, and the statistics are asserted,
   # before a measured call.
   defp analyze_fixture_tables! do
-    Repo.query!("ANALYZE requests")
-    Repo.query!("ANALYZE attempts")
+    CodexPooler.PlannerStatistics.analyze!(["requests", "attempts"])
 
     assert %{rows: [[true]]} = Repo.query!("SELECT bool_and(reltuples > 0) FROM pg_class WHERE oid IN ('public.requests'::regclass, 'public.attempts'::regclass)")
   end

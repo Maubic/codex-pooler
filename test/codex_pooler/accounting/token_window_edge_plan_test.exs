@@ -15,15 +15,7 @@ defmodule CodexPooler.Accounting.TokenWindowEdgePlanTest do
   @tables ["ledger_entries", "api_key_usage_buckets", "requests", "attempts"]
 
   setup tags do
-    case tags[:statistics] do
-      :empty -> put_statistics!(:empty)
-      # The analyzed arm starts from missing statistics too, so its ANALYZE
-      # writes over this transaction's own version of each `pg_class` row and
-      # its counts go with the rollback.
-      statistics when statistics in [:missing, :analyzed] -> put_statistics!(:missing)
-      nil -> :ok
-    end
-
+    if tags[:statistics] in [:missing, :empty], do: put_statistics!(tags[:statistics])
     stats("before_seed")
     :ok
   end
@@ -122,7 +114,7 @@ defmodule CodexPooler.Accounting.TokenWindowEdgePlanTest do
         )
       end
 
-      if statistics == :analyzed, do: analyze_tables()
+      if statistics == :analyzed, do: CodexPooler.PlannerStatistics.analyze!(["ledger_entries", "api_key_usage_buckets"])
 
       handler = "edge-plan-#{System.unique_integer([:positive])}"
       on_exit(fn -> :telemetry.detach(handler) end)
@@ -214,7 +206,7 @@ defmodule CodexPooler.Accounting.TokenWindowEdgePlanTest do
 
           for analyzed <- [false, true] do
             if analyzed do
-              analyze_tables()
+              CodexPooler.PlannerStatistics.analyze!(["ledger_entries", "api_key_usage_buckets"])
               stats("after_analyze")
             end
 
@@ -300,11 +292,6 @@ defmodule CodexPooler.Accounting.TokenWindowEdgePlanTest do
 
       assert ledger_count == @retained_histories * 2 + if(boundary == :few, do: 6, else: 0)
     end
-  end
-
-  defp analyze_tables do
-    Repo.query!("ANALYZE ledger_entries")
-    Repo.query!("ANALYZE api_key_usage_buckets")
   end
 
   defp join_comparisons(nodes) do

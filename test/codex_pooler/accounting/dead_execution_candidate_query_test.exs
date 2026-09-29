@@ -207,8 +207,6 @@ defmodule CodexPooler.Accounting.DeadExecutionCandidateQueryTest do
       [Ecto.UUID.dump!(setup.api_key.id)]
     )
 
-    for table <- ["attempts", "requests", "ledger_entries", "request_replay_entitlements"] do
-      query!("ANALYZE " <> table, [])
-    end
+    CodexPooler.PlannerStatistics.analyze!(["attempts", "requests", "ledger_entries", "request_replay_entitlements"])
   end
 end

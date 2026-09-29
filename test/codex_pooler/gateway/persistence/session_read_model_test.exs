@@ -144,8 +144,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionReadModelTest do
   end
 
   defp put_statistics!(:fresh) do
-    Repo.query!("ANALYZE requests")
-    Repo.query!("ANALYZE codex_turns")
+    CodexPooler.PlannerStatistics.analyze!(["requests", "codex_turns"])
   end
 
   # Every row each plan node handled: the rows it returned and the rows its filters removed, over all its loops.
