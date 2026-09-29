@@ -254,7 +254,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
           label="24h failed"
           value={@cockpit.charts.request_health.kpis.failed_requests_24h}
         />
-        <.health_fact label="Failure rate" value={@model.failure_rate_label} />
+        <.health_fact
+          id="request-health-client-cancelled"
+          label="24h client cancelled"
+          value={@cockpit.charts.request_health.kpis.client_cancelled_requests_24h}
+          title="Requests the client closed before the response finished; not counted as failures"
+        />
+        <.health_fact
+          label="Failure rate"
+          value={@model.failure_rate_label}
+          title="Failed requests over the requests that were not cancelled by the client"
+        />
         <.health_fact
           label="7d requests"
           value={@cockpit.charts.request_health.kpis.total_requests_7d}
@@ -295,7 +305,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
         </p>
         <ul class="sr-only">
           <li :for={point <- @model.points}>
-            {point.label}: {point.success_count} succeeded, {point.failure_count} failed, {point.total_count} total requests
+            {point.label}: {point.success_count} succeeded, {point.failure_count} failed, {point.client_cancelled_count} client cancelled, {point.total_count} total requests
           </li>
         </ul>
       </div>
@@ -320,12 +330,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
     """
   end
 
+  attr :id, :string, default: nil
   attr :label, :string, required: true
   attr :value, :any, required: true
+  attr :title, :string, default: nil
 
   defp health_fact(assigns) do
     ~H"""
-    <div class="grid gap-0.5">
+    <div id={@id} class="grid gap-0.5" title={@title}>
       <span class="text-[10px] font-semibold uppercase tracking-[0.08em] text-base-content/40">
         {@label}
       </span>
@@ -371,6 +383,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
     points = Enum.map(chart.items, &request_health_point/1)
     success_values = Enum.map(points, & &1.success_count)
     failure_values = Enum.map(points, & &1.failure_count)
+    client_cancelled_values = Enum.map(points, & &1.client_cancelled_count)
 
     %{
       points: points,
@@ -378,15 +391,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
       series:
         CodexPooler.JSON.encode!([
           %{name: "Succeeded", type: "column", data: success_values},
-          %{name: "Failed", type: "column", data: failure_values}
+          %{name: "Failed", type: "column", data: failure_values},
+          %{name: "Client cancelled", type: "column", data: client_cancelled_values}
         ]),
-      units: CodexPooler.JSON.encode!(["requests", "failures"]),
+      units: CodexPooler.JSON.encode!(["requests", "failures", "cancellations"]),
       yaxis: CodexPooler.JSON.encode!([%{seriesName: "Succeeded", title: "requests"}]),
-      colors: CodexPooler.JSON.encode!(["var(--color-success)", "var(--color-error)"]),
+      colors: CodexPooler.JSON.encode!(["var(--color-success)", "var(--color-error)", "var(--color-warning)"]),
       failure_rate_label: rate_percent_label(chart.kpis.failure_rate_24h),
       p50_latency_label: latency_label(chart.kpis.p50_latency_ms_24h),
       error_breakdown: Enum.map(chart.kpis.error_breakdown_24h, &error_breakdown_entry/1),
-      summary: "#{Formatting.pluralize_count(chart.kpis.total_requests_7d, "request", "requests")} over seven days; #{chart.kpis.failed_requests_24h} failed in the last 24h; failure rate #{rate_percent_label(chart.kpis.failure_rate_24h)}."
+      summary: "#{Formatting.pluralize_count(chart.kpis.total_requests_7d, "request", "requests")} over seven days; #{chart.kpis.failed_requests_24h} failed in the last 24h; failure rate #{rate_percent_label(chart.kpis.failure_rate_24h)}; #{chart.kpis.client_cancelled_requests_24h} cancelled by the client, not counted as failures."
     }
   end
 
@@ -395,6 +409,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
       label: chart_date_label(item.date),
       success_count: item.success_count,
       failure_count: item.failure_count,
+      client_cancelled_count: item.client_cancelled_count,
       total_count: item.total_count
     }
   end

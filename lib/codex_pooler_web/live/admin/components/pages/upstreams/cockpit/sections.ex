@@ -608,18 +608,33 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Sections do
 
   defp request_note(%{kpis: %{total_requests_24h: 0}}), do: nil
 
+  # Client cancellations are neither failures nor part of the rate's base, so
+  # the note counts the requests that ran to an outcome of their own and names
+  # the cancellations it left out.
+  defp request_note(%{state: state, kpis: %{total_requests_24h: total, client_cancelled_requests_24h: total}})
+       when state in ["healthy", "degraded", "failed"],
+       do: "All #{total} requests in the last 24h were cancelled by the client"
+
   defp request_note(%{state: state, kpis: kpis})
        when state in ["healthy", "degraded", "failed"] do
-    base =
-      "#{kpis.failed_requests_24h} of #{kpis.total_requests_24h} requests failed in the last 24h (#{format_rate(kpis.failure_rate_24h)})"
+    cancelled = kpis.client_cancelled_requests_24h
 
-    case state do
-      "healthy" -> base <> ", within the expected range for upstream calls"
-      _degraded -> base
-    end
+    base =
+      "#{kpis.failed_requests_24h} of #{kpis.total_requests_24h - cancelled} requests failed in the last 24h (#{format_rate(kpis.failure_rate_24h)})"
+
+    note =
+      case state do
+        "healthy" -> base <> ", within the expected range for upstream calls"
+        _degraded -> base
+      end
+
+    note <> client_cancelled_note(cancelled)
   end
 
   defp request_note(_request_health), do: nil
+
+  defp client_cancelled_note(0), do: ""
+  defp client_cancelled_note(count), do: "; #{count} cancelled by the client not counted"
 
   defp format_rate(rate) when is_float(rate),
     do: :erlang.float_to_binary(rate, decimals: 1) <> "%"

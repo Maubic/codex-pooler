@@ -15,12 +15,14 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawer.Format do
   def request_log_subtitle(%{correlation_id: id}) when is_binary(id) and id != "", do: id
   def request_log_subtitle(_log), do: nil
 
+  # A request log carries the status it shows (`display_status`: a client
+  # cancellation is recorded `failed`); an attempt shows its own status.
   @spec request_log_status(map() | nil) :: String.t() | nil
-  def request_log_status(%{status: status}), do: status_label(status || "unknown")
+  def request_log_status(%{status: status} = log), do: status_label(Map.get(log, :display_status) || status || "unknown")
   def request_log_status(_log), do: nil
 
   @spec request_log_status_class(map() | nil) :: String.t() | nil
-  def request_log_status_class(%{status: status}), do: status_chip_class(status)
+  def request_log_status_class(%{status: status} = log), do: status_chip_class(Map.get(log, :display_status) || status)
   def request_log_status_class(_log), do: nil
 
   @spec status_chip_class(String.t() | nil) :: String.t()
@@ -33,7 +35,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawer.Format do
   def status_chip_class("rejected"),
     do: "inline-flex items-center rounded-full border border-error/20 bg-error/10 px-2.5 py-1 text-xs font-medium leading-none text-error"
 
-  def status_chip_class("cancelled"),
+  def status_chip_class(status) when status in ["cancelled", "client_cancelled"],
     do: "inline-flex items-center rounded-full border border-warning/20 bg-warning/10 px-2.5 py-1 text-xs font-medium leading-none text-warning"
 
   def status_chip_class("in_progress"),

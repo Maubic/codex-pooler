@@ -37,6 +37,7 @@ defmodule CodexPooler.Admin.Stats.Charts do
         requests: Aggregates.sum_integer(rows, :requests),
         succeeded: Aggregates.sum_integer(rows, :succeeded),
         failed: Aggregates.sum_integer(rows, :failed),
+        client_cancelled: Aggregates.sum_integer(rows, :client_cancelled),
         in_progress: Aggregates.sum_integer(rows, :in_progress)
       }
     end)

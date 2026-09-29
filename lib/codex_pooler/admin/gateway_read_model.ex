@@ -5,7 +5,7 @@ defmodule CodexPooler.Admin.GatewayReadModel do
 
   import Ecto.Query
 
-  alias CodexPooler.Accounting.{Attempt, Request}
+  alias CodexPooler.Accounting.{Attempt, Request, RequestOutcome}
   alias CodexPooler.Gateway.Persistence.SessionReadModel
   alias CodexPooler.Repo
 
@@ -80,6 +80,7 @@ defmodule CodexPooler.Admin.GatewayReadModel do
       []
     else
       from(request in Request,
+        as: :request,
         where:
           request.pool_id in ^pool_ids and request.admitted_at >= ^started_at and
             request.admitted_at <= ^ended_at,
@@ -89,10 +90,10 @@ defmodule CodexPooler.Admin.GatewayReadModel do
           bucket: type(fragment("date_trunc('hour', ?)", request.admitted_at), :utc_datetime_usec),
           requests: count(request.id),
           succeeded: filter(count(request.id), request.status == "succeeded"),
-          failed: filter(count(request.id), request.status in ^@failed_request_statuses),
           in_progress: filter(count(request.id), request.status == "in_progress")
         }
       )
+      |> select_merge(^outcome_counts())
       |> Repo.all(telemetry_options: [reporting_projection: :stats_request_status_buckets])
     end
   end
@@ -102,6 +103,7 @@ defmodule CodexPooler.Admin.GatewayReadModel do
       []
     else
       from(request in Request,
+        as: :request,
         where:
           request.pool_id in ^pool_ids and request.admitted_at >= ^started_at and
             request.admitted_at <= ^ended_at,
@@ -111,10 +113,10 @@ defmodule CodexPooler.Admin.GatewayReadModel do
           bucket: type(fragment("date_trunc('day', ?)", request.admitted_at), :utc_datetime_usec),
           requests: count(request.id),
           succeeded: filter(count(request.id), request.status == "succeeded"),
-          failed: filter(count(request.id), request.status in ^@failed_request_statuses),
           in_progress: filter(count(request.id), request.status == "in_progress")
         }
       )
+      |> select_merge(^outcome_counts())
       |> Repo.all(telemetry_options: [reporting_projection: :stats_request_status_buckets])
     end
   end
@@ -126,6 +128,18 @@ defmodule CodexPooler.Admin.GatewayReadModel do
         _granularity
       ),
       do: []
+
+  # A client cancellation (`RequestOutcome`) is counted on its own, never as
+  # failed.
+  defp outcome_counts do
+    client_cancelled = RequestOutcome.client_cancelled_condition(:request)
+    not_client_cancelled = RequestOutcome.not_client_cancelled_condition(:request)
+
+    %{
+      failed: dynamic([request: request], filter(count(request.id), request.status in ^@failed_request_statuses and ^not_client_cancelled)),
+      client_cancelled: dynamic([request: request], filter(count(request.id), ^client_cancelled))
+    }
+  end
 
   @spec recent_failures_for_pool_ids(
           [Ecto.UUID.t()],
@@ -143,10 +157,12 @@ defmodule CodexPooler.Admin.GatewayReadModel do
       limit = min(limit, 5)
 
       from(request in Request,
+        as: :request,
         where:
           request.pool_id in ^pool_ids and request.admitted_at >= ^started_at and
             request.admitted_at <= ^ended_at and
             request.status in ^@failed_request_statuses,
+        where: ^RequestOutcome.not_client_cancelled_condition(:request),
         order_by: [desc: request.admitted_at, desc: request.id],
         limit: ^limit,
         select: %{

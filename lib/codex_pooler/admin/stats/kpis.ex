@@ -25,16 +25,19 @@ defmodule CodexPooler.Admin.Stats.Kpis do
       value: Aggregates.sum_integer(request_buckets, :requests),
       succeeded: Aggregates.sum_integer(request_buckets, :succeeded),
       failed: Aggregates.sum_integer(request_buckets, :failed),
+      client_cancelled: Aggregates.sum_integer(request_buckets, :client_cancelled),
       in_progress: Aggregates.sum_integer(request_buckets, :in_progress)
     }
   end
 
+  # A request the client cancelled is neither a success nor a failure, so it
+  # leaves the rate's base as well (`RequestOutcome`).
   @spec success_rate_kpi([map()]) :: map()
-  def success_rate_kpi([]), do: %{value: nil, unit: "percent"}
+  def success_rate_kpi([]), do: %{value: nil, unit: "percent", client_cancelled: 0}
 
   def success_rate_kpi(request_buckets) do
     requests = request_kpi(request_buckets)
-    %{value: Aggregates.percentage(requests.succeeded, requests.value), unit: "percent"}
+    %{value: Aggregates.percentage(requests.succeeded, requests.value - requests.client_cancelled), unit: "percent", client_cancelled: requests.client_cancelled}
   end
 
   @spec token_kpi([map()]) :: map()

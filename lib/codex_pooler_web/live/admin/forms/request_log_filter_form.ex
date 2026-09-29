@@ -3,7 +3,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogFilterForm do
 
   alias CodexPoolerWeb.DateTimeInput
 
-  @status_options ~w(in_progress succeeded failed rejected cancelled)
+  @status_options ~w(in_progress succeeded failed client_cancelled rejected cancelled)
   @filter_keys ~w(pool_id status upstream_identity_id model date_from date_to request_id)
 
   @type filter_error :: %{required(:field) => atom(), required(:message) => String.t()}
@@ -33,14 +33,14 @@ defmodule CodexPoolerWeb.Admin.RequestLogFilterForm do
     {date_to, date_to_error} = parse_date(form_values["date_to"], :date_to, timezone)
 
     filters =
-      [
-        status: status,
-        upstream_identity_id: upstream_id,
-        model: blank_to_nil(form_values["model"]),
-        request_id: blank_to_nil(form_values["request_id"]),
-        date_from: date_from,
-        date_to: date_to
-      ]
+      (status_filters(status) ++
+         [
+           upstream_identity_id: upstream_id,
+           model: blank_to_nil(form_values["model"]),
+           request_id: blank_to_nil(form_values["request_id"]),
+           date_from: date_from,
+           date_to: date_to
+         ])
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
     errors =
@@ -96,6 +96,14 @@ defmodule CodexPoolerWeb.Admin.RequestLogFilterForm do
       "request_id" => string_param(params, "request_id")
     }
   end
+
+  # The status filter selects rows by the status they show. `failed` leaves out
+  # the client cancellations (`RequestOutcome`), which have their own
+  # `client_cancelled` option; "Any status" lists both.
+  defp status_filters(nil), do: []
+  defp status_filters("failed"), do: [status: "failed", client_cancelled: false]
+  defp status_filters("client_cancelled"), do: [client_cancelled: true]
+  defp status_filters(status), do: [status: status]
 
   defp parse_status(nil), do: {nil, nil}
 

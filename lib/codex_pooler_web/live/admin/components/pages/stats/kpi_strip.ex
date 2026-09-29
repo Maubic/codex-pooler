@@ -30,7 +30,7 @@ defmodule CodexPoolerWeb.Admin.StatsPresentation.KpiStrip do
         icon="hero-check-circle"
         label="Success rate"
         value={format_percent(@dashboard.kpis.success_rate.value)}
-        description="Completed"
+        description={success_rate_summary(@dashboard.kpis.success_rate)}
         tone={success_rate_tone(@dashboard.kpis.success_rate.value)}
         compact_mobile
       />
@@ -87,8 +87,14 @@ defmodule CodexPoolerWeb.Admin.StatsPresentation.KpiStrip do
     """
   end
 
-  defp request_summary(%{succeeded: succeeded, failed: failed}),
-    do: "#{format_integer(succeeded)} succeeded · #{format_integer(failed)} failed"
+  defp request_summary(%{succeeded: succeeded, failed: failed} = requests),
+    do: "#{format_integer(succeeded)} succeeded · #{format_integer(failed)} failed" <> client_cancelled_summary(Map.get(requests, :client_cancelled, 0))
+
+  defp client_cancelled_summary(count) when is_integer(count) and count > 0, do: " · #{format_integer(count)} client cancelled"
+  defp client_cancelled_summary(_count), do: ""
+
+  defp success_rate_summary(%{client_cancelled: count}) when is_integer(count) and count > 0, do: "Completed; excludes client cancellations"
+  defp success_rate_summary(_success_rate), do: "Completed"
 
   defp cache_rate_summary(%{input_tokens: 0}), do: "No input tokens"
   defp cache_rate_summary(%{cached_input_tokens: 0}), do: "No cached input"

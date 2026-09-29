@@ -34,10 +34,12 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Filters do
         <summary
           data-role={"#{@role}-trigger"}
           aria-label={@label}
+          title={Map.get(@selected, :title)}
           class="select flex min-h-10 w-full cursor-pointer items-center gap-2 pr-8 text-left text-sm font-normal"
         >
           <.icon name={@selected.icon} class={["size-4 shrink-0", option_icon_class(@selected)]} />
           <span class="truncate">{@selected.label}</span>
+          <span :if={Map.get(@selected, :detail)} data-role={"#{@role}-detail"} class="min-w-0 truncate text-xs text-base-content/50">{@selected.detail}</span>
         </summary>
         <ul
           data-role={"#{@role}-menu"}
@@ -61,6 +63,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Filters do
                 filter_option_active?(option, @selected_value) && "active"
               ]}
               aria-current={filter_option_active?(option, @selected_value) && "true"}
+              title={Map.get(option, :title)}
             >
               <span data-role={"#{@role}-icon"} class="shrink-0">
                 <.icon name={option.icon} class={["size-4", option_icon_class(option)]} />
@@ -71,6 +74,13 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Filters do
                 class="ml-auto shrink-0 text-[0.68rem] text-base-content/50"
               >
                 {option.strategy_label}
+              </span>
+              <span
+                :if={Map.get(option, :detail)}
+                data-role={"#{@role}-option-detail"}
+                class="ml-auto shrink-0 text-[0.68rem] text-base-content/50"
+              >
+                {option.detail}
               </span>
             </button>
           </li>

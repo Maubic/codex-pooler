@@ -129,6 +129,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
                 <tr
                   id={"request-log-row-#{request_log.id}"}
                   data-status={request_log.status}
+                  data-display-status={display_status(request_log)}
                   phx-click="open_request_log"
                   phx-value-request-id={request_log.id}
                   class={["group/request-log cursor-pointer transition-colors hover:bg-base-200/80", (request_log.status == "in_progress" || @current_params["selected_request_id"] == request_log.id) && "bg-base-200/60"]}
@@ -295,7 +296,10 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
   attr :prefix, :string, required: true
 
   def request_log_timestamp_cell(assigns) do
-    assigns = assign(assigns, :latency, format_route_latency(assigns.request_log.latency_ms))
+    assigns =
+      assigns
+      |> assign(:latency, format_route_latency(assigns.request_log.latency_ms))
+      |> assign(:display_status, display_status(assigns.request_log))
 
     ~H"""
     <button
@@ -305,7 +309,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
       phx-click="open_request_log"
       phx-value-request-id={@request_log.id}
       class="request-log-lines group grid max-w-full gap-1 rounded-field text-left transition-colors hover:text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary group-hover/request-log:text-primary"
-      aria-label={"Inspect request #{format_record_id(@request_log.id) || @request_log.id}, #{format_datetime(@request_log.admitted_at, @datetime_preferences)}, #{status_label(@request_log.status || "unknown")}#{if @latency, do: " in #{@latency}"}"}
+      aria-label={"Inspect request #{format_record_id(@request_log.id) || @request_log.id}, #{format_datetime(@request_log.admitted_at, @datetime_preferences)}, #{status_label(@display_status || "unknown")}#{if @latency, do: " in #{@latency}"}"}
     >
       <span
         data-role="timestamp-datetime"
@@ -319,11 +323,11 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
         class="flex min-w-0 items-center gap-1 whitespace-nowrap text-[11px]"
       >
         <span class="sr-only">{"Status: "}</span>
-        <span data-role="status-icon" data-status={@request_log.status} aria-hidden="true" class={["inline-flex size-3 shrink-0 items-center justify-center", status_text_class(@request_log.status)]}>
-          <.icon name={request_status_icon(@request_log.status)} class="size-3" />
+        <span data-role="status-icon" data-status={@display_status} aria-hidden="true" class={["inline-flex size-3 shrink-0 items-center justify-center", status_text_class(@display_status)]}>
+          <.icon name={request_status_icon(@display_status)} class="size-3" />
         </span>
         <span class="admin-control-label">
-          <span data-role="status-text" class={status_text_class(@request_log.status)}>{status_label(@request_log.status || "unknown")}</span><span
+          <span data-role="status-text" class={status_text_class(@display_status)}>{status_label(@display_status || "unknown")}</span><span
             :if={@latency}
             id={"#{@prefix}-#{@request_log.id}-latency"}
             data-role="latency"
@@ -503,10 +507,15 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
     end
   end
 
+  # The status a row shows: a client cancellation is recorded `failed` and
+  # shown as its own class (`RequestOutcome`); rows built without the read
+  # model's `display_status` show their recorded status.
+  defp display_status(request_log), do: Map.get(request_log, :display_status) || request_log.status
+
   # Status icons, labels and failure details share one tone vocabulary.
   defp request_log_tone("succeeded"), do: "success"
   defp request_log_tone(status) when status in ["failed", "rejected"], do: "error"
-  defp request_log_tone("cancelled"), do: "warning"
+  defp request_log_tone(status) when status in ["cancelled", "client_cancelled"], do: "warning"
   defp request_log_tone("in_progress"), do: "info"
   defp request_log_tone(_status), do: nil
 end

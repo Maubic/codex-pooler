@@ -3,7 +3,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
 
   import Ecto.Query
 
-  alias CodexPooler.Accounting.{Attempt, Request}
+  alias CodexPooler.Accounting.{Attempt, Request, RequestOutcome}
   alias CodexPooler.Accounts.Scope
   alias CodexPooler.Admin.UpstreamCockpitMetrics
   alias CodexPooler.Admin.UpstreamCockpitMetrics.Common
@@ -14,6 +14,9 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
   @request_terminal_statuses ["succeeded" | @request_failed_statuses]
   # A share of failed upstream calls is expected in normal operation; request
   # posture only escalates to degraded above this 24h failure-rate percentage.
+  # Client cancellations (`RequestOutcome`) are counted apart: they are neither
+  # failures nor part of the rate's base, so a client that cancels often can
+  # neither degrade an account nor dilute its real failures.
   @degraded_failure_rate_percent 5.0
   @error_breakdown_limit 5
   @event_walk_clock_margin_seconds 60
@@ -106,12 +109,15 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
     |> where([request], request.admitted_at >= ^start_7d and request.admitted_at <= ^as_of)
   end
 
+  # Grouped by error code as well, a bounded vocabulary, so each row is
+  # classified by `RequestOutcome.client_cancelled?/2`.
   defp daily_counts(base_query) do
     base_query
-    |> group_by([request], [fragment("DATE(?)", request.admitted_at), request.status])
+    |> group_by([request], [fragment("DATE(?)", request.admitted_at), request.status, request.last_error_code])
     |> select([request], %{
       date: type(fragment("DATE(?)", request.admitted_at), :date),
       status: request.status,
+      last_error_code: request.last_error_code,
       count: count(request.id)
     })
     |> Repo.all()
@@ -120,8 +126,8 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
   defp recent_status_counts(base_query, start_24h) do
     base_query
     |> where([request], request.admitted_at >= ^start_24h)
-    |> group_by([request], request.status)
-    |> select([request], %{status: request.status, count: count(request.id)})
+    |> group_by([request], [request.status, request.last_error_code])
+    |> select([request], %{status: request.status, last_error_code: request.last_error_code, count: count(request.id)})
     |> Repo.all()
   end
 
@@ -148,12 +154,14 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
 
   defp normalize_latency_percentile(value) when is_integer(value), do: value
 
+  # The failures behind the rate: a client cancellation is counted on its own.
   defp error_breakdown(base_query, start_24h) do
     base_query
     |> where(
       [request],
       request.admitted_at >= ^start_24h and request.status in ^@request_failed_statuses
     )
+    |> where(^RequestOutcome.not_client_cancelled_condition(:request))
     |> group_by([request], [request.response_status_code, request.last_error_code])
     |> order_by([request], desc: count(request.id))
     |> limit(^@error_breakdown_limit)
@@ -194,32 +202,35 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
       success_count =
         bucket_rows |> Enum.filter(&(&1.status == "succeeded")) |> Enum.sum_by(& &1.count)
 
-      failure_count =
-        bucket_rows |> Enum.filter(&failed_request_status?(&1.status)) |> Enum.sum_by(& &1.count)
+      failure_count = bucket_rows |> Enum.filter(&failed_request_row?/1) |> Enum.sum_by(& &1.count)
+
+      client_cancelled_count =
+        bucket_rows |> Enum.filter(&client_cancelled_row?/1) |> Enum.sum_by(& &1.count)
 
       %{
         date: Date.to_iso8601(date),
         success_count: success_count,
         failure_count: failure_count,
-        total_count: success_count + failure_count
+        client_cancelled_count: client_cancelled_count,
+        total_count: success_count + failure_count + client_cancelled_count
       }
     end
   end
 
   defp request_health_kpis(daily_counts, recent_status_counts, summary) do
     total_requests_24h = Enum.sum_by(recent_status_counts, & &1.count)
+    failed_requests_24h = recent_status_counts |> Enum.filter(&failed_request_row?/1) |> Enum.sum_by(& &1.count)
 
-    failed_requests_24h =
-      recent_status_counts
-      |> Enum.filter(&failed_request_status?(&1.status))
-      |> Enum.sum_by(& &1.count)
+    client_cancelled_requests_24h =
+      recent_status_counts |> Enum.filter(&client_cancelled_row?/1) |> Enum.sum_by(& &1.count)
 
     total_requests_7d = Enum.sum_by(daily_counts, & &1.count)
 
     %{
       total_requests_24h: total_requests_24h,
       failed_requests_24h: failed_requests_24h,
-      failure_rate_24h: failure_rate(failed_requests_24h, total_requests_24h),
+      client_cancelled_requests_24h: client_cancelled_requests_24h,
+      failure_rate_24h: failure_rate(failed_requests_24h, total_requests_24h - client_cancelled_requests_24h),
       total_requests_7d: total_requests_7d,
       p50_latency_ms_24h: Map.get(summary, :p50_latency_ms),
       error_breakdown_24h: Map.get(summary, :error_breakdown, [])
@@ -228,8 +239,9 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
 
   defp request_health_state(%{total_requests_7d: 0}), do: "empty"
 
-  defp request_health_state(%{total_requests_24h: total, failed_requests_24h: failed})
-       when total > 0 and failed == total,
+  # Every request that ran to an outcome of its own failed.
+  defp request_health_state(%{total_requests_24h: total, failed_requests_24h: failed, client_cancelled_requests_24h: cancelled})
+       when failed > 0 and failed == total - cancelled,
        do: "failed"
 
   defp request_health_state(%{failure_rate_24h: rate})
@@ -346,14 +358,17 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
 
     retry_probe = retry_probe()
 
+    event? = event_condition(retry_probe)
+
     {events, behind_window} =
       window
       |> subquery()
       |> event_walk(walk)
       |> where(
-        [attempt, request: request],
-        attempt.position > ^@event_walk_depth or
-          (request.pool_id in ^pool_ids and (request.status in ^@request_failed_statuses or exists(subquery(retry_probe))))
+        ^dynamic(
+          [attempt, request: request],
+          attempt.position > ^@event_walk_depth or (request.pool_id in ^pool_ids and ^event?)
+        )
       )
       |> select_merge([attempt], %{behind_window?: attempt.position > ^@event_walk_depth})
       |> Repo.all()
@@ -368,7 +383,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
     from(attempt in Attempt, where: attempt.pool_upstream_assignment_id == ^assignment_id and attempt.started_at >= ^floor)
     |> event_walk(limit)
     |> where([request: request], request.pool_id in ^pool_ids)
-    |> where([request: request], request.status in ^@request_failed_statuses or exists(subquery(retry_probe())))
+    |> where(^event_condition(retry_probe()))
     |> Repo.all()
   end
 
@@ -390,7 +405,17 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
     )
   end
 
-  # Both walks keep a request that failed or has a second attempt.
+  # Both walks keep a request that failed or has a second attempt. A client
+  # cancellation is not a failure of the account: it is kept only for a retry.
+  defp event_condition(retry_probe) do
+    not_client_cancelled = RequestOutcome.not_client_cancelled_condition(:request)
+
+    dynamic(
+      [request: request],
+      (request.status in ^@request_failed_statuses and ^not_client_cancelled) or exists(subquery(retry_probe))
+    )
+  end
+
   defp retry_probe do
     from attempt in Attempt,
       where: attempt.request_id == parent_as(:request).id,
@@ -424,7 +449,10 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
     Enum.map(rows, &Map.put(&1, :attempt_count, Map.get(counts, &1.id, 0)))
   end
 
-  defp failed_request_status?(status), do: status in @request_failed_statuses
+  defp failed_request_row?(%{status: status} = row),
+    do: status in @request_failed_statuses and not RequestOutcome.client_cancelled?(row)
+
+  defp client_cancelled_row?(row), do: RequestOutcome.client_cancelled?(row)
 
   defp failure_rate(_failed, 0), do: 0.0
   defp failure_rate(failed, total), do: Common.percentage(failed, total)

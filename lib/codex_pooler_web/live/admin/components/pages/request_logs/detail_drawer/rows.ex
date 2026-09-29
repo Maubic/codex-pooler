@@ -38,7 +38,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawer.Rows do
     [
       detail("request-log-detail-request-id", "Request id", log.id, mono: true),
       detail("request-log-detail-correlation-id", "Correlation id", log.correlation_id, mono: true),
-      detail("request-log-detail-status", "Status", status_label(log.status || "unknown")),
+      detail("request-log-detail-status", "Status", status_detail(log)),
       detail("request-log-detail-endpoint", "Endpoint", log.endpoint, mono: true),
       detail("request-log-detail-model", "Model", log.requested_model),
       model_rows(log),
@@ -457,4 +457,10 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawer.Rows do
   defp blank?(nil), do: true
   defp blank?(value) when is_binary(value), do: String.trim(value) == ""
   defp blank?(_value), do: false
+
+  # A client cancellation shows its class and the status it was recorded with.
+  defp status_detail(%{display_status: "client_cancelled"} = log),
+    do: "#{status_label("client_cancelled")} (recorded as #{String.downcase(status_label(log.status || "unknown"))})"
+
+  defp status_detail(log), do: status_label(log.status || "unknown")
 end

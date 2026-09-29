@@ -1,6 +1,7 @@
 defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
   @moduledoc false
 
+  alias CodexPooler.Accounting.RequestOutcome
   alias CodexPooler.Accounts.Scope
   alias CodexPooler.Admin.{UpstreamCircuitReadiness, UpstreamCockpitMetrics}
   alias CodexPooler.Audit
@@ -583,7 +584,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
       subtitle: request_recent_event_subtitle(row),
       link: request_recent_event_link(row.id, identity_id),
       request_id: row.id,
-      failure?: row.status in @request_failed_statuses
+      failure?: row.status in @request_failed_statuses and not RequestOutcome.client_cancelled?(row)
     }
   end
 
@@ -604,9 +605,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
 
   defp fallback_request_event_title(_row), do: "Request retried"
 
+  # A client cancellation reaches the feed only through a retry: it names its
+  # class, not "Failed".
   defp request_recent_event_subtitle(row) do
     [
-      human_status(row.status),
+      request_event_status(row),
       retry_label(row),
       pluralize_count(row.attempt_count, "attempt", "attempts")
     ]
@@ -772,6 +775,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
     |> to_string()
     |> String.replace([".", "_"], " ")
     |> String.capitalize()
+  end
+
+  defp request_event_status(row) do
+    if RequestOutcome.client_cancelled?(row), do: "Client cancelled", else: human_status(row.status)
   end
 
   defp human_status(value) do

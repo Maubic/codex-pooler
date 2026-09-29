@@ -542,6 +542,7 @@ defmodule CodexPooler.Admin.StatsTest do
                requests: 2,
                succeeded: 1,
                failed: 1,
+               client_cancelled: 0,
                in_progress: 0
              },
              %{
@@ -549,6 +550,7 @@ defmodule CodexPooler.Admin.StatsTest do
                requests: 4,
                succeeded: 0,
                failed: 2,
+               client_cancelled: 0,
                in_progress: 1
              }
            ]
@@ -697,8 +699,8 @@ defmodule CodexPooler.Admin.StatsTest do
       end)
 
     assert {:ok, dashboard} = dashboard_result
-    assert dashboard.kpis.requests == %{value: 9, succeeded: 1, failed: 6, in_progress: 1}
-    assert dashboard.kpis.success_rate == %{value: 11.1, unit: "percent"}
+    assert dashboard.kpis.requests == %{value: 9, succeeded: 1, failed: 6, client_cancelled: 0, in_progress: 1}
+    assert dashboard.kpis.success_rate == %{value: 11.1, unit: "percent", client_cancelled: 0}
     assert dashboard.sources.requests == 9
     assert Enum.sum(Enum.map(dashboard.charts.requests, & &1.requests)) == 9
     assert length(dashboard.charts.requests) == 6
@@ -751,6 +753,38 @@ defmodule CodexPooler.Admin.StatsTest do
     refute Enum.any?(request_events, &is_nil(&1.projection))
   end
 
+  # A client cancellation is recorded `failed` with `client_disconnected` (499
+  # on a websocket, the 200 an HTTP stream had already sent): the dashboard
+  # counts it apart, outside the failures, the success rate's base and the
+  # recent failures, while a Pooler-side 499 stays a failure (findings#292).
+  test "client cancellations are counted apart from failures, the success rate and the recent failures" do
+    scope = owner_scope()
+    pool = pool_fixture(%{slug: "stats-client-cancelled"})
+    %{api_key: api_key} = active_api_key_fixture(pool)
+    as_of = ~U[2026-08-14 08:55:00.000000Z]
+
+    for {status, code, status_code, transport, minutes} <- [
+          {"succeeded", nil, 200, "http_json", 50},
+          {"succeeded", nil, 200, "http_json", 45},
+          {"succeeded", nil, 200, "http_json", 40},
+          {"failed", "client_disconnected", 499, "websocket", 30},
+          {"failed", "client_disconnected", 200, "http_sse", 20},
+          {"failed", "owner_drained", 499, "websocket", 10}
+        ] do
+      request_fixture(%{pool: pool, api_key: api_key}, %{status: status, last_error_code: code, response_status_code: status_code, transport: transport})
+      |> set_request_time!(DateTime.add(as_of, -minutes, :minute))
+    end
+
+    assert {:ok, dashboard} = Stats.build_dashboard(scope, %{pool_id: pool.id, window: "1h", as_of: as_of})
+
+    # Counted as failures, the two cancellations made 3 failed and 50.0%.
+    assert dashboard.kpis.requests == %{value: 6, succeeded: 3, failed: 1, client_cancelled: 2, in_progress: 0}
+    assert dashboard.kpis.success_rate == %{value: 75.0, unit: "percent", client_cancelled: 2}
+    assert Enum.sum(Enum.map(dashboard.charts.requests, & &1.client_cancelled)) == 2
+    assert Enum.sum(Enum.map(dashboard.charts.requests, & &1.failed)) == 1
+    assert Enum.map(dashboard.tables.recent_failures, & &1.error_code) == ["owner_drained"]
+  end
+
   test "failed-only request buckets do not invent settled usage" do
     scope = owner_scope()
     pool = pool_fixture(%{slug: "stats-failed-only"})
@@ -766,7 +800,7 @@ defmodule CodexPooler.Admin.StatsTest do
     assert {:ok, dashboard} =
              Stats.build_dashboard(scope, %{pool_id: pool.id, window: "1h", as_of: as_of})
 
-    assert dashboard.kpis.requests == %{value: 1, succeeded: 0, failed: 1, in_progress: 0}
+    assert dashboard.kpis.requests == %{value: 1, succeeded: 0, failed: 1, client_cancelled: 0, in_progress: 0}
     assert Enum.sum(Enum.map(dashboard.charts.requests, & &1.requests)) == 1
     assert dashboard.kpis.tokens.total_tokens == 0
     assert Enum.sum(Enum.map(dashboard.charts.tokens, & &1.total_tokens)) == 0
@@ -1353,8 +1387,8 @@ defmodule CodexPooler.Admin.StatsTest do
     assert {:ok, dashboard} =
              Stats.build_dashboard(scope, %{pool_id: pool.id, window: "1h", as_of: as_of})
 
-    assert dashboard.kpis.requests == %{value: 0, succeeded: 0, failed: 0, in_progress: 0}
-    assert dashboard.kpis.success_rate == %{value: nil, unit: "percent"}
+    assert dashboard.kpis.requests == %{value: 0, succeeded: 0, failed: 0, client_cancelled: 0, in_progress: 0}
+    assert dashboard.kpis.success_rate == %{value: nil, unit: "percent", client_cancelled: 0}
     assert dashboard.kpis.tokens.total_tokens == 0
     assert dashboard.kpis.tokens_per_second == %{value: nil, unit: "tokens/second"}
     assert dashboard.kpis.settled_cost == %{status: "unavailable", micros: 0, usd: nil}
