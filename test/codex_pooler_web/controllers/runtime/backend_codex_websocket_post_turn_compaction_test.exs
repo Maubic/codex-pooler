@@ -1357,11 +1357,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
     state
   end
 
+  # Runs one turn and requires what a served turn shows its client: no error
+  # frame, and a success terminal last. It used to drop the frames, so a turn
+  # that ended in an error passed as served (findings#281).
   defp run_turn!(state, frame) do
-    assert {:ok, state} = CodexResponsesSocket.handle_in({frame, [opcode: :text]}, state)
-    Process.put(:crossing_socket_state, state)
-    {state, _frames} = collect_until_idle!(state, [])
-    Process.put(:crossing_socket_state, state)
+    {state, frames} = run_turn_frames!(state, frame)
+    refute Enum.any?(frames, &match?(%{"type" => "error"}, &1)), "the turn pushed an error: #{inspect(frames)}"
+    assert %{"type" => terminal} = List.last(frames)
+    assert terminal in ["response.completed", "response.done"]
     state
   end
 
