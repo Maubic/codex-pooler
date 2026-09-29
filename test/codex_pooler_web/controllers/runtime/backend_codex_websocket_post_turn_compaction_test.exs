@@ -15,7 +15,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
       set_model_serving_mode!: 3,
       model_serving_scope: 0,
       kept_open_line: 5,
-      with_info_log: 1
+      with_info_log: 1,
+      native_previous_response_retry_event: 0
     ]
 
   import CodexPooler.AccountingTestSupport, only: [key_usage_events: 1]
@@ -837,6 +838,98 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
     end
   end
 
+  # An anchored compaction admitted on its connection, whose connection the
+  # provider then closes before the compaction goes out: the connection-bound
+  # guard refuses the anchor on the next connection before anything is sent
+  # (findings#278). The client used to get the collected compaction's 400
+  # `stream_incomplete`, which the released client reads as a fatal invalid
+  # request, and the turn failed. It now gets the `previous_response_not_found`
+  # event an ordinary continuation gets for the same refusal, which the
+  # released client retries as a full request without the anchor: here the
+  # full-history compaction on the same socket, then the final. The
+  # compaction's task is held right before it goes upstream (the egress
+  # observation), while the connection closes.
+  for topology <- [:direct, :owner_forwarded] do
+    @tag topology: topology
+    test "#{topology} guard refusal of an anchored compaction reaches the client as previous_response_not_found and the full-history retry is served", %{topology: topology} do
+      put_owner_forwarding!(topology == :owner_forwarded)
+      turn_id = "guard-refusal-#{topology}"
+      history = [window_message("synthetic guard anchor")]
+      compact_item = %{"type" => "compaction", "encrypted_content" => "synthetic-guard-refusal-#{topology}"}
+
+      # Exactly one compaction reaches the provider, the full-history retry:
+      # the refused one is checked right after its refusal, and `verify!/1`
+      # fails on any request this sequence does not expect.
+      upstream =
+        start_upstream(
+          # provenance: synthetic_adversarial (compaction v2-shaped frames; the provider's close of the connection between a compaction's admission and its send, findings#278)
+          FakeUpstream.strict_sequence([
+            window_request(1, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_guard_refusal_anchor", @anchor_usage)])),
+            window_request(2, [forbidden: ["previous_response_id"]], event_frames(compaction_events(compact_item, "resp_guard_refusal_retry"))),
+            window_request(2, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_guard_refusal_final", @resumed_usage)]))
+          ])
+        )
+
+      setup = gateway_setup(upstream, compact?: true)
+      state = callback_socket!(setup, "guard-refusal-#{topology}")
+
+      try do
+        state = run_turn!(state, mid_turn_payload(setup, history, turn_id, "turn", 1))
+        hold = hold_before_egress!()
+        assert {:ok, state} = CodexResponsesSocket.handle_in({window_compaction_frame(setup, turn_id, "resp_guard_refusal_anchor"), [opcode: :text]}, state)
+        Process.put(:crossing_socket_state, state)
+        assert_receive {^hold, :held, task_pid}, 15_000
+        close_connection_under_held_task!(upstream, hold, task_pid, setup, state)
+
+        {state, frames} = collect_until_idle!(state, [])
+        Process.put(:crossing_socket_state, state)
+        assert [_anchor_request] = FakeUpstream.requests(upstream)
+        assert frames == [native_previous_response_retry_event()]
+
+        retry_frame = mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1)
+        {state, frames} = run_turn_frames!(state, retry_frame)
+        assert [%{"type" => "response.output_item.done", "item" => ^compact_item}, %{"type" => "response.completed", "response" => %{"id" => "resp_guard_refusal_retry", "output" => [^compact_item]}}] = frames
+        state = second_resend_after_retry!(topology, state, retry_frame, upstream)
+        {_state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+        assert [%{"type" => "response.completed", "response" => %{"id" => "resp_guard_refusal_final"}}] = frames
+
+        assert [anchor_row, refused, retry, final] = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: request.admitted_at))
+
+        assert Enum.map([anchor_row, refused, retry, final], &{&1.endpoint, &1.status}) == [
+                 {"/backend-api/codex/responses", "succeeded"},
+                 {"/backend-api/codex/responses/compact", "failed"},
+                 {"/backend-api/codex/responses/compact", "succeeded"},
+                 {"/backend-api/codex/responses", "succeeded"}
+               ]
+
+        # The refused compaction reached no provider: one attempt, the guard's
+        # metadata, no usage and nothing provisional.
+        assert [%Attempt{status: "failed", response_metadata: %{"transport_failure" => %{"termination_source" => "continuation_generation_guard"}}}] =
+                 Repo.all(from(attempt in Attempt, where: attempt.request_id == ^refused.id))
+
+        assert key_usage_events(refused.id) == %{known: 0, provisional: 0, admissions: 1}
+        assert key_usage_events(retry.id) == %{known: @compact_usage["total_tokens"], provisional: 0, admissions: 1}
+        assert :ok = FakeUpstream.verify!(upstream)
+      after
+        CodexResponsesSocket.terminate(:closed, Process.delete(:crossing_socket_state))
+      end
+    end
+  end
+
+  # One successor only: with owner forwarding on, a second full-history
+  # resend after the served retry is refused and reaches no provider. With
+  # forwarding off a resend of a served compaction is read as proof that its
+  # reply was lost and chains onto it (`FailedPredecessorResend`), a rule
+  # findings#278 does not change.
+  defp second_resend_after_retry!(:owner_forwarded, state, retry_frame, upstream) do
+    assert {:push, {:text, refusal}, state} = CodexResponsesSocket.handle_in({retry_frame, [opcode: :text]}, state)
+    assert %{"status" => 409, "error" => %{"code" => "duplicate_turn"}} = CodexPooler.JSON.decode!(refusal)
+    assert [_anchor_request, _retry_request] = FakeUpstream.requests(upstream)
+    state
+  end
+
+  defp second_resend_after_retry!(:direct, state, _retry_frame, _upstream), do: state
+
   # With owner forwarding on, the client's final can reach the owner before
   # the owner hears that its session closed the connection the admission names
   # (findings#270 row 270-182). The owner checks the session's open connection
@@ -1238,6 +1331,55 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
         assert [%{reason: :connection_closed, generation: 1}] = Enum.filter(events, &(&1.operation == :clear and &1.from == :collected_unconfirmed))
         assert [%{first_compact_result: nil}] = Enum.map(live_owners(setup), &:sys.get_state/1)
     end
+  end
+
+  # Holds the next request right before it goes upstream: the egress
+  # observation fires in its task after its admission and accounting, just
+  # before the payload is handed to the upstream session (directly, or through
+  # the owner).
+  defp hold_before_egress! do
+    hold = make_ref()
+    CodexPooler.TestAppEnv.restore_on_exit(:permanent_full_mode_egress_observation_enabled)
+    Application.put_env(:codex_pooler, :permanent_full_mode_egress_observation_enabled, true)
+    handler_id = {__MODULE__, :egress_hold, hold}
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    config = %{hold: hold, test: self(), claimed: :atomics.new(1, [])}
+    :ok = :telemetry.attach(handler_id, [:codex_pooler, :gateway, :upstream, :permanent_full_mode_egress_observation], &__MODULE__.hold_egress/4, config)
+    hold
+  end
+
+  @doc false
+  def hold_egress(_event, _measurements, _metadata, %{hold: hold, test: test, claimed: claimed}) do
+    if :atomics.add_get(claimed, 1, 1) == 1 do
+      send(test, {hold, :held, self()})
+
+      receive do
+        {^hold, :release} -> :ok
+      after
+        15_000 -> :ok
+      end
+    end
+
+    :ok
+  end
+
+  # Closes connection 1 while the held request waits, waits until the session
+  # holding it has closed it (and every owner has handled its signal), then
+  # lets the request go.
+  defp close_connection_under_held_task!(upstream, hold, task_pid, setup, state) do
+    close_ref = make_ref()
+    assert :ok = FakeUpstream.close_websocket_connection(upstream, 1, close_ref: close_ref, notify: self(), code: 1000, reason: "synthetic age limit")
+    assert_receive {:fake_upstream_websocket_peer_closed, 1, ^close_ref}, 15_000
+
+    sessions =
+      case Map.get(state, :upstream_websocket_session) do
+        session when is_pid(session) -> [session]
+        _owned -> Enum.map(live_owners(setup), &:sys.get_state(&1).upstream_pid)
+      end
+
+    Enum.each(sessions, &await_connection_closed!(&1, System.monotonic_time(:millisecond) + 15_000))
+    Enum.each(live_owners(setup), &:sys.get_state/1)
+    send(task_pid, {hold, :release})
   end
 
   # Closes the compaction's connection while its response task is held after

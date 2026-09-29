@@ -1427,9 +1427,10 @@ defmodule CodexPooler.Accounting.ClientRetry do
   end
 
   defp validate_retry_lifecycle_for_policy(turn, request, attempt, %{retry_policy: :native_compaction}, _witness_match) do
-    if verified_compaction_execution_failure?(turn, request, attempt) or verified_unreceived_compaction?(turn, request, attempt),
-      do: :ok,
-      else: validate_compaction_lifecycle(turn, request, attempt)
+    if verified_compaction_execution_failure?(turn, request, attempt) or verified_unreceived_compaction?(turn, request, attempt) or
+         verified_compaction_anchor_refusal?(turn, request, attempt),
+       do: :ok,
+       else: validate_compaction_lifecycle(turn, request, attempt)
   end
 
   defp validate_retry_lifecycle_for_policy(turn, request, attempt, _input, {:grown, candidates}) do
@@ -1454,6 +1455,40 @@ defmodule CodexPooler.Accounting.ClientRetry do
   end
 
   defp verified_compaction_execution_failure?(_turn, _request, _attempt), do: false
+
+  # An anchored native compaction the connection-bound guard refused before
+  # sending it: the connection that produced its anchor had closed, and the
+  # provider resolves an anchor only on that connection (`transport_failure`
+  # from `continuation_generation_guard`, nothing committed upstream). Its
+  # client got the `previous_response_not_found` event an ordinary
+  # continuation gets for the same refusal, which the released client retries
+  # as the full request without the anchor. That resend met `409
+  # duplicate_turn` here while forwarding off served it (findings#278), so it
+  # is admitted as one successor. The provider's own refusal of an anchor
+  # carries no guard metadata and keeps the fence: its client gets the
+  # collected compaction's 400, which it does not retry. Generation zero, one
+  # terminal error frame pushed and nothing before it.
+  defp verified_compaction_anchor_refusal?(
+         %CodexTurn{status: "failed", error_code: code, final_attempt_id: attempt_id, transport_kind: "websocket", completed_at: %DateTime{}},
+         %Request{status: "failed", last_error_code: code, transport: "websocket", endpoint: "/backend-api/codex/responses/compact", completed_at: %DateTime{}},
+         %Attempt{
+           id: attempt_id,
+           status: "failed",
+           network_error_code: code,
+           transport: "websocket",
+           replay_generation: 0,
+           completed_at: %DateTime{},
+           response_metadata: %{
+             "upstream_error_code" => "previous_response_not_found",
+             "transport_failure" => %{"termination_source" => "continuation_generation_guard", "upstream_committed" => false, "text_frame_count" => 0},
+             "downstream_delivery" => %{"outcome" => outcome, "terminal_class" => "error", "highest_frame_class" => "terminal", "frames_after_visible" => 1}
+           }
+         }
+       )
+       when is_binary(attempt_id) and code == "stream_incomplete" and outcome in ["delivered", "aborted"],
+       do: true
+
+  defp verified_compaction_anchor_refusal?(_turn, _request, _attempt), do: false
 
   defp validate_compaction_lifecycle(
          %CodexTurn{

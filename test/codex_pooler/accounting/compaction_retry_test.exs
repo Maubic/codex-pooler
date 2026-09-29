@@ -15,6 +15,7 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
 
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn}
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
+  alias CodexPooler.Gateway.Transports.TransportFailureReason
   alias CodexPooler.Gateway.Websocket.DirectCleanup
   alias CodexPooler.Platform.ExecutionIdentity
   alias CodexPooler.Repo
@@ -316,6 +317,40 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
       {setup, predecessor, opts} = predecessor!(unquote(error), 0)
       attempt = Repo.get_by!(Attempt, request_id: predecessor.id)
       update!(attempt, response_metadata: %{"stream_terminal_type" => "response.failed"})
+      counts = row_counts()
+
+      assert {:error, :terminal_predecessor} =
+               Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+
+      assert row_counts() == counts
+
+      refute Repo.exists?(
+               from link in RequestClientRetryLink,
+                 where: link.predecessor_request_id == ^predecessor.id
+             )
+    end
+  end
+
+  # The connection-bound guard refused an anchored compaction before sending
+  # it, and its client got `previous_response_not_found`, which the released
+  # client retries as the full request without the anchor. With owner
+  # forwarding on, that resend met `terminal_predecessor` here (findings#278).
+  test "claims one successor for a compaction whose anchor the continuation guard refused before sending" do
+    {setup, predecessor, opts} = guard_refused_predecessor!(:guard_refusal)
+
+    assert {:ok, claim} =
+             Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+
+    assert claim.predecessor_request_id == predecessor.id
+    assert Repo.aggregate(RequestClientRetryLink, :count) == 1
+  end
+
+  # The provider's own refusal of an anchor carries no guard metadata, and its
+  # client gets the collected compaction's 400, which it does not retry; a
+  # refusal recorded as sent upstream is not the guard's. Both keep the fence.
+  for mutation <- [:provider_refusal, :upstream_committed] do
+    test "keeps the fence for a compaction anchor refusal: #{mutation}" do
+      {setup, predecessor, opts} = guard_refused_predecessor!(unquote(mutation))
       counts = row_counts()
 
       assert {:error, :terminal_predecessor} =
@@ -1031,6 +1066,33 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
     }
 
     {setup, request, opts}
+  end
+
+  # The refused compaction as the guard's refusal settles it: `stream_incomplete`
+  # everywhere, a turn stamped visible when collection started, and one
+  # terminal error frame pushed (findings#278).
+  defp guard_refused_predecessor!(mutation) do
+    {setup, predecessor, opts} = predecessor!("stream_incomplete", 0)
+    turn = Repo.get_by!(CodexTurn, request_id: predecessor.id)
+    update!(turn, first_visible_output_at: turn.started_at)
+    attempt = Repo.get_by!(Attempt, request_id: predecessor.id)
+    update!(attempt, response_metadata: guard_refusal_metadata(mutation))
+    {setup, predecessor, opts}
+  end
+
+  defp guard_refusal_metadata(mutation) do
+    metadata = %{
+      "stream_terminal_type" => "error",
+      "upstream_error_code" => "previous_response_not_found",
+      "transport_failure" => TransportFailureReason.continuation_generation_guard_metadata(:fresh),
+      "downstream_delivery" => %{"outcome" => "delivered", "terminal_class" => "error", "highest_frame_class" => "terminal", "frames_after_visible" => 1, "transport" => "websocket"}
+    }
+
+    case mutation do
+      :guard_refusal -> metadata
+      :provider_refusal -> Map.delete(metadata, "transport_failure")
+      :upstream_committed -> put_in(metadata, ["transport_failure", "upstream_committed"], true)
+    end
   end
 
   defp update!(row, attrs), do: row |> Ecto.Changeset.change(attrs) |> Repo.update!()

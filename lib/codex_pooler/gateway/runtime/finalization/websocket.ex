@@ -177,18 +177,42 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
       |> Map.put(:collected_provider_failure, failure)
 
     finalization =
-      if native_full_history_compaction?(context.request_options) or
-           (native_collected_compaction?(context.request_options) and finalization.status == 502) do
-        Map.put(
-          finalization,
-          :collected_provider_failure_event,
-          CompactionResultCollector.provider_failure_websocket_event(failure)
-        )
-      else
-        finalization
+      cond do
+        continuation_guard_refusal?(context.request_options, finalization, failure) ->
+          Map.put(finalization, :collected_provider_failure_event, previous_response_retry_event())
+
+        native_full_history_compaction?(context.request_options) or
+            (native_collected_compaction?(context.request_options) and finalization.status == 502) ->
+          Map.put(
+            finalization,
+            :collected_provider_failure_event,
+            CompactionResultCollector.provider_failure_websocket_event(failure)
+          )
+
+        true ->
+          finalization
       end
 
     finalize_terminal_failure(context, finalization)
+  end
+
+  # The connection-bound guard refused the compaction's anchor before anything
+  # went upstream: the connection that produced the anchor closed after the
+  # compaction was admitted (findings#278). Only the guard's exact metadata
+  # proves that (`continuation_guard_metadata/2`). The client gets the event an
+  # ordinary continuation gets for the same refusal, `previous_response_not_found`,
+  # which the released client retries as a full request without the anchor;
+  # the collected-compaction answer to a provider's refusal, a 400 its client
+  # reads as a fatal invalid request, stays for requests the provider refused.
+  defp continuation_guard_refusal?(request_options, finalization, failure) do
+    native_collected_compaction?(request_options) and
+      map_size(continuation_guard_metadata(failure.upstream_code, Map.get(finalization, :transport_failure))) > 0
+  end
+
+  defp previous_response_retry_event do
+    ~s({"type":"error","error":{"code":"previous_response_not_found"}})
+    |> StreamProtocol.canonicalize_native_codex_responses_json_message()
+    |> CodexPooler.JSON.decode!()
   end
 
   defp validate_public_compaction_response(
