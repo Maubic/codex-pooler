@@ -14,8 +14,8 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
 
   @fixture Path.expand("../../fixtures/pricing/openai/2026-07-28.json", __DIR__)
   @target Path.expand("../../../priv/pricing/openai/pricing.json", __DIR__)
-  @target_sha256 "d9bfc702b212e3728b9d74080c3677d0dbf2c3a7c1478966adfcbfc78be6b291"
-  @target_generated_at "2026-09-24T18:20:07.500692Z"
+  @target_sha256 "60f3c58de8306ec02ac14a49a03463fb41fb3614e8834c29f5575aca9f8069c1"
+  @target_generated_at "2026-09-29T20:07:09.418626Z"
   @removed_identifiers [
     "computer-use-preview",
     "gpt-3.5-0301",
@@ -50,6 +50,10 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
       "standard" => ["10.0", "1.0", "12.5", "50.0"],
       "fast" => ["20.0", "2.0", "25.0", "100.0"]
     },
+    "gpt-6.1-sol" => %{
+      "standard" => ["2.0", "0.1", "2.5", "10.0"],
+      "fast" => ["4.0", "0.2", "5.0", "20.0"]
+    },
     "gpt-6-sol" => %{
       "standard" => ["2.0", "0.2", "2.5", "10.0"],
       "fast" => ["4.0", "0.4", "5.0", "20.0"]
@@ -73,6 +77,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
   }
   @reviewed_fast_long_context_rates %{
     "gpt-6-astra" => ["40.0", "4.0", "50.0", "150.0"],
+    "gpt-6.1-sol" => ["8.0", "0.4", "10.0", "30.0"],
     "gpt-6-sol" => ["8.0", "0.8", "10.0", "30.0"],
     "gpt-6-luna" => ["0.4", "0.04", "0.5", "1.5"],
     "gpt-5.6-luna" => ["0.8", "0.08", "1.0", "3.6"],
@@ -343,13 +348,13 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
 
     assert {:ok, first} = OpenAIPricingImporter.import_file(@target)
     assert first.price_version == "#{@target_generated_at}:importer-format-2"
-    assert first.inserted == 203
+    assert first.inserted == 218
     assert first.skipped == 85
 
     rows =
       Repo.all(from snapshot in PricingSnapshot, where: snapshot.price_version == ^first.price_version)
 
-    assert length(rows) == 203
+    assert length(rows) == 218
     assert Enum.all?(rows, &(&1.config["importer_format_revision"] == "2"))
     refute Enum.any?(rows, &(&1.config["service_tier"] == "fast"))
     refute Enum.any?(rows, &(&1.model_identifier in @removed_identifiers))
@@ -386,6 +391,29 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
 
   test "the vendored target prices gpt-6-luna requests at its standard and priority rates" do
     assert_imported_target_settles("gpt-6-luna", default: "164", priority: "328")
+  end
+
+  test "the vendored target prices gpt-6.1-sol requests at its standard and priority rates" do
+    assert_imported_target_settles("gpt-6.1-sol", default: "3240", priority: "6480")
+  end
+
+  test "the vendored target imports every ultrafast context bucket including cache writes" do
+    payload = @target |> File.read!() |> CodexPooler.JSON.decode!()
+    assert {:ok, imported} = OpenAIPricingImporter.import_file(@target)
+    rows = Repo.all(from row in PricingSnapshot, where: row.price_version == ^imported.price_version)
+
+    for {bucket, rates} <- [
+          {"default", ["60.0", "6.0", "75.0", "300.0"]},
+          {"short_context", ["60.0", "6.0", "75.0", "300.0"]},
+          {"long_context", ["120.0", "12.0", "150.0", "450.0"]}
+        ] do
+      assert source_rates(payload, "gpt-6-astra", "ultrafast", bucket) == Enum.map(rates, &Decimal.new/1)
+      assert_snapshot_rates(rows, "gpt-6-astra", "ultrafast", rates, bucket)
+    end
+  end
+
+  test "the vendored target settles gpt-6-astra at its served ultrafast rate" do
+    assert_imported_target_settles("gpt-6-astra", ultrafast: "98400")
   end
 
   test "target checksum, exact rates, removals, and schema descriptors detect drift" do
@@ -982,8 +1010,8 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     for {tier, expected_cost} <- expected_costs do
       correlation_id = "corr-#{identifier}-#{tier}-#{System.unique_integer([:positive])}"
       payload = %{"model" => identifier, "max_output_tokens" => 200}
-      payload = if tier == :priority, do: Map.put(payload, "service_tier", "priority"), else: payload
-      snapshot_tier = if tier == :priority, do: "priority", else: "standard"
+      payload = if tier == :default, do: payload, else: Map.put(payload, "service_tier", to_string(tier))
+      snapshot_tier = if tier == :default, do: "standard", else: to_string(tier)
 
       assert {:ok, reserved} =
                Accounting.reserve(
