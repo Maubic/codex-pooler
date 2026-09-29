@@ -179,6 +179,32 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSessionTest do
     assert Repo.get!(CodexSession, fixture.session.id).owner_lease_token == replacement_token
   end
 
+  # The socket of an owner killed by a new socket's reuse check sees the crash
+  # after that socket's takeover released the owner's lease (findings#270 row
+  # 270-313). Its lease release answers `taken_over_owner_cleanup` and stands
+  # down without the warning a stale release keeps; the takeover's lease stays.
+  test "an old-owner monitor whose lease a takeover released releases nothing and stays quiet", fixture do
+    state =
+      DownstreamSession.put_runtime(fixture.state, %{
+        codex_session: fixture.session,
+        websocket_owner_lease_token: fixture.session.owner_lease_token,
+        websocket_owner_downstream: fixture.state.websocket_owner_downstream
+      })
+
+    assert {:ok, %CodexSession{owner_lease_token: replacement_token}} = SessionContinuity.replace_unavailable_owner_lease(fixture.session, RequestOptions.for_websocket(%{}))
+    assert Gateway.release_websocket_owner_lease(fixture.session, fixture.session.owner_lease_token, "owner_crashed") == {:error, :taken_over_owner_cleanup}
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:stop, {1011, "websocket owner crashed"}, _state} = DownstreamSession.handle_monitor_down(state, fixture.owner_pid, :crashed)
+      end)
+
+    refute log =~ "websocket owner monitor lease release failed"
+    refute log =~ "[warning]"
+    assert %BridgeOwnerLease{status: "released", metadata: %{"release_reason" => "owner_unavailable_takeover"}} = Repo.get!(BridgeOwnerLease, fixture.owner_lease.id)
+    assert %BridgeOwnerLease{lease_token: ^replacement_token} = active_owner_lease(fixture.session.id)
+  end
+
   test "owner monitor recovery failure preserves the lease and unfinished turn", fixture do
     turn = active_turn_fixture(fixture, "websocket")
 

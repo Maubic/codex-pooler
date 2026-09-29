@@ -655,11 +655,15 @@ defmodule CodexPooler.Gateway.Websocket do
 
   def monitor_websocket_owner(_session, _opts), do: {:error, :owner_unavailable}
 
+  # A lease that is no longer the session's answers the cleanup's stale
+  # reason: `taken_over_owner_cleanup` when a takeover released it (a socket
+  # whose owner was killed, findings#270 row 270-313), `stale_owner_cleanup`
+  # otherwise.
   @spec release_websocket_owner_lease(
           CodexSession.t() | nil,
           Ecto.UUID.t() | String.t() | nil,
           String.t()
-        ) :: :ok | {:error, :stale_owner | :owner_unavailable}
+        ) :: :ok | {:error, :stale_owner | :owner_unavailable | :stale_owner_cleanup | :taken_over_owner_cleanup}
   def release_websocket_owner_lease(%CodexSession{} = session, owner_lease_token, reason)
       when is_binary(reason) do
     Interruption.release_owner_cleanup_lease(
