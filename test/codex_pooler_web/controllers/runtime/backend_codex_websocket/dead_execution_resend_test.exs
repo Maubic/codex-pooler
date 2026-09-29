@@ -40,6 +40,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DeadExecutionResendTest d
       # must strand as a direct socket execution, not as an owner-forwarded one.
       Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, forwarding)
       barrier = make_ref()
+      retry_barrier = make_ref()
 
       upstream =
         start_upstream(
@@ -54,12 +55,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DeadExecutionResendTest d
               method: "WEBSOCKET",
               path: "/backend-api/codex/responses",
               respond:
-                FakeUpstream.websocket_text_frames([
-                  CodexPooler.JSON.encode!(%{
-                    "type" => "response.completed",
-                    "response" => %{"id" => "resp_recovered", "status" => "completed"}
-                  })
-                ])
+                FakeUpstream.barrier_websocket_frames(
+                  [
+                    CodexPooler.JSON.encode!(%{
+                      "type" => "response.completed",
+                      "response" => %{"id" => "resp_recovered", "status" => "completed"}
+                    })
+                  ],
+                  notify: self(),
+                  release_ref: retry_barrier
+                )
             )
           ])
         )
@@ -192,33 +197,36 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DeadExecutionResendTest d
       if contender do
         contender_pid = contender.pid
         assert_receive {:contender_ready, ^contender_pid}, @detection_timeout_ms
-        send(contender_pid, :send)
       end
 
       {retry_conn, retry_ws} =
         public_websocket_send_text!(retry_conn, retry_ws, retry_ref, payload)
+
+      # Keep the admitted successor active while the other socket resends.
+      # Once it completes, an identical request is a new eligible successor,
+      # so sending both without this barrier tests scheduler ordering instead.
+      assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^retry_barrier}, @detection_timeout_ms
+
+      if contender do
+        send(contender.pid, :send)
+        send(contender.pid, :result)
+        other_frame = Task.await(contender, @detection_timeout_ms)
+
+        assert %{
+                 "type" => "error",
+                 "status" => 409,
+                 "error" => %{"code" => "duplicate_turn", "type" => "invalid_request_error"}
+               } = CodexPooler.JSON.decode!(other_frame)
+      end
+
+      assert :ok = FakeUpstream.release_remaining_frames(upstream, retry_barrier)
 
       {retry_conn, _retry_ws, frame} =
         public_websocket_receive_text!(retry_conn, retry_ws, retry_ref)
 
       Mint.HTTP.close(retry_conn)
 
-      if contender do
-        send(contender.pid, :result)
-        other_frame = Task.await(contender, @detection_timeout_ms)
-        terminals = Enum.map([frame, other_frame], &CodexPooler.JSON.decode!/1)
-        assert Enum.count(terminals, &(&1["type"] == "response.completed")) == 1
-
-        assert [
-                 %{
-                   "status" => 409,
-                   "error" => %{"code" => "duplicate_turn", "type" => "invalid_request_error"}
-                 }
-               ] =
-                 Enum.filter(terminals, &(&1["type"] == "error"))
-      else
-        assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(frame)
-      end
+      assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(frame)
 
       assert Repo.aggregate(from(r in Request, where: r.pool_id == ^setup.pool.id), :count) == 2
 
