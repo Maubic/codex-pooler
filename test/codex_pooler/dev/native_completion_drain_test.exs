@@ -80,21 +80,27 @@ defmodule CodexPooler.Dev.NativeCompletionDrainTest do
         :disarm -> assert control(setup, "disarm").status == 200
       end
 
-      if @release_action == :release,
-        do: assert_receive({:completion_handoff_waiting, ^caller}, 15_000)
-
-      state = receive_until(state, :complete)
-
-      if @release_action == :release do
-        assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}, 15_000
-
-        assert_receive {:DOWN, ^caller_monitor, :process, ^caller, {:shutdown, :owner_drained}},
-                       15_000
-
-        assert %{durable_completed: true, drained: true} = NativePreAttemptDrain.status()
-      else
-        assert Process.info(caller, :status) != {:status, :suspended}
-      end
+      # The released caller settles the turn the client already holds, and the
+      # drain stops the owner once it has: the owner's `owner_drained` then
+      # meets a turn whose terminal went out, so nothing follows the terminal,
+      # the caller finishes its own handoff, and the idle socket closes after
+      # its owner's exit (findings#287; before, the socket pushed an error frame
+      # after `response.completed` and stopped the caller
+      # `{:shutdown, :owner_drained}`).
+      state =
+        if @release_action == :release do
+          assert_receive {:completion_handoff_waiting, ^caller}, 15_000
+          assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}, 15_000
+          assert %{durable_completed: true, drained: true} = NativePreAttemptDrain.status()
+          send(caller, :release_completion_handoff)
+          state = receive_until(state, {:close, {1001, "websocket owner is draining"}})
+          assert_receive {:DOWN, ^caller_monitor, :process, ^caller, :normal}, 15_000
+          state
+        else
+          state = receive_until(state, :complete)
+          assert Process.info(caller, :status) != {:status, :suspended}
+          state
+        end
 
       assert Repo.get!(Request, request_id).status == "succeeded"
       assert Repo.get_by!(Attempt, request_id: request_id).status == "succeeded"

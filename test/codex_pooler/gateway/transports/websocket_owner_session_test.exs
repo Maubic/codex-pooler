@@ -6155,6 +6155,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
       assert_upstream_close_skipped!(log, deferred.signal, :downstream_replaced, context.codex_session_id)
     end
 
+    # The drain waits for the turn whose terminal went out (findings#287) and
+    # drops the deferred instruction from its first instant, as a rollout
+    # drain start does.
     test "a drain drops a deferred instruction", context do
       deferred = deferred_upstream_close!(context, "upstream-close-deferred-drain")
       submitter = deferred.submitter
@@ -6162,12 +6165,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
       log =
         capture_info_log(fn ->
-          assert :ok = WebsocketOwnerSession.drain_owner(deferred.owner)
-          assert_receive {:DOWN, ^owner_ref, :process, _owner, _reason}, @detection_timeout_ms
+          drain = Task.async(fn -> WebsocketOwnerSession.drain_owner(deferred.owner) end)
+          assert %{draining?: true, drain_settlement: %{}, active_turn: active_turn} = await_drain_settlement(deferred.owner)
+          refute Map.has_key?(active_turn, :upstream_close)
+          release_controlled(deferred.barriers, deferred.controls, :task_result)
+          assert Task.await(drain, @detection_timeout_ms) == :ok
+          assert_receive {:DOWN, ^owner_ref, :process, _owner, :normal}, @detection_timeout_ms
         end)
 
-      assert_receive {:upstream_close_submitter_outcome, ^submitter, {:return, {:error, :owner_drained}}}, @detection_timeout_ms
+      expected = terminal_result(deferred.terminal, "response.completed")
+      assert_receive {:upstream_close_submitter_outcome, ^submitter, {:return, ^expected}}, @detection_timeout_ms
       assert_received {:websocket_owner_frame, "upstream-close-deferred-drain", 1, :complete}
+      refute_received {:websocket_owner_upstream_closed, _correlation_id, _epoch, _signal}
       assert_upstream_close_skipped!(log, deferred.signal, :draining, context.codex_session_id)
     end
 
@@ -7090,6 +7099,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
       state ->
         if poll_again?(deadline), do: await_owner_cleared(owner, deadline), else: state
+    end
+  end
+
+  defp await_drain_settlement(owner, deadline \\ detection_deadline()) do
+    case :sys.get_state(owner) do
+      %{drain_settlement: %{}} = state -> state
+      state -> if poll_again?(deadline), do: await_drain_settlement(owner, deadline), else: state
     end
   end
 

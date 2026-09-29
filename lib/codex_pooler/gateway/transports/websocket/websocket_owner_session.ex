@@ -64,6 +64,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   @handoff_absolute_timeout_ms 5_000
   @compaction_retry_hold_timeout_ms 30_000
   @terminal_result_types ["response.completed", "response.failed", "response.incomplete", "error"]
+  @drain_settlement_poll_ms 25
 
   # The one-shot collection result belongs to this existing owner lifecycle.
   # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
@@ -107,6 +108,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     :closed_downstream,
     :closing_downstream,
     :closed_inheritance,
+    :drain_settlement,
+    :drain_replies,
+    :forwarded_terminal_request_id,
     terminal_delivery_timeout_ms: @terminal_delivery_timeout_ms,
     provisional_issuances: [],
     pending_admissions: %{},
@@ -1533,33 +1537,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     end
   end
 
-  def handle_call(:drain, _from, state) do
-    state =
-      state
-      |> clear_compaction_retry_submit_hold()
-      |> cancel_pending_admissions("owner_drained")
-      |> drop_deferred_upstream_close(:draining)
-
-    state = %{
-      state
-      | termination_cleanup_witness: OwnerCleanup.from_owner_state(state)
-    }
-
-    state = state |> clear_native_compaction_admission(:owner_drained) |> fail_pending_handoff(:owner_drained)
-
-    state =
-      if DownstreamState.active_turn?(state) do
-        terminate_predecessor_task(state.active_turn)
-        _result = Persistence.interrupt_codex_session(state, :owner_drained)
-        reply_active_turn(state, {:error, :owner_drained})
-        finish_active_turn(state, {:error, :owner_drained})
-      else
-        _result = send_owner_error(state, state.downstream, :owner_drained)
-        state
-      end
-
-    {:stop, :normal, :ok, %{state | draining?: true, owner_exit_cause: :drain_cut}}
-  end
+  # A turn whose terminal the owner forwarded is over for the client, and only
+  # its settlement, which the downstream's task runs, is left (findings#287).
+  # The drain then waits for that settlement before the owner stops: stopping
+  # at once interrupted the request the client had completed
+  # (`failed/owner_drained`, its usage lost) and put an error frame after its
+  # terminal. Once the turn settled the owner stops without an `owner_drained`
+  # to its downstream, which learns of the exit from its monitor. The wait ends
+  # inside the drain call's budget: a settlement still pending then is cut as
+  # it always was (`drain_now/2`), so the recovery guarantee stays.
+  def handle_call(:drain, from, state), do: drain(from, state)
 
   def handle_call(
         {:attach_downstream, _pid, _correlation_id, _opts},
@@ -2310,16 +2297,29 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     {:noreply, state}
   end
 
-  def handle_cast(:begin_drain, state) do
-    {:noreply,
-     state
-     |> clear_native_compaction_admission(:owner_drained)
-     |> fail_pending_handoff(:owner_drained)
-     |> drop_deferred_upstream_close(:draining)
-     |> Map.put(:draining?, true)}
-  end
+  def handle_cast(:begin_drain, state), do: {:noreply, begin_drain_state(state)}
 
   @impl GenServer
+  def handle_info({:drain_settlement_poll, ref}, %{drain_settlement: %{ref: ref} = settlement} = state) do
+    case forwarded_turn_settlement(state) do
+      :settled ->
+        finish_drain_settlement(state, :settled)
+
+      :pending ->
+        if System.monotonic_time(:millisecond) < settlement.deadline_ms do
+          Process.send_after(self(), {:drain_settlement_poll, ref}, @drain_settlement_poll_ms)
+          {:noreply, state}
+        else
+          finish_drain_settlement(state, :cut)
+        end
+
+      :none ->
+        finish_drain_settlement(state, :cut)
+    end
+  end
+
+  def handle_info({:drain_settlement_poll, _stale_ref}, state), do: {:noreply, state}
+
   def handle_info(
         {:compaction_retry_submit_hold_expired, ref},
         %{compaction_retry_submit_hold: %{token: %{ref: ref}}} = state
@@ -2735,6 +2735,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       end
     after
       close_upstream(state.callbacks.upstream_closer, state.upstream_pid)
+      answer_drain_waiters(state)
     end
 
     :ok
@@ -3042,6 +3043,123 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       {:error, :invalid_downstream_message}
     end
   end
+
+  defp drain_now(state, how) do
+    state =
+      state
+      |> clear_compaction_retry_submit_hold()
+      |> cancel_pending_admissions("owner_drained")
+      |> drop_deferred_upstream_close(:draining)
+
+    state = %{
+      state
+      | termination_cleanup_witness: OwnerCleanup.from_owner_state(state)
+    }
+
+    state = state |> clear_native_compaction_admission(:owner_drained) |> fail_pending_handoff(:owner_drained)
+
+    state =
+      if DownstreamState.active_turn?(state) do
+        terminate_predecessor_task(state.active_turn)
+        _result = Persistence.interrupt_codex_session(state, :owner_drained)
+        reply_active_turn(state, {:error, :owner_drained})
+        finish_active_turn(state, {:error, :owner_drained})
+      else
+        :ok = notify_drained_downstream(state, how)
+        state
+      end
+
+    %{state | draining?: true, owner_exit_cause: :drain_cut}
+  end
+
+  # After a forwarded turn that settled, its downstream may still be taking
+  # the task's result: an `owner_drained` then met a turn whose terminal went
+  # out and put an error frame after it (findings#287). That downstream learns
+  # of the exit from its monitor instead.
+  defp notify_drained_downstream(_state, :settled), do: :ok
+
+  defp notify_drained_downstream(state, :cut) do
+    _result = send_owner_error(state, state.downstream, :owner_drained)
+    :ok
+  end
+
+  # Where the last turn whose terminal the owner forwarded stands for a drain:
+  # `:pending` while the turn waits only for its result from the provider's
+  # session, or the owner already finished it and the request it witnessed is
+  # still settling; `:settled` once that request settled; `:none` for any
+  # other owner, which the drain cuts at once as it always did.
+  defp forwarded_turn_settlement(%{suspended_replay: nil} = state) do
+    cond do
+      forwarded_turn_awaiting_result?(state.active_turn) -> :pending
+      DownstreamState.active_turn?(state) or not forwarded_turn_witness?(state) -> :none
+      Persistence.pending_finalization?(state) -> :pending
+      true -> :settled
+    end
+  end
+
+  defp forwarded_turn_settlement(_state), do: :none
+
+  defp forwarded_turn_awaiting_result?(%{terminal_forwarded?: true, collect?: false}), do: true
+  defp forwarded_turn_awaiting_result?(_active_turn), do: false
+
+  # The owner keeps serving its mailbox while it waits, so a call the settling
+  # task makes to it still gets its answer. The drain has begun from the first
+  # instant, as `begin_drain/1` begins it, whether or not that came first.
+  defp await_forwarded_turn_settlement(state, waiter) do
+    ref = make_ref()
+    Process.send_after(self(), {:drain_settlement_poll, ref}, @drain_settlement_poll_ms)
+    deadline_ms = System.monotonic_time(:millisecond) + drain_settlement_budget_ms()
+    %{begin_drain_state(state) | drain_settlement: %{waiters: [waiter], ref: ref, deadline_ms: deadline_ms}}
+  end
+
+  defp begin_drain_state(state) do
+    state
+    |> clear_native_compaction_admission(:owner_drained)
+    |> fail_pending_handoff(:owner_drained)
+    |> drop_deferred_upstream_close(:draining)
+    |> Map.put(:draining?, true)
+  end
+
+  # Inside the drain call's own timeout (`drain_owner/1`), so the drain always
+  # gets its answer before it gives up on the owner.
+  defp drain_settlement_budget_ms, do: max(owner_call_timeout() - 1_000, div(owner_call_timeout(), 2))
+
+  defp drain(from, %{drain_settlement: %{waiters: waiters} = settlement} = state),
+    do: {:noreply, %{state | drain_settlement: %{settlement | waiters: [from | waiters]}}}
+
+  defp drain(from, state) do
+    case forwarded_turn_settlement(state) do
+      :pending -> {:noreply, await_forwarded_turn_settlement(state, from)}
+      :settled -> {:stop, :normal, :ok, drain_now(state, :settled)}
+      :none -> {:stop, :normal, :ok, drain_now(state, :cut)}
+    end
+  end
+
+  # A waiting drain is answered once the owner's exit is persisted
+  # (`terminate/2`), as `{:stop, _, reply, _}` answers a drain that does not
+  # wait: its caller, the rollout drain or a closing downstream, goes on to
+  # what follows the owner's exit.
+  defp finish_drain_settlement(%{drain_settlement: %{waiters: waiters}} = state, how) do
+    state = drain_now(%{state | drain_settlement: nil}, how)
+    {:stop, :normal, %{state | drain_replies: {Enum.reverse(waiters), :ok}}}
+  end
+
+  defp answer_drain_waiters(%{drain_replies: {waiters, reply}}), do: Enum.each(waiters, &GenServer.reply(&1, reply))
+  defp answer_drain_waiters(_state), do: :ok
+
+  # The request of the turn `finish_active_turn/2` ends, when the owner
+  # forwarded that turn's terminal to its downstream.
+  defp forwarded_terminal_request_id(%{active_turn: %{terminal_forwarded?: true, collect?: false}, termination_cleanup_witness: %OwnerCleanup{request_id: request_id}}),
+    do: request_id
+
+  defp forwarded_terminal_request_id(_state), do: nil
+
+  # The request the owner's exit would interrupt is still that forwarded
+  # turn's, and no later turn took its place.
+  defp forwarded_turn_witness?(%{forwarded_terminal_request_id: request_id} = state) when is_binary(request_id),
+    do: match?(%OwnerCleanup{request_id: ^request_id}, OwnerCleanup.from_owner_state(state))
+
+  defp forwarded_turn_witness?(_state), do: false
 
   defp send_owner_error(state, downstream, reason) do
     error = owner_error(reason)
@@ -3392,7 +3510,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp finish_active_turn(state, result) do
     downstream = DownstreamState.active_turn_downstream(state)
     deferred_upstream_close = deferred_upstream_close(state.active_turn)
+
     state = %{state | termination_cleanup_witness: OwnerCleanup.from_owner_state(state)}
+    state = %{state | forwarded_terminal_request_id: forwarded_terminal_request_id(state)}
+
     clear_active_turn_resources(state.active_turn)
     state = clear_terminal_replay_state(state, result)
 

@@ -10,7 +10,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexOwnerCompletionDrainTest do
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexTurn}
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
+  alias CodexPooler.Gateway.Transports.Websocket.{OwnerDefaults, WebsocketOwnerSession}
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Persistence
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
@@ -21,6 +21,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexOwnerCompletionDrainTest do
   for disposition <- [:complete, :deadline] do
     @tag slow: "runs eight accounted websocket turns across owner replacement and a controlled finalization drain"
     test "normal drain retains cleanup authority before caller #{disposition}" do
+      # A drain waits for the settlement of the turn its owner forwarded,
+      # within the drain call's budget (findings#287): 750 ms with this owner
+      # call budget, then the cut the `:deadline` disposition expects.
+      owner_defaults = CodexPooler.TestAppEnv.restore_on_exit(OwnerDefaults)
+      Application.put_env(:codex_pooler, OwnerDefaults, Keyword.merge(owner_defaults, owner_call_timeout_ms: 1_500))
+
       {setup, upstream, state, release_ref} =
         fixture(completed_responses: Enum.map(1..7, &custom_response/1))
 

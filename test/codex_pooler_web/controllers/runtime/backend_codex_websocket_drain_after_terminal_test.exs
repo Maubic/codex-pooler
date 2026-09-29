@@ -8,22 +8,31 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDrainAfterTerminalTest do
   # was stopped, and the request was recorded `failed/owner_drained` with the
   # provider's usage lost.
   #
-  # Now the socket node's drain of its own tasks (owner forwarding off, and a
-  # socket whose owner is on another VM) leaves a task whose terminal went out
-  # to settle as the client got it, within half its post-deadline budget, and
-  # nothing follows the terminal on the wire. A task still unsettled at that
-  # bound is cut as it always was: an error frame follows the terminal, so the
-  # client resends, and the request is recorded `failed/owner_drained`.
+  # Now the drain lets that turn settle as the client got it, and nothing
+  # follows the terminal on the wire:
+  # - the socket node's drain of its own tasks (owner forwarding off, and a
+  #   socket whose owner is on another VM) leaves a task whose terminal went
+  #   out to settle, within half its post-deadline budget;
+  # - the owner (owner forwarding on) waits for the settlement, and for the
+  #   provider session's result first when its own turn still waits for it,
+  #   within the drain call's budget, then stops without an `owner_drained` to
+  #   its downstream.
+  # A turn still unsettled at those bounds is cut as it always was: an error
+  # frame follows the terminal, so the client resends, and the request is
+  # recorded `failed/owner_drained`.
   #
   # Determinism: the provider holds its answer at a barrier until the socket's
-  # response task is suspended, so the terminal reaches the client while the
-  # turn cannot settle; the test then applies the drain's cut exactly as the
-  # rollout drain does (`ActivityDrain.drain/4` past its deadline) and resumes
-  # the task.
+  # response task (or the owner's turn task) is suspended, so the terminal
+  # reaches the client while the turn cannot settle; the test then applies the
+  # drain's cut exactly as the rollout drain does
+  # (`WebsocketOwnerSession.begin_drain/1` and `drain_owner/1` for an owner,
+  # `ActivityDrain.drain/4` past its deadline for the socket node's tasks) and
+  # resumes the task.
   #
   # Topology: the real public listener, FakeUpstream, the Pool's default mode
-  # (Full); one node with owner forwarding off, and the session's owner on a
-  # second VM with the socket node's drain.
+  # (Full); one node with the session's owner local (forwarding on) and with
+  # forwarding off; the session's owner on a second VM, drained there or with
+  # the socket node's drain.
   use CodexPoolerWeb.ConnCase, async: false
 
   import Ecto.Query
@@ -36,14 +45,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDrainAfterTerminalTest do
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
   alias CodexPooler.FakeUpstream
-  alias CodexPooler.Gateway.Transports.Websocket.{ActivityDrain, ActivityRegistry}
+  alias CodexPooler.Gateway.Transports.Websocket.{ActivityDrain, ActivityRegistry, OwnerDefaults, WebsocketOwnerSession}
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
+  alias Ecto.Adapters.SQL.Sandbox
 
   @moduletag capture_log: true
 
   @detection_timeout_ms 15_000
   @turn_path "/backend-api/codex/responses"
+  @drained_close {:close, 1001, "websocket owner is draining"}
 
   test "without owner forwarding: the socket node's drain leaves a task whose terminal went out to settle as answered" do
     put_owner_forwarding!(false)
@@ -80,6 +91,108 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDrainAfterTerminalTest do
     assert_drained_error!(error)
     assert [%Request{status: "failed", last_error_code: "owner_drained"}] = await_settled_requests!(turn.setup)
     drop!(turn.client)
+  end
+
+  test "owner on this node: the cut waits for the forwarded turn's settlement, and nothing follows its terminal" do
+    put_owner_forwarding!(true)
+    turn = relayed_turn_held!(start_turn!())
+
+    assert_owner_cut_waits_for_settlement!(turn, turn.state.websocket_owner_pid)
+    assert receive_frames_until_close!(turn.client.conn, turn.client.websocket, turn.client.ref) |> elem(2) == [@drained_close]
+    assert_settled_as_answered!(turn.setup)
+  end
+
+  @tag slow: "boots a second VM that owns the session and shares the committed database"
+  test "owner on another VM: the cut waits for the forwarded turn's settlement, and nothing follows its terminal" do
+    put_owner_forwarding!(true)
+    enter_peer_owner_topology!()
+    turn = relayed_turn_held!(start_turn!(peer: true))
+
+    assert node(turn.owner) != node()
+    assert_owner_cut_waits_for_settlement!(turn, turn.owner)
+    assert receive_frames_until_close!(turn.client.conn, turn.client.websocket, turn.client.ref) |> elem(2) == [@drained_close]
+    assert_settled_as_answered!(turn.setup)
+  end
+
+  # The owner forwarded the terminal while its own turn still waits for the
+  # provider session's result (its turn task is held): the cut waits for that
+  # result and the settlement after it, like a turn the owner already
+  # finished.
+  test "owner on this node: a cut while the forwarded turn still waits for its result waits for both" do
+    put_owner_forwarding!(true)
+    turn = owner_result_held!(start_turn!())
+    :ok = WebsocketOwnerSession.begin_drain(turn.owner)
+    monitor = Process.monitor(turn.owner)
+    drain = Task.async(fn -> WebsocketOwnerSession.drain_owner(turn.owner) end)
+
+    assert Task.yield(drain, 300) == nil
+    assert [%Request{status: "in_progress"}] = pool_requests(turn.setup)
+
+    true = :erlang.resume_process(turn.owner_task)
+    assert Task.await(drain, @detection_timeout_ms) == :ok
+    assert_receive {:DOWN, ^monitor, :process, _owner, :normal}, @detection_timeout_ms
+    assert receive_frames_until_close!(turn.client.conn, turn.client.websocket, turn.client.ref) |> elem(2) == [@drained_close]
+    assert_settled_as_answered!(turn.setup)
+  end
+
+  # The owner's wait is bounded by the drain call's own budget: a settlement
+  # still pending when it is spent is cut as it always was, so nothing is
+  # left open.
+  test "owner on this node: a settlement still pending when the budget is spent is cut as it always was" do
+    put_owner_forwarding!(true)
+    put_owner_call_timeout!(1_500)
+    turn = relayed_turn_held!(start_turn!())
+    owner = turn.state.websocket_owner_pid
+    :ok = await_owner_settling!(owner)
+    monitor = Process.monitor(owner)
+
+    assert_waits_out_the_budget!(owner)
+    assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}, @detection_timeout_ms
+    assert [%Request{status: "failed", last_error_code: "owner_drained"}] = pool_requests(turn.setup)
+
+    Process.exit(turn.task, :kill)
+    assert [error, @drained_close] = receive_frames_until_close!(turn.client.conn, turn.client.websocket, turn.client.ref) |> elem(2)
+    assert_drained_error!(error)
+  end
+
+  test "owner on this node: a forwarded turn whose result is still missing when the budget is spent is cut as it always was" do
+    put_owner_forwarding!(true)
+    put_owner_call_timeout!(1_500)
+    use_committed_repo!()
+    turn = owner_result_held!(start_turn!(committed: true))
+    :ok = WebsocketOwnerSession.begin_drain(turn.owner)
+    monitor = Process.monitor(turn.owner)
+
+    assert_waits_out_the_budget!(turn.owner)
+    assert_receive {:DOWN, ^monitor, :process, _owner, :normal}, @detection_timeout_ms
+    assert [error, @drained_close] = receive_frames_until_close!(turn.client.conn, turn.client.websocket, turn.client.ref) |> elem(2)
+    assert_drained_error!(error)
+    assert [%Request{status: "failed", last_error_code: "owner_drained"}] = await_settled_requests!(turn.setup)
+  end
+
+  # The owner cut as the rollout drain makes it: the owner already finished
+  # the turn it forwarded and reports it active only because its settlement
+  # is pending. While the task cannot settle, the owner neither stops nor
+  # interrupts the request; once the task settles, the owner stops.
+  defp assert_owner_cut_waits_for_settlement!(turn, owner) do
+    :ok = await_owner_settling!(owner)
+    monitor = Process.monitor(owner)
+    drain = Task.async(fn -> WebsocketOwnerSession.drain_owner(owner) end)
+
+    assert Task.yield(drain, 300) == nil
+    assert [%Request{status: "in_progress"}] = pool_requests(turn.setup)
+
+    true = :erlang.resume_process(turn.task)
+    assert Task.await(drain, @detection_timeout_ms) == :ok
+    assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}, @detection_timeout_ms
+  end
+
+  # With a 1.5 s owner call budget the owner waits 750 ms, and answers the
+  # drain before the call's own timeout.
+  defp assert_waits_out_the_budget!(owner) do
+    started_at = System.monotonic_time(:millisecond)
+    assert WebsocketOwnerSession.drain_owner(owner) == :ok
+    assert (System.monotonic_time(:millisecond) - started_at) in 700..1_450
   end
 
   # The socket node's drain past its deadline, as `RolloutDrain` runs it for a
@@ -135,15 +248,53 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDrainAfterTerminalTest do
     Map.merge(turn, %{client: client, task: task, state: state})
   end
 
+  # The owner relays the provider's answer, terminal included, while its turn
+  # task, which waits for the provider session's result, is held: the client
+  # holds its response and the owner's turn still waits for its result.
+  defp owner_result_held!(%{client: client, upstream: upstream, hold: hold} = turn) do
+    assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^hold}, @detection_timeout_ms
+    %{websocket_owner_pid: owner} = await_socket_connection_state!(client.socket, &is_pid(Map.get(&1, :websocket_owner_pid)))
+    assert %{active_turn: %{task_pid: owner_task}} = :sys.get_state(owner)
+    true = :erlang.suspend_process(owner_task)
+    on_exit(fn -> if Process.alive?(owner_task), do: Process.exit(owner_task, :kill) end)
+    :ok = FakeUpstream.release_remaining_frames(upstream, hold)
+
+    {client, events} = receive_until_terminal!(client)
+    assert Enum.map(events, & &1["type"]) == ["response.created", "response.output_item.done", "response.completed"]
+    assert %{active_turn: %{terminal_forwarded?: true, pending_result: nil}} = :sys.get_state(owner)
+    assert [%Request{status: "in_progress"}] = pool_requests(turn.setup)
+
+    Map.merge(turn, %{client: client, owner: owner, owner_task: owner_task})
+  end
+
   defp start_turn!(opts \\ []) do
     hold = make_ref()
     upstream = start_upstream(FakeUpstream.strict_sequence([turn_request(FakeUpstream.barrier_websocket_frames(message_events("resp_drain_after_terminal"), notify: self(), release_ref: hold))]))
     setup = gateway_setup(upstream)
+    if Keyword.get(opts, :committed, false), do: register_unboxed_pool_cleanup!(setup)
     thread = Ecto.UUID.generate()
     owner = if Keyword.get(opts, :peer, false), do: start_peer_window_owner!(setup, "#{thread}:0").owner_pid
     {_server, port} = start_public_endpoint_with_server!()
     client = port |> connect!(setup, thread) |> send_frame!(turn_frame(setup, thread))
     %{client: client, setup: setup, upstream: upstream, hold: hold, owner: owner}
+  end
+
+  # The owner finished the forwarded turn (its terminal went out and the
+  # provider's session answered), and the drain has begun: it reports the turn
+  # active only because the settlement is pending.
+  defp await_owner_settling!(owner) do
+    deadline = System.monotonic_time(:millisecond) + @detection_timeout_ms
+
+    {:ok, %{active_turn?: false}} =
+      Stream.repeatedly(fn -> WebsocketOwnerSession.owner_status(owner) end)
+      |> Enum.find(fn
+        {:ok, %{active_turn?: false}} -> true
+        _active -> if System.monotonic_time(:millisecond) > deadline, do: flunk("the owner never finished the turn"), else: Process.sleep(5) && false
+      end)
+
+    :ok = WebsocketOwnerSession.begin_drain(owner)
+    assert {:ok, %{draining?: true, active_turn?: true}} = WebsocketOwnerSession.owner_status(owner)
+    :ok
   end
 
   defp activity_entry!(task, kind) do
@@ -262,8 +413,21 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDrainAfterTerminalTest do
     end
   end
 
+  # The cut stops a task that can be inside a query, as it always did; in the
+  # sandbox that breaks the one connection every process of the test shares,
+  # so those tests commit their rows, as the peer arms do.
+  defp use_committed_repo! do
+    :ok = Sandbox.mode(Repo, :auto)
+    on_exit(fn -> :ok = Sandbox.mode(Repo, :manual) end)
+  end
+
   defp put_owner_forwarding!(enabled?) do
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, enabled?)
+  end
+
+  defp put_owner_call_timeout!(timeout_ms) do
+    config = CodexPooler.TestAppEnv.restore_on_exit(OwnerDefaults)
+    Application.put_env(:codex_pooler, OwnerDefaults, Keyword.merge(config, owner_call_timeout_ms: timeout_ms))
   end
 end
