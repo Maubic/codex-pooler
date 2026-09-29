@@ -45,7 +45,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
              NativeCompactionAdmission.consume(accounting_compact, compact_capability, @now)
 
     assert NativeCompactionAdmission.phase(consumed_compact) == :consumed_compact
-    assert {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed_compact)
+    assert {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed_compact, @now)
     assert NativeCompactionAdmission.phase(collected) == :collected_unconfirmed
 
     compact_item_digest = <<1::256>>
@@ -98,6 +98,34 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
     assert NativeCompactionAdmission.phase(consumed_final) == :consumed_final
   end
 
+  # findings#270 row 270-249: a collection waits for its acknowledgement as
+  # long as an armed phase waits for its turn, and ends past that bound
+  # instead of holding the admission for as long as the socket stays attached.
+  test "a collection is bound like the armed phases and ends past its bound" do
+    binding = direct_binding()
+    ttl_ms = NativeCompactionAdmission.reservation_ttl_ms()
+    assert ttl_ms == 60_000
+
+    assert {:ok, ordinary} = NativeCompactionAdmission.ordinary_success(binding)
+    assert {:ok, pending_compact} = NativeCompactionAdmission.arm_compact(ordinary, @now + ttl_ms)
+    assert {:ok, reserved, capability} = NativeCompactionAdmission.reserve(pending_compact, :compact, binding, make_ref(), @now)
+    assert {:ok, accounting} = NativeCompactionAdmission.mark_accounting_started(reserved, capability, @now)
+    assert {:ok, consumed} = NativeCompactionAdmission.consume(accounting, capability, @now)
+    assert {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed, @now + 5)
+    assert {collected.phase, collected.expires_at_ms} == {:collected_unconfirmed, @now + 5 + ttl_ms}
+
+    assert {:active, ^collected} = NativeCompactionAdmission.expire_collection(collected, @now + 5 + ttl_ms)
+    assert {:expired, %NativeCompactionAdmission{phase: :cleared}} = NativeCompactionAdmission.expire_collection(collected, @now + 6 + ttl_ms)
+
+    # Only a collection ends here; an armed phase keeps its own expiry checks.
+    assert {:active, ^pending_compact} = NativeCompactionAdmission.expire_collection(pending_compact, @now + 10 * ttl_ms)
+
+    assert {:ok, first, provenance} = NativeCompactionAdmission.authorize_first_compact_collection(ordinary, make_ref())
+    assert {:ok, first_collected} = NativeCompactionAdmission.record_first_compact_collected(first, provenance, @now)
+    assert {first_collected.phase, first_collected.expires_at_ms} == {:collected_unconfirmed, @now + ttl_ms}
+    assert {:expired, %NativeCompactionAdmission{phase: :cleared}} = NativeCompactionAdmission.expire_collection(first_collected, @now + ttl_ms + 1)
+  end
+
   test "final reservation requires exact compact item digest and next window number" do
     binding = direct_binding()
     digest = <<91::256>>
@@ -119,7 +147,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
              NativeCompactionAdmission.mark_accounting_started(reserved, capability, @now)
 
     assert {:ok, consumed} = NativeCompactionAdmission.consume(accounting, capability, @now)
-    assert {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed)
+    assert {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed, @now)
 
     confirmation_binding = %{binding | compaction_item_digest: digest}
 
@@ -186,7 +214,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
     refute inspect(provenance) =~ Base.encode16(provenance.signature)
 
     assert {:ok, collected} =
-             NativeCompactionAdmission.record_first_compact_collected(ordinary, provenance)
+             NativeCompactionAdmission.record_first_compact_collected(ordinary, provenance, @now)
 
     assert NativeCompactionAdmission.phase(collected) == :collected_unconfirmed
 
@@ -254,7 +282,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
              )
 
     assert {:error, :invalid_provenance} =
-             NativeCompactionAdmission.record_first_compact_collected(ordinary, %{})
+             NativeCompactionAdmission.record_first_compact_collected(ordinary, %{}, @now)
 
     for mismatch <- [
           FirstCompactCollection.replace_binding(
@@ -265,13 +293,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
           FirstCompactCollection.replace_phase(provenance, :compact)
         ] do
       assert {:error, :provenance_mismatch, cleared} =
-               NativeCompactionAdmission.record_first_compact_collected(ordinary, mismatch)
+               NativeCompactionAdmission.record_first_compact_collected(ordinary, mismatch, @now)
 
       assert NativeCompactionAdmission.phase(cleared) == :cleared
     end
 
     assert {:ok, collected} =
-             NativeCompactionAdmission.record_first_compact_collected(ordinary, provenance)
+             NativeCompactionAdmission.record_first_compact_collected(ordinary, provenance, @now)
 
     valid_confirmation = %Confirmation{
       source_phase: :first_full_history_compact,
@@ -631,7 +659,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
         NativeCompactionAdmission.mark_accounting_started(reserved, reserved.capability, @now)
 
       {:ok, consumed} = NativeCompactionAdmission.consume(accounting, reserved.capability, @now)
-      {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed)
+      {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed, @now)
       digest = <<96::256>>
 
       confirmation = %Confirmation{
@@ -680,7 +708,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
 
       {:ok, accounting} = NativeCompactionAdmission.mark_accounting_started(reserved, capability, @now)
       {:ok, consumed} = NativeCompactionAdmission.consume(accounting, capability, @now)
-      {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed)
+      {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed, @now)
       digest = <<76::256>>
 
       # The finalizer builds the confirmation from the request's own metadata,
@@ -824,7 +852,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
              NativeCompactionAdmission.mark_accounting_started(reserved, capability, @now)
 
     assert {:ok, consumed} = NativeCompactionAdmission.consume(accounting, capability, @now)
-    assert {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed)
+    assert {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed, @now)
     {collected, control_ref}
   end
 

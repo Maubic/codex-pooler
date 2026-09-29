@@ -542,7 +542,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   def handle_call({:record_first_compact_collected, provenance}, _from, state) do
     admission = admission_state(state)
 
-    case NativeCompactionAdmission.record_first_compact_collected(admission, provenance) do
+    case NativeCompactionAdmission.record_first_compact_collected(admission, provenance, System.system_time(:millisecond)) do
       {:ok, admission} ->
         {:reply, :ok, put_admission(state, admission)}
 
@@ -1281,7 +1281,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # authorization with `502 invalid_compaction_response` (findings#281). It ends
   # the admission as any failed compaction does.
   defp finalize_consumed_request(state, {:ok, %{terminal: terminal}}, :compact, request) when terminal in @completed_terminals do
-    case NativeCompactionAdmission.record_compact_collected(admission_state(state)) do
+    case NativeCompactionAdmission.record_compact_collected(admission_state(state), System.system_time(:millisecond)) do
       {:ok, admission} -> put_admission(state, admission)
       {:error, reason} -> state |> clear_admission(reason) |> collect_closed_connection_compaction(request)
     end
@@ -2916,8 +2916,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     end
   end
 
+  # A collection that no acknowledgement confirmed within its bound reads as
+  # ended, so an acknowledgement lost with its caller no longer refuses the
+  # connection's next ordinary success and first full-history compaction after
+  # the provider served and billed them (findings#270 row 270-249); the next
+  # admission written replaces it.
   defp admission_state(state) do
-    Map.get(state, :native_compaction_admission, %NativeCompactionAdmission{phase: :cleared})
+    admission = Map.get(state, :native_compaction_admission, %NativeCompactionAdmission{phase: :cleared})
+
+    case NativeCompactionAdmission.expire_collection(admission, System.system_time(:millisecond)) do
+      {:expired, cleared} -> cleared
+      {:active, admission} -> admission
+    end
   end
 
   defp put_admission(state, admission) do
@@ -2994,7 +3004,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   defp record_closed_connection_first_collection(state, provenance) do
-    case NativeCompactionAdmission.record_first_compact_collected(state.closed_connection_collection, provenance) do
+    case NativeCompactionAdmission.record_first_compact_collected(state.closed_connection_collection, provenance, System.system_time(:millisecond)) do
       {:ok, collected} -> {:reply, :ok, Map.put(state, :closed_connection_collection, collected)}
       {:error, reason} -> {:reply, {:error, reason}, state}
       {:error, reason, _cleared} -> {:reply, {:error, reason}, state}
@@ -3004,7 +3014,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp collect_closed_connection_compaction(state, %Request{native_compaction_capability: %Capability{} = capability}) do
     with %NativeCompactionAdmission{phase: :consumed_compact} = consumed <- Map.get(state, :closed_connection_collection),
          true <- NativeCompactionAdmission.owns_capability?(consumed, capability),
-         {:ok, collected} <- NativeCompactionAdmission.record_compact_collected(consumed) do
+         {:ok, collected} <- NativeCompactionAdmission.record_compact_collected(consumed, System.system_time(:millisecond)) do
       Map.put(state, :closed_connection_collection, collected)
     else
       _other -> state

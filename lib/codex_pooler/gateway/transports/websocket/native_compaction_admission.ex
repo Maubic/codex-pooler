@@ -440,8 +440,30 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
   @type error :: unquote(Enum.reduce(Enum.reverse(@errors), &{:|, [], [&1, &2]}))
   @type refusal :: error() | :committed | :invalid_provenance | :provenance_mismatch
 
+  # How long an armed or collected admission stays usable: `pending_compact`
+  # from the ordinary success that arms it, `pending_final` from the
+  # confirmation that arms it, `collected_unconfirmed` from its collection.
+  @reservation_ttl_ms 60_000
+
   @spec refusal_reasons() :: [refusal()]
   def refusal_reasons, do: @refusal_reasons
+
+  @doc """
+  The bound, in milliseconds, of an armed or collected admission. Only the
+  tests shorten it (`reservation_ttl_ms` in this module's application
+  environment), so an expiry fits a test; neither runtime configuration nor an
+  Instance Setting carries it.
+  """
+  @spec reservation_ttl_ms() :: pos_integer()
+  def reservation_ttl_ms do
+    :codex_pooler
+    |> Application.get_env(__MODULE__, [])
+    |> Keyword.get(:reservation_ttl_ms, @reservation_ttl_ms)
+    |> case do
+      ttl_ms when is_integer(ttl_ms) and ttl_ms > 0 -> ttl_ms
+      _ttl_ms -> @reservation_ttl_ms
+    end
+  end
 
   @spec refusal_reason?(term()) :: boolean()
   def refusal_reason?(reason), do: reason in @refusal_reasons
@@ -556,12 +578,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
     end
   end
 
-  @spec record_compact_collected(t()) :: {:ok, t()} | {:error, :invalid_transition}
-  def record_compact_collected(%__MODULE__{phase: :consumed_compact} = state) do
-    {:ok, %{state | phase: :collected_unconfirmed, expires_at_ms: nil}}
+  # A collection waits for its acknowledgement for as long as an armed phase
+  # waits for its turn. It used to wait forever: an acknowledgement lost with
+  # its caller left `collected_unconfirmed` for as long as the socket stayed
+  # attached, and every later ordinary success and first full-history
+  # compaction was refused after the provider had served and billed it
+  # (findings#270 row 270-249). `expire_collection/2` ends a collection past
+  # its bound.
+  @spec record_compact_collected(t(), non_neg_integer()) :: {:ok, t()} | {:error, :invalid_transition}
+  def record_compact_collected(%__MODULE__{phase: :consumed_compact} = state, now_ms) when is_integer(now_ms) and now_ms >= 0 do
+    {:ok, %{state | phase: :collected_unconfirmed, expires_at_ms: now_ms + reservation_ttl_ms()}}
   end
 
-  def record_compact_collected(%__MODULE__{}), do: {:error, :invalid_transition}
+  def record_compact_collected(%__MODULE__{}, _now_ms), do: {:error, :invalid_transition}
 
   @spec authorize_first_compact_collection(t(), reference()) ::
           {:ok, t(), FirstCompactCollection.t()} | {:error, :invalid_transition}
@@ -578,7 +607,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
   def authorize_first_compact_collection(%__MODULE__{}, _control_ref),
     do: {:error, :invalid_transition}
 
-  @spec record_first_compact_collected(t(), FirstCompactCollection.t()) ::
+  @spec record_first_compact_collected(t(), FirstCompactCollection.t(), non_neg_integer()) ::
           {:ok, t()}
           | {:error, :invalid_transition | :invalid_provenance}
           | {:error, :provenance_mismatch, t()}
@@ -587,19 +616,21 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
           phase: :ordinary_success,
           first_compact_collection: %FirstCompactCollection{} = expected
         } = state,
-        %FirstCompactCollection{} = presented
-      ) do
+        %FirstCompactCollection{} = presented,
+        now_ms
+      )
+      when is_integer(now_ms) and now_ms >= 0 do
     if FirstCompactCollection.match?(expected, presented) do
-      {:ok, %{state | phase: :collected_unconfirmed}}
+      {:ok, %{state | phase: :collected_unconfirmed, expires_at_ms: now_ms + reservation_ttl_ms()}}
     else
       {:error, :provenance_mismatch, cleared()}
     end
   end
 
-  def record_first_compact_collected(%__MODULE__{phase: :ordinary_success}, _provenance),
+  def record_first_compact_collected(%__MODULE__{phase: :ordinary_success}, _provenance, _now_ms),
     do: {:error, :invalid_provenance}
 
-  def record_first_compact_collected(%__MODULE__{}, _provenance),
+  def record_first_compact_collected(%__MODULE__{}, _provenance, _now_ms),
     do: {:error, :invalid_transition}
 
   @spec confirm_compact(t(), <<_::256>>, Confirmation.t(), non_neg_integer()) ::
@@ -760,6 +791,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
   end
 
   def owns_capability?(_state, _capability), do: false
+
+  @doc """
+  Ends a `collected_unconfirmed` admission past its bound
+  (`record_compact_collected/2`, `record_first_compact_collected/3`); any other
+  admission is left as it is.
+  """
+  @spec expire_collection(t(), non_neg_integer()) :: {:active, t()} | {:expired, t()}
+  def expire_collection(%__MODULE__{phase: :collected_unconfirmed} = state, now_ms), do: expire(state, now_ms)
+  def expire_collection(%__MODULE__{} = state, _now_ms), do: {:active, state}
 
   @spec expire(t(), non_neg_integer()) :: {:active, t()} | {:expired, t()}
   def expire(%__MODULE__{expires_at_ms: expires_at_ms}, now_ms)

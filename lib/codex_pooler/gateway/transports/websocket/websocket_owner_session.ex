@@ -731,7 +731,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
        ) do
     case NativeCompactionAdmission.record_first_compact_collected(
            admission,
-           control.first_compact_collection
+           control.first_compact_collection,
+           System.system_time(:millisecond)
          ) do
       {:ok, next} ->
         {:ok, next, put_admission(state, next)}
@@ -1027,6 +1028,28 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
        do: true
 
   defp owns_confirmation?(_admission, _confirmation), do: false
+
+  # A collection that no acknowledgement confirmed within its bound is spent
+  # before the next admission control reads it: an acknowledgement lost with
+  # its caller used to keep `collected_unconfirmed` for as long as the socket
+  # stayed attached, and the next ordinary success and first full-history
+  # compaction were refused after the provider had served and billed them
+  # (findings#270 row 270-249). Only the admission ends; the results the last
+  # turn left (`first_compact_result`, `ordinary_success_result`) belong to a
+  # newer turn and stay.
+  defp expire_stale_collection(%{native_compaction_admission: %NativeCompactionAdmission{} = admission} = state) do
+    case NativeCompactionAdmission.expire_collection(admission, System.system_time(:millisecond)) do
+      {:expired, _cleared} ->
+        next = %{state | native_compaction_admission: nil, native_compaction_admission_downstream: nil, forwarded_send_witness: nil}
+        observation = observe_admission(state, next, :clear, :expired)
+        remember_last_clear(next, observation)
+
+      {:active, _admission} ->
+        state
+    end
+  end
+
+  defp expire_stale_collection(state), do: state
 
   # Every clear names why it happened, from the fixed lifecycle vocabulary
   # (findings#258 rows 258-23 and 258-50): a default made drains, stale owners,
@@ -1661,7 +1684,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   end
 
   def handle_call({:admission_control_v1, control}, _from, state) do
-    case apply_admission_control(state, control) do
+    case state |> expire_stale_collection() |> apply_admission_control(control) do
       {:ok, reply, next_state} -> {:reply, {:ok, reply}, next_state}
       {:error, reason, next_state} -> {:reply, {:error, reason}, next_state}
     end
@@ -3400,7 +3423,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
          result
        ) do
     if completed_compaction_result?(result) do
-      case NativeCompactionAdmission.record_compact_collected(state.native_compaction_admission) do
+      case NativeCompactionAdmission.record_compact_collected(state.native_compaction_admission, System.system_time(:millisecond)) do
         {:ok, admission} -> put_admission(state, admission)
         {:error, reason} -> clear_native_compaction_admission(state, reason)
       end

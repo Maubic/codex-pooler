@@ -51,6 +51,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession}
   alias CodexPooler.Gateway.Transports.Streaming.DeferredStreamRegistry
+  alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.OwnerDefaults
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Pools.ModelServingOverride
@@ -77,10 +78,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     peer_env = :erpc.call(peer_node, Application, :get_env, [:codex_pooler, OwnerDefaults, []])
     :ok = :erpc.call(peer_node, Application, :put_env, [:codex_pooler, OwnerDefaults, Keyword.merge(peer_env, owner_call_timeout_ms: @owner_call_budget_ms)])
 
+    CodexPooler.TestAppEnv.restore_on_exit(NativeCompactionAdmission)
+
     # Through `:erpc` with the standard library only: this module is compiled
     # on this node alone.
     on_exit(fn ->
-      if peer_node in Node.list(), do: :ok = :erpc.call(peer_node, Application, :put_env, [:codex_pooler, OwnerDefaults, peer_env])
+      if peer_node in Node.list() do
+        :ok = :erpc.call(peer_node, Application, :put_env, [:codex_pooler, OwnerDefaults, peer_env])
+        :ok = :erpc.call(peer_node, Application, :delete_env, [:codex_pooler, NativeCompactionAdmission])
+      end
     end)
   end
 
@@ -283,20 +289,55 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     end
   end
 
+  # An acknowledgement lost with its caller no longer wedges the admission
+  # while the socket stays attached (findings#270 row 270-249): the owner
+  # collected the compaction and its task died before confirming it. The
+  # collection is bound like the armed phases and ends past its bound, so the
+  # client's full-history resend on the same socket is authorized, served and
+  # confirmed, and its final is reserved against it. It used to stay
+  # `collected_unconfirmed` for as long as the socket was attached, and the
+  # resend was served, billed and refused `502 invalid_compaction_response`.
+  # The bound is shortened for the lost compaction only, on the owner's node.
+  for topology <- [:remote, :local, :direct] do
+    @tag topology: topology
+    test "#{topology}: a compaction whose acknowledgement is lost does not hold the admission past its bound", ctx do
+      compaction = open_compaction_session!(ctx, true, [:anchor, :compaction, :compaction, :final])
+      hold = hold_settled_websocket_turn!()
+      put_reservation_ttl!(ctx, 1)
+      {conn, websocket} = public_websocket_send_text!(compaction.client.conn, compaction.client.websocket, compaction.client.ref, compaction_frame(compaction, "compaction", trigger(compaction), "resp_slow_owner_anchor"))
+      compaction = %{compaction | client: %{compaction.client | conn: conn, websocket: websocket}}
+      assert_receive {^hold, :held, task}, @detection_timeout_ms
+
+      # The owner collected the compaction; its task dies before the
+      # acknowledgement, and the collection passes its one-millisecond bound.
+      :ok = await_admission_phase!(compaction.owner, :collected_unconfirmed)
+      Process.exit(task, :kill)
+      put_reservation_ttl!(ctx, nil)
+      _idle = await_socket_connection_state!(compaction.client.socket, &(MapSet.size(&1.tasks) == 0))
+
+      {served, log} = with_info_log(fn -> send_frame!(compaction, compaction_frame(compaction, "compaction", compaction.history ++ trigger(compaction), nil)) end)
+      assert %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_compact", "output" => [item]}} = served
+      refute log =~ "invalid_compaction_response"
+      :ok = await_admission_phase!(compaction.owner, :pending_final)
+
+      final = send_frame!(compaction, final_after_compaction_frame(compaction, item))
+      assert %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_final"}} = final
+      :ok = await_admission_phase!(compaction.owner, :pending_compact)
+      assert Scenario.settled_statuses!(compaction.setup, 4) == ["succeeded", "succeeded", "succeeded", "succeeded"]
+      assert FakeUpstream.count(compaction.upstream) == 4
+    end
+  end
+
   # A socket on the session's window with its owner (on the peer for
   # `:remote`) and one anchor turn it served, settled unless `settle?` is
   # false (its task is then held after its settlement).
-  defp open_compaction_session!(ctx, settle? \\ true) do
+  defp open_compaction_session!(ctx, settle? \\ true, answers \\ [:anchor, :compaction, :final]) do
     item = %{"type" => "compaction", "encrypted_content" => "synthetic-slow-owner-#{ctx.topology}"}
 
     upstream =
       start_upstream(
         # provenance: synthetic_adversarial (a native compaction on a session whose owner is suspended past the owner call budget)
-        FakeUpstream.repeat_last([
-          FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(anchor_event())]),
-          FakeUpstream.websocket_text_frames(Enum.map(compaction_events(item), &CodexPooler.JSON.encode!/1)),
-          FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(final_event())])
-        ])
+        FakeUpstream.repeat_last(Enum.map(answers, &upstream_answer(&1, item)))
       )
 
     setup = gateway_setup(upstream, compact?: true)
@@ -452,6 +493,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
 
   defp anchor_event,
     do: %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_anchor", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 1_200, "output_tokens" => 9, "total_tokens" => 1_209}}}
+
+  defp upstream_answer(:anchor, _item), do: FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(anchor_event())])
+  defp upstream_answer(:compaction, item), do: FakeUpstream.websocket_text_frames(Enum.map(compaction_events(item), &CodexPooler.JSON.encode!/1))
+  defp upstream_answer(:final, _item), do: FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(final_event())])
+
+  # The admission bound (`NativeCompactionAdmission.reservation_ttl_ms/0`) on
+  # the node that collects the compaction: the peer's owner, this node's owner,
+  # or this socket's own upstream session; `nil` restores the default.
+  defp put_reservation_ttl!(%{topology: :remote, peer_node: peer_node}, ttl_ms), do: :ok = :erpc.call(peer_node, Application, :put_env, [:codex_pooler, NativeCompactionAdmission, reservation_ttl_env(ttl_ms)])
+  defp put_reservation_ttl!(_ctx, ttl_ms), do: Application.put_env(:codex_pooler, NativeCompactionAdmission, reservation_ttl_env(ttl_ms))
+
+  defp reservation_ttl_env(nil), do: []
+  defp reservation_ttl_env(ttl_ms), do: [reservation_ttl_ms: ttl_ms]
 
   defp final_event,
     do: %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_final", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 900, "output_tokens" => 7, "total_tokens" => 907}}}

@@ -35,8 +35,6 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
     WebsocketOwnerForwarder
   }
 
-  @compact_reservation_ttl_ms 60_000
-
   @spec finalize_completed(SelectedCandidateContext.t(), map()) :: {:ok, map()} | {:error, map()}
   def finalize_completed(context, finalization) do
     case prepare_completed_finalization(context, finalization) do
@@ -584,7 +582,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
            request_options,
            digest,
            binding,
-           System.system_time(:millisecond) + @compact_reservation_ttl_ms
+           System.system_time(:millisecond) + NativeCompactionAdmission.reservation_ttl_ms()
          ) do
       :ok -> :ok
       {:error, reason} -> deliver_unless_refused(request_options, :confirm, reason)
@@ -771,7 +769,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
     UpstreamWebsocketSession.arm_compact(
       owner,
       binding,
-      System.system_time(:millisecond) + @compact_reservation_ttl_ms,
+      System.system_time(:millisecond) + NativeCompactionAdmission.reservation_ttl_ms(),
       receipt
     )
   end
@@ -795,7 +793,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
              compaction_item_digest: nil,
              confirmation: nil,
              first_compact_collection: receipt,
-             expires_at_ms: System.system_time(:millisecond) + @compact_reservation_ttl_ms,
+             expires_at_ms: System.system_time(:millisecond) + NativeCompactionAdmission.reservation_ttl_ms(),
              now_ms: nil
            }) do
       WebsocketOwnerForwarder.admission_control(session, lease_token, control, opts)
