@@ -916,6 +916,86 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
     end
   end
 
+  # An anchored compaction whose connection the provider closes after the
+  # socket reserved its admission and before its response task starts the
+  # reservation's accounting (findings#284). The task is held where it redeems
+  # its runtime proof, between those two steps. With owner forwarding off the
+  # session clears the admission with its connection, and the accounting start
+  # used to find it cleared and answer `500 gateway_reservation_failed` with two
+  # `[error]` lines; it now gets the retryable `503 owner_unavailable` the
+  # reservation's own check gives a closed connection (findings#275). With
+  # forwarding on the owner keeps a reserved admission across the close, and
+  # the guard answers `previous_response_not_found` at send. Either way nothing
+  # reaches the provider and the client's full-history retry is served.
+  for topology <- [:direct, :owner_forwarded] do
+    @tag topology: topology
+    test "#{topology} compaction whose connection closes between its reservation and its accounting start is refused retryably", %{topology: topology} do
+      put_owner_forwarding!(topology == :owner_forwarded)
+      turn_id = "accounting-close-#{topology}"
+      history = [window_message("synthetic accounting-close anchor")]
+      compact_item = %{"type" => "compaction", "encrypted_content" => "synthetic-accounting-close-#{topology}"}
+
+      upstream =
+        start_upstream(
+          # provenance: synthetic_adversarial (compaction v2-shaped frames; the provider's close of the connection between a compaction's reservation and its accounting start, findings#284)
+          FakeUpstream.strict_sequence([
+            window_request(1, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_accounting_close_anchor", @anchor_usage)])),
+            window_request(2, [forbidden: ["previous_response_id"]], event_frames(compaction_events(compact_item, "resp_accounting_close_retry"))),
+            window_request(2, [forbidden: ["previous_response_id"]], event_frames([completed_event("resp_accounting_close_final", @resumed_usage)]))
+          ])
+        )
+
+      setup = gateway_setup(upstream, compact?: true)
+      state = callback_socket!(setup, "accounting-close-#{topology}")
+
+      try do
+        state = run_turn!(state, mid_turn_payload(setup, history, turn_id, "turn", 1))
+        hold = hold_at_runtime_proof!()
+
+        {{state, frames}, log} =
+          with_log(fn ->
+            assert {:ok, state} = CodexResponsesSocket.handle_in({window_compaction_frame(setup, turn_id, "resp_accounting_close_anchor"), [opcode: :text]}, state)
+            Process.put(:crossing_socket_state, state)
+            assert_receive {^hold, :held, task_pid}, 15_000
+            close_connection_under_held_task!(upstream, hold, task_pid, setup, state)
+            collect_until_idle!(state, [])
+          end)
+
+        Process.put(:crossing_socket_state, state)
+        refute log =~ "[error]"
+        refute log =~ "reservation cleanup failed"
+        assert_accounting_close_refusal!(topology, frames)
+        assert [_anchor_request] = FakeUpstream.requests(upstream)
+
+        {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1))
+        assert [%{"type" => "response.output_item.done", "item" => ^compact_item}, %{"type" => "response.completed", "response" => %{"id" => "resp_accounting_close_retry", "output" => [^compact_item]}}] = frames
+
+        {_state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+        assert [%{"type" => "response.completed", "response" => %{"id" => "resp_accounting_close_final"}}] = frames
+
+        rows = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: request.admitted_at))
+        assert Enum.map(rows, &{&1.endpoint, &1.status}) == accounting_close_rows(topology)
+        assert :ok = FakeUpstream.verify!(upstream)
+      after
+        CodexResponsesSocket.terminate(:closed, Process.delete(:crossing_socket_state))
+      end
+    end
+  end
+
+  # With forwarding off the refusal happens before anything is reserved and
+  # leaves no row; with forwarding on the owner kept the reservation, so the
+  # guard's refusal settles the compaction's row as failed (findings#278).
+  defp assert_accounting_close_refusal!(:direct, frames),
+    do: assert([%{"type" => "error", "status" => 503, "error" => %{"code" => "owner_unavailable"}}] = frames)
+
+  defp assert_accounting_close_refusal!(:owner_forwarded, frames), do: assert(frames == [native_previous_response_retry_event()])
+
+  defp accounting_close_rows(:direct),
+    do: [{"/backend-api/codex/responses", "succeeded"}, {"/backend-api/codex/responses/compact", "succeeded"}, {"/backend-api/codex/responses", "succeeded"}]
+
+  defp accounting_close_rows(:owner_forwarded),
+    do: [{"/backend-api/codex/responses", "succeeded"}, {"/backend-api/codex/responses/compact", "failed"}, {"/backend-api/codex/responses/compact", "succeeded"}, {"/backend-api/codex/responses", "succeeded"}]
+
   # One successor only: with owner forwarding on, a second full-history
   # resend after the served retry is refused and reaches no provider. With
   # forwarding off a resend of a served compaction is read as proof that its
@@ -1362,6 +1442,24 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
 
     :ok
   end
+
+  # Holds the next compaction's response task where it redeems its runtime
+  # proof: after the socket reserved the compaction's admission and before the
+  # task starts the reservation's accounting.
+  defp hold_at_runtime_proof! do
+    hold = make_ref()
+    handler_id = {__MODULE__, :runtime_proof_hold, hold}
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    config = %{hold: hold, test: self(), claimed: :atomics.new(1, [])}
+    :ok = :telemetry.attach(handler_id, [:codex_pooler, :gateway, :native_compaction, :authorization_transition], &__MODULE__.hold_runtime_proof/4, config)
+    hold
+  end
+
+  @doc false
+  def hold_runtime_proof(event, measurements, %{transition: :compact_runtime_proof_redeemed} = metadata, config),
+    do: hold_egress(event, measurements, metadata, config)
+
+  def hold_runtime_proof(_event, _measurements, _metadata, _config), do: :ok
 
   # Closes connection 1 while the held request waits, waits until the session
   # holding it has closed it (and every owner has handled its signal), then

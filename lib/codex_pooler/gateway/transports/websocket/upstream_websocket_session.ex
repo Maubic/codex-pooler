@@ -433,10 +433,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     {:reply, connection_lifecycle_state(state), state}
   end
 
-  def handle_call(:live_connection, _from, state) do
-    generation = if Map.has_key?(state, :conn) and state.generation > 0, do: state.generation
-    {:reply, {:ok, %{lifecycle_id: state.lifecycle_id, generation: generation}}, state}
-  end
+  def handle_call(:live_connection, _from, state), do: {:reply, {:ok, live_connection_state(state)}, state}
 
   def handle_call(:compaction_reservation_snapshot, _from, state) do
     result =
@@ -586,15 +583,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
         {:reply, :ok, put_admission(state, admission)}
 
       {:error, reason} ->
-        :ok =
-          NativeCompactionAuthorizationObservation.log_accounting_rejection(
-            admission_state(state),
-            capability,
-            :direct,
-            reason
-          )
+        if closed_under_capability?(state, capability) do
+          {:reply, {:error, :connection_closed}, state}
+        else
+          :ok =
+            NativeCompactionAuthorizationObservation.log_accounting_rejection(
+              admission_state(state),
+              capability,
+              :direct,
+              reason
+            )
 
-        {:reply, {:error, reason}, clear_rejected_capability(state, capability, reason)}
+          {:reply, {:error, reason}, clear_rejected_capability(state, capability, reason)}
+        end
     end
   end
 
@@ -663,8 +664,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
         {:reply, :ok, clear_admission(state, :request_rejected)}
 
       {:error, reason} ->
-        observe_admission(state, state, :reject, :stale_capability)
-        {:reply, {:error, reason}, state}
+        if closed_under_capability?(state, capability) do
+          {:reply, :ok, state}
+        else
+          observe_admission(state, state, :reject, :stale_capability)
+          {:reply, {:error, reason}, state}
+        end
     end
   end
 
@@ -3048,6 +3053,25 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   defp collect_closed_connection_compaction(state, _request), do: state
+
+  # The connection a reserved compaction was bound to closed before the
+  # reservation's accounting started, and the close ended the admission with it
+  # (`close_connection_state/1`, `connection_closed`). Starting that accounting
+  # used to answer `invalid_transition`, which the runtime turned into `500
+  # gateway_reservation_failed` with two `[error]` lines for what is the close
+  # the reservation's own check answers with the retryable 503 (findings#275,
+  # findings#284). The step now says `connection_closed`, and the runtime's
+  # clear of that capability finds nothing left to clear.
+  defp closed_under_capability?(state, %Capability{binding: %Binding{lifecycle_id: lifecycle_id, generation: generation}} = capability),
+    do: not NativeCompactionAdmission.owns_capability?(admission_state(state), capability) and live_connection_state(state) != %{lifecycle_id: lifecycle_id, generation: generation}
+
+  defp closed_under_capability?(_state, _capability), do: false
+
+  # The open connection, generation nil between connections.
+  defp live_connection_state(state) do
+    generation = if Map.has_key?(state, :conn) and state.generation > 0, do: state.generation
+    %{lifecycle_id: state.lifecycle_id, generation: generation}
+  end
 
   defp clear_rejected_capability(state, capability, reason) do
     if NativeCompactionAdmission.owns_capability?(admission_state(state), capability) do

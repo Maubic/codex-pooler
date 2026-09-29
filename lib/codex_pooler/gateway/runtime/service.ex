@@ -2360,6 +2360,21 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   defp reserve_compaction_retry_owner(%RequestOptions{} = request_options),
     do: {:ok, request_options}
 
+  # A reserved compaction whose connection the provider closed before its
+  # accounting started: the session ended the admission with the connection.
+  # That is the close the reservation's own check answers (findings#275), so
+  # the client gets the same retryable 503 before anything is reserved, not a
+  # 500 reservation failure logged as an error (findings#284).
+  defp start_native_compaction_accounting(%RequestOptions{} = request_options) do
+    case RequestOptions.mark_native_compaction_accounting_started(request_options, System.system_time(:millisecond)) do
+      {:error, :connection_closed} ->
+        {:error, error(503, "owner_unavailable", "websocket owner admission is unavailable", nil, %{accounting_disposition: :zero_work})}
+
+      result ->
+        result
+    end
+  end
+
   defp reserve_and_start_turn(
          auth,
          model,
@@ -2410,11 +2425,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
     # acquiring database locks, so renewal cannot prevent this control's reply.
     # This is a preparation latch: reservation and send authority still follow,
     # and every failed transaction clears this capability outside the lock.
-    with :ok <-
-           RequestOptions.mark_native_compaction_accounting_started(
-             request_options,
-             System.system_time(:millisecond)
-           ) do
+    with :ok <- start_native_compaction_accounting(request_options) do
       reserve_turn_transaction(
         auth,
         model,
