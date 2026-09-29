@@ -678,6 +678,28 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
     end
   end
 
+  # A detach the owner did not answer within its call budget: the owner is
+  # alive but slow, and the detach is still waiting for it, to run once it
+  # answers again. It cancels a turn that showed output and settles it
+  # `client_disconnected`, or arms a pre-visible turn's replay. The socket used
+  # to take the timeout for an owner that is gone: its owner-lost recovery
+  # interrupted the turn `owner_unavailable` under the owner. The resend of a
+  # turn that showed output then met `409 duplicate_turn`. A pre-visible
+  # turn's replay could no longer be armed, the owner generated that turn to
+  # its end for nobody and its late success rewrote the interruption, while
+  # the resend was served by a second generation (findings#270 row 270-257).
+  # The turn is now left to the owner. An owner that never answers again stops
+  # renewing its lease, and the expired-owner recovery settles the turn.
+  defp after_detach({:error, :owner_forward_timeout}, state) do
+    Logger.info(
+      "websocket owner detach left to the owner after its call budget " <>
+        "codex_session_id=#{codex_session_id(state)} " <>
+        "owner_instance_id=#{owner_instance_id(state)} " <>
+        "request_id=#{request_id(Map.get(state, :opts))} " <>
+        "downstream_epoch=#{downstream_epoch(Map.get(state, :websocket_owner_downstream))}"
+    )
+  end
+
   # A socket that already pushed its task's terminal defers the turn interrupt
   # (`websocket_owner_defer_turn_interrupt?`): the task settles that turn itself,
   # and interrupting it first recorded a refusal the client had displayed as
