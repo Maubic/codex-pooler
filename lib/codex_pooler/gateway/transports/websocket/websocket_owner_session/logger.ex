@@ -123,6 +123,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger 
     )
   end
 
+  # The downstream's node became unreachable while its turn was still
+  # generating, no resend could rejoin that turn, and the owner cancelled it
+  # (findings#286).
+  @spec unreachable_downstream_turn_cancelled(map(), map()) :: :ok
+  def unreachable_downstream_turn_cancelled(state, downstream) do
+    owner_event(:info, "websocket owner cancelled the turn of an unreachable downstream",
+      codex_session_id: state.codex_session_id,
+      owner_instance_id: state.owner_instance_id,
+      owner_pid: self(),
+      downstream_epoch: downstream_epoch(downstream)
+    )
+  end
+
   # The retry of a collected compaction whose socket had closed took it over
   # before that socket's own detach arrived, and was attached in its place
   # (findings#206 row 206-454).

@@ -2514,11 +2514,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     |> continue_or_retire()
   end
 
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{downstream_monitor: ref} = state) do
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{downstream_monitor: ref} = state) do
     state =
       state
       |> clear_compaction_retry_submit_hold()
-      |> handle_monitored_downstream_loss()
+      |> handle_monitored_downstream_loss(reason)
       |> reconcile_disconnected_provisional()
 
     state =
@@ -5147,15 +5147,62 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     end
   end
 
-  defp handle_monitored_downstream_loss(state) do
-    if replay_active?(state, state.downstream) do
-      case mark_active_downstream_lost(state, state.downstream) do
-        {:ok, lost} -> lost
-        {:error, _reason} -> suspend_or_detach_downstream(state)
-      end
-    else
-      suspend_or_detach_downstream(state)
+  defp handle_monitored_downstream_loss(state, reason) do
+    cond do
+      replay_active?(state, state.downstream) ->
+        case mark_active_downstream_lost(state, state.downstream) do
+          {:ok, lost} -> lost
+          {:error, _reason} -> suspend_or_detach_downstream(state)
+        end
+
+      unreachable_downstream_turn?(state, reason) ->
+        state
+        |> cancel_turn_of_unreachable_downstream()
+        |> suspend_or_detach_downstream()
+
+      true ->
+        suspend_or_detach_downstream(state)
     end
+  end
+
+  # The downstream's node became unreachable (a partition, or its VM died)
+  # while the turn it asked for was still generating, and no resend can
+  # rejoin that turn: it showed output, carries no replay claim, or is a
+  # compaction. The turn's executor ran on that node, so nobody can receive
+  # the output or settle it. On a partition that node's socket has already
+  # closed, interrupted the turn and released this owner's lease, and the
+  # client's resend is served by a new owner meanwhile; after the node died,
+  # the resend of a turn that showed output meets `lifecycle_conflict`. The
+  # owner kept generating to the end, a second generation of the same turn
+  # that nobody received or recorded (findings#286). It now cancels the turn
+  # the way the socket that takes over an inherited turn does: the upstream
+  # request's caller exits and the upstream session closes the request
+  # (`request_caller_down`).
+  #
+  # A pre-visible turn a resend can still rejoin stays `:lost`, as for any
+  # other downstream loss: after the node died, a resend that reaches this
+  # owner before the turn's first output reattaches to it and receives the
+  # whole turn from this one generation (measured). A replay in progress, and
+  # a downstream that exits on a reachable node, keep their turn as before.
+  defp unreachable_downstream_turn?(%{active_turn: active_turn, downstream: downstream} = state, :noconnection)
+       when is_map(active_turn) and is_map(downstream),
+       do: is_nil(Map.get(state, :suspended_replay)) and still_generating?(active_turn)
+
+  defp unreachable_downstream_turn?(_state, _reason), do: false
+
+  defp still_generating?(active_turn) do
+    not Map.get(active_turn, :terminal_forwarded?, false) and is_nil(Map.get(active_turn, :pending_result)) and
+      is_nil(Map.get(active_turn, :output_commit_probe))
+  end
+
+  defp cancel_turn_of_unreachable_downstream(%{active_turn: active_turn, downstream: downstream} = state) do
+    :ok = Logger.unreachable_downstream_turn_cancelled(state, downstream)
+    terminate_predecessor_task(active_turn)
+    reply_active_turn(state, {:error, :client_disconnected})
+
+    state
+    |> DownstreamState.cancel_active_turn_downstream(downstream, :client_disconnected)
+    |> finish_active_turn({:error, :client_disconnected})
   end
 
   defp suspend_replay_downstream(%{active_turn: %{descriptor: descriptor}} = state) do
