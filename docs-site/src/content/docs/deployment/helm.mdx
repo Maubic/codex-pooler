@@ -223,6 +223,14 @@ With that shape, the chart renders `CODEX_POOLER_WEBSOCKET_OWNER_FORWARDING=true
 on app pods automatically. Render the chart and verify the topology before
 raising `app.replicaCount`.
 
+## Rollout drain
+
+Before an app pod stops, its preStop hook drains it: new work is refused and
+in-flight turns may finish within `app.lifecycle.preStop.drainTimeoutSeconds`
+(85 by default). Turns get about `drainTimeoutSeconds` minus 10.7 seconds; at 10
+or less every drain cuts them at once. If you raise the drain budget, raise
+`app.terminationGracePeriodSeconds` with it.
+
 ## Flux multi-replica example
 
 This example shows a Flux `HelmRepository` and `HelmRelease` for two app
