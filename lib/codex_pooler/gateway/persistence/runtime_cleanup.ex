@@ -21,6 +21,7 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.OwnerLease, as: OwnerLeaseStatus
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.Session, as: SessionStatus
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
+  alias CodexPooler.Platform.ForwardedGenerationEnds
   alias CodexPooler.Platform.InstancePresence
   alias CodexPooler.Repo
 
@@ -160,16 +161,28 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
   # this cannot reason about and stays sheltered, the same direction absence
   # itself is one-directional in.
   defp attempt_owner_may_be_alive?(
-         %{owner_instance_id: node_name, owner_instance_boot_id: boot_id},
+         %{owner_instance_id: node_name, owner_instance_boot_id: boot_id} = attempt,
          opts
        ) do
     case InstancePresence.Identity.owner(node_name, boot_id) do
       nil -> true
-      %InstancePresence.Identity{} -> owner_may_be_alive?({node_name, boot_id}, opts)
+      %InstancePresence.Identity{} -> owner_may_be_alive?({node_name, boot_id}, opts) and not forwarded_generation_ended_while_absent?(attempt, node_name, boot_id, opts)
     end
   end
 
   defp attempt_owner_may_be_alive?(_attempt, _opts), do: true
+
+  # A forwarded attempt whose session owner recorded the end of the generation
+  # it served, while the attempt's own incarnation stopped reporting: the same
+  # exact evidence absent-instance recovery takes (findings#290). It never
+  # unshelters an attempt whose incarnation still reports.
+  defp forwarded_generation_ended_while_absent?(attempt, node_name, boot_id, opts) do
+    identity = InstancePresence.Identity.owner(node_name, boot_id)
+    presence_now = InstancePresence.database_now()
+
+    ForwardedGenerationEnds.ended?(attempt) and InstancePresence.observer_fresh?(presence_now, opts) and
+      InstancePresence.absent?(identity, presence_now, opts) and InstancePresence.status(identity) != :alive
+  end
 
   defp owner_proven_gone?(identity) do
     case InstancePresence.status(identity) do

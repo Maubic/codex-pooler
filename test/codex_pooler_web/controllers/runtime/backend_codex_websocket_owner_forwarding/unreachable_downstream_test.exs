@@ -41,11 +41,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [ensure_test_distribution_started!: 0, start_shared_peer_window_owner!: 3]
   import CodexPoolerWeb.Runtime.UnreachableNodeSupport
 
-  alias CodexPooler.Accounting.Request
+  alias CodexPooler.Accounting
+  alias CodexPooler.Accounting.{Attempt, Request, RequestLifecycle}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn}
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
-  alias CodexPooler.Platform.InstancePresence
+  alias CodexPooler.Platform.{ForwardedGenerationEnd, InstanceHeartbeat, InstancePresence}
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Runtime.OwnerLossScenario, as: Scenario
   alias Ecto.Adapters.SQL.Sandbox
@@ -65,11 +66,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   # past it.
   @lease_check_ms InstancePresence.heartbeat_write_budget_ms()
   @check_margin_ms 1_000
+  @liveness_window_s InstancePresence.liveness_window_seconds()
 
   setup_all do
     ensure_test_distribution_started!()
     {owner_peer, owner_node} = boot_tcp_owner_peer!()
-    %{owner_peer: owner_peer, owner_node: owner_node, app_peers: %{previsible: boot_app_peer!(), visible: boot_app_peer!(), late: boot_app_peer!(), reachable: boot_app_peer!()}}
+    %{owner_peer: owner_peer, owner_node: owner_node, app_peers: %{previsible: boot_app_peer!(), visible: boot_app_peer!(), late: boot_app_peer!(), reachable: boot_app_peer!(), resend_recovery: boot_app_peer!(), cleanup_recovery: boot_app_peer!()}}
   end
 
   setup do
@@ -104,6 +106,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
       assert [%BridgeOwnerLease{status: "released", owner_instance_id: cut_owner_instance}] = leases(turn.session_id)
       assert cut_owner_instance == Atom.to_string(ctx.owner_node)
       assert FakeUpstream.count(turn.upstream) == 2
+
+      # The cut owner recorded the end of the generation it served.
+      assert %{reason: "unreachable_downstream_cancelled", owner_instance_id: ending_owner} = await_generation_end!(turn.request_id)
+      assert ending_owner == Atom.to_string(ctx.owner_node)
     end
 
     @tag shown: :previsible
@@ -240,6 +246,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
       assert %CodexTurn{status: "in_progress"} = Repo.get_by!(CodexTurn, request_id: turn.request_id)
       assert [%BridgeOwnerLease{status: "active", lease_token: ^lease_token}] = leases(turn.session_id)
       assert FakeUpstream.count(turn.upstream) == 2
+      assert %{reason: "unreachable_downstream_cancelled", owner_instance_id: ending_owner} = await_generation_end!(turn.request_id)
+      assert ending_owner == Atom.to_string(node())
     end
 
     @tag shown: :previsible
@@ -266,6 +274,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
       {conn, websocket, events} = receive_turn!(conn, websocket, retry.ref, [])
       assert events == [{"response.created", "resp_unreachable_turn"} | List.duplicate({"response.output_text.delta", nil}, @deltas)] ++ [{"response.completed", "resp_unreachable_turn"}]
       assert FakeUpstream.count(turn.upstream) == 2
+      # The terminal went to the resend, never to the attempt's executor.
+      assert %{reason: "terminal_delivered_to_reattached"} = await_generation_end!(turn.request_id)
       Scenario.close!(%{retry | conn: conn, websocket: websocket})
     end
 
@@ -287,6 +297,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
 
       assert log =~ "websocket owner cancelled a lost turn of an unreachable downstream at its first output"
       assert %{active_turn: nil} = :sys.get_state(turn.owner)
+      assert %{reason: "lost_turn_cancelled_at_output"} = await_generation_end!(turn.request_id)
 
       # The turn showed output, so it waits for recovery under the owner's
       # lease, and the client's late resend meets the refusal it met before.
@@ -299,6 +310,35 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
       assert %{"type" => "error", "status" => 409} = refused
       assert FakeUpstream.count(turn.upstream) == 2
       Scenario.close!(%{retry | conn: conn, websocket: websocket})
+    end
+  end
+
+  describe "the socket's node is replaced by one under another name" do
+    # The dead node's presence row passes the liveness window: 121 s are
+    # taken off it (and off the attempt, which a recovery pass also ages),
+    # instead of waiting. Nothing comes back under its node name or slot, so
+    # the owner's record of the generation's end is the only death evidence.
+    @tag shown: :visible, app_peer: :resend_recovery
+    @tag slow: "halts the peer VM running the socket mid-turn and resends once its presence passed the liveness window"
+    test "the client's resend is admitted once the dead node's presence passed the liveness window", ctx do
+      turn = replaced_socket_node_turn!(ctx)
+
+      retry = Scenario.connect!(turn.port, turn.setup, Scenario.native_route(), turn.window)
+      {conn, websocket} = public_websocket_send_text!(retry.conn, retry.websocket, retry.ref, turn.frame)
+      {conn, websocket, served} = receive_native_terminal!(conn, websocket, retry.ref)
+      assert %{"type" => "response.completed", "response" => %{"id" => "resp_unreachable_successor"}} = served
+      Scenario.close!(%{retry | conn: conn, websocket: websocket})
+      assert_recovered!(turn)
+    end
+
+    @tag shown: :visible, app_peer: :cleanup_recovery
+    @tag slow: "halts the peer VM running the socket mid-turn and runs absent-instance recovery once its presence passed the liveness window"
+    test "absent-instance recovery settles the turn once the dead node's presence passed the liveness window", ctx do
+      turn = replaced_socket_node_turn!(ctx)
+      age_attempt!(turn.request_id, @liveness_window_s + 1)
+
+      assert {:ok, %{absent_instance_attempts_recovered: 1}} = Accounting.recover_absent_instance_attempts(InstancePresence.database_now())
+      assert_recovered!(turn)
     end
   end
 
@@ -319,6 +359,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
       assert %{frames: frames, connection_down_at: nil} = await_frames!(turn.pacer, @frames_before_cancel + 3)
       assert frames >= @frames_before_cancel + 3
       assert %{active_turn: %{visible_output?: true}} = :sys.get_state(turn.owner)
+      refute Repo.get(ForwardedGenerationEnd, attempt(turn.request_id).id)
     end
   end
 
@@ -327,19 +368,23 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   # received). `:partition`: the owner on the TCP-controlled peer, the socket
   # here. `:death`: the owner here, the socket on the application peer (the
   # test's `app_peer` tag, or its `shown` one). `deltas:` sets the turn's
-  # output, `preamble:` the lifecycle events before it.
+  # output, `preamble:` the lifecycle events before it, and `successor: true`
+  # serves any later request at once.
   defp start_turn!(ctx, topology, opts \\ []) do
     release_ref = make_ref()
     pacer = start_pacer!(release_ref)
     frames = turn_frames(Keyword.get(opts, :deltas, @deltas), Keyword.get(opts, :preamble, 0))
+    successor = if Keyword.get(opts, :successor, false), do: [completed_response_frames("resp_unreachable_successor", [], 3, 2)], else: []
 
     upstream =
       start_upstream(
         # provenance: synthetic_adversarial (a turn whose downstream's node is cut off or dies while the provider still generates it)
-        FakeUpstream.repeat_last([
-          completed_response_frames("resp_unreachable_one", [], 3, 2),
-          FakeUpstream.barrier_websocket_frames(frames, notify: pacer, release_ref: release_ref)
-        ])
+        FakeUpstream.repeat_last(
+          [
+            completed_response_frames("resp_unreachable_one", [], 3, 2),
+            FakeUpstream.barrier_websocket_frames(frames, notify: pacer, release_ref: release_ref)
+          ] ++ successor
+        )
       )
 
     :ok = pace_upstream!(pacer, upstream)
@@ -552,6 +597,46 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   end
 
   defp leases(session_id), do: Repo.all(from(l in BridgeOwnerLease, where: l.codex_session_id == ^session_id, order_by: [asc: l.created_at]))
+
+  # A visible turn on the application peer, which publishes presence (so does
+  # this node, the observer recovery requires). The peer is halted, its turn
+  # cancelled by the owner, and its presence row made 121 s stale.
+  defp replaced_socket_node_turn!(ctx) do
+    _observer = start_supervised!({InstanceHeartbeat, enabled: true, name: :"unreachable_node_observer_#{System.unique_integer([:positive])}"})
+    app_node = Map.fetch!(ctx.app_peers, ctx.app_peer).node
+    heartbeat = %{id: :unreachable_node_heartbeat, start: {InstanceHeartbeat, :start_link, [[enabled: true, name: :unreachable_node_heartbeat]]}}
+    {:ok, _heartbeat} = :erpc.call(app_node, Supervisor, :start_child, [CodexPooler.Supervisor, heartbeat])
+    CodexPooler.UnboxedFixture.register_unboxed_cleanup!(fn -> Repo.delete_all(from(i in InstancePresence.Instance, where: i.node_name in ^[Atom.to_string(app_node), Atom.to_string(node())])) end)
+    _published = await_state!(fn -> presence_rows(app_node) end, &(&1 != []), "the application peer never published presence", System.monotonic_time(:millisecond) + @detection_timeout_ms)
+
+    turn = start_turn!(ctx, :death, successor: true)
+    :ok = halt!(turn.app_peer.peer, turn.app_peer.node)
+    %{reason: "unreachable_downstream_cancelled"} = await_generation_end!(turn.request_id)
+    refute RequestLifecycle.execution_recovery_authority(attempt(turn.request_id))
+
+    Repo.query!("UPDATE instance_presences SET last_seen_at = last_seen_at - ($2 * interval '1 second') WHERE node_name = $1", [Atom.to_string(app_node), @liveness_window_s + 1])
+    turn
+  end
+
+  defp assert_recovered!(turn) do
+    assert {"failed", 499, "absent_instance_recovered"} == request_outcome(turn.request_id)
+    assert %CodexTurn{status: "interrupted", error_code: "absent_instance_recovered"} = Repo.get_by!(CodexTurn, request_id: turn.request_id)
+  end
+
+  defp presence_rows(node), do: Repo.all(from(i in InstancePresence.Instance, where: i.node_name == ^Atom.to_string(node), select: i.boot_id))
+
+  defp attempt(request_id), do: Repo.one!(from(a in Attempt, where: a.request_id == ^request_id))
+
+  defp age_attempt!(request_id, seconds) do
+    Repo.query!("UPDATE attempts SET started_at = started_at - ($2 * interval '1 second') WHERE request_id = $1", [Ecto.UUID.dump!(request_id), seconds])
+  end
+
+  # The owner's record of the generation's end for the turn's attempt, once written.
+  defp await_generation_end!(request_id) do
+    attempt_id = attempt(request_id).id
+    deadline = System.monotonic_time(:millisecond) + @detection_timeout_ms
+    await_state!(fn -> Repo.get(ForwardedGenerationEnd, attempt_id) end, &(not is_nil(&1)), "the owner recorded no end of the generation", deadline)
+  end
 
   defp turn_frames(count \\ @deltas, preamble \\ 0) do
     created = %{"type" => "response.created", "response" => %{"id" => "resp_unreachable_turn", "status" => "in_progress"}}

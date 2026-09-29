@@ -68,6 +68,17 @@ defmodule CodexPooler.PoolerFixtures do
 
     Repo.delete_all(from event in "audit_events", where: event.pool_id in ^dumped_pool_ids)
 
+    # Keyed by attempt without a foreign key, so the Pool's cascade misses them
+    # (findings#290).
+    Repo.delete_all(
+      from ending in CodexPooler.Platform.ForwardedGenerationEnd,
+        join: attempt in CodexPooler.Accounting.Attempt,
+        on: attempt.id == ending.attempt_id,
+        join: request in CodexPooler.Accounting.Request,
+        on: request.id == attempt.request_id,
+        where: request.pool_id in ^pool_ids
+    )
+
     # Some workers name only the assignment, such as a saved-reset redemption.
     Repo.delete_all(
       from job in Oban.Job,

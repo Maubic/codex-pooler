@@ -483,6 +483,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
     Repo.delete_all(from(entitlement in RequestReplayEntitlement, where: entitlement.request_id in ^request_ids))
 
     Repo.delete_all(from(turn in CodexTurn, where: turn.request_id in ^request_ids))
+
+    # Keyed by attempt without a foreign key (findings#290).
+    Repo.delete_all(
+      from(ending in CodexPooler.Platform.ForwardedGenerationEnd,
+        join: attempt in Attempt,
+        on: attempt.id == ending.attempt_id,
+        where: attempt.request_id in ^request_ids
+      )
+    )
+
     Repo.delete_all(from(attempt in Attempt, where: attempt.request_id in ^request_ids))
     Repo.delete_all(from(request in Request, where: request.pool_id == ^pool_id))
     Repo.delete_all(from(circuit in RoutingCircuitState, where: circuit.pool_id == ^pool_id))

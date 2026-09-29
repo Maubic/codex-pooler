@@ -8,6 +8,7 @@ defmodule CodexPooler.Jobs.RuntimeStateCleanup do
   alias CodexPooler.Files
   alias CodexPooler.Gateway.Persistence.RuntimeCleanup
   alias CodexPooler.Platform.ExecutionTerminalProofs
+  alias CodexPooler.Platform.ForwardedGenerationEnds
   alias CodexPooler.Platform.InstancePresence
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
   alias CodexPooler.Upstreams.Reconciliation.AccountReconciliation
@@ -45,6 +46,7 @@ defmodule CodexPooler.Jobs.RuntimeStateCleanup do
       {:gateway_runtime, fn -> RuntimeCleanup.cleanup_expired_runtime_state(now) end},
       {:dead_executions, fn -> Accounting.recover_dead_execution_attempts(now) end},
       {:execution_proofs, fn -> ExecutionTerminalProofs.prune(now) end},
+      {:forwarded_generation_ends, fn -> ForwardedGenerationEnds.prune(now) end},
       {:instance_presence, fn -> InstancePresence.prune(now) end},
       {:catalog_sync_runs, fn -> Catalog.cleanup_stale_sync_runs(now) end},
       {:account_reconciliation, fn -> AccountReconciliation.cleanup_stale_state(now) end},

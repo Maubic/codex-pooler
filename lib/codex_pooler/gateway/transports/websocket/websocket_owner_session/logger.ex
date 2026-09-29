@@ -148,6 +148,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger 
     )
   end
 
+  # The end of a forwarded generation could not be recorded (findings#290).
+  @spec generation_end_not_recorded(map(), String.t(), term()) :: :ok
+  def generation_end_not_recorded(state, reason, failure) do
+    owner_event(:warning, "websocket owner could not record a forwarded generation end",
+      codex_session_id: state.codex_session_id,
+      owner_instance_id: state.owner_instance_id,
+      owner_pid: self(),
+      reason_code: reason,
+      failure: Metadata.safe_reason(failure)
+    )
+  end
+
   # The retry of a collected compaction whose socket had closed took it over
   # before that socket's own detach arrived, and was attached in its place
   # (findings#206 row 206-454).

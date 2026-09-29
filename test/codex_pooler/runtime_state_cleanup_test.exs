@@ -617,6 +617,7 @@ defmodule CodexPooler.RuntimeStateCleanupTest do
           :stale_reservations_released,
           :absent_instance_attempts_recovered,
           :instance_presence_rows_pruned,
+          :forwarded_generation_ends_pruned,
           :stale_catalog_sync_runs_failed,
           :stale_account_reconciliations_failed,
           :expired_quota_windows_pruned

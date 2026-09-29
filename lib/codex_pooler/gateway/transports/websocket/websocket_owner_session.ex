@@ -39,6 +39,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
   alias CodexPooler.Gateway.Websocket.DirectCleanup
   alias CodexPooler.Gateway.Websocket.OwnerCleanup
+  alias CodexPooler.Platform.ForwardedGenerationEnds
   alias CodexPooler.Platform.InstancePresence
 
   defmodule ForwardedSendWitnessState do
@@ -2861,6 +2862,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     case deliver_authorized_frame(state, payload) do
       :ok ->
         state
+        |> record_terminal_delivered_to_reattached(terminal?)
         |> maybe_complete_terminal_delivery(terminal?)
         |> continue_or_retire()
 
@@ -5245,6 +5247,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp cancel_unreachable_lost_turn(%{active_turn: active_turn} = state) do
     :ok = Logger.unreachable_lost_turn_cancelled(state)
     terminate_predecessor_task(active_turn)
+    :ok = record_generation_end(state, "lost_turn_cancelled_at_output")
     reply_active_turn(state, {:error, :client_disconnected})
 
     state
@@ -5255,12 +5258,38 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp cancel_turn_of_unreachable_downstream(%{active_turn: active_turn, downstream: downstream} = state) do
     :ok = Logger.unreachable_downstream_turn_cancelled(state, downstream)
     terminate_predecessor_task(active_turn)
+    :ok = record_generation_end(state, "unreachable_downstream_cancelled")
     reply_active_turn(state, {:error, :client_disconnected})
 
     state
     |> DownstreamState.cancel_active_turn_downstream(downstream, :client_disconnected)
     |> finish_active_turn({:error, :client_disconnected})
   end
+
+  # A turn lost to an unreachable node that a resend reattached to delivers
+  # its terminal to that socket, never to the attempt's executor on the
+  # unreachable node: that executor cannot settle the attempt as a success.
+  # A terminal delivered to the attempt's own socket is not recorded, since its
+  # executor may still settle it.
+  defp record_terminal_delivered_to_reattached(%{active_turn: %{lost_to_unreachable_node?: true, downstream: %{active_turn_reconnect?: true}}} = state, true) do
+    :ok = record_generation_end(state, "terminal_delivered_to_reattached")
+    state
+  end
+
+  defp record_terminal_delivered_to_reattached(state, _terminal?), do: state
+
+  # The end of a generation this owner served for an executor on another
+  # node, recorded as the evidence absent-instance recovery takes for a
+  # replaced pod (`ForwardedGenerationEnds`, findings#290). A failed write only
+  # leaves the attempt to the evidence it had before.
+  defp record_generation_end(%{active_turn: %{descriptor: %{attempt_id: attempt_id}}} = state, reason) when is_binary(attempt_id) do
+    case ForwardedGenerationEnds.record(attempt_id, reason) do
+      :ok -> :ok
+      {:error, failure} -> Logger.generation_end_not_recorded(state, reason, failure)
+    end
+  end
+
+  defp record_generation_end(_state, _reason), do: :ok
 
   defp suspend_replay_downstream(%{active_turn: %{descriptor: descriptor}} = state) do
     if state.active_turn.terminal_forwarded? or not is_nil(state.active_turn.pending_result) do

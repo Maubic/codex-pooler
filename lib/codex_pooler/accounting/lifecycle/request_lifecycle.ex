@@ -36,6 +36,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   alias CodexPooler.Gateway.Persistence.RuntimeCleanup
   alias CodexPooler.Platform.ExecutionIdentity
   alias CodexPooler.Platform.ExecutionTerminalProofs
+  alias CodexPooler.Platform.ForwardedGenerationEnds
   alias CodexPooler.Platform.InstancePresence
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
@@ -602,13 +603,17 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   # with failing heartbeat writes (findings#214). Exact death comes from a
   # reachable owner node reporting the execution gone, or, without BEAM
   # connectivity to the owner (the production worker topology, findings#207),
-  # from a successor publishing under the same node name or exclusive slot.
-  # A reachable owner reporting the execution alive vetoes both.
+  # from a successor publishing under the same node name or exclusive slot, or
+  # from the session owner that served a forwarded attempt recording that the
+  # generation ended where the executor could no longer settle it as a
+  # success (findings#290): a replaced pod comes back under no name or slot
+  # of its predecessor. A reachable owner reporting the execution alive
+  # vetoes all three.
   defp absent_execution_dead?(attempt, owner) do
     case ExecutionIdentity.status(attempt) do
       :dead -> true
       :alive -> false
-      :unknown -> InstancePresence.superseded?(owner)
+      :unknown -> InstancePresence.superseded?(owner) or ForwardedGenerationEnds.ended?(attempt)
     end
   end
 

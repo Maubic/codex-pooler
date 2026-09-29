@@ -84,6 +84,41 @@ defmodule CodexPooler.DBInvariantsTest do
     end
   end
 
+  test "forwarded generation ends stamp their end on the database clock and keep their prune index" do
+    id = Ecto.UUID.bingenerate()
+
+    assert %{num_rows: 1} =
+             Repo.query!(
+               """
+               INSERT INTO forwarded_generation_ends (attempt_id, owner_instance_id, owner_instance_boot_id, reason)
+               VALUES ($1, 'owner@example.invalid', 'synthetic-boot', 'unreachable_downstream_cancelled')
+               """,
+               [id]
+             )
+
+    assert %{rows: [[true]]} =
+             Repo.query!(
+               """
+               SELECT ended_at BETWEEN (statement_timestamp() AT TIME ZONE 'UTC') - interval '1 minute'
+                 AND (statement_timestamp() AT TIME ZONE 'UTC')
+               FROM forwarded_generation_ends WHERE attempt_id = $1
+               """,
+               [id]
+             )
+
+    assert {:error, %Postgrex.Error{postgres: %{code: :not_null_violation}}} =
+             Repo.query("UPDATE forwarded_generation_ends SET ended_at=NULL WHERE attempt_id=$1", [id], mode: :savepoint)
+
+    assert %{rows: [[true, true, true]]} =
+             Repo.query!("""
+             SELECT indisvalid,
+               pg_get_indexdef(indexrelid, 1, true) = 'ended_at',
+               pg_get_indexdef(indexrelid, 2, true) = 'attempt_id'
+             FROM pg_index
+             WHERE indexrelid = 'public.forwarded_generation_ends_ended_at_attempt_id_index'::regclass
+             """)
+  end
+
   test "saved-reset first-seen history defaults to the non-null empty version one ledger" do
     user = create_user!("saved-reset-default@example.com")
     identity = create_upstream_identity!(user, "saved-reset-default")
