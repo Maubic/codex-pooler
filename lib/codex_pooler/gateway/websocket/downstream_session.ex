@@ -814,6 +814,11 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
   # logged that at info, and the lease correctly stays with that turn.
   defp log_monitor_recovery({:error, :superseded_owner_cleanup}, _state, _reason), do: :ok
 
+  # A takeover released the lease this cleanup held (findings#270 row
+  # 270-313): the session is the new owner's, and its producer logged that
+  # at info.
+  defp log_monitor_recovery({:error, :taken_over_owner_cleanup}, _state, _reason), do: :ok
+
   defp log_monitor_recovery({:error, recovery_reason}, state, owner_reason) do
     Logger.warning(
       "websocket owner monitor recovery failed " <>
@@ -830,6 +835,7 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
   defp log_monitor_lease_release(:ok, _state, _reason), do: :ok
 
   defp log_monitor_lease_release({:error, :stale_owner}, _state, _reason), do: :ok
+  defp log_monitor_lease_release({:error, :taken_over_owner_cleanup}, _state, _reason), do: :ok
 
   defp log_monitor_lease_release({:error, release_reason}, state, owner_reason) do
     Logger.warning(
@@ -871,6 +877,7 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
   end
 
   defp log_detach_failure({:error, _reason}, _state, {:error, :superseded_owner_cleanup}), do: :ok
+  defp log_detach_failure({:error, _reason}, _state, {:error, :taken_over_owner_cleanup}), do: :ok
 
   defp log_detach_failure({:error, reason}, state, {:error, _recovery_failure}) do
     log_detach_failure({:error, reason}, state, :log_warning)
@@ -882,6 +889,9 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
   defp log_lifecycle_recovery_failure({:ok, _result} = result, _state), do: result
 
   defp log_lifecycle_recovery_failure({:error, :superseded_owner_cleanup} = result, _state),
+    do: result
+
+  defp log_lifecycle_recovery_failure({:error, :taken_over_owner_cleanup} = result, _state),
     do: result
 
   defp log_lifecycle_recovery_failure({:error, reason}, state) do
@@ -906,6 +916,18 @@ defmodule CodexPooler.Gateway.Websocket.DownstreamSession do
       "websocket interrupt cleanup superseded " <>
         "codex_session_id=#{codex_session_id(state)} " <>
         "cleanup_path=owner_detach reason_code=replacement_turn_active"
+    )
+
+    :ok
+  end
+
+  # A takeover released the lease the interrupt was bound to (findings#270 row
+  # 270-313): routine, as for a later running turn.
+  defp log_interrupt_failure({:error, :taken_over_owner_cleanup}, state) do
+    Logger.info(
+      "websocket interrupt cleanup superseded " <>
+        "codex_session_id=#{codex_session_id(state)} " <>
+        "cleanup_path=owner_detach reason_code=lease_taken_over"
     )
 
     :ok

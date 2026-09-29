@@ -11,8 +11,9 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
   alias CodexPooler.Accounting.RequestLifecycle.{DeadExecutionResendRecovery, TurnClaimRelease}
   alias CodexPooler.Accounting.RequestLogFacts
   alias CodexPooler.Gateway.Payloads.RequestOptions
-  alias CodexPooler.Gateway.Persistence.{CodexSession, CodexTurn}
+  alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn}
   alias CodexPooler.Gateway.Persistence.SessionContinuity
+  alias CodexPooler.Gateway.Persistence.StatusVocabulary.OwnerLease, as: OwnerLeaseStatus
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.Session, as: SessionStatus
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.Turn, as: TurnStatus
   alias CodexPooler.Gateway.Runtime.Finalization.InterruptionOutcome
@@ -626,7 +627,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
            SessionContinuity.release_owner_lease(session, state.owner_lease_token, reason, cause) do
       :ok
     else
-      _stale -> Repo.rollback(:stale_owner_cleanup)
+      _stale -> Repo.rollback(stale_cleanup_reason(state.codex_session_id, state.owner_lease_token))
     end
   end
 
@@ -780,11 +781,41 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
         # intended outcome, not a stale cleanup, so it gets its own reason and
         # the callers log it as routine rather than as a failure (findings#225).
         {:replacement_turn_active, true} -> Repo.rollback(:superseded_owner_cleanup)
-        _missing_or_stale -> Repo.rollback(:stale_owner_cleanup)
+        _missing_or_stale -> Repo.rollback(stale_cleanup_reason(session_id, witness_lease_token(witness)))
       end
     end)
     |> finalize_transaction()
   end
+
+  # A cleanup is stale when its lease is no longer the session's. When a
+  # takeover released that lease (a socket found the owner unavailable, or an
+  # HTTP request took an expired lease over), the owner went with it by
+  # design: the session belongs to the takeover's owner now, and the old
+  # owner's turn was settled by its socket's response task or is left to the
+  # new owner's orphan preflight. The cleanup then stands down as routine
+  # (findings#270 row 270-313: an owner killed by a new socket's reuse check
+  # left three to five warnings on every kill). Any other stale cleanup keeps
+  # its warning.
+  defp stale_cleanup_reason(session_id, owner_lease_token) do
+    if lease_taken_over?(session_id, owner_lease_token),
+      do: :taken_over_owner_cleanup,
+      else: :stale_owner_cleanup
+  end
+
+  defp lease_taken_over?(session_id, owner_lease_token) when is_binary(session_id) and is_binary(owner_lease_token) do
+    Repo.exists?(
+      from lease in BridgeOwnerLease,
+        where:
+          lease.codex_session_id == ^session_id and lease.lease_token == ^owner_lease_token and
+            lease.status == ^OwnerLeaseStatus.released_status() and
+            fragment("?->>'release_reason'", lease.metadata) in ["owner_unavailable_takeover", "expired_unrenewed_takeover"]
+    )
+  end
+
+  defp lease_taken_over?(_session_id, _owner_lease_token), do: false
+
+  defp witness_lease_token(%OwnerCleanup{owner_lease_token: token}), do: token
+  defp witness_lease_token(_witness), do: nil
 
   defp close_owner_replay!(request_id) do
     case Accounting.close_request_replay(request_id, :owner_shutdown) do
@@ -1488,6 +1519,17 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
         "codex_session_id=#{safe_log_value(session_id)} " <>
         "recovery_reason=#{safe_log_value(reason)} " <>
         "reason_code=replacement_turn_active"
+    )
+
+    :ok
+  end
+
+  defp log_owner_lifecycle_recovery_failure(session_id, reason, :taken_over_owner_cleanup) do
+    Logger.info(
+      "websocket owner lifecycle recovery superseded " <>
+        "codex_session_id=#{safe_log_value(session_id)} " <>
+        "recovery_reason=#{safe_log_value(reason)} " <>
+        "reason_code=lease_taken_over"
     )
 
     :ok

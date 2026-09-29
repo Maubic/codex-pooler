@@ -264,6 +264,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger 
     :ok
   end
 
+  # A takeover released the lease the owner held before it exited (findings#270
+  # row 270-313): the session is the new owner's, routine as well.
+  def owner_exit_persistence_failure(operation, state, owner_exit_reason, :taken_over_owner_cleanup) do
+    Logger.info(
+      "websocket owner exit persistence superseded " <>
+        "codex_session_id=#{safe_log_value(state.codex_session_id)} " <>
+        "operation=#{operation} " <>
+        "owner_exit_reason=#{owner_exit_reason} " <>
+        "reason_code=lease_taken_over"
+    )
+
+    :ok
+  end
+
   def owner_exit_persistence_failure(operation, state, owner_exit_reason, reason) do
     Logger.warning(
       "websocket owner exit persistence failed " <>

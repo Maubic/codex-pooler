@@ -1639,6 +1639,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
         &verified_task_exception?/3,
         &verified_dead_execution?/3,
         &verified_proven_owner_crash?/3,
+        &verified_proven_owner_crash_failure?/3,
         &verified_provider_terminal_failure?/3,
         &verified_latest_quota_rejection?/3,
         &verified_lifecycle_cut?/3,
@@ -1761,6 +1762,45 @@ defmodule CodexPooler.Accounting.ClientRetry do
        do: ExecutionTerminalProofs.terminal?(attempt)
 
   defp verified_proven_owner_crash?(_turn, _request, _attempt), do: false
+
+  # The same owner crash, settled by the socket's response task instead of
+  # the socket's crash cleanup: the task records the failure it was answered,
+  # 502 `owner_crashed`, on a failed turn. Whichever of the two reaches the
+  # rows first decides the shape; a plain crash landed here in about four
+  # cases out of nine, and after an owner killed by a new socket's reuse check
+  # (whose lease takeover leaves the crash cleanup stale) always
+  # (findings#270 row 270-313). The client's resend met `409 duplicate_turn`
+  # and its turn was lost. The executor's proven end admits it, as for the
+  # interrupted shape.
+  defp verified_proven_owner_crash_failure?(
+         %CodexTurn{
+           status: "failed",
+           error_code: "owner_crashed",
+           final_attempt_id: attempt_id,
+           transport_kind: "websocket",
+           completed_at: %DateTime{}
+         },
+         %Request{
+           status: "failed",
+           response_status_code: 502,
+           last_error_code: "owner_crashed",
+           usage_status: "usage_unknown",
+           completed_at: %DateTime{}
+         },
+         %Attempt{
+           id: attempt_id,
+           status: "failed",
+           network_error_code: "owner_crashed",
+           transport: "websocket",
+           replay_generation: 0,
+           usage_status: "usage_unknown",
+           completed_at: %DateTime{}
+         } = attempt
+       )
+       when is_binary(attempt_id),
+       do: ExecutionTerminalProofs.terminal?(attempt)
+
+  defp verified_proven_owner_crash_failure?(_turn, _request, _attempt), do: false
 
   # Only the provider's own terminal failure finalization writes this shape:
   # turn, request, and attempt failed together with the same provider code on
