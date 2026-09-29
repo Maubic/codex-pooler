@@ -175,16 +175,17 @@ defmodule CodexPoolerWeb.Runtime.SettlementTransactionHold do
   end
 
   @doc """
-  Waits until a socket's codex session lookup waits on the held settlement and
+  Waits until a resend's codex session lookup waits on the held settlement and
   returns the relation of the row it waits for.
 
-  A socket looks its codex session up by alias and locks the row, which the
-  held settlement locked first; the wait shows as that lookup holding a tuple
-  lock while it waits for the settler. `pg_stat_activity` pairs a live wait
-  with the backend's status snapshot, so a sample whose statement is not that
-  lookup is not the wait yet and is sampled again (findings#206 row 206-182).
-  Other writers wait on the held rows too (a closed socket's delivery receipt
-  on the attempt); only the lookup is a socket's.
+  A websocket or native HTTP resend looks its codex session up by alias and
+  locks the row, which the held settlement locked first; the wait shows as
+  that lookup holding a tuple lock while it waits for the settler.
+  `pg_stat_activity` pairs a live wait with the backend's status snapshot, so
+  a sample whose statement is not that lookup is not the wait yet and is
+  sampled again (findings#206 row 206-182). Other writers wait on the held
+  rows too (a closed socket's delivery receipt on the attempt); only the
+  lookup is the resend's.
   """
   @spec await_session_lookup_wait!(pid(), pos_integer()) :: String.t()
   def await_session_lookup_wait!(watcher, settler_backend) when is_integer(settler_backend) do
