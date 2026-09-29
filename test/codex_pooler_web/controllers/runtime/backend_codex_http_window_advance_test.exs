@@ -124,7 +124,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpWindowAdvanceTest do
     assert window_alias_session_ids(setup, "#{ids.thread}:#{window}") == [session.id]
   end
 
-  test "a resume whose previous window's session has lapsed opens its own session", %{conn: conn} do
+  test "a resume whose previous window's session has lapsed opens its own session and closes the lapsed one", %{conn: conn} do
     upstream = start_upstream(FakeUpstream.strict_sequence([turn_sse("resp_lapsed_open"), turn_sse("resp_lapsed_resume")]))
     setup = setup!(upstream, "full")
     ids = ids()
@@ -138,7 +138,46 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpWindowAdvanceTest do
     assert [_open, resumed] = pool_requests(setup)
     refute resumed.request_metadata["codex_session_id"] == session.id
     assert resumed.request_metadata["codex_session_key"] == window_session_key(ids.thread, 1)
-    assert window_alias_session_ids(setup, "#{ids.thread}:0") == [session.id]
+    assert %CodexSession{status: "closed"} = Repo.get!(CodexSession, session.id)
+    assert window_alias_session_ids(setup, "#{ids.thread}:0") == []
+  end
+
+  # The thread's session lapses after a compaction (no request for longer than
+  # the owner lease), and the next turn names the window the session reached
+  # only through its alias: the replacement session prefers the assignment the
+  # thread served on, as a lapse on the same window does (findings#270 row
+  # 270-282). Without a prompt cache key, and with the ring seeded towards the
+  # other assignment, only that preference keeps the turn where it was.
+  test "after the thread's session lapses, the next window's new session prefers its assignment", %{conn: conn} do
+    upstream = start_upstream(FakeUpstream.strict_sequence(upstream_responses(Enum.take(window_advance_requests(:remote), 3)) ++ [turn_sse("resp_lapse_next_turn")]))
+    other_upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_lapse_other"}))
+    setup = setup!(upstream, "full")
+    other = gateway_upstream(setup.pool, other_upstream, "synthetic-lapse-other-token", compact?: true)
+    prime_routing_quota!(other.identity)
+    ids = ids()
+
+    for {kind, input, window} <- Enum.take(window_advance_requests(:remote), 3) do
+      assert response(post_window(conn, setup, ids, kind, input, window, prompt_cache_key: false), 200)
+    end
+
+    assert [session] = pool_sessions(setup)
+    assert session.pool_upstream_assignment_id == setup.assignment.id
+    expire_owner_lease!(session.id)
+
+    setup = %{setup | model: put_model_source_assignments!(setup.model, [setup.assignment, other.assignment])}
+    use_routing_strategy!(setup.pool, "bridge_ring", 2)
+    seed = seed_preferring_assignment([setup.assignment.id, other.assignment.id], other.assignment.id)
+    next_turn = %{ids | turn: "turn-" <> unique_suffix()}
+    input = history() ++ [compaction_item("one"), assistant("done"), user("next task")]
+
+    assert response(post_window(conn, setup, next_turn, "turn", input, 1, prompt_cache_key: false, request_id: seed), 200)
+
+    assert FakeUpstream.count(upstream) == 4
+    assert FakeUpstream.count(other_upstream) == 0
+    assert %CodexSession{status: "closed"} = Repo.get!(CodexSession, session.id)
+    assert [_old, replacement] = Enum.sort_by(pool_sessions(setup), & &1.created_at, DateTime)
+    assert replacement.session_key == window_session_key(ids.thread, 1)
+    assert List.last(pool_requests(setup)).request_metadata["codex_session_id"] == replacement.id
   end
 
   # A file whose affinity names another assignment than the thread session's
@@ -218,7 +257,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpWindowAdvanceTest do
     ]
   end
 
-  defp post_window(conn, setup, ids, kind, input, window) do
+  defp post_window(conn, setup, ids, kind, input, window, opts \\ []) do
     document =
       %{
         "session_id" => ids.thread,
@@ -232,13 +271,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpWindowAdvanceTest do
       |> then(&if kind == "compaction", do: Map.put(&1, "compaction", compaction_metadata(input)), else: &1)
       |> CodexPooler.JSON.encode!()
 
-    payload = %{
-      "model" => setup.model.exposed_model_id,
-      "input" => input,
-      "stream" => true,
-      "prompt_cache_key" => ids.thread,
-      "client_metadata" => %{@metadata_key => document}
-    }
+    payload =
+      %{
+        "model" => setup.model.exposed_model_id,
+        "input" => input,
+        "stream" => true,
+        "client_metadata" => %{@metadata_key => document}
+      }
+      |> then(&if Keyword.get(opts, :prompt_cache_key, true), do: Map.put(&1, "prompt_cache_key", ids.thread), else: &1)
 
     conn
     |> recycle()
@@ -250,6 +290,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpWindowAdvanceTest do
     |> put_req_header("x-codex-window-id", "#{ids.thread}:#{window}")
     |> put_req_header(@metadata_key, document)
     |> put_req_header("originator", "codex_exec")
+    |> then(&if request_id = Keyword.get(opts, :request_id), do: put_req_header(&1, "x-request-id", request_id), else: &1)
     |> then(&if Map.get(setup, :serving_mode) == "lite", do: put_req_header(&1, @lite_header, "true"), else: &1)
     |> post("/backend-api/codex/responses", CodexPooler.JSON.encode!(payload))
   end

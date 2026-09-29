@@ -1510,10 +1510,12 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuityTest do
       assert start_http_window!(auth, "#{thread}:1").id == first.id
     end
 
-    test "a previous window whose session is expired or closed is left alone" do
+    # Never continued: a lapsed one is closed by the start that replaces it
+    # (findings#270 row 270-282), a closed one stays as it is.
+    test "a previous window whose session lapsed or closed is never continued" do
       auth = auth_fixture()
 
-      for ending <- [:lease_expired, :closed] do
+      for {ending, status_after, previous_aliases} <- [{:lease_expired, "closed", 0}, {:closed, "closed", 1}] do
         thread = window_thread()
         first = start_http_window!(auth, "#{thread}:0")
 
@@ -1527,8 +1529,10 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuityTest do
 
         refute next.id == first.id
         assert next.session_key == window_session_key("#{thread}:1")
-        assert Map.take(Repo.get!(CodexSession, first.id), [:status, :owner_lease_expires_at, :owner_lease_token]) == Map.take(ended, [:status, :owner_lease_expires_at, :owner_lease_token])
-        assert window_alias_session_ids(auth, "#{thread}:0") == [first.id]
+        after_next = Repo.get!(CodexSession, first.id)
+        assert {ending, after_next.status} == {ending, status_after}
+        assert Map.take(after_next, [:owner_lease_expires_at, :owner_lease_token]) == Map.take(ended, [:owner_lease_expires_at, :owner_lease_token])
+        assert length(window_alias_session_ids(auth, "#{thread}:0")) == previous_aliases
         assert window_alias_session_ids(auth, "#{thread}:1") == [next.id]
       end
     end
@@ -1572,6 +1576,86 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuityTest do
       assert {:ok, %CodexSession{} = translated} = SessionContinuity.start_codex_session(auth, v1)
       refute translated.id in [first.id, upgraded.id]
     end
+  end
+
+  # A window linked to another window's session (the previous-window fallback
+  # over HTTP, the frame window alias on the websocket) reaches that session
+  # through its alias, not by key. When the session's owner lease has lapsed,
+  # the start that replaces it closes it and prefers its assignment, as a
+  # lapse on the session's own key does (findings#270 row 270-282).
+  describe "lease-expiry recreation through a window alias" do
+    test "the replacement prefers the lapsed session's assignment however the window reached it" do
+      auth = auth_fixture()
+      %{assignment: assignment} = upstream_assignment_fixture(auth.pool)
+
+      scenarios = [
+        # The control: the window the session is keyed by.
+        same_window: {:http, fn _thread, _first -> :ok end, 0},
+        # The resume after a compaction continued the session, then it lapsed.
+        next_window: {:http, fn thread, _first -> start_http_window!(auth, "#{thread}:1") end, 1},
+        # The first request on the next window comes after the lapse.
+        first_on_next_window: {:http, fn _thread, _first -> :ok end, 1},
+        # A websocket frame named the next window on the socket (P115).
+        websocket_frame_alias: {:websocket, fn thread, first -> Aliases.point_frame_window_hash(first, auth, :crypto.hash(:sha256, "#{thread}:1")) end, 1}
+      ]
+
+      for {name, {transport, link, window}} <- scenarios do
+        thread = window_thread()
+        first = start_window!(auth, transport, "#{thread}:0")
+        link.(thread, first)
+        first |> Ecto.Changeset.change(%{pool_upstream_assignment_id: assignment.id}) |> Repo.update!()
+        expire_owner_lease!(first.id)
+
+        replacement = start_window!(auth, transport, "#{thread}:#{window}")
+
+        assert {name, replacement.id != first.id, replacement.recreated_from_assignment_id} == {name, true, assignment.id}
+        assert {name, Repo.get!(CodexSession, first.id).status} == {name, "closed"}
+        assert window_alias_session_ids(auth, "#{thread}:#{window}") == [replacement.id]
+        assert window_alias_session_ids(auth, "#{thread}:0") == if(window == 0, do: [replacement.id], else: [])
+      end
+    end
+
+    @tag :cross_key_window_session
+    test "another key's lapsed session is never closed and never donates its assignment" do
+      auth = auth_fixture()
+      %{assignment: assignment} = upstream_assignment_fixture(auth.pool)
+      %{api_key: other_key} = active_api_key_fixture(auth.pool, %{created_by_user_id: auth.pool.created_by_user_id})
+      other_auth = %{auth | api_key: other_key}
+      thread = window_thread()
+      first = start_http_window!(auth, "#{thread}:0")
+      assert start_http_window!(auth, "#{thread}:1").id == first.id
+      first |> Ecto.Changeset.change(%{pool_upstream_assignment_id: assignment.id}) |> Repo.update!()
+      expire_owner_lease!(first.id)
+
+      other = start_http_window!(other_auth, "#{thread}:1")
+
+      refute other.id == first.id
+      assert is_nil(other.recreated_from_assignment_id)
+      assert Repo.get!(CodexSession, first.id).status == "active"
+      assert window_alias_session_ids(auth, "#{thread}:1") == [first.id]
+      assert window_alias_session_ids(auth, "#{thread}:0") == [first.id]
+    end
+
+    test "a session whose lease is live is never closed through a window alias" do
+      auth = auth_fixture()
+      thread = window_thread()
+      first = start_http_window!(auth, "#{thread}:0")
+      assert start_http_window!(auth, "#{thread}:1").id == first.id
+
+      assert %{closed_count: 0, preferred_assignment_id: nil} =
+               ExpiredSessions.close_for_key_and_aliases!(auth.pool.id, auth.api_key.id, "unrelated-key", ["#{thread}:0", "#{thread}:1"], DateTime.utc_now())
+
+      assert Repo.get!(CodexSession, first.id).status == "active"
+      assert window_alias_session_ids(auth, "#{thread}:1") == [first.id]
+    end
+  end
+
+  defp start_window!(auth, :http, window), do: start_http_window!(auth, window)
+
+  defp start_window!(auth, :websocket, window) do
+    options = RequestOptions.for_websocket(%{session_header: window, session_header_source: "x-codex-window-id"})
+    assert {:ok, %CodexSession{} = session} = SessionContinuity.start_codex_session(auth, options)
+    session
   end
 
   defp window_thread, do: Ecto.UUID.generate()

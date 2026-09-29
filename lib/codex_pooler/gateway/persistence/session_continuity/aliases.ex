@@ -87,6 +87,20 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.Aliases do
     end
   end
 
+  @doc """
+  The `session_header` values through which a request's window reaches a
+  session: its own window or session header and, for a native HTTP request,
+  the previous window of its thread (findings#289). A start that finds no live
+  session closes the lease-expired session they lead to (findings#270 row
+  270-282).
+  """
+  @spec session_header_values(RequestOptions.t()) :: [String.t()]
+  def session_header_values(%RequestOptions{continuity: continuity} = opts) do
+    [blank_to_nil(continuity.session_header), ContinuityPayload.previous_window_session_header(opts)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
   # Read-only strict lookup for the saved-reset bypass proof: the anchor must
   # resolve through an alias that already exists (before this request registers
   # its own), to a session with a bound assignment. Mirrors the

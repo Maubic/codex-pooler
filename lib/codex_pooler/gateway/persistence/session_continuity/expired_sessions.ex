@@ -52,8 +52,29 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.ExpiredSessions do
   only, and a caller that cannot use it must fall through to ordinary ordering.
   """
   @spec close_for_key!(Ecto.UUID.t(), Ecto.UUID.t(), String.t(), DateTime.t()) :: result()
-  def close_for_key!(pool_id, api_key_id, session_key, %DateTime{} = now) do
-    expiring_sessions = lock_expired_sessions(pool_id, api_key_id, session_key, now)
+  def close_for_key!(pool_id, api_key_id, session_key, %DateTime{} = now),
+    do: close_for_key_and_aliases!(pool_id, api_key_id, session_key, [], now)
+
+  @doc """
+  `close_for_key!/4` over the sessions the request reaches through a
+  `session_header` alias of one of `session_header_values` as well: the
+  request's own window and, on native HTTP, the previous window of its thread.
+
+  A window linked to another window's session (the websocket frame alias of
+  findings#206 P115, or the previous-window fallback of findings#289) keeps
+  the alias, not the key, so a start on it after the owner lease expired found
+  nothing to close by key: the replacement softly preferred no assignment and
+  the expired session stayed `active` until the runtime sweep (findings#270
+  row 270-282). Both sets are locked in one statement, in session id order,
+  closed together, and the preference is picked over both. Only this API key's
+  sessions, reached through this key's aliases, and only sessions whose lease
+  has expired are ever closed.
+  """
+  @spec close_for_key_and_aliases!(Ecto.UUID.t(), Ecto.UUID.t(), String.t(), [String.t()], DateTime.t()) :: result()
+  def close_for_key_and_aliases!(pool_id, api_key_id, session_key, session_header_values, %DateTime{} = now)
+      when is_list(session_header_values) do
+    alias_hashes = Enum.map(session_header_values, &:crypto.hash(:sha256, &1))
+    expiring_sessions = lock_expired_sessions(pool_id, api_key_id, session_key, alias_hashes, now)
     session_ids = Enum.map(expiring_sessions, & &1.id)
 
     lock_active_leases!(session_ids)
@@ -86,13 +107,14 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.ExpiredSessions do
   rather than whatever physical order the scan returned. Missing timestamps
   rank last instead of raising.
 
-  More than one candidate is not reachable today: the partial unique index
-  `codex_sessions_pool_api_key_session_key_uq` admits at most one session per
-  `(pool_id, api_key_id, lower(session_key))` while its status is reconnectable, and only
-  reconnectable sessions are closed here. The ordering exists so a legacy row
-  or a future relaxation of that index still resolves deterministically, and it
-  is covered as a pure function because the index makes a multi-row database
-  fixture impossible to construct.
+  By key alone more than one candidate is not reachable: the partial unique
+  index `codex_sessions_pool_api_key_session_key_uq` admits at most one session
+  per `(pool_id, api_key_id, lower(session_key))` while its status is
+  reconnectable, and only reconnectable sessions are closed here. The sessions
+  a request reaches through its window aliases as well
+  (`close_for_key_and_aliases!/5`, findings#270 row 270-282) can add a second
+  one, and the ordering picks the freshest; it also keeps a legacy row
+  resolving deterministically, and it is covered as a pure function.
   """
   @spec preferred_assignment_id([session_snapshot()], Ecto.UUID.t() | nil) ::
           Ecto.UUID.t() | nil
@@ -129,15 +151,15 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.ExpiredSessions do
   defp recency(%DateTime{} = at), do: {1, DateTime.to_unix(at, :microsecond)}
   defp recency(_missing), do: {0, 0}
 
-  defp lock_expired_sessions(pool_id, api_key_id, session_key, now) do
+  defp lock_expired_sessions(pool_id, api_key_id, session_key, alias_hashes, now) do
     Repo.all(
       from session in CodexSession,
         where:
           session.pool_id == ^pool_id and session.api_key_id == ^api_key_id and
-            fragment("lower(?)", session.session_key) == ^String.downcase(session_key) and
             session.status in ^@session_reconnectable_statuses and
             not is_nil(session.owner_lease_expires_at) and
             session.owner_lease_expires_at <= ^now,
+        where: ^reached_by_key_or_alias(pool_id, api_key_id, session_key, alias_hashes, now),
         order_by: [asc: session.id],
         select: %{
           id: session.id,
@@ -148,6 +170,25 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.ExpiredSessions do
           created_at: session.created_at
         },
         lock: "FOR UPDATE"
+    )
+  end
+
+  defp reached_by_key_or_alias(_pool_id, _api_key_id, session_key, [], _now),
+    do: dynamic([session], fragment("lower(?)", session.session_key) == ^String.downcase(session_key))
+
+  defp reached_by_key_or_alias(pool_id, api_key_id, session_key, alias_hashes, now) do
+    aliased =
+      from alias_record in BridgeSessionAlias,
+        where:
+          alias_record.pool_id == ^pool_id and alias_record.api_key_id == ^api_key_id and
+            alias_record.alias_kind == "session_header" and alias_record.alias_hash in ^alias_hashes and
+            alias_record.status == ^@alias_active and alias_record.expires_at > ^now,
+        select: alias_record.codex_session_id
+
+    dynamic(
+      [session],
+      fragment("lower(?)", session.session_key) == ^String.downcase(session_key) or
+        session.id in subquery(aliased)
     )
   end
 

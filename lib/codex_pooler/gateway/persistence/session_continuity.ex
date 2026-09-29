@@ -472,16 +472,20 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
   # replacement should softly prefer when there is nothing to reuse. The
   # preference is produced by the same transaction and row locks that close the
   # lease-expired sessions, so the assignment cannot change underneath the
-  # insert that follows.
+  # insert that follows. The lease-expired sessions closed are the ones of
+  # this key the request reaches by its session key or through a window alias
+  # (findings#270 row 270-282), since a window linked to another window's
+  # session is keyed by that other window.
   defp existing_session_for_start!(auth, opts, session_key, now) do
     resolved_session = Aliases.resolved_session_for_update(auth, opts, session_key, now)
 
     preferred_assignment_id =
       if is_nil(resolved_session) do
-        ExpiredSessions.close_for_key!(
+        ExpiredSessions.close_for_key_and_aliases!(
           auth.pool.id,
           auth.api_key.id,
           session_key,
+          Aliases.session_header_values(opts),
           now
         ).preferred_assignment_id
       end
