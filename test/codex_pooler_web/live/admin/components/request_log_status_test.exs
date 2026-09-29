@@ -11,7 +11,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogStatusTest do
           {"succeeded", "Succeeded", "hero-check-circle", "text-success"},
           {"failed", "Failed", "hero-x-circle", "text-error"},
           {"rejected", "Rejected", "hero-shield-exclamation", "text-error"},
-          {"cancelled", "Cancelled", "hero-no-symbol", "text-warning"},
+          # Nothing writes the recorded `cancelled` status: it has no look of its own.
+          {"cancelled", "Cancelled", "hero-question-mark-circle", "text-base-content/65"},
           {nil, "Unknown", "hero-question-mark-circle", "text-base-content/65"}
         ] do
       latency = if status == "in_progress", do: nil, else: 19_100

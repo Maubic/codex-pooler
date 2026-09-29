@@ -484,7 +484,6 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetricsTest do
 
   defp response_status_code("succeeded"), do: 200
   defp response_status_code("rejected"), do: 429
-  defp response_status_code("cancelled"), do: 499
   defp response_status_code(_status), do: 502
 
   defp request_error_code("succeeded"), do: nil

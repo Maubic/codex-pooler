@@ -515,7 +515,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
   # Status icons, labels and failure details share one tone vocabulary.
   defp request_log_tone("succeeded"), do: "success"
   defp request_log_tone(status) when status in ["failed", "rejected"], do: "error"
-  defp request_log_tone(status) when status in ["cancelled", "client_cancelled"], do: "warning"
+  defp request_log_tone("client_cancelled"), do: "warning"
   defp request_log_tone("in_progress"), do: "info"
   defp request_log_tone(_status), do: nil
 end

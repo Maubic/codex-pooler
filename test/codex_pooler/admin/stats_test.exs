@@ -38,6 +38,13 @@ defmodule CodexPooler.Admin.StatsTest do
     assert Kpis.turn_kpi(buckets) == %{value: 21, succeeded: 12, failed: 5, in_progress: 4}
   end
 
+  # A turn has no rejected or cancelled status (`codex_turns_status_check`): only a
+  # failed or an interrupted turn is a failed one.
+  test "turn KPI counts as failed only the failed statuses a turn can have" do
+    buckets = [%{status: "failed", count: 3}, %{status: "interrupted", count: 2}, %{status: "rejected", count: 1}, %{status: "cancelled", count: 1}]
+    assert Kpis.turn_kpi(buckets).failed == 5
+  end
+
   test "top_api_keys/2 retains the ten highest-ranked API keys" do
     # Given
     pool = pool_fixture(%{name: "Leaderboard pool"})
@@ -545,11 +552,12 @@ defmodule CodexPooler.Admin.StatsTest do
                client_cancelled: 0,
                in_progress: 0
              },
+             # `cancelled` is a status nothing writes: an admitted request, and no outcome.
              %{
                bucket: ~U[2026-08-14 12:00:00.000000Z],
                requests: 4,
                succeeded: 0,
-               failed: 2,
+               failed: 1,
                client_cancelled: 0,
                in_progress: 1
              }
@@ -672,8 +680,9 @@ defmodule CodexPooler.Admin.StatsTest do
 
     assert length(recent_failures) == 5
 
+    # failure-3 is the `cancelled` request, a status nothing writes: no failure.
     assert Enum.map(recent_failures, & &1.error_code) ==
-             ["failure-6", "failure-5", "failure-4", "failure-3", "failure-2"]
+             ["failure-6", "failure-5", "failure-4", "failure-2", "failure-1"]
 
     assert Enum.all?(recent_failures, fn row ->
              Map.keys(row) |> Enum.sort() ==
@@ -699,7 +708,7 @@ defmodule CodexPooler.Admin.StatsTest do
       end)
 
     assert {:ok, dashboard} = dashboard_result
-    assert dashboard.kpis.requests == %{value: 9, succeeded: 1, failed: 6, client_cancelled: 0, in_progress: 1}
+    assert dashboard.kpis.requests == %{value: 9, succeeded: 1, failed: 5, client_cancelled: 0, in_progress: 1}
     assert dashboard.kpis.success_rate == %{value: 11.1, unit: "percent", client_cancelled: 0}
     assert dashboard.sources.requests == 9
     assert Enum.sum(Enum.map(dashboard.charts.requests, & &1.requests)) == 9

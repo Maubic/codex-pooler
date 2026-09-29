@@ -1,7 +1,7 @@
 defmodule CodexPoolerWeb.Admin.RequestLogsDisplay.Status do
   @moduledoc false
 
-  @status_options ~w(in_progress succeeded failed client_cancelled rejected cancelled)
+  @status_options ~w(in_progress succeeded failed client_cancelled rejected)
   # `failed` lists failures without the client cancellations, which have their
   # own option (`RequestOutcome`); the menu says so where the choice is made.
   @status_option_details %{
@@ -28,11 +28,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay.Status do
       icon: "hero-shield-exclamation",
       icon_class: "mx-auto size-5 text-error",
       filter_icon_color: "text-error"
-    },
-    "cancelled" => %{
-      icon: "hero-no-symbol",
-      icon_class: "mx-auto size-5 text-warning",
-      filter_icon_color: "text-warning"
     },
     "client_cancelled" => %{
       icon: "hero-stop-circle",
@@ -83,7 +78,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay.Status do
     %{label: model_filter_label(model), value: model || "", icon: "hero-cpu-chip"}
   end
 
-  # Leads with "Client" so it never reads as the recorded `cancelled` status.
   def status_label("client_cancelled"), do: "Client cancelled"
   def status_label(status), do: status |> String.replace("_", " ") |> String.capitalize()
 

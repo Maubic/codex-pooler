@@ -10,7 +10,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
 
-  @request_failed_statuses ~w(failed rejected interrupted cancelled)
+  @request_failed_statuses ~w(failed rejected)
   @request_terminal_statuses ["succeeded" | @request_failed_statuses]
   # A share of failed upstream calls is expected in normal operation; request
   # posture only escalates to degraded above this 24h failure-rate percentage.

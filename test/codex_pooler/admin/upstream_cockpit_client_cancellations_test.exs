@@ -92,6 +92,24 @@ defmodule CodexPooler.Admin.UpstreamCockpitClientCancellationsTest do
     assert request_health.kpis.error_breakdown_24h == []
   end
 
+  # `cancelled` is a status the database permits and nothing writes: no request
+  # ever carried it, so the cockpit neither counts it nor lists it as a failure.
+  test "a request recorded with the cancelled status nothing writes is not part of the request health",
+       %{scope: scope, identity: identity, fixture: fixture, now: now} do
+    admitted_at = DateTime.add(now, -1, :hour)
+
+    insert_request!(fixture, %{status: "succeeded", admitted_at: admitted_at})
+    insert_request!(fixture, %{status: "cancelled", admitted_at: admitted_at, response_status_code: 499})
+
+    request_health = UpstreamCockpitMetrics.request_health(scope, identity, now)
+
+    assert request_health.kpis.total_requests_24h == 1
+    assert request_health.kpis.failed_requests_24h == 0
+    assert request_health.state == "healthy"
+    assert Enum.find(request_health.items, &(&1.date == Date.to_iso8601(DateTime.to_date(admitted_at)))).failure_count == 0
+    assert %{rows: []} = UpstreamCockpitMetrics.recent_request_events(scope, identity, 10)
+  end
+
   test "recent events keep a client cancellation only when it was retried", %{scope: scope, identity: identity, fixture: fixture, now: now} do
     plain = insert_request!(fixture, %{status: "failed", admitted_at: DateTime.add(now, -30, :second), transport: "websocket", response_status_code: 499, last_error_code: "client_disconnected"})
     drained = insert_request!(fixture, %{status: "failed", admitted_at: DateTime.add(now, -1, :minute), transport: "websocket", response_status_code: 499, last_error_code: "owner_drained"})

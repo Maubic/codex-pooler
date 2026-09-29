@@ -62,7 +62,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Issues do
   end
 
   defp error_text_class(status) when status in ["failed", "rejected"], do: "text-error"
-  defp error_text_class(status) when status in ["cancelled", "client_cancelled"], do: "text-warning"
+  defp error_text_class("client_cancelled"), do: "text-warning"
   defp error_text_class(_status), do: "text-base-content/65"
 
   # A client cancellation's code is not a failure: its marker takes the row's

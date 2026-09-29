@@ -55,7 +55,7 @@ Primary filters are:
     </tr>
     <tr>
       <td>Status</td>
-      <td>Limits rows by the status each row shows: in progress, succeeded, failed, client cancelled, rejected, or cancelled. <code>Failed</code> leaves out the requests the client cancelled, and the menu says so; choose <code>Client cancelled</code> to list those, or <code>Any status</code> to see both.</td>
+      <td>Limits rows by the status each row shows: in progress, succeeded, failed, client cancelled, or rejected. <code>Failed</code> leaves out the requests the client cancelled, and the menu says so; choose <code>Client cancelled</code> to list those, or <code>Any status</code> to see both.</td>
     </tr>
     <tr>
       <td>Upstream account</td>
@@ -129,7 +129,7 @@ OpenAI Responses `response.incomplete` can be a successful delivered terminal re
 
 ### Client cancelled
 
-A request whose client closed the connection before the response finished is recorded as failed with the error code `client_disconnected` and shown as `Client cancelled`. It is a display class, not a recorded status: the request keeps its recorded status `failed`, and the separate `Cancelled` status filter is unrelated. Clients do this on purpose: Codex interrupts a stream to send the next request when new input is waiting, and agents cancel parallel calls they no longer need. A proxy or network path that closes the connection between the client and Codex Pooler looks the same. None of it says anything about the upstream account, so the class is kept apart everywhere failures are counted:
+A request whose client closed the connection before the response finished is recorded as failed with the error code `client_disconnected` and shown as `Client cancelled`. It is a display class, not a recorded status: the request keeps its recorded status `failed`. Clients do this on purpose: Codex interrupts a stream to send the next request when new input is waiting, and agents cancel parallel calls they no longer need. A proxy or network path that closes the connection between the client and Codex Pooler looks the same. None of it says anything about the upstream account, so the class is kept apart everywhere failures are counted:
 
 1. the upstream cockpit counts it on its own, outside the failed requests, the failure rate and the degraded state
 2. the Stats page shows it next to the succeeded and failed counts and leaves it out of the success rate

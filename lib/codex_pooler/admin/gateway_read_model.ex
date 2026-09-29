@@ -10,7 +10,7 @@ defmodule CodexPooler.Admin.GatewayReadModel do
   alias CodexPooler.Repo
 
   @type bucket_granularity :: :hour | :day
-  @failed_request_statuses ~w(failed rejected interrupted cancelled)
+  @failed_request_statuses ~w(failed rejected)
 
   @spec requests_for_pool_ids([Ecto.UUID.t()], DateTime.t(), DateTime.t()) :: [map()]
   def requests_for_pool_ids([], _started_at, _ended_at), do: []

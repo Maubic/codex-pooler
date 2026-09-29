@@ -890,7 +890,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
       request_log_fixture(second_pool, %{
         correlation_id: "req-custom-filter-second",
         requested_model: "gpt-custom-second",
-        status: "cancelled"
+        status: "rejected"
       })
 
     %{request: older_request} =
@@ -1014,12 +1014,15 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
     assert has_element?(view, "#request-log-status-filter [data-role='status-filter-trigger']")
     refute has_element?(view, "select#filters_status")
 
-    for status <- ~w(in_progress succeeded failed rejected cancelled) do
+    for status <- ~w(in_progress succeeded failed rejected) do
       assert has_element?(
                view,
                "#request-log-status-filter [data-role='status-filter-option'][data-status='#{status}'] [data-role='status-filter-icon']"
              )
     end
+
+    # The recorded `cancelled` status has no option: nothing writes it, so it would always list nothing.
+    refute has_element?(view, "#request-log-status-filter [data-role='status-filter-option'][data-status='cancelled']")
 
     assert has_element?(view, "#filters_model[type='hidden']")
     assert has_element?(view, "#request-log-model-filter [data-role='model-filter-trigger']")

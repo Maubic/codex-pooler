@@ -35,7 +35,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawer.Format do
   def status_chip_class("rejected"),
     do: "inline-flex items-center rounded-full border border-error/20 bg-error/10 px-2.5 py-1 text-xs font-medium leading-none text-error"
 
-  def status_chip_class(status) when status in ["cancelled", "client_cancelled"],
+  def status_chip_class("client_cancelled"),
     do: "inline-flex items-center rounded-full border border-warning/20 bg-warning/10 px-2.5 py-1 text-xs font-medium leading-none text-warning"
 
   def status_chip_class("in_progress"),

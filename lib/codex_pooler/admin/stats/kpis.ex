@@ -3,7 +3,9 @@ defmodule CodexPooler.Admin.Stats.Kpis do
 
   alias CodexPooler.Admin.Stats.Aggregates
 
-  @failed_statuses ~w(failed rejected interrupted cancelled)
+  # A turn has no rejected or cancelled status (`codex_turns_status_check`): a
+  # failed turn is a failed or an interrupted one.
+  @failed_turn_statuses ~w(failed interrupted)
 
   @type cache_rate_kpi :: %{
           value: float() | nil,
@@ -107,7 +109,7 @@ defmodule CodexPooler.Admin.Stats.Kpis do
     %{
       value: Enum.sum(Enum.map(turns, & &1.count)),
       succeeded: turn_count(turns, ["succeeded"]),
-      failed: turn_count(turns, @failed_statuses),
+      failed: turn_count(turns, @failed_turn_statuses),
       in_progress: turn_count(turns, ["in_progress"])
     }
   end

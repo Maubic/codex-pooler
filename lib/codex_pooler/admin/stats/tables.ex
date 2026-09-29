@@ -5,7 +5,6 @@ defmodule CodexPooler.Admin.Stats.Tables do
   alias CodexPooler.Admin.Stats.Aggregates
   alias CodexPooler.Upstreams.Quota.ReadModel, as: QuotaReadModel
 
-  @failed_statuses ~w(failed rejected interrupted cancelled)
   @leaderboard_limit 10
 
   @spec top_api_keys([map()], [map()]) :: [map()]
@@ -97,26 +96,6 @@ defmodule CodexPooler.Admin.Stats.Tables do
   defp upstream_lifecycle_state(_account, [_ | _]), do: :current
   defp upstream_lifecycle_state(%{upstream_status: "deleted"}, []), do: :deleted
   defp upstream_lifecycle_state(_account, []), do: :removed
-
-  @spec recent_failures([map()]) :: [map()]
-  def recent_failures(requests) do
-    requests
-    |> Enum.filter(&(&1.status in @failed_statuses))
-    |> Enum.take(5)
-    |> Enum.map(fn request ->
-      %{
-        id: request.id,
-        pool_id: request.pool_id,
-        requested_model: request.requested_model,
-        endpoint: request.endpoint,
-        transport: request.transport,
-        status: request.status,
-        error_code: request.last_error_code,
-        response_status_code: request.response_status_code,
-        admitted_at: request.admitted_at
-      }
-    end)
-  end
 
   @spec daily_rollup_table([map()]) :: [map()]
   def daily_rollup_table(rollups) do

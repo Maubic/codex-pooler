@@ -49,6 +49,29 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitClientCancellationsLiveTest do
     refute has_element?(view, "#upstream-event-summary-rows", "client_disconnected")
   end
 
+  # `cancelled` is a status the database permits and nothing writes, so it is no
+  # failure: such a request reaches the recent activity only for its retry.
+  test "recent activity shows a retried request recorded with the cancelled status nothing writes as retried, not failed", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "cockpit-cancelled-status-live-#{System.unique_integer([:positive])}", name: "Cockpit Cancelled Status"})
+    %{identity: identity, assignment: assignment} = upstream_assignment_fixture(pool, %{account_label: "Cancelled status cockpit"})
+    %{api_key: api_key} = active_api_key_fixture(pool)
+    fixture = %{pool: pool, api_key: api_key, assignment: assignment}
+    admitted_at = DateTime.utc_now() |> DateTime.truncate(:microsecond) |> DateTime.add(-5, :minute)
+
+    fixture
+    |> insert_request!(%{status: "cancelled", admitted_at: admitted_at, response_status_code: nil})
+    |> attempt_fixture(assignment, %{attempt_number: 2, status: "failed"})
+    |> Ecto.Changeset.change(%{started_at: DateTime.add(admitted_at, 2, :second)})
+    |> Repo.update!()
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+    _ = render_async(view, 5_000)
+
+    assert has_element?(view, "#upstream-event-summary-rows [data-role='recent-event-title']", "Request retried")
+    refute has_element?(view, "#upstream-event-summary-rows", "Request failed")
+    refute has_element?(view, "#upstream-event-summary-rows", "after retry")
+  end
+
   defp insert_request!(%{pool: pool, api_key: api_key, assignment: assignment}, attrs) do
     admitted_at = Map.fetch!(attrs, :admitted_at)
     completed_at = DateTime.add(admitted_at, 1, :second)

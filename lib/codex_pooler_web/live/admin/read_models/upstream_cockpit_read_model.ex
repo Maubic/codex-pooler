@@ -20,7 +20,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
   @reactivatable_statuses ~w(paused refresh_due refresh_failed)
   @recovery_statuses ~w(paused refresh_due refresh_failed reauth_required)
   @usable_refresh_statuses ~w(succeeded imported refreshing)
-  @request_failed_statuses ~w(failed rejected interrupted cancelled)
+  @request_failed_statuses ~w(failed rejected)
   @recent_event_limit 8
   @recent_event_prefetch_limit 32
   @oauth_terminal_statuses ~w(failed expired cancelled)

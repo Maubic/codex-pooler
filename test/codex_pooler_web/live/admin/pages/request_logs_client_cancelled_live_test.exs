@@ -58,9 +58,9 @@ defmodule CodexPoolerWeb.Admin.RequestLogsClientCancelledLiveTest do
 
     assert has_element?(view, "#request-log-status-filter [data-role='status-filter-option'][data-status='client_cancelled']", "Client cancelled")
     assert has_element?(view, "#request-log-status-filter [data-role='status-filter-option'][data-status='client_cancelled'] .hero-stop-circle")
-    # The class is not the recorded `cancelled` status, whose option stays as it was.
+    # Nothing writes the recorded `cancelled` status, so it has no option next to the class.
     refute has_element?(view, "#request-log-status-filter [data-role='status-filter-option'][data-status='client_cancelled']", "Cancelled")
-    assert has_element?(view, "#request-log-status-filter [data-role='status-filter-option'][data-status='cancelled'] .hero-no-symbol")
+    refute has_element?(view, "#request-log-status-filter [data-role='status-filter-option'][data-status='cancelled']")
     assert has_element?(view, "#request-log-status-filter [data-role='status-filter-option'][data-status='failed'] [data-role='status-filter-option-detail']", "excl. client cancelled")
 
     view
@@ -88,6 +88,36 @@ defmodule CodexPoolerWeb.Admin.RequestLogsClientCancelledLiveTest do
     {:ok, any_view, _html} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}")
     assert listed(any_view, rows) == [:cancelled_stream, :cancelled_websocket, :drained, :recovered, :succeeded]
     refute has_element?(any_view, "#request-log-status-filter [data-role='status-filter-detail']")
+  end
+
+  test "the recorded cancelled status is not a filter value any more", %{conn: conn, pool: pool} do
+    {:ok, view, _html} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}&status=cancelled")
+
+    assert has_element?(view, "#request-log-filter-errors", "Status filter is not supported")
+  end
+
+  # The recorded `cancelled` status is permitted by the database and written by
+  # nothing: a row that carried it would look like any status the page does not
+  # know, with no warning tone of its own.
+  test "a request recorded with the cancelled status nothing writes has no tone of its own", %{conn: conn, pool: pool} do
+    %{api_key: api_key} = active_api_key_fixture(pool)
+    %{assignment: assignment} = upstream_assignment_fixture(pool, %{account_label: "Recorded cancelled upstream"})
+    request = log_row!(%{pool: pool, api_key: api_key, assignment: assignment}, %{status: "cancelled", last_error_code: "request_cancelled", response_status_code: 499})
+
+    {:ok, view, _html} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}&request_id=#{request.id}")
+
+    row = "#request-log-row-#{request.id}"
+    assert has_element?(view, "#{row} [data-role='status-text']", "Cancelled")
+    refute has_element?(view, "#{row} [data-role='status-text'].text-warning")
+    refute has_element?(view, "#{row} [data-role='status-icon'] .hero-no-symbol")
+    assert has_element?(view, "#request-log-#{request.id}-errors", "request_cancelled")
+    refute has_element?(view, "#request-log-#{request.id}-errors.text-warning")
+
+    render_click(element(view, "#request-log-#{request.id}-open-details"))
+    _ = assert_patch(view)
+
+    assert has_element?(view, "#request-log-detail-sidebar header span", "Cancelled")
+    refute has_element?(view, "#request-log-detail-sidebar header span.text-warning")
   end
 
   test "the detail drawer names the class and the status it was recorded with", %{conn: conn, pool: pool, rows: rows} do

@@ -3368,9 +3368,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     })
 
     request_health_request_fixture(pool, assignment, %{
-      status: "cancelled",
+      status: "rejected",
       admitted_at: DateTime.add(now, -2, :hour),
-      correlation_id: "failure-request-health-cancelled"
+      correlation_id: "failure-request-health-rejected"
     })
 
     assert {:ok, cockpit} = UpstreamCockpitReadModel.load_visible(scope, identity.id)
@@ -6131,12 +6131,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
 
   defp response_status_code("succeeded"), do: 200
   defp response_status_code("rejected"), do: 403
-  defp response_status_code("cancelled"), do: 499
   defp response_status_code(_status), do: 502
 
   defp request_error_code("succeeded"), do: nil
   defp request_error_code("rejected"), do: "request_rejected"
-  defp request_error_code("cancelled"), do: "request_cancelled"
   defp request_error_code(_status), do: "upstream_request_failed"
 
   defp quota_cockpit!(scope, slug_suffix, quota_windows) do
