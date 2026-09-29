@@ -11,45 +11,64 @@ defmodule CodexPooler.Accounting.TokenWindowEdgePlanTest do
   # Larger fixtures mostly measure accounting trigger work during insertion.
   @retained_histories 500
 
+  # The tables the window query reads, with their indexes.
+  @tables ["ledger_entries", "api_key_usage_buckets", "requests", "attempts"]
+
   setup tags do
-    if tags[:statistics] == :empty do
-      # Prime a physical page, then roll back its rows: unlike a pristine
-      # zero-page table, this makes zero-row statistics underestimate bulk data.
-      assert {:error, :primed} =
-               Repo.transaction(fn ->
-                 fixture = accounting_setup()
-
-                 Repo.query!(
-                   """
-                   WITH request AS (
-                     INSERT INTO requests(pool_id,api_key_id,requested_model,endpoint,transport,correlation_id,admitted_at)
-                     VALUES ($1,$2,'synthetic-model','/v1/responses','http_json',gen_random_uuid()::text,$3)
-                     RETURNING id,pool_id,api_key_id,admitted_at
-                   )
-                   INSERT INTO ledger_entries(pool_id,api_key_id,request_id,entry_kind,usage_status,total_tokens,request_count,occurred_at,transport)
-                   SELECT pool_id,api_key_id,id,'reservation','usage_pending',512,1,admitted_at,'http_json' FROM request
-                   """,
-                   [
-                     Ecto.UUID.dump!(fixture.pool.id),
-                     Ecto.UUID.dump!(fixture.api_key.id),
-                     ~U[2026-09-21 12:00:30.000000Z]
-                   ]
-                 )
-
-                 Repo.rollback(:primed)
-               end)
-
-      analyze_tables()
-
-      assert [[tuples, pages]] =
-               Repo.query!("SELECT reltuples,relpages FROM pg_class WHERE oid='ledger_entries'::regclass").rows
-
-      assert tuples == 0
-      assert pages > 0
+    case tags[:statistics] do
+      :empty -> put_statistics!(:empty)
+      # The analyzed arm starts from missing statistics too, so its ANALYZE
+      # writes over this transaction's own version of each `pg_class` row and
+      # its counts go with the rollback.
+      statistics when statistics in [:missing, :analyzed] -> put_statistics!(:missing)
+      nil -> :ok
     end
 
     stats("before_seed")
     :ok
+  end
+
+  # The statistics a plan is measured under are written in the test's own
+  # transaction, never inherited. An ANALYZE inside an earlier test's
+  # rolled-back transaction keeps its `pg_class` row and page counts, and the
+  # scheduled analyze and vacuum sample and truncate what other tests left.
+  # Counts of about ten rows (9 over 46 pages, as a partition run left them)
+  # over a ledger heap the vacuum had truncated to a few dozen pages, with
+  # indexes still grown by earlier tests' rolled-back rows, made every range
+  # lookup here a sequential scan of that small heap, its cheapest plan
+  # (findings#270 row 270-321).
+  #
+  # Missing: nobody analyzed the tables yet (a new database, or right after a
+  # restore). Empty: statistics taken while the tables were empty, over
+  # physical pages, so they underestimate bulk data.
+  defp put_statistics!(:missing) do
+    for relation <- relations(), do: Repo.query!("SELECT pg_clear_relation_stats('public', $1)", [relation])
+    clear_attribute_statistics!()
+
+    assert %{rows: [[0, true]]} =
+             Repo.query!("SELECT (SELECT count(*) FROM pg_stats WHERE schemaname = 'public' AND tablename = ANY($1)), bool_and(reltuples = -1) FROM pg_class WHERE relname = ANY($2) AND relnamespace = 'public'::regnamespace", [@tables, relations()])
+  end
+
+  defp put_statistics!(:empty) do
+    for relation <- relations() do
+      Repo.query!("SELECT pg_restore_relation_stats('schemaname', 'public', 'relname', $1::text, 'reltuples', 0::real, 'relpages', 1::integer, 'relallvisible', 0::integer)", [relation])
+    end
+
+    clear_attribute_statistics!()
+
+    assert %{rows: [[0, true]]} =
+             Repo.query!("SELECT (SELECT count(*) FROM pg_stats WHERE schemaname = 'public' AND tablename = ANY($1)), bool_and(reltuples = 0 AND relpages > 0) FROM pg_class WHERE relname = ANY($2) AND relnamespace = 'public'::regnamespace", [@tables, relations()])
+  end
+
+  defp relations do
+    %{rows: rows} = Repo.query!("SELECT indexrelid::regclass::text FROM pg_index WHERE indrelid = ANY($1::text[]::regclass[])", [Enum.map(@tables, &("public." <> &1))])
+    @tables ++ Enum.map(rows, fn [index] -> String.replace_prefix(index, "public.", "") end)
+  end
+
+  defp clear_attribute_statistics! do
+    for table <- @tables do
+      Repo.query!("SELECT pg_clear_attribute_stats('public', $1, attname, false) FROM pg_attribute WHERE attrelid = $1::text::regclass AND attnum > 0 AND NOT attisdropped", [table])
+    end
   end
 
   defp stats(stage) do
@@ -71,7 +90,7 @@ defmodule CodexPooler.Accounting.TokenWindowEdgePlanTest do
     end
   end
 
-  for statistics <- [:fresh, :empty, :analyzed] do
+  for statistics <- [:missing, :empty, :analyzed] do
     @tag statistics: statistics
     test "#{statistics} current-minute histories use a set projection with no per-request event function",
          %{statistics: statistics} do
@@ -145,7 +164,7 @@ defmodule CodexPooler.Accounting.TokenWindowEdgePlanTest do
         TestDiagnostics.puts("edge_plan join_filter_comparisons=#{comparisons}")
 
         assert comparisons < 10_000,
-               "fresh-table edge projection must not compare every terminal with every reservation"
+               "edge projection must not compare every terminal with every reservation"
 
         edge_history = Enum.find(nodes, &(&1["Subplan Name"] == "CTE edge_history"))
 
@@ -165,7 +184,7 @@ defmodule CodexPooler.Accounting.TokenWindowEdgePlanTest do
     end
   end
 
-  for boundary <- [:none, :few], statistics <- [:fresh, :empty] do
+  for boundary <- [:none, :few], statistics <- [:missing, :empty] do
     @tag boundary: boundary, statistics: statistics
     test "#{statistics} #{boundary} excluded boundaries stay bounded with retained finalized histories",
          %{
