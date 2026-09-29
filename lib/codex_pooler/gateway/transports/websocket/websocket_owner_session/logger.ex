@@ -26,12 +26,43 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger 
     )
   end
 
-  @spec owner_stale_replaced(pid(), keyword()) :: :ok
-  def owner_stale_replaced(pid, opts) do
+  # `reuse_reason`: the owner answered as unfit (`answered_stale`), exited
+  # during the check (`owner_exited`), or did not answer in time and holds a
+  # lease the socket replaced (`lease_replaced`), has not started a renewal
+  # for longer than the lease TTL (`unresponsive`), or is registered with a
+  # value no owner writes (`unrecognized_registration`).
+  @spec owner_stale_replaced(pid(), keyword(), atom()) :: :ok
+  def owner_stale_replaced(pid, opts, reuse_reason) do
     owner_event(:info, "websocket owner stale replaced",
       codex_session_id: Keyword.get(opts, :codex_session_id),
       owner_instance_id: Keyword.get(opts, :owner_instance_id),
       owner_pid: pid,
+      reuse_reason: reuse_reason,
+      request_id: Keyword.get(opts, :request_id)
+    )
+  end
+
+  # A live owner that did not answer the reuse check within its call budget
+  # stays in place; the socket gets `owner_forward_timeout`
+  # (findings#285 row 270-247). The age is `none` for an owner still starting.
+  @spec owner_busy_left(pid(), keyword(), non_neg_integer() | nil) :: :ok
+  def owner_busy_left(pid, opts, last_renewal_age_ms) do
+    owner_event(:info, "websocket owner busy left in place",
+      codex_session_id: Keyword.get(opts, :codex_session_id),
+      owner_instance_id: Keyword.get(opts, :owner_instance_id),
+      owner_pid: pid,
+      owner_last_renewal_age_ms: last_renewal_age_ms || :none,
+      request_id: Keyword.get(opts, :request_id)
+    )
+  end
+
+  @spec owner_stale_killed(pid(), keyword(), pos_integer()) :: :ok
+  def owner_stale_killed(pid, opts, stop_budget_ms) do
+    owner_event(:warning, "websocket owner killed after its stop budget",
+      codex_session_id: Keyword.get(opts, :codex_session_id),
+      owner_instance_id: Keyword.get(opts, :owner_instance_id),
+      owner_pid: pid,
+      stop_budget_ms: stop_budget_ms,
       request_id: Keyword.get(opts, :request_id)
     )
   end

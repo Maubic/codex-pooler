@@ -112,6 +112,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     :drain_settlement,
     :drain_replies,
     :forwarded_terminal_request_id,
+    owner_registry: @registry,
     terminal_delivery_timeout_ms: @terminal_delivery_timeout_ms,
     provisional_issuances: [],
     pending_admissions: %{},
@@ -155,6 +156,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   # An owner is registered before its `init/1` runs and marks itself ready
   # once its upstream has started, the last step of `init/1`; a call sent
   # before then waits for the whole start (findings#206 row 206-216).
+  #
+  # The ready value is `{:ready, lease_digest, last_renewal_monotonic_ms}`:
+  # the SHA-256 digest of the lease token the owner holds (its OTP status
+  # keeps the token itself out of every report), and when it last started a
+  # lease renewal, in milliseconds of this VM's monotonic clock. The owner
+  # writes it when it becomes ready and at every renewal tick. It answers for
+  # an owner that does not answer its status call in time
+  # (`owner_reuse_status/2`, findings#285 row 270-247); it never grants
+  # ownership, which stays with the lease in the database. Every other reader
+  # stays value-agnostic, apart from the `:starting` checks.
   @registry_starting :starting
   @registry_ready :ready
 
@@ -218,20 +229,37 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
         start_owner(opts, attempts - 1)
 
       true ->
-        case owner_reuse_status(pid, opts) do
-          :draining ->
-            {:error, :owner_drained}
+        reuse_or_replace(owner_reuse_status(pid, opts), pid, opts, attempts)
+    end
+  end
 
-          :reusable ->
-            Logger.owner_reused(pid, opts)
-            {:ok, pid, :existing}
+  defp reuse_or_replace(:draining, _pid, _opts, _attempts), do: {:error, :owner_drained}
 
-          :stale ->
-            Logger.owner_stale_replaced(pid, opts)
-            :ok = stop_stale_owner(pid)
-            :erlang.yield()
-            start_owner(opts, attempts - 1)
-        end
+  defp reuse_or_replace(:reusable, pid, opts, _attempts) do
+    Logger.owner_reused(pid, opts)
+    {:ok, pid, :existing}
+  end
+
+  defp reuse_or_replace({:busy, last_renewal_age_ms}, pid, opts, _attempts) do
+    Logger.owner_busy_left(pid, opts, last_renewal_age_ms)
+    {:error, :owner_forward_timeout}
+  end
+
+  defp reuse_or_replace({:stale, reuse_reason}, pid, opts, attempts) do
+    Logger.owner_stale_replaced(pid, opts, reuse_reason)
+
+    case stop_stale_owner(pid, opts) do
+      :stopped ->
+        :erlang.yield()
+        start_owner(opts, attempts - 1)
+
+      # A killed owner runs no `terminate/2`, so a socket attached to it takes
+      # it for crashed and releases its lease. That is the lease a new owner
+      # started here would share. The session goes through the takeover that
+      # replaces an unavailable owner's lease instead: the new owner holds a
+      # new lease, and the old lease's release no longer reaches it.
+      :killed ->
+        {:error, :owner_unavailable}
     end
   end
 
@@ -1314,7 +1342,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     persistence = persistence_boundary(opts)
 
     with {:ok, upstream_pid} <- upstream.start.() do
-      _marked = Registry.update_value(owner_registry(opts), codex_session_id, fn _starting -> @registry_ready end)
+      _marked = Registry.update_value(owner_registry(opts), codex_session_id, fn _starting -> ready_registry_value(owner_lease_token) end)
 
       {:ok,
        %__MODULE__{
@@ -1322,6 +1350,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
          turn_claim_session: turn_claim_session(codex_session_id, opts),
          owner_lease_token: owner_lease_token,
          owner_instance_id: owner_instance_id,
+         owner_registry: owner_registry(opts),
          upstream_pid: upstream_pid,
          callbacks: %Callbacks{
            upstream_sender: upstream.send,
@@ -2823,6 +2852,30 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp pending_admission_exit_reason({:shutdown, :owner_drained}), do: "owner_drained"
   defp pending_admission_exit_reason(_reason), do: "client_disconnected"
 
+  # A live owner can be slower than its status call's budget: a turn's
+  # database writes against a slow database, a backlog of provider frames.
+  # Stopping it for that killed its provider connection, with the response
+  # anchor and cache on it, and the turn it was running for another socket.
+  # When it was blocked inside a callback, the stop timed out and crashed the
+  # new socket's init, and the queued stop still ended the owner afterwards
+  # (findings#285 row 270-247). An owner that does not answer in time is now
+  # judged from its registry value:
+  #
+  #   * still starting (`init/1` only starts the upstream session): busy;
+  #   * holding another lease than this socket's: stale, stopped as before.
+  #     The socket took the lease over once it had expired;
+  #   * a renewal started within the lease TTL: busy. The socket gets
+  #     `owner_forward_timeout`, nothing is written, and the client's retry
+  #     asks again;
+  #   * no renewal started for longer than the lease TTL: unresponsive,
+  #     stopped. A live owner starts one at least once per TTL. The renewal
+  #     interval is at most a third of the TTL, and the TTL covers a renewal
+  #     statement at its full budget (`OwnerRenewalSchedule`). An owner that
+  #     did not could not have kept its lease on its own renewals. The lease
+  #     row cannot tell: every socket that starts its session on this VM
+  #     renews it (`OwnerLease.acquire!/5`).
+  #
+  # Every other exit means the owner is gone.
   defp owner_reuse_status(pid, opts) do
     expected = %{
       codex_session_id: Keyword.fetch!(opts, :codex_session_id),
@@ -2835,21 +2888,50 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
         :draining
 
       {:ok, status} when not is_map_key(status, :draining?) ->
-        :stale
+        {:stale, :answered_stale}
 
       {:ok, status} ->
         cond do
           not uuid?(expected.codex_session_id) -> :reusable
           status.upstream_alive? and Map.take(status, Map.keys(expected)) == expected -> :reusable
-          true -> :stale
+          true -> {:stale, :answered_stale}
         end
 
       _other ->
-        :stale
+        {:stale, :answered_stale}
     end
   catch
-    :exit, _reason -> :stale
+    :exit, {:timeout, _call} -> unanswered_owner_status(pid, opts)
+    :exit, _reason -> {:stale, :owner_exited}
   end
+
+  defp unanswered_owner_status(pid, opts) do
+    case Registry.lookup(owner_registry(opts), Keyword.fetch!(opts, :codex_session_id)) do
+      [{^pid, @registry_starting}] ->
+        {:busy, nil}
+
+      [{^pid, {@registry_ready, lease_digest, last_renewal_monotonic_ms}}] ->
+        last_renewal_age_ms = System.monotonic_time(:millisecond) - last_renewal_monotonic_ms
+
+        cond do
+          lease_digest != lease_digest(Keyword.fetch!(opts, :owner_lease_token)) -> {:stale, :lease_replaced}
+          last_renewal_age_ms > owner_lease_ttl_ms() -> {:stale, :unresponsive}
+          true -> {:busy, last_renewal_age_ms}
+        end
+
+      [{^pid, _value}] ->
+        {:stale, :unrecognized_registration}
+
+      _another_owner_or_none ->
+        {:stale, :owner_exited}
+    end
+  end
+
+  defp ready_registry_value(owner_lease_token),
+    do: {@registry_ready, lease_digest(owner_lease_token), System.monotonic_time(:millisecond)}
+
+  defp lease_digest(owner_lease_token) when is_binary(owner_lease_token), do: :crypto.hash(:sha256, owner_lease_token)
+  defp lease_digest(_owner_lease_token), do: nil
 
   defp start_upstream_task(state, ref, upstream_payload) do
     reservation = %{
@@ -2867,10 +2949,22 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     end)
   end
 
-  defp stop_stale_owner(pid) do
-    GenServer.stop(pid, {:shutdown, :stale_owner}, owner_call_timeout())
+  # An owner blocked inside a callback cannot handle the stop within the
+  # budget. The timeout used to crash the caller while the queued stop still
+  # ended the owner later; such an owner is killed instead. Its linked
+  # upstream session goes with it, and a socket attached to it meets its
+  # crash. Every other exit means the owner is already gone.
+  defp stop_stale_owner(pid, opts) do
+    :ok = GenServer.stop(pid, {:shutdown, :stale_owner}, owner_call_timeout())
+    :stopped
   catch
-    :exit, {:noproc, _details} -> :ok
+    :exit, {:timeout, _stop} ->
+      Process.exit(pid, :kill)
+      Logger.owner_stale_killed(pid, opts, owner_call_timeout())
+      :killed
+
+    :exit, _gone ->
+      :stopped
   end
 
   defp submission_observer?(%UpstreamWebsocketSession.Request{submission_observer: observer}),
@@ -5749,6 +5843,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp schedule_owner_renewal(state), do: state
 
   defp renew_owner_lease(state, schedule_next) do
+    :ok = record_renewal_tick(state)
+
     case Persistence.renew_owner_lease(state) do
       {:ok, state} ->
         state = touch_active_replay_liveness(state)
@@ -5763,6 +5859,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
         Logger.owner_renewal_failed(reason, state)
         {:noreply, schedule_next.(state)}
     end
+  end
+
+  # Each renewal tick the owner starts, the regular one and the early checks
+  # after an unreachable downstream, is what a socket reads when this owner
+  # does not answer its status call in time (`owner_reuse_status/2`). It
+  # records that the owner handled the tick, whatever the renewal answers.
+  defp record_renewal_tick(state) do
+    _updated = Registry.update_value(state.owner_registry, state.codex_session_id, fn _value -> ready_registry_value(state.owner_lease_token) end)
+    :ok
   end
 
   # A downstream on a node this owner can no longer reach (DOWN
