@@ -55,8 +55,8 @@ defmodule CodexPoolerWeb.Admin.BadgeComponentsTest do
   test "known ChatGPT plan values render curated labels" do
     assert BadgeComponents.plan_badge_label("go") == "Go"
     assert BadgeComponents.plan_badge_label("GO") == "Go"
-    assert BadgeComponents.plan_badge_label("prolite") == "Pro"
-    assert BadgeComponents.plan_badge_label("pro") == "Pro More"
+    assert BadgeComponents.plan_badge_label("prolite") == "Pro 100"
+    assert BadgeComponents.plan_badge_label("pro") == "Pro 200"
     assert BadgeComponents.plan_badge_label("promax") == "Pro Max"
     assert BadgeComponents.plan_badge_label("ent26") == "Enterprise"
     assert BadgeComponents.plan_badge_label("hc") == "Enterprise"
@@ -84,18 +84,20 @@ defmodule CodexPoolerWeb.Admin.BadgeComponentsTest do
       {"free", "Free"},
       {"go", "Go"},
       {"plus", "Plus"},
-      {"pro", "Pro More"},
-      {"prolite", "Pro"},
+      {"pro", "Pro 200"},
+      {"prolite", "Pro 100"},
       {"promax", "Pro Max"},
       {"team", "Team"},
       {"business", "Business"},
       {"ent26", "Enterprise"},
       {"enterprise", "Enterprise"},
+      {"hc", "Enterprise"},
       {"enterprise_cbp_automation", "Enterprise Automation"},
       {"enterprise_cbp_usage_based", "Enterprise CBP Usage Based"},
       {"self_serve_business_prolite", "Self Serve Business ProLite"},
       {"self_serve_business_usage_based", "Self Serve Business Usage Based"},
       {"edu", "Edu"},
+      {"education", "Education"},
       {"edu_plus", "Edu Plus"},
       {"edu_pro", "Edu Pro"}
     ]
@@ -103,6 +105,9 @@ defmodule CodexPoolerWeb.Admin.BadgeComponentsTest do
     for {plan, label} <- plans do
       assert BadgeComponents.plan_badge_label(plan) == label
       assert BadgeComponents.plan_badge_label(String.replace(plan, "_", "-")) == label
+
+      html = Phoenix.LiveViewTest.render_component(&BadgeComponents.plan_badge/1, label: plan, family: String.replace(plan, "_", "-"))
+      assert html |> LazyHTML.from_fragment() |> LazyHTML.text() |> String.trim() == label
     end
   end
 

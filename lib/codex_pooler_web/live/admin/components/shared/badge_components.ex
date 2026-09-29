@@ -7,6 +7,7 @@ defmodule CodexPoolerWeb.Admin.BadgeComponents do
   # Keys cover both the raw `chatgpt_plan_type` claim values (underscored, kept
   # in plan_label) and their slugified plan_family forms (dashed). The raw
   # value set tracks the Codex reference `KnownPlan` enum.
+  # Pro display names follow https://help.openai.com/en/articles/9793128-about-chatgpt-pro-tiers.
   @canonical_plan_labels %{
     "business" => "Business",
     "chatgpt plus" => "ChatGPT Plus",
@@ -29,8 +30,8 @@ defmodule CodexPoolerWeb.Admin.BadgeComponents do
     "go" => "Go",
     "hc" => "Enterprise",
     "plus" => "Plus",
-    "pro" => "Pro More",
-    "prolite" => "Pro",
+    "pro" => "Pro 200",
+    "prolite" => "Pro 100",
     "promax" => "Pro Max",
     "self-serve-business-prolite" => "Self Serve Business ProLite",
     "self_serve_business_prolite" => "Self Serve Business ProLite",

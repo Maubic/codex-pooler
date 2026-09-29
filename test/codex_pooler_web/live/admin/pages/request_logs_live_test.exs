@@ -1553,7 +1553,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
     {:ok, view, _html} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}")
 
     assert has_element?(view, "#request-log-row-#{plan_request.id} [data-role='upstream-plan-line'] [data-role='upstream-account']", "Sample upstream")
-    assert has_element?(view, "#request-log-#{plan_request.id}-plan-badge", "Pro More")
+    assert has_element?(view, "#request-log-#{plan_request.id}-plan-badge", "Pro 200")
     assert has_element?(view, "#request-log-#{plan_request.id}-plan-badge [data-role='upstream-plan-separator'][aria-hidden='true']", "·")
     refute has_element?(view, "#request-log-#{no_plan_request.id}-plan-badge [data-role='upstream-plan-separator']")
     assert has_element?(view, "#request-log-#{plan_request.id}-plan-badge", "chatgpt")

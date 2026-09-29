@@ -16,17 +16,7 @@ defmodule CodexPoolerWeb.Dev.ComponentShowcasePlanBadges do
           {"satin", "B / Satin", "A restrained metallic finish with a rounded gold Pro capsule."},
           {"split", "C / Split", "Compact plaque; the palette demonstrates a separate tier segment."}
         ],
-        plans: [
-          {"free", "Free"},
-          {"go", "Go"},
-          {"plus", "Plus"},
-          {"pro", "Pro"},
-          {"prolite", "Pro Lite"},
-          {"team", "Team"},
-          {"business", "Business"},
-          {"enterprise", "Enterprise"},
-          {"edu", "Edu"}
-        ]
+        plans: Enum.map(~w(free go plus pro prolite team business enterprise edu), &{&1, BadgeComponents.plan_badge_label(&1)})
       )
 
     ~H"""
@@ -59,7 +49,7 @@ defmodule CodexPoolerWeb.Dev.ComponentShowcasePlanBadges do
       >
         <span class="mr-2">Current badges</span>
         <BadgeComponents.plan_badge
-          :for={label <- ["Go", "Plus", "Pro", "Pro Lite", "Enterprise"]}
+          :for={label <- ~w(go plus prolite pro promax enterprise)}
           label={label}
         />
       </div>
