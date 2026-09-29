@@ -92,6 +92,17 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
     %{expected(:before_output) | rows: [turn, {@compact_endpoint, "websocket", "failed", "upstream_stream_error", false}, successor, resume]}
   end
 
+  # A cut request without a resend waits for the cleanup scan. Its terminal
+  # proof makes it eligible at 120 seconds; no usage is charged on recovery.
+  def expected(:drain_no_resend, :peer),
+    do: %{
+      retries: %{before_eligible: {"in_progress", nil, :reservation_held}, eligible: {"failed", "dead_execution_recovered", :reservation_released}},
+      rows: [{@turn_endpoint, "websocket", "succeeded", nil, false}, {@compact_endpoint, "websocket", "failed", "dead_execution_recovered", false}],
+      compaction_charges: [0],
+      upstream_compactions: 1,
+      live_rows: 0
+    }
+
   def expected(cut, _topology), do: expected(cut)
 
   defp expected(:no_cut),
@@ -193,7 +204,7 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
   def run_scenario(mode, shape, topology, cut, dispatch \\ :on_arrival, opts \\ []) do
     put_owner_forwarding!(topology in [:forwarded, :peer])
     release_ref = make_ref()
-    ctx = %{mode: mode, shape: shape, topology: topology}
+    ctx = %{mode: mode, shape: shape, topology: topology, before_drain: Keyword.get(opts, :before_drain), after_drain: Keyword.get(opts, :after_drain)}
 
     upstream = start_upstream(FakeUpstream.strict_sequence(upstream_sequence(ctx, cut, topology, release_ref)))
     setup = topology_setup!(topology, upstream, opts)
@@ -280,6 +291,7 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
     # The released client drops the connection its compaction failed on.
     Mint.HTTP.close(client.conn)
     Enum.each(drains, &Task.await(&1, @detection_timeout_ms))
+    if is_function(ctx.after_drain, 0), do: ctx.after_drain.()
     if publisher, do: await_cut_execution_proof!(ctx, publisher)
     retries = released_client_retries!(ctx, port, fn -> :ok end)
     release_held_compaction!(upstream, release_ref, if(cut == :drain_after_output, do: 3, else: 1))
@@ -296,6 +308,24 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
     Mint.HTTP.close(client.conn)
     await_compaction_settled!(ctx.setup.pool.id, ["failed"])
     released_client_retries!(ctx, port, fn -> :ok end)
+  end
+
+  defp cut_and_resend(:drain_no_resend, ctx, client, _port, upstream, release_ref) do
+    await_barrier!(0, release_ref)
+    publisher = start_proof_publisher!()
+    drains = drain_socket_node!(ctx, client)
+    {client, frame} = receive_frame!(client)
+    assert %{"type" => "error", "status" => 503, "error" => %{"code" => "owner_drained"}} = frame
+    Mint.HTTP.close(client.conn)
+    Enum.each(drains, &Task.await(&1, @detection_timeout_ms))
+    attempt = await_cut_execution_proof!(ctx, publisher)
+
+    {:ok, _summary} = CodexPooler.Accounting.recover_dead_execution_attempts(DateTime.add(attempt.started_at, 119, :second))
+    before_eligible = cut_request_state(attempt.request_id)
+    {:ok, _summary} = CodexPooler.Accounting.recover_dead_execution_attempts(DateTime.add(attempt.started_at, 121, :second))
+    eligible = cut_request_state(attempt.request_id)
+    release_held_compaction!(upstream, release_ref, 1)
+    %{before_eligible: before_eligible, eligible: eligible}
   end
 
   defp cut_and_resend(:unobserved_cut, ctx, client, port, upstream, release_ref) do
@@ -383,6 +413,7 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
     [task] = MapSet.to_list(state.tasks)
     entry = Enum.find(ActivityRegistry.activities(), &(&1.pid == task))
     refute Map.get(entry, :terminal_delivered?, false), "the compaction's terminal went out before the drain"
+    if is_function(ctx.before_drain, 2), do: ctx.before_drain.(state, entry)
     policy = %{now_ms: fn -> System.monotonic_time(:millisecond) end, schedule_wait: &schedule_drain_wait/3, cancel_wait: &cancel_drain_wait/2, owner_post_deadline_call_budget_ms: 5_000}
     task_drain = Task.async(fn -> ActivityDrain.drain(entry, System.monotonic_time(:millisecond) - 1, policy, ActivityRegistry) end)
 
@@ -415,6 +446,16 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
     [cut] = Enum.filter(pool_requests(ctx.setup.pool.id), &(&1.endpoint == @compact_endpoint))
     attempt = Repo.one!(from(attempt in Attempt, where: attempt.request_id == ^cut.id, order_by: [desc: attempt.attempt_number], limit: 1))
     :ok = ExecutionProofSupport.await_terminal!(attempt, publisher)
+    # The socket node flushes this proof before exiting; the child-VM test in
+    # execution_proof_shutdown_test.exs covers that shutdown boundary.
+    attempt
+  end
+
+  defp cut_request_state(request_id) do
+    request = Repo.get!(Request, request_id)
+    kinds = Repo.all(from(entry in LedgerEntry, where: entry.request_id == ^request_id, select: entry.entry_kind))
+    reservation = if "release" in kinds, do: :reservation_released, else: if("reservation" in kinds, do: :reservation_held, else: :no_reservation)
+    {request.status, request.last_error_code, reservation}
   end
 
   # The socket the owner streams the running compaction to, before its client
@@ -725,6 +766,9 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
           FakeUpstream.expect_request(method: "POST", path: @turn_endpoint, json: [valid: true, forbidden: ["previous_response_id"]], respond: FakeUpstream.sse_stream(completed_events(@final_response)))
 
         [turn, anchored, https_compaction, https_resume]
+
+      {:drain_no_resend, _topology} ->
+        [turn, anchored]
 
       _websocket_resend ->
         [turn, anchored, full_history, resume]

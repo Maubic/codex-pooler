@@ -5799,8 +5799,10 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       :await_worker
     else
       cancel_direct_response_task(state, task_pid)
-
-      :ok = Websocket.close_websocket_session(Map.get(state, :upstream_websocket_session))
+      # The upstream session is still waiting on this task's request. The
+      # cancellation watcher stops the task after the drain error is delivered;
+      # its monitored exit then interrupts the upstream receive loop. Stopping
+      # the session synchronously here only exhausts the GenServer stop timeout.
       :kill_worker
     end
   end

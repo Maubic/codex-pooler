@@ -49,7 +49,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexSsePrevisibleTimeoutResendTest do
           FakeUpstream.barrier_sse_stream([created_event(), completed_event("resp_previsible_timeout_late")],
             barrier_after: 1,
             notify: self(),
-            release_ref: release_ref
+            release_ref: release_ref,
+            on_client_close: :expected
           ),
           FakeUpstream.sse_stream([created_event(), completed_event("resp_previsible_timeout_resend")])
         ])
@@ -69,6 +70,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexSsePrevisibleTimeoutResendTest do
 
     {resend_status, resend_body} = post_stream!(setup, payload, thread_id)
     send(upstream_pid, {:fake_upstream_release_chunk, release_ref})
+    assert_receive {:fake_upstream_client_closed, 2, ^upstream_pid, ^release_ref}, @detection_timeout_ms
+    assert [%{outcome: :client_closed_expected, chunk_index: 2, chunk_count: 3}] = FakeUpstream.sse_outcomes(upstream)
 
     assert {resend_status, resend_body =~ "resp_previsible_timeout_resend"} == {200, true}
     assert is_nil(first_visible)

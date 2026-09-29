@@ -70,6 +70,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionCutPeerTe
     end
   end
 
+  test "never resent: the dead-execution scan settles it once the attempt is eligible", %{peer_node: peer_node} do
+    assert Scenario.run_scenario("full", :pre_turn, :peer, :drain_no_resend, :on_arrival, peer_node: peer_node) == Scenario.expected(:drain_no_resend, :peer)
+  end
+
   for mode <- ["full", "lite"], cut <- [:no_cut, :before_output, :after_output, :after_completion, :unobserved_cut] do
     @tag mode: mode, shape: :pre_turn, topology: :peer, cut: cut
     test "#{mode} pre_turn peer admitted compaction #{cut}: the released client's retries buy the compaction once per request and the turn completes",
