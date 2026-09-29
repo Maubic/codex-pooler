@@ -41,7 +41,7 @@ defmodule CodexPooler.Gateway.Websocket.DirectCleanup do
   @type cleanup_result :: interrupt_result() | :none
 
   @spec begin(RequestOptions.t()) ::
-          :ok | {:error, :cancelled | :owner_unavailable | :stale_owner}
+          :ok | {:error, :cancelled | :owner_forward_timeout | :owner_unavailable | :stale_owner}
   def begin(%RequestOptions{runtime: %{direct_cleanup: nil}}), do: :ok
 
   def begin(%RequestOptions{runtime: %{direct_cleanup: context}} = options) do
@@ -57,6 +57,12 @@ defmodule CodexPooler.Gateway.Websocket.DirectCleanup do
     end
   end
 
+  # An owner that does not answer the registration within its call budget is
+  # still there: the timeout keeps its own reason, whichever node the owner
+  # runs on, as every other owner call's does (findings#270 row 270-301). A
+  # remote owner's stall already answers it, whether the erpc deadline or the
+  # owner call on the owner's node ran out first; a local owner's call exits
+  # with it. Both used to read as an absent owner.
   defp register_owner_admission(%{owner_binding: binding} = context, options)
        when is_map(binding) do
     case WebsocketOwnerForwarder.register_pre_attempt_admission(
@@ -65,10 +71,11 @@ defmodule CodexPooler.Gateway.Websocket.DirectCleanup do
            options.transport.websocket_owner.forwarder_opts
          ) do
       :ok -> :ok
-      {:error, :stale_owner} -> {:error, :stale_owner}
+      {:error, reason} when reason in [:stale_owner, :owner_forward_timeout] -> {:error, reason}
       _ -> {:error, :owner_unavailable}
     end
   catch
+    :exit, {:timeout, _call} -> {:error, :owner_forward_timeout}
     _, _ -> {:error, :owner_unavailable}
   end
 

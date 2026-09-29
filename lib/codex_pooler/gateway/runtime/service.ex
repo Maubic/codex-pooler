@@ -391,6 +391,9 @@ defmodule CodexPooler.Gateway.Runtime.Service do
       {:error, :owner_unavailable} ->
         {:error, error(503, "owner_unavailable", "websocket owner admission is unavailable")}
 
+      {:error, :owner_forward_timeout} ->
+        {:error, error(504, "owner_forward_timeout", "websocket owner forwarding timed out")}
+
       {:error, :stale_owner} ->
         {:error, error(409, "stale_owner", "websocket owner lease is stale")}
     end

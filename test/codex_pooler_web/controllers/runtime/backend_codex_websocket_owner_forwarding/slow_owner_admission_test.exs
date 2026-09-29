@@ -559,6 +559,42 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     end
   end
 
+  # A turn whose owner does not answer the socket's pre-attempt admission
+  # registration within the owner call budget is refused with the timeout's
+  # own `504 owner_forward_timeout`, whichever node the owner runs on
+  # (findings#270 row 270-301). The registration read every failure as an
+  # absent owner, `503 owner_unavailable` "websocket owner admission is
+  # unavailable": a local owner's call exit and a remote owner's timeout
+  # alike. The owner is held right before it handles the registration, so the
+  # calls the turn makes before it are answered. The released client retries
+  # on a new connection instead; the resend on the same socket is a path
+  # another client can take.
+  for topology <- [:remote, :local] do
+    @tag topology: topology
+    test "#{topology}: a turn whose admission registration its owner answers too late is refused 504 with the timeout, and the socket serves the resend", ctx do
+      compaction = open_compaction_session!(ctx, true, [:anchor, :final])
+      frame = next_turn_frame(compaction, "turn whose admission registration meets a held owner")
+      held = hold_owner_after!(compaction, :pre_attempt_admission)
+
+      {refusal, log} =
+        with_info_log(fn ->
+          refusal = send_frame!(compaction, frame)
+          :ok = release_slow_owner!(compaction, held)
+          refusal
+        end)
+
+      assert %{"type" => "error", "status" => 504, "error" => %{"code" => "owner_forward_timeout", "message" => "websocket owner forwarding timed out"}} = refusal
+      assert log =~ ~r/websocket native turn failed .*error_code=owner_forward_timeout/
+      assert log =~ "reason_code=owner_forward_timeout"
+      refute log =~ "error_code=owner_unavailable"
+      assert_owner_kept_session!(compaction, log)
+
+      assert %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_final"}} = send_frame!(compaction, frame)
+      assert Scenario.settled_statuses!(compaction.setup, 2) == ["succeeded", "succeeded"]
+      assert FakeUpstream.count(compaction.upstream) == 2
+    end
+  end
+
   # A final that comes after its bound (findings#270 row 270-289). The
   # released client also compacts after a turn, and then sends the final with
   # the user's next message, which can come long after. The late final ran as
