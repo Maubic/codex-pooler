@@ -65,15 +65,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionCutTest d
   # compaction was handed on from a connection the Pooler has not seen close.
   # With owner forwarding off (`direct_committed`: the direct topology on
   # committed rows, so the held cleanup's transaction stalls no other
-  # connection; Full only, as the peer arms, since the Lite override commits an
-  # owner session) the retry carries the compaction's own claim; its claim waits,
+  # connection) the retry carries the compaction's own claim; its claim waits,
   # bounded, for the running request to settle, and the held cleanup is
   # released once it waits. It used to be refused at once, twice, and the
   # compaction was bought over HTTPS.
   for {mode, shape} <- [{"full", :pre_turn}, {"lite", :pre_turn}, {"full", :mid_turn}],
       topology <- [:forwarded, :direct_committed],
       cut <- [:observed_cut, :observed_cut_exited],
-      mode == "full" or topology != :direct_committed,
       shape == :pre_turn or cut == :observed_cut,
       topology != :direct_committed or cut == :observed_cut do
     @tag mode: mode, shape: shape, topology: topology, cut: cut
@@ -98,8 +96,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionCutTest d
   # compaction settled (or takes it over from a socket that already closed),
   # and without owner forwarding the compaction claim refuses it.
   for {mode, shape} <- [{"full", :pre_turn}, {"lite", :pre_turn}, {"full", :mid_turn}],
-      {topology, cut} <- [{:forwarded, :unobserved_cut}, {:direct, :unobserved_cut}, {:forwarded, :observed_cut}, {:direct_committed, :observed_cut}],
-      mode == "full" or topology != :direct_committed do
+      {topology, cut} <- [{:forwarded, :unobserved_cut}, {:direct, :unobserved_cut}, {:forwarded, :observed_cut}, {:direct_committed, :observed_cut}] do
     @tag mode: mode, shape: shape, topology: topology, cut: cut, dispatch: :queued
     test "#{mode} #{shape} #{topology} compaction queued behind the settling turn, #{cut}: the owner keys it and no resend is a second generation while it runs",
          %{mode: mode, shape: shape, topology: topology, cut: cut} do
