@@ -111,6 +111,21 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ProviderUsageLimit do
     end
   end
 
+  @doc "A quota-refused connection whose Pool still has possible capacity needs a client-authored full-history retry."
+  @spec retryable_continuation_frame(binary()) :: binary()
+  def retryable_continuation_frame(frame) when is_binary(frame) do
+    decoded = CodexPooler.JSON.decode!(frame)
+    refusal = Contracts.pinned_continuation_unavailable_error()
+    error = %{"type" => "server_error", "code" => refusal.code, "message" => refusal.message}
+
+    decoded
+    |> Map.put("status", refusal.status)
+    |> Map.delete("headers")
+    |> Map.put("error", error)
+    |> Map.update("response", %{"status" => "failed", "error" => error}, &Map.put(&1, "error", error))
+    |> CodexPooler.JSON.encode!()
+  end
+
   @doc """
   The frame's refusal as the socket relays it: `{:terminal, error}` for the
   Pooler's terminal usage limit, `{:relay, provider_error}` for a usage limit

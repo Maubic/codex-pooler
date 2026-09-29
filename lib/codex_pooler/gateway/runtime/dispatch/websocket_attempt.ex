@@ -8,6 +8,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
   alias CodexPooler.Accounting.FailureResponse
   alias CodexPooler.Gateway.Contracts
   alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.Gateway.Payloads.RequestOptions.OpenAICompatibility
   alias CodexPooler.Gateway.Routing.CandidateEligibility.PoolReturn
   alias CodexPooler.Gateway.Routing.CircuitRetryAfter
   alias CodexPooler.Gateway.Runtime.Dispatch.AuthRefresh
@@ -435,7 +436,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
       deliver_retry_exhausted_websocket_failure(
         dispatch_request,
         response,
-        &ProviderUsageLimit.pool_frame(&1, fn -> other_candidates_return(context) end, fn -> other_candidates_circuit_seconds(context) end)
+        &quota_refusal_frame(&1, context)
       )
 
     answer = delivered |> List.last() |> usage_limit_answer(RequestOptions.native_originator(context.request_options))
@@ -759,6 +760,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
   # to every client.
   defp usage_limit_answer(frame, originator) when is_binary(frame) do
     case CodexPooler.JSON.decode(frame) do
+      {:ok, %{"status" => 503, "error" => %{"code" => "pinned_continuation_unavailable"}}} -> {:withheld, 503}
       {:ok, %{} = decoded} -> decoded |> ProviderUsageLimit.frame_projection() |> projected_usage_limit_answer(originator)
       _other -> nil
     end
@@ -820,8 +822,31 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
     CircuitRetryAfter.current_seconds(auth, model, others, route_class)
   end
 
-  defp other_candidates_return(%{model: model, route_state: route_state, assignment: assignment}),
-    do: PoolReturn.others(model, RouteState.route_filter_candidates(route_state), assignment.id, DateTime.utc_now())
+  defp quota_refusal_frame(frame, context) do
+    others = fn -> other_candidates_return(context) end
+    circuit = fn -> other_candidates_circuit_seconds(context) end
+
+    if native_anchored_continuation?(context) and
+         ProviderUsageLimit.frame_projection(CodexPooler.JSON.decode!(frame)) != :canonical do
+      anchored_quota_refusal_frame(frame, others.(), circuit)
+    else
+      ProviderUsageLimit.pool_frame(frame, others, circuit)
+    end
+  end
+
+  defp anchored_quota_refusal_frame(frame, :unknown, _circuit), do: ProviderUsageLimit.retryable_continuation_frame(frame)
+  defp anchored_quota_refusal_frame(frame, known, circuit), do: ProviderUsageLimit.pool_frame(frame, fn -> known end, circuit)
+
+  defp native_anchored_continuation?(%{request_options: options}) do
+    is_binary(options.continuity.previous_response_id) and
+      not OpenAICompatibility.translated_responses_surface?(options.openai_compatibility) and
+      not RequestOptions.connection_bound_compaction?(options)
+  end
+
+  defp other_candidates_return(%{model: model, route_state: route_state, assignment: assignment} = context) do
+    candidates = if native_anchored_continuation?(context), do: RouteState.usage_limit_capacity(route_state), else: RouteState.route_filter_candidates(route_state)
+    PoolReturn.others(model, candidates, assignment.id, DateTime.utc_now())
+  end
 
   defp sanitize_retry_terminal(frame) do
     with {:ok, event} <- CodexPooler.JSON.decode(frame),

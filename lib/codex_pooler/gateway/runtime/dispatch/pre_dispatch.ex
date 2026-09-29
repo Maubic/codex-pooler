@@ -203,6 +203,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
            ) do
       route_state =
         route_state
+        |> RouteState.put_usage_limit_capacity(usage_limit_capacity(canonical_filter_input_candidates, visible_model_context.valid_canonical_assignment_ids, endpoint, request_options))
         |> RouteState.put_saved_reset_auto_capacity(request_compatible_capacity)
         |> RouteState.put_candidates(candidates)
         |> RouteState.put_partition_fallback(partition_fallback(canonical_filter_input_candidates, candidates, visible_model_context, endpoint, request_options, model))
@@ -432,6 +433,19 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
       visible_model_context.valid_canonical_assignment_ids
     else
       visible_model_context.selected_partition_assignment_ids
+    end
+  end
+
+  # Advice describes runtime-compatible Pool capacity before the connection pin.
+  # This cohort is never used to dispatch an anchored request on another socket.
+  defp usage_limit_capacity(candidates, valid_ids, endpoint, request_options) do
+    candidates = Enum.filter(candidates, fn {assignment, _identity} -> assignment.id in valid_ids end)
+
+    with {:ok, candidates} <- SessionContinuity.filter_file_affinity(candidates, request_options),
+         {:ok, candidates} <- CandidateEligibility.maybe_filter_compact(endpoint, candidates) do
+      candidates
+    else
+      _unavailable -> []
     end
   end
 

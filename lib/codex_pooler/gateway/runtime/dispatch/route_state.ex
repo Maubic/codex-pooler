@@ -173,6 +173,15 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.RouteState do
 
   def route_filter_candidates(_route_state), do: []
 
+  @doc "Runtime-compatible Pool capacity before connection pinning, for quota advice only."
+  @spec put_usage_limit_capacity(t(), [candidate()]) :: t()
+  def put_usage_limit_capacity(%__MODULE__{} = route_state, candidates) when is_list(candidates),
+    do: %{route_state | extensions: Map.put(route_state.extensions, :usage_limit_capacity, candidates)}
+
+  @spec usage_limit_capacity(t()) :: [candidate()]
+  def usage_limit_capacity(%__MODULE__{extensions: extensions} = route_state),
+    do: Map.get(extensions, :usage_limit_capacity, route_filter_candidates(route_state))
+
   @doc """
   Records the runtime-compatible candidates canonical partition selection held
   back from a native turn (valid sources outside the selected partition, after

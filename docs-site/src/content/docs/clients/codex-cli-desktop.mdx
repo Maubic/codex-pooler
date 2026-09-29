@@ -258,6 +258,8 @@ Codex CLI 0.158.0 keeps its app server running in the background after you quit,
 
 When every account in the Pool has used up its quota, Codex CLI names the time the Pool resets in its usage-limit message. Codex Desktop shows Codex Pooler's own message instead, for example `The Pool's usage limit is reached. Try again at 01:28 UTC (in about 1 h 24 min).`, because its built-in usage-limit screen reads the ChatGPT account and cannot know the Pool's reset. See [When every upstream account is exhausted](/clients/openai-compatible/#when-every-upstream-account-is-exhausted).
 
+An account running out of quota does not exhaust a Pool that still has compatible capacity. If that happens during an anchored native websocket continuation, Codex Pooler returns a retryable error so the client can reconnect and resend its full history to another account. The previous response anchor stays bound to the original connection.
+
 If Codex repeatedly enters a broken login/account state with a Pooler provider, advanced users can change the provider to `requires_openai_auth = false`. That makes Codex treat the provider as gateway-only and use only `env_key` for runtime auth, but Codex will no longer appear signed in for that provider and account-dependent features, including mobile/app-server features, may be unavailable.
 
 <a id="route-boundaries"></a>
