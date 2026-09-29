@@ -28,13 +28,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementTurnFaultTest d
   use CodexPoolerWeb.ConnCase, async: false
 
   import Ecto.Query
+  import ExUnit.CaptureLog
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [await_socket_connection_state!: 2, metadata_control_frame?: 1]
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Runtime.SettlementTransactionHold
+  alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
 
   @moduletag capture_log: true
 
@@ -59,17 +62,21 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementTurnFaultTest d
 
   # The released client does not resend a turn whose `response.completed` it
   # read: its next request is the next turn, on the same socket, anchored on
-  # that answer. The raising task's `500 websocket_response_task_failed`
-  # reaches the socket after the completion, as it did before (findings#270
-  # row 270-290).
+  # that answer. The raising task's failure reaches the socket after the
+  # completion and is logged and recorded on the rows only: a frame pushed for
+  # it would wait at the idle client and be read as the failure of that next
+  # request (findings#270 row 270-325; before, the socket pushed `500
+  # websocket_response_task_failed` there, row 270-290).
   for forwarding <- [:forwarded, :direct] do
     @tag forwarding: forwarding
     test "#{forwarding}: after a rolled-back delivered completion the client's next turn on the same socket is served and nothing is left open", %{forwarding: forwarding} do
-      measured = run_continuation(forwarding)
+      {measured, log} = with_info_log(fn -> run_continuation(forwarding) end)
       CodexPooler.TestDiagnostics.puts(fn -> "settlement turn fault continuation #{forwarding}: #{inspect(measured)}" end)
 
       assert measured.first_frames == [{"response.created", "resp_turn_fault_first"}, {"response.output_item.done", nil}, {"response.completed", "resp_turn_fault_first"}]
-      assert measured.trailing == {"error", 500, "websocket_response_task_failed"}
+      assert measured.after_completed == []
+      assert log =~ "websocket turn error not sent after its terminal"
+      assert log =~ "terminal_class=response.completed error_code=websocket_response_task_failed"
       assert measured.next_frames == [{"response.created", "resp_turn_fault_next"}, {"response.output_item.done", nil}, {"response.completed", "resp_turn_fault_next"}]
       assert measured.upstream == [nil, "resp_turn_fault_first"]
       assert measured.rows == [{"failed", "owner_task_exception", "usage_unknown"}, {"succeeded", nil, "usage_known"}]
@@ -145,15 +152,17 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementTurnFaultTest d
     setup = gateway_setup(upstream)
     {_server, port} = start_public_endpoint_with_server!()
     install_fault!()
-    {conn, websocket, ref} = connect!(port, setup, thread_id)
+    {conn, websocket, ref, socket} = connect!(port, setup, thread_id)
 
     try do
       {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, frame(setup, thread_id))
       {conn, websocket, first_frames} = receive_until_terminal(conn, websocket, ref, [])
       [first] = await_settled!(setup.pool.id)
       recovered = row_state(first.id)
-      {conn, websocket, trailing_text} = public_websocket_receive_text!(conn, websocket, ref)
-      trailing = CodexPooler.JSON.decode!(trailing_text)
+      # The socket handled the raising task's failure, so whatever it pushed
+      # for it is written before the pong of a ping sent now.
+      _state = await_socket_connection_state!(socket, &(MapSet.size(Map.get(&1, :tasks, MapSet.new())) == 0))
+      {conn, websocket, after_completed} = frames_before_pong!(conn, websocket, ref)
 
       next = frame(setup, thread_id, turn_id: "#{thread_id}-next", input: [user_message("synthetic next prompt")], previous_response_id: "resp_turn_fault_first")
       {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, next)
@@ -162,7 +171,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementTurnFaultTest d
 
       %{
         first_frames: Enum.map(first_frames, &frame_summary/1),
-        trailing: {trailing["type"], trailing["status"], get_in(trailing, ["error", "code"])},
+        after_completed: Enum.map(after_completed, &{&1["type"], &1["status"], get_in(&1, ["error", "code"])}),
         recovered: recovered,
         next_frames: Enum.map(next_frames, &frame_summary/1),
         rows: Enum.map(rows, &{&1.status, &1.last_error_code, &1.usage_status}),
@@ -176,6 +185,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementTurnFaultTest d
   end
 
   defp connect!(port, setup, thread_id) do
+    before = WebsocketCleanupFence.listener_sockets()
     {:ok, conn} = Mint.HTTP.connect(:http, "127.0.0.1", port, protocols: [:http1])
 
     headers = [
@@ -189,7 +199,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementTurnFaultTest d
     {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, @turn_endpoint, headers)
     {:ok, conn, status, response_headers} = await_public_websocket_upgrade(conn, ref)
     {conn, websocket} = mint_websocket_new!(conn, ref, status, response_headers)
-    {conn, websocket, ref}
+    {conn, websocket, ref, WebsocketCleanupFence.await_new_listener_socket!(before)}
   end
 
   defp receive_until_terminal(conn, websocket, ref, frames) do
@@ -202,6 +212,36 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementTurnFaultTest d
   end
 
   defp frame_summary(frame), do: {frame["type"], get_in(frame, ["response", "id"])}
+
+  # Every text frame the client receives before the pong of a ping sent now,
+  # the Pooler's metadata control frames aside.
+  defp frames_before_pong!(conn, websocket, ref) do
+    payload = "settlement-turn-fault-#{System.unique_integer([:positive])}"
+    {:ok, websocket, data} = Mint.WebSocket.encode(websocket, {:ping, payload})
+    {:ok, conn} = Mint.WebSocket.stream_request_body(conn, ref, data)
+    frames_before_pong!(conn, websocket, ref, payload, [])
+  end
+
+  defp frames_before_pong!(conn, websocket, ref, payload, frames) do
+    message = receive_mint_socket_message!(conn, @detection_timeout_ms, "timed out waiting for the pong")
+    {:ok, conn, responses} = Mint.WebSocket.stream(conn, message)
+
+    {websocket, decoded} =
+      Enum.reduce(responses, {websocket, []}, fn
+        {:data, ^ref, data}, {websocket, decoded} ->
+          {:ok, websocket, frames} = Mint.WebSocket.decode(websocket, data)
+          {websocket, decoded ++ frames}
+
+        _response, acc ->
+          acc
+      end)
+
+    frames = frames ++ for({:text, text} = frame <- decoded, not metadata_control_frame?(frame), do: CodexPooler.JSON.decode!(text))
+
+    if {:pong, payload} in decoded,
+      do: {conn, websocket, frames},
+      else: frames_before_pong!(conn, websocket, ref, payload, frames)
+  end
 
   defp turn_outcome(%Request{id: id}) do
     turn = Repo.get_by!(CodexTurn, request_id: id)
@@ -377,6 +417,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SettlementTurnFaultTest d
 
     not Repo.exists?(from(attempt in Attempt, where: attempt.request_id in ^ids and attempt.status in ["queued", "in_progress"])) and
       not Repo.exists?(from(turn in CodexTurn, where: turn.request_id in ^ids and turn.status == "in_progress"))
+  end
+
+  # The socket notes the failure it did not send at `info`.
+  defp with_info_log(fun) do
+    previous_level = Logger.level()
+    on_exit(fn -> Logger.configure(level: previous_level) end)
+    Logger.configure(level: :info)
+
+    try do
+      with_log([level: :info], fun)
+    after
+      Logger.configure(level: previous_level)
+    end
   end
 
   defp put_owner_forwarding!(forwarding) do

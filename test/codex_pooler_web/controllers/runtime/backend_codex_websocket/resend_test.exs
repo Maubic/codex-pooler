@@ -26,6 +26,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
   alias CodexPoolerWeb.CodexResponsesSocket
+  alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
   alias Ecto.Adapters.SQL.Sandbox
 
   # Failure-detection budget for an expected message: a green run returns as
@@ -747,7 +748,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
       })
 
     {_server, port} = start_public_endpoint_with_server!()
+    before = WebsocketCleanupFence.listener_sockets()
     {conn, websocket, ref} = public_websocket_connect!(port, setup, turn_state)
+    socket = WebsocketCleanupFence.await_new_listener_socket!(before)
 
     {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, payload)
     assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^barrier}, 15_000
@@ -761,16 +764,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
     assert :ok = FakeUpstream.release_remaining_frames(upstream, barrier)
     assert_receive {:fake_upstream_frame_barrier, 3, _handler, ^barrier}, 15_000
 
-    {conn, _websocket, seen_types, failure_frame} =
-      receive_public_websocket_until_error(conn, websocket, ref, [])
+    {conn, websocket, seen_types, terminal} =
+      receive_public_websocket_until_terminal(conn, websocket, ref, [])
 
     assert "response.output_text.delta" in seen_types
+    assert %{"type" => "response.completed"} = terminal
 
-    assert %{
-             "type" => "error",
-             "status" => 500,
-             "error" => %{"code" => "websocket_response_task_failed"}
-           } = failure_frame
+    # The task raises in its settlement after the completion went out. Once
+    # the socket handled that failure, nothing follows the completion: the
+    # released client would read a frame there as the failure of its next
+    # request (findings#270 row 270-325). The barrier fails on any frame
+    # before its pong.
+    await_socket_connection_state!(socket, &(MapSet.size(Map.get(&1, :tasks, MapSet.new())) == 0))
+    {conn, _websocket} = socket_transport_barrier!(conn, websocket, ref)
 
     Application.delete_env(:codex_pooler, :settlement_pricing_test_fault)
 
@@ -2488,18 +2494,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
 
       %{"type" => type} ->
         receive_public_websocket_until_terminal(conn, websocket, ref, [type | seen_types])
-    end
-  end
-
-  defp receive_public_websocket_until_error(conn, websocket, ref, seen_types) do
-    {conn, websocket, frame} = public_websocket_receive_text!(conn, websocket, ref)
-
-    case CodexPooler.JSON.decode!(frame) do
-      %{"type" => "error"} = error ->
-        {conn, websocket, Enum.reverse(seen_types), error}
-
-      %{"type" => type} ->
-        receive_public_websocket_until_error(conn, websocket, ref, [type | seen_types])
     end
   end
 end

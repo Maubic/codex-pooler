@@ -2030,13 +2030,23 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     {:ok, state}
   end
 
-  # The socket authors its own error for a failed native turn unless an error
-  # frame for that turn already reached the client (an owner-relayed error or a
-  # relayed provider error): a second error would be read as the failure of
-  # whatever the client sends next. A provider success terminal followed by a
-  # settlement failure still gets its error frame, so the client resends.
+  # The socket authors its own error for a failed native turn only while the
+  # client holds no terminal of that turn. Once one was pushed (the provider's
+  # `response.completed` or `response.failed`, an owner-relayed error, an error
+  # the socket authored), the failure is logged and recorded on the turn's rows
+  # and nothing more is sent. The released client reads the socket only while
+  # a request is in flight: a frame after the turn's terminal waits there and
+  # is read as the first event of the client's next request, which then fails
+  # (a status-500 `error` becomes an HTTP error for that request, findings#276),
+  # and the client retries it with the full history on a new connection. That
+  # includes a provider success terminal followed by a settlement failure,
+  # which used to get its error frame on the premise that the client would
+  # resend the turn (5d375fdc4); the released client does not resend a turn
+  # whose completion it read (findings#270 row 270-325).
   defp native_turn_error_result(state, pid, reason) do
-    terminal_pushed? = downstream_error_terminal_pushed?(state, pid)
+    evidence = downstream_delivery_evidence(state, pid)
+
+    if pushed_terminal_evidence?(evidence), do: log_turn_error_after_terminal(state, pid, evidence, reason)
 
     state =
       state
@@ -2045,11 +2055,23 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       |> remove_native_turn_output(pid)
       |> maybe_start_queued_response_task()
 
-    if terminal_pushed? do
+    if pushed_terminal_evidence?(evidence) do
       {:ok, state}
     else
       {:push, {:text, CodexPooler.JSON.encode!(client_error_event(reason, state))}, state}
     end
+  end
+
+  # Metadata only: the request, the terminal class the client holds and the
+  # failure's code. A raising task's own line carries the exception.
+  defp log_turn_error_after_terminal(state, pid, evidence, reason) do
+    Logger.info(
+      "websocket turn error not sent after its terminal " <>
+        "request_id=#{DiagnosticTaxonomy.safe_correlator(Adapter.request_id(response_task_opts(state, pid)))} " <>
+        "codex_session_id=#{codex_session_id(state)} " <>
+        "terminal_class=#{evidence.terminal_class} " <>
+        "error_code=#{DiagnosticTaxonomy.reason_code(reason) || "none"}"
+    )
   end
 
   defp maybe_finish_public_owner_turn(state) do
