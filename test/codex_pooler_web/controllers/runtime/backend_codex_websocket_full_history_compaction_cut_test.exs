@@ -281,9 +281,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
 
     setup = gateway_setup(upstream, compact?: true)
     register_unboxed_pool_cleanup!(setup)
-    # The serving-mode update needs an operator scope, which would commit an
-    # owner here; the Pool's own override row is removed with the Pool.
-    if mode == "lite", do: put_serving_override!(setup, "lite")
+    if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
     ctx = Map.put(ctx, :setup, setup)
     watcher = SettlementTransactionHold.start_lock_watcher!()
     port = start_public_endpoint!()
@@ -323,12 +321,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
       upstream_compactions: upstream |> FakeUpstream.requests() |> Enum.count(&compaction_request?/1),
       live_rows: Enum.count(rows, &(&1.status in ["accepted", "in_progress"]))
     }
-  end
-
-  defp put_serving_override!(setup, mode) do
-    timestamp = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-    Repo.insert!(%CodexPooler.Pools.ModelServingOverride{pool_id: setup.pool.id, exposed_model_id: setup.model.exposed_model_id, mode: mode, created_at: timestamp, updated_at: timestamp})
-    :ok
   end
 
   defp run_ordinary_replay(mode) do

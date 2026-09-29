@@ -27,10 +27,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpSettlementWindowResendTest do
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
     only: [gateway_setup: 1, native_text_input: 1, register_unboxed_pool_cleanup!: 1, start_public_endpoint!: 0, start_upstream: 1]
 
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
+
   alias CodexPooler.Accounting.{LedgerEntry, Request, RequestClientRetryLink}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.CodexTurn
-  alias CodexPooler.Pools.ModelServingOverride
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Runtime.SettlementTransactionHold
   alias Ecto.Adapters.SQL.Sandbox
@@ -71,7 +72,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpSettlementWindowResendTest do
 
     setup = gateway_setup(upstream)
     register_unboxed_pool_cleanup!(setup)
-    put_serving_mode!(setup, mode)
+    _revision = set_model_serving_mode!(model_serving_scope(), setup, mode)
     watcher = SettlementTransactionHold.start_lock_watcher!()
     port = start_public_endpoint!()
     thread_id = Ecto.UUID.generate()
@@ -214,10 +215,4 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpSettlementWindowResendTest do
 
   defp completed_event(id),
     do: {"response.completed", %{"type" => "response.completed", "response" => %{"id" => id, "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 2, "output_tokens" => 1, "total_tokens" => 3}}}}
-
-  defp put_serving_mode!(setup, mode) do
-    timestamp = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-    Repo.insert!(%ModelServingOverride{pool_id: setup.pool.id, exposed_model_id: setup.model.exposed_model_id, mode: mode, created_at: timestamp, updated_at: timestamp})
-    :ok
-  end
 end

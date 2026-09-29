@@ -208,9 +208,30 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
     %{setup | model: model}
   end
 
+  # An instance owner changes a Pool's serving modes. Inside the sandbox the
+  # fixture's owner goes with the test's transaction. A test that commits its
+  # rows (`Sandbox.mode(Repo, :auto)`, `Sandbox.unboxed_run/2`) gets its owner
+  # from `committed_bootstrap_owner_fixture!/1`, which registers the removal of
+  # everything that owner commits: the sandbox fixture committed one there that
+  # nothing removed (findings#270 row 270-295).
   def model_serving_scope do
-    %{user: owner} = CodexPooler.AccountsFixtures.bootstrap_owner_fixture()
+    %{user: owner} =
+      if inside_sandbox_transaction?(),
+        do: CodexPooler.AccountsFixtures.bootstrap_owner_fixture(),
+        else: CodexPooler.AccountsFixtures.committed_bootstrap_owner_fixture!()
+
     Scope.for_user(owner, ["instance_owner"])
+  end
+
+  # The sandbox runs a test's statements inside the transaction it opened for
+  # the test, where a savepoint is allowed (and goes with the sandbox's own
+  # per-statement savepoint); a committing connection has no transaction
+  # block, and PostgreSQL refuses the savepoint there.
+  defp inside_sandbox_transaction? do
+    case Repo.query("SAVEPOINT codex_pooler_sandbox_probe") do
+      {:ok, _result} -> true
+      {:error, %Postgrex.Error{postgres: %{code: :no_active_sql_transaction}}} -> false
+    end
   end
 
   def set_model_serving_mode!(scope, setup, mode, expected_revision \\ nil) do

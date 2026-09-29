@@ -6,7 +6,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpPartialToolRetryTest do
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink}
-  alias CodexPooler.Accounts.Scope
   alias CodexPooler.CompatibilityMatrix
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.{CodexSession, CodexTurn}
@@ -158,12 +157,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpPartialToolRetryTest do
     CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
     on_exit(fn -> Sandbox.mode(Repo, :manual) end)
     :ok = Sandbox.mode(Repo, :auto)
-    %{user: owner} = CodexPooler.AccountsFixtures.committed_bootstrap_owner_fixture!()
     upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.abrupt_close_mid_stream(partial_events("custom_tool_call")), FakeUpstream.sse_stream([completed_event()])]))
     setup = gateway_setup(upstream)
     register_unboxed_pool_cleanup!(setup)
-    scope = Scope.for_user(owner, ["instance_owner"])
-    _revision = set_model_serving_mode!(scope, setup, "full")
+    _revision = set_model_serving_mode!(model_serving_scope(), setup, "full")
     setup = Map.put(setup, :serving_mode, "full")
     port = start_public_endpoint!()
     thread_id = Ecto.UUID.generate()

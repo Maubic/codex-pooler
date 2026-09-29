@@ -9,8 +9,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.PrewarmDel
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
 
   alias CodexPooler.Access
-  alias CodexPooler.Accounts.Scope
-  alias CodexPooler.AccountsFixtures
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
@@ -37,7 +35,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.PrewarmDel
       upstream = start_upstream(upstream_response(mode))
       fixture = gateway_setup(upstream)
       register_fixture_cleanup(fixture, topology)
-      set_model_serving_mode!(serving_scope(topology), fixture, mode)
+      set_model_serving_mode!(model_serving_scope(), fixture, mode)
       {:ok, auth} = Access.authenticate_authorization_header(fixture.authorization)
       state = prepare_socket(auth, fixture, topology)
 
@@ -75,13 +73,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.PrewarmDel
 
   defp upstream_response("full"), do: FakeUpstream.websocket_text_frames([completed_frame()])
   defp upstream_response("lite"), do: FakeUpstream.sse_stream([CodexPooler.JSON.decode!(completed_frame())])
-
-  defp serving_scope(:local_owner), do: model_serving_scope()
-
-  defp serving_scope(:proxy) do
-    %{user: owner} = AccountsFixtures.committed_bootstrap_owner_fixture!()
-    Scope.for_user(owner, ["instance_owner"])
-  end
 
   defp register_fixture_cleanup(_fixture, :local_owner), do: :ok
   defp register_fixture_cleanup(fixture, :proxy), do: register_unboxed_pool_cleanup!(fixture)
