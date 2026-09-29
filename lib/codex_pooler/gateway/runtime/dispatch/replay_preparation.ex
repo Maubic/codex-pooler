@@ -69,8 +69,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation do
          true <- NativeCodexTurnMetadata.window_id_digest(window) == metadata.window_id_digest,
          header = String.trim(header),
          true <- window != header,
-         {:ok, thread} <- window_thread(window),
-         {:ok, ^thread} <- window_thread(header) do
+         {:ok, thread} <- NativeCodexTurnMetadata.window_thread(window),
+         {:ok, ^thread} <- NativeCodexTurnMetadata.window_thread(header) do
       {:ok, :crypto.hash(:sha256, window)}
     else
       _other -> :none
@@ -78,17 +78,6 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation do
   end
 
   def frame_window_alias_hash(%RequestOptions{}, _payload), do: :none
-
-  # `<thread>:<window number>`, the released client's window id.
-  defp window_thread(window) do
-    case String.split(window, ":") do
-      [thread, number] when thread != "" and number != "" ->
-        if String.match?(number, ~r/\A[0-9]{1,20}\z/), do: {:ok, thread}, else: :error
-
-      _other ->
-        :error
-    end
-  end
 
   defp canonical_metadata(%{"client_metadata" => %{"x-codex-turn-metadata" => metadata}})
        when is_map(metadata), do: {:ok, metadata}

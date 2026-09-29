@@ -127,6 +127,45 @@ defmodule CodexPooler.Gateway.Payloads.NativeCodexTurnMetadata do
     digest(:native_compaction_item, :erlang.term_to_binary(item, [:deterministic]))
   end
 
+  @doc """
+  The thread of a released Codex client's window id, `<thread>:<window number>`
+  (`codex-rs/core/src/session/mod.rs` `current_window/0`), or `:error` for any
+  other shape.
+  """
+  @spec window_thread(String.t()) :: {:ok, String.t()} | :error
+  def window_thread(window) when is_binary(window) do
+    case String.split(window, ":") do
+      [thread, number] when thread != "" and number != "" ->
+        if String.match?(number, ~r/\A[0-9]{1,20}\z/), do: {:ok, thread}, else: :error
+
+      _other ->
+        :error
+    end
+  end
+
+  @doc """
+  The window before a released Codex client's window id, on the same thread.
+  The client numbers a thread's windows from 0 and moves to the next one after
+  every compaction it completes, local or remote, and on a token-budget new
+  window (`codex-rs/core/src/state/auto_compact_window.rs` `advance/0`), so the
+  previous window is the one the thread used right before. Only a canonical
+  number above 0, within the identifier bound, has one; anything else answers
+  `:none`.
+  """
+  @spec previous_window(String.t()) :: {:ok, String.t()} | :none
+  def previous_window(window) when is_binary(window) and byte_size(window) <= @max_identifier_bytes do
+    with {:ok, thread} <- window_thread(window),
+         [_thread, digits] <- String.split(window, ":"),
+         {number, ""} when number > 0 and number <= @max_window_number <- Integer.parse(digits),
+         true <- Integer.to_string(number) == digits do
+      {:ok, thread <> ":" <> Integer.to_string(number - 1)}
+    else
+      _other -> :none
+    end
+  end
+
+  def previous_window(_window), do: :none
+
   defp fetch_canonical(%{"client_metadata" => client_metadata}) when is_map(client_metadata) do
     case Map.fetch(client_metadata, @canonical_key) do
       {:ok, value} -> decode_canonical(value)

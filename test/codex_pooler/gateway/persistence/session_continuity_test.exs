@@ -1456,6 +1456,151 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuityTest do
     end
   end
 
+  # The released Codex client names the next window of its thread
+  # (`<thread>:<n + 1>`) on the HTTP request that resumes after a compaction and
+  # keeps every other identity; the request continues the live session of the
+  # previous window, found through that window's alias under its own Pool and
+  # API key (findings#289).
+  describe "previous window of a native HTTP request" do
+    test "the next window continues the thread's live session, window after window" do
+      auth = auth_fixture()
+      thread = window_thread()
+      first = start_http_window!(auth, "#{thread}:0")
+
+      log = capture_info_log(fn -> assert start_http_window!(auth, "#{thread}:1").id == first.id end)
+
+      assert log =~ "http window alias codex_session_id=#{first.id} alias_preview=#{window_alias_preview("#{thread}:1")} disposition=linked"
+      refute log =~ thread
+      assert start_http_window!(auth, "#{thread}:2").id == first.id
+
+      for window <- ["#{thread}:0", "#{thread}:1", "#{thread}:2"] do
+        assert window_alias_session_ids(auth, window) == [first.id]
+      end
+
+      assert Repo.get!(CodexSession, first.id).session_key == window_session_key("#{thread}:0")
+      assert pool_session_ids(auth) == [first.id]
+    end
+
+    @tag :cross_key_window_session
+    test "another key of the Pool or of another Pool never continues this key's thread" do
+      auth = auth_fixture()
+      owner_id = auth.pool.created_by_user_id
+      %{api_key: same_pool_key} = active_api_key_fixture(auth.pool, %{created_by_user_id: owner_id})
+      other_pool = pool_fixture(%{created_by_user_id: owner_id})
+      %{api_key: other_pool_key} = active_api_key_fixture(other_pool, %{created_by_user_id: owner_id})
+      thread = window_thread()
+      first = start_http_window!(auth, "#{thread}:0")
+      before = Repo.get!(CodexSession, first.id)
+      lease_before = active_lease!(first.id)
+
+      for other_auth <- [%{auth | api_key: same_pool_key}, %{pool: other_pool, api_key: other_pool_key}] do
+        other = start_http_window!(other_auth, "#{thread}:1")
+        refute other.id == first.id
+        assert other.api_key_id == other_auth.api_key.id
+        assert other.pool_id == other_auth.pool.id
+        assert window_alias_session_ids(other_auth, "#{thread}:1") == [other.id]
+        assert window_alias_session_ids(other_auth, "#{thread}:0") == []
+      end
+
+      after_others = Repo.get!(CodexSession, first.id)
+      assert Map.take(after_others, [:api_key_id, :owner_lease_token, :owner_lease_expires_at, :status]) == Map.take(before, [:api_key_id, :owner_lease_token, :owner_lease_expires_at, :status])
+      assert active_lease!(first.id).lease_token == lease_before.lease_token
+      assert window_alias_session_ids(auth, "#{thread}:1") == []
+
+      assert start_http_window!(auth, "#{thread}:1").id == first.id
+    end
+
+    test "a previous window whose session is expired or closed is left alone" do
+      auth = auth_fixture()
+
+      for ending <- [:lease_expired, :closed] do
+        thread = window_thread()
+        first = start_http_window!(auth, "#{thread}:0")
+
+        case ending do
+          :lease_expired -> expire_owner_lease!(first.id)
+          :closed -> first |> Ecto.Changeset.change(%{status: "closed"}) |> Repo.update!()
+        end
+
+        ended = Repo.get!(CodexSession, first.id)
+        next = start_http_window!(auth, "#{thread}:1")
+
+        refute next.id == first.id
+        assert next.session_key == window_session_key("#{thread}:1")
+        assert Map.take(Repo.get!(CodexSession, first.id), [:status, :owner_lease_expires_at, :owner_lease_token]) == Map.take(ended, [:status, :owner_lease_expires_at, :owner_lease_token])
+        assert window_alias_session_ids(auth, "#{thread}:0") == [first.id]
+        assert window_alias_session_ids(auth, "#{thread}:1") == [next.id]
+      end
+    end
+
+    test "an older window stays where it is, and only the window right before is looked up" do
+      auth = auth_fixture()
+      thread = window_thread()
+      first = start_http_window!(auth, "#{thread}:0")
+      assert start_http_window!(auth, "#{thread}:1").id == first.id
+      linked = Repo.one!(from(a in BridgeSessionAlias, where: a.alias_hash == ^:crypto.hash(:sha256, "#{thread}:1") and a.api_key_id == ^auth.api_key.id))
+
+      # A rollback or a stale process back on the first window reaches the
+      # thread's session through its own alias and moves nothing.
+      assert start_http_window!(auth, "#{thread}:0").id == first.id
+      assert Repo.get!(BridgeSessionAlias, linked.id).codex_session_id == first.id
+
+      # A window two ahead of the last known one has no previous-window alias.
+      skipped = start_http_window!(auth, "#{thread}:3")
+      refute skipped.id == first.id
+      assert window_alias_session_ids(auth, "#{thread}:3") == [skipped.id]
+    end
+
+    test "a malformed window, a websocket upgrade and a /v1 request never fall back" do
+      auth = auth_fixture()
+      thread = window_thread()
+      first = start_http_window!(auth, "#{thread}:0")
+
+      # Each would reach the first window's session if it were read as the
+      # window after it.
+      for window <- ["#{thread}", "#{thread}:", "#{thread}:x", "#{thread}:1:2", "#{thread}:01", " #{thread}:1x", ":1"] do
+        refute start_http_window!(auth, window).id == first.id
+      end
+
+      assert pool_session_ids(auth) |> Enum.uniq() |> length() == 8
+
+      websocket = RequestOptions.for_websocket(%{session_header: "#{thread}:1", session_header_source: "x-codex-window-id"})
+      assert {:ok, %CodexSession{} = upgraded} = SessionContinuity.start_codex_session(auth, websocket)
+      refute upgraded.id == first.id
+
+      v1 = RequestOptions.mark_openai_compatibility_origin(http_window_options("#{thread}:2"), "/v1/responses", "/backend-api/codex/responses")
+      assert {:ok, %CodexSession{} = translated} = SessionContinuity.start_codex_session(auth, v1)
+      refute translated.id in [first.id, upgraded.id]
+    end
+  end
+
+  defp window_thread, do: Ecto.UUID.generate()
+
+  defp http_window_options(window) do
+    RequestOptions.build(%{session_header: window, session_header_source: "x-codex-window-id"}, "/backend-api/codex/responses", %{"stream" => true})
+  end
+
+  defp start_http_window!(auth, window) do
+    assert {:ok, %CodexSession{} = session} = SessionContinuity.start_codex_session(auth, http_window_options(window))
+    session
+  end
+
+  defp window_session_key(window), do: "x-codex-window-id:" <> Base.encode16(:crypto.hash(:sha256, window), case: :lower)
+
+  defp window_alias_preview(window), do: :crypto.hash(:sha256, window) |> Base.encode16(case: :lower) |> String.slice(0, 16)
+
+  defp window_alias_session_ids(auth, window) do
+    Repo.all(
+      from alias_record in BridgeSessionAlias,
+        where:
+          alias_record.pool_id == ^auth.pool.id and alias_record.api_key_id == ^auth.api_key.id and alias_record.alias_kind == "session_header" and
+            alias_record.alias_hash == ^:crypto.hash(:sha256, window) and alias_record.status == "active",
+        select: alias_record.codex_session_id
+    )
+  end
+
+  defp pool_session_ids(auth), do: Repo.all(from(session in CodexSession, where: session.pool_id == ^auth.pool.id, select: session.id))
+
   defp expired_assigned_session!(auth, session_key, assignment) do
     assert {:ok, %CodexSession{} = session} =
              Gateway.start_codex_session(auth, %{

@@ -117,18 +117,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
     assert %{"id" => "resp_window_rotation"} = json_response(successor, 200)
     assert FakeUpstream.count(upstream) == 2
 
-    # And it is still filed under its own window-keyed session: the claim now
-    # follows the thread, while routing and affinity keep following the window
-    # exactly where `6441e83d` put them.
+    # And it continues the thread's session: a window whose own session is
+    # missing follows the live session of the window right before it
+    # (findings#289), which keeps the key of the window that opened it, while
+    # the claim follows the thread.
     assert [^opening_request, successor_request] = pool_requests(setup)
 
     assert opening_request.request_metadata["codex_session_key"] ==
              window_session_key(thread, 1)
 
     assert successor_request.request_metadata["codex_session_key"] ==
-             window_session_key(thread, 2)
+             window_session_key(thread, 1)
 
-    refute opening_request.request_metadata["codex_session_id"] ==
+    assert opening_request.request_metadata["codex_session_id"] ==
              successor_request.request_metadata["codex_session_id"]
   end
 

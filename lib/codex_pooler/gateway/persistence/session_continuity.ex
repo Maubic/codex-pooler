@@ -486,13 +486,39 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
         ).preferred_assignment_id
       end
 
-    existing_session = resolved_session || active_session_for_update(auth, session_key, now)
+    existing_session =
+      resolved_session || active_session_for_update(auth, session_key, now) ||
+        previous_window_session_for_update(auth, opts, now)
 
     if is_nil(existing_session) and authenticated_owner_attach_requires_existing?(opts) do
       Repo.rollback(:owner_unavailable)
     end
 
     {existing_session, preferred_assignment_id}
+  end
+
+  # A native HTTP request whose own window has no live session continues the
+  # live session of its thread's previous window (findings#289). The released
+  # Codex client names the next window on the request that resumes after a
+  # compaction and nothing else changes; on the websocket the socket's session
+  # carries the thread across (P115), over HTTP only the previous window's
+  # alias does. `Aliases.register!/4` then registers the request's window on
+  # that session, as it registers any window of a reused session.
+  defp previous_window_session_for_update(auth, opts, now) do
+    case Aliases.previous_window_session_for_update(auth, opts, now) do
+      %CodexSession{} = session ->
+        Logger.info("http window alias codex_session_id=#{session.id} alias_preview=#{window_alias_preview(opts)} disposition=linked")
+        session
+
+      nil ->
+        nil
+    end
+  end
+
+  defp window_alias_preview(%RequestOptions{continuity: %{session_header: window}}) do
+    :crypto.hash(:sha256, String.trim(window))
+    |> Base.encode16(case: :lower)
+    |> String.slice(0, 16)
   end
 
   # Every lookup that reaches here is scoped to the requesting API key, so the

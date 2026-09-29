@@ -307,6 +307,50 @@ defmodule CodexPooler.Gateway.Payloads.NativeCodexTurnMetadataTest do
     end
   end
 
+  # The released client's window id is `<thread>:<window number>`; the number
+  # starts at 0 and moves by one per completed compaction (findings#289).
+  test "reads the thread of a released window id and nothing else" do
+    thread = "019a0000-0000-7000-8000-000000000289"
+
+    for window <- ["#{thread}:0", "#{thread}:7", "#{thread}:01", "#{thread}:18446744073709551615"] do
+      assert NativeCodexTurnMetadata.window_thread(window) == {:ok, thread}
+    end
+
+    for window <- [thread, "#{thread}:", ":1", "#{thread}:x", "#{thread}:1:2", "#{thread}:-1", "#{thread}: 1", "#{thread}:#{String.duplicate("1", 21)}", ""] do
+      assert NativeCodexTurnMetadata.window_thread(window) == :error
+    end
+  end
+
+  test "names the previous window of a canonical window number above zero only" do
+    thread = "019a0000-0000-7000-8000-000000000289"
+
+    assert NativeCodexTurnMetadata.previous_window("#{thread}:1") == {:ok, "#{thread}:0"}
+    assert NativeCodexTurnMetadata.previous_window("#{thread}:10") == {:ok, "#{thread}:9"}
+
+    assert NativeCodexTurnMetadata.previous_window("#{thread}:18446744073709551615") ==
+             {:ok, "#{thread}:18446744073709551614"}
+
+    for window <- [
+          "#{thread}:0",
+          "#{thread}:01",
+          "#{thread}:00",
+          "#{thread}:18446744073709551616",
+          thread,
+          "#{thread}:",
+          ":1",
+          "#{thread}:x",
+          "#{thread}:1:2",
+          String.duplicate("t", 255) <> ":1",
+          "",
+          nil
+        ] do
+      assert NativeCodexTurnMetadata.previous_window(window) == :none
+    end
+
+    assert NativeCodexTurnMetadata.previous_window(String.duplicate("t", 254) <> ":1") ==
+             {:ok, String.duplicate("t", 254) <> ":0"}
+  end
+
   defp released_turn_metadata(extra) do
     %{
       "installation_id" => "00000000-0000-4000-8000-00000000b001",

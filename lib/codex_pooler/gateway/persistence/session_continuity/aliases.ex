@@ -68,6 +68,25 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.Aliases do
     end
   end
 
+  @doc """
+  The live session of the previous window of a native HTTP request's thread,
+  for a request whose own window has none (findings#289): the resume after a
+  compaction names the next window, which only the previous window's
+  `session_header` alias leads back from. The lookup is
+  `active_session_for_update/5` itself, so it is scoped to this request's Pool
+  and API key on the alias and on the session, needs a reconnectable session
+  with a live owner lease, and locks the session before its alias like the
+  lookup of the request's own window. It reads the previous window's alias
+  and never writes it.
+  """
+  @spec previous_window_session_for_update(map(), RequestOptions.t(), DateTime.t()) :: CodexSession.t() | nil
+  def previous_window_session_for_update(%{pool: %{id: pool_id}, api_key: %{id: api_key_id}}, %RequestOptions{} = opts, now) do
+    case ContinuityPayload.previous_window_session_header(opts) do
+      nil -> nil
+      previous_window -> active_session_for_update(pool_id, api_key_id, "session_header", previous_window, now)
+    end
+  end
+
   # Read-only strict lookup for the saved-reset bypass proof: the anchor must
   # resolve through an alias that already exists (before this request registers
   # its own), to a session with a bound assignment. Mirrors the

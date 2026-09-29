@@ -824,11 +824,11 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
   end
 
   defp affinity_assignment_query(pool, api_key, candidates, now) do
-    [{kind_1, hash_1}, {kind_2, hash_2}, {kind_3, hash_3}] =
+    [{kind_1, hash_1}, {kind_2, hash_2}, {kind_3, hash_3}, {kind_4, hash_4}] =
       candidates
       |> Enum.map(fn {kind, value} -> {kind, :crypto.hash(:sha256, value)} end)
-      |> Kernel.++(List.duplicate({"", <<>>}, 3))
-      |> Enum.take(3)
+      |> Kernel.++(List.duplicate({"", <<>>}, 4))
+      |> Enum.take(4)
 
     from session in CodexSession,
       join: alias_record in BridgeSessionAlias,
@@ -839,7 +839,7 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
           session.status in ^["active", "interrupted"] and session.owner_lease_expires_at > ^now,
       where:
         fragment(
-          "(?, ?) IN ((?, ?), (?, ?), (?, ?))",
+          "(?, ?) IN ((?, ?), (?, ?), (?, ?), (?, ?))",
           alias_record.alias_kind,
           alias_record.alias_hash,
           ^kind_1,
@@ -847,12 +847,14 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
           ^kind_2,
           ^hash_2,
           ^kind_3,
-          ^hash_3
+          ^hash_3,
+          ^kind_4,
+          ^hash_4
         ),
       order_by: [
         asc:
           fragment(
-            "CASE WHEN ? = ? AND ? = ? THEN 1 WHEN ? = ? AND ? = ? THEN 2 WHEN ? = ? AND ? = ? THEN 3 ELSE 4 END",
+            "CASE WHEN ? = ? AND ? = ? THEN 1 WHEN ? = ? AND ? = ? THEN 2 WHEN ? = ? AND ? = ? THEN 3 WHEN ? = ? AND ? = ? THEN 4 ELSE 5 END",
             alias_record.alias_kind,
             ^kind_1,
             alias_record.alias_hash,
@@ -864,7 +866,11 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
             alias_record.alias_kind,
             ^kind_3,
             alias_record.alias_hash,
-            ^hash_3
+            ^hash_3,
+            alias_record.alias_kind,
+            ^kind_4,
+            alias_record.alias_hash,
+            ^hash_4
           ),
         desc: alias_record.last_seen_at,
         desc: alias_record.updated_at
@@ -873,7 +879,12 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
       select: session.pool_upstream_assignment_id
   end
 
-  defp codex_session_affinity_aliases(%RequestOptions{continuity: continuity}) do
+  # The same session the session attach reaches, looked up before it: the
+  # request's own anchors first and, last, the previous window a native HTTP
+  # request continues when its own window has no live session (findings#289),
+  # so a file conflicting with that session's assignment is refused here as it
+  # is on the previous window, instead of leaving routing an impossible pin.
+  defp codex_session_affinity_aliases(%RequestOptions{continuity: continuity} = request_options) do
     opts = %{
       accepted_turn_state: continuity.accepted_turn_state,
       previous_response_id: continuity.previous_response_id,
@@ -883,7 +894,8 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
     [
       {"turn_state", Map.get(opts, :accepted_turn_state)},
       {"previous_response_id", Map.get(opts, :previous_response_id)},
-      {"session_header", Map.get(opts, :session_header)}
+      {"session_header", Map.get(opts, :session_header)},
+      {"session_header", ContinuityPayload.previous_window_session_header(request_options)}
     ]
     |> Enum.map(fn {kind, value} -> {kind, clean_string(value)} end)
     |> Enum.reject(fn {_kind, value} -> is_nil(value) end)
