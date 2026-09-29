@@ -426,8 +426,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
              UpstreamWebsocketSession.request(session, final_request)
 
     assert :consumed_final = UpstreamWebsocketSession.compaction_admission_phase(session)
-    assert :ok = UpstreamWebsocketSession.acknowledge_final_response(session, :success)
-    assert :cleared = UpstreamWebsocketSession.compaction_admission_phase(session)
 
     assert observer.() ==
              expected_native_compaction_counts()
@@ -567,7 +565,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
       # Every admission phase maps to a named stage, so a phase added to the
       # admission cannot silently land in "unknown".
       for phase <- NativeCompactionLifecycleObservation.phases(), phase != :cleared do
-        assert metric.tag_values.(%{reason: :final_success, phase_from: phase, topology: :forwarded}).stage in ~w(armed compacting finalizing)
+        assert metric.tag_values.(%{reason: :final_failure, phase_from: phase, topology: :forwarded}).stage in ~w(armed compacting finalizing)
       end
     end
   end
@@ -913,12 +911,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
 
     assert {:error, :invalid_input} =
              UpstreamWebsocketSession.acknowledge_compact_finalization(session, :invalid)
-
-    assert {:error, :invalid_input} =
-             UpstreamWebsocketSession.acknowledge_final_response(session, :invalid)
-
-    assert {:error, :invalid_input} =
-             UpstreamWebsocketSession.acknowledge_final_response(:bad, :success)
 
     assert {:error, :invalid_input} = UpstreamWebsocketSession.clear_compaction_admission(:bad)
     assert {:error, :invalid_input} = UpstreamWebsocketSession.compaction_admission_phase(:bad)

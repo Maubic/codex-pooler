@@ -286,14 +286,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   def acknowledge_compact_finalization(_pid, _acknowledgement),
     do: {:error, :invalid_input}
 
-  @spec acknowledge_final_response(pid(), :success | :failure) :: :ok | {:error, atom()}
-  def acknowledge_final_response(pid, acknowledgement)
-      when is_pid(pid) and acknowledgement in [:success, :failure] do
-    admission_call(pid, {:acknowledge_final_response, acknowledgement})
-  end
-
-  def acknowledge_final_response(_pid, _acknowledgement), do: {:error, :invalid_input}
-
   @spec clear_compaction_admission(pid()) :: :ok | {:error, :unavailable}
   def clear_compaction_admission(pid) when is_pid(pid) do
     admission_call(pid, :clear_compaction_admission)
@@ -659,16 +651,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   def handle_call({:acknowledge_compact_finalization, _invalid}, _from, state),
     do: {:reply, {:error, :invalid_input}, clear_admission(state, :invalid_input)}
-
-  def handle_call({:acknowledge_final_response, :success}, _from, state) do
-    case NativeCompactionAdmission.clear_consumed(admission_state(state)) do
-      {:ok, _admission} -> {:reply, :ok, clear_admission(state, :final_success)}
-      {:error, reason} -> {:reply, {:error, reason}, clear_admission(state, reason)}
-    end
-  end
-
-  def handle_call({:acknowledge_final_response, :failure}, _from, state),
-    do: {:reply, :ok, clear_admission(state, :final_failure)}
 
   # The explicit clear control: the runtime rejected the request the
   # admission was reserved for (`Service.clear_native_compaction_admission`).
@@ -3207,8 +3189,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp status_message_class({operation, _arg})
        when operation in [
               :record_first_compact_collected,
-              :acknowledge_compact_finalization,
-              :acknowledge_final_response
+              :acknowledge_compact_finalization
             ],
        do: operation
 

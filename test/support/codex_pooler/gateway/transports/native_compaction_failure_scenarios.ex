@@ -148,9 +148,7 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionFailureScenarios do
     :finalization_failure,
     :compact_collection,
     :compact_ack_success,
-    :compact_ack_failure,
-    :final_success,
-    :final_failure
+    :compact_ack_failure
   ]
 
   @spec required_row_ids() :: [atom()]
@@ -217,8 +215,6 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionFailureScenarios do
         1
       ),
       row(:compact_ack_failure, :direct_session_boundary, DirectSessionBoundary, :cleared, 1, 1),
-      row(:final_success, :direct_session_boundary, DirectSessionBoundary, :cleared, 1, 1),
-      row(:final_failure, :direct_session_boundary, DirectSessionBoundary, :cleared, 1, 1),
       row(
         :caller_death_after_accounting,
         :forwarded_owner_boundary,

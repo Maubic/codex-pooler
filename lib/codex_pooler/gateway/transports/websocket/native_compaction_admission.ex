@@ -731,10 +731,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
        ),
        do: {:error, :binding_mismatch, cleared()}
 
-  @spec clear_consumed(t()) :: {:ok, t()} | {:error, :invalid_transition}
-  def clear_consumed(%__MODULE__{phase: :consumed_final}), do: {:ok, cleared()}
-  def clear_consumed(%__MODULE__{}), do: {:error, :invalid_transition}
-
   @spec clear(t()) :: t()
   def clear(%__MODULE__{}), do: cleared()
 

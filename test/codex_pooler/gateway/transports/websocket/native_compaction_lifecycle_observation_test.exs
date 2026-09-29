@@ -179,7 +179,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionLifecycleObse
       :request_rejected,
       :connection_invalidated,
       :connection_closed,
-      :final_success,
       :final_failure,
       :compact_failure,
       :send_failure,

@@ -96,8 +96,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
              NativeCompactionAdmission.consume(accounting_final, final_capability, @now)
 
     assert NativeCompactionAdmission.phase(consumed_final) == :consumed_final
-    assert {:ok, cleared} = NativeCompactionAdmission.clear_consumed(consumed_final)
-    assert NativeCompactionAdmission.phase(cleared) == :cleared
   end
 
   test "final reservation requires exact compact item digest and next window number" do
