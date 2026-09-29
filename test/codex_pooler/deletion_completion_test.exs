@@ -57,6 +57,11 @@ defmodule CodexPooler.DeletionCompletionTest do
     pool = pool_fixture(%{status: "archived"})
     assert {:deleting, _} = Deletion.schedule(owner, pool)
     Repo.query!("INSERT INTO oban_jobs (state, queue, worker, args) SELECT 'available', 'jobs', 'CodexPooler.Jobs.PoolDeletionWorker', jsonb_build_object('pool_id', md5(g::text)) FROM generate_series(1, 20000) g")
+    # The bulk insert leaves its entries in the GIN index's pending list, which
+    # autovacuum merges in a live database; until then the planner prices the
+    # index by that list (about 850 here against 22 once merged) and a seq scan
+    # can win on table statistics alone, as it did on Drone 1709.
+    Repo.query!("SELECT gin_clean_pending_list('oban_jobs_args_index')")
     Repo.query!("ANALYZE oban_jobs")
     capture = {__MODULE__, make_ref()}
     on_exit(fn -> :telemetry.detach(capture) end)
@@ -64,8 +69,7 @@ defmodule CodexPooler.DeletionCompletionTest do
     assert Deletion.states([pool.id]) == %{pool.id => :in_progress}
     :telemetry.detach(capture)
     assert_receive {:state_query, sql, params}
-    %{rows: [[plan]]} = Repo.query!("EXPLAIN (FORMAT JSON) " <> sql, params)
-    assert inspect(plan) =~ "oban_jobs_args_index"
+    assert state_lookup_plan(sql, params) =~ "oban_jobs_args_index"
 
     %{api_key: key} = active_api_key_fixture(pool_fixture(), %{scope: scope})
     assert {:deleting, _} = KeyDeletion.schedule(scope, key)
@@ -73,8 +77,19 @@ defmodule CodexPooler.DeletionCompletionTest do
     assert KeyDeletion.states([key.id]) == %{key.id => :in_progress}
     :telemetry.detach(capture)
     assert_receive {:state_query, sql, params}
+    assert state_lookup_plan(sql, params) =~ "oban_jobs_args_index"
+  end
+
+  # Plans the captured lookup with sequential scans priced out, as the other plan
+  # tests do: whether the lookup can use the containment index is a property of its
+  # predicate, not of how the planner weighs this test's table statistics. A
+  # predicate the index cannot serve still plans a sequential scan here.
+  defp state_lookup_plan(sql, params) do
+    Repo.query!("SET LOCAL enable_seqscan = off")
     %{rows: [[plan]]} = Repo.query!("EXPLAIN (FORMAT JSON) " <> sql, params)
-    assert inspect(plan) =~ "oban_jobs_args_index"
+    inspect(plan)
+  after
+    Repo.query!("SET LOCAL enable_seqscan = on")
   end
 
   for kind <- [:pool, :key] do
