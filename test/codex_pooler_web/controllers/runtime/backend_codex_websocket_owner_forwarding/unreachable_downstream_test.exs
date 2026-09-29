@@ -360,6 +360,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
       assert frames >= @frames_before_cancel + 3
       assert %{active_turn: %{visible_output?: true}} = :sys.get_state(turn.owner)
       refute Repo.get(ForwardedGenerationEnd, attempt(turn.request_id).id)
+
+      # And it does, once the provider ends the turn and nobody received it.
+      # Awaited here, before the Pool's rows go: the test used to end with the
+      # turn still `in_progress`, and that task's settlement then raised
+      # `Ecto.NoResultsError` in `lock_finalization_rows/2` (findings#270 row
+      # 270-288).
+      assert {{"failed", 503, "owner_unavailable"}, {"failed", "owner_unavailable"}} == await_turn_settled!(turn.request_id)
     end
   end
 
@@ -624,6 +631,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   end
 
   defp presence_rows(node), do: Repo.all(from(i in InstancePresence.Instance, where: i.node_name == ^Atom.to_string(node), select: i.boot_id))
+
+  # The request's outcome and its turn's once the request, every attempt and
+  # the turn are terminal.
+  defp await_turn_settled!(request_id) do
+    deadline = System.monotonic_time(:millisecond) + @detection_timeout_ms
+
+    await_state!(
+      fn -> {request_outcome(request_id), Repo.get_by!(CodexTurn, request_id: request_id), Repo.exists?(from(a in Attempt, where: a.request_id == ^request_id and is_nil(a.completed_at)))} end,
+      fn {{status, _code, _error}, turn, open_attempt?} -> status not in ["accepted", "in_progress"] and turn.status != "in_progress" and not open_attempt? end,
+      "the turn never settled",
+      deadline
+    )
+    |> then(fn {outcome, turn, _open_attempt?} -> {outcome, {turn.status, turn.error_code}} end)
+  end
 
   defp attempt(request_id), do: Repo.one!(from(a in Attempt, where: a.request_id == ^request_id))
 
