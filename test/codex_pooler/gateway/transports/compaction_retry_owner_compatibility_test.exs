@@ -325,7 +325,7 @@ defmodule CodexPooler.Gateway.Transports.CompactionRetryOwnerCompatibilityTest d
 
     after_acceptance = counts()
 
-    assert {:ok, duplicate} =
+    assert {:ok, next_resend} =
              Service.prepare_websocket_response(
                payload,
                options(session, payload, CompatibleOwner)
@@ -333,8 +333,14 @@ defmodule CodexPooler.Gateway.Transports.CompactionRetryOwnerCompatibilityTest d
                fn _ -> :ok end
              )
 
-    assert {:error, %{code: "duplicate_turn"}} =
-             Service.prepare_replay_intent(auth, duplicate)
+    # The accepted retry settled failed (`owner_drained`), so the client's
+    # next resend of the compaction chains from it, not from the original
+    # predecessor, which already has its successor (findings#270 row
+    # 270-237). Preparing it creates nothing and submits nothing.
+    retry_id = envelope.observation.request_id
+
+    assert {:ok, %{intent: :fresh, lifecycle: %{client_retry_predecessor_request_id: ^retry_id}}} =
+             Service.prepare_replay_intent(auth, next_resend)
 
     assert counts() == after_acceptance
     refute_received {:compatible_owner_submission, _args}
