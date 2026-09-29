@@ -110,7 +110,7 @@ client = OpenAI(
 )
 
 response = client.responses.create(
-    model="gpt-6-sol",
+    model="gpt-6.1-sol",
     input="Write a short setup confirmation.",
 )
 
@@ -128,7 +128,7 @@ const client = new OpenAI({
 });
 
 const response = await client.responses.create({
-  model: "gpt-6-sol",
+  model: "gpt-6.1-sol",
   input: "Write a short setup confirmation.",
 });
 
@@ -147,7 +147,7 @@ const pooler = createOpenAI({
 });
 
 const { text } = await generateText({
-  model: pooler.responses("gpt-6-sol"),
+  model: pooler.responses("gpt-6.1-sol"),
   providerOptions: {
     openai: {
       promptCacheOptions: { mode: "explicit", ttl: "30m" },
@@ -182,7 +182,7 @@ on every generation that participates in the tool loop:
 
 ```ts
 const result = await generateText({
-  model: pooler.responses("gpt-6-sol"),
+  model: pooler.responses("gpt-6.1-sol"),
   providerOptions: {
     openai: { store: false },
   },
@@ -301,7 +301,7 @@ const pooler = createOpenAI({
 });
 
 const result = await generateText({
-  model: pooler.responses("gpt-6-sol"),
+  model: pooler.responses("gpt-6.1-sol"),
   providerOptions: {
     openai: {
       store: false,

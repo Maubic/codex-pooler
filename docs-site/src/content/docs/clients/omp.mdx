@@ -75,8 +75,8 @@ providers:
       v2StreamingEnabled: true
       v2Endpoint: https://codex-pooler.example.com/backend-api/codex/responses
     models:
-      - id: gpt-6-sol
-        name: GPT-6 Sol via Codex Pooler
+      - id: gpt-6.1-sol
+        name: GPT-6.1 Sol via Codex Pooler
         reasoning: true
         input:
           - text
@@ -127,19 +127,19 @@ startup:
 defaultThinkingLevel: xhigh
 enabledModels:
   - codex-pooler/gpt-6-luna
-  - codex-pooler/gpt-6-sol
+  - codex-pooler/gpt-6.1-sol
   - codex-pooler/gpt-6-astra
 modelProviderOrder:
   - codex-pooler
 modelRoles:
-  default: codex-pooler/gpt-6-sol:xhigh
+  default: codex-pooler/gpt-6.1-sol:xhigh
   smol: codex-pooler/gpt-6-luna:low
   tiny: codex-pooler/gpt-6-luna:minimal
   slow: codex-pooler/gpt-6-astra:xhigh
   plan: codex-pooler/gpt-6-astra:xhigh
-  task: codex-pooler/gpt-6-sol:high
-  vision: codex-pooler/gpt-6-sol:high
-  advisor: codex-pooler/gpt-6-sol:medium
+  task: codex-pooler/gpt-6.1-sol:high
+  vision: codex-pooler/gpt-6.1-sol:high
+  advisor: codex-pooler/gpt-6.1-sol:medium
   commit: codex-pooler/gpt-6-luna:minimal
   designer: codex-pooler/gpt-6-astra:high
 compaction:
@@ -162,7 +162,7 @@ Run a one-shot prompt from the repository you want OMP to inspect:
 **macOS / Linux / WSL**
 
 ```bash
-omp --model codex-pooler/gpt-6-sol:xhigh \
+omp --model codex-pooler/gpt-6.1-sol:xhigh \
   --no-session \
   --tools bash \
   -p 'Reply with exactly: omp ok'
@@ -171,7 +171,7 @@ omp --model codex-pooler/gpt-6-sol:xhigh \
 **Windows PowerShell**
 
 ```powershell
-omp --model codex-pooler/gpt-6-sol:xhigh --no-session --tools bash -p 'Reply with exactly: omp ok'
+omp --model codex-pooler/gpt-6.1-sol:xhigh --no-session --tools bash -p 'Reply with exactly: omp ok'
 ```
 
 `--no-session` keeps the check ephemeral. For normal interactive use, omit that flag if you want OMP to reuse session state.

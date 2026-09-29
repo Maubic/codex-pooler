@@ -133,7 +133,7 @@ Bearer 令牌或原始 Codex 密钥。实例所有者保留全局管理界面，
 ## 客户端配置
 
 准备好运行中的 Codex Pooler 实例、Pool API 密钥和已安装的客户端。
-示例包含 `gpt-6-luna`、`gpt-6-sol` 和 `gpt-6-astra`，默认选择 Sol。
+示例包含 `gpt-6-luna`、`gpt-6.1-sol` 和 `gpt-6-astra`，默认选择 Sol。
 请保留你的 Pool 提供的模型。
 将 `<pool-api-key>` 替换为你的密钥，在启动客户端前运行对应终端的命令。
 
@@ -187,7 +187,7 @@ Codex CLI 和 Desktop 会自动读取 Pool 提供的上下文大小。
 请使用该文件夹中的文件。如果已有 `[features]` 节，请将设置添加到现有节中。
 
 ```toml
-model = "gpt-6-sol"
+model = "gpt-6.1-sol"
 model_provider = "codex-pooler-ws"
 
 [model_providers.codex-pooler-ws]
@@ -230,7 +230,7 @@ api_key_model_discovery = true
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "codex-pooler/gpt-6-sol",
+  "model": "codex-pooler/gpt-6.1-sol",
   "agents": {
     "title": {
       "model": "codex-pooler/gpt-6-luna"
@@ -261,8 +261,8 @@ api_key_model_discovery = true
             "reasoningSummary": "auto"
           }
         },
-        "gpt-6-sol": {
-          "modelID": "gpt-6-sol",
+        "gpt-6.1-sol": {
+          "modelID": "gpt-6.1-sol",
           "capabilities": {
             "tools": true,
             "input": ["text", "image"],
@@ -300,7 +300,7 @@ api_key_model_discovery = true
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "openai/gpt-6-sol",
+  "model": "openai/gpt-6.1-sol",
   "small_model": "openai/gpt-6-luna",
   "provider": {
     "openai": {
@@ -330,9 +330,9 @@ api_key_model_discovery = true
           },
           "limit": { "context": 828400, "input": 828400, "output": 64000 }
         },
-        "gpt-6-sol": {
-          "id": "gpt-6-sol",
-          "name": "GPT-6 Sol",
+        "gpt-6.1-sol": {
+          "id": "gpt-6.1-sol",
+          "name": "GPT-6.1 Sol",
           "family": "gpt",
           "attachment": true,
           "reasoning": true,
@@ -397,7 +397,7 @@ api_key_model_discovery = true
   agents: {
     defaults: {
       model: {
-        primary: "openai/gpt-6-sol",
+        primary: "openai/gpt-6.1-sol",
         list: [{ id: "background", model: "openai/gpt-6-luna" }],
       },
       compaction: { reserveTokens: 128000 },
@@ -423,8 +423,8 @@ api_key_model_discovery = true
             maxTokens: 128000,
           },
           {
-            id: "gpt-6-sol",
-            name: "GPT-6 Sol via Codex Pooler",
+            id: "gpt-6.1-sol",
+            name: "GPT-6.1 Sol via Codex Pooler",
             reasoning: true,
             input: ["text", "image"],
             contextWindow: 828400,
@@ -478,7 +478,7 @@ STT_OPENAI_BASE_URL=http://localhost:4000/v1
 
 ```yaml
 model:
-  default: gpt-6-sol
+  default: gpt-6.1-sol
   provider: openai-api
   base_url: http://localhost:4000/v1
   api_mode: codex_responses
@@ -550,8 +550,8 @@ auxiliary:
           "thinkingLevelMap": { "xhigh": "xhigh" }
         },
         {
-          "id": "gpt-6-sol",
-          "name": "GPT-6 Sol via Codex Pooler",
+          "id": "gpt-6.1-sol",
+          "name": "GPT-6.1 Sol via Codex Pooler",
           "reasoning": true,
           "input": ["text", "image"],
           "contextWindow": 828400,
@@ -578,10 +578,10 @@ auxiliary:
 ```json
 {
   "defaultProvider": "codex-pooler",
-  "defaultModel": "gpt-6-sol",
+  "defaultModel": "gpt-6.1-sol",
   "enabledModels": [
     "codex-pooler/gpt-6-luna",
-    "codex-pooler/gpt-6-sol",
+    "codex-pooler/gpt-6.1-sol",
     "codex-pooler/gpt-6-astra"
   ],
   "compaction": { "reserveTokens": 128000 }
@@ -634,8 +634,8 @@ providers:
           streamIdleTimeoutMs: 300000
         contextWindow: 828400
         maxTokens: 128000
-      - id: gpt-6-sol
-        name: GPT-6 Sol via Codex Pooler
+      - id: gpt-6.1-sol
+        name: GPT-6.1 Sol via Codex Pooler
         reasoning: true
         input: [text, image]
         compat:
@@ -659,19 +659,19 @@ startup:
   setupWizard: false
 enabledModels:
   - codex-pooler/gpt-6-luna
-  - codex-pooler/gpt-6-sol
+  - codex-pooler/gpt-6.1-sol
   - codex-pooler/gpt-6-astra
 modelProviderOrder:
   - codex-pooler
 modelRoles:
-  default: codex-pooler/gpt-6-sol:high
+  default: codex-pooler/gpt-6.1-sol:high
   smol: codex-pooler/gpt-6-luna:low
   tiny: codex-pooler/gpt-6-luna:minimal
   slow: codex-pooler/gpt-6-astra:xhigh
   plan: codex-pooler/gpt-6-astra:xhigh
-  task: codex-pooler/gpt-6-sol:high
-  vision: codex-pooler/gpt-6-sol:high
-  advisor: codex-pooler/gpt-6-sol:medium
+  task: codex-pooler/gpt-6.1-sol:high
+  vision: codex-pooler/gpt-6.1-sol:high
+  advisor: codex-pooler/gpt-6.1-sol:medium
   commit: codex-pooler/gpt-6-luna:minimal
   designer: codex-pooler/gpt-6-astra:high
 compaction:
@@ -728,7 +728,7 @@ Cursor BYOK 需要 **Pro 或更高订阅**。请求经过 Cursor 服务器，
 ```jsonc
 {
   "$schema": "https://app.kilo.ai/config.json",
-  "model": "codex-pooler/gpt-6-sol",
+  "model": "codex-pooler/gpt-6.1-sol",
   "enabled_providers": ["codex-pooler"],
   "provider": {
     "codex-pooler": {
@@ -749,8 +749,8 @@ Cursor BYOK 需要 **Pro 或更高订阅**。请求经过 Cursor 服务器，
           },
           "limit": { "context": 828400, "input": 828400, "output": 64000 }
         },
-        "gpt-6-sol": {
-          "name": "GPT-6 Sol via Codex Pooler",
+        "gpt-6.1-sol": {
+          "name": "GPT-6.1 Sol via Codex Pooler",
           "tool_call": true,
           "reasoning": true,
           "temperature": false,
@@ -797,7 +797,7 @@ Cursor BYOK 需要 **Pro 或更高订阅**。请求经过 Cursor 服务器，
 | API format | OpenAI Chat Completions |
 | Custom Request URL | `http://localhost:4000/v1` |
 | Full URL | Off |
-| Model ID | `gpt-6-sol` |
+| Model ID | `gpt-6.1-sol` |
 | API key | 你的 Pool API 密钥 |
 | Model Series | Default |
 
@@ -825,7 +825,7 @@ URL 末尾不要加斜杠。保存模型后，在 agent 模型选择器中关闭
 打开对应系统路径下的 `.aider.conf.yml`，添加以下设置：
 
 ```yaml
-model: openai/gpt-6-sol
+model: openai/gpt-6.1-sol
 openai-api-base: http://localhost:4000/v1
 ```
 
@@ -885,9 +885,9 @@ models:
       maxTokens: 128000
     roles: [chat, edit, apply, summarize]
     capabilities: [tool_use, image_input]
-  - name: GPT-6 Sol via Codex Pooler
+  - name: GPT-6.1 Sol via Codex Pooler
     provider: openai
-    model: gpt-6-sol
+    model: gpt-6.1-sol
     apiBase: http://localhost:4000/v1
     apiKey: "${{ secrets.CODEX_POOLER_API_KEY }}"
     contextLength: 828400
@@ -929,13 +929,13 @@ cline auth \
   --provider openai \
   --apikey "$CODEX_POOLER_API_KEY" \
   --baseurl http://localhost:4000/v1 \
-  --modelid gpt-6-sol
+  --modelid gpt-6.1-sol
 ```
 
 **Windows PowerShell**
 
 ```powershell
-cline auth --provider openai --apikey "$env:CODEX_POOLER_API_KEY" --baseurl http://localhost:4000/v1 --modelid gpt-6-sol
+cline auth --provider openai --apikey "$env:CODEX_POOLER_API_KEY" --baseurl http://localhost:4000/v1 --modelid gpt-6.1-sol
 ```
 
 启动 Cline 并使用保存的模型。在 IDE 扩展中选择 **OpenAI Compatible**，
@@ -963,7 +963,7 @@ cline auth --provider openai --apikey "$env:CODEX_POOLER_API_KEY" --baseurl http
 
 ```yaml
 GOOSE_PROVIDER: openai
-GOOSE_MODEL: gpt-6-sol
+GOOSE_MODEL: gpt-6.1-sol
 OPENAI_HOST: http://localhost:4000
 OPENAI_BASE_PATH: v1/chat/completions
 GOOSE_CONTEXT_LIMIT: 828400
@@ -1019,14 +1019,14 @@ $env:OPENAI_API_KEY = $env:CODEX_POOLER_API_KEY
         models:
           - id: gpt-6-luna
             contextWindow: 828400
-          - id: gpt-6-sol
+          - id: gpt-6.1-sol
             contextWindow: 828400
           - id: gpt-6-astra
             contextWindow: 828400
 - id: agent-default-model
   config:
     provider: codex-pooler
-    model: gpt-6-sol
+    model: gpt-6.1-sol
 ```
 
 添加配置时，请保留这些条目中的现有设置。
@@ -1063,11 +1063,11 @@ providers:
     resource_path: u/<owner>/codex_pooler
     models:
       - gpt-6-luna
-      - gpt-6-sol
+      - gpt-6.1-sol
       - gpt-6-astra
 default_model:
   provider: customai
-  model: gpt-6-sol
+  model: gpt-6.1-sol
 metadata_model:
   provider: customai
   model: gpt-6-luna
@@ -1118,7 +1118,7 @@ client = OpenAI(
 )
 
 response = client.responses.create(
-    model="gpt-6-sol",
+    model="gpt-6.1-sol",
     input="Write a one-sentence status update.",
 )
 
@@ -1148,7 +1148,7 @@ const client = new OpenAI({
 });
 
 const response = await client.responses.create({
-  model: "gpt-6-sol",
+  model: "gpt-6.1-sol",
   input: "Write a one-sentence status update.",
 });
 
@@ -1179,7 +1179,7 @@ const pooler = createOpenAI({
 });
 
 const { text } = await generateText({
-  model: pooler.responses("gpt-6-sol"),
+  model: pooler.responses("gpt-6.1-sol"),
   prompt: "Write a one-sentence status update.",
 });
 
