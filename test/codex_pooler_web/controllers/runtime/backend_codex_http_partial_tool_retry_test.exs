@@ -20,7 +20,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpPartialToolRetryTest do
   for mode <- ["full", "lite"], arm <- [:opening, :tool_continuation], tool_type <- ["custom_tool_call", "function_call"] do
     @tag mode: mode, arm: arm, tool_type: tool_type
     test "an identical #{mode} native HTTP #{arm} retries a partial #{tool_type} exactly once", %{mode: mode, arm: arm, tool_type: tool_type} do
-      {upstream, setup, port, thread_id, payload} = scenario(mode, arm, partial_events(tool_type), [FakeUpstream.sse_stream([completed_event()])])
+      {upstream, setup, port, thread_id, payload} = scenario(mode, arm, partial_events(tool_type), [FakeUpstream.sse_stream([completed_event()]), FakeUpstream.sse_stream([completed_event()])])
       assert_cut!(port, setup, payload, thread_id, tool_type)
       [first] = pool_requests(setup)
       contract = partial_retry_contract()
@@ -41,10 +41,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpPartialToolRetryTest do
       assert [%Attempt{status: "succeeded"}] = Repo.all(from(a in Attempt, where: a.request_id == ^retry.id))
       assert_settled_once!([first.id, retry.id])
 
-      assert_refused!(port, setup, payload, thread_id)
-      assert FakeUpstream.count(upstream) == 1 + contract.retry_limit
-      assert length(pool_requests(setup)) == 1 + contract.retry_limit
-      assert_settled_once!([first.id, retry.id])
+      assert_completed_resend!(port, setup, payload, thread_id)
+      assert FakeUpstream.count(upstream) == 2 + contract.retry_limit
+      assert length(pool_requests(setup)) == 2 + contract.retry_limit
+      assert_settled_once!(Enum.map(pool_requests(setup), & &1.id))
     end
   end
 
@@ -61,15 +61,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpPartialToolRetryTest do
       summary = %{"type" => "response.reasoning_summary_text.delta", "item_id" => "rs_synthetic", "output_index" => 0, "summary_index" => 0, "delta" => "synthetic"}
       tool_events = Enum.map(tool_events, fn {type, event} -> {type, Map.put(event, "output_index", 1)} end)
       events = [created, {reasoning["type"], reasoning}, {summary["type"], summary}] ++ tool_events ++ [{"codex.rate_limits", %{"type" => "codex.rate_limits"}}]
-      {upstream, setup, port, thread_id, payload} = scenario(mode, :opening, events, [FakeUpstream.sse_stream([completed_event()])])
+      {upstream, setup, port, thread_id, payload} = scenario(mode, :opening, events, [FakeUpstream.sse_stream([completed_event()]), FakeUpstream.sse_stream([completed_event()])])
       assert_cut!(port, setup, payload, thread_id, tool_type)
       [first] = pool_requests(setup)
       attempt = Repo.get_by!(Attempt, request_id: first.id)
       assert attempt.response_metadata["native_http_partial_tool"]["poisoned"] == false
       {status, body} = post_stream!(port, setup, payload, thread_id)
       assert {status, body =~ "response.completed"} == {200, true}
-      assert_refused!(port, setup, payload, thread_id)
-      assert FakeUpstream.count(upstream) == 2
+      assert_completed_resend!(port, setup, payload, thread_id)
+      assert FakeUpstream.count(upstream) == 3
       assert_settled_once!(Enum.map(pool_requests(setup), & &1.id))
     end
   end
@@ -123,15 +123,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpPartialToolRetryTest do
     @tag mode: mode, tool_type: tool_type
     test "clean EOF after #{mode} #{tool_type} input.done admits one identical retry", %{mode: mode, tool_type: tool_type} do
       events = partial_events(tool_type) ++ [input_done_event(tool_type)]
-      {upstream, setup, port, thread_id, payload} = scenario(mode, :opening, events, [FakeUpstream.sse_stream([completed_event()])], :clean)
+      {upstream, setup, port, thread_id, payload} = scenario(mode, :opening, events, [FakeUpstream.sse_stream([completed_event()]), FakeUpstream.sse_stream([completed_event()])], :clean)
       assert_cut!(port, setup, payload, thread_id, tool_type)
       [first] = pool_requests(setup)
       attempt = Repo.get_by!(Attempt, request_id: first.id)
       assert attempt.response_metadata["native_http_partial_tool"] == %{"version" => 1, "parser_complete" => true, "poisoned" => false, "partial_tool" => tool_type, "input_done" => true}
       {status, body} = post_stream!(port, setup, payload, thread_id)
       assert {status, body =~ "response.completed"} == {200, true}
-      assert_refused!(port, setup, payload, thread_id)
-      assert FakeUpstream.count(upstream) == 2
+      assert_completed_resend!(port, setup, payload, thread_id)
+      assert FakeUpstream.count(upstream) == 3
       assert_settled_once!(Enum.map(pool_requests(setup), & &1.id))
     end
   end
@@ -274,6 +274,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpPartialToolRetryTest do
     turn = Repo.get_by!(CodexTurn, request_id: first.id)
     assert %DateTime{} = turn.first_visible_output_at
     assert %DateTime{} = turn.completed_at
+  end
+
+  defp assert_completed_resend!(port, setup, payload, thread_id) do
+    predecessor = List.last(pool_requests(setup))
+    assert predecessor.status == "succeeded"
+    {status, body} = post_stream!(port, setup, payload, thread_id)
+    assert status == 200
+    assert body =~ "response.completed"
+    successor = List.last(pool_requests(setup))
+    assert successor.id != predecessor.id
+    assert successor.status == "succeeded"
+    assert Repo.exists?(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^predecessor.id and link.successor_request_id == ^successor.id))
   end
 
   defp assert_refused!(port, setup, payload, thread_id) do

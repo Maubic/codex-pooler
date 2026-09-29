@@ -2207,10 +2207,10 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defp resend_settlement?(
          %CodexTurn{status: status, error_code: code},
          %Request{status: "failed", last_error_code: code},
-         %Attempt{status: "failed", network_error_code: code}
+         %Attempt{status: "failed", network_error_code: code, transport: transport}
        )
        when (status == "interrupted" and code in ["client_disconnected", "owner_drained"]) or
-              (status in ["failed", "interrupted"] and code == "upstream_stream_error"),
+              (transport == "websocket" and status in ["failed", "interrupted"] and code == "upstream_stream_error"),
        do: true
 
   defp resend_settlement?(_turn, _request, _attempt), do: false
@@ -2404,8 +2404,16 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defp mailbox_ending_matches?(%Request{} = successor, %{ending: ending}),
     do: original_witness_eligible?(successor) and mailbox_witness_matches?(successor, ending)
 
-  defp mailbox_output_matches?(turn, %Request{transport: "websocket"} = request, attempt, candidate),
-    do: verified_completed_item_resend?(turn, request, attempt, [candidate])
+  # New addressed mailbox input is a different continuation contract from a
+  # resend retaining only part of an answer. It requires the complete recorded
+  # output and an interrupted delivery, not the relaxed resend prefix proof.
+  defp mailbox_output_matches?(
+         turn,
+         %Request{transport: "websocket"} = request,
+         %Attempt{response_metadata: %{"downstream_delivery" => %{"outcome" => "aborted", "terminal_class" => "none", "highest_frame_class" => "item_done", "completed_item_digests" => digests}}} = attempt,
+         %{items: items} = candidate
+       ),
+       do: items == digests and verified_completed_item_resend?(turn, request, attempt, [candidate])
 
   defp mailbox_output_matches?(%CodexTurn{transport_kind: "http_sse"}, %Request{transport: "http_sse"}, %Attempt{transport: "http_sse", response_metadata: %{"native_http_resume_progress" => recorded}}, %{http_progress: expected}) do
     case {recorded, expected} do

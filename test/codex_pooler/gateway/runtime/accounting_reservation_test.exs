@@ -781,7 +781,9 @@ defmodule CodexPooler.Gateway.Runtime.AccountingReservationTest do
     {:ok, retry} =
       Service.prepare_websocket_response(CodexPooler.JSON.encode!(payload), opts, fn _ -> :ok end)
 
-    assert {:error, %{code: "duplicate_turn"}} = Service.prepare_replay_intent(auth, retry)
+    assert {:ok, %{intent: :fresh, lifecycle: %{client_retry_predecessor_request_id: completed_id}}} = Service.prepare_replay_intent(auth, retry)
+    assert completed_id == link.successor_request_id
+    assert Repo.get!(Request, request.id) == request
   end
 
   defp cleanup_predecessor(auth, model, session, request, prepared, phase) do

@@ -95,7 +95,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteerProgr
     # different compaction point and no more user messages after it than the
     # opener had. It is still a later request of the turn.
     test "after a mid-turn compaction of a compacted session is served once (full)", %{conn: conn} do
-      upstream = start_upstream(FakeUpstream.strict_sequence([turn_sse("resp_mono_open"), compaction_sse("resp_mono_compaction"), turn_sse("resp_mono_steer")]))
+      upstream = start_upstream(FakeUpstream.strict_sequence([turn_sse("resp_mono_open"), compaction_sse("resp_mono_compaction"), turn_sse("resp_mono_steer"), turn_sse("resp_mono_retry")]))
       setup = http_setup!(upstream, "full")
       ids = ids()
       opener = [user("earlier turn"), compaction_item("earlier"), user("open the turn")]
@@ -105,15 +105,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteerProgr
 
       steered = [user("earlier turn"), user("open the turn"), compaction_item("mid-turn"), user("steer the running turn")]
       assert response(post_http(conn, setup, ids, "turn", steered, 1), 200)
-      assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(post_http(conn, setup, ids, "turn", steered, 1), 409)
+      assert post_http(conn, setup, ids, "turn", steered, 1).status == 200
 
-      assert FakeUpstream.count(upstream) == 3
+      assert FakeUpstream.count(upstream) == 4
 
       assert [
                {"codex-turn", "opening", "succeeded"},
                {"codex-request", "compaction", "succeeded"},
-               {"codex-resume", "steered_continuation", "succeeded"}
+               {"codex-resume", "steered_continuation", "succeeded"},
+               {"codex-request-retry", "steered_continuation", "succeeded"}
              ] = http_rows(setup)
+
+      [_, _, predecessor, successor] = pool_requests(setup)
+      assert Repo.get_by!(CodexPooler.Accounting.RequestClientRetryLink, predecessor_request_id: predecessor.id).successor_request_id == successor.id
+      for request <- [predecessor, successor], do: assert(ledger_kinds(request.id) == %{"reservation" => 1, "settlement" => 1, "release" => 1})
     end
   end
 
@@ -165,13 +170,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteerProgr
     # opener's resend policy refuses it. It is not generated a second time.
     for topology <- [:local, :direct] do
       @tag topology: topology
-      test "the steer's full-history resend is refused, not generated again (#{topology} owner, full)", %{topology: topology} do
+      test "the previous-release steer follows the topology-specific retry policy (#{topology} owner, full)", %{topology: topology} do
         upstream =
           start_upstream(
-            FakeUpstream.strict_sequence([
-              native_request(response_frames("resp_mono_open", "msg_mono_open")),
-              native_request(response_frames("resp_mono_steer", "msg_mono_steer"))
-            ])
+            FakeUpstream.strict_sequence(
+              [
+                native_request(response_frames("resp_mono_open", "msg_mono_open")),
+                native_request(response_frames("resp_mono_steer", "msg_mono_steer"))
+              ] ++ if(topology == :local, do: [native_request(response_frames("resp_mono_retry", "msg_mono_retry"))], else: [])
+            )
           )
 
         setup = websocket_setup!(topology, upstream, "full")
@@ -197,9 +204,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteerProgr
         {:ok, resend} = send_on_new_socket(port, setup, turn_payload(model, opener ++ [assistant("msg_mono_open"), steer_user]))
 
         outcome = finish(setup, upstream)
-        assert answer_of(resend) == {"error", 409, "duplicate_turn"}
-        assert_served_once_each!(outcome, 2)
-        assert [opener_row, steer_row] = outcome.requests
+
+        if topology == :local do
+          assert answer_of(resend) == {"response.completed", "resp_mono_retry"}
+          assert_served_once_each!(outcome, 3)
+          assert [_, steer, successor] = outcome.requests
+          assert Repo.get_by!(CodexPooler.Accounting.RequestClientRetryLink, predecessor_request_id: steer.id).successor_request_id == successor.id
+        else
+          assert answer_of(resend) == {"error", 409, "duplicate_turn"}
+          assert_served_once_each!(outcome, 2)
+        end
+
+        [opener_row, steer_row | _] = outcome.requests
         assert String.starts_with?(opener_row.correlation_id, "codex-turn:")
         assert String.starts_with?(steer_row.correlation_id, "codex-request:")
       end

@@ -188,13 +188,15 @@ defmodule CodexPooler.Gateway.Runtime.NativeCompactionPreflightTest do
                })
              end)
 
-    assert {:ok, {:error, :terminal_predecessor}} =
+    assert {:ok, {:ok, %{client_retry_predecessor_request_id: exact_predecessor}}} =
              Repo.transaction(fn ->
                ClientRetry.preflight_snapshot(session, setup.api_key, setup.model, %{
                  input
                  | replay_claim_digest: first.replay_claim_digest
                })
              end)
+
+    assert is_binary(exact_predecessor)
 
     {:ok, owner} =
       Owner.start_link([])
@@ -331,13 +333,10 @@ defmodule CodexPooler.Gateway.Runtime.NativeCompactionPreflightTest do
           compaction_result_mode: :native_websocket
         )
 
-      assert {:error, %{code: "duplicate_turn"}} =
-               Service.prepare_replay_intent(setup.auth, %{
-                 first
-                 | request_options: invalid_options
-               })
+      assert {:ok, %{intent: :fresh, lifecycle: %{client_retry_predecessor_request_id: ^exact_predecessor}}} =
+               Service.prepare_replay_intent(setup.auth, %{first | request_options: invalid_options})
 
-      assert {:error, %{code: "duplicate_turn"}} =
+      assert {:ok, %{intent: :fresh, lifecycle: %{client_retry_predecessor_request_id: ^exact_predecessor}}} =
                Service.prepare_replay_intent(setup.auth, first)
 
       {:ok, _} =

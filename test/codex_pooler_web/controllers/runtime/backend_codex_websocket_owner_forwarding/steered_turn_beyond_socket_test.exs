@@ -58,13 +58,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteeredTur
   describe "a steer sent as full history on a new socket" do
     for {topology, mode} <- [{:local, "full"}, {:local, "lite"}, {:peer, "full"}, {:direct, "full"}, {:direct, "lite"}] do
       @tag topology: topology, serving_mode: mode
-      test "is served once, and its resend and the opener's resend stay refused (#{topology} owner, #{mode})", %{topology: topology, serving_mode: mode} do
+      test "chains its resend and preserves the topology-specific older opener fence (#{topology} owner, #{mode})", %{topology: topology, serving_mode: mode} do
         {outcome, logs} = with_info_log(fn -> run_new_socket_steer(topology, mode) end)
 
         assert outcome.steer_answer == {"response.completed", "resp_beyond_steer"}
-        assert outcome.resend_answers == [{"error", 409, "duplicate_turn"}, {"error", 409, "duplicate_turn"}]
-        assert_served_once_each!(outcome, 2)
-        assert [_opener, steer] = outcome.requests
+        assert outcome.resend_answers == [{"response.completed", "resp_beyond_retry"}, if(topology == :direct, do: {"response.completed", "resp_beyond_opener_retry"}, else: {"error", 409, "duplicate_turn"})]
+        assert_served_once_each!(outcome, if(topology == :direct, do: 4, else: 3))
+        [opener, steer, successor | rest] = outcome.requests
+        if rest != [], do: assert_chain!(opener, hd(rest))
+        assert_chain!(steer, successor)
         assert String.starts_with?(steer.correlation_id, "codex-resume:")
         assert logs =~ "native websocket steered turn claim rebound"
       end
@@ -79,12 +81,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteeredTur
         {outcome, _logs} = with_info_log(fn -> run_anchored_opener_steer(topology) end)
 
         assert outcome.steer_answer == {"response.completed", "resp_beyond_steer"}
-        assert outcome.resend_answers == [{"error", 409, "duplicate_turn"}]
-        assert_served_once_each!(outcome, 3)
+        assert outcome.resend_answers == [if(topology == :direct, do: {"response.completed", "resp_beyond_retry"}, else: {"error", 409, "duplicate_turn"})]
+        assert_served_once_each!(outcome, if(topology == :direct, do: 4, else: 3))
 
         # The anchored opener recorded the progress of the history its anchor
         # stood for: a digest, never content.
-        assert [_previous, opener, steer] = outcome.requests
+        [_previous, opener, steer | rest] = outcome.requests
+        if rest != [], do: assert_chain!(opener, hd(rest))
         assert %{"version" => 1, "digest" => <<_::binary-size(43)>>} = opener.request_metadata["native_turn_progress"]
         assert String.starts_with?(opener.correlation_id, "codex-turn:")
         assert String.starts_with?(steer.correlation_id, "codex-resume:")
@@ -93,16 +96,17 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteeredTur
 
     # A steer served anchored on its own socket and then sent again as full
     # history on another socket (its client never read the answer) is the same
-    # request, and must not be generated twice.
+    # request; its resend is a separately billed chained successor.
     for topology <- [:local, :direct] do
       @tag topology: topology
-      test "is refused when it repeats a steer already served anchored on the old socket (#{topology} owner, full)", %{topology: topology} do
+      test "chains a full-history resend of a steer served anchored on the old socket (#{topology} owner, full)", %{topology: topology} do
         {outcome, _logs} = with_info_log(fn -> run_anchored_steer_then_full_history(topology) end)
 
         assert outcome.steer_answer == {"response.completed", "resp_beyond_steer"}
-        assert outcome.resend_answers == [{"error", 409, "duplicate_turn"}]
-        assert_served_once_each!(outcome, 2)
-        assert [_opener, steer] = outcome.requests
+        assert outcome.resend_answers == [{"response.completed", "resp_beyond_retry"}]
+        assert_served_once_each!(outcome, 3)
+        assert [_opener, steer, successor] = outcome.requests
+        assert_chain!(steer, successor)
         assert String.starts_with?(steer.correlation_id, "codex-resume:")
       end
     end
@@ -111,22 +115,27 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteeredTur
   describe "a steer sent over HTTPS after a websocket opener" do
     for mode <- ["full", "lite"] do
       @tag serving_mode: mode
-      test "is served once, and its resend and the opener's HTTPS resends stay refused (#{mode})", %{conn: conn, serving_mode: mode} do
+      test "chains its resend while older opener HTTPS resends stay refused (#{mode})", %{conn: conn, serving_mode: mode} do
         outcome = run_https_steer(conn, mode)
 
         # The opener's HTTPS fallback, as sent and rebuilt with its delivered
         # answer, is the opener again.
         assert outcome.opener_resend_statuses == [{409, "duplicate_turn"}, {409, "duplicate_turn"}]
         assert outcome.steer_status == 200
-        assert outcome.steer_resend_status == {409, "duplicate_turn"}
-        assert_served_once_each!(outcome, 2)
+        assert outcome.steer_resend_status == 200
+        assert_served_once_each!(outcome, 3)
 
-        assert [opener, steer] = outcome.requests
+        assert [opener, steer, successor] = outcome.requests
+        assert_chain!(steer, successor)
         assert opener.transport == "websocket" and String.starts_with?(opener.correlation_id, "codex-turn:")
         assert String.starts_with?(steer.correlation_id, "codex-resume:")
         assert steer.request_metadata["native_http_claim_arm"] == "steered_continuation"
       end
     end
+  end
+
+  defp assert_chain!(predecessor, successor) do
+    assert Repo.get_by!(CodexPooler.Accounting.RequestClientRetryLink, predecessor_request_id: predecessor.id).successor_request_id == successor.id
   end
 
   defp assert_served_once_each!(outcome, count) do
@@ -145,10 +154,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteeredTur
     upstream =
       start_upstream(
         # provenance: source-derived findings#206 row 206-412 (rust-v0.156.1 client.rs websocket_connection resets the cached session when the connection closed, so the steer drained after response.completed goes out as full history on a new socket)
-        FakeUpstream.strict_sequence([
-          native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_opening", "msg_beyond_opening"))),
-          native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_steer", "msg_beyond_steer")))
-        ])
+        FakeUpstream.strict_sequence(
+          [
+            native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_opening", "msg_beyond_opening"))),
+            native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_steer", "msg_beyond_steer"))),
+            native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_retry", "msg_beyond_retry")))
+          ] ++ if(topology == :direct, do: [native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_opener_retry", "msg_beyond_opener_retry")))], else: [])
+        )
       )
 
     setup = topology_setup!(topology, upstream)
@@ -172,11 +184,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteeredTur
     upstream =
       start_upstream(
         # provenance: source-derived findings#206 row 206-412 (rust-v0.156.1 client.rs carries the websocket session across turns, so the next turn's opener is an anchored increment; after a reconnect its steer is full history)
-        FakeUpstream.strict_sequence([
-          native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_previous", "msg_beyond_previous"))),
-          native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_opening", "msg_beyond_opening"))),
-          native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_steer", "msg_beyond_steer")))
-        ])
+        FakeUpstream.strict_sequence(
+          [
+            native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_previous", "msg_beyond_previous"))),
+            native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_opening", "msg_beyond_opening"))),
+            native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_steer", "msg_beyond_steer")))
+          ] ++ if(topology == :direct, do: [native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_retry", "msg_beyond_retry")))], else: [])
+        )
       )
 
     setup = topology_setup!(topology, upstream)
@@ -214,7 +228,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteeredTur
         # provenance: source-derived findings#206 row 206-412 (rust-v0.156.1 client.rs resends a request as full history on a new connection; the steer's anchored and full-history forms are one request)
         FakeUpstream.strict_sequence([
           native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_opening", "msg_beyond_opening"))),
-          native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_steer", "msg_beyond_steer")))
+          native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_steer", "msg_beyond_steer"))),
+          native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_retry", "msg_beyond_retry")))
         ])
       )
 
@@ -250,7 +265,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteeredTur
         # provenance: source-derived findings#206 row 206-412 (rust-v0.156.1 client.rs try_switch_fallback_transport disables websockets for the rest of the session, so a steer drained after a websocket request completed goes out over HTTPS as full history)
         FakeUpstream.strict_sequence([
           native_request(FakeUpstream.websocket_text_frames(response_frames("resp_beyond_opening", "msg_beyond_opening"))),
-          turn_sse("resp_beyond_steer")
+          turn_sse("resp_beyond_steer"),
+          turn_sse("resp_beyond_retry")
         ])
       )
 

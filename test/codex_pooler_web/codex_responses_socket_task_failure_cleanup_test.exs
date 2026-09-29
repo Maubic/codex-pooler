@@ -43,7 +43,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTaskFailureCleanupTest do
            ) == 1
   end
 
-  test "ordinary cancellation stays terminal and cannot claim a successor" do
+  test "ordinary cancellation preserves its settlement and admits an identical successor" do
     fixture = fixture()
     {context, token, state} = cleanup_fixture(fixture)
 
@@ -54,6 +54,9 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTaskFailureCleanupTest do
              )
 
     assert Repo.reload!(fixture.request).last_error_code == "client_disconnected"
+    assert {:ok, %ClientRetry.SuccessorClaim{predecessor_request_id: predecessor_id, link: link}} = claim(fixture)
+    assert predecessor_id == fixture.request.id
+    assert link.predecessor_request_id == fixture.request.id
     assert {:error, _} = claim(fixture)
   end
 
@@ -70,6 +73,10 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTaskFailureCleanupTest do
                state
              )
 
+    assert Repo.reload!(fixture.request) == before
+    assert {:ok, %ClientRetry.SuccessorClaim{predecessor_request_id: predecessor_id, link: link}} = claim(fixture)
+    assert predecessor_id == fixture.request.id
+    assert link.predecessor_request_id == fixture.request.id
     assert Repo.reload!(fixture.request) == before
     assert {:error, _} = claim(fixture)
 

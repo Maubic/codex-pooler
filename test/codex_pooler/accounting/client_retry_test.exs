@@ -573,7 +573,7 @@ defmodule CodexPooler.Accounting.ClientRetryTest do
                )
     end
 
-    test "requires exact Mint.TransportError close identity for receive-phase closed signals" do
+    test "an exact settled websocket resend remains eligible when partial-reasoning close evidence differs" do
       for mutation <- [:wrong_source, :wrong_exception, :wrong_reason] do
         setup = accounting_setup(%{price_version: unique_price_version(to_string(mutation))})
         %{rows: [[now]]} = Repo.query!("SELECT clock_timestamp()", [])
@@ -602,7 +602,7 @@ defmodule CodexPooler.Accounting.ClientRetryTest do
         Repo.update!(Ecto.Changeset.change(attempt, response_metadata: metadata))
         opts = successor_opts(setup, session, digest, semantic_digest, now)
 
-        assert {:error, :terminal_predecessor} =
+        assert {:ok, %ClientRetry.SuccessorClaim{predecessor_request_id: previous_id}} =
                  Accounting.claim_client_retry_successor(
                    setup.auth,
                    setup.model,
@@ -615,7 +615,9 @@ defmodule CodexPooler.Accounting.ClientRetryTest do
                    where: link.predecessor_request_id == ^predecessor.id
                  ),
                  :count
-               ) == 0
+               ) == 1
+
+        assert previous_id == predecessor.id
       end
 
       setup = accounting_setup(%{price_version: unique_price_version("mint-closed-positive")})
@@ -649,11 +651,25 @@ defmodule CodexPooler.Accounting.ClientRetryTest do
                )
     end
 
+    test "an exact settled websocket resend with a completed output observation creates one linked successor" do
+      setup = accounting_setup()
+      %{rows: [[now]]} = Repo.query!("SELECT clock_timestamp()", [])
+      digest = :crypto.strong_rand_bytes(32)
+      semantic = :crypto.strong_rand_bytes(32)
+      {session, request, attempt} = eligible_predecessor!(setup, digest, semantic, now)
+      metadata = put_in(attempt.response_metadata, ["native_client_retry_observation", "output_item_done_count"], 1)
+      Repo.update!(Ecto.Changeset.change(attempt, response_metadata: metadata))
+      opts = successor_opts(setup, session, digest, semantic, now)
+      assert {:ok, %ClientRetry.SuccessorClaim{predecessor_request_id: previous_id, link: link}} = Accounting.claim_client_retry_successor(setup.auth, setup.model, %{"model" => setup.model.exposed_model_id, "input" => []}, opts)
+      assert previous_id == request.id
+      assert link.predecessor_request_id == request.id
+      assert {:error, :successor_claimed} = Accounting.claim_client_retry_successor(setup.auth, setup.model, %{"model" => setup.model.exposed_model_id, "input" => []}, opts)
+    end
+
     test "rejects expired, changed, unsafe, entitled, and successor-chain predecessors without effects" do
       expected_reasons = %{
         expired: :retry_expired,
         payload: :payload_mismatch,
-        completed_output: :unsafe_completed_output,
         entitlement: :entitlement_present,
         successor: :retry_exhausted,
         missing_witness: :missing_witness,
@@ -690,15 +706,6 @@ defmodule CodexPooler.Accounting.ClientRetryTest do
           end
 
         case mutation do
-          :completed_output ->
-            update_in(
-              attempt.response_metadata["native_client_retry_observation"],
-              fn observation ->
-                Map.put(observation, "output_item_done_count", 1)
-              end
-            )
-            |> then(&Repo.update!(Ecto.Changeset.change(attempt, response_metadata: &1.response_metadata)))
-
           :entitlement ->
             insert_entitlement!(
               setup,
@@ -1041,10 +1048,10 @@ defmodule CodexPooler.Accounting.ClientRetryTest do
       assert Repo.aggregate(RequestClientRetryLink, :count) == 1
     end
 
-    test "keeps the partial-reasoning contract and fences near misses of the lifecycle-only cut" do
+    test "exact websocket resends use settled identity independently of partial-reasoning observations" do
       for {label, update, expected} <- [
             {"reasoning-kept", &Function.identity/1, :ok},
-            {"visible-without-reasoning", &put_in(&1, ["native_client_retry_observation", "partial_reasoning_seen"], false), :terminal_predecessor},
+            {"visible-without-reasoning", &put_in(&1, ["native_client_retry_observation", "partial_reasoning_seen"], false), :ok},
             {"lifecycle-with-item",
              fn _metadata ->
                put_in(
@@ -1052,7 +1059,7 @@ defmodule CodexPooler.Accounting.ClientRetryTest do
                  ["native_client_retry_observation", "output_item_done_count"],
                  1
                )
-             end, :unsafe_completed_output},
+             end, :ok},
             {"lifecycle-with-candidate",
              fn _metadata ->
                put_in(
@@ -1060,7 +1067,7 @@ defmodule CodexPooler.Accounting.ClientRetryTest do
                  ["native_client_retry_observation", "terminal_candidate_seen"],
                  true
                )
-             end, :terminal_predecessor}
+             end, :ok}
           ] do
         setup = accounting_setup(%{price_version: unique_price_version(label)})
         %{rows: [[now]]} = Repo.query!("SELECT clock_timestamp()", [])

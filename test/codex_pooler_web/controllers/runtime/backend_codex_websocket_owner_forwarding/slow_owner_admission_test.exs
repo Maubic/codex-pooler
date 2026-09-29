@@ -936,9 +936,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     do: [%{"type" => "custom_tool_call_output", "call_id" => "call_#{compaction.turn_id}", "output" => "synthetic tool output"}, %{"type" => "compaction_trigger"}]
 
   # The turn that continues on the compacted history: its input starts with
-  # the compaction item.
+  # the retained user message followed by its compaction item.
   defp final_frame(compaction),
-    do: compaction_frame(compaction, "turn", [compaction.item, %{"type" => "message", "role" => "user", "content" => "synthetic turn after the compaction"}], nil)
+    do: compaction_frame(compaction, "turn", [%{"type" => "message", "role" => "user", "content" => "synthetic turn after the compaction"}, compaction.item], nil)
 
   defp anchor_event,
     do: %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_anchor", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 1_200, "output_tokens" => 9, "total_tokens" => 1_209}}}
@@ -976,7 +976,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
   # compaction item first, on the next window and a new context window.
   defp final_after_compaction_frame(compaction, item) do
     metadata = %{"turn_id" => compaction.turn_id, "window_id" => "#{compaction.window.thread}:1", "context_window_id" => "00000000-0000-4000-8000-000000000246", "window_number" => 2, "request_kind" => "turn"}
-    input = [item, %{"type" => "message", "role" => "user", "content" => "synthetic turn after the compaction"}]
+    input = [%{"type" => "message", "role" => "user", "content" => "synthetic turn after the compaction"}, item]
 
     CodexPooler.JSON.encode!(%{"type" => "response.create", "model" => compaction.setup.model.exposed_model_id, "input" => input, "stream" => true, "generate" => true, "client_metadata" => %{"turn_id" => compaction.turn_id, "x-codex-turn-metadata" => CodexPooler.JSON.encode!(metadata)}})
   end

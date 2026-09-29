@@ -47,14 +47,12 @@ defmodule CodexPooler.Accounting.MailboxResumeChainTest do
     end
   end
 
-  test "byte-identical resume and changed delivered output cannot buy another dispatch", %{fixture: fixture} do
+  test "changed mailbox output stays fenced while settled identical resends chain", %{fixture: fixture} do
     original = admit!(fixture, fixture.payload, "websocket")
     output = reasoning("first")
     cut!(fixture, original, output)
 
-    assert_refused!(fixture, fixture.payload, :terminal_predecessor)
     assert_refused!(fixture, append(fixture.payload, [reasoning("changed"), mailbox(1)]), :terminal_predecessor)
-    assert_http_refused!(fixture, fixture.payload, :terminal_predecessor)
     assert_http_refused!(fixture, append(fixture.payload, [reasoning("changed"), mailbox(1)]), :terminal_predecessor)
 
     candidate = append(fixture.payload, [output, mailbox(1)])
@@ -62,8 +60,23 @@ defmodule CodexPooler.Accounting.MailboxResumeChainTest do
     assert_edge!(original, successor)
     assert_refused!(fixture, candidate, :active_predecessor)
     cut!(fixture, successor, reasoning("second"))
-    assert_refused!(fixture, candidate, :terminal_predecessor)
+    repeated = admit!(fixture, candidate, "websocket")
+    assert_edge!(successor, repeated)
+    assert_refused!(fixture, candidate, :active_predecessor)
+    cut!(fixture, repeated, reasoning("third"))
+    # This fixture's HTTP resume witness uses a different projection from its
+    # websocket witness; the mismatch remains refused.
     assert_http_refused!(fixture, candidate, :terminal_predecessor)
+  end
+
+  for transport <- ["websocket", "http_sse"] do
+    test "identical interrupted resume chains over #{transport}", %{fixture: fixture} do
+      original = admit!(fixture, fixture.payload, unquote(transport))
+      cut!(fixture, original, reasoning("first"))
+      successor = admit!(fixture, fixture.payload, unquote(transport))
+      assert_edge!(original, successor)
+      if unquote(transport) == "websocket", do: assert_refused!(fixture, fixture.payload, :active_predecessor)
+    end
   end
 
   test "a historical mailbox end must equal the successor's actual stored witness", %{fixture: fixture} do

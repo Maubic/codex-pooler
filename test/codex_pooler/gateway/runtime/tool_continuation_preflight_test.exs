@@ -151,7 +151,7 @@ defmodule CodexPooler.Gateway.Runtime.ToolContinuationPreflightTest do
                ClientRetry.preflight_snapshot(session, setup.api_key, setup.model, input)
              end)
 
-    assert {:ok, {:error, :unsafe_completed_output}} =
+    assert {:ok, {:ok, %{client_retry_predecessor_request_id: exact_predecessor}}} =
              Repo.transaction(fn ->
                ClientRetry.preflight_snapshot(session, setup.api_key, setup.model, %{
                  input
@@ -162,7 +162,7 @@ defmodule CodexPooler.Gateway.Runtime.ToolContinuationPreflightTest do
     assert {:ok, %{intent: :fresh, lifecycle: nil}} =
              Service.prepare_replay_intent(setup.auth, next)
 
-    assert {:error, %{code: "duplicate_turn"}} = Service.prepare_replay_intent(setup.auth, first)
+    assert {:ok, %{intent: :fresh, lifecycle: %{client_retry_predecessor_request_id: ^exact_predecessor}}} = Service.prepare_replay_intent(setup.auth, first)
 
     forged_options =
       RequestOptions.put_continuity(first.request_options,

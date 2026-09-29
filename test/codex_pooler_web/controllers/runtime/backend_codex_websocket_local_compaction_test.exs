@@ -36,7 +36,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport,
     only: [enter_peer_owner_topology!: 0, start_peer_window_owner!: 2]
 
-  alias CodexPooler.Accounting.Request
+  alias CodexPooler.Accounting.{Request, RequestClientRetryLink}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.CodexSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
@@ -103,10 +103,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
       assert Enum.map(rows, &(&1.correlation_id |> String.split(":") |> hd())) == expected_claim_classes(ctx.shape)
       assert Enum.uniq_by(rows, & &1.correlation_id) == rows
 
-      # A true resend of the last resume meets it and never reaches the provider.
+      # An identical client resend is served as the completed request's successor.
       {first, resent} = send_turn!(first, resume)
-      assert [%{"type" => "error", "status" => 409, "error" => %{"code" => "duplicate_turn"}}] = resent
-      assert length(pool_requests(setup)) == length(rows)
+      assert %{"type" => "response.completed"} = List.last(resent)
+      assert_completed_successor!(setup, List.last(rows), length(rows) + 1)
       assert :ok = FakeUpstream.verify!(upstream)
 
       drop!(first)
@@ -234,11 +234,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
     assert "codex-resume:" <> _later_request_claim = resumed_row.correlation_id
     assert [_opener, _summary, _resumed] = FakeUpstream.requests(upstream)
 
-    # A true resend of the summarization request is still a duplicate.
+    # An identical summarization resend is served and linked to that request.
     third = connect!(port, setup, turn, "compaction")
     {third, resend} = send_turn!(third, summary_frame(turn))
-    assert [%{"type" => "error", "status" => 409, "error" => %{"code" => "duplicate_turn"}}] = resend
-    assert length(pool_requests(setup)) == 3
+    assert %{"type" => "response.completed"} = List.last(resend)
+    assert_completed_successor!(setup, summary_row, 4)
     assert :ok = FakeUpstream.verify!(upstream)
 
     drop!(third)
@@ -253,7 +253,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
     FakeUpstream.strict_sequence([
       turn_request(1, FakeUpstream.websocket_text_frames(tool_call_events())),
       turn_request(2, FakeUpstream.barrier_websocket_frames(message_events("resp_local_compaction_summary", @summary_text), notify: self(), release_ref: summary_hold)),
-      turn_request(1, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_resumed", "synthetic final answer")))
+      turn_request(1, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_resumed", "synthetic final answer"))),
+      turn_request(3, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_summary_retry", @summary_text)))
     ])
   end
 
@@ -339,7 +340,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
       turn_request(2, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_summary_one", @summary_text))),
       turn_request(1, FakeUpstream.websocket_text_frames(tool_call_events("resp_local_compaction_resumed_one", "call_local_compaction_two"))),
       turn_request(3, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_summary_two", @summary_text))),
-      turn_request(1, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_resumed_two", answer_text("resp_local_compaction_resumed_two"))))
+      turn_request(1, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_resumed_two", answer_text("resp_local_compaction_resumed_two")))),
+      turn_request(1, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_resend", "synthetic resent answer")))
     ])
   end
 
@@ -351,8 +353,34 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketLocalCompactionTest do
       turn_request(1, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_resumed_one", answer_text("resp_local_compaction_resumed_one")))),
       turn_request(1, FakeUpstream.websocket_text_frames(tool_call_events("resp_local_compaction_next_opener", "call_local_compaction_two"))),
       turn_request(3, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_summary_two", @summary_text))),
-      turn_request(1, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_resumed_two", answer_text("resp_local_compaction_resumed_two"))))
+      turn_request(1, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_resumed_two", answer_text("resp_local_compaction_resumed_two")))),
+      turn_request(1, FakeUpstream.websocket_text_frames(message_events("resp_local_compaction_resend", "synthetic resent answer")))
     ])
+  end
+
+  defp assert_completed_successor!(setup, predecessor, count) do
+    rows = pool_requests(setup)
+    assert length(rows) == count
+    successor = await_request_succeeded!(List.last(rows).id, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+    assert Repo.exists?(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^predecessor.id and link.successor_request_id == ^successor.id))
+  end
+
+  defp await_request_succeeded!(request_id, deadline) do
+    case Repo.get!(Request, request_id) do
+      %Request{status: "succeeded"} = request ->
+        request
+
+      %Request{status: status} when status in ["accepted", "in_progress"] ->
+        assert System.monotonic_time(:millisecond) < deadline, "successor did not settle"
+
+        receive do
+        after
+          5 -> await_request_succeeded!(request_id, deadline)
+        end
+
+      request ->
+        flunk("successor ended with #{request.status}")
+    end
   end
 
   defp answer_text(response_id), do: "synthetic final answer of #{response_id}"

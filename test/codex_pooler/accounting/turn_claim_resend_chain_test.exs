@@ -39,7 +39,7 @@ defmodule CodexPooler.Accounting.TurnClaimResendChainTest do
 
     chain =
       Enum.reduce(1..3, [original], fn _step, [predecessor | _earlier] = chain ->
-        assert {:ok, %{request: successor, client_resend: %{predecessor_request_id: predecessor_id, predecessor_shape: :previsible_disconnect}}} =
+        assert {:ok, %{request: successor, client_resend: %{predecessor_request_id: predecessor_id, predecessor_shape: :identical_resend}}} =
                  Accounting.claim_websocket_turn(setup.auth, setup.model, opts)
 
         assert predecessor_id == predecessor.id

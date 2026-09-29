@@ -1101,7 +1101,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
           # provenance: synthetic_adversarial
           FakeUpstream.strict_sequence([
             strict_native_request_any_connection(FakeUpstream.websocket_text_frames(Enum.map(frames, &CodexPooler.JSON.encode!/1))),
-            strict_native_request_any_connection(completed_response_frames("resp_cap_successor", 3, 1))
+            strict_native_request_any_connection(completed_response_frames("resp_cap_successor", 3, 1)),
+            strict_native_request_any_connection(completed_response_frames("resp_cap_successor_retry", 3, 1))
           ])
         )
 
@@ -1230,9 +1231,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
         {_conn, _websocket, _, duplicate} =
           receive_public_websocket_until_terminal(conn, websocket, ref, [])
 
-        assert %{"status" => 409, "error" => %{"code" => "duplicate_turn"}} = duplicate
-        assert successor_counts(setup) == %{requests: 3, links: 1, reservations: 3, attempts: 2}
-        assert FakeUpstream.count(upstream) == 2
+        assert %{"type" => "response.completed"} = duplicate
+        retry_link = Repo.get_by!(RequestClientRetryLink, predecessor_request_id: successor_id)
+        await_turn_completed!(retry_link.successor_request_id)
+        assert successor_counts(setup) == %{requests: 4, links: 2, reservations: 4, attempts: 3}
+        assert FakeUpstream.count(upstream) == 3
         assert :ok = FakeUpstream.verify!(upstream)
 
         CodexPooler.TestDiagnostics.puts(
@@ -1243,7 +1246,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
             denied_rows_unchanged: true,
             changed_payload: 409,
             released_successor: 1,
-            duplicate_after_success: 409,
+            duplicate_after_success: 200,
             active: 0
           })
         )
@@ -1393,17 +1396,17 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
     assert log =~ "websocket client resend admitted stage=websocket_turn_claim"
     assert log =~ "reason_code=failed_predecessor_retry"
     assert log =~ "predecessor_request_id=#{request.id}"
-    assert log =~ "predecessor_shape=lifecycle_cut"
+    assert log =~ "predecessor_shape=identical_resend"
 
-    refute Repo.exists?(
+    assert Repo.exists?(
              from(link in CodexPooler.Accounting.RequestClientRetryLink,
-               where: link.predecessor_request_id == ^request.id
+               where: link.predecessor_request_id == ^request.id and link.successor_request_id == ^resend.id
              )
            )
   end
 
   @tag :stream_cut_resend
-  test "stream cut after one completed output item keeps the duplicate turn fence for the byte-identical resend" do
+  test "stream cut after one completed output item admits a chained byte-identical resend" do
     completed_item =
       CodexPooler.JSON.encode!(%{
         "type" => "response.output_item.done",
@@ -1419,7 +1422,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
       stream_cut_resend_scenario(
         tool_continuation_input("completed item cut prompt sentinel"),
         "completed_item",
-        expect: :rejected,
+        expect: :admitted,
         pre_close_frames: [completed_item],
         last_upstream_event_type: "response.output_item"
       )
@@ -1430,11 +1433,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
     assert is_binary(first_visible_at)
     assert String.starts_with?(request.correlation_id, "codex-request:")
 
-    assert log =~
-             "websocket replay rejection stage=websocket_turn_claim reason_code=reservation_duplicate"
-
-    assert log =~ "resend_disposition=terminal_predecessor"
-    refute log =~ "websocket client resend admitted"
+    assert log =~ "websocket client resend admitted"
+    refute log =~ "websocket replay rejection"
   end
 
   # The released Codex client sends a turn after the first as an anchored delta;

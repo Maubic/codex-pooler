@@ -118,7 +118,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Compaction
             websocket_connection_ordinal: 1,
             json: [
               valid: true,
-              equals: %{"type" => "response.create", "input.0.type" => "compaction"},
+              equals: %{"type" => "response.create", "input.1.type" => "compaction"},
               forbidden: ["previous_response_id"]
             ],
             respond:
@@ -293,8 +293,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Compaction
             "x-codex-turn-metadata" => final_metadata
           },
           "input" => [
-            compact_item,
-            %{"type" => "message", "role" => "user", "content" => "final"}
+            %{"type" => "message", "role" => "user", "content" => "final"},
+            compact_item
           ]
         })
 
@@ -1041,8 +1041,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Compaction
     upstream =
       start_upstream(
         # Strict finite scenario: the historical turn and the fresh tool
-        # continuation are the only two sends, both opening with the compaction
-        # history item; the duplicate client retry sends nothing.
+        # continuation and its identical successor are three distinct sends,
+        # each opening with the historical compaction item.
         # provenance: synthetic_adversarial
         FakeUpstream.strict_sequence([
           FakeUpstream.expect_request(
@@ -1070,6 +1070,21 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Compaction
               FakeUpstream.websocket_text_frames([
                 CodexPooler.JSON.encode!(%{
                   "id" => "resp_synthetic_continuation",
+                  "object" => "response",
+                  "output" => []
+                })
+              ])
+          ),
+          FakeUpstream.expect_request(
+            method: "WEBSOCKET",
+            json: [
+              valid: true,
+              equals: %{"type" => "response.create", "input.0.type" => "compaction"}
+            ],
+            respond:
+              FakeUpstream.websocket_text_frames([
+                CodexPooler.JSON.encode!(%{
+                  "id" => "resp_synthetic_continuation_retry",
                   "object" => "response",
                   "output" => []
                 })
@@ -1159,14 +1174,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Compaction
                CodexResponsesSocket.handle_in({next_payload, [opcode: :text]}, next_state)
 
       assert {:push, {:text, retry_frame}, retry_state} = receive_owner_socket_push(retry_state)
-      assert CodexPooler.JSON.decode!(retry_frame)["error"]["code"] == "duplicate_turn"
-      assert MapSet.size(retry_state.tasks) == 0
+      assert CodexPooler.JSON.decode!(retry_frame)["id"] == "resp_synthetic_continuation_retry"
+      assert {:ok, retry_state} = receive_socket_done(retry_state)
       assert :ok = CodexResponsesSocket.terminate(:closed, retry_state)
-      assert [first, second] = request_logs(setup.pool.id)
+      assert [first, second, successor] = request_logs(setup.pool.id)
       assert first.status == "succeeded"
       assert second.status == "succeeded"
       refute first.correlation_id == second.correlation_id
-      assert length(await_upstream_requests(upstream, 2)) == 2
+      assert successor.status == "succeeded"
+      assert length(await_upstream_requests(upstream, 3)) == 3
 
       request_ids = [first.id, second.id]
 
@@ -1182,11 +1198,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Compaction
                :count
              ) == 2
 
-      refute Repo.exists?(
-               from(link in RequestClientRetryLink,
-                 where: link.predecessor_request_id in ^request_ids
-               )
-             )
+      refute Repo.exists?(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^first.id))
+      assert Repo.exists?(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^second.id and link.successor_request_id == ^successor.id))
 
       for request_id <- request_ids do
         kinds =

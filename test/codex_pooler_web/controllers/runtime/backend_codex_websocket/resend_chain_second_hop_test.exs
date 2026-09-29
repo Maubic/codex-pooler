@@ -46,12 +46,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
       assert measured.cut_resend == {"failed", "client_disconnected", nil, :no_entitlement}
       assert measured.next_resend == {"response.completed", nil}
       assert measured.requests == [{"failed", "server_error"}, {"failed", "client_disconnected"}, {"succeeded", nil}]
-      assert measured.links == [{0, 1}, {1, 2}]
+      assert measured.links == [{0, 1}, {1, 2}, {2, 3}]
       assert measured.generations == [[0], [0], [0]]
       assert measured.recorded_settlements == [1, 1, 1]
       assert measured.upstream_requests == 3
-      assert measured.duplicate_after_success == {"error", "duplicate_turn"}
-      assert measured.upstream_requests_after_duplicate == 3
+      assert measured.duplicate_after_success == {"response.completed", nil}
+      assert measured.upstream_requests_after_duplicate == 4
     end
   end
 
@@ -63,7 +63,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
   # client then falls back to HTTPS with the same request. The HTTP walk chains
   # onto the cut resend under the chain-edge rule (findings#206 rows 206-519
   # and 206-526): served once, linked, and one more identical HTTPS resend
-  # after it was served stays a duplicate.
+  # after it was served is another chained successor.
   for mode <- ["full", "lite"] do
     @tag serving_mode: mode
     test "websocket direct #{mode}: the HTTPS fallback after a two-request websocket chain is served once as the cut resend's successor", ctx do
@@ -72,14 +72,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
 
       assert measured.cut_resend == {"failed", "client_disconnected", nil, :no_entitlement}
       assert measured.first_resend == {200, "response.completed"}
-      assert measured.requests == [{"failed", "upstream_stream_error", "websocket"}, {"failed", "client_disconnected", "websocket"}, {"succeeded", nil, "http_sse"}]
-      assert measured.links == [{0, 1}, {1, 2}]
-      assert measured.client_resend == [nil, 0, 1]
-      assert measured.generations == [[0], [0], [0]]
-      assert measured.recorded_settlements == [1, 1, 1]
+      assert measured.requests == [{"failed", "upstream_stream_error", "websocket"}, {"failed", "client_disconnected", "websocket"}, {"succeeded", nil, "http_sse"}, {"succeeded", nil, "http_sse"}]
+      assert measured.links == [{0, 1}, {1, 2}, {2, 3}]
+      assert measured.client_resend == [nil, 0, 1, 2]
+      assert measured.generations == [[0], [0], [0], [0]]
+      assert measured.recorded_settlements == [1, 1, 1, 1]
       assert measured.upstream_requests == 3
-      assert measured.second_resend == {409, "duplicate_turn", "terminal_predecessor"}
-      assert measured.upstream_requests_after_second == 3
+      assert measured.second_resend == {200, "response.completed", "served"}
+      assert measured.upstream_requests_after_second == 4
     end
   end
 
@@ -89,7 +89,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
   # both zero-output requests instead of judging them (findings#212 row
   # 212-50), so the fallback is served under the claim derived from the cut
   # resend without a link, once; one more identical HTTPS resend after it was
-  # served stays a duplicate (row 206-526, residual of the HTTPS arm above).
+  # served is another chained successor.
   for mode <- ["full", "lite"] do
     @tag serving_mode: mode
     test "websocket direct #{mode}: the HTTPS fallback after a zero-output websocket chain steps over it and is served once", ctx do
@@ -98,15 +98,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
 
       assert measured.cut_resend == {"failed", "client_disconnected", nil, :no_entitlement}
       assert measured.first_resend == {200, "response.completed"}
-      assert measured.requests == [{"failed", "server_error", "websocket"}, {"failed", "client_disconnected", "websocket"}, {"succeeded", nil, "http_sse"}]
-      assert measured.links == [{0, 1}]
-      assert measured.client_resend == [nil, 0, nil]
+      assert measured.requests == [{"failed", "server_error", "websocket"}, {"failed", "client_disconnected", "websocket"}, {"succeeded", nil, "http_sse"}, {"succeeded", nil, "http_sse"}]
+      assert measured.links == [{0, 1}, {2, 3}]
+      assert measured.client_resend == [nil, 0, nil, 2]
       assert measured.fallback_claim == :derived_from_cut_resend
-      assert measured.generations == [[0], [0], [0]]
-      assert measured.recorded_settlements == [1, 1, 1]
+      assert measured.generations == [[0], [0], [0], [0]]
+      assert measured.recorded_settlements == [1, 1, 1, 1]
       assert measured.upstream_requests == 3
-      assert measured.second_resend == {409, "duplicate_turn", "terminal_predecessor"}
-      assert measured.upstream_requests_after_second == 3
+      assert measured.second_resend == {200, "response.completed", "served"}
+      assert measured.upstream_requests_after_second == 4
     end
   end
 
@@ -118,14 +118,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
   # `409 duplicate_turn`.
   for mode <- ["full", "lite"] do
     @tag serving_mode: mode
-    test "websocket direct #{mode}: a websocket resend after the HTTPS fallback was served is refused as its served predecessor", ctx do
+    test "websocket direct #{mode}: a websocket resend after the HTTPS fallback chains onto the served predecessor", ctx do
       measured = run_direct_chain(ctx.serving_mode, :lifecycle_cut, :https_then_direct_websocket)
       CodexPooler.TestDiagnostics.puts(fn -> "websocket after https direct #{ctx.serving_mode}: #{inspect(measured)}" end)
 
       assert measured.first_resend == {200, "response.completed"}
-      assert measured.second_resend == {"error", "duplicate_turn", "terminal_predecessor"}
-      assert measured.links == [{0, 1}, {1, 2}]
-      assert measured.upstream_requests_after_second == 3
+      assert measured.second_resend == {"response.completed", nil, "served"}
+      assert measured.links == [{0, 1}, {1, 2}, {2, 3}]
+      assert measured.upstream_requests_after_second == 4
     end
   end
 
@@ -182,15 +182,17 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
     upstream =
       start_upstream(
         # provenance: observed findings issue 124 (lifecycle frames, transport close), runbook terminal-failure resend (response.failed server_error) and row 232-231 (the released client's HTTPS fallback of a websocket request); every reply frame synthetic
-        FakeUpstream.strict_sequence([
-          FakeUpstream.expect_request(method: "WEBSOCKET", path: "/backend-api/codex/responses", respond: first_frames(first)),
-          FakeUpstream.expect_request(
-            method: "WEBSOCKET",
-            path: "/backend-api/codex/responses",
-            respond: FakeUpstream.websocket_close_without_terminal_barrier(notify: self(), release_ref: release_ref, code: 1001, reason: "synthetic pre-visible loss")
-          ),
-          FakeUpstream.expect_request(method: "POST", path: "/backend-api/codex/responses", respond: FakeUpstream.sse_stream(completed_events("resp_https_fallback_served")))
-        ])
+        FakeUpstream.strict_sequence(
+          [
+            FakeUpstream.expect_request(method: "WEBSOCKET", path: "/backend-api/codex/responses", respond: first_frames(first)),
+            FakeUpstream.expect_request(
+              method: "WEBSOCKET",
+              path: "/backend-api/codex/responses",
+              respond: FakeUpstream.websocket_close_without_terminal_barrier(notify: self(), release_ref: release_ref, code: 1001, reason: "synthetic pre-visible loss")
+            ),
+            FakeUpstream.expect_request(method: "POST", path: "/backend-api/codex/responses", respond: FakeUpstream.sse_stream(completed_events("resp_https_fallback_served")))
+          ] ++ tail_reply(tail)
+        )
       )
 
     setup = gateway_setup(upstream)
@@ -219,7 +221,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
     send(upstream_pid, {:fake_upstream_release_websocket, release_ref})
 
     {first_resend, second_resend, upstream_requests} = resend_tail!(tail, port, setup, thread, frame, upstream)
-    rows = await_rows!(setup, 3)
+    rows = await_rows!(setup, if(tail in [:https_twice, :https_then_direct_websocket], do: 4, else: 3))
     requests = pool_requests(setup)
 
     %{
@@ -237,6 +239,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
     }
   end
 
+  defp tail_reply(:https_twice), do: [FakeUpstream.expect_request(method: "POST", path: "/backend-api/codex/responses", respond: FakeUpstream.sse_stream(completed_events("resp_https_retry")))]
+  defp tail_reply(:https_then_direct_websocket), do: [FakeUpstream.expect_request(method: "WEBSOCKET", path: "/backend-api/codex/responses", respond: completed_frames("resp_ws_retry"))]
+  defp tail_reply(_), do: []
+
   # The second HTTPS resend meets the served fallback; its refusal names that
   # request's disposition (findings#206 row 206-534).
   defp resend_tail!(:https_twice, _port, setup, thread, frame, upstream) do
@@ -244,7 +250,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
     _rows = await_rows!(setup, 3)
     count = FakeUpstream.count(upstream)
     {{status, code}, log} = with_info_log(fn -> https_outcome(post_https_fallback!(setup, thread, frame)) end)
-    {first, {status, code, resend_disposition(log, "native_http_turn_claim")}, count}
+    {first, {status, code, if(status == 200, do: "served", else: resend_disposition(log, "native_http_turn_claim"))}, count}
   end
 
   defp resend_tail!(:https_then_direct_websocket, port, setup, thread, frame, upstream) do
@@ -252,7 +258,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
     _rows = await_rows!(setup, 3)
     count = FakeUpstream.count(upstream)
     {{type, code}, log} = with_info_log(fn -> websocket_outcome(port, setup, thread, frame) end)
-    {first, {type, code, resend_disposition(log, "websocket_turn_claim")}, count}
+    {first, {type, code, if(type == "response.completed", do: "served", else: resend_disposition(log, "websocket_turn_claim"))}, count}
   end
 
   defp resend_tail!(:https_then_forwarded_websocket, port, setup, thread, frame, upstream) do
@@ -291,7 +297,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
 
   # The fallback's claim: the one derived from the cut resend, when the HTTP
   # walk stepped over the chain without linking to it.
-  defp fallback_claim([first, cut, fallback]) do
+  defp fallback_claim([first, cut, fallback | _]) do
     {:ok, from_first} = ClientRetry.deterministic_failed_predecessor_claim(first.correlation_id, first.id)
     {:ok, from_cut} = ClientRetry.deterministic_failed_predecessor_claim(from_first, cut.id)
 
@@ -506,7 +512,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
             path: "/backend-api/codex/responses",
             respond: FakeUpstream.websocket_close_without_terminal_barrier(notify: self(), release_ref: release_ref, code: 1001, reason: "synthetic pre-visible loss")
           ),
-          FakeUpstream.expect_request(method: "WEBSOCKET", path: "/backend-api/codex/responses", respond: completed_frames("resp_second_hop_served"))
+          FakeUpstream.expect_request(method: "WEBSOCKET", path: "/backend-api/codex/responses", respond: completed_frames("resp_second_hop_served")),
+          FakeUpstream.expect_request(method: "WEBSOCKET", path: "/backend-api/codex/responses", respond: completed_frames("resp_second_hop_retry"))
         ])
       )
 
@@ -544,15 +551,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
     requests = pool_requests(setup)
     upstream_requests = FakeUpstream.count(upstream)
 
-    # One more identical resend after the turn was served stays a duplicate.
+    # A later identical resend chains onto the served request.
     duplicate = resend!(port, setup, thread, frame)
+    _ = await_rows!(setup, 4)
+    assert links(pool_requests(setup)) == [{0, 1}, {1, 2}, {2, 3}]
+    assert Enum.all?(pool_requests(setup), &(recorded_settlements(&1) == 1))
 
     %{
       suspension_attempts: suspension_attempts,
       cut_resend: cut_resend_shape(cut_request.id),
       next_resend: {next["type"], get_in(next, ["error", "code"])},
       requests: rows,
-      links: links(requests),
+      links: links(Enum.take(pool_requests(setup), 4)),
       generations: Enum.map(requests, &generations/1),
       recorded_settlements: Enum.map(requests, &recorded_settlements/1),
       upstream_requests: upstream_requests,

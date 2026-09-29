@@ -38,7 +38,9 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuationTest do
     refute ClientRetry.verified_mailbox_continuation?(turn, %{request | status: "succeeded", last_error_code: nil}, attempt, witness, nil)
     refute ClientRetry.verified_mailbox_continuation?(turn, request, %{attempt | replay_generation: 1}, witness, nil)
 
-    for change <- [%{"completed_items" => 2}, %{"terminal_class" => "response.completed"}, %{"outcome" => "delivered"}, %{"completed_item_digests" => []}] do
+    [recorded_digest] = attempt.response_metadata["downstream_delivery"]["completed_item_digests"]
+
+    for change <- [%{"completed_items" => 2}, %{"terminal_class" => "response.completed"}, %{"outcome" => "delivered"}, %{"completed_item_digests" => []}, %{"completed_items" => 2, "completed_item_digests" => [recorded_digest, "abcdef123456"]}] do
       changed = update_in(attempt.response_metadata["downstream_delivery"], &Map.merge(&1, change))
       refute ClientRetry.verified_mailbox_continuation?(turn, request, changed, witness, nil)
     end

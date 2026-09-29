@@ -239,6 +239,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
                  {"/backend-api/codex/responses", "websocket", "succeeded"}
                ]
 
+        [opening_row, _compact_row, next_turn_row] = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: request.admitted_at))
+        assert "codex-turn:" <> _ = opening_row.correlation_id
+        assert "codex-turn:" <> _ = next_turn_row.correlation_id
+        refute opening_row.correlation_id == next_turn_row.correlation_id
+
         assert :ok = FakeUpstream.verify!(upstream)
       after
         Mint.HTTP.close(conn)
@@ -685,7 +690,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
       try do
         state = run_turn!(state, mid_turn_payload(setup, [window_message("synthetic sequence anchor")], turn_id, "turn", 1))
         state = run_turn!(state, window_compaction_frame(setup, turn_id, "resp_sequence_anchor"))
-        {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+        {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [window_message("synthetic final"), compact_item], turn_id, "turn", 2))
         assert [%{"type" => "response.completed", "response" => %{"id" => "resp_sequence_final"}}] = frames
         _state = state
         assert_window_accounting!(setup, [@anchor_usage, @compact_usage, @resumed_usage])
@@ -741,7 +746,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
         history = [window_message("synthetic first sequence anchor")]
         state = run_turn!(state, mid_turn_payload(setup, history, turn_id, "turn", 1))
         state = run_turn!(state, mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1))
-        {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+        {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [window_message("synthetic final"), compact_item], turn_id, "turn", 2))
         assert [%{"type" => "response.completed", "response" => %{"id" => "resp_first_sequence_final"}}] = frames
         _state = state
         assert_window_accounting!(setup, [@anchor_usage, @compact_usage, @resumed_usage])
@@ -805,7 +810,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
         {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1))
         assert [%{"type" => "response.output_item.done", "item" => ^compact_item}, %{"type" => "response.completed", "response" => %{"id" => "resp_failed_compaction_retry", "output" => [^compact_item]}}] = frames
 
-        {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+        {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [window_message("synthetic final"), compact_item], turn_id, "turn", 2))
         assert [%{"type" => "response.completed", "response" => %{"id" => "resp_failed_compaction_final"}}] = frames
         Process.put(:crossing_socket_state, state)
 
@@ -897,7 +902,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
         retry_frame = mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1)
         {state, frames} = run_turn_frames!(state, retry_frame)
         assert [%{"type" => "response.output_item.done", "item" => ^compact_item}, %{"type" => "response.completed", "response" => %{"id" => "resp_guard_refusal_retry", "output" => [^compact_item]}}] = frames
-        {_state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+        {_state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [window_message("synthetic final"), compact_item], turn_id, "turn", 2))
         assert [%{"type" => "response.completed", "response" => %{"id" => "resp_guard_refusal_final"}}] = frames
 
         assert [anchor_row, refused, retry, final] = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: request.admitted_at))
@@ -977,7 +982,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
         {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1))
         assert [%{"type" => "response.output_item.done", "item" => ^compact_item}, %{"type" => "response.completed", "response" => %{"id" => "resp_accounting_close_retry", "output" => [^compact_item]}}] = frames
 
-        {_state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+        {_state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [window_message("synthetic final"), compact_item], turn_id, "turn", 2))
         assert [%{"type" => "response.completed", "response" => %{"id" => "resp_accounting_close_final"}}] = frames
 
         rows = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: request.admitted_at))
@@ -1064,7 +1069,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
         {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, history ++ [%{"type" => "compaction_trigger"}], turn_id, "compaction", 1))
         assert [%{"type" => "response.output_item.done", "item" => ^compact_item}, %{"type" => "response.completed", "response" => %{"id" => "resp_provider_refusal_retry", "output" => [^compact_item]}}] = frames
 
-        {_state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+        {_state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [window_message("synthetic final"), compact_item], turn_id, "turn", 2))
         assert [%{"type" => "response.completed", "response" => %{"id" => "resp_provider_refusal_final"}}] = frames
 
         rows = [_anchor_row, refused, retry, _final] = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: request.admitted_at))
@@ -1138,7 +1143,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
       assert_receive {:fake_upstream_websocket_peer_closed, 1, ^close_ref}, 15_000
       assert_receive {:upstream_websocket_connection_closed, ^session, signal}, 15_000
 
-      {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+      {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [window_message("synthetic final"), compact_item], turn_id, "turn", 2))
       assert [%{"type" => "response.completed", "response" => %{"id" => "resp_late_signal_final"}}] = frames
 
       # Reserved nowhere: the owner ended the admission when the final asked
@@ -1396,7 +1401,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
       Process.put(:crossing_socket_state, state)
       assert [%{"type" => "response.output_item.done", "item" => ^compact_item}, %{"type" => "response.completed", "response" => %{"output" => [^compact_item]}}] = frames
 
-      {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+      {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [window_message("synthetic final"), compact_item], turn_id, "turn", 2))
       assert [%{"type" => "response.completed", "response" => %{"id" => "resp_window_close_final"}}] = frames
       _state = state
 
@@ -1464,7 +1469,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
       Process.put(:crossing_socket_state, state)
       assert [%{"type" => "response.output_item.done", "item" => ^compact_item}, %{"type" => "response.completed", "response" => %{"output" => [^compact_item]}}] = frames
 
-      {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [compact_item, window_message("synthetic final")], turn_id, "turn", 2))
+      {state, frames} = run_turn_frames!(state, mid_turn_payload(setup, [window_message("synthetic final"), compact_item], turn_id, "turn", 2))
       assert [%{"type" => "response.completed", "response" => %{"id" => "resp_first_window_final"}}] = frames
 
       assert_window_accounting!(setup, [@anchor_usage, @compact_usage, @resumed_usage])
@@ -1633,6 +1638,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
            ]
 
     requests = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id, order_by: request.admitted_at))
+    assert [opener, _compact, resume] = requests
+    assert "codex-turn:" <> _ = opener.correlation_id
+    assert "codex-resume:" <> _ = resume.correlation_id
 
     for {request, usage} <- Enum.zip(requests, usages) do
       assert [%Attempt{status: "succeeded"}] = Repo.all(from(attempt in Attempt, where: attempt.request_id == ^request.id))
@@ -1737,6 +1745,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
     end
   end
 
+  # A mid-turn compact installs retained messages before its final compaction
+  # item; a user message after that pivot opens a different turn instead.
   defp mid_turn_payload(setup, input, turn_id, request_kind, window_number) do
     metadata =
       %{"turn_id" => turn_id, "window_id" => "mid-turn-crossing-window-#{window_number}", "context_window_id" => "00000000-0000-4000-8000-00000000028#{window_number}", "window_number" => window_number, "request_kind" => request_kind}

@@ -26,7 +26,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpLocalCompactionTest do
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
 
-  alias CodexPooler.Accounting.Request
+  alias CodexPooler.Accounting.{Request, RequestClientRetryLink}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Repo
 
@@ -41,9 +41,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpLocalCompactionTest do
     @mode mode
     @shape shape
 
-    test "a #{mode} thread's resume after a #{shape} local compaction is served, and a true resend of it is refused", %{conn: conn} do
+    test "a #{mode} thread's resume after a #{shape} local compaction is served, its identical resend chains and a changed resend is refused", %{conn: conn} do
       requests = requests(@shape)
-      upstream = start_upstream(FakeUpstream.strict_sequence(for step <- 1..length(requests), do: turn_sse("resp_local_compaction_#{step}")))
+      upstream = start_upstream(FakeUpstream.strict_sequence(for step <- 1..(length(requests) + 1), do: turn_sse("resp_local_compaction_#{step}")))
       setup = setup!(upstream, @mode)
       thread = %{id: Ecto.UUID.generate(), turns: %{first: Ecto.UUID.generate(), second: Ecto.UUID.generate()}}
 
@@ -59,16 +59,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpLocalCompactionTest do
       claims = Enum.map(pool_requests(setup), & &1.correlation_id)
       assert claims == Enum.uniq(claims)
 
-      # A true resend of the last resume meets it, and so does its rebuilt
-      # retry (model output appended): neither reaches the provider.
+      # The identical resend is a successor; appended output changes the
+      # request and still cannot replay the completed turn.
       {turn, kind, input, window} = List.last(requests)
-
-      for resend <- [input, input ++ [assistant("partial answer")]] do
-        assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(post_request(conn, setup, thread, {turn, kind, resend, window}), 409)
-      end
-
-      assert FakeUpstream.count(upstream) == length(requests)
-      assert rows(setup) == expected_rows(@shape)
+      predecessor = List.last(pool_requests(setup))
+      resent = post_request(conn, setup, thread, {turn, kind, input, window})
+      assert resent.status == 200
+      successor = List.last(pool_requests(setup))
+      assert successor.status == "succeeded"
+      assert Repo.exists?(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^predecessor.id and link.successor_request_id == ^successor.id))
+      assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(post_request(conn, setup, thread, {turn, kind, input ++ [assistant("partial answer")], window}), 409)
+      assert FakeUpstream.count(upstream) == length(requests) + 1
+      assert length(pool_requests(setup)) == length(requests) + 1
       assert :ok = FakeUpstream.verify!(upstream)
     end
   end

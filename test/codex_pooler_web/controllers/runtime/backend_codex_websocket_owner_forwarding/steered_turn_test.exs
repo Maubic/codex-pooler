@@ -13,7 +13,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteeredTur
   # was refused `409 duplicate_turn` (findings#206 row 206-409). A frame
   # anchored on a response its own turn produced on this socket is now a later
   # request of that turn, claimed per payload like a tool-result continuation;
-  # its identical resend and the opener's own resend stay refused.
+  # an anchored same-socket duplicate retains its fence, while a qualifying
+  # full-history resend is served as a chained successor.
   #
   # Topology: the real public listener; owner forwarding on with the session's
   # owner on this node or on a second VM sharing the committed database, and
@@ -73,26 +74,31 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteeredTur
   end
 
   # The opener's own resend is not anchored on a response of its turn, so it
-  # keeps the bare turn claim and today's refusal, even after a steer.
-  test "the opener's resend on the same socket is still refused after a steer (local owner, full)" do
+  # keeps the bare turn claim, so its qualifying resend chains to that opener.
+  test "the opener's resend on the same socket is chained after a steer (local owner, full)" do
     {outcome, _logs} = with_info_log(fn -> run_scenario(:local, "full", [:resend_opener]) end)
 
     assert outcome.steer_answer == {"response.completed", "resp_steered_successor"}
-    assert outcome.resend_answers == [{"error", 409, "duplicate_turn"}]
-    assert_served_once_each!(outcome, 2)
+    assert outcome.resend_answers == [{"response.completed", "resp_steered_open_retry"}]
+    assert_served_once_each!(outcome, 3)
+    assert_chain!(Enum.at(outcome.requests, 0), Enum.at(outcome.requests, 2))
   end
 
   # Only the anchor on a response of the frame's OWN turn marks a later request.
   # The next turn's opener is anchored on the previous turn's response and keeps
-  # the bare turn claim, which is what fences its full-history resend from
-  # another socket.
-  test "a new turn anchored on the previous turn's response keeps the turn claim; its full-history resend on another socket is refused (local owner, full)" do
+  # the bare turn claim, which binds its full-history resend from another socket.
+  test "a new turn anchored on the previous response keeps its claim and chains its full-history resend (local owner, full)" do
     {outcome, _logs} = with_info_log(fn -> run_next_turn_scenario() end)
 
     assert outcome.next_turn_answer == {"response.completed", "resp_next_turn_opening"}
-    assert outcome.resend_answer == {"error", 409, "duplicate_turn"}
-    assert Enum.map(outcome.requests, &String.slice(&1.correlation_id, 0, 11)) == ["codex-turn:", "codex-turn:"]
-    assert_served_once_each!(outcome, 2)
+    assert outcome.resend_answer == {"response.completed", "resp_next_turn_retry"}
+    assert Enum.map(outcome.requests, &String.slice(&1.correlation_id, 0, 11)) == ["codex-turn:", "codex-turn:", "client-retr"]
+    assert_served_once_each!(outcome, 3)
+    assert_chain!(Enum.at(outcome.requests, 1), Enum.at(outcome.requests, 2))
+  end
+
+  defp assert_chain!(predecessor, successor) do
+    assert Repo.get_by!(CodexPooler.Accounting.RequestClientRetryLink, predecessor_request_id: predecessor.id).successor_request_id == successor.id
   end
 
   defp assert_served_once_each!(outcome, count) do
@@ -111,10 +117,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteeredTur
     upstream =
       start_upstream(
         # provenance: source-derived findings#206 row 206-409 (rust-v0.156.1 session/turn.rs drains steered input after response.completed; client.rs sends it as an anchored increment on the same connection)
-        FakeUpstream.strict_sequence([
-          native_request(FakeUpstream.websocket_text_frames(response_frames("resp_steered_opening", "msg_steered_opening"))),
-          native_request(FakeUpstream.websocket_text_frames(response_frames("resp_steered_successor", "msg_steered_successor")))
-        ])
+        FakeUpstream.strict_sequence(
+          [
+            native_request(FakeUpstream.websocket_text_frames(response_frames("resp_steered_opening", "msg_steered_opening"))),
+            native_request(FakeUpstream.websocket_text_frames(response_frames("resp_steered_successor", "msg_steered_successor")))
+          ] ++ if(:resend_opener in extras, do: [native_request(FakeUpstream.websocket_text_frames(response_frames("resp_steered_open_retry", "msg_steered_open_retry")))], else: [])
+        )
       )
 
     setup = topology_setup!(topology, upstream)
@@ -168,7 +176,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SteeredTur
         # provenance: source-derived findings#206 row 206-409 (rust-v0.156.1 client.rs carries the websocket session across turns, so a new turn's opener is an anchored increment on the previous turn's last response)
         FakeUpstream.strict_sequence([
           native_request(FakeUpstream.websocket_text_frames(response_frames("resp_previous_turn", "msg_previous_turn"))),
-          native_request(FakeUpstream.websocket_text_frames(response_frames("resp_next_turn_opening", "msg_next_turn_opening")))
+          native_request(FakeUpstream.websocket_text_frames(response_frames("resp_next_turn_opening", "msg_next_turn_opening"))),
+          native_request(FakeUpstream.websocket_text_frames(response_frames("resp_next_turn_retry", "msg_next_turn_retry")))
         ])
       )
 

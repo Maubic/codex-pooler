@@ -196,10 +196,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StalledReaderReceiptTest 
       resend = send_and_receive_terminal!(port, setup, turn_state, raw_payload)
       await_all_settled!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
 
-      assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = resend
-      assert [%Request{id: ^request_id, status: "succeeded"}] = pool_requests(setup.pool.id)
-      assert Repo.all(RequestClientRetryLink) == []
-      assert FakeUpstream.count(upstream) == 1
+      assert %{"type" => "response.completed"} = resend
+      assert [%Request{id: ^request_id, status: "succeeded"}, %Request{id: successor_id, status: "succeeded"}] = pool_requests(setup.pool.id)
+      assert [%RequestClientRetryLink{predecessor_request_id: ^request_id, successor_request_id: ^successor_id}] = Repo.all(RequestClientRetryLink)
+      assert_one_settlement_each!([request_id, successor_id])
+      assert FakeUpstream.count(upstream) == 2
     end
   end
 

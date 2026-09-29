@@ -433,7 +433,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
       end)
 
     assert log =~ "websocket client resend admitted stage=websocket_turn_claim"
-    assert log =~ "predecessor_shape=lifecycle_cut"
+    assert log =~ "predecessor_shape=identical_resend"
     refute log =~ "websocket replay rejection"
     refute log =~ "sentinel"
 
