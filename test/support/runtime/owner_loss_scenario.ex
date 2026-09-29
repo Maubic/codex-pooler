@@ -84,7 +84,8 @@ defmodule CodexPoolerWeb.Runtime.OwnerLossScenario do
     case loss do
       :owner_killed -> Process.exit(owner, :kill)
       :upstream_killed -> Process.exit(:sys.get_state(owner).upstream_pid, :kill)
-      :owner_drained -> :ok = WebsocketOwnerSession.drain_owner(owner)
+      # The owner's last turn, relayed and settled, before the drain (findings#287).
+      :owner_drained -> {:ok, :settled} = WebsocketOwnerSession.drain_owner(owner)
       :owner_stopped -> :ok = GenServer.stop(owner, :normal)
     end
 

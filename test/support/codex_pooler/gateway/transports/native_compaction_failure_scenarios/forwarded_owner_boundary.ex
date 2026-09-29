@@ -180,7 +180,8 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionFailureScenarios.Forwar
   defp execute(:owner_drain, context, _accounting) do
     fixture = start_accounted_owner(context, :owner_drain)
     owner_monitor = Process.monitor(fixture.owner)
-    assert :ok = WebsocketOwnerSession.drain_owner(fixture.owner)
+    # The accounted turn the owner relayed has settled (findings#287).
+    assert {:ok, :settled} = WebsocketOwnerSession.drain_owner(fixture.owner)
     assert_down(owner_monitor, fixture.owner)
     observe_retired(fixture)
   end

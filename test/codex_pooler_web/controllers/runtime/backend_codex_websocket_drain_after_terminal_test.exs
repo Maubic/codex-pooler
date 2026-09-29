@@ -45,7 +45,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDrainAfterTerminalTest do
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
   alias CodexPooler.FakeUpstream
-  alias CodexPooler.Gateway.Transports.Websocket.{ActivityDrain, ActivityRegistry, OwnerDefaults, WebsocketOwnerSession}
+  alias CodexPooler.Gateway.Transports.Websocket.{ActivityDrain, ActivityRegistry, OwnerDefaults, RolloutDrain, WebsocketOwnerSession}
+  alias CodexPooler.Gateway.Transports.WebsocketRolloutDrainSupport
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
   alias Ecto.Adapters.SQL.Sandbox
@@ -129,8 +130,29 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDrainAfterTerminalTest do
     assert [%Request{status: "in_progress"}] = pool_requests(turn.setup)
 
     true = :erlang.resume_process(turn.owner_task)
-    assert Task.await(drain, @detection_timeout_ms) == :ok
+    assert Task.await(drain, @detection_timeout_ms) == {:ok, :settled}
     assert_receive {:DOWN, ^monitor, :process, _owner, :normal}, @detection_timeout_ms
+    assert receive_frames_until_close!(turn.client.conn, turn.client.websocket, turn.client.ref) |> elem(2) == [@drained_close]
+    assert_settled_as_answered!(turn.setup)
+  end
+
+  # The rollout drain's deadline finds the turn active and cuts the owner; the
+  # owner lets the turn settle during its wait, and the drain's summary counts
+  # a completed turn, not an aborted one.
+  test "owner on this node: the rollout drain counts a turn that settles during the owner's wait as completed" do
+    put_owner_forwarding!(true)
+    put_owner_call_timeout!(1_500)
+    turn = owner_result_held!(start_turn!())
+    harness = WebsocketRolloutDrainSupport.start_rollout_drain_harness(self())
+    deadline = harness.deadline
+    drain = Task.async(fn -> RolloutDrain.start_drain([name: harness.name, timeout_ms: 500] ++ WebsocketRolloutDrainSupport.deadline_options(deadline)) end)
+
+    assert_receive {:rollout_drain_deadline_wait, ^deadline, _wait_ms}, @detection_timeout_ms
+    :ok = WebsocketRolloutDrainSupport.VirtualDeadline.advance(deadline, 10_000)
+    :ok = await_owner_drain_waiting!(turn.owner)
+
+    true = :erlang.resume_process(turn.owner_task)
+    assert %{owners_drained: 1, turns_completed: 1, turns_aborted: 0} = Task.await(drain, @detection_timeout_ms)
     assert receive_frames_until_close!(turn.client.conn, turn.client.websocket, turn.client.ref) |> elem(2) == [@drained_close]
     assert_settled_as_answered!(turn.setup)
   end
@@ -183,8 +205,25 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDrainAfterTerminalTest do
     assert [%Request{status: "in_progress"}] = pool_requests(turn.setup)
 
     true = :erlang.resume_process(turn.task)
-    assert Task.await(drain, @detection_timeout_ms) == :ok
+    assert Task.await(drain, @detection_timeout_ms) == {:ok, :settled}
     assert_receive {:DOWN, ^monitor, :process, ^owner, :normal}, @detection_timeout_ms
+  end
+
+  # The drain's cut reached the owner, which now waits for the turn.
+  defp await_owner_drain_waiting!(owner) do
+    deadline = System.monotonic_time(:millisecond) + @detection_timeout_ms
+
+    %{drain_settlement: %{}} =
+      Stream.repeatedly(fn -> :sys.get_state(owner) end)
+      |> Enum.find(fn state ->
+        cond do
+          is_map(state.drain_settlement) -> true
+          System.monotonic_time(:millisecond) > deadline -> flunk("the drain never reached the owner")
+          true -> Process.sleep(5) && false
+        end
+      end)
+
+    :ok
   end
 
   # With a 1.5 s owner call budget the owner waits 750 ms, and answers the

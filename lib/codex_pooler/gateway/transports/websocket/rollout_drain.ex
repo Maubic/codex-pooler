@@ -438,9 +438,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
   defp drain_settled_owner(outcome, owner) do
     case drain_owner(owner) do
       :ok -> {:ok, outcome}
+      {:ok, :settled} -> {:ok, settled_outcome(outcome)}
       {:error, _reason} = error -> error
     end
   end
+
+  # The owner let the turn whose terminal it forwarded settle before it
+  # stopped (findings#287): the turn the deadline found still active
+  # completed, and the drain's summary says so.
+  defp settled_outcome(:aborted), do: :completed
+  defp settled_outcome(outcome), do: outcome
 
   defp drain_http_cohort(deadline, policy, registry, snapshot) do
     {:http_streams, DeferredStreamDrain.drain_all(deadline, policy, registry, fn entries -> :ets.insert(snapshot, {:entries, entries}) end)}

@@ -262,7 +262,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
       attach_admission_clear_observer(armed.binding.lifecycle_id)
       owner_ref = Process.monitor(armed.owner)
 
-      assert :ok = WebsocketOwnerSession.drain_owner(armed.owner)
+      assert {:ok, :settled} = WebsocketOwnerSession.drain_owner(armed.owner)
       assert_receive {:admission_clear, %{reason: :owner_drained, phase_from: :pending_compact, phase_to: :cleared}}
       assert_receive {:DOWN, ^owner_ref, :process, _owner, _reason}
       refute_received {:admission_clear, %{reason: :request_rejected}}

@@ -234,7 +234,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     end
   end
 
-  @spec drain_owner(GenServer.server()) :: :ok | {:error, term()}
+  @doc """
+  Drains the owner and stops it. Answers `{:ok, :settled}` when the last turn
+  whose terminal the owner forwarded had settled before it stopped, so a turn
+  the rollout drain's deadline found active counts as completed
+  (findings#287).
+  """
+  @spec drain_owner(GenServer.server()) :: :ok | {:ok, :settled} | {:error, term()}
   def drain_owner(owner), do: GenServer.call(owner, :drain, owner_call_timeout())
 
   @spec begin_drain(GenServer.server()) :: :ok
@@ -3130,8 +3136,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp drain(from, state) do
     case forwarded_turn_settlement(state) do
       :pending -> {:noreply, await_forwarded_turn_settlement(state, from)}
-      :settled -> {:stop, :normal, :ok, drain_now(state, :settled)}
-      :none -> {:stop, :normal, :ok, drain_now(state, :cut)}
+      :settled -> {:stop, :normal, drain_reply(:settled), drain_now(state, :settled)}
+      :none -> {:stop, :normal, drain_reply(:cut), drain_now(state, :cut)}
     end
   end
 
@@ -3141,11 +3147,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   # what follows the owner's exit.
   defp finish_drain_settlement(%{drain_settlement: %{waiters: waiters}} = state, how) do
     state = drain_now(%{state | drain_settlement: nil}, how)
-    {:stop, :normal, %{state | drain_replies: {Enum.reverse(waiters), :ok}}}
+    {:stop, :normal, %{state | drain_replies: {Enum.reverse(waiters), drain_reply(how)}}}
   end
 
   defp answer_drain_waiters(%{drain_replies: {waiters, reply}}), do: Enum.each(waiters, &GenServer.reply(&1, reply))
   defp answer_drain_waiters(_state), do: :ok
+
+  defp drain_reply(:settled), do: {:ok, :settled}
+  defp drain_reply(:cut), do: :ok
 
   # The request of the turn `finish_active_turn/2` ends, when the owner
   # forwarded that turn's terminal to its downstream.

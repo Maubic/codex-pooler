@@ -48,7 +48,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexOwnerCompletionDrainTest do
       {_anchor, _call_id, state} = receive_custom_completed(state)
       first_owner = state.websocket_owner_pid
       WebsocketOwnerSession.begin_drain(first_owner)
-      assert :ok = WebsocketOwnerSession.drain_owner(first_owner)
+      # The owner's last turn, relayed and settled, before the drain (findings#287).
+      assert {:ok, :settled} = WebsocketOwnerSession.drain_owner(first_owner)
       # The idle socket closes rather than tell its client (findings#276).
       state = receive_until(state, {:close, {1001, "websocket owner is draining"}})
       assert :ok = CodexResponsesSocket.terminate(:closed, state)
@@ -185,7 +186,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexOwnerCompletionDrainTest do
         end
 
       owner_ref = Process.monitor(owner)
-      assert :ok = WebsocketOwnerSession.drain_owner(owner)
+      drained = if unquote(disposition) == :complete, do: {:ok, :settled}, else: :ok
+      assert WebsocketOwnerSession.drain_owner(owner) == drained
       assert_receive {:DOWN, ^owner_ref, :process, ^owner, :normal}, @budget
 
       assert Repo.aggregate(
