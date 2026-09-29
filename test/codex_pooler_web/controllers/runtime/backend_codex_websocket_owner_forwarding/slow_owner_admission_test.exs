@@ -587,6 +587,49 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     end
   end
 
+  # A `response.processed` the socket forwards to an owner on its node waits
+  # for that owner within the forward budget, as its forward to an owner on
+  # another node does (findings#270 row 270-300). The socket's response task
+  # waited without a bound: the socket still answered pings, but every turn the
+  # client sent meanwhile queued behind the forward for as long as the owner
+  # stalled, and a closed socket took its terminate budgets to exit. The client
+  # is now told the forward failed, the acknowledgement is on record as a
+  # forward that timed out, the owner still forwards the frame it had queued
+  # and keeps the socket's downstream, and the next turn is served: the outcome
+  # of the same stall on a remote owner. The forward budget is shortened to a
+  # second, on this node.
+  @tag topology: :local
+  test "local: a response.processed its owner answers too late is answered with the timeout, and the next turn is served", ctx do
+    compaction = open_compaction_session!(ctx, true, [:anchor, :final])
+    owner = compaction.owner
+    client = compaction.client
+    budgets = Application.get_env(:codex_pooler, OwnerDefaults, [])
+    Application.put_env(:codex_pooler, OwnerDefaults, Keyword.put(budgets, :forward_timeout_ms, @owner_call_budget_ms))
+    attached = :sys.get_state(owner).downstream
+    processed = CodexPooler.JSON.encode!(%{"type" => "response.processed", "response_id" => "resp_slow_owner_anchor", "request_id" => "slow-owner-processed"})
+    :ok = :sys.suspend(owner)
+
+    refusal =
+      try do
+        {conn, websocket} = public_websocket_send_text!(client.conn, client.websocket, client.ref, processed)
+        {_conn, _websocket, frame} = public_websocket_receive_text!(conn, websocket, client.ref)
+        CodexPooler.JSON.decode!(frame)
+      after
+        :ok = :sys.resume(owner)
+      end
+
+    assert %{"status" => 502, "error" => %{"code" => "upstream_websocket_forward_failed", "message" => message}} = refusal
+    assert message =~ "owner_forward_timeout"
+    assert %{downstream: ^attached} = :sys.get_state(owner)
+
+    assert %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_final"}} = send_frame!(compaction, next_turn_frame(compaction, "next turn after the acknowledgement"))
+    assert ["response.create", "response.processed", "response.create"] = Enum.map(FakeUpstream.requests(compaction.upstream), & &1.json["type"])
+
+    assert [ack] = Repo.all(from(r in Request, where: r.pool_id == ^compaction.setup.pool.id and fragment("?->>'response_processed' = 'true'", r.request_metadata)))
+    assert %Request{status: "failed", response_status_code: 502, last_error_code: "owner_forward_timeout"} = ack
+    assert ack.request_metadata["response_processed_forward"] == %{"outcome" => "owner_forward_timeout", "upstream_delivery" => "unknown"}
+  end
+
   # A socket on the session's window with its owner (on the peer for
   # `:remote`) and one anchor turn it served, settled unless `settle?` is
   # false (its task is then held after its settlement).
