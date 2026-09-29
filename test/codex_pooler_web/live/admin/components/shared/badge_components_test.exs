@@ -57,7 +57,7 @@ defmodule CodexPoolerWeb.Admin.BadgeComponentsTest do
     assert BadgeComponents.plan_badge_label("GO") == "Go"
     assert BadgeComponents.plan_badge_label("prolite") == "Pro 100"
     assert BadgeComponents.plan_badge_label("pro") == "Pro 200"
-    assert BadgeComponents.plan_badge_label("promax") == "Pro Max"
+    assert BadgeComponents.plan_badge_label("promax") == "Pro 500"
     assert BadgeComponents.plan_badge_label("ent26") == "Enterprise"
     assert BadgeComponents.plan_badge_label("hc") == "Enterprise"
     assert BadgeComponents.plan_badge_label("edu_plus") == "Edu Plus"
@@ -86,7 +86,7 @@ defmodule CodexPoolerWeb.Admin.BadgeComponentsTest do
       {"plus", "Plus"},
       {"pro", "Pro 200"},
       {"prolite", "Pro 100"},
-      {"promax", "Pro Max"},
+      {"promax", "Pro 500"},
       {"team", "Team"},
       {"business", "Business"},
       {"ent26", "Enterprise"},

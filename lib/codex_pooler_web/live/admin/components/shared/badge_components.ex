@@ -32,7 +32,7 @@ defmodule CodexPoolerWeb.Admin.BadgeComponents do
     "plus" => "Plus",
     "pro" => "Pro 200",
     "prolite" => "Pro 100",
-    "promax" => "Pro Max",
+    "promax" => "Pro 500",
     "self-serve-business-prolite" => "Self Serve Business ProLite",
     "self_serve_business_prolite" => "Self Serve Business ProLite",
     "self-serve-business-usage-based" => "Self Serve Business Usage Based",

@@ -10,7 +10,7 @@ defmodule CodexPooler.Upstreams.PromaxImportTest do
   alias CodexPooler.Upstreams.Auth.{CodexAuth, CodexAuthJson}
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
-  test "Pro Max auth claims survive parsing and encrypted identity import" do
+  test "promax auth claims survive parsing and encrypted identity import" do
     %{user: user} = bootstrap_owner_fixture()
     scope = Scope.for_user(user, ["instance_owner"])
     pool = pool_fixture()
