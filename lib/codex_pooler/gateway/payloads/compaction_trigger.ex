@@ -30,6 +30,12 @@ defmodule CodexPooler.Gateway.Payloads.CompactionTrigger do
     text
   )
 
+  # What a native Codex client's compaction carries besides the compaction's
+  # own fields, and what it reaches the provider with: its metadata (turn
+  # metadata among it), `include` and `tool_choice`, as every other request of
+  # its turn does (findings#270 row 270-368).
+  @client_fields ~w(client_metadata include tool_choice)
+
   @stream_headers [{"content-type", "text/event-stream"}]
 
   @type payload :: %{optional(String.t()) => term()}
@@ -143,6 +149,25 @@ defmodule CodexPooler.Gateway.Payloads.CompactionTrigger do
     |> maybe_put_stream(result_transport)
     |> maybe_put_previous_response_id(payload)
   end
+
+  @doc """
+  Restores the native client's metadata, include and tool choice after compact projection.
+
+  The released client sends these fields on remote compaction Responses requests.
+  Native bridges preserve them with the same normalization as ordinary turns;
+  direct compact aliases and public `/v1` compaction keep the narrow projection.
+  """
+  @spec put_client_fields(payload(), payload()) :: payload()
+  def put_client_fields(compact_payload, source) when is_map(compact_payload) and is_map(source) do
+    source
+    |> Map.take(@client_fields)
+    |> Enum.reject(fn {_field, value} -> is_nil(value) end)
+    |> Enum.into(compact_payload)
+  end
+
+  @doc "The fields `put_client_fields/2` puts back, which no claim over a bridged compaction binds."
+  @spec client_fields() :: [String.t()]
+  def client_fields, do: @client_fields
 
   @spec streaming_result?(RequestOptions.t()) :: boolean()
   def streaming_result?(%RequestOptions{

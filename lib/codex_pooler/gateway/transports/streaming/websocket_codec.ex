@@ -603,11 +603,25 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
       })
       when is_binary(semantic) and byte_size(semantic) == 32 and
              is_binary(replay) and byte_size(replay) == 32 do
-    ordinary_native_tool_continuation?(payload, options) or replay_request_kind?(payload, options) or
-      projected_native_compaction_retry?(endpoint, options)
+    if endpoint == "/backend-api/codex/responses/compact" or options.payload_context.compaction_trigger_bridge?,
+      do: projected_native_compaction_retry?(endpoint, options),
+      else: ordinary_native_tool_continuation?(payload, options) or replay_request_kind?(payload, options)
   end
 
   def replay_eligible?(%PreparedWebsocketFrame{}), do: false
+
+  # A bridged compaction, and any frame on the compact route, is eligible by
+  # its own rule alone: only its
+  # full-history form on the native websocket, the form the client resends a
+  # compaction it did not complete in (`projected_native_compaction_retry?/2`).
+  # An anchored compaction is never eligible (findings#270 row 270-358): its
+  # anchor binds it to the connection that produced the response it names,
+  # and the owner admits it through its runtime proof. It used to be
+  # ineligible only because the bridged frame kept no turn metadata of its
+  # own to read a kind from, and a tool output it carried could still make it
+  # an ordinary continuation under the kind of the socket's upgrade; with the
+  # client's metadata back on the bridged frame (row 270-368) its kind
+  # `compaction` would make every compaction eligible.
 
   @spec prevalidated_request?(
           map(),
@@ -1489,10 +1503,9 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
         downstream_payload = coerced.payload
 
         compact_payload =
-          CompactionTrigger.project_responses_payload(
-            compact_payload,
-            if(CompactionTrigger.v2_streaming?(downstream_payload), do: :sse, else: :buffered)
-          )
+          compact_payload
+          |> CompactionTrigger.project_responses_payload(if(CompactionTrigger.v2_streaming?(downstream_payload), do: :sse, else: :buffered))
+          |> CompactionTrigger.put_client_fields(downstream_payload)
 
         request_options =
           coerced.request_options

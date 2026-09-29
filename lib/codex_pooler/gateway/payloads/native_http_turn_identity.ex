@@ -106,6 +106,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
   # for all return `:none`, which leaves the generated correlation id and
   # today's behaviour exactly as they are.
 
+  alias CodexPooler.Gateway.Payloads.CompactionTrigger
   alias CodexPooler.Gateway.Payloads.NativeCodexTurnMetadata
   alias CodexPooler.Gateway.Payloads.NativeTurnContinuation
   alias CodexPooler.Gateway.Payloads.RequestOptions
@@ -208,7 +209,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
       NativeTurnContinuation.compaction_request?(payload, request_options) ->
         with {:ok, claim} <-
                claim(
-                 WebsocketTurnIdentity.compaction_claim_key(identity.semantic_turn_key, payload),
+                 WebsocketTurnIdentity.compaction_claim_key(identity.semantic_turn_key, compaction_claim_payload(payload, request_options)),
                  :compaction
                ),
              do: {:ok, Map.put(claim, :websocket_compaction_claims, websocket_compaction_claims(identity, request_options, payload, metadata))}
@@ -333,6 +334,17 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
       end
     end
   end
+
+  # The claim of an HTTP compaction binds the compacted payload the bridge
+  # built, without the client's own fields it puts back since findings#270 row
+  # 270-368 (`CompactionTrigger.client_fields/0`), so the claim is what it
+  # was before and binds nothing that moves between sends. A compaction the
+  # bridge does not rewrite (a local compaction's summarization request) is
+  # claimed over its payload as before.
+  defp compaction_claim_payload(payload, %RequestOptions{payload_context: %{compaction_trigger_bridge?: true}}),
+    do: Map.drop(payload, CompactionTrigger.client_fields())
+
+  defp compaction_claim_payload(payload, %RequestOptions{}), do: payload
 
   defp native_client_retry_witness(
          identity,

@@ -22,7 +22,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpSteerAndCompactionRetryTest do
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
 
-  alias CodexPooler.Accounting.{LedgerEntry, Request}
+  alias CodexPooler.Accounting.{LedgerEntry, Request, RequestClientRetryLink}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Repo
 
@@ -108,6 +108,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpSteerAndCompactionRetryTest do
   # compaction (findings#270 row 270-373). The first attempt's completion is
   # moved back, so the retry lands a margin inside or outside the window
   # whatever the machine's speed.
+  test "an HTTP compaction retried 300 s after its reply was lost is chained", %{conn: conn} do
+    upstream = start_upstream(FakeUpstream.strict_sequence([turn_sse("resp_open"), compaction_sse("resp_compaction_one"), compaction_sse("resp_compaction_two")]))
+    {setup, ids, compaction, first} = lost_http_compaction!(conn, upstream, 300)
+
+    assert response(post(conn, setup, ids, "compaction", compaction), 200)
+    assert [_open, %Request{id: first_id}, retry] = pool_requests(setup)
+    assert first_id == first.id
+    assert retry.request_metadata["client_resend"] == %{"predecessor_request_id" => first.id, "reason" => "failed_predecessor"}
+    assert String.starts_with?(retry.correlation_id, "codex-request-retry:")
+    assert :ok = FakeUpstream.verify!(upstream)
+  end
+
   test "an HTTP compaction retried 325 s after its reply was lost is chained", %{conn: conn} do
     upstream = start_upstream(FakeUpstream.strict_sequence([turn_sse("resp_open"), compaction_sse("resp_compaction_one"), compaction_sse("resp_compaction_two")]))
     {setup, ids, compaction, first} = lost_http_compaction!(conn, upstream, 325)
@@ -142,8 +154,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpSteerAndCompactionRetryTest do
     {setup, ids, compaction, first}
   end
 
-  test "a steer into an uncompacted turn is served, while a rebuilt retry of the opener stays refused", %{conn: conn} do
-    upstream = start_upstream(FakeUpstream.strict_sequence([turn_sse("resp_open"), turn_sse("resp_steer")]))
+  test "a steer into an uncompacted turn and its identical resend are served, while an unverified rebuilt opener stays refused", %{conn: conn} do
+    upstream = start_upstream(FakeUpstream.strict_sequence([turn_sse("resp_open"), turn_sse("resp_steer"), turn_sse("resp_steer_resend")]))
     setup = setup!(upstream, "full")
     ids = ids()
     open = native_text_input("open the turn")
@@ -157,9 +169,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpSteerAndCompactionRetryTest do
     steered = open ++ [assistant("delivered answer"), user("steer the running turn")]
     assert response(post(conn, setup, ids, "turn", steered), 200)
 
-    assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(post(conn, setup, ids, "turn", steered), 409)
-    assert FakeUpstream.count(upstream) == 2
-    assert [{"codex-turn", "opening", "succeeded"}, {"codex-resume", "steered_continuation", "succeeded"}] = rows(setup)
+    assert response(post(conn, setup, ids, "turn", steered), 200)
+    assert FakeUpstream.count(upstream) == 3
+    assert [{"codex-turn", "opening", "succeeded"}, {"codex-resume", "steered_continuation", "succeeded"}, {"codex-request-retry", "steered_continuation", "succeeded"}] = rows(setup)
+    [_opening, predecessor, successor] = pool_requests(setup)
+    assert Repo.exists?(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^predecessor.id and link.successor_request_id == ^successor.id))
+    assert :ok = FakeUpstream.verify!(upstream)
   end
 
   defp setup!(upstream, mode) do

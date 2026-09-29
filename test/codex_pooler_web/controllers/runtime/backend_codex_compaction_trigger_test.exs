@@ -549,8 +549,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCompactionTriggerTest do
       assert captured.json["stream"] == true
       assert captured.json["store"] == false
       assert List.last(captured.json["input"]) == compaction_trigger()
-      refute Map.has_key?(captured.json, "client_metadata")
-      refute Map.has_key?(captured.json, "include")
+      assert captured.json["client_metadata"] == payload["client_metadata"]
+      assert captured.json["include"] == payload["include"]
 
       assert request.endpoint == "/backend-api/codex/responses/compact"
       assert request.transport == "http_compact_json"
@@ -565,7 +565,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCompactionTriggerTest do
       assert settlement.request_id == request.id
       assert settlement.attempt_id == attempt.id
 
-      refute inspect(captured.json) =~ raw_metadata_sentinel
+      assert inspect(captured.json) =~ raw_metadata_sentinel
       refute inspect(request) =~ raw_metadata_sentinel
       refute inspect(attempt) =~ raw_metadata_sentinel
       refute inspect(settlement) =~ raw_metadata_sentinel
@@ -733,7 +733,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCompactionTriggerTest do
       assert captured.path == "/backend-api/codex/responses", "#{alias_name}:#{metadata_name}"
       assert captured.json["store"] == false, "#{alias_name}:#{metadata_name}"
       assert captured.json["stream"] == true, "#{alias_name}:#{metadata_name}"
-      refute Map.has_key?(captured.json, "client_metadata"), "#{alias_name}:#{metadata_name}"
+      assert captured.json["client_metadata"] == payload["client_metadata"], "#{alias_name}:#{metadata_name}"
 
       assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
 
@@ -1481,6 +1481,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCompactionTriggerTest do
                parallel_tool_calls
                reasoning
                service_tier
+               client_metadata
+               include
+               tool_choice
                              prompt_cache_key
                              text
                              store
@@ -1492,10 +1495,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCompactionTriggerTest do
     assert captured.json["store"] == false
     refute Map.has_key?(captured.json, "previous_response_id")
     refute Map.has_key?(captured.json, "conversation")
-    refute Map.has_key?(captured.json, "tool_choice")
+    assert captured.json["tool_choice"] == "auto"
     assert captured.json["stream"] == true
-    refute Map.has_key?(captured.json, "include")
-    refute Map.has_key?(captured.json, "client_metadata")
+    assert captured.json["include"] == ["reasoning.encrypted_content"]
+    assert captured.json["client_metadata"] == %{"source" => "omp"}
 
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
     assert request.endpoint == "/backend-api/codex/responses/compact"

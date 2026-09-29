@@ -3,6 +3,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodecTest do
 
   alias CodexPooler.Gateway.Payloads.{CompactionTrigger, NativeHttpTurnIdentity, RequestOptions}
   alias CodexPooler.Gateway.Payloads.NativeCodexTurnMetadata
+  alias CodexPooler.Gateway.Payloads.NativeTurnContinuation
   alias CodexPooler.Gateway.Persistence.CodexSession
   alias CodexPooler.Gateway.Transports.Streaming.PreparedWebsocketFrame
   alias CodexPooler.Gateway.Transports.Streaming.{StreamProtocol, WebsocketCodec}
@@ -95,7 +96,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodecTest do
     assert is_nil(prepared.request_options.continuity.previous_response_id)
   end
 
-  test "projected full-history native compact retains replay eligibility without raw metadata" do
+  test "projected full-history native compact keeps the client's metadata and stays replay-eligible" do
     payload =
       remote_compaction_v2_incremental_subset!("full_history_without_anchor")
       |> Map.put("model", "gpt-example")
@@ -138,7 +139,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodecTest do
                fn _ -> :ok end
              )
 
-    refute Map.has_key?(prepared.payload, "client_metadata")
+    # The bridged frame keeps the client's metadata, scrubbed of its turn id as
+    # every native frame is (findings#270 row 270-368).
+    assert %{"x-codex-turn-metadata" => document} = prepared.payload["client_metadata"]
+    assert %{"request_kind" => "compaction"} = decoded = CodexPooler.JSON.decode!(document)
+    refute Map.has_key?(decoded, "turn_id")
     assert prepared.request_options.payload_context.compaction_input_mode == :full_history
     assert WebsocketCodec.replay_eligible?(prepared)
 
@@ -175,6 +180,41 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodecTest do
       context = struct!(prepared.request_options.payload_context, updates)
 
       refute WebsocketCodec.replay_eligible?(put_in(prepared.request_options.payload_context, context))
+    end
+  end
+
+  # The anchored compaction (findings#270 row 270-358): with the client's
+  # turn metadata back on the bridged frame its kind is `compaction`, which
+  # makes an ordinary native frame replay-eligible; the anchored compaction
+  # stays ineligible by its own rule, and its full-history form stays
+  # eligible.
+  test "an anchored native compaction is never replay-eligible, though its bridged frame declares its kind" do
+    for scenario <- ["anchored_tool_output_and_trigger", "anchored_trigger_only"] do
+      prepared = owner_compaction_frame!(scenario)
+
+      assert prepared.request_options.payload_context.compaction_input_mode == :incremental
+      assert NativeTurnContinuation.request_kind(prepared.payload, prepared.request_options) == "compaction"
+      refute WebsocketCodec.replay_eligible?(prepared), scenario
+    end
+
+    assert WebsocketCodec.replay_eligible?(owner_compaction_frame!("full_history_without_anchor"))
+  end
+
+  # A socket's upgrade names the request it was opened for, usually the
+  # prewarm (kind `prewarm`, no turn, window 0), and a later frame on it is a
+  # compaction, a turn or a resume in a later window (findings#270 row
+  # 270-359). A bridged compaction frame used to keep no turn metadata of its
+  # own and was read with the upgrade's; it reads its own, as every other
+  # frame on the socket does.
+  test "a bridged compaction frame on a socket a prewarm opened reads its own turn metadata, not the upgrade's" do
+    upgrade_document =
+      CodexPooler.JSON.encode!(%{"turn_id" => "", "window_id" => "prewarm-window:0", "context_window_id" => Ecto.UUID.generate(), "window_number" => 0, "request_kind" => "prewarm"})
+
+    for scenario <- ["anchored_tool_output_and_trigger", "full_history_without_anchor"] do
+      prepared = owner_compaction_frame!(scenario, forwarded_metadata_headers: [{"x-codex-turn-metadata", upgrade_document}])
+
+      assert NativeTurnContinuation.request_kind(prepared.payload, prepared.request_options) == "compaction", scenario
+      assert NativeTurnContinuation.window_number(prepared.payload, prepared.request_options) == 1, scenario
     end
   end
 
@@ -1214,6 +1254,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodecTest do
             do: Map.put(expected_payload, "stream", true),
             else: expected_payload
 
+        # The client's own fields ride with the compaction (findings#270 row
+        # 270-368).
+        expected_payload = CompactionTrigger.put_client_fields(expected_payload, payload)
+        assert Map.take(expected_payload, ["include", "tool_choice"]) == %{"include" => ["reasoning.encrypted_content"], "tool_choice" => "auto"}
+
         assert coerced.payload == expected_payload
 
         assert is_function(coerced.result_adapter, 1)
@@ -1267,7 +1312,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodecTest do
       assert {:ok, compact_payload} =
                CompactionTrigger.prepare_bridge("/backend-api/codex/responses", payload)
 
-      http_projection = CompactionTrigger.project_responses_payload(compact_payload, :sse)
+      http_projection = compact_payload |> CompactionTrigger.project_responses_payload(:sse) |> CompactionTrigger.put_client_fields(payload)
 
       assert coerced.request_options.payload_context.compaction_result_transport == :sse
       assert coerced.payload == http_projection
@@ -1292,7 +1337,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodecTest do
         third_projection = CompactionTrigger.project_responses_payload(second_projection, :sse)
 
         assert coerced.endpoint == "/backend-api/codex/responses/compact"
-        assert coerced.payload == first_projection
+        assert coerced.payload == CompactionTrigger.put_client_fields(first_projection, payload)
         assert second_projection == first_projection
         assert third_projection == first_projection
         assert coerced.payload["previous_response_id"] == payload["previous_response_id"]
@@ -2041,6 +2086,39 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodecTest do
       "/backend-api/codex/responses",
       payload
     )
+  end
+
+  # A remote compaction frame of the released client's fixture on an owner
+  # socket, with its turn metadata parsed as the socket parses it.
+  defp owner_compaction_frame!(scenario, transport \\ []) do
+    payload =
+      remote_compaction_v2_incremental_subset!(scenario)
+      |> Map.put("model", "gpt-example")
+      |> Map.put("client_metadata", %{
+        "x-codex-window-id" => "compaction-window:1",
+        "x-codex-turn-metadata" =>
+          CodexPooler.JSON.encode!(%{
+            "turn_id" => "turn-compaction-frame",
+            "window_id" => "compaction-window:1",
+            "context_window_id" => Ecto.UUID.generate(),
+            "window_number" => 1,
+            "request_kind" => "compaction",
+            "compaction" => %{"trigger" => "auto", "reason" => "context_limit", "implementation" => "responses_compaction_v2", "phase" => "mid_turn", "strategy" => "memento"}
+          })
+      })
+
+    session_id = Ecto.UUID.generate()
+    assert {:ok, metadata} = NativeCodexTurnMetadata.parse(payload, session_id)
+
+    options =
+      %{transport: "websocket", websocket_owner_forwarding_enabled?: true, codex_session: %{id: session_id}}
+      |> RequestOptions.build("/backend-api/codex/responses", payload)
+      |> RequestOptions.put_payload_context(native_codex_turn_metadata: metadata)
+      |> then(&if(transport == [], do: &1, else: RequestOptions.put_transport(&1, transport)))
+
+    assert {:ok, prepared} = WebsocketCodec.prepare_frame(CodexPooler.JSON.encode!(payload), options, fn _ -> :ok end)
+    assert prepared.request_options.payload_context.compaction_trigger_bridge?
+    prepared
   end
 
   defp native_responses_options(payload, session_id \\ Ecto.UUID.generate()) do

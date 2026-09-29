@@ -909,7 +909,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionTriggerTest do
 
         refute Map.has_key?(compact_request.json, "generate")
 
-        assert_compact_transport_envelope(compact_request.json, transport, mode)
+        assert_compact_transport_envelope(compact_request.json, transport, mode, frame_turn_state)
 
         assert_compact_turn_state_header(compact_request.headers, transport, frame_turn_state)
 
@@ -2414,7 +2414,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionTriggerTest do
   defp compact_lite_marker_present?(:sse, "lite"), do: true
   defp compact_lite_marker_present?(_transport, _mode), do: false
 
-  defp assert_compact_transport_envelope(payload, :sse, mode) do
+  defp assert_compact_transport_envelope(payload, :sse, mode, frame_turn_state) do
+    assert payload["client_metadata"]["x-codex-turn-state"] == frame_turn_state
     assert payload["type"] == "response.create"
 
     assert get_in(payload, [
@@ -2423,9 +2424,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionTriggerTest do
            ]) == if(mode == "lite", do: "true")
   end
 
-  defp assert_compact_transport_envelope(payload, :buffered, _mode) do
+  defp assert_compact_transport_envelope(payload, :buffered, _mode, frame_turn_state) do
     refute Map.has_key?(payload, "type")
-    refute Map.has_key?(payload, "client_metadata")
+    assert payload["client_metadata"] == %{"x-codex-turn-state" => frame_turn_state}
   end
 
   defp compact_expected(:sse, key),
@@ -2852,11 +2853,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionTriggerTest do
   defp maybe_expect_lite_marker(expected, "full"), do: expected
 
   defp maybe_expect_lite_marker(expected, "lite") do
-    put_in(
-      expected,
-      ["client_metadata"],
-      %{"ws_request_header_x_openai_internal_codex_responses_lite" => "true"}
-    )
+    Map.put(expected, "client_metadata.ws_request_header_x_openai_internal_codex_responses_lite", "true")
   end
 
   defp trace_root(label) do

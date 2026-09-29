@@ -709,9 +709,9 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
              compaction_trigger_bridge?: true,
              compaction_result_transport: result_transport
            }
-         }
+         } = request_options
        ) do
-    CompactionTrigger.project_responses_payload(payload, result_transport)
+    project_bridged_compaction(payload, result_transport, request_options)
   end
 
   defp maybe_project_compact_payload(
@@ -723,9 +723,9 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
              compaction_trigger_bridge?: true,
              compaction_result_transport: result_transport
            }
-         }
+         } = request_options
        ) do
-    CompactionTrigger.project_responses_payload(payload, result_transport)
+    project_bridged_compaction(payload, result_transport, request_options)
   end
 
   defp maybe_project_compact_payload(
@@ -745,6 +745,20 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
   end
 
   defp maybe_project_compact_payload(payload, _endpoint, %RequestOptions{}), do: payload
+
+  # A native client's compaction keeps its metadata, `include` and
+  # `tool_choice` on its way to the provider, normalized as every other
+  # request of its turn is (`CompactionTrigger.put_client_fields/2`,
+  # findings#270 row 270-368); a public `/v1` compaction keeps only the
+  # compaction's own fields.
+  defp project_bridged_compaction(payload, result_transport, %RequestOptions{openai_compatibility: %{source_endpoint: nil, public_openai_responses_stream: false}}) do
+    payload
+    |> CompactionTrigger.project_responses_payload(result_transport)
+    |> CompactionTrigger.put_client_fields(payload)
+  end
+
+  defp project_bridged_compaction(payload, result_transport, %RequestOptions{}),
+    do: CompactionTrigger.project_responses_payload(payload, result_transport)
 
   defp finalize_compact_transport_envelope(
          payload,

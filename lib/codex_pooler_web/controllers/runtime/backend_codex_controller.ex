@@ -196,6 +196,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexController do
          result_transport
        ) do
     compact_endpoint = "/backend-api/codex/responses/compact"
+    compact_payload = CompactionTrigger.put_client_fields(compact_payload, downstream_payload)
 
     conn
     |> PublicGatewayDispatch.dispatch_json_payload(

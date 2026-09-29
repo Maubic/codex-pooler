@@ -22,6 +22,27 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentityTest do
              )
   end
 
+  test "restoring native bridge fields preserves the websocket and HTTP claim bytes" do
+    alias CodexPooler.Gateway.Payloads.{NativeHttpTurnIdentity, RequestOptions}
+    alias CodexPooler.Gateway.Persistence.CodexSession
+
+    metadata = CodexPooler.JSON.encode!(%{"turn_id" => "synthetic-turn", "request_kind" => "compaction", "window_id" => "synthetic-thread:0"})
+    payload = %{"model" => "gpt-test-model", "input" => [%{"type" => "message", "role" => "user", "content" => "synthetic"}, %{"type" => "compaction_trigger"}], "store" => false, "stream" => true}
+    restored = Map.merge(payload, %{"client_metadata" => %{"x-codex-turn-metadata" => metadata, "x-codex-ws-stream-request-start-ms" => "1"}, "include" => ["reasoning.encrypted_content"], "tool_choice" => "auto"})
+    semantic = :crypto.hash(:sha256, "synthetic-turn")
+    window = :crypto.hash(:sha256, "synthetic-thread:0")
+
+    assert WebsocketTurnIdentity.remote_compaction_claim_key(semantic, window, payload) == WebsocketTurnIdentity.remote_compaction_claim_key(semantic, window, restored)
+
+    options =
+      RequestOptions.build(%{codex_session: %CodexSession{id: @session_id}, forwarded_headers: [{"x-codex-turn-metadata", metadata}]}, "/backend-api/codex/responses/compact", payload)
+      |> RequestOptions.put_payload_context(compaction_trigger_bridge?: true)
+
+    assert {:ok, before_claim} = NativeHttpTurnIdentity.request_claim_key(options, payload)
+    assert {:ok, ^before_claim} = NativeHttpTurnIdentity.request_claim_key(options, restored)
+    assert {:ok, ^before_claim} = NativeHttpTurnIdentity.request_claim_key(options, put_in(restored, ["client_metadata", "x-codex-ws-stream-request-start-ms"], "2"))
+  end
+
   # A compaction request whose payload keeps its client metadata (a local
   # compaction's summarization request, findings#282) names its window through
   # `x-codex-window-id`: an identical resend names one claim, while the next

@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
   @moduledoc false
 
   alias CodexPooler.Gateway.OpenAICompatibility.Error
+  alias CodexPooler.Gateway.Payloads.CompactionTrigger
 
   @direct_turn_param "client_metadata.turn_id"
   @canonical_metadata_key "x-codex-turn-metadata"
@@ -254,26 +255,28 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
   It binds the turn, the compaction's own window (`window_digest`, the digest
   of the canonical turn metadata's `window_id`,
   `NativeCodexTurnMetadata.window_id_digest/1`) and every field of the
-  bridged payload except `input`, `previous_response_id` and
-  `client_metadata`. The window is read from the frame's turn metadata
-  before the compaction bridge: the bridged payload keeps no client
-  metadata, and the claim taken from it alone was the same for every remote
-  compaction of a turn, so the turn's second compaction met the first one's
-  and was refused `409 duplicate_turn`, or was chained as a resend of it
-  (findings#270 rows 270-351 and 270-357). The client moves to its next
-  window after every compaction it completes and never before, so a
-  compaction's anchored form and every resend of it share the window, and
-  the turn's next compaction is a claim of its own. The client metadata adds
-  nothing a resend keeps that the turn and the window do not already bind,
-  and carries what every send changes (`x-codex-ws-stream-request-start-ms`)
-  and what a transport moves (the Lite marker, a header over HTTPS), so none
-  of it is bound, whatever the bridge keeps of it.
+  bridged payload except `input`, `previous_response_id` and the client's
+  own fields the bridge puts back (`client_metadata`, `include`,
+  `tool_choice`: `CompactionTrigger.client_fields/0`). The window is read
+  from the frame's turn metadata before the compaction bridge: the bridged
+  payload kept no client metadata, and the claim taken from it alone was the
+  same for every remote compaction of a turn, so the turn's second
+  compaction met the first one's and was refused `409 duplicate_turn`, or
+  was chained as a resend of it (findings#270 rows 270-351 and 270-357). The
+  client moves to its next window after every compaction it completes and
+  never before, so a compaction's anchored form and every resend of it share
+  the window, and the turn's next compaction is a claim of its own. The
+  client's own fields add nothing a resend keeps that the turn and the window
+  do not already bind, and carry what every send changes
+  (`x-codex-ws-stream-request-start-ms`) and what a transport moves (the Lite
+  marker, a header over HTTPS), so none of them is bound; the bridge put
+  them back after this claim was defined (row 270-368) without moving it.
   """
   @spec remote_compaction_claim_key(<<_::256>>, <<_::256>>, map()) :: String.t()
   def remote_compaction_claim_key(semantic_turn_key, window_digest, payload)
       when is_binary(semantic_turn_key) and byte_size(semantic_turn_key) == 32 and
              is_binary(window_digest) and byte_size(window_digest) == 32 and is_map(payload) do
-    projection = request_claim_projection(Map.drop(payload, ["input", "previous_response_id", "client_metadata"]))
+    projection = request_claim_projection(Map.drop(payload, ["input", "previous_response_id" | CompactionTrigger.client_fields()]))
 
     digest =
       :crypto.mac(

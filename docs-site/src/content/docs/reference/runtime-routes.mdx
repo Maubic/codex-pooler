@@ -576,8 +576,11 @@ Every non-compact request that reaches the backend Responses destination has a
 `include` after final normalization. This applies to canonical backend HTTP and
 websocket traffic, backend `/v1` Responses and Chat Completions aliases, and
 translated `POST /v1/responses`, `GET /v1/responses`, and
-`POST /v1/chat/completions` traffic. Compact dispatch is excluded and keeps its
-narrow compact request shape.
+`POST /v1/chat/completions` traffic. Native backend compaction requests preserve
+the client's `client_metadata`, `include`, and `tool_choice`, with the same
+websocket turn-id removal and Lite marker handling as ordinary turns. Direct
+compact aliases and public `/v1` compaction keep their narrow compact request
+shape.
 
 When upstream returns a valid parameter path with an error, failed attempt
 detail may expose it as `upstream_error_param`. The value is limited to a

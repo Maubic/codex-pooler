@@ -2282,8 +2282,8 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                  transport: "http_compact_json",
                  valid_trigger: "exactly_one_final_input_item",
                  malformed_trigger: %{status: 400, param: "input", upstream_dispatch: false},
-                 retained: ["final_compaction_trigger"],
-                 strips: ["include", "prompt_cache_options"],
+                 retained: ["final_compaction_trigger", "client_metadata", "include", "tool_choice"],
+                 strips: ["prompt_cache_options"],
                  result_classification: %{
                    source: "request_input_compaction_trigger",
                    marker: "terminal_compaction_trigger",
