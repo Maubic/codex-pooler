@@ -299,18 +299,23 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
   # confirmed, and its final is reserved against it. It used to stay
   # `collected_unconfirmed` for as long as the socket was attached, and the
   # resend was served, billed and refused `502 invalid_compaction_response`.
-  # The bound is shortened for the lost compaction only, on the owner's node.
+  # The bound is shortened for the lost compaction's collection only, on the
+  # owner's node: once the provider holds the request, so its capability,
+  # bounded from its reservation (row 270-317), was consumed first.
   # The released client retries on a new connection instead, and the closed
   # socket's detach ends the admission; the resend on the same socket is a
   # path another client can take.
   for topology <- [:remote, :local, :direct] do
     @tag topology: topology
     test "#{topology}: a compaction whose acknowledgement is lost does not hold the admission past its bound", ctx do
-      compaction = open_compaction_session!(ctx, true, [:anchor, :compaction, :compaction, :final])
+      ref = make_ref()
+      compaction = open_compaction_session!(ctx, true, [:anchor, {:held_compaction, self(), ref}, :compaction, :final])
       hold = hold_settled_websocket_turn!()
-      put_reservation_ttl!(ctx, 1)
       {conn, websocket} = public_websocket_send_text!(compaction.client.conn, compaction.client.websocket, compaction.client.ref, compaction_frame(compaction, "compaction", trigger(compaction), "resp_slow_owner_anchor"))
       compaction = %{compaction | client: %{compaction.client | conn: conn, websocket: websocket}}
+      assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^ref}, @detection_timeout_ms
+      put_reservation_ttl!(ctx, 1)
+      :ok = FakeUpstream.release_remaining_frames(compaction.upstream, ref)
       assert_receive {^hold, :held, task}, @detection_timeout_ms
 
       # The owner collected the compaction; its task dies before the
@@ -587,6 +592,35 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     end
   end
 
+  # An incremental compaction the client sends long after the ordinary turn
+  # that armed it (findings#270 row 270-317). The armed compaction expired 60
+  # s after that turn, and the compaction was refused `503 owner_unavailable`
+  # before dispatch (`cause=expired`); the released client resent it with its
+  # whole history on a new connection. The provider still resolves the anchor
+  # on its connection after thirty minutes of idle, so the armed compaction now
+  # lasts as long as that connection, and the compaction is served anchored
+  # on it. The bound is shortened to a millisecond for the anchor turn's
+  # arming only, on this node, which computes it.
+  for topology <- [:remote, :local, :direct] do
+    @tag topology: topology
+    test "#{topology}: an incremental compaction long after the turn that armed it is served anchored on the same connection", ctx do
+      Application.put_env(:codex_pooler, NativeCompactionAdmission, reservation_ttl_ms: 1)
+      compaction = open_compaction_session!(ctx, true, [:anchor, :compaction])
+      :ok = await_admission_phase!(compaction.owner, :pending_compact)
+      Application.put_env(:codex_pooler, NativeCompactionAdmission, [])
+      Process.sleep(10)
+
+      {served, log} = with_info_log(fn -> send_frame!(compaction, compaction_frame(compaction, "compaction", trigger(compaction), "resp_slow_owner_anchor")) end)
+
+      assert %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_compact", "output" => [%{"type" => "compaction"}]}} = served
+      refute log =~ "cause=expired"
+      assert [_anchor, %{json: %{"previous_response_id" => "resp_slow_owner_anchor", "input" => input}}] = FakeUpstream.requests(compaction.upstream)
+      assert List.last(input) == %{"type" => "compaction_trigger"}
+      assert FakeUpstream.websocket_connection_count(compaction.upstream) == 1
+      assert Scenario.settled_statuses!(compaction.setup, 2) == ["succeeded", "succeeded"]
+    end
+  end
+
   # A `response.processed` the socket forwards to an owner on its node waits
   # for that owner within the forward budget, as its forward to an owner on
   # another node does (findings#270 row 270-300). The socket's response task
@@ -843,6 +877,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
   defp upstream_answer(:anchor, _item), do: FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(anchor_event())])
   defp upstream_answer(:compaction, item), do: FakeUpstream.websocket_text_frames(Enum.map(compaction_events(item), &CodexPooler.JSON.encode!/1))
   defp upstream_answer(:final, _item), do: FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(final_event())])
+
+  # A compaction whose frames the provider sends only once the test releases
+  # them: barrier `0` is the request's arrival.
+  defp upstream_answer({:held_compaction, notify, ref}, item),
+    do: FakeUpstream.barrier_websocket_frames(Enum.map(compaction_events(item), &CodexPooler.JSON.encode!/1), notify: notify, release_ref: ref)
 
   # A turn whose frames the provider sends one at a time, each after the test
   # releases its barrier (`0` to `2`); barrier `3` follows the last frame.

@@ -440,16 +440,31 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
   @type error :: unquote(Enum.reduce(Enum.reverse(@errors), &{:|, [], [&1, &2]}))
   @type refusal :: error() | :committed | :invalid_provenance | :provenance_mismatch
 
-  # How long an armed or collected admission stays usable: `pending_compact`
-  # from the ordinary success that arms it, `pending_final` from the
-  # confirmation that arms it, `collected_unconfirmed` from its collection.
+  # How long a finalizing or collected admission, and a reservation, stays
+  # usable: `pending_final` from the confirmation that arms it,
+  # `collected_unconfirmed` from its collection, a capability from its
+  # reservation.
+  #
+  # `pending_compact` has no time bound: it lasts as long as the upstream
+  # connection it names (findings#270 row 270-317). The provider resolves
+  # `previous_response_id` only on the connection that produced the response,
+  # and still does after thirty minutes of idle there (direct probe: 10 of 10
+  # after two, ten, twenty and thirty minutes; the same anchor on a new
+  # connection is refused). The connection's own checks keep the anchor
+  # reachable: the admission names its lifecycle and generation, every close
+  # of it clears the admission (a missed pong included), and a reservation
+  # checks that it is still the open one. The 60-second bound protected
+  # nothing those checks do not: it refused incremental compactions the
+  # provider would have served, and the client resent each with its whole
+  # history on a new connection.
   @reservation_ttl_ms 60_000
 
   @spec refusal_reasons() :: [refusal()]
   def refusal_reasons, do: @refusal_reasons
 
   @doc """
-  The bound, in milliseconds, of an armed or collected admission. Only the
+  The bound, in milliseconds, of a finalizing or collected admission and of a
+  reservation; an armed compaction (`pending_compact`) has none. Only the
   tests shorten it (`reservation_ttl_ms` in this module's application
   environment), so an expiry fits a test; neither runtime configuration nor an
   Instance Setting carries it.
@@ -477,10 +492,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
     end
   end
 
+  # The caller still computes a bound, which the owner admission control
+  # carries across nodes and an owner of an earlier release enforces; an armed
+  # compaction keeps none (`@reservation_ttl_ms`).
   @spec arm_compact(t(), non_neg_integer()) :: {:ok, t()} | {:error, :invalid_transition}
   def arm_compact(%__MODULE__{phase: :ordinary_success} = state, expires_at_ms)
       when is_integer(expires_at_ms) and expires_at_ms >= 0 do
-    {:ok, %{state | phase: :pending_compact, expires_at_ms: expires_at_ms}}
+    {:ok, %{state | phase: :pending_compact, expires_at_ms: nil}}
   end
 
   def arm_compact(%__MODULE__{}, _expires_at_ms), do: {:error, :invalid_transition}
@@ -496,9 +514,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
       )
       when is_reference(control_ref) and is_integer(now_ms) and now_ms >= 0 do
     with :ok <- expected_pending_phase(pending_phase, requested_phase),
-         :ok <- not_expired(expires_at_ms, now_ms),
+         :ok <- pending_not_expired(requested_phase, expires_at_ms, now_ms),
          :ok <- validate_final_item(requested_phase, binding, requested_binding),
          true <- reservation_binding_match?(requested_phase, binding, requested_binding) do
+      expires_at_ms = reservation_expires_at_ms(requested_phase, expires_at_ms, now_ms)
+
       capability = %Capability{
         phase: requested_phase,
         binding: requested_binding,
@@ -512,7 +532,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
          state
          | phase: reserved_phase(requested_phase),
            binding: requested_binding,
-           capability: capability
+           capability: capability,
+           expires_at_ms: expires_at_ms
        }, capability}
     else
       false -> {:error, :binding_mismatch}
@@ -561,7 +582,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
     case reserved_state_phase(state.phase) do
       {:ok, requested_phase} ->
         with :ok <- valid_capability(state, capability, requested_phase, now_ms) do
-          {:ok, %{state | phase: pending_phase(requested_phase), capability: nil}}
+          {:ok, %{state | phase: pending_phase(requested_phase), capability: nil, expires_at_ms: pending_expires_at_ms(requested_phase, state.expires_at_ms)}}
         end
 
       {:error, :invalid_transition} ->
@@ -578,13 +599,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
     end
   end
 
-  # A collection waits for its acknowledgement for as long as an armed phase
-  # waits for its turn. It used to wait forever: an acknowledgement lost with
-  # its caller left `collected_unconfirmed` for as long as the socket stayed
-  # attached, and every later ordinary success and first full-history
-  # compaction was refused after the provider had served and billed it
-  # (findings#270 row 270-249). `expire_unconsumed/2` ends a collection past
-  # its bound.
+  # A collection waits for its acknowledgement for as long as a confirmed
+  # compaction waits for its final. It used to wait forever: an
+  # acknowledgement lost with its caller left `collected_unconfirmed` for as
+  # long as the socket stayed attached, and every later ordinary success and
+  # first full-history compaction was refused after the provider had served
+  # and billed it (findings#270 row 270-249). `expire_unconsumed/2` ends a
+  # collection past its bound.
   @spec record_compact_collected(t(), non_neg_integer()) :: {:ok, t()} | {:error, :invalid_transition}
   def record_compact_collected(%__MODULE__{phase: :consumed_compact} = state, now_ms) when is_integer(now_ms) and now_ms >= 0 do
     {:ok, %{state | phase: :collected_unconfirmed, expires_at_ms: now_ms + reservation_ttl_ms()}}
@@ -801,7 +822,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
   reservation and runs as an ordinary turn; kept, the expired `pending_final`
   also refused that turn's ordinary success and every later one, so no
   compaction on the connection was armed again. Any other admission is left
-  as it is.
+  as it is: an armed compaction has no bound, and a reservation is bounded
+  by its capability.
   """
   @spec expire_unconsumed(t(), non_neg_integer()) :: {:active, t()} | {:expired, t()}
   def expire_unconsumed(%__MODULE__{phase: phase} = state, now_ms) when phase in [:collected_unconfirmed, :pending_final], do: expire(state, now_ms)
@@ -938,6 +960,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission do
   defp expected_pending_phase(:pending_compact, :compact), do: :ok
   defp expected_pending_phase(:pending_final, :final), do: :ok
   defp expected_pending_phase(_state_phase, _requested_phase), do: {:error, :invalid_transition}
+
+  # An armed compaction has no bound (`@reservation_ttl_ms`): its capability
+  # gets one from the reservation, and a cancelled reservation arms it again
+  # without one. A final keeps the bound its confirmation armed, capability
+  # included.
+  defp pending_not_expired(:compact, _expires_at_ms, _now_ms), do: :ok
+  defp pending_not_expired(:final, expires_at_ms, now_ms), do: not_expired(expires_at_ms, now_ms)
+
+  defp reservation_expires_at_ms(:compact, _expires_at_ms, now_ms), do: now_ms + reservation_ttl_ms()
+  defp reservation_expires_at_ms(:final, expires_at_ms, _now_ms), do: expires_at_ms
+
+  defp pending_expires_at_ms(:compact, _expires_at_ms), do: nil
+  defp pending_expires_at_ms(:final, expires_at_ms), do: expires_at_ms
 
   defp not_expired(expires_at_ms, now_ms) when now_ms <= expires_at_ms, do: :ok
   defp not_expired(_expires_at_ms, _now_ms), do: {:error, :expired}

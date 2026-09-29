@@ -67,9 +67,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.OwnerAdmissionAnswerVocabular
 
     assert NativeCompactionAdmission.phase(pending) == :pending_compact
 
-    assert {:error, :expired} =
-             answer.(:reserve, binding: binding, phase: :compact, control_ref: make_ref(), now_ms: expires + 1)
-
     assert {:error, :binding_mismatch} =
              answer.(:reserve, binding: %{binding | semantic_turn_key: <<9::256>>}, phase: :compact, control_ref: make_ref(), now_ms: now)
 
@@ -90,6 +87,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.OwnerAdmissionAnswerVocabular
              answer.(:cancel, capability: capability, disposition: :pre_accounting, now_ms: now)
 
     assert {:error, :capability_mismatch} = answer.(:clear, capability: forged)
+
+    # An armed compaction has no bound (findings#270 row 270-317): past the
+    # bound its arming carried it is still reserved, and `expired` answers a
+    # capability past the bound of its own reservation.
+    {binding, receipt} = OrdinarySuccessTestSeed.request(owner, downstream, forwarded_binding(ids, downstream), seed_url)
+
+    assert {:ok, _pending} =
+             answer.(:record_ordinary_success, binding: binding, first_compact_collection: receipt, expires_at_ms: expires)
+
+    assert {:ok, %NativeCompactionAdmission.Capability{} = late} =
+             answer.(:reserve, binding: binding, phase: :compact, control_ref: make_ref(), now_ms: expires + 1)
+
+    assert {:error, :expired} =
+             answer.(:mark_accounting_started, capability: late, now_ms: late.expires_at_ms + 1)
 
     driven = [:stale_downstream, :invalid_transition, :binding_mismatch, :expired, :capability_mismatch, :committed]
 

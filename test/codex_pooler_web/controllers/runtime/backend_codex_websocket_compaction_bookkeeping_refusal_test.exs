@@ -55,12 +55,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionBookkeepingRefus
   # findings#206 row 206-304 the owner admits it when its anchor is exactly the
   # admitted response (`backend_codex_websocket_pre_turn_compaction_admission_test.exs`);
   # the `foreign_anchor` arm keeps the refusal for a pre-turn compaction
-  # anchored on any other response. Row 206-289: after a pause longer than the
-  # admission's 60 s (`@compact_reservation_ttl_ms`) the owner refuses the
-  # reservation `expired` before it compares bindings; the test moves the armed
-  # deadline into the past instead of waiting, since the owner compares it with
-  # the wall clock at reservation.
-  for {arm, cause} <- [{:foreign_anchor, "binding_mismatch"}, {:expired, "expired"}] do
+  # anchored on any other response. Row 206-289 also refused one that came
+  # after a pause longer than the admission's 60 s (`expired`); since
+  # findings#270 row 270-317 the armed admission lasts as long as its
+  # connection, and that compaction is served
+  # (`backend_codex_websocket_pre_turn_compaction_admission_test.exs`).
+  for {arm, cause} <- [{:foreign_anchor, "binding_mismatch"}] do
     @tag arm: arm, cause: cause
     test "owner_forwarded #{arm} anchored compaction without a usable admission is refused before dispatch and the client's full-history retry carries the turn",
          %{arm: arm, cause: cause} do
@@ -90,8 +90,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionBookkeepingRefus
 
       first = ordinary_turn!(first, turn_frame(setup, @turn_id, [prompt("first")]), @anchor)
       owner = owner!(setup)
-      admission = await_pending_compact!(owner)
-      if arm == :expired, do: expire_admission!(owner, admission)
+      await_pending_compact!(owner)
       await_socket_response_tasks_released!(setup)
 
       {first, log} =
@@ -252,19 +251,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionBookkeepingRefus
         Process.sleep(10)
         {:cont, nil}
     end)
-  end
-
-  # Stands for the wall clock passing the armed admission's deadline: the
-  # reservation compares `expires_at_ms` with the system time it is made at.
-  defp expire_admission!(owner, %NativeCompactionAdmission{expires_at_ms: expires_at_ms}) when is_integer(expires_at_ms) do
-    expired_at = System.system_time(:millisecond) - 1
-    assert expired_at < expires_at_ms
-
-    :sys.replace_state(owner, fn state ->
-      %{state | native_compaction_admission: %{state.native_compaction_admission | expires_at_ms: expired_at}}
-    end)
-
-    :ok
   end
 
   # Every response task settles its request after the terminal frame reached

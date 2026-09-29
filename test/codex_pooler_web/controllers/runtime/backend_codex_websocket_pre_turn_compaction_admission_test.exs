@@ -32,10 +32,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionAdmission
   # compaction. The owner now admits it on its first send, once, because it
   # declares the pre-turn phase and is anchored on exactly the response the
   # admission was armed for, on the same window, context, connection
-  # generation and downstream, inside the admission deadline; the reservation
-  # adopts T2's turn key, so the final request's admission matches. Frames keep
-  # the released client's key sets; identifiers, prompt text and reply frames
-  # are synthetic. Serving mode Full (the fake catalog model). Topologies:
+  # generation and downstream; the reservation adopts T2's turn key, so the
+  # final request's admission matches. The armed admission has no deadline:
+  # after a pause past the 60 s it used to expire at, which refused the
+  # compaction `expired` before dispatch, it is served the same way
+  # (findings#270 row 270-317). Frames keep the released client's key sets;
+  # identifiers, prompt text and reply frames are synthetic. Serving mode Full
+  # (the fake catalog model). Topologies:
   # one node with owner forwarding off (`direct`) or on (`forwarded`, the owner
   # on the socket's node), and `peer`: forwarding on with the socket on this
   # node and the owner and its provider connection on a second VM sharing the
@@ -54,10 +57,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionAdmission
   @final_response "resp_preturn_admission_final0001"
   @lifecycle_event [:codex_pooler, :gateway, :native_compaction, :lifecycle]
 
-  for topology <- [:forwarded, :direct, :peer] do
-    @tag topology: topology
-    test "#{topology} released pre-turn compaction anchored on the admitted response is served on its first send, billed once, and its turn continues on the same connection",
-         %{topology: topology} do
+  for topology <- [:forwarded, :direct, :peer], pause <- [:none, :past_old_bound] do
+    @tag topology: topology, pause: pause
+    test "#{topology} released pre-turn compaction anchored on the admitted response#{if pause == :past_old_bound, do: " after a pause past the old admission bound"} is served on its first send, billed once, and its turn continues on the same connection",
+         %{topology: topology, pause: pause} do
       put_owner_forwarding!(topology != :direct)
       attach_lifecycle_events!(topology)
       item = compaction_item("served")
@@ -86,8 +89,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionAdmission
       client = connect!(port, setup, @window_id)
 
       try do
+        if pause == :past_old_bound, do: put_reservation_ttl!(1)
         client = ordinary_turn!(client, turn_frame(setup, @turn_id, [prompt("first")]), @anchor)
         await_armed!(topology, setup)
+        if pause == :past_old_bound, do: pass_old_bound!()
 
         {client, log} =
           with_log([level: :warning], fn ->
@@ -136,7 +141,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionAdmission
         Mint.HTTP.close(client.conn)
       end
     end
+  end
 
+  for topology <- [:forwarded, :direct, :peer] do
     @tag topology: topology
     test "#{topology} a resend of a served pre-turn compaction finds the admission spent and is refused before dispatch",
          %{topology: topology} do
@@ -353,6 +360,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPreTurnCompactionAdmission
         true -> Process.sleep(10) && {:cont, nil}
       end
     end)
+  end
+
+  # The bound the anchor turn's success arms is computed on this node, the
+  # socket's, whichever node owns the session; the compaction's own
+  # reservation is bounded on the owner's node, from the default restored
+  # before it.
+  defp put_reservation_ttl!(ttl_ms) do
+    CodexPooler.TestAppEnv.restore_on_exit(NativeCompactionAdmission)
+    Application.put_env(:codex_pooler, NativeCompactionAdmission, reservation_ttl_ms: ttl_ms)
+  end
+
+  defp pass_old_bound! do
+    Application.put_env(:codex_pooler, NativeCompactionAdmission, [])
+    Process.sleep(10)
   end
 
   defp put_owner_forwarding!(enabled?) do

@@ -466,12 +466,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   def handle_call(:live_connection, _from, state), do: {:reply, {:ok, live_connection_state(state)}, state}
 
+  # An armed compaction has no bound, and `admission_state/1` has already
+  # ended a final past its own (findings#270 rows 270-317 and 270-289).
   def handle_call(:compaction_reservation_snapshot, _from, state) do
     result =
-      with %{phase: phase, binding: %Binding{} = binding, expires_at_ms: expires}
-           when phase in [:pending_compact, :pending_final] and is_integer(expires) <-
+      with %{phase: phase, binding: %Binding{} = binding}
+           when phase in [:pending_compact, :pending_final] <-
              admission_state(state),
-           true <- expires >= System.system_time(:millisecond),
            :ok <- validate_direct_binding(state, binding),
            true <- binding.serving_mode in [:full, :lite] do
         {:ok, Map.take(binding, [:lifecycle_id, :generation, :serving_mode])}

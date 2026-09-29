@@ -99,9 +99,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
   end
 
   # findings#270 row 270-249: a collection waits for its acknowledgement as
-  # long as an armed phase waits for its turn, and ends past that bound
-  # instead of holding the admission for as long as the socket stays attached.
-  test "a collection is bound like the armed phases and ends past its bound" do
+  # long as a confirmed compaction waits for its final, and ends past that
+  # bound instead of holding the admission for as long as the socket stays
+  # attached.
+  test "a collection is bound like a pending final and ends past its bound" do
     binding = direct_binding()
     ttl_ms = NativeCompactionAdmission.reservation_ttl_ms()
     assert ttl_ms == 60_000
@@ -117,8 +118,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
     assert {:active, ^collected} = NativeCompactionAdmission.expire_unconsumed(collected, @now + 5 + ttl_ms)
     assert {:expired, %NativeCompactionAdmission{phase: :cleared}} = NativeCompactionAdmission.expire_unconsumed(collected, @now + 6 + ttl_ms)
 
-    # An armed compaction keeps its own expiry checks: the next ordinary success
-    # arms it again.
+    # An armed compaction has no bound (row 270-317).
     assert {:active, ^pending_compact} = NativeCompactionAdmission.expire_unconsumed(pending_compact, @now + 10 * ttl_ms)
 
     assert {:ok, first, provenance} = NativeCompactionAdmission.authorize_first_compact_collection(ordinary, make_ref())
@@ -147,6 +147,39 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
 
     assert {:active, ^pending_final} = NativeCompactionAdmission.expire_unconsumed(pending_final, @now + ttl_ms)
     assert {:expired, %NativeCompactionAdmission{phase: :cleared}} = NativeCompactionAdmission.expire_unconsumed(pending_final, @now + ttl_ms + 1)
+  end
+
+  # findings#270 row 270-317: an armed compaction lasts as long as the
+  # connection it names, which the provider still resolves the anchor on after
+  # thirty minutes of idle. Its reservation is bounded from itself, and a final
+  # keeps the bound its confirmation armed.
+  test "an armed compaction is reserved past the bound, from which its capability is bounded, while a final keeps its bound" do
+    binding = direct_binding()
+    ttl_ms = NativeCompactionAdmission.reservation_ttl_ms()
+    digest = <<91::256>>
+    control_ref = make_ref()
+    late = @now + 10 * ttl_ms
+    assert {:ok, ordinary} = NativeCompactionAdmission.ordinary_success(binding)
+    assert {:ok, pending_compact} = NativeCompactionAdmission.arm_compact(ordinary, @now + ttl_ms)
+    assert {pending_compact.phase, pending_compact.expires_at_ms} == {:pending_compact, nil}
+
+    assert {:ok, reserved, capability} = NativeCompactionAdmission.reserve(pending_compact, :compact, binding, make_ref(), late)
+    assert capability.expires_at_ms == late + ttl_ms
+    assert {:ok, rearmed} = NativeCompactionAdmission.cancel(reserved, capability, :pre_accounting, late)
+    assert {rearmed.phase, rearmed.expires_at_ms} == {:pending_compact, nil}
+
+    assert {:ok, reserved, capability} = NativeCompactionAdmission.reserve(rearmed, :compact, binding, control_ref, late + ttl_ms)
+    assert {:error, :expired} = NativeCompactionAdmission.mark_accounting_started(reserved, capability, late + 2 * ttl_ms + 1)
+    assert {:ok, accounting} = NativeCompactionAdmission.mark_accounting_started(reserved, capability, late + 2 * ttl_ms)
+    assert {:ok, consumed} = NativeCompactionAdmission.consume(accounting, capability, late + 2 * ttl_ms)
+    assert {:ok, collected} = NativeCompactionAdmission.record_compact_collected(consumed, late + 2 * ttl_ms)
+    confirmation = %Confirmation{source_phase: :compact, source_control_ref: control_ref, binding: %{binding | compaction_item_digest: digest}}
+    assert {:ok, pending_final} = NativeCompactionAdmission.confirm_compact(collected, digest, confirmation, late + 3 * ttl_ms)
+
+    final = direct_binding(window_digest: <<92::256>>, context_digest: <<93::256>>, window_number: binding.window_number + 1, compaction_item_digest: digest)
+    assert {:error, :expired} = NativeCompactionAdmission.reserve(pending_final, :final, final, make_ref(), late + 3 * ttl_ms + 1)
+    assert {:ok, _reserved_final, final_capability} = NativeCompactionAdmission.reserve(pending_final, :final, final, make_ref(), late + 3 * ttl_ms)
+    assert final_capability.expires_at_ms == late + 3 * ttl_ms
   end
 
   test "final reservation requires exact compact item digest and next window number" do
@@ -400,10 +433,17 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
                @now
              )
 
-    assert {:error, :expired} =
+    # A reservation is bounded from itself, not from the ordinary success that
+    # armed it (findings#270 row 270-317).
+    past_capability = @now + NativeCompactionAdmission.reservation_ttl_ms() + 1
+
+    assert {:ok, _accounting} =
              NativeCompactionAdmission.mark_accounting_started(reserved, capability, @now + 101)
 
-    assert {:expired, expired_cleared} = NativeCompactionAdmission.expire(reserved, @now + 101)
+    assert {:error, :expired} =
+             NativeCompactionAdmission.mark_accounting_started(reserved, capability, past_capability)
+
+    assert {:expired, expired_cleared} = NativeCompactionAdmission.expire(reserved, past_capability)
     assert NativeCompactionAdmission.phase(expired_cleared) == :cleared
 
     assert {:ok, accounting} =
@@ -754,7 +794,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
     end
   end
 
-  test "a pre-turn continuation is refused unless it is anchored on the armed response of the same window, connection and downstream before the deadline" do
+  test "a pre-turn continuation is refused unless it is anchored on the armed response of the same window, connection and downstream" do
     for binding <- [direct_binding(), forwarded_binding()] do
       {:ok, ordinary} = NativeCompactionAdmission.ordinary_success(binding)
       {:ok, pending} = NativeCompactionAdmission.arm_compact(ordinary, @now + 100)
@@ -776,7 +816,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmissionTest
         assert {:error, :binding_mismatch} = NativeCompactionAdmission.reserve(pending, :compact, invalid, make_ref(), @now)
       end
 
-      assert {:error, :expired} = NativeCompactionAdmission.reserve(pending, :compact, candidate, make_ref(), @now + 101)
+      # An armed compaction has no deadline (findings#270 row 270-317).
+      assert {:ok, _reserved, _capability} = NativeCompactionAdmission.reserve(pending, :compact, candidate, make_ref(), @now + 101)
     end
   end
 

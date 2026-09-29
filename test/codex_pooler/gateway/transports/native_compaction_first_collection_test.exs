@@ -131,11 +131,15 @@ defmodule CodexPooler.Gateway.NativeCompactionFirstCollectionTest do
     end)
   end
 
-  test "direct reservation snapshot rejects expired pending authority" do
+  # An armed compaction has no bound (findings#270 row 270-317): the snapshot
+  # serves it past the bound its arming carried, for as long as the
+  # connection it names is the session's open one.
+  test "direct reservation snapshot serves an armed compaction past the bound its arming carried" do
     with_owner(fn owner, upstream ->
       {binding, receipt} = connect(owner, upstream)
       assert :ok = Owner.arm_compact(owner, binding, now() - 1, receipt)
-      assert {:error, :owner_unavailable} = Owner.compaction_reservation_snapshot(owner)
+      assert {:ok, %{lifecycle_id: lifecycle_id, generation: generation}} = Owner.compaction_reservation_snapshot(owner)
+      assert {lifecycle_id, generation} == {binding.lifecycle_id, binding.generation}
       assert FakeUpstream.count(upstream) == 1
     end)
   end

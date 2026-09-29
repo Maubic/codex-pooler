@@ -3445,9 +3445,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     end
   end
 
-  # Every successful native turn arms `pending_compact` for 60 s, and
-  # `ordinary_success`, `consumed_final` and `cleared` hold nothing in flight,
-  # so those phases are idle. So is `pending_final`: the compaction it follows
+  # Every successful native turn arms `pending_compact` until its connection
+  # closes (findings#270 row 270-317), and `ordinary_success`,
+  # `consumed_final` and `cleared` hold nothing in flight, so those phases are
+  # idle. So is `pending_final`: the compaction it follows
   # is over, and its binding names the closed connection, so its final request
   # can no longer be admitted (it failed `native_compaction_capability_rejected`
   # on the fresh connection); the owner drops that admission with the

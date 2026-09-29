@@ -586,10 +586,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     binding = direct_admission_binding(lifecycle, ordinary_receipt)
     assert :ok = UpstreamWebsocketSession.arm_compact(session, binding, 30_000, ordinary_receipt)
 
-    assert {:error, :expired} =
+    # An armed compaction has no bound any more (findings#270 row 270-317), so
+    # the refusal is a reservation of the wrong phase.
+    assert {:error, :invalid_transition} =
              UpstreamWebsocketSession.reserve_compaction(
                session,
-               :compact,
+               :final,
                binding,
                make_ref(),
                30_001
