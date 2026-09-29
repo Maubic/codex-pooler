@@ -12,6 +12,7 @@ defmodule CodexPooler.Accounting.RequestReplayTest do
   }
 
   alias CodexPooler.Access
+  alias CodexPooler.Gateway.OperationalSettings
 
   alias CodexPooler.Gateway.Persistence.{
     BridgeOwnerLease,
@@ -1311,6 +1312,28 @@ defmodule CodexPooler.Accounting.RequestReplayTest do
     assert request_attempt_count(fixture.request.id) == 1
   end
 
+  # findings#270 row 270-258: the owner touches a started replay at every
+  # renewal of its lease, so the window outlasts the lease whatever the
+  # operator sets; the shipped settings keep the idle timeout's 30 minutes.
+  @tag :replay_liveness
+  test "a started replay's liveness window outlasts its owner's lease when the lease TTL is raised above the idle timeout" do
+    previous = CodexPooler.TestAppEnv.restore_on_exit(OperationalSettings)
+    base = Keyword.get(previous, :settings, %OperationalSettings{})
+    raised = %{base | bridge_owner_lease_ttl_seconds: 120, bridge_owner_lease_renewal_seconds: 15, websocket_owner_idle_timeout_ms: 60_000}
+    Application.put_env(:codex_pooler, OperationalSettings, Keyword.put(previous, :settings, raised))
+
+    assert {started, touched} = start_and_touch_replay!()
+    assert DateTime.diff(started.abandon_at, started.started_at, :millisecond) >= (120 + 15) * 1_000
+    assert DateTime.diff(touched.abandon_at, touched.last_liveness_at, :millisecond) >= (120 + 15) * 1_000
+  end
+
+  @tag :replay_liveness
+  test "the shipped settings keep a started replay's thirty-minute liveness window" do
+    assert {started, touched} = start_and_touch_replay!()
+    assert DateTime.diff(started.abandon_at, started.started_at, :millisecond) == 1_800_000
+    assert DateTime.diff(touched.abandon_at, touched.last_liveness_at, :millisecond) == 1_800_000
+  end
+
   @tag :replay_cleanup
   @tag :replay_liveness
   test "consumed replay abandonment settles N+1 once and current touch postpones cleanup" do
@@ -2024,5 +2047,14 @@ defmodule CodexPooler.Accounting.RequestReplayTest do
       assert terminal_ledger_count(fixture.request.id, "settlement") == 1
       assert terminal_ledger_count(fixture.request.id, "release") == 1
     end
+  end
+
+  defp start_and_touch_replay! do
+    fixture = replay_fixture(owner?: true, reservation?: true)
+    assert {:ok, armed} = RequestReplay.arm(arm_input(fixture))
+    assert {:ok, consumed} = RequestReplay.consume(consume_input(fixture, armed, :crypto.strong_rand_bytes(32)))
+    assert {:ok, started} = RequestReplay.mark_started(consumed.consume_binding)
+    assert {:ok, touched} = RequestReplay.touch_liveness(consumed.consume_binding)
+    {started, touched}
   end
 end

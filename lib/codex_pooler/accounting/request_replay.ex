@@ -2139,6 +2139,16 @@ defmodule CodexPooler.Accounting.RequestReplay do
     end
   end
 
+  # The window in which the owner of a started replay must touch it again
+  # before the replay cleanup takes the replay for abandoned. The owner touches
+  # it at every renewal of its lease, so the window lasts at least the lease
+  # TTL plus one renewal interval: it cannot lapse while the owner's lease is
+  # still valid. The cleanup then asks only an owner whose lease is already
+  # gone, with its 100 ms probe. A lease TTL raised above the idle timeout used
+  # to leave a shorter window, and the probe closed a live but slow owner's
+  # replay `owner_unavailable` (findings#270 row 270-258). The shipped
+  # settings are not affected: their window is the idle timeout's 30 minutes
+  # against a 45 s lease.
   defp replay_liveness_grace_ms do
     settings = OperationalSettings.current()
 
@@ -2146,6 +2156,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
     |> max(settings.bridge_owner_lease_renewal_seconds * 3 * 1_000)
     |> min(3_660_000)
     |> max(60_000)
+    |> max((settings.bridge_owner_lease_ttl_seconds + settings.bridge_owner_lease_renewal_seconds) * 1_000)
   end
 
   defp current_replay_authorization?(
