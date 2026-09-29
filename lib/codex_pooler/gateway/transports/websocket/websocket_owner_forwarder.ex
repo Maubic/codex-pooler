@@ -588,23 +588,23 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   defp call_reconnect_control(owner_pid, :preflight, downstream, semantic_turn_key, control_ref) do
     WebsocketOwnerSession.preflight_reconnect(owner_pid, downstream, semantic_turn_key, control_ref)
   catch
-    :exit, reason -> reconnect_control_exit(reason)
+    :exit, reason -> owner_call_exit(reason)
   end
 
   defp call_reconnect_control(owner_pid, :cancel, downstream, _semantic_turn_key, control_ref) do
     WebsocketOwnerSession.cancel_reconnect(owner_pid, downstream, control_ref)
   catch
-    :exit, reason -> reconnect_control_exit(reason)
+    :exit, reason -> owner_call_exit(reason)
   end
 
   defp call_reconnect_control_v2(owner_pid, control) do
     WebsocketOwnerSession.reconnect_control_v2(owner_pid, control)
   catch
-    :exit, reason -> reconnect_control_exit(reason)
+    :exit, reason -> owner_call_exit(reason)
   end
 
-  defp reconnect_control_exit({:timeout, _call}), do: {:error, :owner_forward_timeout}
-  defp reconnect_control_exit(_reason), do: {:error, :owner_unavailable}
+  defp owner_call_exit({:timeout, _call}), do: {:error, :owner_forward_timeout}
+  defp owner_call_exit(_reason), do: {:error, :owner_unavailable}
 
   @spec consume_replay_reserve(CodexSession.t(), binary(), map(), submit_opts()) ::
           {:ok, reference()} | {:error, :invalid | :owner_unavailable}
@@ -815,7 +815,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
       WebsocketOwnerSession.prepare_next_replay_descriptor(owner_pid, downstream, descriptor)
     end
   catch
-    :exit, reason -> reconnect_control_exit(reason)
+    :exit, reason -> owner_call_exit(reason)
   end
 
   @doc false
@@ -1315,8 +1315,30 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
     end
   end
 
-  defp dispatch_submit({:local, _owner_instance_id}, codex_session_id, downstream, frame, _opts) do
-    remote_submit_frame(codex_session_id, downstream, frame)
+  # A frame for an owner on the socket's node is submitted the way a remote
+  # caller's is: a separate process makes the owner call, as the erpc worker
+  # does on the owner's node, and the caller waits for it within the forward
+  # budget. The caller made the call itself and waited without a bound: an
+  # owner that did not answer held the socket's response task, and every turn
+  # the client sent meanwhile queued behind it (findings#270 row 270-300). The
+  # submitting process outlives the caller's timeout, so the owner still takes
+  # the frame it had queued, as after a remote caller's timeout (findings#206
+  # row 206-276).
+  defp dispatch_submit({:local, _owner_instance_id}, codex_session_id, downstream, frame, opts) do
+    timeout = Keyword.get(opts, :timeout, WebsocketOwnerContract.default_forward_timeout_ms())
+    task = Task.Supervisor.async_nolink(WebsocketOwnerSession.TaskSupervisor, fn -> remote_submit_frame(codex_session_id, downstream, frame) end)
+
+    case Task.yield(task, timeout) do
+      {:ok, result} ->
+        result
+
+      {:exit, reason} ->
+        owner_call_exit(reason)
+
+      nil ->
+        Task.ignore(task)
+        {:error, :owner_forward_timeout}
+    end
   end
 
   # A timed-out frame forward sends no best-effort cancel (findings#206 row
