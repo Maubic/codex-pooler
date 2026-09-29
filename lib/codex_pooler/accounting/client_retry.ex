@@ -1640,6 +1640,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
         &verified_dead_execution?/3,
         &verified_proven_owner_crash?/3,
         &verified_proven_owner_crash_failure?/3,
+        &verified_proven_owner_unavailable_failure?/3,
         &verified_provider_terminal_failure?/3,
         &verified_latest_quota_rejection?/3,
         &verified_lifecycle_cut?/3,
@@ -1801,6 +1802,43 @@ defmodule CodexPooler.Accounting.ClientRetry do
        do: ExecutionTerminalProofs.terminal?(attempt)
 
   defp verified_proven_owner_crash_failure?(_turn, _request, _attempt), do: false
+
+  # The owner's node cut off by a partition: the socket's response task, whose
+  # forward to the cut owner failed, settles the turn with that answer, 503
+  # `owner_unavailable` on a failed turn, when it reaches the rows before the
+  # socket's crash cleanup (which writes the interrupted shape above). The
+  # client's resend met `409 duplicate_turn` and its turn was lost
+  # (findings#270 row 270-349). The executor's proven end admits it, as for
+  # the other two shapes.
+  defp verified_proven_owner_unavailable_failure?(
+         %CodexTurn{
+           status: "failed",
+           error_code: "owner_unavailable",
+           final_attempt_id: attempt_id,
+           transport_kind: "websocket",
+           completed_at: %DateTime{}
+         },
+         %Request{
+           status: "failed",
+           response_status_code: 503,
+           last_error_code: "owner_unavailable",
+           usage_status: "usage_unknown",
+           completed_at: %DateTime{}
+         },
+         %Attempt{
+           id: attempt_id,
+           status: "failed",
+           network_error_code: "owner_unavailable",
+           transport: "websocket",
+           replay_generation: 0,
+           usage_status: "usage_unknown",
+           completed_at: %DateTime{}
+         } = attempt
+       )
+       when is_binary(attempt_id),
+       do: ExecutionTerminalProofs.terminal?(attempt)
+
+  defp verified_proven_owner_unavailable_failure?(_turn, _request, _attempt), do: false
 
   # Only the provider's own terminal failure finalization writes this shape:
   # turn, request, and attempt failed together with the same provider code on

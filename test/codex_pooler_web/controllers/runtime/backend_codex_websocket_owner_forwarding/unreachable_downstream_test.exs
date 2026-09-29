@@ -42,13 +42,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   import CodexPoolerWeb.Runtime.UnreachableNodeSupport
 
   alias CodexPooler.Accounting
-  alias CodexPooler.Accounting.{Attempt, Request, RequestLifecycle}
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink, RequestLifecycle}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn}
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
-  alias CodexPooler.Platform.{ForwardedGenerationEnd, InstanceHeartbeat, InstancePresence}
+  alias CodexPooler.Platform.{ExecutionProofPublisher, ExecutionTerminalProof, ExecutionTerminalProofs, ForwardedGenerationEnd, InstanceHeartbeat, InstancePresence}
   alias CodexPooler.Repo
+  alias CodexPooler.UnboxedFixture
   alias CodexPoolerWeb.Runtime.OwnerLossScenario, as: Scenario
   alias Ecto.Adapters.SQL.Sandbox
 
@@ -84,33 +85,112 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   end
 
   describe "a partition cuts the socket's node off from the owner's" do
+    # Once the cut reaches this node, two finalizations race to settle the
+    # turn (findings#270 row 270-349): the socket's crash cleanup interrupts it
+    # (499 `owner_crashed`, turn interrupted), or the socket's response task,
+    # whose forward to the cut owner failed, fails it with that answer (503
+    # `owner_unavailable`, turn failed). A loaded run once landed in the second
+    # shape where the arm expected the first. Each order is now forced: the
+    # response task is held until the crash cleanup settled the turn, or the
+    # socket is held until the task did. The released client closes on the
+    # socket's 1011 and resends the turn whole; once the proof of the
+    # attempt's executor's end exists the resend is served once in both
+    # shapes. Against the task's shape it met `409 duplicate_turn`.
+    for order <- [:socket_first, :task_first] do
+      @tag shown: :visible, order: order
+      @tag slow: "cuts a peer VM's owner off mid-turn, forces which finalization settles the turn and resends it"
+      test "#{order}: the owner cancels a turn that showed output at once, and the client's resend of the settled turn is served once", ctx do
+        proofs_before = Repo.all(from(proof in ExecutionTerminalProof, select: proof.execution_id))
+        _publisher = start_supervised!({ExecutionProofPublisher, enabled: true})
+        turn = start_turn!(ctx, :partition, successor: true)
+        :ok = register_proof_cleanup!(proofs_before)
+        %{tasks: tasks} = socket_connection_state!(turn.client.socket)
+        [task] = MapSet.to_list(tasks)
+        held = hold_finalizer!(turn.client.socket, task, ctx.order)
+
+        on_exit(fn -> heal!(ctx.owner_node) end)
+        partition!(ctx.owner_node)
+
+        # The owner cancels the turn at its downstream's DOWN, and its
+        # upstream session closes the turn's connection; the provider's next
+        # frame finds it closed. An owner that kept the turn goes on at the
+        # provider's pace.
+        handled = await_peer_state!(ctx.owner_peer, turn.owner, &downstream_handled?/1, "the owner never handled its downstream's DOWN")
+
+        if match?(%{active_turn: nil}, handled) do
+          :ok = await_peer_upstream_connection_closed!(ctx.owner_peer, handled.upstream_pid)
+          :ok = step!(turn.pacer)
+        end
+
+        :ok = pace!(turn.pacer, @pace_ms)
+        assert_turn_cancelled_at_once!(turn.pacer)
+        owner_state = peer_owner_state(ctx.owner_peer, turn.owner)
+        assert owner_state == :stopped or match?(%{active_turn: nil}, owner_state)
+
+        settled = await_state!(fn -> request_outcome(turn.request_id) end, &match?({"failed", _, _}, &1), "the turn was never settled", System.monotonic_time(:millisecond) + @detection_timeout_ms)
+        :ok = release_finalizer!(held)
+        {conn, _websocket, frames} = receive_frames_until_close!(turn.client.conn, turn.client.websocket, turn.client.ref)
+        Mint.HTTP.close(conn)
+        assert List.last(frames) == {:close, 1011, "websocket owner crashed"}
+
+        # The finalization that came first settled the turn; the other found it
+        # settled. The socket's node released the cut owner's lease either way.
+        {request_shape, turn_shape} = settled_shape(ctx.order)
+        assert settled == request_shape
+        assert request_outcome(turn.request_id) == request_shape
+        assert turn_shape == Repo.get_by!(CodexTurn, request_id: turn.request_id) |> Map.take([:status, :error_code])
+        assert [%BridgeOwnerLease{status: "released", owner_instance_id: cut_owner_instance}] = leases(turn.session_id)
+        assert cut_owner_instance == Atom.to_string(ctx.owner_node)
+        assert FakeUpstream.count(turn.upstream) == 2
+
+        # The cut owner recorded the end of the generation it served.
+        assert %{reason: "unreachable_downstream_cancelled", owner_instance_id: ending_owner} = await_generation_end!(turn.request_id)
+        assert ending_owner == Atom.to_string(ctx.owner_node)
+
+        # Once the proof of the attempt's executor's end exists, the client's
+        # resend is served once, linked to the settled turn, which stays at no
+        # charge while the successor pays its usage.
+        :ok = await_executor_proof!(turn.request_id)
+        retry = Scenario.connect!(turn.port, turn.setup, Scenario.native_route(), turn.window)
+        {conn, websocket} = public_websocket_send_text!(retry.conn, retry.websocket, retry.ref, turn.frame)
+        {conn, websocket, served} = receive_native_terminal!(conn, websocket, retry.ref)
+        assert %{"type" => "response.completed", "response" => %{"id" => "resp_unreachable_successor"}} = served
+        Scenario.close!(%{retry | conn: conn, websocket: websocket})
+        assert [%RequestClientRetryLink{successor_request_id: successor_id}] = Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^turn.request_id))
+        assert {"succeeded", 200, nil} == request_outcome(successor_id)
+        assert settled_cost(turn.request_id) == Decimal.new(0)
+        assert Decimal.gt?(settled_cost(successor_id), 0)
+        assert FakeUpstream.count(turn.upstream) == 3
+      end
+    end
+
+    # Without the proof of the executor's end the task's shape admits nothing:
+    # the executor might still settle the attempt.
     @tag shown: :visible
-    @tag slow: "cuts a peer VM's owner off mid-turn and paces the provider until the turn's connection closes"
-    test "the owner cancels a turn that showed output at once, and the socket's node interrupts it", ctx do
-      turn = start_turn!(ctx, :partition)
+    @tag slow: "cuts a peer VM's owner off mid-turn, lets the response task settle the turn and resends it with no execution proof published"
+    test "task_first: the resend of a turn the response task settled is refused without the proof of its executor's end", ctx do
+      turn = start_turn!(ctx, :partition, successor: true)
+      %{tasks: tasks} = socket_connection_state!(turn.client.socket)
+      [task] = MapSet.to_list(tasks)
+      held = hold_finalizer!(turn.client.socket, task, :task_first)
 
       on_exit(fn -> heal!(ctx.owner_node) end)
       partition!(ctx.owner_node)
-      :ok = pace!(turn.pacer, @pace_ms)
-
+      settled = await_state!(fn -> request_outcome(turn.request_id) end, &match?({"failed", _, _}, &1), "the turn was never settled", System.monotonic_time(:millisecond) + @detection_timeout_ms)
+      :ok = release_finalizer!(held)
       {conn, _websocket, frames} = receive_frames_until_close!(turn.client.conn, turn.client.websocket, turn.client.ref)
       Mint.HTTP.close(conn)
       assert List.last(frames) == {:close, 1011, "websocket owner crashed"}
-      assert_turn_cancelled_at_once!(turn.pacer)
-      owner_state = peer_owner_state(ctx.owner_peer, turn.owner)
-      assert owner_state == :stopped or match?(%{active_turn: nil}, owner_state)
+      assert settled == {"failed", 503, "owner_unavailable"}
+      refute ExecutionTerminalProofs.terminal?(attempt(turn.request_id))
 
-      # The socket's node interrupted the turn and released the cut owner's
-      # lease, as before.
-      assert {"failed", 499, "owner_crashed"} == request_outcome(turn.request_id)
-      assert %CodexTurn{status: "interrupted", error_code: "owner_crashed"} = Repo.get_by!(CodexTurn, request_id: turn.request_id)
-      assert [%BridgeOwnerLease{status: "released", owner_instance_id: cut_owner_instance}] = leases(turn.session_id)
-      assert cut_owner_instance == Atom.to_string(ctx.owner_node)
+      retry = Scenario.connect!(turn.port, turn.setup, Scenario.native_route(), turn.window)
+      {conn, websocket} = public_websocket_send_text!(retry.conn, retry.websocket, retry.ref, turn.frame)
+      {conn, websocket, refused} = receive_native_terminal!(conn, websocket, retry.ref)
+      assert %{"type" => "error", "status" => 409, "error" => %{"code" => "duplicate_turn"}} = refused
+      Scenario.close!(%{retry | conn: conn, websocket: websocket})
+      assert Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^turn.request_id)) == []
       assert FakeUpstream.count(turn.upstream) == 2
-
-      # The cut owner recorded the end of the generation it served.
-      assert %{reason: "unreachable_downstream_cancelled", owner_instance_id: ending_owner} = await_generation_end!(turn.request_id)
-      assert ending_owner == Atom.to_string(ctx.owner_node)
     end
 
     @tag shown: :previsible
@@ -538,6 +618,64 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   end
 
   defp lost_turn?(state), do: match?(%{downstream: nil, active_turn: %{descriptor: %{downstream_status: :lost}}}, state)
+
+  # The owner handled its downstream's DOWN: it cancelled the turn, or it let
+  # the downstream go and kept the turn.
+  defp downstream_handled?(state), do: match?(%{active_turn: nil}, state) or match?(%{downstream: nil}, state)
+
+  # Holds the finalization that must come second: the socket's response task
+  # for `:socket_first` (suspended, so its failed forward waits), the socket
+  # for `:task_first` (its owner's exit waits).
+  defp hold_finalizer!(_socket, task, :socket_first) do
+    true = :erlang.suspend_process(task)
+    on_exit(fn -> resume_task(task) end)
+    {:task, task}
+  end
+
+  defp hold_finalizer!(socket, _task, :task_first) do
+    :ok = :sys.suspend(socket)
+    on_exit(fn -> resume_if_alive(socket) end)
+    {:socket, socket}
+  end
+
+  defp release_finalizer!({:task, task}), do: resume_task(task)
+  defp release_finalizer!({:socket, socket}), do: :sys.resume(socket)
+
+  defp resume_task(task) do
+    if Process.alive?(task), do: :erlang.resume_process(task)
+    :ok
+  catch
+    :error, :badarg -> :ok
+  end
+
+  defp settled_shape(:socket_first), do: {{"failed", 499, "owner_crashed"}, %{status: "interrupted", error_code: "owner_crashed"}}
+  defp settled_shape(:task_first), do: {{"failed", 503, "owner_unavailable"}, %{status: "failed", error_code: "owner_unavailable"}}
+
+  # The owner's upstream session, on the cut peer, closed the turn's
+  # connection.
+  defp await_peer_upstream_connection_closed!(peer, upstream) do
+    deadline = System.monotonic_time(:millisecond) + @detection_timeout_ms
+    _closed = await_state!(fn -> :peer.call(peer, UpstreamWebsocketSession, :live_connection, [upstream]) end, &match?({:ok, %{generation: nil}}, &1), "the owner's upstream session kept the turn's connection open", deadline)
+    :ok
+  end
+
+  defp await_executor_proof!(request_id) do
+    attempt = attempt(request_id)
+    _proven = await_state!(fn -> ExecutionTerminalProofs.terminal?(attempt) end, & &1, "the executor's proof was never published", System.monotonic_time(:millisecond) + @detection_timeout_ms)
+    :ok
+  end
+
+  # The publisher commits its proofs, of this test's executions and of any
+  # the node's execution registry still holds from earlier ones: every proof
+  # the test found absent goes.
+  defp register_proof_cleanup!(proofs_before) do
+    UnboxedFixture.register_unboxed_cleanup!(fn -> Repo.delete_all(from(proof in ExecutionTerminalProof, where: proof.execution_id not in ^proofs_before)) end)
+  end
+
+  defp settled_cost(request_id) do
+    Repo.one!(from(entry in LedgerEntry, where: entry.request_id == ^request_id and entry.entry_kind == "settlement" and entry.amount_status == "recorded", select: entry.settled_cost_micros))
+    |> Decimal.normalize()
+  end
 
   # The owner handled a turn's first output: it cancelled the turn, or it
   # committed the turn's visibility and went on.
