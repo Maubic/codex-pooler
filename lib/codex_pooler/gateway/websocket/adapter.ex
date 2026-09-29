@@ -147,23 +147,27 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
   rate-limit headers for the same reason (findings#279 point 1). The frame
   still reaches the quota observers before the socket; every other control,
   `codex.response.metadata` and unknown ones included, passes.
+
+  `originator` is the client's own `originator` header: the Pool-exhausted
+  refusal goes out as `Contracts.native_usage_limit_answer/2` answers it
+  (findings#279 point 2).
   """
-  @spec native_downstream_response_chunk(binary(), (-> boolean())) :: binary() | :drop
-  def native_downstream_response_chunk(data, sole_account?) when is_binary(data) and is_function(sole_account?, 0) do
+  @spec native_downstream_response_chunk(binary(), (-> boolean()), String.t() | nil) :: binary() | :drop
+  def native_downstream_response_chunk(data, sole_account?, originator \\ nil) when is_binary(data) and is_function(sole_account?, 0) do
     case CodexPooler.JSON.decode(data) do
       {:ok, %{} = decoded} ->
         if StreamProtocol.internal_rate_limit_event?(decoded),
           do: :drop,
-          else: native_client_frame(data, decoded, sole_account?)
+          else: native_client_frame(data, decoded, sole_account?, originator)
 
       _other ->
         StreamProtocol.canonicalize_native_codex_responses_json_message(data)
     end
   end
 
-  defp native_client_frame(data, decoded, sole_account?) do
+  defp native_client_frame(data, decoded, sole_account?, originator) do
     {canonical, canonical_decoded} = StreamProtocol.canonicalize_native_codex_responses_json_message(data, decoded)
-    native_refusal_frame(canonical, canonical_decoded, sole_account?)
+    native_refusal_frame(canonical, canonical_decoded, sole_account?, originator)
   end
 
   # A provider 400 refusal arrives as the wrapped
@@ -210,16 +214,16 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
   # Pooler message naming the status instead (row 254-91). The socket holds no per-turn input index map, so an `input[N]`
   # param loses its index rather than name a position a Lite rewrite moved
   # (row 254-61). Every other frame passes unchanged.
-  defp native_refusal_frame(canonical, %{"type" => "response.failed", "error" => %{} = error} = canonical_decoded, sole_account?) do
+  defp native_refusal_frame(canonical, %{"type" => "response.failed", "error" => %{} = error} = canonical_decoded, sole_account?, originator) do
     case wrapped_status(canonical_decoded) do
       400 = status -> native_400_refusal_frame(canonical, status, error)
-      429 -> native_usage_limit_frame(canonical, canonical_decoded)
+      429 -> native_usage_limit_frame(canonical, canonical_decoded, originator)
       status when is_integer(status) -> native_final_refusal_frame(canonical, canonical_decoded, status, error, sole_account?)
       _other -> canonical
     end
   end
 
-  defp native_refusal_frame(canonical, _canonical_decoded, _sole_account?), do: canonical
+  defp native_refusal_frame(canonical, _canonical_decoded, _sole_account?, _originator), do: canonical
 
   # A provider usage limit with a reset still ahead goes out as the wrapped
   # terminal `429` event of an all-exhausted Pool (findings#206 rows 206-508,
@@ -236,9 +240,9 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
   # canonical `response.failed` it used to keep is a retryable stream error to
   # the released client, which reconnected five times and then fell back to
   # HTTP.
-  defp native_usage_limit_frame(canonical, canonical_decoded) do
+  defp native_usage_limit_frame(canonical, canonical_decoded, originator) do
     case ProviderUsageLimit.frame_projection(canonical_decoded) do
-      {:terminal, error} -> error |> websocket_error() |> CodexPooler.JSON.encode!()
+      {:terminal, error} -> error |> Contracts.native_usage_limit_answer(originator) |> websocket_error() |> CodexPooler.JSON.encode!()
       {:relay, provider_error} -> relay_usage_limit_frame(provider_error, canonical_decoded)
       :canonical -> canonical
     end

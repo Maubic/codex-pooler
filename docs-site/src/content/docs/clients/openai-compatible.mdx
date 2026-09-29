@@ -532,7 +532,8 @@ has one type on every surface.
   until a known reset (see below). Retry after the reset it names. The same
   `quota_exhausted` code on a retryable `503` keeps `server_error`.
 - `invalid_request_error`: the client must change the request before retrying,
-  or the connection was superseded by its own newer replacement.
+  or the connection was superseded by its own newer replacement. Codex Desktop
+  also gets it for an exhausted Pool (see below).
 
 No released client branches on `error.type` for retries. openai-node,
 openai-python and the Vercel AI SDK retry on the HTTP status (`408`, `409`,
@@ -577,7 +578,27 @@ Codex backend uses for an exhausted account, on every route and transport:
   is longer than 60 seconds.
 
 The Codex client ends the turn and names the reset time; the OpenAI SDKs do not
-retry it. The time is advice rather than a promise: an automatically redeemed
+retry it.
+
+Codex Desktop is the exception on the Codex backend Responses routes
+(`/backend-api/codex/responses` over HTTP and websocket,
+`/backend-api/codex/responses/compact`, and their `/backend-api/codex/v1/`
+aliases). It answers `usage_limit_reached` with its own usage-limit screen,
+built from the ChatGPT account it is signed in with, so it never shows the
+Pool's reset. A request whose `originator` header is `Codex Desktop` therefore
+gets the same refusal as HTTP `400` (`"status": 400` on the websocket error
+frame, which then has no `headers`), with `error.type`
+`invalid_request_error`, `error.code` `invalid_prompt`, `resets_at`,
+`resets_in_seconds`, and the reset written into the message, for example:
+
+`The Pool's usage limit is reached. Try again at 01:28 UTC (in about 1 h 24 min).`
+
+Over HTTP it carries `x-should-retry: false` and no `Retry-After`. Codex
+Desktop shows that message as it is and ends the turn. The code is chosen for
+how Codex Desktop displays the refusal, not because anything is wrong with the
+prompt. `/v1/*` and every other client keep the `429`.
+
+The time is advice rather than a promise: an automatically redeemed
 saved reset can bring an account back sooner. When the reset of any of those
 accounts is unknown (missing or stale quota evidence), or an account was taken
 out by an open circuit rather than by quota, the answer stays a retryable `503`
@@ -603,8 +624,9 @@ message, and `resets_at` and `resets_in_seconds` for the soonest of the
 backend's reset and the resets of the other accounts, which must all be
 exhausted with a known reset (otherwise the refusal stays retryable),
 `Retry-After`, and `x-should-retry: false` when the wait is longer than 60
-seconds. The backend's own message and other fields are not relayed. Over
-the `GET /v1/responses` websocket the same refusal is the `error` event with
+seconds (Codex Desktop gets the `400` described above). The backend's own
+message and other fields are not relayed. Over the `GET /v1/responses`
+websocket the same refusal is the `error` event with
 `"status": 429`, those fields and `headers.retry-after`. A streaming
 `/v1/responses` request that Codex Pooler carries over the backend's
 websocket gets the same HTTP answer, or moves to another eligible account,

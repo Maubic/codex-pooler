@@ -75,4 +75,57 @@ defmodule CodexPooler.Gateway.ContractsTest do
       refute Contracts.hard_pinned_continuation_recovery?(error)
     end
   end
+
+  # findings#279 point 2: the Codex Desktop app shows the message of a `400
+  # invalid_prompt` as sent, and never the reset of a `429
+  # usage_limit_reached`.
+  describe "native_usage_limit_answer/2" do
+    test "answers Codex Desktop 400 invalid_prompt with the reset, rounded up to the minute, in the message" do
+      for {resets_at, seconds, wait} <- [
+            {1_790_904_430, 5_008, "at 01:28 UTC (in about 1 h 24 min)"},
+            {1_790_904_420, 840, "at 01:27 UTC (in about 14 min)"},
+            {1_790_904_420, 1, "at 01:27 UTC (in about 1 min)"},
+            {1_790_904_420, 7_200, "at 01:27 UTC (in about 2 h)"},
+            {1_790_904_420, 86_400, "on 2026-10-02 at 01:27 UTC (in about 1 day)"},
+            {1_791_071_999, 90_000, "on 2026-10-04 at 00:00 UTC (in about 1 day 1 h)"},
+            {1_791_180_030, 273_900, "on 2026-10-05 at 06:01 UTC (in about 3 days 5 h)"}
+          ] do
+        refusal = pool_refusal(resets_at, seconds)
+        answer = Contracts.native_usage_limit_answer(refusal, "Codex Desktop")
+
+        assert Map.take(answer, [:status, :code, :message, :param, :usage_limit]) == %{
+                 status: 400,
+                 code: "invalid_prompt",
+                 message: "The Pool's usage limit is reached. Try again #{wait}.",
+                 param: nil,
+                 usage_limit: refusal.usage_limit
+               }
+
+        assert Contracts.usage_limit_error_fields(answer) == %{"resets_at" => resets_at, "resets_in_seconds" => seconds}
+        assert Contracts.usage_limit_record(answer) == Contracts.usage_limit_record(refusal)
+        assert Contracts.usage_limit_response_headers(answer) == [{"x-should-retry", "false"}]
+      end
+    end
+
+    test "leaves every other originator and every other refusal unchanged" do
+      refusal = pool_refusal(1_790_904_430, 5_008)
+
+      for originator <- ["codex-tui", "codex_exec", "codex_vscode", "codex desktop", "Codex Desktop/0.158.0", nil] do
+        assert Contracts.native_usage_limit_answer(refusal, originator) == refusal
+      end
+
+      for error <- [
+            Map.merge(Map.delete(refusal, :usage_limit), %{status: 503}),
+            %{status: 429, code: "api_key_policy_limit_exceeded", message: "policy", pooler_policy: true, retry_after_seconds: 30},
+            %{status: 400, code: "invalid_prompt", message: "provider refusal"}
+          ] do
+        assert Contracts.native_usage_limit_answer(error, "Codex Desktop") == error
+        assert Contracts.usage_limit_error_fields(error) == %{}
+        assert Contracts.usage_limit_response_headers(error) == []
+      end
+    end
+  end
+
+  defp pool_refusal(resets_at, seconds),
+    do: %{status: 429, code: "quota_exhausted", message: "upstream quota is exhausted until its reset time", param: "model", usage_limit: %{resets_at: resets_at, resets_in_seconds: seconds}}
 end

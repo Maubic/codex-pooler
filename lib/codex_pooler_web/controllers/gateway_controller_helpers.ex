@@ -218,7 +218,7 @@ defmodule CodexPoolerWeb.GatewayControllerHelpers do
         |> put_resp_header("x-codex-turn-state", turn_state)
         |> WebSockAdapter.upgrade(
           CodexPoolerWeb.CodexResponsesSocket,
-          %{auth: auth, opts: request_options, firewall_client_ip: conn.remote_ip},
+          %{auth: auth, opts: request_options, firewall_client_ip: conn.remote_ip, client_originator: client_originator(conn)},
           websocket_upgrade_opts()
         )
         |> halt()
@@ -254,6 +254,19 @@ defmodule CodexPoolerWeb.GatewayControllerHelpers do
   @spec send_or_error(conn(), gateway_call_result()) :: conn()
   def send_or_error(%Plug.Conn{} = conn, {:ok, result}), do: send_gateway_result(conn, result)
   def send_or_error(%Plug.Conn{} = conn, {:error, reason}), do: send_error(conn, reason)
+
+  @doc """
+  A native Responses route's result as the client that sent the request reads
+  it: the Pool-exhausted refusal as `Contracts.native_usage_limit_answer/2`
+  answers the request's `originator` (findings#279 point 2).
+  """
+  @spec native_usage_limit_answer(conn(), gateway_call_result()) :: gateway_call_result()
+  def native_usage_limit_answer(%Plug.Conn{} = conn, {:error, reason}), do: {:error, Contracts.native_usage_limit_answer(reason, client_originator(conn))}
+  def native_usage_limit_answer(%Plug.Conn{}, result), do: result
+
+  @doc "The client's own `originator` header, which the Pooler never forwards upstream."
+  @spec client_originator(conn()) :: String.t() | nil
+  def client_originator(%Plug.Conn{} = conn), do: conn |> get_req_header("originator") |> List.first()
 
   @spec result_headers(Contracts.gateway_result() | map()) :: Contracts.response_headers()
   def result_headers(%{headers: headers}) when is_list(headers), do: headers

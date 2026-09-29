@@ -10,6 +10,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexController do
   alias CodexPoolerWeb.GatewayControllerHelpers, as: GatewayHelpers
   alias CodexPoolerWeb.PublicGatewayDispatch
 
+  # The Codex turn routes, whose Pool-exhausted refusal the Codex Desktop app
+  # reads as `GatewayHelpers.native_usage_limit_answer/2` renders it
+  # (findings#279 point 2).
+  @codex_turn_endpoints ["/backend-api/codex/responses", "/backend-api/codex/v1/responses", "/backend-api/codex/responses/compact", "/backend-api/codex/v1/responses/compact"]
+
   def models(conn, _params) do
     serve_models(conn, "/backend-api/codex/models", "/backend-api/codex/models")
   end
@@ -135,6 +140,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexController do
         )
       end
 
+    result = if local_endpoint in @codex_turn_endpoints, do: GatewayHelpers.native_usage_limit_answer(conn, result), else: result
     GatewayHelpers.send_or_error(conn, result)
   end
 

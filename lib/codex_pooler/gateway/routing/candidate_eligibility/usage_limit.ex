@@ -5,8 +5,10 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.UsageLimit do
 
   The provider answers an exhausted account with `429`, `error.type`
   `usage_limit_reached`, `resets_at` (epoch seconds) and `resets_in_seconds`;
-  the released Codex client ends the turn on it and names the reset, where it
-  resends a `503` as a transient fault. When routing excluded every candidate
+  the released Codex client ends the turn on it and names the reset (the TUI
+  and `codex exec`; a native route answers the Codex Desktop app, which never
+  names it, `Contracts.native_usage_limit_answer/2`), where it resends a
+  `503` as a transient fault. When routing excluded every candidate
   for exhaustion and each exhausted window carries a reset still ahead, the
   Pool is in the same state, and the advice is the soonest reset among the
   exhausted windows of all its candidates.

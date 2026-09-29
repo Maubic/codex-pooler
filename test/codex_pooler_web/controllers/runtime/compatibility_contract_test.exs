@@ -12,6 +12,8 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Files
   alias CodexPooler.Files.FileRecord
+  alias CodexPooler.Gateway.Contracts
+  alias CodexPooler.Gateway.ErrorClassification
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.TransportEnvelope
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
@@ -55,6 +57,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     api_key_reservation_policy_refusals: [:route, :auth, :error, :streaming, :ownership],
     api_key_terminal_policy_denials: [:route, :auth, :error, :streaming],
     exhausted_pool_usage_limit: [:route, :error, :streaming, :ownership],
+    desktop_pool_usage_limit_answer: [:route, :error, :streaming, :ownership],
     reasoning_context: [:route, :auth, :error, :ownership],
     unsupported_upstream_fields: [:route, :auth, :ownership],
     api_key_websocket_revocation: [:auth, :error, :streaming, :ownership],
@@ -92,9 +95,9 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     {:delete, "/v1/responses/:response_id"} => ~w(v1_unsupported_public_surface)a,
     {:get, "/api/codex/usage"} => ~w(firewall usage_alias_meter_identity)a,
     {:get, "/backend-api/codex/models"} => ~w(api_key_reasoning_availability backend_models_etag database_unavailable firewall pool_model_serving_modes)a,
-    {:get, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable duplicate_turn_fence exhausted_pool_usage_limit firewall function_tool_schema_lowering multi_agent_product_certification native_websocket_owner_exit native_websocket_provider_controls native_websocket_upstream_close pool_model_serving_modes pooler_authored_error_type rejection_metadata terminal_failure_diagnostics tool_output_preservation upstream_error_param websocket_continuity)a,
+    {:get, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable desktop_pool_usage_limit_answer duplicate_turn_fence exhausted_pool_usage_limit firewall function_tool_schema_lowering multi_agent_product_certification native_websocket_owner_exit native_websocket_provider_controls native_websocket_upstream_close pool_model_serving_modes pooler_authored_error_type rejection_metadata terminal_failure_diagnostics tool_output_preservation upstream_error_param websocket_continuity)a,
     {:get, "/backend-api/codex/v1/models"} => ~w(backend_models_etag backend_v1_alias_surface pool_model_serving_modes)a,
-    {:get, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface duplicate_turn_fence function_tool_schema_lowering multi_agent_product_certification native_websocket_owner_exit native_websocket_provider_controls native_websocket_upstream_close pool_model_serving_modes tool_output_preservation)a,
+    {:get, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface desktop_pool_usage_limit_answer duplicate_turn_fence function_tool_schema_lowering multi_agent_product_certification native_websocket_owner_exit native_websocket_provider_controls native_websocket_upstream_close pool_model_serving_modes tool_output_preservation)a,
     {:get, "/backend-api/wham/usage"} => ~w(firewall usage_alias_meter_identity)a,
     {:get, "/v1/files"} => ~w(v1_supported_surface)a,
     {:get, "/v1/files/:file_id"} => ~w(v1_supported_surface)a,
@@ -106,11 +109,11 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     {:get, "/wham/usage"} => ~w(firewall usage_alias_meter_identity)a,
     {:post, "/backend-api/codex/images/edits"} => ~w(api_key_terminal_policy_denials backend_image_proxy_surface image_generation_permission)a,
     {:post, "/backend-api/codex/images/generations"} => ~w(api_key_terminal_policy_denials backend_image_proxy_surface image_generation_permission)a,
-    {:post, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable decompression degraded_routing duplicate_turn_fence exhausted_pool_usage_limit firewall first_event_stream_retry function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type reasoning_minimal reasoning_none reasoning_ultra rejection_metadata response_body_cap responses_chat strict_schema_validation terminal_failure_diagnostics tool_output_preservation unsupported_input_image_reference unsupported_upstream_fields upstream_error_param upstream_validation_rejection_relay)a,
-    {:post, "/backend-api/codex/responses/compact"} => ~w(api_key_reasoning_availability bulkheads duplicate_turn_fence pool_model_serving_modes pooler_authored_error_type reasoning_ultra tool_output_preservation)a,
+    {:post, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable decompression degraded_routing desktop_pool_usage_limit_answer duplicate_turn_fence exhausted_pool_usage_limit firewall first_event_stream_retry function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type reasoning_minimal reasoning_none reasoning_ultra rejection_metadata response_body_cap responses_chat strict_schema_validation terminal_failure_diagnostics tool_output_preservation unsupported_input_image_reference unsupported_upstream_fields upstream_error_param upstream_validation_rejection_relay)a,
+    {:post, "/backend-api/codex/responses/compact"} => ~w(api_key_reasoning_availability bulkheads desktop_pool_usage_limit_answer duplicate_turn_fence pool_model_serving_modes pooler_authored_error_type reasoning_ultra tool_output_preservation)a,
     {:post, "/backend-api/codex/v1/chat/completions"} => ~w(api_key_reasoning_availability backend_responses_envelope backend_v1_alias_surface pool_model_serving_modes public_strict_schema_object_roots tool_output_preservation upstream_validation_rejection_relay)a,
-    {:post, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface function_tool_schema_lowering pool_model_serving_modes response_body_cap tool_output_preservation upstream_validation_rejection_relay)a,
-    {:post, "/backend-api/codex/v1/responses/compact"} => ~w(api_key_reasoning_availability backend_v1_alias_surface pool_model_serving_modes tool_output_preservation)a,
+    {:post, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface desktop_pool_usage_limit_answer function_tool_schema_lowering pool_model_serving_modes response_body_cap tool_output_preservation upstream_validation_rejection_relay)a,
+    {:post, "/backend-api/codex/v1/responses/compact"} => ~w(api_key_reasoning_availability backend_v1_alias_surface desktop_pool_usage_limit_answer pool_model_serving_modes tool_output_preservation)a,
     {:post, "/backend-api/files"} => ~w(files firewall pooler_authored_error_type)a,
     {:post, "/backend-api/files/:file_id/uploaded"} => ~w(files firewall)a,
     {:post, "/backend-api/transcribe"} => ~w(audio_transcription_permission backend_transcription firewall response_body_cap)a,
@@ -666,6 +669,49 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       assert fixture.public_v1_websocket == :relays_no_codex_control
       assert CompatibilityMatrix.fixture!(fixture.provider_metadata).provider_metadata_event.x_models_etag == :removed
       assert fixture.observability == %{line: :none, metric: :none}
+    end
+
+    # findings#279 point 2: the fixture's answer is the one the gateway renders
+    # for the Codex Desktop originator, and every other originator keeps the
+    # Pool-exhausted 429, so the contract cannot drift from what is sent.
+    test "locks the Codex Desktop answer to an exhausted Pool" do
+      feature = CompatibilityMatrix.by_slug!(:desktop_pool_usage_limit_answer)
+      fixture = CompatibilityMatrix.fixture!(:desktop_pool_usage_limit_answer)
+
+      assert feature.current == :desktop_400_invalid_prompt_with_pool_reset
+      assert feature.future_routes == []
+
+      assert Enum.map(feature.routes, &{&1.method, &1.path, Map.get(&1, :transport, :http)}) == [
+               {:post, "/backend-api/codex/responses", :http},
+               {:get, "/backend-api/codex/responses", :websocket},
+               {:post, "/backend-api/codex/v1/responses", :http},
+               {:get, "/backend-api/codex/v1/responses", :websocket},
+               {:post, "/backend-api/codex/responses/compact", :http},
+               {:post, "/backend-api/codex/v1/responses/compact", :http}
+             ]
+
+      assert fixture.refusal == :exhausted_pool_usage_limit
+      terminal = CompatibilityMatrix.fixture!(fixture.refusal).terminal
+      refusal = %{status: terminal.status, code: terminal.code, message: CompatibilityMatrix.fixture!(fixture.refusal).v1_message, param: "model", usage_limit: %{resets_at: 1_790_904_430, resets_in_seconds: 5_008}}
+      answer = Contracts.native_usage_limit_answer(refusal, fixture.originator)
+
+      assert Map.take(answer, [:status, :code, :message, :param]) == Map.take(fixture.answer, [:status, :code, :message, :param])
+      assert ErrorClassification.error_type(answer.code, answer.status) == fixture.answer.type
+      assert answer |> Contracts.usage_limit_error_fields() |> Map.keys() |> Enum.sort() == fixture.answer.fields
+      assert Contracts.usage_limit_response_headers(answer) == fixture.answer.http_headers
+      assert fixture.answer.websocket_headers == :none
+      assert %{"type" => "error", "status" => 400, "error" => %{"code" => "invalid_prompt"}} = event = WebsocketAdapter.websocket_error(answer)
+      refute Map.has_key?(event, "headers")
+
+      assert fixture.unchanged == %{originators: ["codex-tui", "codex_exec", "codex_vscode", nil], routes: :public_v1, retryable_503: :unchanged}
+
+      for originator <- fixture.unchanged.originators do
+        assert Contracts.native_usage_limit_answer(refusal, originator) == refusal
+      end
+
+      assert fixture.recorded == %{status: terminal.status, code: terminal.code, usage_limit: :advised_reset, http_request_line_status: 400}
+      assert Contracts.usage_limit_record(answer) == Contracts.usage_limit_record(refusal)
+      assert fixture.topologies == [:owner_forwarding_off, :owner_on_this_node]
     end
 
     test "documents the pruned runtime helper firewall matrix" do

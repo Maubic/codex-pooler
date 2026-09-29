@@ -6,6 +6,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   alias CodexPooler.Access
   alias CodexPooler.Access.APIKey
   alias CodexPooler.Events
+  alias CodexPooler.Gateway.Contracts
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Gateway.Payloads.{CompactionTrigger, NativeCodexTurnMetadata, NativeTurnContinuation}
   alias CodexPooler.Gateway.Payloads.PayloadNormalizer
@@ -247,7 +248,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
           |> maybe_schedule_accepted_response_task_delivery(task_pid)
 
         data
-        |> Adapter.native_downstream_response_chunk(sole_account_check(state, task_pid))
+        |> Adapter.native_downstream_response_chunk(sole_account_check(state, task_pid), usage_limit_originator(state))
         |> native_push(state)
 
       true ->
@@ -1669,7 +1670,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       end
 
     data
-    |> Adapter.native_downstream_response_chunk(sole_account_check(state, active_native_owner_turn_pid(state)))
+    |> Adapter.native_downstream_response_chunk(sole_account_check(state, active_native_owner_turn_pid(state)), usage_limit_originator(state))
     |> native_push(state)
   end
 
@@ -1694,11 +1695,11 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         if downstream_error_terminal_pushed?(state, pid) do
           {:ok, state}
         else
-          {:push, {:text, CodexPooler.JSON.encode!(Adapter.websocket_error(payload))}, record_downstream_terminal(state, pid, "error")}
+          {:push, {:text, CodexPooler.JSON.encode!(client_error_event(payload, state))}, record_downstream_terminal(state, pid, "error")}
         end
 
       nil ->
-        {:push, {:text, CodexPooler.JSON.encode!(Adapter.websocket_error(payload))}, state}
+        {:push, {:text, CodexPooler.JSON.encode!(client_error_event(payload, state))}, state}
     end
   end
 
@@ -1935,7 +1936,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     if terminal_pushed? do
       {:ok, state}
     else
-      {:push, {:text, CodexPooler.JSON.encode!(Adapter.websocket_error(reason))}, state}
+      {:push, {:text, CodexPooler.JSON.encode!(client_error_event(reason, state))}, state}
     end
   end
 
@@ -3411,7 +3412,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
     payload =
       reason
-      |> Adapter.websocket_error()
+      |> client_error_event(state)
       |> maybe_put_public_stream_id(Map.get(state, :public_response_stream_id))
       |> CodexPooler.JSON.encode!()
 
@@ -3799,6 +3800,16 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   # Asked only for a provider 403 that demotes the account (row 254-93): the
   # turn's model is the one its frame named when the socket started its task.
+  # The error event a turn's refusal sends the client: on a native socket the
+  # Pool-exhausted refusal is answered as the client's own `originator` reads
+  # it (`Contracts.native_usage_limit_answer/2`, findings#279 point 2). Only
+  # the event changes: the turn's log line, row and settlement keep `reason`.
+  defp client_error_event(reason, state), do: reason |> Contracts.native_usage_limit_answer(usage_limit_originator(state)) |> Adapter.websocket_error()
+
+  # The upgrade's `originator` on a native socket; a public `/v1` socket keeps
+  # the answer every client gets.
+  defp usage_limit_originator(state), do: if(Adapter.public_responses_stream?(state), do: nil, else: Map.get(state, :client_originator))
+
   defp sole_account_check(state, task_pid) do
     model = state |> Map.get(:response_task_models, %{}) |> Map.get(task_pid)
     session = Map.get(state, :codex_session)
