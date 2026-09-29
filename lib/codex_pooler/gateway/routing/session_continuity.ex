@@ -134,7 +134,9 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
 
   # The reread row replaces the struct the socket holds, which is the one that
   # carries the virtual `recreated_from_assignment_id` of a session recreated
-  # after owner-lease expiry, so the preference is carried onto it. Routing
+  # after owner-lease expiry, or the virtual `previous_window_assignment_id` of
+  # a session a websocket upgrade opened on a window no session knew
+  # (findings#270 row 270-283), so the preference is carried onto it. Routing
   # reads it only while the row is still unassigned.
   defp attach_existing_codex_session(session_id, request_options) do
     case Repo.get(CodexSession, session_id) do
@@ -147,10 +149,16 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
   end
 
   defp keep_recreation_preference(%CodexSession{} = session, %RequestOptions{
-         continuity: %{codex_session: %CodexSession{id: session_id, recreated_from_assignment_id: assignment_id}}
+         continuity: %{
+           codex_session: %CodexSession{
+             id: session_id,
+             recreated_from_assignment_id: recreated_from,
+             previous_window_assignment_id: previous_window
+           }
+         }
        })
        when session.id == session_id,
-       do: %{session | recreated_from_assignment_id: assignment_id}
+       do: %{session | recreated_from_assignment_id: recreated_from, previous_window_assignment_id: previous_window}
 
   defp keep_recreation_preference(%CodexSession{} = session, %RequestOptions{}), do: session
 
@@ -264,11 +272,11 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
         %RequestOptions{} = request_options,
         %Model{} = model
       ) do
-    case {recreated_session_assignment_preference(request_options), classify_codex_session_pin(request_options, model)} do
-      {assignment_id, {:soft, :recreated_session_assignment}} when is_binary(assignment_id) ->
+    case {session_assignment_preference(request_options), classify_codex_session_pin(request_options, model)} do
+      {{reason, assignment_id}, {:soft, reason}} when is_binary(assignment_id) ->
         {:ok, prefer_codex_session_assignment(candidates, assignment_id)}
 
-      _no_recreation_preference ->
+      _no_session_preference ->
         filter_codex_session_assignment(candidates, request_options)
     end
   end
@@ -323,6 +331,7 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
           | :file_affinity
           | :live_upstream_websocket
           | :recreated_session_assignment
+          | :previous_window_assignment
           | :local_session_header
           | :accepted_turn_state
           | :same_model_successful_turn
@@ -417,14 +426,19 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
 
   @spec soft_codex_session_pin(RequestOptions.t(), Model.t()) :: {pin_mode(), pin_reason()}
   defp soft_codex_session_pin(%RequestOptions{} = request_options, %Model{} = model) do
+    preference = session_assignment_preference(request_options)
+
     cond do
       # Ranked above the other soft reasons deliberately. A lease-expiry
       # recreation nearly always also carries the session header that produced
       # the session key, and that reason has nothing to order by here because
       # the replacement session is still unassigned. Naming the recreation is
       # both the accurate diagnostic and the only soft reason with a target.
-      recreated_session_assignment_preference(request_options) != nil ->
-        {:soft, :recreated_session_assignment}
+      # The same holds for the session a websocket upgrade opened on a window
+      # no session knew, which prefers its thread's previous window's
+      # assignment (findings#270 row 270-283).
+      match?({_reason, _assignment_id}, preference) ->
+        {:soft, elem(preference, 0)}
 
       local_session_header?(request_options) ->
         {:soft, :local_session_header}
@@ -491,6 +505,37 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
        do: clean_string(assignment_id)
 
   defp recreated_session_assignment_preference(%RequestOptions{}), do: nil
+
+  # The same one-shot preference for a session a native websocket upgrade
+  # opened on a window no session knew, while its thread's previous window's
+  # session was live on this assignment (findings#270 row 270-283). A
+  # recreation (row 270-282) names the upgrade's own key and outranks it; the
+  # start never sets both.
+  @spec session_assignment_preference(RequestOptions.t()) ::
+          {:recreated_session_assignment | :previous_window_assignment, String.t()} | nil
+  defp session_assignment_preference(%RequestOptions{} = request_options) do
+    case recreated_session_assignment_preference(request_options) do
+      assignment_id when is_binary(assignment_id) -> {:recreated_session_assignment, assignment_id}
+      nil -> previous_window_assignment_preference(request_options)
+    end
+  end
+
+  defp previous_window_assignment_preference(%RequestOptions{
+         continuity: %{
+           codex_session: %CodexSession{
+             pool_upstream_assignment_id: nil,
+             previous_window_assignment_id: assignment_id
+           }
+         }
+       })
+       when is_binary(assignment_id) do
+    case clean_string(assignment_id) do
+      nil -> nil
+      assignment_id -> {:previous_window_assignment, assignment_id}
+    end
+  end
+
+  defp previous_window_assignment_preference(%RequestOptions{}), do: nil
 
   @spec live_upstream_websocket_continuity?(RequestOptions.t()) :: boolean()
   defp live_upstream_websocket_continuity?(%RequestOptions{transport: transport}) do

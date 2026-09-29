@@ -565,6 +565,20 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
        when is_binary(assignment_id),
        do: {"recreated", assignment_id}
 
+  # A session a native websocket upgrade opened on a window no session knew
+  # carries its thread's previous window's assignment the same way
+  # (findings#270 row 270-283).
+  defp codex_session_preference(%RequestOptions{
+         continuity: %{
+           codex_session: %CodexSession{
+             pool_upstream_assignment_id: nil,
+             previous_window_assignment_id: assignment_id
+           }
+         }
+       })
+       when is_binary(assignment_id),
+       do: {"previous_window", assignment_id}
+
   defp codex_session_preference(%RequestOptions{}), do: nil
 
   defp preference_status(candidates, assignment_id) do

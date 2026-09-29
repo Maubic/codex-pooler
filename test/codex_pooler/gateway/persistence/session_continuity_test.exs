@@ -1578,6 +1578,118 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuityTest do
     end
   end
 
+  # A native websocket upgrade on a window no session knew, after the socket
+  # that compacted was lost before any frame named the window: it opens a
+  # session of its own, which prefers the assignment of its thread's previous
+  # window's live session (findings#270 row 270-283). It never joins that
+  # session, as a native HTTP request does: two live processes on one thread
+  # would then share one owner, which serves the socket that attached last.
+  describe "previous window of a native websocket upgrade" do
+    test "the next window's upgrade opens its own session and prefers the thread's assignment" do
+      auth = auth_fixture()
+      %{assignment: assignment} = upstream_assignment_fixture(auth.pool)
+
+      for previous_transport <- [:websocket, :http] do
+        thread = window_thread()
+        first = start_window!(auth, previous_transport, "#{thread}:0")
+        first = first |> Ecto.Changeset.change(%{pool_upstream_assignment_id: assignment.id}) |> Repo.update!()
+        lease_before = active_lease!(first.id)
+
+        log = capture_info_log(fn -> send(self(), {:next_window_session, start_window!(auth, :websocket, "#{thread}:1")}) end)
+        assert_received {:next_window_session, next}
+
+        refute next.id == first.id
+        assert {previous_transport, next.previous_window_assignment_id, next.recreated_from_assignment_id} == {previous_transport, assignment.id, nil}
+        assert is_nil(Repo.get!(CodexSession, next.id).pool_upstream_assignment_id)
+        assert next.session_key == window_session_key("#{thread}:1")
+        assert log =~ "websocket upgrade window preference previous_codex_session_id=#{first.id} alias_preview=#{window_alias_preview("#{thread}:1")} disposition=preferred"
+        refute log =~ thread
+
+        # The previous window's session is left as it was.
+        after_next = Repo.get!(CodexSession, first.id)
+        assert Map.take(after_next, [:status, :owner_lease_token, :owner_lease_expires_at, :pool_upstream_assignment_id]) == Map.take(first, [:status, :owner_lease_token, :owner_lease_expires_at, :pool_upstream_assignment_id])
+        assert active_lease!(first.id).lease_token == lease_before.lease_token
+        assert window_alias_session_ids(auth, "#{thread}:0") == [first.id]
+        assert window_alias_session_ids(auth, "#{thread}:1") == [next.id]
+
+        # Its own window leads the thread's next upgrade to it, with no preference.
+        again = start_window!(auth, :websocket, "#{thread}:1")
+        assert {again.id, again.previous_window_assignment_id} == {next.id, nil}
+      end
+    end
+
+    test "no preference from a previous window whose session is unassigned, lapsed or closed" do
+      auth = auth_fixture()
+      %{assignment: assignment} = upstream_assignment_fixture(auth.pool)
+
+      for ending <- [:unassigned, :lease_expired, :closed] do
+        thread = window_thread()
+        first = start_window!(auth, :websocket, "#{thread}:0")
+        if ending != :unassigned, do: first |> Ecto.Changeset.change(%{pool_upstream_assignment_id: assignment.id}) |> Repo.update!()
+
+        case ending do
+          :unassigned -> :ok
+          :lease_expired -> expire_owner_lease!(first.id)
+          :closed -> Repo.get!(CodexSession, first.id) |> Ecto.Changeset.change(%{status: "closed"}) |> Repo.update!()
+        end
+
+        ended = Repo.get!(CodexSession, first.id)
+        log = capture_info_log(fn -> send(self(), {:next_window_session, start_window!(auth, :websocket, "#{thread}:1")}) end)
+        assert_received {:next_window_session, next}
+
+        refute next.id == first.id
+        assert {ending, next.previous_window_assignment_id, next.recreated_from_assignment_id} == {ending, nil, nil}
+        assert {ending, log =~ "disposition=preferred"} == {ending, false}
+        # The upgrade closes no session of another window: the lapsed one
+        # stays for its own window's next start (row 270-282).
+        assert {ending, Repo.get!(CodexSession, first.id).status} == {ending, ended.status}
+      end
+    end
+
+    @tag :cross_key_window_session
+    test "another key of the Pool or of another Pool never gets this key's assignment" do
+      auth = auth_fixture()
+      %{assignment: assignment} = upstream_assignment_fixture(auth.pool)
+      owner_id = auth.pool.created_by_user_id
+      %{api_key: same_pool_key} = active_api_key_fixture(auth.pool, %{created_by_user_id: owner_id})
+      other_pool = pool_fixture(%{created_by_user_id: owner_id})
+      %{api_key: other_pool_key} = active_api_key_fixture(other_pool, %{created_by_user_id: owner_id})
+      thread = window_thread()
+      first = start_window!(auth, :websocket, "#{thread}:0")
+      first |> Ecto.Changeset.change(%{pool_upstream_assignment_id: assignment.id}) |> Repo.update!()
+
+      for other_auth <- [%{auth | api_key: same_pool_key}, %{pool: other_pool, api_key: other_pool_key}] do
+        other = start_window!(other_auth, :websocket, "#{thread}:1")
+        refute other.id == first.id
+        assert {other.api_key_id, other.previous_window_assignment_id} == {other_auth.api_key.id, nil}
+      end
+
+      assert start_window!(auth, :websocket, "#{thread}:1").previous_window_assignment_id == assignment.id
+    end
+
+    test "a /v1 upgrade, a client turn state, a response anchor and a malformed window get no preference" do
+      auth = auth_fixture()
+      %{assignment: assignment} = upstream_assignment_fixture(auth.pool)
+      thread = window_thread()
+      first = start_window!(auth, :websocket, "#{thread}:0")
+      first |> Ecto.Changeset.change(%{pool_upstream_assignment_id: assignment.id}) |> Repo.update!()
+      upgrade = RequestOptions.for_websocket(%{session_header: "#{thread}:1", session_header_source: "x-codex-window-id"})
+
+      refused = [
+        v1_origin: RequestOptions.mark_openai_compatibility_origin(upgrade, "/v1/responses", "/backend-api/codex/responses"),
+        client_turn_state: RequestOptions.put_continuity(upgrade, accepted_turn_state: "client-turn-state-#{System.unique_integer([:positive])}"),
+        response_anchor: RequestOptions.put_continuity(upgrade, previous_response_id: "resp_anchor_#{System.unique_integer([:positive])}"),
+        malformed_window: RequestOptions.for_websocket(%{session_header: "#{thread}:01", session_header_source: "x-codex-window-id"})
+      ]
+
+      for {case_name, options} <- refused do
+        assert {:ok, %CodexSession{} = session} = SessionContinuity.start_codex_session(auth, options)
+        refute session.id == first.id
+        assert {case_name, session.previous_window_assignment_id} == {case_name, nil}
+      end
+    end
+  end
+
   # A window linked to another window's session (the previous-window fallback
   # over HTTP, the frame window alias on the websocket) reaches that session
   # through its alias, not by key. When the session's owner lease has lapsed,

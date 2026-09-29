@@ -63,6 +63,48 @@ defmodule CodexPooler.Gateway.Payloads.ContinuityPayload do
 
   def previous_window_session_header(%RequestOptions{}), do: nil
 
+  @doc """
+  The previous window of a native websocket upgrade's thread, whose live
+  session's assignment the session the upgrade opens prefers when the
+  upgrade's own window has no live session (findings#270 row 270-283).
+
+  A process that compacts on its socket (a manual `thread/compact`, or the
+  post-turn compaction) and loses the socket before any frame named the next
+  window leaves that window without an alias (findings#206, P115): the next
+  turn's upgrade names a window no session knows. Unlike the native HTTP
+  request of `previous_window_session_header/1`, the upgrade does not join the
+  previous window's session: an owner serves one socket, the one that
+  attached last, and two live processes on one thread each keep a session
+  (a stale resumed process reconnecting on the old window would otherwise
+  displace the one that joined). The new session only prefers the same
+  account, so the provider's cache follows the thread. The same eligibility
+  applies: a native upgrade keyed by its window header, on a canonical window
+  above zero, with no turn state the client sent (the one the Pooler issues
+  on the upgrade names only that connection) and no response anchor. A `/v1`
+  upgrade and anything else answer `nil`.
+  """
+  @spec previous_window_preference_header(RequestOptions.t()) :: String.t() | nil
+  def previous_window_preference_header(%RequestOptions{
+        transport: %{transport: "websocket"},
+        openai_compatibility: %{source_endpoint: nil},
+        continuity: %{session_header_source: "x-codex-window-id", session_header: window} = continuity
+      })
+      when is_binary(window) do
+    with nil <- client_turn_state(continuity),
+         nil <- blank_to_nil(continuity.previous_response_id),
+         window when is_binary(window) <- blank_to_nil(window),
+         {:ok, previous} <- NativeCodexTurnMetadata.previous_window(window) do
+      previous
+    else
+      _other -> nil
+    end
+  end
+
+  def previous_window_preference_header(%RequestOptions{}), do: nil
+
+  defp client_turn_state(%{pooler_issued_turn_state?: true}), do: nil
+  defp client_turn_state(continuity), do: blank_to_nil(continuity.accepted_turn_state)
+
   @spec current_encrypted_reasoning?(term()) :: boolean()
   def current_encrypted_reasoning?(%{
         "type" => "reasoning",

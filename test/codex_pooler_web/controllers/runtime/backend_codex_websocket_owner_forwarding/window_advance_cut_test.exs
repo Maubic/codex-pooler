@@ -38,6 +38,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, BridgeSessionAlias, CodexSession, CodexTurn}
   alias CodexPooler.Repo
   alias CodexPooler.TestAppEnv
+  alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
   alias Ecto.Adapters.SQL.Sandbox
 
@@ -235,6 +236,116 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
       end
 
       unless later == :foreign_anchor and topology == :direct, do: assert(:ok = FakeUpstream.verify!(upstream))
+    end
+  end
+
+  # A process that compacts on its socket (a manual `thread/compact`, or the
+  # post-turn compaction) and loses the socket before any frame named the next
+  # window: no frame alias leads that window anywhere, and the next turn's
+  # upgrade on it opens a session of its own (findings#270 row 270-283,
+  # measured with the released client after an idle close). It does not join
+  # the previous window's live session, as a native HTTP request does
+  # (findings#289): an owner serves the socket that attached last, and a second
+  # live process on the thread would displace the one that joined (the
+  # `stale_resume ... session_open` arm above). The new session's first turn
+  # prefers the assignment the thread served on instead (`previous_window` in
+  # the request's routing metadata), so the provider's cache follows the
+  # thread. The ring's own order (least recent success) leads to the other
+  # account, so only that preference keeps the turn where the thread was.
+  @lost_socket_arms [
+    {:manual, "full", :forwarded},
+    {:post_turn, "lite", :forwarded},
+    {:manual, "lite", :direct},
+    {:post_turn, "full", :direct},
+    {:manual, "full", :peer},
+    {:post_turn, "full", :peer}
+  ]
+
+  for {shape, mode, topology} <- @lost_socket_arms do
+    @tag shape: shape, serving_mode: mode, topology: topology
+    test "#{shape} #{mode} #{topology}: after a compaction and a lost socket the next window's session prefers the thread's assignment",
+         %{shape: shape, serving_mode: mode, topology: topology} do
+      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology in [:forwarded, :peer])
+      upstream = start_upstream(FakeUpstream.strict_sequence([turn_1_upstream(), compaction_upstream(), served_upstream()]))
+      other_upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_window_advance_other_unused"}))
+      setup = topology_setup!(topology, upstream)
+      if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+      ctx = %{shape: shape, mode: mode, topology: topology, setup: setup}
+      port = start_public_endpoint!()
+
+      session_id = compact_and_lose_socket!(ctx, port)
+      before = Repo.get!(CodexSession, session_id)
+      assert before.pool_upstream_assignment_id == setup.assignment.id
+      other = add_least_recently_used_account!(setup, other_upstream)
+
+      {rows, logs} = next_window_turn!(ctx, port)
+      next_request = List.last(rows)
+      next_session_id = request_session_id(next_request.id)
+
+      CodexPooler.TestDiagnostics.puts(fn ->
+        "270-283 #{shape} #{mode} #{topology}: #{inspect(%{rows: Enum.map(rows, &{&1.status, short(request_session_id(&1.id))}), preference: routing_preference(next_request), next_assignment: short(Repo.get!(CodexSession, next_session_id).pool_upstream_assignment_id), thread_assignment: short(setup.assignment.id), other: short(other.assignment.id)})}"
+      end)
+
+      assert Enum.map(rows, & &1.status) == ["succeeded", "succeeded", "succeeded"]
+      assert Enum.all?(rows, &(&1.transport == "websocket"))
+      # A session of its own, and the previous window's session left as it was.
+      refute next_session_id == session_id
+      assert session_count(setup.pool.id) == 2
+      assert window_alias_session_id(setup, @window_1) == next_session_id
+      assert Map.take(Repo.get!(CodexSession, session_id), [:status, :owner_lease_token, :pool_upstream_assignment_id]) == Map.take(before, [:status, :owner_lease_token, :pool_upstream_assignment_id])
+      # Its first turn preferred the thread's assignment, and was served there.
+      assert routing_preference(next_request) == {"previous_window", "applied"}
+      assert Repo.get!(CodexSession, next_session_id).pool_upstream_assignment_id == setup.assignment.id
+      assert FakeUpstream.count(other_upstream) == 0
+      assert logs =~ "websocket upgrade window preference previous_codex_session_id=#{session_id} alias_preview=#{window_preview(@window_1)} disposition=preferred"
+      assert :ok = FakeUpstream.verify!(upstream)
+    end
+  end
+
+  # The previous window's session is no usable preference: its lease lapsed
+  # (no preference at all), or its account left the candidates (the
+  # preference finds nothing). The new session's first turn is routed as any
+  # other, to the account the ring's own order leads to.
+  for unusable <- [:lease_expired, :account_paused] do
+    @tag unusable: unusable
+    test "manual full forwarded #{unusable}: the next window's session without a usable preference is routed as any other", %{unusable: unusable} do
+      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
+      upstream = start_upstream(FakeUpstream.strict_sequence([turn_1_upstream(), compaction_upstream()]))
+      other_upstream = start_upstream(FakeUpstream.strict_sequence([served_upstream()]))
+      setup = topology_setup!(:forwarded, upstream)
+      ctx = %{shape: :manual, mode: "full", topology: :forwarded, setup: setup}
+      port = start_public_endpoint!()
+
+      session_id = compact_and_lose_socket!(ctx, port)
+      other = add_least_recently_used_account!(setup, other_upstream)
+
+      case unusable do
+        :lease_expired ->
+          stop_owner!(ctx, session_id)
+
+        :account_paused ->
+          {1, _rows} = Repo.update_all(from(assignment in PoolUpstreamAssignment, where: assignment.id == ^setup.assignment.id), set: [status: "paused"])
+      end
+
+      {rows, logs} = next_window_turn!(ctx, port)
+      next_request = List.last(rows)
+      next_session_id = request_session_id(next_request.id)
+
+      assert Enum.map(rows, & &1.status) == ["succeeded", "succeeded", "succeeded"]
+      refute next_session_id == session_id
+      assert Repo.get!(CodexSession, next_session_id).pool_upstream_assignment_id == other.assignment.id
+
+      case unusable do
+        :lease_expired ->
+          assert routing_preference(next_request) == {nil, nil}
+          refute logs =~ "websocket upgrade window preference"
+
+        :account_paused ->
+          assert routing_preference(next_request) == {"previous_window", "candidate_unavailable"}
+      end
+
+      assert :ok = FakeUpstream.verify!(upstream)
+      assert :ok = FakeUpstream.verify!(other_upstream)
     end
   end
 
@@ -786,6 +897,37 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
   end
 
   defp session_count(pool_id), do: Repo.aggregate(from(session in CodexSession, where: session.pool_id == ^pool_id), :count)
+
+  # The window-0 process answers a turn and compacts on its socket, then loses
+  # the socket before any frame named window 1.
+  defp compact_and_lose_socket!(ctx, port) do
+    compacting = connect!(port, ctx.setup, @window_0)
+    compacting = compacting |> send_frame!(turn_1_frame(ctx)) |> completed!()
+    compacting |> send_frame!(compaction_frame(ctx, ctx.shape)) |> completed!() |> close!()
+    assert is_nil(window_alias_session_id(ctx.setup, @window_1))
+    ctx.setup.pool.id |> pool_requests() |> hd() |> Map.fetch!(:id) |> request_session_id()
+  end
+
+  # A second account of the Pool that the ring's own order puts first: least
+  # recent success, and this one never served.
+  defp add_least_recently_used_account!(setup, other_upstream) do
+    other = gateway_upstream(setup.pool, other_upstream, "synthetic-window-advance-other-token", compact?: true)
+    prime_routing_quota!(other.identity)
+    _model = put_model_source_assignments!(setup.model, [setup.assignment, other.assignment])
+    use_routing_strategy!(setup.pool, "least_recent_success", 2)
+    other
+  end
+
+  # The next turn's upgrade on window 1, with the thread's full history.
+  defp next_window_turn!(ctx, port) do
+    {:ok, logs} = with_info_log(fn -> connect!(port, ctx.setup, @window_1) |> send_frame!(window_1_frame(ctx, @turn_2, window_1_history(ctx, 2))) |> completed!() |> close!() end)
+    {settled_rows(ctx.setup.pool.id), logs}
+  end
+
+  defp routing_preference(%Request{id: request_id}) do
+    routing = Repo.get!(Request, request_id).request_metadata["routing"] || %{}
+    {routing["session_preference_kind"], routing["session_preference_status"]}
+  end
 
   # A charge is a settlement that billed known usage.
   defp charges(%Request{id: request_id}) do

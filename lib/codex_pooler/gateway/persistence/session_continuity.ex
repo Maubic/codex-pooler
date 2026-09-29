@@ -459,23 +459,23 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
 
   defp upsert_session_for_start!(auth, opts, session_key, owner, now) do
     case existing_session_for_start!(auth, opts, session_key, now) do
-      {%CodexSession{} = session, _preferred_assignment_id} ->
+      {%CodexSession{} = session, _preference} ->
         update_existing_session!(session, auth, opts, owner, now)
 
-      {nil, preferred_assignment_id} ->
+      {nil, preference} ->
         maybe_test_block_before_session_insert()
-        insert_new_session!(auth, opts, session_key, owner, now, preferred_assignment_id)
+        insert_new_session!(auth, opts, session_key, owner, now, preference)
     end
   end
 
-  # Returns the session to reuse, if any, together with the assignment the
-  # replacement should softly prefer when there is nothing to reuse. The
-  # preference is produced by the same transaction and row locks that close the
-  # lease-expired sessions, so the assignment cannot change underneath the
-  # insert that follows. The lease-expired sessions closed are the ones of
-  # this key the request reaches by its session key or through a window alias
-  # (findings#270 row 270-282), since a window linked to another window's
-  # session is keyed by that other window.
+  # Returns the session to reuse, if any, together with the assignment a new
+  # session should softly prefer when there is nothing to reuse. The
+  # recreation preference is produced by the same transaction and row locks
+  # that close the lease-expired sessions, so the assignment cannot change
+  # underneath the insert that follows. The lease-expired sessions closed are
+  # the ones of this key the request reaches by its session key or through a
+  # window alias (findings#270 row 270-282), since a window linked to another
+  # window's session is keyed by that other window.
   defp existing_session_for_start!(auth, opts, session_key, now) do
     resolved_session = Aliases.resolved_session_for_update(auth, opts, session_key, now)
 
@@ -498,7 +498,34 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
       Repo.rollback(:owner_unavailable)
     end
 
-    {existing_session, preferred_assignment_id}
+    {existing_session, session_preference(existing_session, preferred_assignment_id, auth, opts, now)}
+  end
+
+  # A new session prefers the assignment of the lease-expired session of its
+  # key it replaces (row 270-282); failing that, a native websocket upgrade
+  # prefers the assignment of its thread's previous window's live session, on
+  # a window no session knew yet (row 270-283). The upgrade does not join that
+  # session as a native HTTP request does (findings#289): an owner serves the
+  # socket that attached last, and a second live process on the thread (a
+  # stale resumed process reconnecting on the old window) would displace the
+  # socket that joined, whose next turn then meets `stale_owner`.
+  defp session_preference(%CodexSession{}, _assignment_id, _auth, _opts, _now), do: nil
+  defp session_preference(nil, assignment_id, _auth, _opts, _now) when is_binary(assignment_id), do: {:recreated, assignment_id}
+  defp session_preference(nil, _assignment_id, auth, opts, now), do: previous_window_preference(auth, opts, now)
+
+  defp previous_window_preference(auth, opts, now) do
+    case Aliases.previous_window_preference_session(auth, opts, now) do
+      %CodexSession{pool_upstream_assignment_id: assignment_id} = session when is_binary(assignment_id) ->
+        Logger.info("websocket upgrade window preference previous_codex_session_id=#{session.id} alias_preview=#{window_alias_preview(opts)} disposition=preferred")
+        {:previous_window, assignment_id}
+
+      %CodexSession{} = session ->
+        Logger.info("websocket upgrade window preference previous_codex_session_id=#{session.id} alias_preview=#{window_alias_preview(opts)} disposition=unassigned")
+        nil
+
+      nil ->
+        nil
+    end
   end
 
   # A native HTTP request whose own window has no live session continues the
@@ -544,7 +571,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
     |> Repo.update!()
   end
 
-  defp insert_new_session!(auth, opts, session_key, owner, now, preferred_assignment_id) do
+  defp insert_new_session!(auth, opts, session_key, owner, now, preference) do
     attrs = %{
       pool_id: auth.pool.id,
       api_key_id: auth.api_key.id,
@@ -564,24 +591,27 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
     |> Repo.insert(mode: :savepoint)
     |> case do
       {:ok, %CodexSession{} = session} ->
-        put_recreation_preference(session, preferred_assignment_id)
+        put_session_preference(session, preference)
 
       {:error, %Ecto.Changeset{} = changeset} ->
         recover_session_start_conflict!(changeset, auth, opts, session_key, owner, now)
     end
   end
 
-  # Carries the closed session's assignment on the replacement struct only, for
-  # the request that recreated it. Nothing is persisted: writing it to
+  # Carries the preferred assignment on the new session's struct only, for the
+  # request that opened it: the closed session's (row 270-282) or the previous
+  # window's live session's (row 270-283). Nothing is persisted: writing it to
   # `pool_upstream_assignment_id` would make routing filter on it, and on a
   # websocket turn it could even escalate to a hard pin. The conflict-recovery
   # path deliberately does not receive it, because a recovered session already
   # carries its own assignment.
-  defp put_recreation_preference(%CodexSession{} = session, assignment_id)
-       when is_binary(assignment_id),
-       do: %{session | recreated_from_assignment_id: assignment_id}
+  defp put_session_preference(%CodexSession{} = session, {:recreated, assignment_id}),
+    do: %{session | recreated_from_assignment_id: assignment_id}
 
-  defp put_recreation_preference(%CodexSession{} = session, _assignment_id), do: session
+  defp put_session_preference(%CodexSession{} = session, {:previous_window, assignment_id}),
+    do: %{session | previous_window_assignment_id: assignment_id}
+
+  defp put_session_preference(%CodexSession{} = session, nil), do: session
 
   defp session_start_changeset(%CodexSession{} = session, attrs) do
     session

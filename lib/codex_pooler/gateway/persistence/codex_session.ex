@@ -37,6 +37,13 @@ defmodule CodexPooler.Gateway.Persistence.CodexSession do
     # durable pin that routing may filter on, and binding it before dispatch
     # would turn a preference into a filter.
     field :recreated_from_assignment_id, :binary_id, virtual: true
+
+    # The same kind of one-shot preference for a session a native websocket
+    # upgrade opened on a window no session knew yet, while the live session of
+    # its thread's previous window serves on this assignment (findings#270 row
+    # 270-283). The upgrade does not join that session, whose owner may serve
+    # another live socket of the thread; it only asks for the same account.
+    field :previous_window_assignment_id, :binary_id, virtual: true
   end
 
   @spec statuses() :: [status()]

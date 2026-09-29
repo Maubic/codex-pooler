@@ -36,6 +36,13 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.Aliases do
           DateTime.t()
         ) :: CodexSession.t() | nil
   def active_session_for_update(pool_id, api_key_id, alias_kind, alias_value, now) do
+    pool_id
+    |> active_session_query(api_key_id, alias_kind, alias_value, now)
+    |> lock("FOR UPDATE")
+    |> Repo.one()
+  end
+
+  defp active_session_query(pool_id, api_key_id, alias_kind, alias_value, now) do
     alias_hash = alias_hash(alias_value)
 
     query =
@@ -49,12 +56,9 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.Aliases do
             alias_record.status == ^@alias_active and alias_record.expires_at > ^now and
             session.status in ^@session_reconnectable_statuses,
         order_by: [desc: alias_record.last_seen_at, desc: alias_record.updated_at],
-        limit: 1,
-        lock: "FOR UPDATE"
+        limit: 1
 
-    query
-    |> maybe_require_active_owner_lease(alias_kind, now)
-    |> Repo.one()
+    maybe_require_active_owner_lease(query, alias_kind, now)
   end
 
   @spec resolved_session_for_update(map(), RequestOptions.t(), String.t(), DateTime.t()) ::
@@ -84,6 +88,22 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.Aliases do
     case ContinuityPayload.previous_window_session_header(opts) do
       nil -> nil
       previous_window -> active_session_for_update(pool_id, api_key_id, "session_header", previous_window, now)
+    end
+  end
+
+  @doc """
+  The live session of a native websocket upgrade's previous window, whose
+  assignment the session the upgrade opens prefers (findings#270 row 270-283,
+  `ContinuityPayload.previous_window_preference_header/1`). The upgrade never
+  joins it, so it is read without a lock; it keeps the lookup's scope (the
+  request's Pool and API key, on the alias and on the session) and its live
+  owner lease requirement.
+  """
+  @spec previous_window_preference_session(map(), RequestOptions.t(), DateTime.t()) :: CodexSession.t() | nil
+  def previous_window_preference_session(%{pool: %{id: pool_id}, api_key: %{id: api_key_id}}, %RequestOptions{} = opts, now) do
+    case ContinuityPayload.previous_window_preference_header(opts) do
+      nil -> nil
+      previous_window -> pool_id |> active_session_query(api_key_id, "session_header", previous_window, now) |> Repo.one()
     end
   end
 
@@ -361,6 +381,12 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.Aliases do
 
   defp maybe_require_active_owner_lease(query, "previous_response_id", _now), do: query
 
+  # The live lease also keeps a lapsed session of a thread's previous window
+  # out. For a native HTTP request (findings#289) it is a second layer,
+  # independent of the lease-expiry recreation that closes a lapsed session
+  # before the lookup (findings#270 row 270-282), and it stays even though that
+  # close runs first. For a websocket upgrade's preference (row 270-283) it is
+  # the only one: a lapsed session gives no preference.
   defp maybe_require_active_owner_lease(query, _alias_kind, now) do
     where(query, [session], session.owner_lease_expires_at > ^now)
   end

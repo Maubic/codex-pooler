@@ -63,4 +63,45 @@ defmodule CodexPooler.Gateway.Payloads.ContinuityPayloadTest do
       RequestOptions.build(%{session_header: window, session_header_source: "x-codex-window-id"}, endpoint, payload)
     end
   end
+
+  # The websocket upgrade does not join the previous window's session; the
+  # session it opens prefers that session's assignment (findings#270 row
+  # 270-283).
+  describe "previous window preference header (findings#270 row 270-283)" do
+    @thread "019a0000-0000-7000-8000-000000000283"
+
+    test "a native websocket upgrade keyed by its window names the previous window of its thread" do
+      upgrade = upgrade_options(" #{@thread}:2 ")
+      assert ContinuityPayload.previous_window_preference_header(upgrade) == "#{@thread}:1"
+
+      # The turn state the Pooler issues on an upgrade names only that connection.
+      issued = RequestOptions.put_continuity(upgrade, accepted_turn_state: "pooler-issued", pooler_issued_turn_state?: true, authenticated_owner_attach: true)
+      assert ContinuityPayload.previous_window_preference_header(issued) == "#{@thread}:1"
+
+      # The upgrade never joins that session.
+      assert ContinuityPayload.previous_window_session_header(upgrade) == nil
+      assert ContinuityPayload.previous_window_session_header(issued) == nil
+    end
+
+    test "nothing else names one" do
+      upgrade = upgrade_options("#{@thread}:2")
+
+      refused = [
+        native_http: RequestOptions.build(%{session_header: "#{@thread}:2", session_header_source: "x-codex-window-id"}, "/backend-api/codex/responses", %{"stream" => true}),
+        v1_origin: RequestOptions.mark_openai_compatibility_origin(upgrade, "/v1/responses", "/backend-api/codex/responses"),
+        session_id_header: RequestOptions.for_websocket(%{session_header: "#{@thread}:2", session_header_source: "session-id"}),
+        client_turn_state: RequestOptions.put_continuity(upgrade, accepted_turn_state: "client-turn-state"),
+        response_anchor: RequestOptions.put_continuity(upgrade, previous_response_id: "resp_anchor"),
+        first_window: upgrade_options("#{@thread}:0"),
+        malformed_window: upgrade_options("#{@thread}:x"),
+        blank_window: upgrade_options("  ")
+      ]
+
+      for {case_name, options} <- refused do
+        assert {case_name, ContinuityPayload.previous_window_preference_header(options)} == {case_name, nil}
+      end
+    end
+
+    defp upgrade_options(window), do: RequestOptions.for_websocket(%{session_header: window, session_header_source: "x-codex-window-id"})
+  end
 end
