@@ -277,6 +277,9 @@ defmodule CodexPooler.Accounting.RequestLifecycle.AbsentInstanceRecovery do
     end
   end
 
+  # The turn is interrupted inside the settlement's own transaction
+  # (`RequestLifecycle`'s `:before_commit`), so no reader sees the request
+  # recovered while its turn is still open (findings#288).
   defp finalize(%Request{} = request, %Attempt{} = attempt, now) do
     with {:ok, _result} <-
            RequestLifecycle.finalize_request(request, attempt, %{
@@ -286,13 +289,14 @@ defmodule CodexPooler.Accounting.RequestLifecycle.AbsentInstanceRecovery do
              last_error_code: @recovery_code,
              error_message: @recovery_message,
              usage: %{status: "usage_unknown", source: @recovery_source},
-             now: now
+             now: now,
+             before_commit: fn _settled ->
+               RuntimeCleanup.recover_stale_request_turn(request.id, attempt.id,
+                 now: now,
+                 error_code: @recovery_code
+               )
+             end
            }) do
-      RuntimeCleanup.recover_stale_request_turn(request.id, attempt.id,
-        now: now,
-        error_code: @recovery_code
-      )
-
       {:ok, :recovered}
     end
   end

@@ -1360,16 +1360,18 @@ defmodule CodexPooler.Accounting.RequestReplay do
     :closed
   end
 
-  # A request that was already terminal when its turn was met still open is,
+  # A request that was already terminal when its turn was met still open was,
   # most often, a settlement in flight: the request, its attempt and its ledger
-  # commit before the turn row, in a second transaction. The turn is written
-  # the way that settlement writes it (`Finalization.Interruption`'s terminal
-  # turn vocabulary: interrupted for a lost client or owner, failed otherwise,
-  # the request's own error code), so a resend judged in between meets the
-  # same predecessor it meets after the settlement, and the settlement's own
-  # turn write then finds nothing to do. It used to close it `failed
-  # orphaned_turn_closed`, which no resend policy admits: the released client's
-  # resend of a provider-failed turn arriving in that window was refused `409
+  # used to commit before the turn row, in a second transaction. Every writer
+  # that settles a request carrying a turn now completes the turn in the
+  # request's own transaction (findings#288), so this is defense in depth for
+  # rows an older release left that way. The turn is written the way a
+  # settlement writes it (`Finalization.Interruption`'s terminal turn
+  # vocabulary: interrupted for a lost client or owner, failed otherwise, the
+  # request's own error code), so a resend meets the same predecessor it meets
+  # after a settlement. It used to close it `failed orphaned_turn_closed`,
+  # which no resend policy admits: the released client's resend of a
+  # provider-failed turn arriving in that window was refused `409
   # duplicate_turn` (findings#206 row 206-609). A request this closer finalizes
   # itself keeps `orphaned_turn_closed`.
   defp settled_turn_outcome(%Request{status: "succeeded"}), do: {"succeeded", nil}

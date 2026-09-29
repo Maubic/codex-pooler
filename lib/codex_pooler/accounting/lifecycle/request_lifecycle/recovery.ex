@@ -248,44 +248,41 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Recovery do
   # `attempts`. The phase records that separation on the release itself, and
   # names this branch for what it is: nothing live ever reached the turn.
   defp release_undispatched_request(%Request{} = request, now) do
-    with {:ok, result} <-
-           RequestLifecycle.finalize_reserved_request_failure(request, %{
-             request_status: "failed",
-             response_status_code: 499,
-             last_error_code: @recovery_code,
-             usage_status: "not_applicable",
-             pre_attempt_phase: PreAttemptRelease.stale_sweep(),
-             now: now
-           }) do
-      recover_stale_turn(request, nil, now)
-      {:ok, result}
-    end
+    RequestLifecycle.finalize_reserved_request_failure(request, %{
+      request_status: "failed",
+      response_status_code: 499,
+      last_error_code: @recovery_code,
+      usage_status: "not_applicable",
+      pre_attempt_phase: PreAttemptRelease.stale_sweep(),
+      now: now,
+      before_commit: recover_stale_turn(request, nil, now)
+    })
   end
 
   defp settle_dispatched_request(%Request{} = request, %Attempt{} = attempt, now) do
-    with {:ok, result} <-
-           RequestLifecycle.finalize_request(request, attempt, %{
-             request_status: "failed",
-             attempt_status: "failed",
-             response_status_code: 499,
-             last_error_code: @recovery_code,
-             error_message: "stale reservation recovered after request lifecycle was abandoned",
-             usage: %{status: "usage_unknown", source: @recovery_source},
-             now: now
-           }) do
-      recover_stale_turn(request, attempt, now)
-      {:ok, result}
+    RequestLifecycle.finalize_request(request, attempt, %{
+      request_status: "failed",
+      attempt_status: "failed",
+      response_status_code: 499,
+      last_error_code: @recovery_code,
+      error_message: "stale reservation recovered after request lifecycle was abandoned",
+      usage: %{status: "usage_unknown", source: @recovery_source},
+      now: now,
+      before_commit: recover_stale_turn(request, attempt, now)
+    })
+  end
+
+  # The request's turn is interrupted inside the settlement's own transaction
+  # (`RequestLifecycle`'s `:before_commit`), so no reader sees the request
+  # recovered while its turn is still open (findings#288).
+  defp recover_stale_turn(%Request{id: request_id}, attempt, now) when is_binary(request_id) do
+    fn _settled ->
+      RuntimeCleanup.recover_stale_request_turn(request_id, attempt_id(attempt),
+        now: now,
+        error_code: @recovery_code
+      )
     end
   end
-
-  defp recover_stale_turn(%Request{id: request_id}, attempt, now) when is_binary(request_id) do
-    RuntimeCleanup.recover_stale_request_turn(request_id, attempt_id(attempt),
-      now: now,
-      error_code: @recovery_code
-    )
-  end
-
-  defp recover_stale_turn(%Request{}, _attempt, _now), do: :ok
 
   defp attempt_id(%Attempt{id: attempt_id}) when is_binary(attempt_id), do: attempt_id
   defp attempt_id(_attempt), do: nil
