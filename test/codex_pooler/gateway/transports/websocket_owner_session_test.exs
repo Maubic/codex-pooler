@@ -3149,7 +3149,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     send_barrier = await_controlled_barrier(:downstream_send_result, controls)
     release_controlled(send_barrier, controls, :downstream_send_result)
 
-    assert Task.await(submit_task, @detection_timeout_ms) == {:error, :owner_unavailable}
+    # The reply keeps the terminal it could not deliver, so the task settles
+    # the provider's usage (findings#270 row 270-293).
+    assert {:error, %{reason: :owner_unavailable, body: ^terminal_frame, headers: [], started: false}} = Task.await(submit_task, @detection_timeout_ms)
 
     assert_receive {:websocket_owner_frame, "send-failure", 1, {:error, :owner_unavailable, safe_payload}}
 

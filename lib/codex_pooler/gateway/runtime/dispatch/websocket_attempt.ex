@@ -834,13 +834,17 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
 
   @spec dispatch_websocket_request_with_owner_recovery(PreparedContext.t(), DispatchRequest.t()) ::
           {:ok, map()} | {:error, map()}
+  # Only a failure before anything visible is retried on a recovered owner.
+  # Any other stays the error it is: an owner that could not deliver a turn's
+  # terminal answers with it as the body (findings#270 row 270-293), and the
+  # bare map this branch used to return crashed the task.
   defp dispatch_websocket_request_with_owner_recovery(prepared_context, dispatch_request) do
     case UpstreamDispatch.websocket_request(dispatch_request) do
       {:error, %{reason: :owner_unavailable} = error} ->
         if pre_visible_transport_websocket_failure?(error) do
           retry_owner_websocket_request(prepared_context, dispatch_request, error)
         else
-          error
+          {:error, error}
         end
 
       result ->

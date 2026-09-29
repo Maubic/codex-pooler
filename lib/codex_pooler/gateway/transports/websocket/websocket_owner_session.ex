@@ -3003,7 +3003,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
       {:error, reason} ->
         state
-        |> fail_terminal_delivery(terminal?, reason)
+        |> fail_terminal_delivery(terminal?, reason, payload)
         |> continue_or_retire()
 
       :stale_generation ->
@@ -3802,6 +3802,23 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp emit_compact_acknowledged(nil),
     do: NativeCompactionAuthorizationObservation.emit(:compact_acknowledged, :forwarded)
 
+  defp relay_final_result(_state, _downstream, :ok), do: :ok
+  defp relay_final_result(_state, _downstream, {:ok, _result}), do: :ok
+
+  defp relay_final_result(state, downstream, {:error, %{body: body, forward_error_body?: true, reason: _reason}})
+       when is_binary(body) and body != "",
+       do: send_downstream(state, downstream, {:data, body})
+
+  # The terminal it could not deliver goes back to the task as the body; the
+  # downstream still gets the owner's error, as with the bare reason.
+  defp relay_final_result(state, downstream, {:error, %{undelivered_terminal?: true, reason: reason}}),
+    do: send_owner_error(state, downstream, reason)
+
+  defp relay_final_result(_state, _downstream, {:error, %{body: _body, reason: _reason}}), do: :ok
+  defp relay_final_result(state, downstream, {:error, %{reason: reason}}), do: send_owner_error(state, downstream, reason)
+  defp relay_final_result(state, downstream, {:error, reason}), do: send_owner_error(state, downstream, reason)
+  defp relay_final_result(state, downstream, _other), do: send_owner_error(state, downstream, :owner_crashed)
+
   defp successful_upstream_result?(:ok), do: true
   defp successful_upstream_result?({:ok, _result}), do: true
   defp successful_upstream_result?(_result), do: false
@@ -3810,30 +3827,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   defp completed_compaction_result?(_result), do: false
 
   defp finish_relay_active_turn(state, downstream, result) do
-    case result do
-      :ok ->
-        :ok
-
-      {:ok, _result} ->
-        :ok
-
-      {:error, %{body: body, forward_error_body?: true, reason: _reason}}
-      when is_binary(body) and body != "" ->
-        _result = send_downstream(state, downstream, {:data, body})
-
-      {:error, %{body: _body, reason: _reason}} ->
-        :ok
-
-      {:error, %{reason: reason}} ->
-        _result = send_owner_error(state, downstream, reason)
-
-      {:error, reason} ->
-        _result = send_owner_error(state, downstream, reason)
-
-      _other ->
-        _result = send_owner_error(state, downstream, :owner_crashed)
-    end
-
+    _result = relay_final_result(state, downstream, result)
     _result = send_downstream(state, downstream, :complete)
 
     state
@@ -5738,13 +5732,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     end
   end
 
-  defp fail_terminal_delivery(state, terminal?, reason) do
-    if terminal? do
-      settle_active_turn(state, {:error, reason})
-    else
-      state
-    end
-  end
+  # A terminal the owner could not deliver (its downstream gone, or lost
+  # while the turn kept generating for a socket that exited on a reachable
+  # node) still carries the provider's verdict and usage. The response task
+  # settles the turn from this reply, so the reply keeps the terminal as its
+  # body and the settlement reads the usage from it; with the bare reason it
+  # recorded the usage unknown and charged the reservation's estimate
+  # (findings#270 row 270-293). The map carries the headers and the start flag
+  # every task version destructures, so an older task settles it too.
+  defp fail_terminal_delivery(state, true, reason, payload) when is_binary(payload),
+    do: settle_active_turn(state, {:error, %{reason: reason, body: payload, headers: [], started: false, undelivered_terminal?: true}})
+
+  defp fail_terminal_delivery(state, true, reason, _payload), do: settle_active_turn(state, {:error, reason})
+  defp fail_terminal_delivery(state, false, _reason, _payload), do: state
 
   defp retain_terminal_result(state, result) do
     timer_token = make_ref()

@@ -367,6 +367,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
       # `Ecto.NoResultsError` in `lock_finalization_rows/2` (findings#270 row
       # 270-288).
       assert {{"failed", 503, "owner_unavailable"}, {"failed", "owner_unavailable"}} == await_turn_settled!(turn.request_id)
+
+      # The owner received the provider's `response.completed` and its usage
+      # but had nobody to deliver it to. Its answer to that node's task keeps
+      # the terminal, so the settlement records the usage the provider
+      # reported (5 in, 10 out) instead of `usage_unknown` at the
+      # reservation's estimate (findings#270 row 270-293).
+      assert %Request{usage_status: "usage_known"} = Repo.get!(Request, turn.request_id)
+      assert settled_usage(turn.request_id) == {"usage_known", 5, 10, 15}
     end
   end
 
@@ -644,6 +652,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
       deadline
     )
     |> then(fn {outcome, turn, _open_attempt?} -> {outcome, {turn.status, turn.error_code}} end)
+  end
+
+  defp settled_usage(request_id) do
+    Repo.one!(
+      from(entry in CodexPooler.Accounting.LedgerEntry,
+        where: entry.request_id == ^request_id and entry.entry_kind == "settlement" and entry.amount_status == "recorded",
+        select: {entry.usage_status, entry.input_tokens, entry.output_tokens, entry.total_tokens}
+      )
+    )
   end
 
   defp attempt(request_id), do: Repo.one!(from(a in Attempt, where: a.request_id == ^request_id))
