@@ -1163,6 +1163,14 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
       full_history_native_compaction?(prepared.endpoint, request_options) ->
         WebsocketTurnIdentity.native_compaction_claim_key(semantic_turn_key, payload)
 
+      # A local compaction's summarization request (findings#282) carries the
+      # turn's own `turn_id` but is not a request of the turn: the turn's opener
+      # holds the bare claim, so it takes the claim a remote compaction's
+      # full-history frame takes, which an identical resend and the client's
+      # HTTPS fallback of it derive too.
+      NativeTurnContinuation.local_compaction_request?(payload, request_options) ->
+        WebsocketTurnIdentity.native_compaction_claim_key(semantic_turn_key, payload)
+
       post_compaction_resume?(payload, request_options) ->
         {:post_compaction_resume, anchor} = NativeTurnContinuation.turn_role(payload)
         WebsocketTurnIdentity.resume_claim_key(semantic_turn_key, anchor)

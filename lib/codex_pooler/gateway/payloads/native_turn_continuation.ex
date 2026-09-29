@@ -213,6 +213,34 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuation do
   def compaction_request?(_payload, _options), do: false
 
   @doc """
+  True for the summarization request of a LOCAL compaction: a compaction the
+  client runs itself when its provider is not named `OpenAI`
+  (`core/src/compact.rs`, rust-v0.158.0), declared `request_kind:
+  "compaction"` with `compaction.implementation: "responses"`.
+
+  It is not a request of the turn itself: the client builds it from the
+  turn's history plus its own compaction prompt, sends it on a new client
+  session (a new websocket) under the turn's `turn_id`, and then resumes the
+  turn on the summary. A remote compaction declares
+  `responses_compaction_v2` (or the older `responses_compact`) and is
+  classified by the websocket codec's compaction bridge instead.
+  """
+  @spec local_compaction_request?(map(), RequestOptions.t()) :: boolean()
+  def local_compaction_request?(payload, %RequestOptions{} = options) when is_map(payload) do
+    upstream_endpoint(options) != @compact_endpoint and request_kind(payload, options) == "compaction" and
+      compaction_implementation(payload, options) == "responses"
+  end
+
+  def local_compaction_request?(_payload, _options), do: false
+
+  defp compaction_implementation(payload, options) do
+    case canonical_metadata_map(canonical_document(payload, options)) do
+      %{"compaction" => %{"implementation" => implementation}} when is_binary(implementation) -> implementation
+      _absent -> nil
+    end
+  end
+
+  @doc """
   Which request of its turn this is, from the payload alone.
 
   One `turn_id` covers every model request of a Codex turn, so this is the only

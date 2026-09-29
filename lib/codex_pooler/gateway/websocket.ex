@@ -7,7 +7,7 @@ defmodule CodexPooler.Gateway.Websocket do
   alias CodexPooler.Accounting.Request
   alias CodexPooler.Gateway.Contracts
   alias CodexPooler.Gateway.{OperationalSettings, OperationalStatus}
-  alias CodexPooler.Gateway.Payloads.{ContinuityPayload, PayloadNormalizer, RequestOptions}
+  alias CodexPooler.Gateway.Payloads.{ContinuityPayload, NativeTurnContinuation, PayloadNormalizer, RequestOptions}
   alias CodexPooler.Gateway.Persistence.{CodexSession, CodexTurn, SessionContinuity}
   alias CodexPooler.Gateway.Persistence.SessionContinuity.OwnerWitness
   alias CodexPooler.Gateway.Routing.CandidateEligibility
@@ -72,11 +72,28 @@ defmodule CodexPooler.Gateway.Websocket do
     opts = websocket_request_options(opts)
 
     with :ok <- reject_if_rollout_draining() do
-      if websocket_owner_forwarding_enabled?(),
+      if websocket_owner_forwarding_enabled?() and not local_compaction_socket?(opts),
         do: prepare_owner_websocket_session(auth, opts),
         else: prepare_local_websocket_session(auth, opts)
     end
   end
+
+  # A client whose provider is not named `OpenAI` compacts locally: it opens a
+  # second websocket for its summarization request, whose handshake carries
+  # that request's turn metadata (`request_kind: "compaction"`,
+  # `implementation: "responses"`), and resumes the turn on its first
+  # websocket once the summary arrived (Codex 0.158.0, findings#282). The
+  # session's owner serves one downstream, the socket that attached last: had
+  # the compaction's socket attached, the turn's own socket would have met
+  # `stale_owner` on the resume. The compaction's socket therefore stays off
+  # the owner and serves its frames on an upstream connection of its own, as
+  # every socket does with owner forwarding off. The summarization request
+  # carries its whole history, so it needs nothing the owner's connection
+  # holds; any other frame on that socket is answered as with forwarding off.
+  defp local_compaction_socket?(%RequestOptions{openai_compatibility: %{public_openai_responses_stream: false}} = opts),
+    do: NativeTurnContinuation.local_compaction_request?(%{}, opts)
+
+  defp local_compaction_socket?(%RequestOptions{}), do: false
 
   defp reject_if_rollout_draining do
     if OperationalStatus.draining?(),
