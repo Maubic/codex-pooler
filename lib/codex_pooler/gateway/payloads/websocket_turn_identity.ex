@@ -15,6 +15,7 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
   @request_claim_domain "native_websocket_response_claim_v1"
   @compaction_claim_domain "native_websocket_compaction_claim_v1"
   @native_compaction_claim_domain "native_websocket_compaction_claim_v2"
+  @remote_compaction_claim_domain "native_websocket_compaction_claim_v3"
   @kind_claim_domain_prefix "native_turn_kind_claim_v1:"
   @resume_claim_domain "native_turn_compaction_resume_claim_v1"
 
@@ -216,8 +217,28 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
   end
 
   @doc """
-  The claim of one native websocket compaction, the same whether the client
-  sent it anchored or as full history.
+  The claim of a compaction request whose payload keeps its client metadata:
+  a local compaction's summarization request (findings#282), which the
+  compaction bridge does not rewrite, and its HTTPS form. It binds the turn
+  and every field except `input` and `previous_response_id`,
+  `x-codex-window-id` among them, so the thread's next local compaction, one
+  window later, is a claim of its own. A remote compaction's payload has been
+  through the bridge, which keeps no client metadata: it takes
+  `remote_compaction_claim_key/3`, which binds the window explicitly.
+  """
+  @spec native_compaction_claim_key(<<_::256>>, map()) :: String.t()
+  def native_compaction_claim_key(semantic_turn_key, payload)
+      when is_binary(semantic_turn_key) and byte_size(semantic_turn_key) == 32 and is_map(payload) do
+    scoped_request_claim_key(
+      semantic_turn_key,
+      Map.drop(payload, ["input", "previous_response_id"]),
+      @native_compaction_claim_domain
+    )
+  end
+
+  @doc """
+  The claim of one remote compaction, the same whether the client sent it
+  anchored or as full history, and the claim its HTTPS fallback derives.
 
   The released client builds a remote compaction as one prompt and lets the
   websocket layer compress it: on the connection that produced the previous
@@ -228,20 +249,44 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
   full-history resend found its payload-scoped claim free: with owner
   forwarding off it was served and billed again after the first one had been
   billed, or it raced the closing socket into the active-turn index
-  (findings#206 row 206-310). Both forms therefore derive this claim, which
-  binds the turn and every field except `input` and `previous_response_id`
-  (`x-codex-window-id` among them). A second compaction of the same turn is a
-  different claim, because the client advances the window after every
-  compaction it completes.
+  (findings#206 row 206-310). Both forms therefore derive this claim.
+
+  It binds the turn, the compaction's own window (`window_digest`, the digest
+  of the canonical turn metadata's `window_id`,
+  `NativeCodexTurnMetadata.window_id_digest/1`) and every field of the
+  bridged payload except `input`, `previous_response_id` and
+  `client_metadata`. The window is read from the frame's turn metadata
+  before the compaction bridge: the bridged payload keeps no client
+  metadata, and the claim taken from it alone was the same for every remote
+  compaction of a turn, so the turn's second compaction met the first one's
+  and was refused `409 duplicate_turn`, or was chained as a resend of it
+  (findings#270 rows 270-351 and 270-357). The client moves to its next
+  window after every compaction it completes and never before, so a
+  compaction's anchored form and every resend of it share the window, and
+  the turn's next compaction is a claim of its own. The client metadata adds
+  nothing a resend keeps that the turn and the window do not already bind,
+  and carries what every send changes (`x-codex-ws-stream-request-start-ms`)
+  and what a transport moves (the Lite marker, a header over HTTPS), so none
+  of it is bound, whatever the bridge keeps of it.
   """
-  @spec native_compaction_claim_key(<<_::256>>, map()) :: String.t()
-  def native_compaction_claim_key(semantic_turn_key, payload)
-      when is_binary(semantic_turn_key) and byte_size(semantic_turn_key) == 32 and is_map(payload) do
-    scoped_request_claim_key(
-      semantic_turn_key,
-      Map.drop(payload, ["input", "previous_response_id"]),
-      @native_compaction_claim_domain
-    )
+  @spec remote_compaction_claim_key(<<_::256>>, <<_::256>>, map()) :: String.t()
+  def remote_compaction_claim_key(semantic_turn_key, window_digest, payload)
+      when is_binary(semantic_turn_key) and byte_size(semantic_turn_key) == 32 and
+             is_binary(window_digest) and byte_size(window_digest) == 32 and is_map(payload) do
+    projection = request_claim_projection(Map.drop(payload, ["input", "previous_response_id", "client_metadata"]))
+
+    digest =
+      :crypto.mac(
+        :hmac,
+        :sha256,
+        request_claim_hmac_key(),
+        :erlang.term_to_binary(
+          {@remote_compaction_claim_domain, semantic_turn_key, window_digest, projection},
+          [:deterministic]
+        )
+      )
+
+    @request_claim_prefix <> Base.url_encode64(digest, padding: false)
   end
 
   @doc """

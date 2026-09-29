@@ -235,18 +235,42 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
         {:error, :missing_predecessor}
 
       nil ->
-        {:ok,
-         %{
-           claim: claim,
-           predecessor: predecessor,
-           predecessor_shape: shape,
-           recovery_markers: Enum.reverse(markers)
-         }}
+        if passed_compaction?(predecessor) do
+          {:error, :terminal_predecessor}
+        else
+          {:ok,
+           %{
+             claim: claim,
+             predecessor: predecessor,
+             predecessor_shape: shape,
+             recovery_markers: Enum.reverse(markers)
+           }}
+        end
 
       %Request{} = request ->
         continue_chain(request, predecessor, claim, scope, now, markers, depth)
     end
   end
+
+  # A websocket compaction whose turn went on after it: a request of the same
+  # session and turn is newer than the node the resend would chain onto. The
+  # client sends its next request of a turn only once it completed the turn's
+  # compaction, and resends only a compaction it did not complete, so that
+  # resend repeats a compaction the client read and is refused, as the owner's
+  # compaction policy refuses it with forwarding on (findings#270 row 270-357).
+  # It used to be chained and billed with forwarding off. A compaction's
+  # resends before the client goes on chain as before.
+  defp passed_compaction?(%Request{id: request_id, endpoint: "/backend-api/codex/responses/compact", transport: "websocket"}) do
+    case Repo.one(from(turn in CodexTurn, where: turn.request_id == ^request_id)) do
+      %CodexTurn{codex_session_id: session_id, semantic_turn_digest: <<_::256>> = digest, turn_sequence: sequence} ->
+        Repo.exists?(from(turn in CodexTurn, where: turn.codex_session_id == ^session_id and turn.semantic_turn_digest == ^digest and turn.turn_sequence > ^sequence))
+
+      _no_turn ->
+        false
+    end
+  end
+
+  defp passed_compaction?(_predecessor), do: false
 
   defp continue_chain(request, previous, claim, scope, now, markers, depth) do
     with {:ok, derived} <-

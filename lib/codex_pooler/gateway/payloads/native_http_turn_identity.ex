@@ -106,6 +106,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
   # for all return `:none`, which leaves the generated correlation id and
   # today's behaviour exactly as they are.
 
+  alias CodexPooler.Gateway.Payloads.NativeCodexTurnMetadata
   alias CodexPooler.Gateway.Payloads.NativeTurnContinuation
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
@@ -185,7 +186,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
            ),
          {:ok, identity} <-
            WebsocketTurnIdentity.resolve(canonical_payload(metadata), claim_scope),
-         {:ok, claim} <- claim_for(identity, request_options, payload) do
+         {:ok, claim} <- claim_for(identity, request_options, payload, metadata) do
       {:ok,
        claim
        |> Map.put(
@@ -202,7 +203,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
 
   def request_claim(_request_options, _payload), do: :none
 
-  defp claim_for(identity, request_options, payload) do
+  defp claim_for(identity, request_options, payload, metadata) do
     cond do
       NativeTurnContinuation.compaction_request?(payload, request_options) ->
         with {:ok, claim} <-
@@ -210,7 +211,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
                  WebsocketTurnIdentity.compaction_claim_key(identity.semantic_turn_key, payload),
                  :compaction
                ),
-             do: {:ok, Map.put(claim, :websocket_compaction_claims, websocket_compaction_claims(identity, payload))}
+             do: {:ok, Map.put(claim, :websocket_compaction_claims, websocket_compaction_claims(identity, request_options, payload, metadata))}
 
       turn_request?(payload, request_options) ->
         turn_claim(identity, payload)
@@ -306,16 +307,31 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
   # payload coerced for the compact route, which drops `type` and the client
   # metadata; the websocket one keeps the `stream: true` every native frame
   # carries and the HTTP one does not, so the websocket payload is rebuilt by
-  # restoring it. The marked variant covers a coercion that keeps the Lite
-  # marker. Deriving the websocket claim lets the reservation find the
-  # websocket compaction this request repeats (findings#206 row 206-330); the
-  # HTTP compaction still reserves under its own payload-scoped claim when no
-  # such compaction exists.
-  defp websocket_compaction_claims(identity, payload) do
-    payload
-    |> Map.put("stream", true)
-    |> lite_marker_variants()
-    |> Enum.map(&WebsocketTurnIdentity.native_compaction_claim_key(identity.semantic_turn_key, &1))
+  # restoring it. The window the websocket claim binds is the one the
+  # request's turn metadata names, as the frame's names it: without it the
+  # fallback of the turn's second compaction found the first one and was
+  # chained to it (findings#270 row 270-357). A document naming no usable
+  # window derives no websocket claim, as its frame's metadata would have been
+  # refused. A local compaction is not bridged and keeps its client metadata
+  # on both transports, so it derives the payload claim its frame takes, and
+  # the marked variant covers a coercion that keeps the Lite marker (the
+  # remote claim binds no client metadata). Deriving the websocket claim lets
+  # the reservation find the websocket compaction this request repeats
+  # (findings#206 row 206-330); the HTTP compaction still reserves under its
+  # own payload-scoped claim when no such compaction exists.
+  defp websocket_compaction_claims(identity, request_options, payload, metadata) do
+    frame = Map.put(payload, "stream", true)
+
+    if NativeTurnContinuation.local_compaction_request?(payload, request_options) do
+      frame
+      |> lite_marker_variants()
+      |> Enum.map(&WebsocketTurnIdentity.native_compaction_claim_key(identity.semantic_turn_key, &1))
+    else
+      case NativeCodexTurnMetadata.canonical_window_digest(NativeTurnContinuation.canonical_metadata_map(metadata)) do
+        {:ok, window} -> [WebsocketTurnIdentity.remote_compaction_claim_key(identity.semantic_turn_key, window, frame)]
+        :error -> []
+      end
+    end
   end
 
   defp native_client_retry_witness(

@@ -1061,10 +1061,12 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
   runtime proof, or nil for any other frame.
 
   It is the claim the same compaction's full-history resend derives
-  (`WebsocketTurnIdentity.native_compaction_claim_key/2`), so a client cut
-  during the admitted compaction resends into the predecessor's claim and meets
-  the resend policy instead of being served and billed a second time
-  (findings#206 row 206-310).
+  (`WebsocketTurnIdentity.remote_compaction_claim_key/3`, bound to the
+  compaction's own window from its turn metadata), so a client cut during the
+  admitted compaction resends into the predecessor's claim and meets the
+  resend policy instead of being served and billed a second time
+  (findings#206 row 206-310), while the turn's next compaction, one window
+  later, takes a claim of its own (findings#270 row 270-351).
   """
   @spec admitted_compaction_claim(String.t(), map(), RequestOptions.t()) :: String.t() | nil
   def admitted_compaction_claim(
@@ -1073,11 +1075,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
         %RequestOptions{
           native_compaction_admission: %RequestOptions.NativeCompactionAdmission{},
           continuity: %{semantic_turn_key: semantic_turn_key},
-          payload_context: %{native_codex_turn_metadata: %NativeCodexTurnMetadata{request_kind: :compaction}}
+          payload_context: %{native_codex_turn_metadata: %NativeCodexTurnMetadata{request_kind: :compaction, window_id_digest: <<_::256>> = window}}
         }
       )
       when is_map(payload) and is_binary(semantic_turn_key) and byte_size(semantic_turn_key) == 32,
-      do: WebsocketTurnIdentity.native_compaction_claim_key(semantic_turn_key, payload)
+      do: WebsocketTurnIdentity.remote_compaction_claim_key(semantic_turn_key, window, payload)
 
   def admitted_compaction_claim(_endpoint, _payload, %RequestOptions{}), do: nil
 
@@ -1161,13 +1163,14 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
 
     cond do
       full_history_native_compaction?(prepared.endpoint, request_options) ->
-        WebsocketTurnIdentity.native_compaction_claim_key(semantic_turn_key, payload)
+        %NativeCodexTurnMetadata{window_id_digest: window} = request_options.payload_context.native_codex_turn_metadata
+        WebsocketTurnIdentity.remote_compaction_claim_key(semantic_turn_key, window, payload)
 
       # A local compaction's summarization request (findings#282) carries the
       # turn's own `turn_id` but is not a request of the turn: the turn's opener
-      # holds the bare claim, so it takes the claim a remote compaction's
-      # full-history frame takes, which an identical resend and the client's
-      # HTTPS fallback of it derive too.
+      # holds the bare claim, so it takes a compaction claim over its own
+      # payload, whose client metadata names its window, which an identical
+      # resend and the client's HTTPS fallback of it derive too.
       NativeTurnContinuation.local_compaction_request?(payload, request_options) ->
         WebsocketTurnIdentity.native_compaction_claim_key(semantic_turn_key, payload)
 
@@ -1205,7 +1208,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
              compaction_trigger_bridge?: true,
              compaction_input_mode: :full_history,
              compaction_result_mode: :native_websocket,
-             native_codex_turn_metadata: %NativeCodexTurnMetadata{request_kind: :compaction}
+             native_codex_turn_metadata: %NativeCodexTurnMetadata{request_kind: :compaction, window_id_digest: <<_::256>>}
            }
          }
        ),

@@ -307,6 +307,25 @@ defmodule CodexPooler.Gateway.Payloads.NativeCodexTurnMetadataTest do
     end
   end
 
+  # A native HTTP request carries the canonical document in a header, and the
+  # remote compaction claim its HTTPS fallback derives binds the same window
+  # digest the websocket frame's parsed metadata carries (findings#270 row
+  # 270-357); a window `parse/2` would refuse names none.
+  test "digests a canonical document's window as the parsed metadata does, and nothing else" do
+    window = "019a0000-0000-7000-8000-000000000357:1"
+    canonical = %{"window_id" => window, "request_kind" => "compaction"}
+
+    assert NativeCodexTurnMetadata.canonical_window_digest(canonical) == {:ok, NativeCodexTurnMetadata.window_id_digest(window)}
+
+    for invalid <- [%{}, %{"window_id" => nil}, %{"window_id" => ""}, %{"window_id" => "   "}, %{"window_id" => 1}, %{"window_id" => String.duplicate("w", 257)}, %{"window_id" => <<0xFF>>}] do
+      assert NativeCodexTurnMetadata.canonical_window_digest(invalid) == :error
+    end
+
+    for not_a_document <- [nil, "window", [window]] do
+      assert NativeCodexTurnMetadata.canonical_window_digest(not_a_document) == :error
+    end
+  end
+
   # The released client's window id is `<thread>:<window number>`; the number
   # starts at 0 and moves by one per completed compaction (findings#289).
   test "reads the thread of a released window id and nothing else" do

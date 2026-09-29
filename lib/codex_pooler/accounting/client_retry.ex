@@ -634,14 +634,8 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
     query =
       case input do
-        %{retry_policy: :native_compaction} ->
-          from turn in query,
-            join: request in Request,
-            on: request.id == turn.request_id,
-            where: request.endpoint == "/backend-api/codex/responses/compact"
-
-        _other_policy ->
-          query
+        %{retry_policy: :native_compaction} -> compaction_original_query(query, input)
+        _other_policy -> query
       end
 
     Repo.exists?(query)
@@ -1302,8 +1296,32 @@ defmodule CodexPooler.Accounting.ClientRetry do
     end
   end
 
-  defp lock_predecessor_turn_row(query, %{retry_policy: :native_compaction}),
-    do: Repo.one(from(turn in query, order_by: [desc: turn.turn_sequence]))
+  # A native compaction's resend repeats the compaction holding the claim it
+  # derives (`original_request_claim`), which binds the compaction's window
+  # (`WebsocketTurnIdentity.remote_compaction_claim_key/3`), so its predecessor
+  # is the newest node of that compaction's chain: the request holding the
+  # claim, then the successors its links name. Every request of a turn shares
+  # the turn's digest, and the newest row of the digest used to be taken
+  # instead: the resume after the turn's first compaction, whose endpoint
+  # refused every full-history send of the turn's second compaction
+  # `authorization_changed` (findings#270 row 270-354), or, among the turn's
+  # compactions only, the first compaction, to which a second one sent first
+  # as full history (its socket closed during the tool round in between) was
+  # chained, or refused once the first one's window had passed (row 270-357).
+  # A request of the turn newer than the chain means the client completed the
+  # compaction and went on: it resends only a compaction it did not complete,
+  # so that resend is refused.
+  defp lock_predecessor_turn_row(query, %{retry_policy: :native_compaction} = input) do
+    scope = exclude(query, :lock)
+
+    with %CodexTurn{} = original <- Repo.one(compaction_original_query(scope, input)),
+         %CodexTurn{} = tail <- compaction_chain_tail(scope, original, 0),
+         false <- Repo.exists?(from(turn in scope, where: turn.turn_sequence > ^tail.turn_sequence)) do
+      Repo.one(from(turn in query, where: turn.id == ^tail.id))
+    else
+      _no_chain_or_moved_on -> nil
+    end
+  end
 
   # Every tool continuation of one user turn shares the semantic digest, so the
   # client retry policy judges the newest original request of that turn rather
@@ -1324,11 +1342,11 @@ defmodule CodexPooler.Accounting.ClientRetry do
       Repo.one(from(turn in query, order_by: [desc: turn.turn_sequence]))
   end
 
-  # The newest compaction of the turn is the predecessor once it settled, a
-  # successor included: the resend chains onto it (findings#270 row 270-237
-  # (a)). A successor still unsettled (claimed and never attempted, or still
-  # running) is judged from its own predecessor, which reclaims it or answers
-  # `successor_claimed`.
+  # The newest node of the compaction's chain is the predecessor once it
+  # settled, a successor included: the resend chains onto it (findings#270 row
+  # 270-237 (a)). A successor still unsettled (claimed and never attempted, or
+  # still running) is judged from its own predecessor, which reclaims it or
+  # answers `successor_claimed`.
   defp resolve_predecessor_turn(%CodexTurn{status: status, completed_at: %DateTime{}} = turn, %{retry_policy: :native_compaction})
        when status != "in_progress",
        do: turn
@@ -1351,6 +1369,39 @@ defmodule CodexPooler.Accounting.ClientRetry do
   end
 
   defp resolve_predecessor_turn(turn, _input), do: turn
+
+  # The turn row of the compaction holding the claim a native compaction's
+  # resend derives; a resend without one repeats no recorded compaction.
+  defp compaction_original_query(query, %{original_request_claim: claim}) when is_binary(claim) do
+    from turn in query,
+      join: request in Request,
+      on: request.id == turn.request_id,
+      where: request.endpoint == "/backend-api/codex/responses/compact" and request.correlation_id == ^claim
+  end
+
+  defp compaction_original_query(query, _input), do: from(turn in query, where: false)
+
+  # The newest turn row of the chain from `turn`, through the successors its
+  # links name inside the same session and turn. A request carries at most one
+  # link on each side, so the chain is a list; a successor recorded without a
+  # turn row of this turn (a native HTTP fallback) ends the walk, as it ended
+  # the newest-row lookup it replaces.
+  defp compaction_chain_tail(_scope, turn, depth) when depth >= @max_chain_depth, do: turn
+
+  defp compaction_chain_tail(scope, turn, depth) do
+    successor =
+      Repo.one(
+        from successor in scope,
+          join: link in RequestClientRetryLink,
+          on: link.successor_request_id == successor.request_id,
+          where: link.predecessor_request_id == ^turn.request_id and successor.turn_sequence > ^turn.turn_sequence
+      )
+
+    case successor do
+      %CodexTurn{} -> compaction_chain_tail(scope, successor, depth + 1)
+      nil -> turn
+    end
+  end
 
   defp lock_attempt(attempt_id, request_id) when is_binary(attempt_id) do
     Repo.one(
@@ -2010,14 +2061,33 @@ defmodule CodexPooler.Accounting.ClientRetry do
   like an undelivered completion (findings#206 rows 206-330 and 206-332,
   precedent row 232-201). Only the compact route, generation zero.
 
+  A settled compaction is admitted without reading its delivery receipt
+  (findings#270 row 270-357). The receipt records what the Pooler wrote to the
+  connection, not what the client read: a reply written into a connection
+  that is then lost records `delivered` with a `response.completed` terminal,
+  as a reply the client read does, so requiring an undelivered receipt would
+  refuse the lost reply this rule exists for. The resend itself, under the
+  claim that binds the compaction's window
+  (`WebsocketTurnIdentity.remote_compaction_claim_key/3`), is the proof the
+  reply was lost; the proof the client read it is the turn's next request,
+  after which the resend is refused in both topologies (the owner's
+  compaction policy, `lock_predecessor_turn_row/2`, and
+  `FailedPredecessorResend`). Until the claim bound the window, every remote
+  compaction of a turn derived the same claim, and a later compaction was
+  taken for the resend of the first one.
+
   On a websocket the Pooler's own cut of a compaction it had started
   collecting counts too: a rollout drain (`owner_drained`) or an executor
   proven dead (`dead_execution_recovered`), with the only terminal the client
   was written the cut's error, or none. The released client reads that error
   as its compaction's failure and resends the compaction; it used to be
   refused twice and then bought again over HTTPS (findings#270 row 270-352).
-  A cut before the collection started keeps its own shapes
-  (`compaction_resend_shape/3`).
+  Here the receipt is read, because it admits a predecessor that failed: a
+  `response.completed` written before the cut, or no receipt at all, keeps
+  the fence. That is the conservative choice for a drain that cut right after
+  the terminal went out, when the orderly close that follows (1001) makes a
+  lost terminal unlikely. A cut before the collection started keeps its own
+  shapes (`compaction_resend_shape/3`).
   """
   @spec verified_unreceived_compaction?(term(), term(), term()) :: boolean()
   def verified_unreceived_compaction?(

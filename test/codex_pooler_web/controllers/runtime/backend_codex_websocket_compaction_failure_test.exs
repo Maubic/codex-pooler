@@ -671,23 +671,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionFailureTest do
         )
       )
 
-    # This lower-level service fixture enters through the semantic claim path.
-    # Production public websocket frames redeem a one-shot capability and store
-    # an owner-authorized UUID instead; the released-client smoke proves that
-    # full path. Keep this focused regression on the persisted predecessor shape.
-    request =
-      request
-      |> Ecto.Changeset.change(correlation_id: Ecto.UUID.generate())
-      |> Repo.update!()
-
-    assert request.status == "failed"
-    assert request.last_error_code == "upstream_stream_error"
-    assert {:ok, request.correlation_id} == Ecto.UUID.cast(request.correlation_id)
-    refute String.starts_with?(request.correlation_id, "codex-turn:")
-
-    assert [%{status: "failed"}] =
-             Repo.all(from(t in CodexTurn, where: t.request_id == ^request.id))
-
     full_history_retry_payload =
       payload
       |> CodexPooler.JSON.decode!()
@@ -700,6 +683,25 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionFailureTest do
                RequestOptions.capture_api_key_runtime_epoch(options, auth),
                fn frame -> send(self(), {:retry_frame, frame}) end
              )
+
+    # This lower-level service fixture enters without the owner's admission,
+    # so the anchored compaction took the claim its own frame derived.
+    # Production records an admitted anchored compaction under the claim its
+    # full-history resend derives (findings#206 row 206-310), bound to the
+    # compaction's window (findings#270 row 270-351), and the owner's policy
+    # meets the resend through the request holding that claim (row 270-354):
+    # the predecessor is given that persisted shape.
+    request =
+      request
+      |> Ecto.Changeset.change(correlation_id: prepared_retry.request_options.continuity.request_claim_key)
+      |> Repo.update!()
+
+    assert request.status == "failed"
+    assert request.last_error_code == "upstream_stream_error"
+    assert String.starts_with?(request.correlation_id, "codex-request:")
+
+    assert [%{status: "failed"}] =
+             Repo.all(from(t in CodexTurn, where: t.request_id == ^request.id))
 
     assert {:ok,
             %{

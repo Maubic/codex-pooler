@@ -122,6 +122,23 @@ defmodule CodexPooler.Gateway.Payloads.NativeCodexTurnMetadata do
   @spec context_id_digest(String.t()) :: digest()
   def context_id_digest(value), do: digest(:context_window_id, value)
 
+  @doc """
+  The digest of a canonical turn metadata document's `window_id`
+  (`window_id_digest/1`), validated as `parse/2` validates a compaction's, or
+  `:error` when the document names no usable window. A native HTTP request
+  carries the document in its `x-codex-turn-metadata` header, so this names
+  the window a websocket frame's parsed metadata names for the same document.
+  """
+  @spec canonical_window_digest(term()) :: {:ok, digest()} | :error
+  def canonical_window_digest(canonical) when is_map(canonical) do
+    case required_identifier(canonical, "window_id") do
+      {:ok, window_id} -> {:ok, window_id_digest(window_id)}
+      {:error, _reason} -> :error
+    end
+  end
+
+  def canonical_window_digest(_canonical), do: :error
+
   @spec compaction_item_digest(map()) :: digest()
   def compaction_item_digest(item) when is_map(item) do
     digest(:native_compaction_item, :erlang.term_to_binary(item, [:deterministic]))

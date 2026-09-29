@@ -22,12 +22,12 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentityTest do
              )
   end
 
-  # The anchored form of a native compaction and its full-history resend after
-  # a reconnect differ only in `input` and `previous_response_id`; both must
-  # name one claim, while the next compaction of the turn (on the window the
-  # client advances after a completed compaction) or another turn must not
-  # (findings#206 row 206-310).
-  test "a native compaction claim is the same for the anchored form and its full-history resend" do
+  # A compaction request whose payload keeps its client metadata (a local
+  # compaction's summarization request, findings#282) names its window through
+  # `x-codex-window-id`: an identical resend names one claim, while the next
+  # compaction of the thread (on the window the client advances after a
+  # completed compaction) or another turn must not.
+  test "a native compaction claim over a payload that keeps its client metadata binds its window" do
     semantic = :crypto.hash(:sha256, "synthetic-compaction-turn")
     trigger = %{"type" => "compaction_trigger"}
     history = [%{"type" => "message", "role" => "user", "content" => "synthetic"}, %{"type" => "message", "role" => "assistant", "content" => "synthetic answer"}]
@@ -52,6 +52,41 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentityTest do
     refute claim == WebsocketTurnIdentity.compaction_claim_key(semantic, full_history)
     refute claim == WebsocketTurnIdentity.native_compaction_claim_key(semantic, put_in(full_history, ["client_metadata", "x-codex-window-id"], "synthetic-thread:1"))
     refute claim == WebsocketTurnIdentity.native_compaction_claim_key(:crypto.hash(:sha256, "synthetic-other-turn"), full_history)
+  end
+
+  # A remote compaction's payload has been through the compaction bridge,
+  # which keeps no client metadata. The anchored form and its full-history
+  # resend after a reconnect differ only in `input` and `previous_response_id`
+  # and share the compaction's window, read from its turn metadata before the
+  # bridge: both name one claim (findings#206 row 206-310). The turn's next
+  # compaction, one window later, must not (findings#270 row 270-351): from
+  # the bridged payload alone it did.
+  test "a remote compaction claim is the same for the anchored form and its full-history resend, and binds the window" do
+    semantic = :crypto.hash(:sha256, "synthetic-compaction-turn")
+    window = :crypto.hash(:sha256, "synthetic-thread:0")
+    next_window = :crypto.hash(:sha256, "synthetic-thread:1")
+    trigger = %{"type" => "compaction_trigger"}
+    history = [%{"type" => "message", "role" => "user", "content" => "synthetic"}, %{"type" => "message", "role" => "assistant", "content" => "synthetic answer"}]
+    full_history = %{"model" => "gpt-test-model", "instructions" => "synthetic", "input" => history ++ [trigger], "store" => false, "stream" => true}
+    anchored = full_history |> Map.put("input", [trigger]) |> Map.put("previous_response_id", "resp_synthetic_anchor")
+
+    claim = WebsocketTurnIdentity.remote_compaction_claim_key(semantic, window, full_history)
+
+    assert WebsocketTurnIdentity.request_claim?(claim)
+    assert WebsocketTurnIdentity.native_claim?(claim)
+    assert claim == WebsocketTurnIdentity.remote_compaction_claim_key(semantic, window, anchored)
+    refute claim == WebsocketTurnIdentity.remote_compaction_claim_key(semantic, next_window, full_history)
+    refute claim == WebsocketTurnIdentity.remote_compaction_claim_key(semantic, next_window, anchored)
+    refute claim == WebsocketTurnIdentity.native_compaction_claim_key(semantic, full_history)
+    refute claim == WebsocketTurnIdentity.compaction_claim_key(semantic, full_history)
+    refute claim == WebsocketTurnIdentity.remote_compaction_claim_key(:crypto.hash(:sha256, "synthetic-other-turn"), window, full_history)
+    refute claim == WebsocketTurnIdentity.remote_compaction_claim_key(semantic, window, Map.put(full_history, "model", "other"))
+
+    # Client metadata a bridge keeps, a send's start timestamp or a transport's
+    # Lite marker never moves it.
+    client_metadata = %{"x-codex-window-id" => "synthetic-thread:0", "x-codex-ws-stream-request-start-ms" => "1", "ws_request_header_x_openai_internal_codex_responses_lite" => "true"}
+    assert claim == WebsocketTurnIdentity.remote_compaction_claim_key(semantic, window, Map.put(anchored, "client_metadata", client_metadata))
+    assert claim == WebsocketTurnIdentity.remote_compaction_claim_key(semantic, window, Map.put(full_history, "client_metadata", %{"x-codex-ws-stream-request-start-ms" => "2"}))
   end
 
   describe "claim_scope/2" do

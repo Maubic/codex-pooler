@@ -159,8 +159,12 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
     end
   end
 
+  # The turn's next compaction runs one window later under a claim of its own
+  # (findings#270 rows 270-351 and 270-357): its resend meets it, never the
+  # older compaction's chain, and the older one's resend after it is refused,
+  # since the client completed that one and went on.
   for terminal_status <- ["failed", "interrupted"] do
-    test "selects the newest #{terminal_status} compaction when an older failure already has a successor" do
+    test "selects the turn's newer #{terminal_status} compaction by its own claim when an older failure already has a successor" do
       {setup, older, opts} = predecessor!("client_disconnected", 0)
 
       assert {:ok, older_claim} =
@@ -169,11 +173,12 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
       completed_at = DateTime.utc_now()
       update!(older_claim.request, status: "succeeded", completed_at: completed_at)
       update!(older_claim.codex_turn, status: "succeeded", completed_at: completed_at)
+      newer_claim_key = compaction_claim()
 
       assert {:ok, %{request: newer}} =
                Accounting.claim_websocket_turn(setup.auth, setup.model, %{
                  endpoint: opts.endpoint,
-                 correlation_id: Ecto.UUID.generate(),
+                 correlation_id: newer_claim_key,
                  native_client_retry_witness:
                    ClientRetry.original_witness!(
                      opts.replay_claim_digest,
@@ -218,8 +223,20 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
       assert {:error, :terminal_predecessor} =
                Accounting.claim_client_retry_successor(setup.auth, setup.model, %{}, opts)
 
-      assert {:ok, newer_claim} =
+      counts = row_counts()
+
+      assert {:error, :terminal_predecessor} =
                Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+
+      assert row_counts() == counts
+
+      assert {:ok, newer_claim} =
+               Accounting.claim_compaction_retry_successor(
+                 setup.auth,
+                 setup.model,
+                 %{},
+                 Map.put(opts, :original_request_claim, newer_claim_key)
+               )
 
       assert newer_claim.predecessor_request_id == newer.id
       assert newer_claim.link.predecessor_request_id == newer.id
@@ -415,11 +432,12 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
   for endpoint <- ["/backend-api/codex/responses", "/backend-api/codex/responses/compact"] do
     test "does not revive an older failed compact after a newer successful #{endpoint} turn" do
       {setup, predecessor, opts} = predecessor!("upstream_stream_error", 0)
+      newer_claim_key = if(unquote(endpoint) == "/backend-api/codex/responses/compact", do: compaction_claim(), else: Ecto.UUID.generate())
 
       assert {:ok, %{request: newer}} =
                Accounting.claim_websocket_turn(setup.auth, setup.model, %{
                  endpoint: unquote(endpoint),
-                 correlation_id: Ecto.UUID.generate()
+                 correlation_id: newer_claim_key
                })
 
       completed_at = DateTime.utc_now()
@@ -448,25 +466,56 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
       })
 
       counts = row_counts()
-      claimed = Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+
+      # A request of the turn newer than the compaction's chain means the
+      # client completed that compaction and went on: the resume after it, or
+      # the turn's next compaction, one window later under a claim of its own.
+      # The client resends only a compaction it did not complete, so the older
+      # one's resend is refused and nothing revives it (findings#270 rows
+      # 270-354 and 270-357). Before, the newest request of the turn was the
+      # predecessor whatever its claim: a newer compaction took the older
+      # one's resend, and a newer resume refused every full-history send of
+      # the turn's next compaction `authorization_changed`.
+      assert {:error, :terminal_predecessor} =
+               Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
 
       refute Repo.exists?(
                from link in RequestClientRetryLink,
                  where: link.predecessor_request_id == ^predecessor.id
              )
 
-      # A newer compaction of the same digest that succeeded is the one the
-      # resend repeats: the client resends a compaction only when it did not
-      # read its reply, so that one is chained, never the older failed one
-      # (findings#206 row 206-330). A newer ordinary turn keeps the fence.
+      assert row_counts() == counts
+
+      # The newer compaction's own resend, under the claim it holds, is chained
+      # onto it: the client resends a compaction only when it did not read its
+      # reply (findings#206 row 206-330).
       if unquote(endpoint) == "/backend-api/codex/responses/compact" do
-        assert {:ok, %{predecessor_request_id: predecessor_request_id}} = claimed
+        assert {:ok, %{predecessor_request_id: predecessor_request_id}} =
+                 Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, Map.put(opts, :original_request_claim, newer_claim_key))
+
         assert predecessor_request_id == newer.id
-      else
-        assert {:error, _reason} = claimed
-        assert row_counts() == counts
       end
     end
+  end
+
+  # A resend whose claim no compaction of the turn holds repeats nothing
+  # recorded: the owner's preflight answers `:none`, the frame is served as a
+  # new compaction, and a successor claim is refused. The turn's second
+  # compaction sent first as full history (its socket closed during the tool
+  # round before it) was chained to the first one (findings#270 row 270-357).
+  test "a compaction resend whose claim no compaction of the turn holds is new, not a resend of the turn's compaction" do
+    {setup, predecessor, opts} = predecessor!("client_disconnected", 0)
+    opts = Map.put(opts, :original_request_claim, compaction_claim())
+    counts = row_counts()
+
+    assert :none =
+             ClientRetry.preflight_snapshot(opts.codex_session, setup.api_key, setup.model, Map.put(opts, :retry_policy, :native_compaction))
+
+    assert {:error, :terminal_predecessor} =
+             Accounting.claim_compaction_retry_successor(setup.auth, setup.model, %{}, opts)
+
+    assert row_counts() == counts
+    refute Repo.exists?(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^predecessor.id))
   end
 
   test "rejects expired, visible, mismatched and unauthorized predecessors without side effects" do
@@ -963,6 +1012,7 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
     semantic = :crypto.strong_rand_bytes(32)
     digest = :crypto.strong_rand_bytes(32)
     endpoint = "/backend-api/codex/responses/compact"
+    claim = compaction_claim()
     parent = self()
 
     child =
@@ -977,7 +1027,7 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
                %{
                  endpoint: endpoint,
                  transport: "websocket",
-                 correlation_id: Ecto.UUID.generate()
+                 correlation_id: claim
                }
              )
 
@@ -1068,6 +1118,7 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
        runtime_revocation_epoch: setup.api_key.runtime_revocation_epoch,
        codex_session: session,
        semantic_turn_digest: semantic,
+       original_request_claim: claim,
        replay_claim_digest: digest
      }}
   end
@@ -1169,11 +1220,12 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
     semantic = :crypto.strong_rand_bytes(32)
     endpoint = "/backend-api/codex/responses/compact"
     witness = ClientRetry.original_witness!(digest, setup.api_key.runtime_revocation_epoch)
+    claim = compaction_claim()
 
     assert {:ok, %{request: request}} =
              Accounting.claim_websocket_turn(setup.auth, setup.model, %{
                endpoint: endpoint,
-               correlation_id: Ecto.UUID.generate(),
+               correlation_id: claim,
                native_client_retry_witness: witness
              })
 
@@ -1223,11 +1275,16 @@ defmodule CodexPooler.Accounting.CompactionRetryTest do
       runtime_revocation_epoch: setup.api_key.runtime_revocation_epoch,
       codex_session: session,
       semantic_turn_digest: semantic,
+      original_request_claim: claim,
       replay_claim_digest: digest
     }
 
     {setup, request, opts}
   end
+
+  # A compaction claim in its wire form (`WebsocketTurnIdentity.remote_compaction_claim_key/3`):
+  # the resend policy meets the compaction holding the claim the resend derives.
+  defp compaction_claim, do: "codex-request:" <> Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
 
   # The refused compaction as the guard's refusal settles it: `stream_incomplete`
   # everywhere, a turn stamped visible when collection started, and one
