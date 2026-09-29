@@ -21,12 +21,15 @@ defmodule CodexPoolerWeb.Runtime.OwnerCallHold do
   native compaction admission snapshot, or an owner's status (the reuse check
   a socket's init makes before it attaches). `:pre_attempt_admission` holds an
   owner right before it handles a turn's pre-attempt admission registration
-  instead, so that call itself meets the held owner.
+  instead, so that call itself meets the held owner. `:detach_downstream`
+  holds an owner right before it handles a closing socket's detach, so the
+  socket's earlier calls (its pre-visible detach) are answered and only the
+  detach meets the held owner.
   """
   # The hook's state is a map: `:sys` reads an installed `{func, state}` whose
   # state is a two-tuple as `{func_id, {func, state}}`, and silently drops it.
   def install(server, ref, test, reply \\ :first_compact_authorization)
-      when is_reference(ref) and is_pid(test) and reply in [:first_compact_authorization, :admission_snapshot, :owner_status, :pre_attempt_admission],
+      when is_reference(ref) and is_pid(test) and reply in [:first_compact_authorization, :admission_snapshot, :owner_status, :pre_attempt_admission, :detach_downstream],
       do: :sys.install(server, {&__MODULE__.hook/3, %{ref: ref, test: test, reply: reply}})
 
   @doc false
@@ -53,5 +56,6 @@ defmodule CodexPoolerWeb.Runtime.OwnerCallHold do
   defp held_reply?(:owner_status, {:out, {:ok, %{upstream_alive?: _, draining?: _}}, _to}), do: true
   defp held_reply?(:owner_status, {:out, {:ok, %{upstream_alive?: _, draining?: _}}, _to, _state}), do: true
   defp held_reply?(:pre_attempt_admission, {:in, {:"$gen_call", _from, {:register_pre_attempt_admission_v1, _context}}}), do: true
+  defp held_reply?(:detach_downstream, {:in, {:"$gen_call", _from, {:detach_downstream, _pid, _epoch, _correlation_id}}}), do: true
   defp held_reply?(_reply, _event), do: false
 end

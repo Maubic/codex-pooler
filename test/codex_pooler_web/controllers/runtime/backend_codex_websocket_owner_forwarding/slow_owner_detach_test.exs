@@ -18,9 +18,17 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerD
   # that answers in time. Owner forwarding on, native route, the Pool's
   # default serving mode, the released client's frames, FakeUpstream holding
   # the turn before its first frame (or after two). The owner runs on a
-  # second VM sharing the database and is suspended (`:sys.suspend/1`) past a
-  # one-second owner call budget, set on both nodes, until the socket's
-  # cleanup gave up on it.
+  # second VM sharing the database, booted once for the module, under a
+  # one-second owner call budget set on both nodes. It stops answering until
+  # the socket's cleanup gave up on it:
+  #
+  #   * For the turn that showed output, it is held right before the socket's
+  #     detach (`OwnerCallHold`). The socket's pre-visible call before it is
+  #     answered, as a live owner answers it, so only the detach waits out its
+  #     budget.
+  #   * For the pre-visible turn, it is suspended (`:sys.suspend/1`) before
+  #     the client closes. The pre-visible call, whose late answer arms the
+  #     replay, times out on its one-second budget too.
   use CodexPoolerWeb.ConnCase, async: false
 
   import Ecto.Query
@@ -34,6 +42,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerD
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Gateway.Transports.Websocket.OwnerDefaults
   alias CodexPooler.Repo
+  alias CodexPoolerWeb.Runtime.OwnerCallHold
   alias CodexPoolerWeb.Runtime.OwnerLossScenario, as: Scenario
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
 
@@ -63,11 +72,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerD
     end)
   end
 
-  @tag slow: "suspends a peer VM's owner past two one-second detach budgets while the client closes its socket mid-turn"
+  @tag slow: "holds a peer VM's owner at the socket's detach past a one-second owner call budget while the client closes its socket mid-turn"
   test "a turn that showed output is settled client_disconnected once the owner answers, and the client's resend is served", ctx do
     turn = start_turn!(ctx, :visible)
 
-    :ok = close_while_owner_suspended!(turn)
+    :ok = close_while_owner_held_at_detach!(turn, ctx.peer_node)
 
     # The owner cancelled the turn and settled it for the client that left.
     assert :ok = await_request!(turn.request_id, &match?(%Request{status: "failed", response_status_code: 499, last_error_code: "client_disconnected"}, &1))
@@ -141,7 +150,24 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerD
   # budget each, and leaves the turn untouched; then the owner answers again.
   defp close_while_owner_suspended!(turn) do
     :ok = :sys.suspend(turn.owner)
+    :ok = close_and_await_cleanup_left_to_owner!(turn)
+    :sys.resume(turn.owner)
+  end
 
+  # The client closes its socket, and the owner, on the peer, is held right
+  # before it handles the socket's detach. The socket's cleanup gives up on
+  # the detach after the owner call budget and leaves the turn untouched; then
+  # the owner is released and runs the detach.
+  defp close_while_owner_held_at_detach!(turn, peer_node) do
+    ref = make_ref()
+    :ok = :erpc.call(peer_node, OwnerCallHold, :install, [turn.owner, ref, self(), :detach_downstream])
+    :ok = close_and_await_cleanup_left_to_owner!(turn)
+    assert_receive {^ref, :held, owner}, @detection_timeout_ms
+    send(owner, {ref, :release})
+    :ok
+  end
+
+  defp close_and_await_cleanup_left_to_owner!(turn) do
     {_cleaned, log} =
       with_info_log(fn ->
         Mint.HTTP.close(turn.client.conn)
@@ -151,7 +177,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerD
     assert log =~ "websocket owner detach left to the owner after its call budget"
     assert %Request{status: "in_progress"} = Repo.get!(Request, turn.request_id)
     assert %CodexTurn{status: "in_progress"} = Repo.get_by!(CodexTurn, request_id: turn.request_id)
-    :sys.resume(turn.owner)
+    :ok
   end
 
   defp resend!(turn) do
