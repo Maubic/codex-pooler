@@ -30,6 +30,11 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
   @spec acknowledge([String.t()], GenServer.server()) :: :ok | :unknown
   def acknowledge(ids, server \\ __MODULE__), do: call(server, {:acknowledge, ids})
 
+  # The caller (the proof publisher) is asked to publish early each time an
+  # execution ends `process_down`.
+  @spec subscribe(GenServer.server()) :: :ok | :unknown
+  def subscribe(server \\ __MODULE__), do: call(server, :subscribe)
+
   defp call(server, request) do
     GenServer.call(server, request, 1_000)
   catch
@@ -45,6 +50,7 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
          monitors: %{},
          owners: %{},
          pending: %{},
+         subscribers: %{},
          overflow: false,
          expired_warning: false
        }}
@@ -117,10 +123,16 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
     {:reply, :ok, %{state | pending: Map.drop(state.pending, ids), overflow: false, expired_warning: false}}
   end
 
+  def handle_call(:subscribe, {pid, _}, state) do
+    if pid in Map.values(state.subscribers),
+      do: {:reply, :ok, state},
+      else: {:reply, :ok, %{state | subscribers: Map.put(state.subscribers, Process.monitor(pid), pid)}}
+  end
+
   @impl true
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
     case Map.get(state.monitors, ref) do
-      nil -> {:noreply, state}
+      nil -> {:noreply, %{state | subscribers: Map.delete(state.subscribers, ref)}}
       id -> {:noreply, retire(state, id, pid, ref, "process_down")}
     end
   end
@@ -163,6 +175,7 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
     }
 
     if map_size(state.pending) < @pending_limit do
+      if end_kind == "process_down", do: request_early_publication(state.subscribers)
       %{state | pending: Map.put(state.pending, id, proof)}
     else
       unless state.overflow,
@@ -171,4 +184,10 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
       %{state | overflow: true}
     end
   end
+
+  # An execution that ended without delivering its result: a client's resend
+  # of its turn waits for this proof (findings#283). A completed execution
+  # stays on the publisher's tick.
+  defp request_early_publication(subscribers),
+    do: Enum.each(subscribers, fn {_ref, subscriber} -> send(subscriber, :publish_early) end)
 end

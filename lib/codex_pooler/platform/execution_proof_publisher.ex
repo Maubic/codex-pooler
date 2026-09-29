@@ -5,6 +5,7 @@ defmodule CodexPooler.Platform.ExecutionProofPublisher do
 
   alias CodexPooler.Platform.{ExecutionRegistry, ExecutionTerminalProofs}
   @interval_ms 1_000
+  @early_ms 20
 
   @spec start_link(keyword()) :: GenServer.on_start() | :ignore
   def start_link(opts) do
@@ -16,8 +17,17 @@ defmodule CodexPooler.Platform.ExecutionProofPublisher do
   end
 
   @impl true
-  def init(opts),
-    do: {:ok, %{registry: Keyword.get(opts, :registry, ExecutionRegistry), timer: nil, failed: false}, {:continue, :publish}}
+  def init(opts) do
+    state = %{
+      registry: Keyword.get(opts, :registry, ExecutionRegistry),
+      interval_ms: Keyword.get(opts, :interval_ms, @interval_ms),
+      timer: nil,
+      early: nil,
+      failed: false
+    }
+
+    {:ok, state, {:continue, :publish}}
+  end
 
   @impl true
   def handle_continue(:publish, state), do: {:noreply, publish(state)}
@@ -25,14 +35,31 @@ defmodule CodexPooler.Platform.ExecutionProofPublisher do
   @impl true
   def handle_info(:publish, state), do: {:noreply, publish(state)}
 
+  # The registry asks for this when an execution ends `process_down`, without
+  # delivering its result. A client's resend of that execution's turn waits
+  # for its proof: `ClientRetry` admits the resend of an owner-crashed turn
+  # only once the proof exists, and at the one-second tick the released
+  # client's first resend met `409 duplicate_turn` in about half the cases
+  # (findings#283). Requests within `@early_ms` share one publication, and
+  # none brings publication forward while it is failing, which the tick keeps
+  # retrying on its own cadence.
+  def handle_info(:publish_early, %{early: nil, failed: false} = state),
+    do: {:noreply, %{state | early: Process.send_after(self(), :publish, @early_ms)}}
+
+  def handle_info(:publish_early, state), do: {:noreply, state}
+
+  # Subscribing on every publication brings a restarted registry's requests
+  # back within one tick.
   defp publish(state) do
     if state.timer, do: Process.cancel_timer(state.timer)
+    if state.early, do: Process.cancel_timer(state.early)
+    _subscribed = ExecutionRegistry.subscribe(state.registry)
     result = publish_pending(state.registry)
 
     if result == :error and not state.failed,
       do: Logger.warning("execution terminal proof publication unavailable; pending proofs retained")
 
-    %{state | timer: Process.send_after(self(), :publish, @interval_ms), failed: result == :error}
+    %{state | timer: Process.send_after(self(), :publish, state.interval_ms), early: nil, failed: result == :error}
   end
 
   defp publish_pending(registry) do

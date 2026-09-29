@@ -28,6 +28,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
   alias CodexPooler.Gateway.Websocket, as: Gateway
   alias CodexPooler.Gateway.Websocket.Adapter
+  alias CodexPooler.Platform.{ExecutionProofPublisher, ExecutionTerminalProof, ExecutionTerminalProofs}
   alias CodexPooler.Pools.ModelServingOverride
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
@@ -1192,6 +1193,91 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
         refute log =~ "Postgrex.Protocol"
         assert Enum.all?(error_lines(log), &(&1 =~ "WebsocketOwnerSession.Registry" and &1 =~ "terminating"))
       end
+    end
+  end
+
+  # findings#283: the released client resends a turn whose owner's upstream
+  # connection process died before any output. `ClientRetry` admits that
+  # resend only once the terminal proof of the turn's executor exists, and the
+  # publisher wrote proofs only at its one-second tick, so the client's first
+  # resend, about half a second after the owner went, met `409 duplicate_turn`
+  # in about half the cases. The executor ends `process_down` once its socket
+  # closes, and its registry now asks the publisher to write that proof at
+  # once. The publisher here is the production one paired with this VM's
+  # registry, with a tick far beyond the test, so only that early publication
+  # can write the proof. One node, owner forwarding on, native, the Pool's
+  # default serving mode, the real public listener, FakeUpstream holding the
+  # turn before any event.
+  describe "the released client's resend after the owner's upstream connection dies before any output" do
+    test "is admitted once the executor that ended without delivering is published at once" do
+      start_supervised!({ExecutionProofPublisher, enabled: true, name: :owner_death_resend_publisher, interval_ms: 60_000})
+      release_ref = make_ref()
+      created = CodexPooler.JSON.encode!(%{"type" => "response.created", "response" => %{"id" => "resp_owner_death_resend", "status" => "in_progress"}})
+
+      upstream =
+        start_upstream(
+          # provenance: synthetic_adversarial (the owner's upstream session process dies while the provider holds the turn, then the resend is served)
+          FakeUpstream.repeat_last([
+            FakeUpstream.barrier_websocket_frames([created], notify: self(), release_ref: release_ref),
+            completed_response_frames("resp_owner_death_resend_served", [], 3, 2)
+          ])
+        )
+
+      setup = gateway_setup(upstream)
+      {_server, port} = start_public_endpoint_with_server!()
+      frame = released_client_frame(setup, "019a0000-0000-7000-8000-000000000283")
+      turn = frame.(native_text_input("owner death resend"), Ecto.UUID.generate(), %{})
+
+      before = WebsocketCleanupFence.listener_sockets()
+      {conn, websocket, ref} = public_websocket_connect!(port, setup, "ws-owner-death-resend")
+      socket = WebsocketCleanupFence.await_new_listener_socket!(before)
+      {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, turn)
+      assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^release_ref}, @detection_timeout_ms
+      owner = socket_connection_state!(socket).websocket_owner_pid
+      owner_ref = Process.monitor(owner)
+      Process.exit(:sys.get_state(owner).upstream_pid, :kill)
+      assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}, @detection_timeout_ms
+      {conn, _websocket, frames} = receive_frames_until_close!(conn, websocket, ref)
+      assert List.last(frames) == {:close, 1011, "websocket owner crashed"}
+      Mint.HTTP.close(conn)
+      :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(socket)
+
+      assert [predecessor] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
+      assert {predecessor.status, predecessor.last_error_code, predecessor.response_status_code} == {"failed", "owner_crashed", 499}
+      attempt = Repo.get_by!(Attempt, request_id: predecessor.id)
+      :ok = await_execution_proof!(attempt, System.monotonic_time(:millisecond) + 2_000)
+      assert %ExecutionTerminalProof{end_kind: "process_down"} = Repo.get!(ExecutionTerminalProof, attempt.owner_execution_id)
+
+      # The same frame on a new socket, as the released client resends it.
+      before = WebsocketCleanupFence.listener_sockets()
+      {conn, websocket, ref} = public_websocket_connect!(port, setup, "ws-owner-death-resend")
+      socket = WebsocketCleanupFence.await_new_listener_socket!(before)
+      {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, turn)
+      {conn, _websocket, terminal} = receive_native_terminal!(conn, websocket, ref)
+      Mint.HTTP.close(conn)
+      :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(socket)
+
+      assert %{"type" => "response.completed", "response" => %{"id" => "resp_owner_death_resend_served"}} = terminal
+      assert %RequestClientRetryLink{successor_request_id: successor_id} = Repo.get_by!(RequestClientRetryLink, predecessor_request_id: predecessor.id)
+      assert %Request{status: "succeeded"} = Repo.get!(Request, successor_id)
+      assert %CodexTurn{status: "interrupted", error_code: "owner_crashed"} = Repo.get_by!(CodexTurn, request_id: predecessor.id)
+      assert FakeUpstream.count(upstream) == 2
+    end
+  end
+
+  defp await_execution_proof!(attempt, deadline) do
+    cond do
+      ExecutionTerminalProofs.terminal?(attempt) ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("the executor's terminal proof was not published before the publisher's tick")
+
+      true ->
+        receive do
+        after
+          5 -> await_execution_proof!(attempt, deadline)
+        end
     end
   end
 
