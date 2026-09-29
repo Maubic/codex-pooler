@@ -11,7 +11,11 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketTaskFailureAfterTerminalTest do
   #
   # Topology: the real public listener, FakeUpstream, the Pool's default mode
   # (Full), one node, owner forwarding off (direct) and on (local owner). The
-  # settlement fails once through the pricing lookup's test fault.
+  # settlement fails once through the pricing lookup's test fault, a
+  # transient `DBConnection.ConnectionError`. With its retry window closed
+  # (`window_ms: 0`) the task raises that failure as before; within the window
+  # the settlement runs again and the first response settles succeeded
+  # (findings#291).
   use CodexPoolerWeb.ConnCase, async: false
 
   import Ecto.Query
@@ -39,11 +43,20 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketTaskFailureAfterTerminalTest do
 
   @detection_timeout_ms 15_000
 
-  for topology <- [:direct, :local_owner] do
+  for topology <- [:direct, :local_owner], settlement <- [:window_closed, :retried] do
     @tag :v1_websocket
     @tag topology: topology
-    test "#{topology}: a task that fails after the turn's response.completed sends the client nothing, and the next response on the socket is served", %{topology: topology} do
+    @tag settlement: settlement
+    test "#{topology}: #{if settlement == :retried, do: "a settlement retried after a transient failure settles the turn, sends nothing more", else: "a task that fails after the turn's response.completed sends the client nothing"}, and the next response on the socket is served",
+         %{topology: topology, settlement: settlement} do
       put_owner_forwarding!(topology == :local_owner)
+      CodexPooler.TestAppEnv.restore_on_exit(CodexPooler.Gateway.Runtime.Finalization.SettlementRetry)
+
+      Application.put_env(
+        :codex_pooler,
+        CodexPooler.Gateway.Runtime.Finalization.SettlementRetry,
+        if(settlement == :retried, do: [initial_backoff_ms: 10, max_backoff_ms: 50], else: [window_ms: 0])
+      )
 
       upstream =
         start_upstream(
@@ -79,7 +92,8 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketTaskFailureAfterTerminalTest do
       assert [{"response.created", "resp_v1_fault_next"} | _] = next
       assert {"response.completed", "resp_v1_fault_next"} = List.last(next)
       refute Enum.any?(next, &match?({"error", _id}, &1))
-      assert [{"failed", "owner_task_exception"}, {"succeeded", nil}] = Enum.map(await_settled!(setup.pool.id), &{&1.status, &1.last_error_code})
+      first_settlement = if settlement == :retried, do: {"succeeded", nil}, else: {"failed", "owner_task_exception"}
+      assert [^first_settlement, {"succeeded", nil}] = Enum.map(await_settled!(setup.pool.id), &{&1.status, &1.last_error_code})
     end
   end
 

@@ -660,6 +660,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
     CodexPooler.TestAppEnv.restore_on_exit(:settlement_pricing_test_fault)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
+    # The injected failure is a transient `DBConnection.ConnectionError`, which
+    # the settlement would run again within its retry window (findings#291);
+    # with the window closed the task raises it, the shape this resend follows.
+    CodexPooler.TestAppEnv.restore_on_exit(CodexPooler.Gateway.Runtime.Finalization.SettlementRetry)
+    Application.put_env(:codex_pooler, CodexPooler.Gateway.Runtime.Finalization.SettlementRetry, window_ms: 0)
 
     # Strict finite scenario: the first turn streams visible output and its
     # terminal on the single physical connection, then the response task dies

@@ -517,11 +517,14 @@ defmodule CodexPoolerWeb.V1.ResponsesSseRolloutDrainTest do
 
     assert_receive {:rollout_drain_deadline_wait, ^deadline, _}, @await_timeout_ms
 
+    # A transient database failure is retried and, once its window closes,
+    # answered without raising (findings#291), so the raising settlement is an
+    # exception outside that class.
     if fault == :finalization_raise do
       Application.put_env(
         :codex_pooler,
         :settlement_pricing_test_fault,
-        {setup.pool.id, %DBConnection.ConnectionError{message: "synthetic settlement failure"}}
+        {setup.pool.id, %RuntimeError{message: "synthetic settlement failure"}}
       )
     end
 
@@ -529,7 +532,7 @@ defmodule CodexPoolerWeb.V1.ResponsesSseRolloutDrainTest do
     assert {:raised, exception_module} = Task.await(request_task, @await_timeout_ms)
 
     assert exception_module ==
-             if(fault == :relay_raise, do: ArgumentError, else: DBConnection.ConnectionError)
+             if(fault == :relay_raise, do: ArgumentError, else: RuntimeError)
 
     VirtualDeadline.advance(deadline, 200)
 

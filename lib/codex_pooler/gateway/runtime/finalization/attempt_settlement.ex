@@ -14,6 +14,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Gateway.Persistence.SessionContinuity
   alias CodexPooler.Gateway.Persistence.SessionContinuity.OwnerWitness
+  alias CodexPooler.Gateway.Runtime.Finalization.SettlementRetry
 
   @type attrs :: %{optional(atom()) => term()}
   @type usage :: %{optional(atom()) => term()} | %{optional(String.t()) => term()}
@@ -53,7 +54,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
       |> Map.new()
       |> complete_turn_before_commit(CodexTurn.succeeded_status(), nil, attempt, owner_witness)
 
-    Accounting.finalize_success_with_disposition(request, attempt, usage, attrs)
+    :finalize_success
+    |> SettlementRetry.run(request, attempt, fn -> Accounting.finalize_success_with_disposition(request, attempt, usage, attrs) end)
     |> accounting_result(:finalize_success, request, attempt)
   end
 
@@ -75,7 +77,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
         owner_witness
       )
 
-    Accounting.finalize_failure_with_disposition(request, attempt, attrs)
+    :finalize_failure
+    |> SettlementRetry.run(request, attempt, fn -> Accounting.finalize_failure_with_disposition(request, attempt, attrs) end)
     |> accounting_result(:finalize_failure, request, attempt)
   end
 
@@ -104,14 +107,15 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
         owner_witness
       )
 
-    Accounting.finalize_partial_stream_failure_with_disposition(request, attempt, usage, attrs)
+    :finalize_partial_stream_failure
+    |> SettlementRetry.run(request, attempt, fn -> Accounting.finalize_partial_stream_failure_with_disposition(request, attempt, usage, attrs) end)
     |> accounting_result(:finalize_partial_stream_failure, request, attempt)
   end
 
   @spec record_retryable_failure(Request.t(), Attempt.t(), attrs()) :: settlement_result()
   def record_retryable_failure(request, attempt, attrs) do
-    attempt
-    |> Accounting.record_retryable_attempt_failure(attrs)
+    :record_retryable_failure
+    |> SettlementRetry.run(request, attempt, fn -> Accounting.record_retryable_attempt_failure(attempt, attrs) end)
     |> accounting_result(:record_retryable_failure, request, attempt)
   end
 
@@ -126,7 +130,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
         :ok
       end)
 
-    Accounting.finalize_reservation_failure(request, attrs)
+    :finalize_reservation_failure
+    |> SettlementRetry.run(request, nil, fn -> Accounting.finalize_reservation_failure(request, attrs) end)
     |> accounting_result(:finalize_reservation_failure, request)
   end
 
@@ -153,6 +158,11 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
        do: {:stale_generation, value}
 
   defp accounting_result({:ok, value}, _operation, _request, _attempt), do: {:ok, value}
+
+  # `SettlementRetry` already logged the one warning that names the request
+  # and the stage; the request is left to execution recovery.
+  defp accounting_result({:error, :settlement_retry_exhausted}, _operation, _request, _attempt),
+    do: {:error, %{status: 500, code: "gateway_accounting_failed", message: "gateway accounting finalization failed"}}
 
   defp accounting_result(
          {:error, %{code: code}},
