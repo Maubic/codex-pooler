@@ -400,6 +400,24 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
       ),
       do: %{options | first_compact_collection: provenance}
 
+  # How a step of a compaction's confirmation ended when its owner did not
+  # confirm it: `:unknown` when the owner did not answer within its call budget
+  # (`owner_forward_timeout`, or `timeout` from the connection's session with
+  # owner forwarding off) or the call to it failed in transit (`owner_crashed`),
+  # so it may still apply the step once it answers; `:not_applied` when the
+  # owner is gone (exited, drained, replaced, or its lease is no longer this
+  # socket's) and never will; `:refused` when it answered with a refusal of
+  # the admission's own (`binding_mismatch`, `stale_downstream`,
+  # `invalid_transition`, ...). Only a refusal proves the compaction
+  # inconsistent with the owner's admission (findings#270 row 270-249).
+  @unanswered_confirmation_reasons [:owner_forward_timeout, :timeout, :owner_crashed]
+  @gone_owner_confirmation_reasons [:owner_unavailable, :stale_owner, :owner_drained, :unavailable]
+
+  @spec compact_confirmation_outcome(term()) :: :unknown | :not_applied | :refused
+  def compact_confirmation_outcome(reason) when reason in @unanswered_confirmation_reasons, do: :unknown
+  def compact_confirmation_outcome(reason) when reason in @gone_owner_confirmation_reasons, do: :not_applied
+  def compact_confirmation_outcome(_reason), do: :refused
+
   @spec acknowledge_native_compact_finalization(
           t(),
           <<_::256>>,
@@ -413,7 +431,7 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
         expires_at_ms
       ) do
     with {:ok, source_phase, control_ref, owner} <- compact_confirmation_source(options),
-         :ok <- record_first_compact_collection_if_needed(options, owner) do
+         :ok <- recorded_unless_refused(record_first_compact_collection_if_needed(options, owner)) do
       confirmation = %NativeCompactionAdmission.Confirmation{
         source_phase: source_phase,
         source_control_ref: control_ref,
@@ -423,6 +441,19 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
       acknowledge_compact_owner(owner, digest, confirmation, expires_at_ms)
     end
   end
+
+  # A first full-history compaction's collection the owner did not confirm is
+  # still followed by its acknowledgement. The owner handles its calls in
+  # order, so one that applies the collection late applies the acknowledgement
+  # right after it and arms the final, instead of keeping a
+  # `collected_unconfirmed` admission that no acknowledgement follows; one
+  # that is gone answers the acknowledgement the same way. A refusal ends the
+  # confirmation there (findings#270 row 270-249).
+  defp recorded_unless_refused({:error, reason} = refused) do
+    if compact_confirmation_outcome(reason) == :refused, do: refused, else: :ok
+  end
+
+  defp recorded_unless_refused(:ok), do: :ok
 
   defp record_first_compact_collection_if_needed(
          %__MODULE__{
@@ -487,7 +518,10 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
     {:ok, :first_full_history_compact, provenance.control_ref, first_compact_owner(options)}
   end
 
-  defp compact_confirmation_source(%__MODULE__{}), do: {:error, :owner_unavailable}
+  # A request with neither provenance never reaches the owner: nothing it
+  # could confirm was reserved or collected, so it is refused as such, never
+  # as an owner that is gone.
+  defp compact_confirmation_source(%__MODULE__{}), do: {:error, :missing_confirmation_provenance}
 
   defp first_compact_owner(%__MODULE__{
          transport: %{upstream_websocket_session: owner, websocket_owner: %{enabled?: false}}

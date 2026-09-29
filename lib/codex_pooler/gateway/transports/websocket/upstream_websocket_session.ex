@@ -53,6 +53,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # The terminals of a response the provider completed. Only these record a
   # response id, a serving mode, or a collected compaction.
   @completed_terminals ["response.completed", "response.done"]
+  # The budget of a caller's call to the session's compaction admission.
+  @admission_call_timeout_ms 1_000
   @five_seconds_ms :timer.seconds(5)
   @thirty_seconds_ms :timer.seconds(30)
   @one_minute_ms :timer.minutes(1)
@@ -224,7 +226,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
         %FirstCompactResult{} = result
       )
       when is_pid(pid) do
-    admission_call(pid, {:authorize_first_compact_collection, binding, result})
+    confirmation_call(pid, {:authorize_first_compact_collection, binding, result})
   end
 
   def authorize_first_compact_collection(_pid, _binding, _control_ref),
@@ -234,7 +236,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
           :ok | {:error, atom()}
   def record_first_compact_collected(pid, %FirstCompactCollection{} = provenance)
       when is_pid(pid) do
-    admission_call(pid, {:record_first_compact_collected, provenance})
+    confirmation_call(pid, {:record_first_compact_collected, provenance})
   end
 
   def record_first_compact_collected(_pid, _provenance), do: {:error, :invalid_input}
@@ -280,7 +282,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
           {:success, <<_::256>>, Confirmation.t(), non_neg_integer()} | :failure
         ) :: :ok | {:error, atom()}
   def acknowledge_compact_finalization(pid, acknowledgement) when is_pid(pid) do
-    admission_call(pid, {:acknowledge_compact_finalization, acknowledgement})
+    confirmation_call(pid, {:acknowledge_compact_finalization, acknowledgement})
   end
 
   def acknowledge_compact_finalization(_pid, _acknowledgement),
@@ -308,8 +310,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   def compaction_admission_phase(_pid), do: {:error, :invalid_input}
 
   defp admission_call(pid, message) do
-    GenServer.call(pid, message, 1_000)
+    GenServer.call(pid, message, @admission_call_timeout_ms)
   catch
+    :exit, _reason -> {:error, :unavailable}
+  end
+
+  # The steps that confirm a compaction the provider already served keep a
+  # session that did not answer within the call budget (`timeout`: it may
+  # still apply the step when it does) apart from one that is gone
+  # (`unavailable`), which the runtime tells apart when it decides whether the
+  # client still gets that compaction (findings#270 row 270-249).
+  defp confirmation_call(pid, message) do
+    GenServer.call(pid, message, @admission_call_timeout_ms)
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
     :exit, _reason -> {:error, :unavailable}
   end
 

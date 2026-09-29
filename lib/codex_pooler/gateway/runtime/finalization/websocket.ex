@@ -504,11 +504,16 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
            lifecycle_id: lifecycle.lifecycle_id,
            generation: lifecycle.generation
          },
-         true <- receipt.item_digest == NativeCodexTurnMetadata.compaction_item_digest(item),
-         {:ok, provenance} <- authorize_collected_first(owner, binding, receipt) do
-      options
-      |> RequestOptions.put_first_compact_collection(provenance)
-      |> acknowledge_native_compact_success(finalization)
+         true <- receipt.item_digest == NativeCodexTurnMetadata.compaction_item_digest(item) do
+      case authorize_collected_first(owner, binding, receipt) do
+        {:ok, provenance} ->
+          options
+          |> RequestOptions.put_first_compact_collection(provenance)
+          |> acknowledge_native_compact_success(finalization)
+
+        {:error, reason} ->
+          deliver_unless_refused(options, :authorize, reason)
+      end
     else
       _invalid -> {:error, compact_ack_error()}
     end
@@ -582,18 +587,56 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
            System.system_time(:millisecond) + @compact_reservation_ttl_ms
          ) do
       :ok -> :ok
-      {:error, _reason} -> {:error, compact_ack_error()}
+      {:error, reason} -> deliver_unless_refused(request_options, :confirm, reason)
     end
+  end
+
+  # A compaction the provider served and billed and the collector validated
+  # reaches its client unless its owner refused to confirm it. The owner may
+  # not answer within its call budget (a slow owner, or the connection's slow
+  # session with forwarding off) and apply the confirmation once it answers
+  # again, which arms the final against the item the client received; or it
+  # may be gone (exited, drained, replaced) and never apply it, which leaves
+  # the final to run as an ordinary turn, as when the provider closed the
+  # connection before the confirmation (findings#275). Both used to answer
+  # `502 invalid_compaction_response`: the client resent the compaction with its
+  # full history, and on the same connection the late confirmation's
+  # `pending_final` refused that resend's first-compact authorization after the
+  # provider had served and billed it, on every retry (findings#270 row
+  # 270-249; the owner gone between collection and confirmation, row 270-170).
+  # A refusal of the admission's own still answers the 502.
+  defp deliver_unless_refused(request_options, step, reason) do
+    case RequestOptions.compact_confirmation_outcome(reason) do
+      :refused ->
+        {:error, compact_ack_error()}
+
+      outcome ->
+        log_unconfirmed_compaction_answer(request_options, step, reason, outcome)
+        :ok
+    end
+  end
+
+  defp log_unconfirmed_compaction_answer(%RequestOptions{} = request_options, step, reason, outcome) do
+    Logger.warning(fn ->
+      "native compaction answered without owner confirmation " <>
+        "step=#{step} " <>
+        "reason=#{DiagnosticTaxonomy.identifier(reason) || "unknown"} " <>
+        "confirmation=#{outcome} " <>
+        "compaction_input_mode=#{compact_confirmation_input_mode(request_options)} " <>
+        "serving_mode=#{serving_mode(request_options)} " <>
+        "correlation_id=#{DiagnosticTaxonomy.safe_correlator(RequestOptions.websocket_request_correlation_id(request_options))} " <>
+        "codex_session_id=#{DiagnosticTaxonomy.safe_correlator(compact_confirmation_session_id(request_options))}"
+    end)
+
+    :ok
   end
 
   # The confirmation binding is only authorized against provenance the request
   # itself carries: the admission capability the socket reserved, or the
   # first-compact collection this finalizer just collected. An incremental
   # compaction whose owner reservation answered `:owner_unavailable` reaches
-  # this point with neither, and `RequestOptions.acknowledge_native_compact_finalization/4`
-  # would answer `:owner_unavailable` for exactly that shape, so the
-  # confirmation fails closed with its own reason instead of dereferencing an
-  # absent provenance (findings#257).
+  # this point with neither, and the confirmation fails closed with its own
+  # reason instead of dereferencing an absent provenance (findings#257).
   defp compact_confirmation_provenance(%RequestOptions{} = request_options) do
     case RequestOptions.native_compaction_admission(request_options) do
       {:ok, capability, _owner, lifecycle} -> {:ok, capability.binding.topology, lifecycle}

@@ -2718,6 +2718,25 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptionsTest do
     end
   end
 
+  # findings#270 row 270-249: only a refusal its owner answered proves a served
+  # compaction inconsistent with the admission; an owner that did not answer
+  # within its call budget, or is gone, leaves the compaction to its client.
+  describe "compact_confirmation_outcome/1" do
+    test "keeps an unanswered confirmation and an owner that is gone apart from a refusal" do
+      for reason <- [:owner_forward_timeout, :timeout, :owner_crashed] do
+        assert RequestOptions.compact_confirmation_outcome(reason) == :unknown
+      end
+
+      for reason <- [:owner_unavailable, :stale_owner, :owner_drained, :unavailable] do
+        assert RequestOptions.compact_confirmation_outcome(reason) == :not_applied
+      end
+
+      for reason <- NativeCompactionAdmission.refusal_reasons() ++ [:stale_downstream, :invalid_input, :missing_confirmation_provenance, :connection_closed, :owner_busy] do
+        assert RequestOptions.compact_confirmation_outcome(reason) == :refused
+      end
+    end
+  end
+
   describe "json_request_bytes/1" do
     test "returns nil for payloads that cannot be encoded as JSON" do
       assert RequestOptions.json_request_bytes(%{"callback" => fn -> :ok end}) == nil
