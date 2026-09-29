@@ -485,6 +485,46 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   end
 
   @doc """
+  Abandons a remote attach whose call timed out: the attach is still in the
+  owner's mailbox, and the owner that takes it late would make the socket that
+  gave up its downstream in place of the live one (findings#270 row 270-248).
+  The answer is ignored under the one-second downstream send budget, like the
+  cancel of a timed-out preflight. An owner node of an earlier release has no
+  `remote_abandon_attach_v1/2`, and its attach runs as before.
+  """
+  @spec abandon_remote_attach(node(), binary(), map(), submit_opts()) :: :ok
+  def abandon_remote_attach(node, codex_session_id, downstream, opts)
+      when is_atom(node) and is_binary(codex_session_id) and is_map(downstream) and is_list(opts) do
+    _ignored =
+      call_remote(
+        node,
+        :remote_abandon_attach_v1,
+        [codex_session_id, Map.take(downstream, [:pid, :correlation_id])],
+        Keyword.put(opts, :timeout, WebsocketOwnerContract.default_downstream_send_timeout_ms())
+      )
+
+    :ok
+  end
+
+  # The record comes first and the owner is looked up after it, as for an
+  # abandoned submission: either the owner takes the attach after the record
+  # and refuses it, or it took it already and the abandon detaches the socket
+  # that gave up.
+  @doc false
+  @spec remote_abandon_attach_v1(binary(), map()) :: :ok
+  def remote_abandon_attach_v1(codex_session_id, %{pid: pid, correlation_id: correlation_id} = downstream)
+      when is_binary(codex_session_id) and is_pid(pid) and is_binary(correlation_id) do
+    :ok = AbandonedSubmissions.record(AbandonedSubmissions.attach_key(codex_session_id, downstream))
+
+    case WebsocketOwnerSession.lookup(codex_session_id) do
+      {:ok, owner_pid} -> WebsocketOwnerSession.abandon_attach(owner_pid, downstream)
+      {:error, _reason} -> :ok
+    end
+  end
+
+  def remote_abandon_attach_v1(_codex_session_id, _downstream), do: :ok
+
+  @doc """
   Builds the remote attach call arguments with rolling-deploy compatibility:
   an attach without options keeps the previous two-argument shape so a new
   proxy node can still attach through an owner node running the prior

@@ -303,6 +303,9 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerPreviousReleaseFixture do
         {:ok, _task_supervisor} =
           Task.Supervisor.start_link(name: CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.TaskSupervisor)
 
+        {:ok, _abandoned_submissions} =
+          Registry.start_link(keys: :unique, name: CodexPooler.Gateway.Transports.Websocket.AbandonedSubmissions.Registry)
+
         send(caller, {ready_ref, :ready})
 
         receive do

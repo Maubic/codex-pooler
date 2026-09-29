@@ -1252,19 +1252,29 @@ defmodule CodexPooler.Gateway.Websocket do
     end
   end
 
+  # An attach that timed out may still reach the owner, which would then make
+  # this socket, gone by then, its downstream in place of the live one
+  # (findings#270 row 270-248): the socket abandons it before giving up.
   defp attach_owner({:remote, node, _owner_instance_id}, codex_session_id, downstream, opts) do
-    WebsocketOwnerForwarder.call_remote(
-      node,
-      :remote_attach_downstream,
-      WebsocketOwnerForwarder.remote_attach_args(
-        codex_session_id,
-        downstream,
-        owner_attach_opts(opts)
-      ),
-      opts
-      |> owner_forwarder_opts()
-      |> Keyword.put_new(:timeout, WebsocketOwnerContract.default_owner_call_timeout_ms())
-    )
+    forwarder_opts = owner_forwarder_opts(opts)
+
+    case WebsocketOwnerForwarder.call_remote(
+           node,
+           :remote_attach_downstream,
+           WebsocketOwnerForwarder.remote_attach_args(
+             codex_session_id,
+             downstream,
+             owner_attach_opts(opts)
+           ),
+           Keyword.put_new(forwarder_opts, :timeout, WebsocketOwnerContract.default_owner_call_timeout_ms())
+         ) do
+      {:error, :owner_forward_timeout} = timeout ->
+        :ok = WebsocketOwnerForwarder.abandon_remote_attach(node, codex_session_id, downstream, forwarder_opts)
+        timeout
+
+      result ->
+        result
+    end
   end
 
   defp detach_owner({:local, owner_instance_id}, codex_session_id, downstream, opts) do

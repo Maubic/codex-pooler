@@ -25,6 +25,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.AbandonedSubmissions do
   # submission registers its owner and then reads the record, so one of them
   # always sees the other: either the submission finds the record and is
   # refused, or the abandon finds the owner and abandons the turn there.
+  #
+  # An attach a socket abandoned after its call to a remote owner timed out
+  # is recorded the same way, under `{:attach, session, socket pid,
+  # correlation id}` (findings#270 row 270-248). The call is already in the
+  # stalled owner's mailbox, so the owner consumes the record when it takes
+  # the attach, and refuses it instead of making the socket that gave up its
+  # downstream in place of the live one.
 
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
 
@@ -32,7 +39,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.AbandonedSubmissions do
   @supervisor WebsocketOwnerSession.TaskSupervisor
   @ttl_ms :timer.minutes(10)
 
-  @type key :: {binary(), pid(), term(), term(), pid()}
+  @type key :: {binary(), pid(), term(), term(), pid()} | {:attach, binary(), pid(), binary()}
 
   @spec registry() :: atom()
   def registry, do: @registry
@@ -43,6 +50,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.AbandonedSubmissions do
       do: {codex_session_id, pid, epoch, correlation_id, owner_turn_id}
 
   def key(_codex_session_id, _downstream), do: nil
+
+  @spec attach_key(binary(), map()) :: key() | nil
+  def attach_key(codex_session_id, %{pid: pid, correlation_id: correlation_id})
+      when is_binary(codex_session_id) and is_pid(pid) and is_binary(correlation_id),
+      do: {:attach, codex_session_id, pid, correlation_id}
+
+  def attach_key(_codex_session_id, _downstream), do: nil
 
   # Returns once the key is registered, so a submission that reads the record
   # after this call returned sees it.

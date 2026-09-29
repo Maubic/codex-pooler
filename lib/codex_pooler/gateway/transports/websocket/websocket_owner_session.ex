@@ -13,6 +13,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
   alias CodexPooler.Gateway.Transports.Streaming.RuntimeAdmissionProof
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
+  alias CodexPooler.Gateway.Transports.Websocket.AbandonedSubmissions
   alias CodexPooler.Gateway.Transports.Websocket.ActivityRegistry
   alias CodexPooler.Gateway.Transports.Websocket.CompactionRetrySubmitHold
   alias CodexPooler.Gateway.Transports.Websocket.ForwardedOwnerRequestHandoff
@@ -317,6 +318,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       owner_call_timeout()
     )
   end
+
+  @doc """
+  Detaches `downstream` when it is the attached one: its socket abandoned the
+  attach after its call timed out, and the owner took the attach before the
+  abandon's record (findings#270 row 270-248). The downstream it replaced is
+  not restored; that socket meets `stale_owner` on its next request and
+  attaches again on its retry.
+  """
+  @spec abandon_attach(GenServer.server(), map()) :: :ok
+  def abandon_attach(owner, %{pid: pid, correlation_id: correlation_id})
+      when is_pid(pid) and is_binary(correlation_id),
+      do: GenServer.cast(owner, {:abandon_attach, pid, correlation_id})
 
   @spec restore_downstream(GenServer.server(), downstream()) ::
           {:ok, downstream()} | {:error, term()}
@@ -1713,6 +1726,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   # instead of redirecting the running turn's frames.
   def handle_call({:attach_downstream, pid, correlation_id, opts}, _from, state) do
     cond do
+      abandoned_attach?(state, pid, correlation_id) ->
+        {:reply, {:error, :stale_downstream}, state}
+
       Keyword.get(opts, :reject_if_busy, false) and owner_occupied?(state) and
           not suspended_replay_attachable?(state.suspended_replay) ->
         {:reply, {:error, :owner_busy}, state}
@@ -2302,6 +2318,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
     {:noreply, state}
   end
+
+  # The abandoned attach is the attached downstream: it is lost the way a
+  # downstream that exits is, through the same monitor path, and its monitor
+  # is dropped first so the exit of the socket that gave up is not taken a
+  # second time. The attach was taken already, so its record has nothing left
+  # to refuse.
+  def handle_cast({:abandon_attach, pid, correlation_id}, %{downstream: %{pid: pid, correlation_id: correlation_id}, downstream_monitor: monitor} = state)
+      when is_reference(monitor) do
+    AbandonedSubmissions.consume(AbandonedSubmissions.attach_key(state.codex_session_id, state.downstream))
+    Process.demonitor(monitor, [:flush])
+    handle_info({:DOWN, monitor, :process, pid, :abandoned_attach}, state)
+  end
+
+  def handle_cast({:abandon_attach, _pid, _correlation_id}, state), do: {:noreply, state}
 
   def handle_cast(:begin_drain, state), do: {:noreply, begin_drain_state(state)}
 
@@ -3431,6 +3461,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     do: status in [:armed, :provisional, :consume_reserved, :committed_not_started]
 
   defp suspended_replay_attachable?(_suspended), do: false
+
+  # An attach its socket abandoned after its call timed out (findings#270 row
+  # 270-248): the abandon recorded it on this node before this owner took it.
+  defp abandoned_attach?(state, pid, correlation_id),
+    do: AbandonedSubmissions.consume(AbandonedSubmissions.attach_key(state.codex_session_id, %{pid: pid, correlation_id: correlation_id}))
 
   defp attach_downstream_now(state, pid, correlation_id) do
     state = settle_probe_before_reconnect(state)

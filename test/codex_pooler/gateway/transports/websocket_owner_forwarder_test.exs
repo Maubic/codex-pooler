@@ -330,6 +330,58 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     end
   end
 
+  # A socket whose attach to a remote owner timed out abandons the attach on
+  # the owner's node before it gives up, while the attach still waits in the
+  # stalled owner's mailbox (findings#270 row 270-248). The record comes before
+  # the owner is looked up, and the owner that takes the attach afterwards
+  # refuses it once: the live socket stays its downstream. An owner node of an
+  # earlier release has no entrypoint for the abandon, and its failure is
+  # ignored.
+  test "an abandoned attach is refused once by the owner that takes it after the abandon", %{auth: auth} do
+    %{session: session} = owner_session_fixture(auth, Atom.to_string(node()), "abandoned-attach")
+    upstream = WebsocketOwnerNodeHarness.fake_upstream_boundary(self(), messages: [])
+    {:ok, owner} = start_owner(session, upstream)
+    live = attach_downstream(session.id, "live-attach")
+    abandoned = %{pid: idle_socket!(), correlation_id: "abandoned-attach"}
+    key = AbandonedSubmissions.attach_key(session.id, abandoned)
+    on_exit(fn -> AbandonedSubmissions.consume(key) end)
+
+    assert :ok = WebsocketOwnerForwarder.remote_abandon_attach_v1(session.id, abandoned)
+    assert AbandonedSubmissions.recorded?(key)
+    assert {:error, :stale_downstream} = WebsocketOwnerSession.attach_downstream(owner, abandoned)
+    refute AbandonedSubmissions.recorded?(key)
+    assert :sys.get_state(owner).downstream == live
+    assert {:ok, %{correlation_id: "abandoned-attach"}} = WebsocketOwnerSession.attach_downstream(owner, abandoned)
+
+    earlier_release_node = :"codex_pooler@earlier-release-owner.example"
+    undef = {:error, {:exception, :undef, [{WebsocketOwnerForwarder, :remote_abandon_attach_v1, [session.id, abandoned], []}]}}
+    opts = WebsocketOwnerNodeHarness.node_client_opts([earlier_release_node], calls: %{earlier_release_node => {:return, undef}})
+    assert :ok = WebsocketOwnerForwarder.abandon_remote_attach(earlier_release_node, session.id, abandoned, opts)
+    assert_receive {:websocket_owner_harness_node_call, %{node: ^earlier_release_node, function: :remote_abandon_attach_v1, arity: 2, timeout: 1_000}}
+    assert :ok = WebsocketOwnerSession.drain_owner(owner)
+  end
+
+  # The owner took the attach before the abandon recorded it: the abandon
+  # detaches the socket that gave up, and the socket it replaced is not
+  # restored. That socket meets `stale_owner` on its next request and attaches
+  # again on its retry (findings#270 row 270-248).
+  test "an abandon that arrives after its owner took the attach detaches that socket and restores nothing", %{auth: auth} do
+    %{session: session} = owner_session_fixture(auth, Atom.to_string(node()), "late-abandon")
+    upstream = WebsocketOwnerNodeHarness.fake_upstream_boundary(self(), messages: [])
+    {:ok, owner} = start_owner(session, upstream)
+    _replaced = attach_downstream(session.id, "replaced-attach")
+    abandoned = %{pid: idle_socket!(), correlation_id: "late-abandoned-attach"}
+    assert {:ok, %{correlation_id: "late-abandoned-attach"}} = WebsocketOwnerSession.attach_downstream(owner, abandoned)
+    key = AbandonedSubmissions.attach_key(session.id, abandoned)
+    on_exit(fn -> AbandonedSubmissions.consume(key) end)
+
+    assert :ok = WebsocketOwnerForwarder.remote_abandon_attach_v1(session.id, abandoned)
+    assert %{downstream: nil, downstream_monitor: nil} = :sys.get_state(owner)
+    refute AbandonedSubmissions.recorded?(key)
+    assert Process.alive?(abandoned.pid)
+    assert :ok = WebsocketOwnerSession.drain_owner(owner)
+  end
+
   test "a client retry submission without a recoverable owner refuses instead of raising" do
     downstream = %{pid: self(), epoch: 1, correlation_id: "missing-retry-owner", owner_turn_id: self()}
     assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.remote_submit_request_v5(Ecto.UUID.generate(), downstream, abandoned_v5_request())
@@ -3839,6 +3891,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   end
 
   defp downstream(correlation_id), do: %{pid: self(), epoch: 1, correlation_id: correlation_id}
+
+  # A socket process that stays alive until the test ends.
+  defp idle_socket! do
+    pid = spawn(fn -> receive do: (:stop -> :ok) end)
+    on_exit(fn -> send(pid, :stop) end)
+    pid
+  end
 
   defp request(payload) do
     %UpstreamWebsocketSession.Request{

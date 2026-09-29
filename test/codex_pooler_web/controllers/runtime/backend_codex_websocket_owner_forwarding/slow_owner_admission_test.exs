@@ -39,6 +39,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     only: [
       await_socket_connection_state!: 2,
       hold_settled_websocket_turn!: 0,
+      receive_frames_until_close!: 3,
       receive_native_terminal!: 3,
       release_settled_websocket_turn: 2,
       socket_connection_state!: 1,
@@ -362,6 +363,37 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
     end
   end
 
+  # A second socket on the session's window whose first request its remote
+  # owner does not answer within the owner call budget gives up at its attach
+  # and closes `1011`, while the attach still waits in the owner's mailbox.
+  # The owner took it once it answered again and made the socket that gave up
+  # its downstream in place of the live one, whose next turn met `409
+  # stale_owner` (findings#270 row 270-248). The socket now abandons the attach
+  # on the owner's node before it gives up, and the owner refuses it: the live
+  # socket's next turn is served. A local owner's attach timeout is findings#270
+  # row 270-284.
+  @tag topology: :remote
+  test "remote: a second socket's attach its owner answers too late leaves the live socket attached", ctx do
+    compaction = open_compaction_session!(ctx, true, [:anchor, :final])
+    :ok = :sys.suspend(compaction.owner)
+
+    {closed, log} =
+      with_info_log(fn ->
+        second = Scenario.connect!(compaction.port, compaction.setup, Scenario.native_route(), compaction.window)
+        {conn, websocket} = public_websocket_send_text!(second.conn, second.websocket, second.ref, next_turn_frame(compaction, "first turn of a second socket"))
+        {_conn, _websocket, closed} = receive_frames_until_close!(conn, websocket, second.ref)
+        :ok = :sys.resume(compaction.owner)
+        closed
+      end)
+
+    assert closed == [{:close, 1011, "websocket owner forwarding timed out"}]
+    assert log =~ "phase=init reason_class=owner_forward_timeout"
+    assert %{"type" => "response.completed", "response" => %{"id" => "resp_slow_owner_final"}} = send_frame!(compaction, next_turn_frame(compaction, "next turn of the live socket"))
+    assert_owner_kept_session!(compaction, log)
+    assert Scenario.settled_statuses!(compaction.setup, 2) == ["succeeded", "succeeded"]
+    assert FakeUpstream.count(compaction.upstream) == 2
+  end
+
   # A socket on the session's window with its owner (on the peer for
   # `:remote`) and one anchor turn it served, settled unless `settle?` is
   # false (its task is then held after its settlement).
@@ -516,6 +548,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.SlowOwnerA
         end
     end
   end
+
+  defp next_turn_frame(compaction, content),
+    do: compaction_frame(compaction, "turn", compaction.history ++ [%{"type" => "message", "role" => "user", "content" => content}], nil)
 
   defp trigger(compaction),
     do: [%{"type" => "custom_tool_call_output", "call_id" => "call_#{compaction.turn_id}", "output" => "synthetic tool output"}, %{"type" => "compaction_trigger"}]
