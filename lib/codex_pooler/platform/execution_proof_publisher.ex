@@ -23,6 +23,7 @@ defmodule CodexPooler.Platform.ExecutionProofPublisher do
       interval_ms: Keyword.get(opts, :interval_ms, @interval_ms),
       timer: nil,
       early: nil,
+      early_ids: [],
       failed: false
     }
 
@@ -44,49 +45,58 @@ defmodule CodexPooler.Platform.ExecutionProofPublisher do
   # window still writes the proof before that first resend (the executor
   # ended within about 230 ms of the owner's crash and the resend came about
   # 490 ms after it), and it bounds a node whose sockets drop one after
-  # another to about ten publications a second. None brings publication
-  # forward while it is failing, which the tick keeps retrying on its own
-  # cadence.
-  def handle_info(:publish_early, %{early: nil, failed: false} = state),
-    do: {:noreply, %{state | early: Process.send_after(self(), :publish, @early_ms)}}
+  # another to about ten publications a second. The early publication writes
+  # exactly the executions that asked for it: the tick writes the oldest
+  # hundred pending proofs, so behind a backlog (proofs retained through a
+  # database outage) the asking execution waited one tick per hundred older
+  # ones. None brings publication forward while it is failing, which the tick
+  # keeps retrying on its own cadence.
+  def handle_info({:publish_early, id}, %{failed: false} = state) do
+    early = state.early || Process.send_after(self(), :publish_early, @early_ms)
+    {:noreply, %{state | early: early, early_ids: [id | state.early_ids]}}
+  end
 
-  def handle_info(:publish_early, state), do: {:noreply, state}
+  def handle_info({:publish_early, _id}, state), do: {:noreply, state}
+
+  def handle_info(:publish_early, state) do
+    result = publish_proofs(state.registry, fn -> ExecutionRegistry.pending_proofs(state.early_ids, state.registry) end)
+    {:noreply, %{note_result(state, result) | early: nil, early_ids: []}}
+  end
 
   # Subscribing on every publication brings a restarted registry's requests
   # back within one tick.
   defp publish(state) do
     if state.timer, do: Process.cancel_timer(state.timer)
-    if state.early, do: Process.cancel_timer(state.early)
     _subscribed = ExecutionRegistry.subscribe(state.registry)
-    result = publish_pending(state.registry)
+    result = publish_proofs(state.registry, fn -> ExecutionRegistry.pending(100, state.registry) end)
+    %{note_result(state, result) | timer: Process.send_after(self(), :publish, state.interval_ms)}
+  end
 
+  defp note_result(state, result) do
     if result == :error and not state.failed,
       do: Logger.warning("execution terminal proof publication unavailable; pending proofs retained")
 
-    %{state | timer: Process.send_after(self(), :publish, state.interval_ms), early: nil, failed: result == :error}
+    %{state | failed: result == :error}
   end
 
-  defp publish_pending(registry) do
-    if Process.whereis(CodexPooler.Repo), do: publish_available(registry), else: :error
+  defp publish_proofs(registry, proofs) do
+    if Process.whereis(CodexPooler.Repo), do: publish_available(registry, proofs.()), else: :error
   end
 
-  defp publish_available(registry) do
-    case ExecutionRegistry.pending(100, registry) do
-      [] ->
-        :ok
+  defp publish_available(_registry, []), do: :ok
+  defp publish_available(_registry, :unknown), do: :error
 
-      proofs when is_list(proofs) ->
-        case ExecutionTerminalProofs.publish(proofs) do
-          {:ok, _} ->
-            ExecutionRegistry.acknowledge(Enum.map(proofs, & &1.owner_execution_id), registry)
+  defp publish_available(registry, proofs) when is_list(proofs) do
+    Enum.reduce_while(Enum.chunk_every(proofs, 100), :ok, fn chunk, :ok ->
+      case ExecutionTerminalProofs.publish(chunk) do
+        {:ok, _} ->
+          _acknowledged = ExecutionRegistry.acknowledge(Enum.map(chunk, & &1.owner_execution_id), registry)
+          {:cont, :ok}
 
-          {:error, _} ->
-            :error
-        end
-
-      :unknown ->
-        :error
-    end
+        {:error, _} ->
+          {:halt, :error}
+      end
+    end)
   rescue
     _error in [DBConnection.ConnectionError, Postgrex.Error] -> :error
   catch

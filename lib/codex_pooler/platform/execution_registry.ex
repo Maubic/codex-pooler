@@ -35,6 +35,12 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
   @spec subscribe(GenServer.server()) :: :ok | :unknown
   def subscribe(server \\ __MODULE__), do: call(server, :subscribe)
 
+  # The pending proofs of `ids`, for the early publication those executions
+  # asked for; one already published is no longer pending.
+  @spec pending_proofs([String.t()], GenServer.server()) ::
+          [ExecutionTerminalProofs.terminal()] | :unknown
+  def pending_proofs(ids, server \\ __MODULE__) when is_list(ids), do: call(server, {:pending_proofs, ids})
+
   defp call(server, request) do
     GenServer.call(server, request, 1_000)
   catch
@@ -119,6 +125,9 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
     {:reply, proofs, state}
   end
 
+  def handle_call({:pending_proofs, ids}, _from, state) when is_list(ids),
+    do: {:reply, state.pending |> Map.take(ids) |> Map.values(), state}
+
   def handle_call({:acknowledge, ids}, _from, state) do
     {:reply, :ok, %{state | pending: Map.drop(state.pending, ids), overflow: false, expired_warning: false}}
   end
@@ -175,7 +184,7 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
     }
 
     if map_size(state.pending) < @pending_limit do
-      if end_kind == "process_down", do: request_early_publication(state.subscribers)
+      if end_kind == "process_down", do: request_early_publication(state.subscribers, id)
       %{state | pending: Map.put(state.pending, id, proof)}
     else
       unless state.overflow,
@@ -192,6 +201,6 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
   # task hears that its error was delivered. Were the socket to confirm that
   # delivery first, the task would complete and its proof would wait for the
   # tick again.
-  defp request_early_publication(subscribers),
-    do: Enum.each(subscribers, fn {_ref, subscriber} -> send(subscriber, :publish_early) end)
+  defp request_early_publication(subscribers, id),
+    do: Enum.each(subscribers, fn {_ref, subscriber} -> send(subscriber, {:publish_early, id}) end)
 end

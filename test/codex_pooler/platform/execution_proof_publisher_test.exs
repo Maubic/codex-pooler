@@ -28,6 +28,29 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
     assert %ExecutionTerminalProof{end_kind: "process_down"} = Repo.get!(ExecutionTerminalProof, execution.identity.owner_execution_id)
   end
 
+  # A backlog of older pending proofs (retained through a database outage, or
+  # left by earlier tests in this VM, where the application's publisher is
+  # off) does not hold the early publication back: it writes the execution
+  # that asked for it and leaves the backlog to the tick, which writes the
+  # oldest hundred at a time. It used to write the oldest hundred, so the
+  # asking execution waited one tick per hundred older proofs (Drone 1707).
+  test "an execution that ends without delivering is published ahead of an older backlog" do
+    {registry, publisher} = start_pair!()
+
+    for _ <- 1..250 do
+      id = Ecto.UUID.generate()
+      :ok = ExecutionRegistry.register(id, registry)
+      :ok = ExecutionRegistry.complete(id, registry)
+    end
+
+    execution = start_execution!(registry)
+    Process.exit(execution.pid, :kill)
+
+    :ok = await_published!(execution.identity)
+    assert %{early: nil, early_ids: []} = :sys.get_state(publisher)
+    assert length(ExecutionRegistry.pending(10_000, registry)) == 250
+  end
+
   test "an execution that completes waits for the tick" do
     {registry, publisher} = start_pair!()
     execution = start_execution!(registry)
