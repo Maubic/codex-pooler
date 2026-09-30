@@ -921,39 +921,24 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizerTest do
                "input_text"
     end
 
-    @tag :encrypted_reasoning_continuity
-    test "retains current encrypted reasoning across HTTP and websocket normalization" do
-      reasoning = %{
-        "type" => "reasoning",
-        "content" => nil,
-        "encrypted_content" => "synthetic-current-reasoning"
-      }
+    for {shape, fields} <- [{"null", %{"content" => nil}}, {"omitted", %{}}, {"empty", %{"content" => []}}],
+        mode <- ["full", "lite"] do
+      @tag :encrypted_reasoning_continuity
+      test "retains encrypted reasoning with #{shape} content in #{mode} across HTTP and websocket normalization" do
+        reasoning = Map.merge(%{"type" => "reasoning", "summary" => [], "encrypted_content" => "synthetic-current-reasoning"}, unquote(Macro.escape(fields)))
+        payload = %{"model" => "gpt-6-sol", "input" => [reasoning]}
+        model = %Model{upstream_model_id: "provider-model"}
+        http_options = RequestOptions.build(serving_mode_opts(unquote(mode)), "/backend-api/codex/responses", payload)
+        websocket_options = RequestOptions.for_websocket(http_options, payload)
+        expected_input = if unquote(mode) == "lite", do: [%{"type" => "additional_tools", "role" => "developer", "tools" => []}, reasoning], else: [reasoning]
 
-      payload = %{"model" => "gpt-6-sol", "input" => [reasoning]}
-      model = %Model{upstream_model_id: "provider-model"}
-      http_options = RequestOptions.build(%{}, "/backend-api/codex/responses", payload)
-      websocket_options = RequestOptions.for_websocket(http_options, payload)
-
-      assert {:ok, http_encoded} =
-               PayloadNormalizer.upstream_payload(
-                 payload,
-                 model,
-                 "/backend-api/codex/responses",
-                 http_options
-               )
-
-      assert {:ok, websocket_encoded} =
-               PayloadNormalizer.upstream_payload(
-                 payload,
-                 model,
-                 "/backend-api/codex/responses",
-                 websocket_options
-               )
-
-      refute Map.has_key?(Map.from_struct(http_options.continuity), :protected_replay?)
-      refute Map.has_key?(Map.from_struct(websocket_options.continuity), :protected_replay?)
-      assert CodexPooler.JSON.decode!(http_encoded)["input"] == [reasoning]
-      assert CodexPooler.JSON.decode!(websocket_encoded)["input"] == [reasoning]
+        for options <- [http_options, websocket_options] do
+          assert {:ok, encoded} = PayloadNormalizer.upstream_payload(payload, model, "/backend-api/codex/responses", options)
+          assert CodexPooler.JSON.decode!(encoded)["input"] == expected_input
+          assert ContinuityPayload.current_encrypted_reasoning?(reasoning)
+          refute Map.has_key?(Map.from_struct(options.continuity), :protected_replay?)
+        end
+      end
     end
 
     @tag :encrypted_reasoning_continuity
@@ -978,8 +963,11 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizerTest do
     @tag :encrypted_reasoning_continuity
     test "strips malformed encrypted reasoning shapes from HTTP and websocket upstream JSON" do
       invalid_reasoning_items = [
-        %{"type" => "reasoning", "content" => [], "encrypted_content" => "opaque"},
-        %{"type" => "reasoning", "encrypted_content" => "opaque"},
+        %{"type" => "reasoning", "content" => [%{"type" => "reasoning_text", "text" => "synthetic text"}], "encrypted_content" => "opaque"},
+        %{"type" => "reasoning", "content" => %{}, "encrypted_content" => "opaque"},
+        %{"type" => "reasoning", "content" => false, "encrypted_content" => "opaque"},
+        %{"type" => "reasoning", "content" => [], "encrypted_content" => "   "},
+        %{"type" => "reasoning", "encrypted_content" => "   "},
         %{"type" => "reasoning", "content" => "non-null", "encrypted_content" => "opaque"},
         %{"type" => "reasoning", "content" => nil, "encrypted_content" => "   "}
       ]
@@ -3150,29 +3138,25 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizerTest do
 
     @tag :encrypted_reasoning_continuity
     test "drops non-canonical encrypted reasoning on ordinary routes but not through compaction" do
-      # `backend_codex_invalid_encrypted_reasoning?` is a fail-closed whitelist:
-      # only the canonical continuity shape (`content: null` plus a nonblank
-      # `encrypted_content`) replays upstream, and an item that omits `content`
-      # altogether is dropped rather than kept -- pinned for both transports by
-      # "strips malformed encrypted reasoning shapes from HTTP and websocket
-      # upstream JSON". The compact projection runs neither reject pass, so it
-      # forwards the client's history as sent; pin that asymmetry so a change to
-      # either side has to be deliberate.
+      # Ordinary replay admits encrypted reasoning only without clear content.
+      # The compact projection preserves history as sent; keep that separate
+      # contract pinned with a genuinely invalid ordinary replay shape.
       canonical = %{
         "type" => "reasoning",
         "content" => nil,
         "encrypted_content" => "synthetic-canonical-reasoning"
       }
 
-      omitted_content = %{
+      clear_content = %{
         "type" => "reasoning",
-        "encrypted_content" => "synthetic-omitted-content-reasoning"
+        "content" => [%{"type" => "reasoning_text", "text" => "synthetic text"}],
+        "encrypted_content" => "synthetic-clear-content-reasoning"
       }
 
       trigger = %{"type" => "compaction_trigger"}
       model = %Model{upstream_model_id: "provider-model"}
       endpoint = "/backend-api/codex/responses"
-      payload = %{"model" => "gpt-6-sol", "input" => [canonical, omitted_content]}
+      payload = %{"model" => "gpt-6-sol", "input" => [canonical, clear_content]}
       http_options = RequestOptions.build(%{}, endpoint, payload)
 
       for request_options <- [http_options, RequestOptions.for_websocket(http_options, payload)] do
@@ -3186,13 +3170,13 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizerTest do
         prepare_full_history_lite_compact(%{
           "model" => "gpt-6-sol",
           "stream" => true,
-          "input" => [canonical, omitted_content, trigger]
+          "input" => [canonical, clear_content, trigger]
         })
 
       assert compact["input"] == [
                %{"type" => "additional_tools", "role" => "developer", "tools" => []},
                canonical,
-               omitted_content,
+               clear_content,
                trigger
              ]
     end
@@ -4084,16 +4068,16 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizerTest do
     # position it claims to map must hold that client item upstream, and a
     # payload the Pooler also dropped an item from must be `:unknown`.
     manifest = %{"type" => "additional_tools", "role" => "developer", "tools" => [%{"type" => "custom", "name" => "client_manifest"}]}
-    stale_reasoning = %{"type" => "reasoning", "summary" => [], "encrypted_content" => "stale-ciphertext"}
+    invalid_reasoning = %{"type" => "reasoning", "content" => "invalid-scalar", "summary" => [], "encrypted_content" => "synthetic-ciphertext"}
 
     for {name, mode, fields, expected} <- [
           {"Full keeps positions", "full", %{}, :identity},
-          {"Full with a dropped item is unknown", "full", %{"leading" => [stale_reasoning]}, :unknown},
+          {"Full with a dropped item is unknown", "full", %{"leading" => [invalid_reasoning]}, :unknown},
           {"Lite without tools inserts an empty manifest", "lite", %{}, {:shift, 0, 1}},
           {"Lite with tools and instructions inserts two items", "lite", %{"tools" => [%{"type" => "custom", "name" => "t"}], "instructions" => "Be brief."}, {:shift, 0, 2}},
           {"Lite keeps a leading client manifest in place", "lite", %{"leading" => [manifest]}, {:shift, 1, 0}},
           {"Lite keeps a leading client manifest and inserts instructions after it", "lite", %{"leading" => [manifest], "instructions" => "Be brief."}, {:shift, 1, 1}},
-          {"Lite with a dropped item is unknown", "lite", %{"leading" => [stale_reasoning]}, :unknown}
+          {"Lite with a dropped item is unknown", "lite", %{"leading" => [invalid_reasoning]}, :unknown}
         ] do
       @tag mode: mode, fields: fields, expected: expected
       test name, %{mode: mode, fields: fields, expected: expected} do

@@ -54,6 +54,91 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
   # received them before the cut (findings#232 row 232-232).
   @item_text "completed answer"
 
+  # Current released Codex starts a new turn as an anchored suffix on the
+  # existing provider socket, then resends full history after mailbox preemption.
+  # The durable predecessor therefore contains only the suffix claim.
+  for forwarding <- [false, true, :peer], provider <- [:held, :completes] do
+    @tag anchored_mailbox_tail: true, forwarding: forwarding, provider: provider
+    test "#{forwarding} #{provider}: an anchored new-turn suffix recovers as full history plus retained reasoning and mailbox", %{forwarding: forwarding, provider: provider} do
+      CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
+      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, forwarding != false)
+      release_ref = make_ref()
+      anchor = "resp_anchored_mailbox_prelude"
+
+      upstream =
+        start_upstream(
+          FakeUpstream.strict_sequence([
+            native_request(FakeUpstream.websocket_text_frames(stream_frames(anchor))),
+            FakeUpstream.expect_request(method: "WEBSOCKET", websocket_connection_ordinal: 1, json: [equals: %{"previous_response_id" => anchor}], respond: FakeUpstream.barrier_websocket_frames(reasoning_stream_frames(), notify: self(), release_ref: release_ref)),
+            successor_request(:websocket)
+          ])
+        )
+
+      setup = topology_setup(upstream, forwarding)
+      turn_state = Ecto.UUID.generate()
+      peer = if forwarding == :peer, do: start_peer_session_owner!(setup, %{accepted_turn_state: turn_state})
+      payload = native_turn_payload(Ecto.UUID.generate(), setup.model.exposed_model_id) |> mailbox_resume_payload(:opening)
+      prelude = anchored_turn(payload, "synthetic-prior-turn")
+      tail = %{"type" => "message", "role" => "user", "content" => [%{"type" => "input_text", "text" => "synthetic next turn"}]}
+      anchored = payload |> anchored_turn("synthetic-next-turn") |> Map.put("previous_response_id", anchor) |> Map.put("input", [tail])
+      port = start_public_endpoint!()
+      {conn, websocket, ref} = public_websocket_connect!(port, setup, turn_state)
+      {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(prelude))
+      {conn, terminal} = receive_terminal!(conn, websocket, ref)
+      assert terminal["type"] == "response.completed"
+      {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(anchored))
+
+      for ordinal <- 0..2 do
+        assert_receive {:fake_upstream_frame_barrier, ^ordinal, _handler, ^release_ref}, @timeout_ms
+        :ok = FakeUpstream.release_frame(upstream, release_ref)
+      end
+
+      assert_receive {:fake_upstream_frame_barrier, 3, _handler, ^release_ref}, @timeout_ms
+      conn = receive_until!(conn, websocket, ref, "response.output_item.done")
+      predecessor = List.last(pool_requests(setup.pool.id))
+      assert_peer_forwarding(predecessor, peer)
+      _receipt = close_and_await_receipt!(conn, predecessor.id, provider, upstream, release_ref)
+      full_history = prelude["input"] ++ terminal["response"]["output"] ++ [tail]
+      candidate = anchored |> Map.delete("previous_response_id") |> Map.put("input", full_history) |> resend_payload(:mailbox)
+
+      controls = [
+        Map.put(candidate, "instructions", "synthetic changed instructions"),
+        update_in(candidate["input"], &List.replace_at(&1, length(full_history) - 1, Map.put(tail, "content", "synthetic changed tail"))),
+        update_in(candidate["input"], &List.update_at(&1, length(full_history), fn item -> Map.put(item, "encrypted_content", "synthetic changed output") end))
+      ]
+
+      for changed <- controls, do: assert_mailbox_refused!(resend!(:websocket, port, setup, turn_state, changed))
+      assert FakeUpstream.count(upstream) == 2
+      assert %{"type" => "response.completed"} = resend!(:websocket, port, setup, turn_state, candidate)
+      await_all_settled!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
+      assert [prior, original, successor] = pool_requests(setup.pool.id)
+      assert original.id == predecessor.id
+      assert original.status == if(provider == :held, do: "failed", else: "succeeded")
+      assert successor.status == "succeeded"
+      assert_one_settlement_each!([prior.id, original.id, successor.id])
+      assert Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^original.id, select: link.successor_request_id)) == [successor.id]
+      assert Repo.all(from(turn in CodexTurn, where: turn.request_id in ^[prior.id, original.id, successor.id], select: turn.codex_session_id)) |> Enum.uniq() |> length() == 1
+      assert [first, second, third] = FakeUpstream.requests(upstream)
+      assert second.websocket_connection_id == first.websocket_connection_id
+      assert second.json["input"] == [tail]
+      assert third.json["input"] == candidate["input"]
+      refute Map.has_key?(third.json, "previous_response_id")
+
+      if provider == :held do
+        refute FakeUpstream.websocket_connection_alive?(upstream, second.websocket_connection_id)
+        :ok = FakeUpstream.acknowledge(upstream, {:frame_barrier, release_ref, 4})
+      end
+
+      assert :ok = FakeUpstream.verify!(upstream)
+    end
+  end
+
+  defp anchored_turn(payload, turn_id) do
+    payload
+    |> put_in(["client_metadata", "turn_id"], turn_id)
+    |> update_in(["client_metadata", "x-codex-turn-metadata"], fn metadata -> metadata |> CodexPooler.JSON.decode!() |> Map.put("turn_id", turn_id) |> CodexPooler.JSON.encode!() end)
+  end
+
   for forwarding <- [true, false, :peer] do
     for transport <- [:websocket, :https], role <- [:opening, :local_summary, :remote_resume], provider <- [:held, :completes] do
       @tag forwarding: forwarding, transport: transport, role: role, provider: provider, post_compaction_mailbox: true

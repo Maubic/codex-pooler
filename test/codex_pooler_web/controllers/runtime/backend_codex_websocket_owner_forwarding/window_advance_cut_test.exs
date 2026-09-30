@@ -30,12 +30,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
 
   import Ecto.Query
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
-  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3, stop_websocket_owner_session: 1, native_previous_response_retry_event: 0, with_info_log: 1]
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [await_socket_connection_state!: 2, socket_connection_state!: 1, model_serving_scope: 0, set_model_serving_mode!: 3, stop_websocket_owner_session: 1, native_previous_response_retry_event: 0, with_info_log: 1]
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [enter_peer_owner_topology!: 0, start_peer_window_owner!: 2]
 
-  alias CodexPooler.Accounting.{LedgerEntry, Request, RequestReplayEntitlement}
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink, RequestReplayEntitlement}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, BridgeSessionAlias, CodexSession, CodexTurn}
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Repo
   alias CodexPooler.TestAppEnv
   alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
@@ -112,6 +113,203 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
       assert :ok = FakeUpstream.verify!(upstream)
     end
   end
+
+  # The reconnect upgrade overlaps an admitted window-1 turn on the still
+  # open window-0 socket. All rows are committed and the provider is held at
+  # its first frame, so neither settlement nor client cleanup can precede
+  # the new upgrade. This distinguishes alias resolution from later replay.
+  @overlap_arms [{"full", :direct}, {"lite", :direct}, {"full", :forwarded}, {"lite", :forwarded}, {"full", :peer}]
+
+  for {mode, topology} <- @overlap_arms, cut <- [:live, :cleanup_held, :alias_held] do
+    @tag overlap_window: true, serving_mode: mode, topology: topology, cut: cut
+    test "#{mode} #{topology} #{cut}: a reconnect upgrade joins the committed frame window while its predecessor is live",
+         %{serving_mode: mode, topology: topology, cut: cut} do
+      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology in [:forwarded, :peer])
+      release_ref = make_ref()
+      upstream = start_upstream(FakeUpstream.strict_sequence(upstream_sequence(:post_turn, release_ref)))
+
+      if topology != :peer do
+        :ok = Sandbox.mode(Repo, :auto)
+        on_exit(fn -> :ok = Sandbox.mode(Repo, :manual) end)
+      end
+
+      setup = topology_setup!(topology, upstream)
+      if topology != :peer, do: register_unboxed_pool_cleanup!(setup)
+      if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+      ctx = %{shape: :post_turn, mode: mode, topology: topology, setup: setup}
+      port = start_public_endpoint!()
+      {original, frame} = open_cut_socket!(ctx, port)
+      original = send_frame!(original, frame)
+      assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^release_ref}, @detection_timeout_ms
+      predecessor = latest_request(setup.pool.id)
+      assert predecessor.status == "in_progress"
+      session_id = request_session_id(predecessor.id)
+      assert window_alias_session_id(setup, @window_1) == session_id
+      assert Process.alive?(original.cleanup_socket)
+
+      cleanup = if cut == :cleanup_held, do: hold_original_cleanup!(original)
+      assert Repo.get!(Request, predecessor.id).status == "in_progress"
+
+      replacement =
+        if cut == :alias_held do
+          holder = hold_alias_row!(window_alias!(setup, @window_1).id)
+          watcher = watch_alias_row_waiters!(holder)
+
+          try do
+            replacement = connect!(port, setup, @window_1)
+            assert socket_connection_state!(replacement.cleanup_socket).codex_session.id == session_id
+            waited = stop_watcher!(watcher)
+            assert Enum.any?(waited, &match?([_pid, "Lock"], &1))
+            replacement
+          after
+            release_alias_row!(holder)
+          end
+        else
+          connect!(port, setup, @window_1)
+        end
+
+      replacement_state = socket_connection_state!(replacement.cleanup_socket)
+      assert replacement_state.codex_session.id == session_id
+      assert session_count(setup.pool.id) == 1
+
+      if topology == :forwarded do
+        assert {:ok, owner} = WebsocketOwnerSession.lookup(session_id)
+        assert node(owner) == node()
+      end
+
+      if topology == :peer do
+        assert node(setup.peer_owner.owner_pid) != node()
+        assert replacement_state.codex_session.owner_instance_id == Repo.get!(CodexSession, session_id).owner_instance_id
+      end
+
+      if cleanup do
+        :ok = :sys.resume(cleanup)
+        :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(original.cleanup_socket)
+      else
+        close!(original)
+      end
+
+      if topology == :direct,
+        do: await!(fn -> Repo.get!(Request, predecessor.id).status == "failed" end, "the overlapped predecessor never settled"),
+        else: await!(fn -> entitlement_status(predecessor.id) == "armed" end, "the overlapped predecessor never armed")
+
+      replacement = replacement |> send_frame!(frame) |> completed!()
+
+      if topology in [:forwarded, :peer] do
+        owner =
+          if topology == :peer do
+            setup.peer_owner.owner_pid
+          else
+            {:ok, owner} = WebsocketOwnerSession.lookup(session_id)
+            owner
+          end
+
+        assert :sys.get_state(owner).downstream.pid == replacement.cleanup_socket
+      end
+
+      close!(replacement)
+      release_held_turn!(upstream, release_ref, :post_turn)
+      rows = settled_rows(setup.pool.id)
+      assert request_session_id(List.last(rows).id) == session_id
+      assert session_count(setup.pool.id) == 1
+      assert Enum.all?(rows, &(&1.transport == "websocket"))
+      assert Enum.all?(rows, &(&1.status in ["succeeded", "failed"]))
+      assert Enum.count(rows, &(&1.status == "succeeded")) == 3
+      assert length(rows) == if(topology == :direct, do: 4, else: 3)
+      assert entitlement_status(predecessor.id) == if(topology == :direct, do: nil, else: "consumed")
+      retry_links = Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^predecessor.id, select: link.successor_request_id))
+      assert retry_links == if(topology == :direct, do: [List.last(rows).id], else: [])
+      for %Request{status: "succeeded"} = request <- rows, do: assert(charges(request) == 1)
+      assert :ok = FakeUpstream.verify!(upstream)
+    end
+  end
+
+  # The provider completed and the socket wrote its terminal, but the
+  # client retained only the first completed item before mailbox preemption.
+  # Hold the real response task so settlement cannot precede the new upgrade.
+  for {mode, topology} <- @overlap_arms, sticky <- [false, true] do
+    @tag delivered_window_overlap: true, serving_mode: mode, topology: topology, sticky: sticky
+    test "#{mode} #{topology} sticky=#{sticky}: a delivered window advance admits one retained-prefix mailbox successor after an overlapping upgrade",
+         %{serving_mode: mode, topology: topology, sticky: sticky} do
+      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology in [:forwarded, :peer])
+      release_ref = make_ref()
+      output = [reasoning_item(), answer()]
+      held = FakeUpstream.expect_request(method: "WEBSOCKET", respond: FakeUpstream.barrier_websocket_frames(completed_messages(@cut, output), notify: self(), release_ref: release_ref))
+      upstream = start_upstream(FakeUpstream.strict_sequence([turn_1_upstream(), compaction_upstream(), held, served_upstream()]))
+
+      if topology != :peer do
+        :ok = Sandbox.mode(Repo, :auto)
+        on_exit(fn -> :ok = Sandbox.mode(Repo, :manual) end)
+      end
+
+      setup = topology_setup!(topology, upstream)
+      if topology != :peer, do: register_unboxed_pool_cleanup!(setup)
+      if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+      ctx = %{shape: :post_turn, mode: mode, topology: topology, setup: setup}
+      port = start_public_endpoint!()
+      {original, frame} = open_cut_socket!(ctx, port)
+      frame = maybe_sticky_frame(frame, original.turn_state, sticky)
+      original = send_frame!(original, frame)
+      assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^release_ref}, @detection_timeout_ms
+      predecessor = latest_request(setup.pool.id)
+      session_id = request_session_id(predecessor.id)
+      assert window_alias_session_id(setup, @window_1) == session_id
+      state = await_socket_connection_state!(original.cleanup_socket, &(MapSet.size(&1.tasks) == 1))
+      [task] = MapSet.to_list(state.tasks)
+      on_exit(fn -> if Process.alive?(task), do: :erlang.resume_process(task) end)
+      true = :erlang.suspend_process(task)
+
+      for ordinal <- 0..1 do
+        if ordinal > 0, do: assert_receive({:fake_upstream_frame_barrier, ^ordinal, _handler, ^release_ref}, @detection_timeout_ms)
+        :ok = FakeUpstream.release_frame(upstream, release_ref)
+      end
+
+      {original, created} = receive_frame!(original)
+      {original, retained} = receive_frame!(original)
+      assert created["type"] == "response.created"
+      assert retained["type"] == "response.output_item.done"
+      :ok = FakeUpstream.release_remaining_frames(upstream, release_ref)
+      _delivered = await_socket_connection_state!(original.cleanup_socket, &(get_in(&1, [:downstream_delivery_evidence, task, :terminal_class]) == "response.completed"))
+      assert Repo.get!(Request, predecessor.id).status == "in_progress"
+
+      # No terminal is consumed from the old Mint client. Its socket remains
+      # open while the new socket resolves window 1 against committed aliases.
+      replacement = connect!(port, setup, @window_1)
+      assert socket_connection_state!(replacement.cleanup_socket).codex_session.id == session_id
+      assert session_count(setup.pool.id) == 1
+      true = :erlang.resume_process(task)
+      await!(fn -> Repo.get!(Request, predecessor.id).status == "succeeded" end, "the delivered predecessor never settled")
+      await!(fn -> match?(%{"terminal_class" => "response.completed"}, delivery_receipt(predecessor.id)) end, "the delivered predecessor never recorded its receipt")
+      assert %{"completed_items" => 2, "terminal_class" => "response.completed"} = delivery_receipt(predecessor.id)
+      close!(original)
+
+      resend = window_1_frame(ctx, @turn_2, window_1_history(ctx, 2) ++ [reasoning_item(), mailbox_item()])
+
+      resend = maybe_sticky_frame(resend, original.turn_state, sticky)
+
+      replacement = replacement |> send_frame!(resend) |> completed!()
+      assert socket_connection_state!(replacement.cleanup_socket).codex_session.id == session_id
+      close!(replacement)
+      rows = settled_rows(setup.pool.id)
+      assert length(rows) == 4
+      assert Enum.all?(rows, &(&1.status == "succeeded" and &1.transport == "websocket"))
+      successor = List.last(rows)
+      assert request_session_id(successor.id) == session_id
+      assert session_count(setup.pool.id) == 1
+      assert Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^predecessor.id, select: link.successor_request_id)) == [successor.id]
+      for request <- rows, do: assert(charges(request) == 1)
+      assert FakeUpstream.count(upstream) == 4
+      assert :ok = FakeUpstream.verify!(upstream)
+    end
+  end
+
+  defp maybe_sticky_frame(frame, _turn_state, false), do: frame
+  defp maybe_sticky_frame(frame, turn_state, true), do: frame |> CodexPooler.JSON.decode!() |> put_in(["client_metadata", "x-codex-turn-state"], turn_state) |> CodexPooler.JSON.encode!()
+
+  defp delivery_receipt(request_id), do: Repo.one(from(attempt in Attempt, where: attempt.request_id == ^request_id, select: attempt.response_metadata))["downstream_delivery"]
+
+  defp reasoning_item, do: %{"type" => "reasoning", "id" => "rs_window_overlap", "summary" => [], "encrypted_content" => "synthetic-window-reasoning"}
+  defp mailbox_item, do: %{"type" => "agent_message", "author" => "/root/worker", "recipient" => "/root", "content" => [%{"type" => "input_text", "text" => "synthetic update"}]}
 
   # What the window's re-pointed lookup leads to afterwards. A later process
   # on the window (a resume after the cut process ended) sends full history
@@ -517,6 +715,21 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
     end
   end
 
+  # Pause the listener before the TCP close so its terminate/cleanup has
+  # certainly not begun when the replacement upgrade arrives. The upstream
+  # barrier keeps the admitted executor live throughout this overlap.
+  defp hold_original_cleanup!(original) do
+    socket = original.cleanup_socket
+
+    on_exit(fn ->
+      if Process.alive?(socket), do: :sys.resume(socket)
+    end)
+
+    :ok = :sys.suspend(socket)
+    Mint.HTTP.close(original.conn)
+    socket
+  end
+
   # Holds the alias row in a transaction of its own until released. The
   # holder and the watcher use connections of their own, outside the Repo
   # pool: in the sandbox's auto mode every process that queried keeps its
@@ -783,7 +996,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
     {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, "/backend-api/codex/responses", headers)
     {:ok, conn, status, response_headers} = await_public_websocket_upgrade(conn, ref)
     {conn, websocket} = mint_websocket_new!(conn, ref, status, response_headers)
-    %{conn: conn, websocket: websocket, ref: ref, cleanup_socket: WebsocketCleanupFence.await_new_listener_socket!(sockets)}
+    %{conn: conn, websocket: websocket, ref: ref, turn_state: List.keyfind(response_headers, "x-codex-turn-state", 0) |> elem(1), cleanup_socket: WebsocketCleanupFence.await_new_listener_socket!(sockets)}
   end
 
   defp close!(client) do

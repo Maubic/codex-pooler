@@ -83,6 +83,23 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuationTest do
     refute ClientRetry.verified_mailbox_continuation?(next_turn, successor, next_attempt, witness(append(current, [reasoning("unrequested")])), nil)
   end
 
+  test "an anchored opening is recognized by its request tail before the completed output and mailbox" do
+    original = payload()
+    tail = %{"type" => "message", "role" => "user", "content" => "synthetic new turn"}
+    original = append(original, [tail])
+    anchored = original |> Map.put("previous_response_id", "resp_synthetic_prior") |> Map.put("input", [tail])
+    {:ok, anchored_digest} = WebsocketTurnIdentity.replay_tail_digest(@semantic, anchored)
+    output = reasoning("anchored")
+    continuation = append(original, [output, mailbox("anchored")])
+    {turn, request, attempt} = predecessor(original, output, "websocket")
+    request = %{request | native_client_retry_digest: anchored_digest}
+    assert ClientRetry.verified_mailbox_continuation?(turn, request, attempt, witness(continuation), nil)
+
+    for changed <- [put_in(continuation, ["input", Access.at(-3), "content"], "synthetic different turn"), Map.put(continuation, "instructions", "synthetic different instructions"), put_in(continuation, ["input", Access.at(-2), "encrypted_content"], "synthetic changed output")] do
+      refute ClientRetry.verified_mailbox_continuation?(turn, request, attempt, witness(changed), nil)
+    end
+  end
+
   test "header-only HTTP metadata preserves the input witness and missing agent identity stays fenced" do
     original = payload()
     output = reasoning("first")

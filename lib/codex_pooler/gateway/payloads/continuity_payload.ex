@@ -106,13 +106,14 @@ defmodule CodexPooler.Gateway.Payloads.ContinuityPayload do
   defp client_turn_state(continuity), do: blank_to_nil(continuity.accepted_turn_state)
 
   @spec current_encrypted_reasoning?(term()) :: boolean()
-  def current_encrypted_reasoning?(%{
-        "type" => "reasoning",
-        "content" => nil,
-        "encrypted_content" => encrypted_content
-      })
+  def current_encrypted_reasoning?(
+        %{
+          "type" => "reasoning",
+          "encrypted_content" => encrypted_content
+        } = item
+      )
       when is_binary(encrypted_content),
-      do: String.trim(encrypted_content) != ""
+      do: Map.get(item, "content") in [nil, []] and String.trim(encrypted_content) != ""
 
   def current_encrypted_reasoning?(_item), do: false
 

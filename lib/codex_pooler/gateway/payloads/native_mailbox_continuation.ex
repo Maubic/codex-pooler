@@ -116,10 +116,14 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
     with {:ok, http} <- WebsocketTurnIdentity.http_resume_input_digest(semantic_key, payload["input"]),
          {:ok, plain} <- WebsocketTurnIdentity.replay_claim_digest(semantic_key, frame),
          {:ok, lite} <- WebsocketTurnIdentity.replay_claim_digest(semantic_key, marked),
-         {:ok, unframed} <- WebsocketTurnIdentity.replay_claim_digest(semantic_key, payload) do
+         {:ok, unframed} <- WebsocketTurnIdentity.replay_claim_digest(semantic_key, payload),
+         {:ok, tails} <- WebsocketTurnIdentity.replay_claim_alternates_of_variants(semantic_key, Enum.uniq([frame, marked, payload])) do
       # HTTP tool continuations retain their original unframed replay witness;
       # opening HTTP requests use the reconstructed websocket variants instead.
-      %{http: http, websocket: Enum.uniq([plain, lite, unframed])}
+      # A websocket opener may have been anchored with only its input delta.
+      # Its stored tail witness is matched before retained output and mail are
+      # appended, using the same bounded full-history proof as an exact resend.
+      %{http: http, websocket: Enum.uniq([plain, lite, unframed] ++ List.flatten(tails))}
     else
       _unproved -> nil
     end
