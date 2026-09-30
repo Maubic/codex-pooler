@@ -212,6 +212,8 @@ defmodule CodexPooler.InstanceSettingsTest do
     assert Map.get(settings.gateway, :upstream_token_refresh_margin_seconds) == 172_800
     assert settings.files.max_size_bytes == 25 * 1024 * 1024
     assert settings.transcription.max_upload_bytes == 26_214_400
+    assert settings.ingress.max_compressed_body_bytes == 128 * 1024 * 1024
+    assert settings.ingress.max_decompressed_body_bytes == 256 * 1024 * 1024
 
     assert settings.catalog.openai_pricing_url ==
              "https://icoretech.github.io/openai-json-pricing/pricing.json"
@@ -342,6 +344,17 @@ defmodule CodexPooler.InstanceSettingsTest do
 
     expected_lock_version = newer.lock_version
     assert_receive {Cache, {:applied, ^expected_lock_version}}, 5_000
+  end
+
+  test "new ingress defaults preserve existing operator limits including the former default pair" do
+    for {compressed, decompressed} <- [{32 * 1024 * 1024, 64 * 1024 * 1024}, {1_234_567, 7_654_321}] do
+      settings = InstanceSettings.ensure_singleton!()
+      assert {:ok, saved} = InstanceSettings.update_system_settings(settings, %{"ingress" => %{"max_compressed_body_bytes" => compressed, "max_decompressed_body_bytes" => decompressed}})
+      current = InstanceSettings.ensure_singleton!()
+      assert current.ingress.max_compressed_body_bytes == compressed
+      assert current.ingress.max_decompressed_body_bytes == decompressed
+      assert current.lock_version == saved.lock_version
+    end
   end
 
   test "duplicate singleton rows are rejected by the database and ensure_singleton!/0 is idempotent" do

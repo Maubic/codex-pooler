@@ -57,8 +57,8 @@ defmodule CodexPooler.Gateway.OperationalSettingsTest do
     assert settings.trusted_proxies_compiled == {:ok, []}
     assert settings.decompression_algorithms == ["gzip", "deflate", "zstd"]
     assert settings.zstd_supported?
-    assert settings.max_compressed_body_bytes == 32 * 1024 * 1024
-    assert settings.max_decompressed_body_bytes == 64 * 1024 * 1024
+    assert settings.max_compressed_body_bytes == 128 * 1024 * 1024
+    assert settings.max_decompressed_body_bytes == 256 * 1024 * 1024
     assert settings.max_decompression_ratio == 200
     assert settings.decompression_timeout_ms == 10_000
     refute settings.gateway_debug?
@@ -501,8 +501,8 @@ defmodule CodexPooler.Gateway.OperationalSettingsTest do
     assert settings.file_max_size_bytes == 25 * 1024 * 1024
     refute settings.gateway_debug?
     assert settings.decompression_algorithms == ["gzip", "deflate", "zstd"]
-    assert settings.max_compressed_body_bytes == 32 * 1024 * 1024
-    assert settings.max_decompressed_body_bytes == 64 * 1024 * 1024
+    assert settings.max_compressed_body_bytes == 128 * 1024 * 1024
+    assert settings.max_decompressed_body_bytes == 256 * 1024 * 1024
     assert settings.decompression_timeout_ms == 10_000
     assert settings.bulkheads["proxy_control"].max_concurrency == 8
   end

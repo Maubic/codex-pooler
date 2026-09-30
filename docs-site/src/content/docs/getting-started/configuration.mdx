@@ -200,7 +200,7 @@ client address, so a settings update cannot change the decision halfway through
 that request.
 
 Compressed JSON ingress is enabled for `gzip`, `deflate`, and `zstd` when runtime
-support is available. The defaults are 32 MiB compressed, 64 MiB decompressed, a
+support is available. New installations default to 128 MiB compressed, 256 MiB decompressed, a
 200:1 expansion ratio, and a 10-second decode timeout. Tune these four values and
 the algorithm list together. Multipart uploads are not decompressed here; file,
 audio, and image routes keep their own route-specific limits.
@@ -211,15 +211,20 @@ cannot resolve a Pooler `413 compressed_request_too_large` or
 `413 decompressed_request_too_large`. An owner can increase **Max compressed
 bytes** (`ingress.max_compressed_body_bytes`) and **Max decompressed bytes**
 (`ingress.max_decompressed_body_bytes`) on **System > Firewall**, then retry the
-blocked request. For example, 128 MiB compressed and 256 MiB decompressed are
-`134217728` and `268435456` bytes. New requests use the saved limits without a
-restart; existing saved settings retain their values after an upgrade.
+blocked request. The current defaults in bytes are `134217728` and `268435456`.
+Existing installations retain their saved limits after an upgrade, including
+the former 32 MiB / 64 MiB defaults. An owner must save the larger values to
+adopt them. New HTTP requests use saved limits without a restart; websocket
+connections capture their limits on upgrade and must reconnect to pick up a change.
 
 Choose limits for the memory available at the expected concurrent request count:
 compressed bodies, decompressed JSON, and parsed input coexist during decoding.
-Keep the ratio and timeout budgets enabled, and check any reverse proxy body
-limit too. These are Pooler ingress budgets, not a claim about the upstream's
-maximum body size.
+Decoding occurs before gateway admission, so gateway concurrency limits do not
+cap simultaneous body decoding. The decompressed budget also bounds plain JSON,
+MCP request bodies and incoming websocket frames. Keep the ratio and timeout
+budgets enabled, and check any reverse proxy body limit too. These are Pooler
+ingress budgets chosen to accommodate large histories, not a claim about the
+upstream's maximum body size. File and multipart upload budgets remain separate.
 
 Pool image permission is checked after Pool API-key authentication and before
 body parsing for exactly these four actions: `POST /backend-api/codex/images/generations`,

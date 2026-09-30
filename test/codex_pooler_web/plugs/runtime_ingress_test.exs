@@ -1480,18 +1480,21 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
                |> CompressedBody.read_plain_json_body([])
     end
 
-    @tag slow: "decodes a synthetic 48-image history larger than the default 32 MiB compressed budget"
-    test "image-heavy zstd history can be retried after increasing the compressed limit" do
+    @tag slow: "decodes a synthetic 48-image history larger than the former 32 MiB compressed budget"
+    test "default ingress budgets accept image-heavy zstd history while explicit smaller limits still reject" do
       settings = %OperationalSettings{}
+      previous_settings = %{settings | max_compressed_body_bytes: 32 * 1024 * 1024, max_decompressed_body_bytes: 64 * 1024 * 1024}
 
       images =
         Enum.map(1..48, fn _index ->
-          %{"type" => "input_image", "image_url" => "data:image/png;base64," <> Base.encode64(:crypto.strong_rand_bytes(750_000))}
+          %{"type" => "input_image", "image_url" => "data:image/png;base64," <> Base.encode64(:crypto.strong_rand_bytes(1_500_000))}
         end)
 
       encoded = CodexPooler.JSON.encode!(%{"input" => [%{"type" => "message", "role" => "user", "content" => images}]})
       compressed = zstd_encoded(encoded)
-      assert byte_size(compressed) > settings.max_compressed_body_bytes
+      assert byte_size(compressed) > previous_settings.max_compressed_body_bytes
+      assert byte_size(compressed) < settings.max_compressed_body_bytes
+      assert byte_size(encoded) > previous_settings.max_decompressed_body_bytes
       assert byte_size(encoded) < settings.max_decompressed_body_bytes
 
       new_conn = fn ->
@@ -1500,14 +1503,20 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
         |> put_req_header("content-encoding", "zstd")
       end
 
-      assert {:error, %{status: 413, code: "compressed_request_too_large", message: message}, _conn} = CompressedBody.decode(new_conn.(), settings)
-      assert message =~ "#{settings.max_compressed_body_bytes}-byte limit"
+      assert {:error, %{status: 413, code: "compressed_request_too_large", message: message}, _conn} = CompressedBody.decode(new_conn.(), previous_settings)
+      assert message =~ "#{previous_settings.max_compressed_body_bytes}-byte limit"
       assert message =~ "ingress.max_compressed_body_bytes"
 
-      raised_settings = %{settings | max_compressed_body_bytes: 128 * 1024 * 1024, max_decompressed_body_bytes: 256 * 1024 * 1024}
-      assert {:ok, accepted} = CompressedBody.decode(new_conn.(), raised_settings)
+      assert {:error, %{status: 413, code: "decompressed_request_too_large"}} = CompressedBody.decode(new_conn.(), %{settings | max_decompressed_body_bytes: previous_settings.max_decompressed_body_bytes})
+
+      assert {:ok, accepted} = CompressedBody.decode(new_conn.(), settings)
       assert length(hd(accepted.body_params["input"])["content"]) == 48
       assert :crypto.hash(:sha256, CodexPooler.JSON.encode!(accepted.body_params)) == :crypto.hash(:sha256, encoded)
+
+      assert {:ok, ^encoded, _conn} =
+               Plug.Test.conn(:post, "/plain-json-reader", encoded)
+               |> put_private(:codex_pooler_runtime_ingress_settings, settings)
+               |> CompressedBody.read_plain_json_body([])
     end
 
     test "rejects decompressed bodies above the decompressed-size limit", %{conn: conn} do
