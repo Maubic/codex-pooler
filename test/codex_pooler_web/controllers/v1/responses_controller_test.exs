@@ -5004,7 +5004,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       assert {:ok, projection} =
                Observatory.read(principal, "1h", as_of: DateTime.add(request.completed_at, 1, :second))
 
-      assert projection.totals.requests == %{total: 1, succeeded: 1, failed: 0, in_progress: 0}
+      assert %{total: 1, succeeded: 1, failed: 0, in_progress: 0} = projection.totals.requests
       assert projection.accounting.recorded_settlements == 1
       assert projection.accounting.unknown_usage == if(known?, do: 0, else: 1)
 
