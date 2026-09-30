@@ -55,24 +55,31 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
   @item_text "completed answer"
 
   for forwarding <- [true, false, :peer] do
-    for transport <- [:websocket, :https] do
-      @tag forwarding: forwarding, transport: transport, post_compaction_mailbox: true
+    for transport <- [:websocket, :https], role <- [:opening, :local_summary, :remote_resume], provider <- [:held, :completes] do
+      @tag forwarding: forwarding, transport: transport, role: role, provider: provider, post_compaction_mailbox: true
       @tag slow: "a Full post-compaction reasoning cut, mailbox continuation and duplicate control through the real socket"
-      test "owner forwarding #{forwarding}: a post-compaction mailbox continuation is served once over #{transport}", %{forwarding: forwarding, transport: transport} do
+      test "owner forwarding #{forwarding}: a #{role} mailbox continuation after provider #{provider} is served once over #{transport}", %{forwarding: forwarding, transport: transport, role: role, provider: provider} do
         contract = CompatibilityMatrix.by_slug!(:duplicate_turn_fence).duplicate_turn.mailbox_resume
-        %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, receipt: receipt, port: port, turn_state: turn_state, resend_payload: payload} = scenario!(forwarding, :held, :mailbox, transport)
+        %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, receipt: receipt, port: port, turn_state: turn_state, resend_payload: payload} = scenario!(forwarding, provider, :mailbox, transport, mailbox_role: role, negative_mailbox_controls: true)
 
         case transport do
-          :websocket -> assert resend["type"] == "response.completed"
+          :websocket -> assert {resend["type"], get_in(resend, ["error", "code"])} == {"response.completed", nil}
           :https -> assert {200, _body} = resend
         end
 
         assert %{"completed_items" => 1, "highest_frame_class" => "item_done", "terminal_class" => "none"} = receipt
-        assert [%Request{id: ^request_id, status: "failed", last_error_code: "client_disconnected", correlation_id: original_claim}, %Request{status: "succeeded", correlation_id: continuation_claim}] = pool_requests(setup.pool.id)
-        assert String.starts_with?(original_claim, contract.original_prefix)
+        requests = pool_requests(setup.pool.id)
+        expected_count = if role == :local_summary, do: 3, else: 2
+        assert length(requests) == expected_count
+        assert [%Request{id: ^request_id, correlation_id: original_claim} = original, %Request{id: successor_id, status: "succeeded", correlation_id: continuation_claim}] = Enum.take(requests, -2)
+        assert original.status == if(provider == :held, do: "failed", else: "succeeded")
+        if provider == :held, do: assert(original.last_error_code == "client_disconnected")
+        assert String.starts_with?(original_claim, if(role == :opening, do: "codex-turn:", else: contract.original_prefix))
+        assert [%RequestClientRetryLink{predecessor_request_id: ^request_id, successor_request_id: ^successor_id}] = Repo.all(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^request_id)
+        assert_one_settlement_each!(Enum.map(requests, & &1.id))
         assert String.starts_with?(continuation_claim, contract.successor_prefix)
         assert original_claim != continuation_claim
-        assert FakeUpstream.count(upstream) == 2
+        assert FakeUpstream.count(upstream) == expected_count
 
         changed = update_in(payload["input"], fn input -> input ++ [%{"type" => "message", "role" => "assistant", "content" => "changed history"}] end)
 
@@ -82,9 +89,37 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
           _unexpected -> flunk("the changed mailbox continuation was not fenced")
         end
 
-        assert length(pool_requests(setup.pool.id)) == 2
-        assert FakeUpstream.count(upstream) == 2
+        assert length(pool_requests(setup.pool.id)) == expected_count
+        assert FakeUpstream.count(upstream) == expected_count
       end
+    end
+  end
+
+  for forwarding <- [true, :peer] do
+    @tag forwarding: forwarding, mailbox_chain: true
+    @tag slow: "two real mailbox item cuts through the owner followed by one completed successor and duplicate control"
+    test "owner forwarding #{forwarding}: two ordinary mailbox cuts preserve the exact predecessor chain", %{forwarding: forwarding} do
+      %{setup: setup, upstream: upstream, request_id: first_id, resend: resend, port: port, turn_state: turn_state, resend_payload: payload} = scenario!(forwarding, :held, :mailbox, :websocket, mailbox_role: :opening, successor_cut: true)
+      assert resend["type"] == "response.completed"
+      assert [%Request{id: ^first_id, status: "failed"}, %Request{id: second_id, status: "failed"}, %Request{id: third_id, status: "succeeded"}] = pool_requests(setup.pool.id)
+      assert Repo.all(from l in RequestClientRetryLink, where: l.predecessor_request_id in ^[first_id, second_id], select: {l.predecessor_request_id, l.successor_request_id}) |> Enum.sort() == Enum.sort([{first_id, second_id}, {second_id, third_id}])
+      assert_one_settlement_each!([first_id, second_id, third_id])
+      assert %{"terminal_class" => "response.completed"} = await_receipt!(third_id, System.monotonic_time(:millisecond) + @timeout_ms)
+      changed = Map.update!(payload, "input", &(&1 ++ [client_recorded_item("synthetic changed history")]))
+      assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = resend!(:websocket, port, setup, turn_state, changed)
+      assert FakeUpstream.count(upstream) == 3
+      assert %{"type" => "response.completed"} = resend!(:websocket, port, setup, turn_state, payload)
+      await_all_settled!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
+      requests = pool_requests(setup.pool.id)
+      assert length(requests) == 4
+      fourth = List.last(requests)
+      assert [%RequestClientRetryLink{predecessor_request_id: ^third_id, successor_request_id: fourth_id}] = Repo.all(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^third_id)
+      assert fourth.id == fourth_id
+      assert fourth.status == "succeeded"
+      assert_one_settlement_each!(Enum.map(requests, & &1.id))
+      assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = resend!(:websocket, port, setup, turn_state, changed)
+      assert length(pool_requests(setup.pool.id)) == 4
+      assert FakeUpstream.count(upstream) == 4
     end
   end
 
@@ -237,26 +272,23 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, forwarding != false)
     release_ref = make_ref()
-    served? = resend_shape in [:identical, :grown, :mailbox]
     mailbox? = resend_shape == :mailbox
     frames = if mailbox?, do: reasoning_stream_frames(), else: stream_frames("resp_completed_item_original")
     hold_at = length(frames) - 1
-
-    upstream =
-      start_upstream(
-        FakeUpstream.strict_sequence(
-          [native_request(FakeUpstream.barrier_websocket_frames(frames, notify: self(), release_ref: release_ref))] ++
-            if(served?, do: [successor_request(resend_transport)], else: [])
-        )
-      )
+    mailbox_role = Keyword.get(opts, :mailbox_role, :remote_resume)
+    local_resume? = mailbox? and mailbox_role == :local_summary
+    second_cut = if Keyword.get(opts, :successor_cut, false), do: make_ref()
+    upstream = start_scenario_upstream!(frames, release_ref, local_resume?, second_cut, resend_shape, resend_transport)
 
     setup = topology_setup(upstream, forwarding)
     if not mailbox?, do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
     turn_state = Ecto.UUID.generate()
     peer = if forwarding == :peer, do: start_peer_session_owner!(setup, %{accepted_turn_state: turn_state})
     payload = native_turn_payload(Ecto.UUID.generate(), setup.model.exposed_model_id)
-    payload = if mailbox?, do: mailbox_resume_payload(payload), else: payload
+    payload = if mailbox?, do: mailbox_resume_payload(payload, mailbox_role), else: payload
     port = start_public_endpoint!()
+
+    prelude_id = serve_window_prelude!(local_resume?, port, setup, turn_state, payload)
 
     {conn, websocket, ref} = public_websocket_connect!(port, setup, turn_state)
     {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(payload))
@@ -270,7 +302,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
     # helpers consume every message they do not recognise.
     assert_receive {:fake_upstream_frame_barrier, ^hold_at, _handler, ^release_ref}, @timeout_ms
     conn = receive_until!(conn, websocket, ref, "response.output_item.done")
-    assert [%Request{id: request_id} = original] = pool_requests(setup.pool.id)
+    assert %Request{id: request_id} = original = List.last(pool_requests(setup.pool.id))
+
+    assert_window_rebound!(original, prelude_id)
+
     if mailbox?, do: assert(original.request_metadata["routing"]["model_serving_mode"] == "full")
 
     assert_peer_forwarding(original, peer)
@@ -278,17 +313,86 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
     {receipt, proven_attempt_id} = CleanupProofRace.around_cut(opts, request_id, fn -> close_and_await_receipt!(conn, request_id, provider, upstream, release_ref) end)
     _settled = await_settled!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
 
-    if code = Keyword.get(opts, :settlement_variant) do
-      {1, _} = Repo.update_all(from(r in Request, where: r.id == ^request_id), set: [last_error_code: code])
-      {1, _} = Repo.update_all(from(t in CodexTurn, where: t.request_id == ^request_id), set: [error_code: code])
-      {1, _} = Repo.update_all(from(a in Attempt, where: a.request_id == ^request_id), set: [network_error_code: code])
-    end
-
+    apply_settlement_variant!(request_id, Keyword.get(opts, :settlement_variant))
     resend_payload = resend_payload(payload, resend_shape)
+    transport_context = %{transport: resend_transport, port: port, setup: setup, turn_state: turn_state, upstream: upstream, local_resume?: local_resume?}
+    assert_mailbox_controls!(Keyword.get(opts, :negative_mailbox_controls, false), transport_context, payload, resend_payload)
+    resend_payload = continue_after_second_cut!(second_cut, transport_context, request_id, resend_payload)
     resend = resend!(resend_transport, port, setup, turn_state, resend_payload)
 
     await_all_settled!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
     %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, receipt: receipt, port: port, turn_state: turn_state, resend_payload: resend_payload, proven_attempt_id: proven_attempt_id}
+  end
+
+  defp start_scenario_upstream!(frames, release_ref, local_resume?, second_cut, shape, transport) do
+    prelude = if local_resume?, do: [native_request(FakeUpstream.websocket_text_frames(stream_frames("resp_window_opening")))], else: []
+    responses = prelude ++ [native_request(FakeUpstream.barrier_websocket_frames(frames, notify: self(), release_ref: release_ref))] ++ scenario_successor_responses(second_cut, shape, transport)
+    start_upstream(FakeUpstream.strict_sequence(responses))
+  end
+
+  defp scenario_successor_responses(second_cut, _shape, transport) when is_reference(second_cut),
+    do: [native_request(FakeUpstream.barrier_websocket_frames(reasoning_stream_frames(), notify: self(), release_ref: second_cut)), successor_request(transport), successor_request(transport)]
+
+  defp scenario_successor_responses(nil, shape, transport) when shape in [:identical, :grown, :mailbox], do: [successor_request(transport)]
+  defp scenario_successor_responses(nil, _shape, _transport), do: []
+
+  defp serve_window_prelude!(false, _port, _setup, _turn_state, _payload), do: nil
+
+  defp serve_window_prelude!(true, port, setup, turn_state, payload) do
+    opening = payload |> Map.update!("input", &Enum.take(&1, 1)) |> mailbox_window(0)
+    assert %{"type" => "response.completed"} = send_and_receive_terminal!(port, setup, turn_state, CodexPooler.JSON.encode!(opening))
+    assert [prior] = pool_requests(setup.pool.id)
+    await_all_settled!(setup.pool.id, System.monotonic_time(:millisecond) + @timeout_ms)
+    prior.id
+  end
+
+  defp assert_window_rebound!(_original, nil), do: :ok
+
+  defp assert_window_rebound!(original, prelude_id) do
+    prior = Repo.get!(Request, prelude_id)
+    refute original.correlation_id == prior.correlation_id
+    assert original.request_metadata["codex_session_id"] == prior.request_metadata["codex_session_id"]
+  end
+
+  defp apply_settlement_variant!(_request_id, nil), do: :ok
+
+  defp apply_settlement_variant!(request_id, code) do
+    {1, _} = Repo.update_all(from(r in Request, where: r.id == ^request_id), set: [last_error_code: code])
+    {1, _} = Repo.update_all(from(t in CodexTurn, where: t.request_id == ^request_id), set: [error_code: code])
+    {1, _} = Repo.update_all(from(a in Attempt, where: a.request_id == ^request_id), set: [network_error_code: code])
+  end
+
+  defp assert_mailbox_controls!(false, _context, _payload, _resend_payload), do: :ok
+
+  defp assert_mailbox_controls!(true, context, payload, resend_payload) do
+    wrong_output = update_in(resend_payload["input"], fn input -> List.update_at(input, length(payload["input"]), &Map.put(&1, "encrypted_content", "synthetic-altered")) end)
+    tool = %{"type" => "function_call", "id" => "fc_synthetic", "call_id" => "synthetic-call", "name" => "synthetic_tool", "arguments" => "{}"}
+    call_without_output = Map.update!(resend_payload, "input", &List.insert_at(&1, length(payload["input"]) + 1, tool))
+    for refused <- [wrong_output, call_without_output], do: assert_mailbox_refused!(resend!(context.transport, context.port, context.setup, context.turn_state, refused))
+    assert FakeUpstream.count(context.upstream) == if(context.local_resume?, do: 2, else: 1)
+  end
+
+  defp assert_mailbox_refused!(%{"type" => "error", "error" => %{"code" => "duplicate_turn"}}), do: :ok
+  defp assert_mailbox_refused!({409, body}), do: assert(%{"error" => %{"code" => "duplicate_turn"}} = CodexPooler.JSON.decode!(body))
+  defp assert_mailbox_refused!(_unexpected), do: flunk("unproved mailbox continuation was not fenced")
+
+  defp continue_after_second_cut!(nil, _context, _request_id, payload), do: payload
+
+  defp continue_after_second_cut!(second_cut, context, request_id, payload) do
+    {conn, websocket, ref} = public_websocket_connect!(context.port, context.setup, context.turn_state)
+    {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(payload))
+
+    for ordinal <- 0..2 do
+      assert_receive {:fake_upstream_frame_barrier, ^ordinal, _handler, ^second_cut}, @timeout_ms
+      :ok = FakeUpstream.release_frame(context.upstream, second_cut)
+    end
+
+    assert_receive {:fake_upstream_frame_barrier, 3, _handler, ^second_cut}, @timeout_ms
+    conn = receive_until!(conn, websocket, ref, "response.output_item.done")
+    second = List.last(pool_requests(context.setup.pool.id))
+    assert second.id != request_id
+    close_and_await_receipt!(conn, second.id, :held, context.upstream, second_cut)
+    resend_payload(payload, :mailbox)
   end
 
   defp topology_setup(upstream, :peer) do
@@ -319,11 +423,28 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisibleCompletedItemR
   defp appended_items(:extra), do: [client_recorded_item(@item_text), client_recorded_item(@item_text)]
   defp appended_items(:mailbox), do: [reasoning_item() | Enum.map(1..5, fn n -> %{"type" => "agent_message", "author" => "/root/worker", "recipient" => "/root", "content" => [%{"type" => "input_text", "text" => "synthetic task update #{n}"}]} end)]
 
-  defp mailbox_resume_payload(payload) do
+  defp mailbox_resume_payload(payload, role) do
+    suffix =
+      case role do
+        :opening -> []
+        :local_summary -> [%{"type" => "message", "role" => "user", "content" => [%{"type" => "input_text", "text" => "synthetic local summary"}]}]
+        :remote_resume -> [%{"type" => "compaction", "encrypted_content" => "synthetic-compaction"}]
+      end
+
     payload
     |> Map.update!("client_metadata", &Map.delete(&1, @websocket_lite_marker))
     |> update_in(["client_metadata", "x-codex-turn-metadata"], fn metadata -> metadata |> CodexPooler.JSON.decode!() |> Map.put("agent_name", "/root") |> CodexPooler.JSON.encode!() end)
-    |> Map.update!("input", &(&1 ++ [%{"type" => "compaction", "encrypted_content" => "synthetic-compaction"}]))
+    |> mailbox_window(if(role == :opening, do: 0, else: 1))
+    |> Map.update!("input", &(&1 ++ suffix))
+  end
+
+  defp mailbox_window(payload, number) do
+    metadata = CodexPooler.JSON.decode!(payload["client_metadata"]["x-codex-turn-metadata"])
+    window = "#{metadata["thread_id"]}:#{number}"
+
+    payload
+    |> put_in(["client_metadata", "x-codex-window-id"], window)
+    |> put_in(["client_metadata", "x-codex-turn-metadata"], CodexPooler.JSON.encode!(Map.merge(metadata, %{"window_id" => window, "window_number" => number})))
   end
 
   defp reasoning_item, do: %{"type" => "reasoning", "id" => "rs_mailbox_original", "summary" => [%{"type" => "summary_text", "text" => "synthetic reasoning"}], "encrypted_content" => "synthetic-reasoning"}

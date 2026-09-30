@@ -561,7 +561,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   # settlement. Such a predecessor is still live, not proof of zero output:
   # resolve its existing claim so the lifecycle fence refuses it until settled.
   # Apply on every chain hop; generic zero-output retry policy stays separate.
-  defp unfinished_http_mailbox_predecessor?(%Request{transport: "http_sse", request_metadata: %{"native_http_claim_arm" => "post_compaction_resume"}} = request, %{opts: opts}) do
+  defp unfinished_http_mailbox_predecessor?(%Request{transport: "http_sse", request_metadata: %{"native_http_claim_arm" => arm}} = request, %{opts: opts}) when arm in ["opening", "steered_continuation", "tool_continuation", "post_compaction_resume"] do
     (is_nil(request.completed_at) or request.status in ["accepted", "in_progress"]) and
       match?(%ClientRetry.OriginalWitness{mailbox: [_first | _rest]}, attr(opts, :native_client_retry_witness))
   end

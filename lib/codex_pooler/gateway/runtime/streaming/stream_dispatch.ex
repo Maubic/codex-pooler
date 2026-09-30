@@ -315,8 +315,9 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
 
   defp maybe_enable_native_http_progress(
          state,
-         %{request_metadata: %{"native_http_claim_arm" => "post_compaction_resume"}}
-       ),
+         %{request_metadata: %{"native_http_claim_arm" => arm}}
+       )
+       when arm in ["opening", "steered_continuation", "tool_continuation", "post_compaction_resume"],
        do: DownstreamStream.enable_native_http_progress(state)
 
   defp maybe_enable_native_http_progress(state, _request), do: state

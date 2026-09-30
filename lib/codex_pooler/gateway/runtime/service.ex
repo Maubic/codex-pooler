@@ -1152,6 +1152,21 @@ defmodule CodexPooler.Gateway.Runtime.Service do
     end
   end
 
+  # A mailbox continuation keeps its original durable turn claim, like a
+  # compaction resume. Its sealed candidates must reach that claim's resolver:
+  # the ordinary owner retry policy only recognizes exact/grown payloads.
+  # This schedules no dispatch; FailedPredecessorResend still verifies the
+  # predecessor, delivered prefix, addressed mail, session, epoch and lineage
+  # under the reservation locks before it can admit a successor.
+  defp classify_client_retry_intent(
+         _session,
+         _api_key,
+         _model,
+         %{endpoint: "/backend-api/codex/responses", request_options: %RequestOptions{native_client_retry_witness: %CodexPooler.Accounting.ClientRetry.OriginalWitness{mailbox: [_first | _rest]}}},
+         authorization_binding
+       ),
+       do: replay_intent_result(:fresh, authorization_binding, nil)
+
   defp classify_client_retry_intent(
          session,
          api_key,

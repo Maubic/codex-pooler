@@ -10,7 +10,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
   @lite_marker "ws_request_header_x_openai_internal_codex_responses_lite"
 
   # Mailbox delivery can stop the client after a reasoning/commentary item and
-  # append new input before its next request. Keep the original resume claim:
+  # append new input before its next request. Keep the original turn claim:
   # a separate key would bypass old pods during a rolling deployment. Instead
   # seal the candidate prefix, delivered output and mailbox boundary for the
   # accounting chain to verify against its actual predecessor and successor.
@@ -22,7 +22,6 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
   defp candidates(semantic_key, %{"input" => input} = payload, options) when is_list(input) do
     with nil <- Map.get(payload, "previous_response_id"),
          "turn" <- NativeTurnContinuation.request_kind(payload, options),
-         {:post_compaction_resume, _anchor} <- NativeTurnContinuation.turn_role(payload),
          %{"agent_name" => agent} when is_binary(agent) and byte_size(agent) in 1..256 <-
            payload |> NativeTurnContinuation.canonical_document(options) |> NativeTurnContinuation.canonical_metadata_map(),
          runs when length(runs) <= @max_mailbox_runs <- mailbox_runs(input, agent) do
@@ -70,7 +69,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
     |> Enum.with_index()
     |> Enum.reduce([], fn {item, index}, runs ->
       cond do
-        compaction?(item) -> []
+        history_boundary?(item) -> []
         incoming?(item, agent) -> extend_run(runs, index)
         true -> runs
       end
@@ -78,8 +77,9 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
     |> Enum.reverse()
   end
 
-  defp compaction?(%{"type" => type}), do: type in ["compaction", "compaction_summary", "context_compaction"]
-  defp compaction?(_item), do: false
+  defp history_boundary?(%{"type" => "message", "role" => "user"}), do: true
+  defp history_boundary?(%{"type" => type}), do: type in ["compaction", "compaction_summary", "context_compaction"]
+  defp history_boundary?(_item), do: false
 
   defp extend_run([{start, index} | rest], index), do: [{start, index + 1} | rest]
   defp extend_run(runs, index), do: [{index, index + 1} | runs]
@@ -115,8 +115,11 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
 
     with {:ok, http} <- WebsocketTurnIdentity.http_resume_input_digest(semantic_key, payload["input"]),
          {:ok, plain} <- WebsocketTurnIdentity.replay_claim_digest(semantic_key, frame),
-         {:ok, lite} <- WebsocketTurnIdentity.replay_claim_digest(semantic_key, marked) do
-      %{http: http, websocket: Enum.uniq([plain, lite])}
+         {:ok, lite} <- WebsocketTurnIdentity.replay_claim_digest(semantic_key, marked),
+         {:ok, unframed} <- WebsocketTurnIdentity.replay_claim_digest(semantic_key, payload) do
+      # HTTP tool continuations retain their original unframed replay witness;
+      # opening HTTP requests use the reconstructed websocket variants instead.
+      %{http: http, websocket: Enum.uniq([plain, lite, unframed])}
     else
       _unproved -> nil
     end

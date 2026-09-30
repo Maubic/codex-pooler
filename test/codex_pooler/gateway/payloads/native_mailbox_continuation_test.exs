@@ -40,13 +40,13 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuationTest do
 
     [recorded_digest] = attempt.response_metadata["downstream_delivery"]["completed_item_digests"]
 
-    for change <- [%{"completed_items" => 2}, %{"terminal_class" => "response.completed"}, %{"outcome" => "delivered"}, %{"completed_item_digests" => []}, %{"completed_items" => 2, "completed_item_digests" => [recorded_digest, "abcdef123456"]}] do
+    for change <- [%{"completed_items" => 2}, %{"terminal_class" => "response.failed"}, %{"outcome" => "unknown"}, %{"completed_item_digests" => []}, %{"completed_items" => 2, "completed_item_digests" => ["abcdef123456", recorded_digest]}] do
       changed = update_in(attempt.response_metadata["downstream_delivery"], &Map.merge(&1, change))
       refute ClientRetry.verified_mailbox_continuation?(turn, request, changed, witness, nil)
     end
   end
 
-  test "self-authored output, other recipients, malformed mail, old mail and non-resume requests do not qualify" do
+  test "self-authored output, other recipients, malformed mail, old mail and non-turn requests do not qualify" do
     original = payload()
     output = reasoning("first")
     mail = mailbox("first")
@@ -59,7 +59,11 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuationTest do
     assert witness(append(original, [output, mail]) |> Map.put("previous_response_id", "resp_synthetic_anchor")).mailbox == []
     assert witness(append(original, [output, mail]) |> Map.put("client_metadata", %{})).mailbox == []
     assert witness(append(original, [output, mail]) |> put_in(["client_metadata", "x-codex-turn-metadata", "request_kind"], "compaction")).mailbox == []
-    assert witness(append(original, [output, mail, %{"type" => "function_call_output", "call_id" => "synthetic-call", "output" => "synthetic"}])).mailbox == []
+    followed_by_tool = witness(append(original, [output, mail, %{"type" => "function_call_output", "call_id" => "synthetic-call", "output" => "synthetic"}]))
+    assert [historical] = followed_by_tool.mailbox
+    refute historical.current?
+    {turn, request, attempt} = predecessor(original, output, "websocket")
+    refute ClientRetry.verified_mailbox_continuation?(turn, request, attempt, followed_by_tool, nil)
   end
 
   test "a historical edge must end at its actual successor, including a websocket to HTTP chain" do
@@ -112,6 +116,43 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuationTest do
     assert length(witness(append(payload(), [reasoning("first") | many_mail])).mailbox) == 1
     too_many_runs = Enum.flat_map(1..17, fn n -> [reasoning(Integer.to_string(n)), mailbox(Integer.to_string(n))] end)
     assert witness(append(payload(), too_many_runs)).mailbox == []
+  end
+
+  test "mail before a later user message cannot be an edge of that request" do
+    original = payload()
+    old_mail = append(original, [reasoning("old"), mailbox("old"), %{"type" => "message", "role" => "user", "content" => "synthetic later input"}])
+    assert witness(old_mail).mailbox == []
+    assert length(witness(append(old_mail, [reasoning("new"), mailbox("new")])).mailbox) == 1
+  end
+
+  test "ordinary opening and local-summary windows produce the same bounded mailbox proof" do
+    ordinary = Map.update!(payload(), "input", &Enum.take(&1, 1))
+    local_summary = ordinary |> append([%{"type" => "message", "role" => "user", "content" => "synthetic summary"}]) |> put_in(["client_metadata", "x-codex-turn-metadata", "window_number"], 2)
+
+    for original <- [ordinary, local_summary] do
+      output = reasoning("completed")
+      candidate = append(original, [output, mailbox("incoming")])
+      assert [proof] = witness(candidate).mailbox
+      assert proof.current?
+      assert {:ok, digest} = WebsocketTurnIdentity.replay_claim_digest(@semantic, original)
+      assert digest in proof.prefix.websocket
+      assert {:ok, item_digest} = WebsocketTurnIdentity.completed_item_digest(output)
+      assert proof.items == [item_digest]
+      assert {:ok, end_digest} = WebsocketTurnIdentity.replay_claim_digest(@semantic, candidate)
+      assert end_digest in proof.ending.websocket
+    end
+  end
+
+  test "only contiguous completed reasoning or commentary can precede incoming mail" do
+    ordinary = Map.update!(payload(), "input", &Enum.take(&1, 1))
+    commentary = %{"type" => "message", "role" => "assistant", "phase" => "commentary", "content" => [%{"type" => "output_text", "text" => "synthetic commentary"}]}
+    assert length(witness(append(ordinary, [reasoning("first"), commentary, mailbox("incoming")])).mailbox) == 2
+
+    for gap <- [%{"type" => "message", "role" => "user", "content" => "synthetic"}, %{"type" => "function_call", "call_id" => "synthetic-call", "name" => "synthetic_tool", "arguments" => "{}"}, %{"type" => "function_call_output", "call_id" => "synthetic-call", "output" => "synthetic"}, Map.put(commentary, "phase", "final_answer")] do
+      assert witness(append(ordinary, [reasoning("first"), gap, mailbox("incoming")])).mailbox == []
+    end
+
+    assert length(witness(append(ordinary, Enum.map(1..5, &reasoning(Integer.to_string(&1))) ++ [mailbox("incoming")])).mailbox) == 4
   end
 
   defp witness(payload, options \\ options()) do

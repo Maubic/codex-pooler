@@ -397,19 +397,20 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
              Enum.uniq(variant_digests ++ List.flatten(tail_digests)) -- [digest],
              List.flatten(grown)
            ) do
-      witness
+      NativeMailboxContinuation.attach(witness, identity.semantic_turn_key, payload, request_options)
     else
       _unavailable -> nil
     end
   end
 
-  # Ordinary HTTP tool continuations can retry only their exact request after
-  # a proved partial-tool cut, so they need no tail or grown-history witnesses.
+  # Ordinary HTTP tool continuations retain their exact request witness after
+  # a proved partial-tool cut. Mailbox proofs separately bind only completed
+  # reasoning/commentary before incoming mail, never delivered tool items.
   defp native_client_retry_witness(identity, %{"input" => input} = payload, request_options, :tool_continuation)
        when is_list(input) do
     with {:ok, digest} <- WebsocketTurnIdentity.replay_claim_digest(identity.semantic_turn_key, payload),
          {:ok, witness} <- ClientRetry.original_witness(digest, request_options.runtime.api_key_runtime_epoch) do
-      witness
+      NativeMailboxContinuation.attach(witness, identity.semantic_turn_key, payload, request_options)
     else
       _unavailable -> nil
     end

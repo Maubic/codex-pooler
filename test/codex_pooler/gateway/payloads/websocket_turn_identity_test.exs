@@ -743,6 +743,79 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentityTest do
       assert :error = WebsocketTurnIdentity.completed_item_digest(%{"text" => "no type"})
     end
 
+    # Codex rust-v0.158.0 ResponseItem::Reasoning keeps content only when the
+    # array contains reasoning_text, and serde drops unknown object fields.
+    test "reasoning content omitted by the client keeps the completed receipt identity", ctx do
+      assert {:ok, expected} = WebsocketTurnIdentity.completed_item_digest(ctx.provider_reasoning)
+      assert {:ok, original_claim} = WebsocketTurnIdentity.replay_claim_digest(ctx.semantic, ctx.original)
+
+      for content <- [nil, [], [%{"type" => "text", "text" => "synthetic omitted text"}]] do
+        provider = Map.put(ctx.provider_reasoning, "content", content)
+        assert {:ok, ^expected} = WebsocketTurnIdentity.completed_item_digest(provider)
+
+        grown = Map.update!(ctx.original, "input", &(&1 ++ [ctx.client_reasoning]))
+        assert {:ok, [%{items: [^expected], digest: ^original_claim}]} = WebsocketTurnIdentity.grown_resend_candidates(ctx.semantic, grown)
+      end
+    end
+
+    test "reasoning identity retains client fields and ignores provider-only fields", ctx do
+      provider =
+        ctx.provider_reasoning
+        |> Map.merge(%{"status" => "completed", "provider_extension" => "synthetic", "internal_chat_message_metadata_passthrough" => %{"synthetic" => true}})
+        |> put_in(["summary", Access.at(0), "provider_extension"], "synthetic summary metadata")
+
+      assert {:ok, expected} = WebsocketTurnIdentity.completed_item_digest(ctx.client_reasoning)
+      assert {:ok, ^expected} = WebsocketTurnIdentity.completed_item_digest(provider)
+
+      for changed <- [
+            Map.put(provider, "id", "rs_other"),
+            Map.put(provider, "encrypted_content", "enc_other"),
+            put_in(provider, ["summary", Access.at(0), "text"], "synthetic changed summary"),
+            Map.put(provider, "summary", [])
+          ] do
+        assert {:ok, digest} = WebsocketTurnIdentity.completed_item_digest(changed)
+        refute digest == expected
+      end
+    end
+
+    test "reasoning_text retains the entire mixed content array in order", ctx do
+      parts = [%{"type" => "text", "text" => "synthetic text"}, %{"type" => "reasoning_text", "text" => "synthetic reasoning"}]
+      client = Map.put(ctx.client_reasoning, "content", parts)
+      provider = Map.put(ctx.provider_reasoning, "content", Enum.map(parts, &Map.put(&1, "provider_extension", "synthetic part metadata")))
+
+      assert {:ok, expected} = WebsocketTurnIdentity.completed_item_digest(client)
+      assert {:ok, ^expected} = WebsocketTurnIdentity.completed_item_digest(provider)
+
+      for changed <- [
+            ctx.client_reasoning,
+            Map.put(client, "content", tl(parts)),
+            Map.put(client, "content", Enum.reverse(parts)),
+            put_in(client, ["content", Access.at(0), "text"], "synthetic changed text"),
+            put_in(client, ["content", Access.at(1), "text"], "synthetic changed reasoning")
+          ] do
+        assert {:ok, digest} = WebsocketTurnIdentity.completed_item_digest(changed)
+        refute digest == expected
+      end
+    end
+
+    test "reasoning projection does not change generic message identity or request claim inputs", ctx do
+      assert {:ok, message_digest} = WebsocketTurnIdentity.completed_item_digest(ctx.client_message)
+
+      for changed <- [
+            Map.put(ctx.client_message, "provider_extension", "synthetic"),
+            put_in(ctx.client_message, ["content", Access.at(0), "provider_extension"], "synthetic")
+          ] do
+        assert {:ok, digest} = WebsocketTurnIdentity.completed_item_digest(changed)
+        refute digest == message_digest
+      end
+
+      omitted = Map.put(ctx.original, "input", [ctx.provider_reasoning])
+      empty = Map.put(ctx.original, "input", [Map.put(ctx.provider_reasoning, "content", [])])
+      refute WebsocketTurnIdentity.request_claim_key(ctx.semantic, omitted) == WebsocketTurnIdentity.request_claim_key(ctx.semantic, empty)
+      refute WebsocketTurnIdentity.replay_claim_digest(ctx.semantic, omitted) == WebsocketTurnIdentity.replay_claim_digest(ctx.semantic, empty)
+      refute WebsocketTurnIdentity.http_resume_input_digest(ctx.semantic, omitted["input"]) == WebsocketTurnIdentity.http_resume_input_digest(ctx.semantic, empty["input"])
+    end
+
     test "the grown resend names its original and the items appended to it", ctx do
       assert {:ok, original_claim} = WebsocketTurnIdentity.replay_claim_digest(ctx.semantic, ctx.original)
       {:ok, message_digest} = WebsocketTurnIdentity.completed_item_digest(ctx.provider_message)

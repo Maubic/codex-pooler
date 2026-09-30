@@ -584,10 +584,11 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
   items appended (measured with Codex 0.156.1 through a recording proxy). It
   re-serializes each item from its own model, so the item it resends differs
   from the one it was pushed only in what that model does not keep: the item's
-  `status`, a content part's `annotations` and `logprobs`, and fields it never
-  had or writes as `null` (a reasoning item's `content`). The identity drops
-  exactly those and binds everything else under a keyed digest, the house
-  12-character shape, so a receipt can carry it without carrying content.
+  `status`, a content part's `annotations` and `logprobs`, and null fields.
+  Reasoning items use the client's fields, with summary/content parts projected
+  to `type` and `text`; content survives only if it contains `reasoning_text`
+  (Codex 0.158.0). The identity binds those fields under a keyed digest, the
+  house 12-character shape, so a receipt can carry it without carrying content.
   `:error` for anything that is not an item map.
   """
   @spec completed_item_digest(term()) :: {:ok, String.t()} | :error
@@ -692,6 +693,17 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
   defp completed_output_item?(%{"type" => type}) when is_binary(type), do: not String.ends_with?(type, "_output")
   defp completed_output_item?(_item), do: false
 
+  defp completed_item_identity(%{"type" => "reasoning"} = item) do
+    item
+    |> Map.take(["type", "id", "summary", "encrypted_content", "content"])
+    |> Map.new(fn
+      {"summary", parts} when is_list(parts) -> {"summary", Enum.map(parts, &reasoning_item_part/1)}
+      {"content", parts} -> {"content", reasoning_item_content(parts)}
+      entry -> entry
+    end)
+    |> without_nulls()
+  end
+
   defp completed_item_identity(item) do
     item
     |> Map.drop(["status", "internal_chat_message_metadata_passthrough"])
@@ -701,6 +713,19 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
     end)
     |> without_nulls()
   end
+
+  defp reasoning_item_content(parts) when is_list(parts) do
+    if Enum.any?(parts, &match?(%{"type" => "reasoning_text"}, &1)) do
+      Enum.map(parts, &reasoning_item_part/1)
+    end
+  end
+
+  defp reasoning_item_content(content), do: content
+
+  defp reasoning_item_part(%{"type" => type} = part) when type in ["summary_text", "reasoning_text", "text"],
+    do: Map.take(part, ["type", "text"])
+
+  defp reasoning_item_part(part), do: part
 
   defp completed_item_part(%{} = part), do: part |> Map.drop(["annotations", "logprobs"]) |> without_nulls()
   defp completed_item_part(part), do: without_nulls(part)

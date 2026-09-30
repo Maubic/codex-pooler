@@ -424,6 +424,9 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
       request.status in @live_request_statuses or is_nil(request.completed_at) ->
         {:error, :active_predecessor}
 
+      mailbox_continuation?(request, scope) ->
+        admit_mailbox_predecessor(request, scope, now)
+
       identical_resend?(request, scope) or completed_item_resend?(request, scope) ->
         undelivered_completion(request, scope, now)
 
@@ -673,7 +676,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     end
   end
 
-  defp mailbox_continuation?(request, %{resume_claim?: true} = scope) do
+  defp mailbox_continuation?(request, %{native_client_retry_witness: %ClientRetry.OriginalWitness{mailbox: [_first | _rest]}} = scope) do
     turn = lock_turn(request.id)
     attempt = lock_final_attempt(turn, request.id)
 
@@ -682,6 +685,14 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   end
 
   defp mailbox_continuation?(_request, _scope), do: false
+
+  defp admit_mailbox_predecessor(request, scope, now) do
+    cond do
+      live_turn?(request.id) or live_attempt?(request.id) -> {:error, :active_predecessor}
+      entitlement?(request.id) -> {:error, :entitlement_present}
+      true -> with :ok <- validate_retry_window(request, request.id |> lock_turn() |> lock_final_attempt(request.id), now, scope), do: {:ok, :mailbox_continuation}
+    end
+  end
 
   defp completed_item_resend?(%Request{} = request, scope) do
     turn = lock_turn(request.id)

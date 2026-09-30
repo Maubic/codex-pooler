@@ -2414,17 +2414,17 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   def verified_completed_item_resend?(_turn, _request, _attempt, _candidates), do: false
 
-  @doc "Verifies a stopped resume followed by its delivered output and new addressed mailbox input. Candidates are transient, never persisted."
+  @doc "Verifies a settled native request followed by a retained completed-output prefix and new addressed mailbox input. Candidates are transient, never persisted."
   @spec verified_mailbox_continuation?(term(), term(), term(), term(), term()) :: boolean()
   def verified_mailbox_continuation?(
-        %CodexTurn{status: "interrupted", error_code: "client_disconnected", final_attempt_id: attempt_id, completed_at: %DateTime{}} = turn,
-        %Request{status: "failed", last_error_code: "client_disconnected", endpoint: "/backend-api/codex/responses", completed_at: %DateTime{}} = request,
-        %Attempt{id: attempt_id, status: "failed", network_error_code: "client_disconnected", replay_generation: 0, completed_at: %DateTime{}} = attempt,
+        %CodexTurn{transport_kind: transport, final_attempt_id: attempt_id, completed_at: %DateTime{}} = turn,
+        %Request{transport: transport, endpoint: "/backend-api/codex/responses", completed_at: %DateTime{}} = request,
+        %Attempt{id: attempt_id, transport: transport, replay_generation: 0, completed_at: %DateTime{}} = attempt,
         %OriginalWitness{version: 1, auth_epoch: epoch, mailbox: candidates},
         successor
       )
-      when is_list(candidates) do
-    original_witness_eligible?(request) and request.native_client_retry_auth_epoch == epoch and
+      when is_binary(attempt_id) and transport in ["websocket", "http_sse"] and is_list(candidates) do
+    mailbox_settlement?(turn, request, attempt) and original_witness_eligible?(request) and request.native_client_retry_auth_epoch == epoch and
       Enum.any?(candidates, fn candidate ->
         mailbox_witness_matches?(request, candidate.prefix) and
           mailbox_ending_matches?(successor, candidate) and
@@ -2434,11 +2434,26 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   def verified_mailbox_continuation?(_turn, _request, _attempt, _witness, _successor), do: false
 
+  defp mailbox_settlement?(%CodexTurn{status: "succeeded"}, %Request{status: "succeeded"}, %Attempt{status: "succeeded"}), do: true
+
+  defp mailbox_settlement?(
+         %CodexTurn{status: "interrupted", error_code: "client_disconnected"},
+         %Request{status: "failed", last_error_code: "client_disconnected"},
+         %Attempt{status: "failed", network_error_code: "client_disconnected"}
+       ),
+       do: true
+
+  defp mailbox_settlement?(_turn, _request, _attempt), do: false
+
   defp mailbox_witness_matches?(%Request{transport: "websocket", native_client_retry_digest: digest}, %{websocket: candidates}),
     do: Enum.any?(candidates, &secure_compare(digest, &1))
 
   defp mailbox_witness_matches?(%Request{transport: "http_sse", native_client_retry_digest: digest, request_metadata: %{"native_http_claim_arm" => "post_compaction_resume"}}, %{http: expected}),
     do: secure_compare(digest, expected)
+
+  defp mailbox_witness_matches?(%Request{transport: "http_sse", native_client_retry_digest: digest, request_metadata: %{"native_http_claim_arm" => arm}}, %{websocket: candidates})
+       when arm in ["opening", "steered_continuation", "tool_continuation"],
+       do: Enum.any?(candidates, &secure_compare(digest, &1))
 
   defp mailbox_witness_matches?(_request, _witnesses), do: false
 
@@ -2447,16 +2462,11 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defp mailbox_ending_matches?(%Request{} = successor, %{ending: ending}),
     do: original_witness_eligible?(successor) and mailbox_witness_matches?(successor, ending)
 
-  # Websocket mailbox input requires the complete recorded output and an
-  # interrupted delivery. HTTP below can prove the nonempty prefix the client
-  # consumed before preemption from its separately bounded committed receipt.
-  defp mailbox_output_matches?(
-         turn,
-         %Request{transport: "websocket"} = request,
-         %Attempt{response_metadata: %{"downstream_delivery" => %{"outcome" => "aborted", "terminal_class" => "none", "highest_frame_class" => "item_done", "completed_item_digests" => digests}}} = attempt,
-         %{items: items} = candidate
-       ),
-       do: items == digests and verified_completed_item_resend?(turn, request, attempt, [candidate])
+  # Server writes do not acknowledge client consumption. Match a nonempty
+  # ordered prefix of the complete receipt, under the same proof used for a
+  # grown resend; candidates themselves exclude tool calls and outputs.
+  defp mailbox_output_matches?(turn, %Request{transport: "websocket"} = request, attempt, candidate),
+    do: verified_completed_item_resend?(turn, request, attempt, [candidate])
 
   defp mailbox_output_matches?(%CodexTurn{transport_kind: "http_sse"}, %Request{transport: "http_sse"}, %Attempt{transport: "http_sse", response_metadata: metadata}, %{http_progress: candidates, items: items}) do
     Enum.any?(candidates, &exact_http_mailbox_progress?(metadata["native_http_resume_progress"], &1)) or
