@@ -205,6 +205,22 @@ support is available. The defaults are 32 MiB compressed, 64 MiB decompressed, a
 the algorithm list together. Multipart uploads are not decompressed here; file,
 audio, and image routes keep their own route-specific limits.
 
+An image-heavy Codex history can exceed the byte limit before token-based
+compaction starts. Retrying the same body, or compacting with that same history,
+cannot resolve a Pooler `413 compressed_request_too_large` or
+`413 decompressed_request_too_large`. An owner can increase **Max compressed
+bytes** (`ingress.max_compressed_body_bytes`) and **Max decompressed bytes**
+(`ingress.max_decompressed_body_bytes`) on **System > Firewall**, then retry the
+blocked request. For example, 128 MiB compressed and 256 MiB decompressed are
+`134217728` and `268435456` bytes. New requests use the saved limits without a
+restart; existing saved settings retain their values after an upgrade.
+
+Choose limits for the memory available at the expected concurrent request count:
+compressed bodies, decompressed JSON, and parsed input coexist during decoding.
+Keep the ratio and timeout budgets enabled, and check any reverse proxy body
+limit too. These are Pooler ingress budgets, not a claim about the upstream's
+maximum body size.
+
 Pool image permission is checked after Pool API-key authentication and before
 body parsing for exactly these four actions: `POST /backend-api/codex/images/generations`,
 `POST /backend-api/codex/images/edits`, `POST /v1/images/generations`, and

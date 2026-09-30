@@ -1451,7 +1451,13 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
           :zlib.gzip(~s({"model":"x"}))
         )
 
-      assert json_response(conn, 413)["error"]["code"] == "compressed_request_too_large"
+      error = json_response(conn, 413)["error"]
+      assert error["code"] == "compressed_request_too_large"
+      assert error["message"] =~ "1-byte limit"
+      assert error["message"] =~ "ingress.max_compressed_body_bytes in System > Firewall before retrying"
+      assert Repo.aggregate(Request, :count) == 0
+      assert Repo.aggregate(Attempt, :count) == 0
+      assert Repo.aggregate(LedgerEntry, :count) == 0
     end
 
     test "plain JSON readers pick up updated body limits for new requests" do
@@ -1474,6 +1480,36 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
                |> CompressedBody.read_plain_json_body([])
     end
 
+    @tag slow: "decodes a synthetic 48-image history larger than the default 32 MiB compressed budget"
+    test "image-heavy zstd history can be retried after increasing the compressed limit" do
+      settings = %OperationalSettings{}
+
+      images =
+        Enum.map(1..48, fn _index ->
+          %{"type" => "input_image", "image_url" => "data:image/png;base64," <> Base.encode64(:crypto.strong_rand_bytes(750_000))}
+        end)
+
+      encoded = CodexPooler.JSON.encode!(%{"input" => [%{"type" => "message", "role" => "user", "content" => images}]})
+      compressed = zstd_encoded(encoded)
+      assert byte_size(compressed) > settings.max_compressed_body_bytes
+      assert byte_size(encoded) < settings.max_decompressed_body_bytes
+
+      new_conn = fn ->
+        Plug.Test.conn(:post, "/backend-api/codex/responses", compressed)
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("content-encoding", "zstd")
+      end
+
+      assert {:error, %{status: 413, code: "compressed_request_too_large", message: message}, _conn} = CompressedBody.decode(new_conn.(), settings)
+      assert message =~ "#{settings.max_compressed_body_bytes}-byte limit"
+      assert message =~ "ingress.max_compressed_body_bytes"
+
+      raised_settings = %{settings | max_compressed_body_bytes: 128 * 1024 * 1024, max_decompressed_body_bytes: 256 * 1024 * 1024}
+      assert {:ok, accepted} = CompressedBody.decode(new_conn.(), raised_settings)
+      assert length(hd(accepted.body_params["input"])["content"]) == 48
+      assert :crypto.hash(:sha256, CodexPooler.JSON.encode!(accepted.body_params)) == :crypto.hash(:sha256, encoded)
+    end
+
     test "rejects decompressed bodies above the decompressed-size limit", %{conn: conn} do
       setup_runtime_ingress(%OperationalSettings{max_decompressed_body_bytes: 16})
       setup = active_api_key_fixture()
@@ -1489,7 +1525,13 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
           :zlib.gzip(CodexPooler.JSON.encode!(payload))
         )
 
-      assert json_response(conn, 413)["error"]["code"] == "decompressed_request_too_large"
+      error = json_response(conn, 413)["error"]
+      assert error["code"] == "decompressed_request_too_large"
+      assert error["message"] =~ "16-byte limit"
+      assert error["message"] =~ "ingress.max_decompressed_body_bytes in System > Firewall before retrying"
+      assert Repo.aggregate(Request, :count) == 0
+      assert Repo.aggregate(Attempt, :count) == 0
+      assert Repo.aggregate(LedgerEntry, :count) == 0
     end
 
     test "updated decompressed limits affect subsequent compressed requests", %{conn: conn} do

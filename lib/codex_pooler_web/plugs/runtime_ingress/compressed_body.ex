@@ -136,7 +136,7 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress.CompressedBody do
     remaining_bytes = settings.max_compressed_body_bytes - total_bytes
 
     if remaining_bytes <= 0 do
-      compressed_body_too_large(conn)
+      compressed_body_too_large(conn, settings)
     else
       read_opts = [
         length: remaining_bytes,
@@ -169,12 +169,12 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress.CompressedBody do
     end
   end
 
-  defp compressed_body_too_large(conn) do
+  defp compressed_body_too_large(conn, settings) do
     {:error,
      %{
        status: 413,
        code: "compressed_request_too_large",
-       message: "compressed request body is too large"
+       message: "compressed request body exceeds the #{settings.max_compressed_body_bytes}-byte limit; ask the operator to increase ingress.max_compressed_body_bytes in System > Firewall before retrying"
      }, conn}
   end
 
@@ -444,7 +444,7 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress.CompressedBody do
        %{
          status: 413,
          code: "decompressed_request_too_large",
-         message: "decompressed request body is too large"
+         message: "decompressed request body exceeds the #{settings.max_decompressed_body_bytes}-byte limit; ask the operator to increase ingress.max_decompressed_body_bytes in System > Firewall before retrying"
        }}
     end
   end
