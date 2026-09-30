@@ -52,8 +52,7 @@ defmodule CodexPooler.Accounting.PricingResolution do
       end
 
     lookup_for_tier(
-      model,
-      requested_model,
+      pricing_identifiers(model, requested_model, attr(opts, :endpoint)),
       requested_tier,
       actual_tier,
       price_bucket,
@@ -93,9 +92,8 @@ defmodule CodexPooler.Accounting.PricingResolution do
           metadata_service_tier(attempt.response_metadata) ||
           request |> metadata_pricing_value("actual_service_tier")
 
-      model
+      pricing_identifiers(model, request.requested_model, request.endpoint)
       |> lookup_for_tier(
-        request.requested_model,
         requested_tier,
         actual_tier,
         Costing.price_bucket_for_input_tokens(usage.input_tokens),
@@ -197,8 +195,7 @@ defmodule CodexPooler.Accounting.PricingResolution do
     actual_tier = metadata_pricing_value(request, "actual_service_tier")
 
     lookup_for_tier(
-      model,
-      request.requested_model,
+      pricing_identifiers(model, request.requested_model, request.endpoint),
       requested_tier,
       actual_tier,
       metadata_pricing_value(request, "price_bucket") || @default_price_bucket,
@@ -208,8 +205,7 @@ defmodule CodexPooler.Accounting.PricingResolution do
   end
 
   defp lookup_for_tier(
-         %Model{} = model,
-         requested_model,
+         identifiers,
          requested_tier,
          actual_tier,
          price_bucket,
@@ -218,7 +214,6 @@ defmodule CodexPooler.Accounting.PricingResolution do
        ) do
     requested_tier = ServiceTier.canonicalize(requested_tier)
     actual_tier = ServiceTier.canonicalize(actual_tier)
-    identifiers = pricing_identifiers(model, requested_model)
 
     case priceable_service_tier(requested_tier, actual_tier, batch_usage?) do
       {:ok, service_tier} ->
@@ -422,7 +417,7 @@ defmodule CodexPooler.Accounting.PricingResolution do
     end
   end
 
-  # `pricing_identifiers/2` is a precedence, not a set: an explicit
+  # `pricing_identifiers/3` is a precedence, not a set: an explicit
   # `pricing_ref` is what an operator set this model to be priced as, the
   # upstream model id is what was actually served, and the requested model is
   # only what the client typed — under an enforced-model key it need not name
@@ -748,7 +743,14 @@ defmodule CodexPooler.Accounting.PricingResolution do
     }
   end
 
-  defp pricing_identifiers(model, requested_model) do
+  # Native Images use a catalog model only to select an eligible account. That
+  # carrier's text-token prices do not describe the image service's usage.
+  defp pricing_identifiers(_model, requested_model, endpoint)
+       when endpoint in ["/backend-api/codex/images/generations", "/backend-api/codex/images/edits"] do
+    Enum.reject([requested_model], &blank?/1)
+  end
+
+  defp pricing_identifiers(model, requested_model, _endpoint) do
     Enum.uniq(
       Enum.reject(
         [model.pricing_ref, model.upstream_model_id, model.exposed_model_id, requested_model],

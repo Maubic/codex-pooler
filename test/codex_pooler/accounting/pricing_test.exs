@@ -256,7 +256,7 @@ defmodule CodexPooler.Accounting.PricingTest do
       assert reserved.pricing_snapshot.model_identifier == "gpt-unmapped"
     end
 
-    # findings#236 item 11: `pricing_identifiers/2` is a precedence, not a set.
+    # findings#236 item 11: `pricing_identifiers/3` is a precedence, not a set.
     # A pricing import stamps one `effective_at` on every model it writes, so
     # a model whose explicit ref and whose upstream model are both in the
     # catalog used to tie, and row id picked the winner.

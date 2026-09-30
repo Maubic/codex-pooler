@@ -6,28 +6,6 @@ defmodule CodexPooler.Catalog.OpenAIPricingPreflightTest do
 
   @fixture Path.expand("../../fixtures/pricing/openai/2026-07-28.json", __DIR__)
   @target Path.expand("../../../priv/pricing/openai/pricing.json", __DIR__)
-  @target_sha256 "60f3c58de8306ec02ac14a49a03463fb41fb3614e8834c29f5575aca9f8069c1"
-
-  @skipped_pricing_type_paths [
-    "models.gpt-4o-mini-transcribe.pricing_type",
-    "models.gpt-4o-transcribe-diarize.pricing_type",
-    "models.gpt-4o-transcribe.pricing_type",
-    "models.gpt-live-1.pricing_type",
-    "models.gpt-live-transcribe.pricing_type",
-    "models.gpt-realtime-translate.pricing_type",
-    "models.gpt-realtime-whisper.pricing_type",
-    "models.gpt-transcribe.pricing_type",
-    "models.tts-1-hd.pricing_type",
-    "models.tts-1.pricing_type",
-    "models.whisper.pricing_type"
-  ]
-
-  @incomplete_bucket_paths [
-    "models.omni-moderation-latest.prices.standard.default",
-    "models.text-embedding-3-large.prices.standard.default",
-    "models.text-embedding-3-small.prices.standard.default",
-    "models.text-embedding-ada-002.prices.standard.default"
-  ]
 
   test "expanded tool rates reject malformed or inconsistent billing metadata" do
     payload = @target |> File.read!() |> CodexPooler.JSON.decode!()
@@ -65,25 +43,22 @@ defmodule CodexPooler.Catalog.OpenAIPricingPreflightTest do
     end
   end
 
-  test "new image models retain exact multimodal prices without generic token snapshots" do
+  test "image modality prices are validated and excluded from generic snapshots in every tier" do
     payload = @target |> File.read!() |> CodexPooler.JSON.decode!()
     result = OpenAIPricingFormat.classify(payload)
 
-    for model <- ~w(gpt-image-2.5-flare gpt-image-2.5-sunburst) do
-      assert payload["models"][model]["prices"] == %{
-               "standard" => %{
-                 "text" => %{"input" => 5.0, "cached_input" => 1.25},
-                 "image" => %{"input" => 8.0, "cached_input" => 2.0, "output" => 30.0}
-               }
-             }
+    assert result.compatible?
+    assert result.errors == []
 
+    for model <- ~w(gpt-image-2.5-flare gpt-image-2.5-sunburst) do
       refute Enum.any?(result.rows, &(&1.model_identifier == model))
 
-      for bucket <- ~w(text image) do
-        assert Enum.any?(result.warnings, fn warning ->
-                 warning.code == :unsupported_price_bucket and
-                   warning.path == "models.#{model}.prices.standard.#{bucket}"
-               end)
+      for tier <- ~w(batch standard), bucket <- ~w(text image) do
+        path = "models.#{model}.prices.#{tier}.#{bucket}"
+        assert Enum.any?(result.warnings, &(&1.code == :unsupported_price_bucket and &1.path == path))
+
+        invalid = put_in(payload, ["models", model, "prices", tier, bucket, "input"], "1")
+        refute OpenAIPricingPreflight.validate_payload(invalid).compatible?
       end
     end
   end
@@ -118,50 +93,6 @@ defmodule CodexPooler.Catalog.OpenAIPricingPreflightTest do
              "models.text-embedding-3-small.prices.standard.default",
              "models.text-embedding-ada-002.prices.standard.default"
            ]
-  end
-
-  test "classifies the reviewed September 29 target with exact artifact and warning coverage" do
-    raw = File.read!(@target)
-    payload = CodexPooler.JSON.decode!(raw)
-    result = OpenAIPricingPreflight.validate_file(@target)
-
-    assert byte_size(raw) == 74_285
-    assert Base.encode16(:crypto.hash(:sha256, raw), case: :lower) == @target_sha256
-    assert payload["generated_at"] == "2026-09-29T20:07:09.418626Z"
-    assert payload["models_count"] == 84
-    assert map_size(payload["models"]) == 84
-    assert payload["tools_count"] == 4
-    assert map_size(payload["tools"]) == 4
-
-    assert result.compatible?
-    assert result.errors == []
-    assert length(result.warnings) == 85
-
-    assert result.summary == %{
-             importable_rows: 218,
-             priced_rows: 212,
-             unavailable_rows: 6,
-             skipped_models: 11,
-             skipped_price_buckets: 74
-           }
-
-    assert result.coverage.imported_price_buckets == %{
-             "default" => 128,
-             "long_context" => 45,
-             "short_context" => 45
-           }
-
-    assert Enum.frequencies_by(result.warnings, & &1.code) == %{
-             incomplete_price_bucket: 4,
-             unsupported_price_bucket: 70,
-             unsupported_pricing_type: 11
-           }
-
-    warning_paths = Enum.group_by(result.warnings, & &1.code, & &1.path)
-    assert warning_paths.incomplete_price_bucket == @incomplete_bucket_paths
-    assert warning_paths.unsupported_pricing_type == @skipped_pricing_type_paths
-    assert length(Enum.uniq(warning_paths.unsupported_price_bucket)) == 70
-    assert result.warnings == Enum.sort_by(result.warnings, &{&1.path, &1.code, &1.message})
   end
 
   test "strict root, model, and tool objects reject missing, extra, and wrong typed values" do

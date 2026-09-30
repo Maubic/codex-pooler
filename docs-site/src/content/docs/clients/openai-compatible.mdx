@@ -430,7 +430,7 @@ A mask identifies editable regions through transparent pixels while opaque pixel
 
 `input_fidelity` is accepted only for `gpt-image-1` and `gpt-image-1.5`. Omit it for `gpt-image-2`, which [always processes image inputs at high fidelity](https://developers.openai.com/api/docs/guides/image-generation#image-input-fidelity), and for `gpt-image-1-mini`, which does not support the option. Codex Pooler also rejects configurable `input_fidelity` for both GPT Image 2.5 models; this is an adapter limitation, not a claim about their public OpenAI API capabilities. Unsupported model/option combinations are rejected before dispatch.
 
-The bundled pricing catalog includes both GPT Image 2.5 models. Their separate text/image token prices are not converted into generic token pricing snapshots; catalog presence does not guarantee a calculated image cost.
+The bundled pricing catalog includes standard and batch text/image token rates for both GPT Image 2.5 models. These separate modality prices are validated but are not converted into generic token pricing snapshots. Native Images requests retain reported aggregate token usage when available, but do not borrow the routing host's language-model rates; without supported image pricing, dollar cost remains unavailable rather than zero. Batch prices in the catalog do not enable the unsupported `/v1/batches` API.
 
 Image responses contain base64 image data. `response_format` may be omitted or set to `b64_json`; `url` and other values are rejected. The optional `user` hint accepts a string or null and is discarded before dispatch; it does not establish ownership or routing identity. Unsupported options, including image streaming and output compression, are rejected rather than silently ignored.
 

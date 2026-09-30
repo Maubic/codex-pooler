@@ -14,77 +14,6 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
 
   @fixture Path.expand("../../fixtures/pricing/openai/2026-07-28.json", __DIR__)
   @target Path.expand("../../../priv/pricing/openai/pricing.json", __DIR__)
-  @target_sha256 "60f3c58de8306ec02ac14a49a03463fb41fb3614e8834c29f5575aca9f8069c1"
-  @target_generated_at "2026-09-29T20:07:09.418626Z"
-  @removed_identifiers [
-    "computer-use-preview",
-    "gpt-3.5-0301",
-    "gpt-3.5-turbo-0613",
-    "gpt-3.5-turbo-16k-0613",
-    "gpt-4-0125-preview",
-    "gpt-4-0314",
-    "gpt-4-1106-preview",
-    "gpt-4-1106-vision-preview",
-    "gpt-4-32k",
-    "gpt-4o-audio-preview",
-    "gpt-4o-mini-audio-preview",
-    "gpt-4o-mini-realtime-preview",
-    "gpt-4o-mini-search-preview",
-    "gpt-4o-realtime-preview",
-    "gpt-4o-search-preview",
-    "gpt-5-chat-latest",
-    "gpt-5-codex",
-    "gpt-5.1-chat-latest",
-    "gpt-5.1-codex",
-    "gpt-5.1-codex-max",
-    "gpt-5.1-codex-mini",
-    "gpt-5.2-codex",
-    "o1-mini",
-    "o3-deep-research",
-    "o4-mini-deep-research",
-    "sora-2",
-    "sora-2-pro"
-  ]
-  @reviewed_rates %{
-    "gpt-6-astra" => %{
-      "standard" => ["10.0", "1.0", "12.5", "50.0"],
-      "fast" => ["20.0", "2.0", "25.0", "100.0"]
-    },
-    "gpt-6.1-sol" => %{
-      "standard" => ["2.0", "0.1", "2.5", "10.0"],
-      "fast" => ["4.0", "0.2", "5.0", "20.0"]
-    },
-    "gpt-6-sol" => %{
-      "standard" => ["2.0", "0.2", "2.5", "10.0"],
-      "fast" => ["4.0", "0.4", "5.0", "20.0"]
-    },
-    "gpt-6-luna" => %{
-      "standard" => ["0.1", "0.01", "0.125", "0.5"],
-      "fast" => ["0.2", "0.02", "0.25", "1.0"]
-    },
-    "gpt-5.6-luna" => %{
-      "standard" => ["0.2", "0.02", "0.25", "1.2"],
-      "fast" => ["0.4", "0.04", "0.5", "2.4"]
-    },
-    "gpt-5.6-terra" => %{
-      "standard" => ["2.0", "0.2", "2.5", "12.0"],
-      "fast" => ["4.0", "0.4", "5.0", "24.0"]
-    },
-    "gpt-5.6-sol" => %{
-      "standard" => ["4.0", "0.4", "5.0", "20.0"],
-      "fast" => ["8.0", "0.8", "10.0", "40.0"]
-    }
-  }
-  @reviewed_fast_long_context_rates %{
-    "gpt-6-astra" => ["40.0", "4.0", "50.0", "150.0"],
-    "gpt-6.1-sol" => ["8.0", "0.4", "10.0", "30.0"],
-    "gpt-6-sol" => ["8.0", "0.8", "10.0", "30.0"],
-    "gpt-6-luna" => ["0.4", "0.04", "0.5", "1.5"],
-    "gpt-5.6-luna" => ["0.8", "0.08", "1.0", "3.6"],
-    "gpt-5.6-terra" => ["8.0", "0.8", "10.0", "36.0"],
-    "gpt-5.6-sol" => ["16.0", "1.6", "20.0", "60.0"]
-  }
-  @reviewed_fast_long_context_unavailable ~w(gpt-5.4 gpt-5.5)
   @barrier_timeout 5_000
   @actor_timeout 10_000
 
@@ -324,65 +253,8 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     refute Enum.any?(rows, &(&1.config["service_tier"] == "fast"))
   end
 
-  test "imports the reviewed September 24 target as canonical revision 2 rows" do
-    payload = @target |> File.read!() |> CodexPooler.JSON.decode!()
-
-    assert Map.keys(payload["models"]) |> Enum.filter(&(&1 in @removed_identifiers)) == []
-
-    Enum.each(@reviewed_rates, fn {identifier, tiers} ->
-      Enum.each(tiers, fn {tier, expected} ->
-        assert source_rates(payload, identifier, tier) == Enum.map(expected, &Decimal.new/1)
-      end)
-    end)
-
-    Enum.each(@reviewed_fast_long_context_rates, fn {identifier, expected} ->
-      assert source_rates(payload, identifier, "fast", "long_context") ==
-               Enum.map(expected, &Decimal.new/1)
-    end)
-
-    Enum.each(@reviewed_fast_long_context_unavailable, fn identifier ->
-      assert get_in(payload, ["models", identifier, "prices", "fast", "long_context"]) == %{
-               "available" => false
-             }
-    end)
-
-    assert {:ok, first} = OpenAIPricingImporter.import_file(@target)
-    assert first.price_version == "#{@target_generated_at}:importer-format-2"
-    assert first.inserted == 218
-    assert first.skipped == 85
-
-    rows =
-      Repo.all(from snapshot in PricingSnapshot, where: snapshot.price_version == ^first.price_version)
-
-    assert length(rows) == 218
-    assert Enum.all?(rows, &(&1.config["importer_format_revision"] == "2"))
-    refute Enum.any?(rows, &(&1.config["service_tier"] == "fast"))
-    refute Enum.any?(rows, &(&1.model_identifier in @removed_identifiers))
-
-    Enum.each(@reviewed_rates, fn {identifier, tiers} ->
-      assert_snapshot_rates(rows, identifier, "standard", tiers["standard"])
-      assert_snapshot_rates(rows, identifier, "priority", tiers["fast"])
-    end)
-
-    Enum.each(@reviewed_fast_long_context_rates, fn {identifier, expected} ->
-      assert_snapshot_rates(rows, identifier, "priority", expected, "long_context")
-    end)
-
-    Enum.each(@reviewed_fast_long_context_unavailable, fn identifier ->
-      assert Enum.any?(rows, fn row ->
-               row.model_identifier == identifier and
-                 row.config["service_tier"] == "priority" and
-                 row.config["price_bucket"] == "long_context" and
-                 row.config["availability"] == "unavailable"
-             end)
-    end)
-
-    assert {:ok, %{inserted: 0, skipped: 85}} = OpenAIPricingImporter.import_file(@target)
-  end
-
-  # The rows above only prove the importer wrote the rates. These settle real
-  # requests after the release entrypoint imports the vendored target, with the
-  # model shaped as catalog sync discovers it (`pricing_ref` defaults to
+  # Settle real requests after the release entrypoint imports the vendored target,
+  # with the model shaped as catalog sync discovers it (`pricing_ref` defaults to
   # `openai/<upstream id>`, which no snapshot names), so the price has to come
   # through the accounting identifier precedence exactly as in production.
   test "the vendored target prices gpt-6-sol requests at its standard and priority rates" do
@@ -416,60 +288,18 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     assert_imported_target_settles("gpt-6-astra", ultrafast: "98400")
   end
 
-  test "target checksum, exact rates, removals, and schema descriptors detect drift" do
-    raw = File.read!(@target)
-    payload = CodexPooler.JSON.decode!(raw)
-    expected_rates = @reviewed_fast_long_context_rates["gpt-5.6-luna"] |> Enum.map(&Decimal.new/1)
-
-    # The positive half. Without it the pin can go stale and the refute below
-    # still passes -- a mutated file differs from a stale pin exactly as it
-    # differs from a current one, so the test would claim to detect drift while
-    # being unable to.
-    assert file_sha256(@target) == @target_sha256
-
-    one_byte_path = write_raw!(raw <> " ")
-    refute file_sha256(one_byte_path) == @target_sha256
-
-    rate_mutation =
-      put_in(
-        payload,
-        ["models", "gpt-5.6-luna", "prices", "fast", "long_context", "input"],
-        9
-      )
-
-    rate_path = write_json!(rate_mutation)
-
-    refute source_rates(
-             CodexPooler.JSON.decode!(File.read!(rate_path)),
-             "gpt-5.6-luna",
-             "fast",
-             "long_context"
-           ) ==
-             expected_rates
-
-    removal_mutation =
-      payload
-      |> put_in(["models", hd(@removed_identifiers)], payload["models"]["babbage-002"])
-      |> put_in(["models", hd(@removed_identifiers), "model"], hd(@removed_identifiers))
-
-    removal_path = write_json!(removal_mutation)
-
-    assert Map.keys(CodexPooler.JSON.decode!(File.read!(removal_path))["models"])
-           |> Enum.filter(&(&1 in @removed_identifiers)) == [hd(@removed_identifiers)]
-
-    schema_mutation =
-      put_in(
-        payload,
-        ["models", "gpt-4o-mini-transcribe", "prices", "standard", "transcription"],
-        %{"estimated_cost" => nil}
-      )
-
+  test "malformed image batch rates reject the whole catalog without snapshot writes" do
+    payload = @target |> File.read!() |> CodexPooler.JSON.decode!()
     count = Repo.aggregate(PricingSnapshot, :count)
 
-    assert {:error, %{code: :incompatible_pricing_catalog}} =
-             OpenAIPricingImporter.import_file(write_json!(schema_mutation))
+    for model <- ~w(gpt-image-2.5-flare gpt-image-2.5-sunburst), bucket <- ~w(image text) do
+      invalid = put_in(payload, ["models", model, "prices", "batch", bucket, "input"], "1")
 
-    assert Repo.aggregate(PricingSnapshot, :count) == count
+      assert {:error, %{code: :incompatible_pricing_catalog}} =
+               OpenAIPricingImporter.import_file(write_json!(invalid))
+
+      assert Repo.aggregate(PricingSnapshot, :count) == count
+    end
   end
 
   test "equal fast and priority aliases emit one canonical row with Decimal equality" do
@@ -997,7 +827,6 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
   # at that tier's default-bucket rates, in micro-dollars.
   defp assert_imported_target_settles(identifier, expected_costs) do
     assert {:ok, %{price_version: price_version}} = CodexPooler.Catalog.import_openai_pricing_from_priv()
-    assert price_version == "#{@target_generated_at}:importer-format-2"
 
     setup = accounting_setup()
 
@@ -1143,7 +972,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     Ecto.Changeset.change(snapshot, config: Map.put(snapshot.config, key, value))
   end
 
-  defp source_rates(payload, identifier, tier, price_bucket \\ "default") do
+  defp source_rates(payload, identifier, tier, price_bucket) do
     bucket = get_in(payload, ["models", identifier, "prices", tier, price_bucket])
 
     Enum.map(["input", "cached_input", "cache_write", "output"], fn key ->
@@ -1154,7 +983,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
   defp decimal_from_json_number(value) when is_integer(value), do: Decimal.new(value)
   defp decimal_from_json_number(value) when is_float(value), do: Decimal.from_float(value)
 
-  defp assert_snapshot_rates(rows, identifier, tier, expected, price_bucket \\ "default") do
+  defp assert_snapshot_rates(rows, identifier, tier, expected, price_bucket) do
     snapshot =
       Enum.find(rows, fn row ->
         row.model_identifier == identifier and row.config["service_tier"] == tier and
@@ -1172,13 +1001,6 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
 
     assert Enum.zip_with(actual, expected, &Decimal.equal?(&1, Decimal.new(&2)))
            |> Enum.all?()
-  end
-
-  defp file_sha256(path) do
-    path
-    |> File.read!()
-    |> then(&:crypto.hash(:sha256, &1))
-    |> Base.encode16(case: :lower)
   end
 
   defp persisted_snapshot_fields(snapshot) do

@@ -5,7 +5,8 @@ defmodule CodexPoolerWeb.V1.ImagesNativeDispatchTest do
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
     only: [auth: 2, gateway_setup: 1, start_upstream: 1]
 
-  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, PricingResolution, Request}
+  alias CodexPooler.Accounting.RequestLogs.SettlementPresentation
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.OpenAICompatibility.Images
   alias CodexPooler.Pools.ModelServingOverride
@@ -45,6 +46,70 @@ defmodule CodexPoolerWeb.V1.ImagesNativeDispatchTest do
 
     assert {settlement.input_tokens, settlement.output_tokens, settlement.total_tokens} ==
              {7, 13, 20}
+
+    assert settlement.pricing_snapshot_id == nil
+    assert SettlementPresentation.cost(settlement).usd == nil
+  end
+
+  for mode <- ["full", "lite"], operation <- ["generations", "edits"] do
+    @usage_mode mode
+    @usage_operation operation
+    test "native #{@usage_operation} preserves known usage without #{@usage_mode} carrier pricing", %{conn: conn} do
+      usage = %{
+        "input_tokens" => 17,
+        "input_tokens_details" => %{"text_tokens" => 7, "image_tokens" => 10, "cached_tokens" => 3},
+        "output_tokens" => 13,
+        "total_tokens" => 30
+      }
+
+      upstream =
+        start_upstream({:json, 200, %{"created" => 1, "data" => [%{"b64_json" => Base.encode64(png())}], "usage" => usage}})
+
+      setup = gateway_setup(upstream)
+      assert {:ok, _imported} = CodexPooler.Catalog.import_openai_pricing_from_priv()
+
+      now = DateTime.utc_now()
+
+      Repo.insert!(%ModelServingOverride{
+        pool_id: setup.pool.id,
+        exposed_model_id: setup.model.exposed_model_id,
+        mode: @usage_mode,
+        created_at: now,
+        updated_at: now
+      })
+
+      payload = %{"model" => "gpt-image-2.5-flare", "prompt" => "synthetic image"}
+
+      payload =
+        if @usage_operation == "edits" do
+          file = Path.join(System.tmp_dir!(), "native-image-usage-#{System.unique_integer([:positive])}.png")
+          on_exit(fn -> File.rm(file) end)
+          File.write!(file, png())
+          Map.put(payload, "image", %Plug.Upload{path: file, filename: "source.png", content_type: "image/png"})
+        else
+          payload
+        end
+
+      response = conn |> auth(setup) |> post("/v1/images/#{@usage_operation}", payload)
+      assert json_response(response, 200)["usage"] == usage
+
+      assert [request] = Repo.all(Request)
+      assert request.status == "succeeded"
+      assert request.usage_status == "usage_known"
+      assert request.model_id == setup.model.id
+      assert request.request_metadata["pricing"]["status"] == "unpriced_missing_model"
+      assert PricingResolution.latest_snapshot_for_request(request, setup.model) == nil
+
+      assert [attempt] = Repo.all(Attempt)
+      assert attempt.usage_status == "usage_known"
+      assert attempt.response_metadata["routing"]["model_serving_mode"] == @usage_mode
+
+      assert [settlement] = Repo.all(from(e in LedgerEntry, where: e.entry_kind == "settlement"))
+      assert {settlement.input_tokens, settlement.cached_input_tokens, settlement.output_tokens, settlement.total_tokens} == {17, 3, 13, 30}
+      assert settlement.pricing_snapshot_id == nil
+      assert settlement.details["settled_cost_micros"] == nil
+      assert SettlementPresentation.cost(settlement).usd == nil
+    end
   end
 
   test "mask edits retain legacy Responses translation" do
