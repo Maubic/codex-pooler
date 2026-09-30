@@ -59,6 +59,35 @@ defmodule CodexPoolerWeb.ObservatoryClientCancelledLiveTest do
     refute html =~ "client_disconnected"
   end
 
+  test "a holder sees rejected outcomes with their reason and accepted requests as pending", %{conn: conn} do
+    pool = pool_fixture()
+    %{api_key: api_key, raw_key: raw_key} = active_api_key_fixture(pool)
+    Helpers.enable_dashboard_access!(api_key)
+    context = %{pool: pool, api_key: api_key}
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    for {seconds_ago, attrs} <- [
+          {3, %{status: "rejected", last_error_code: "rate_limit_exceeded", response_status_code: 429}},
+          {2, %{status: "rejected", last_error_code: "model_not_allowed", response_status_code: 400}},
+          {1, %{status: "accepted"}}
+        ] do
+      context
+      |> request_fixture(attrs)
+      |> Ecto.Changeset.change(%{admitted_at: DateTime.add(now, -seconds_ago, :second)})
+      |> Repo.update!()
+    end
+
+    {:ok, view, _html} = conn |> authenticated_conn(raw_key) |> live(@observatory_path)
+    render_hook(view, "observatory-refresh", %{"reason" => "initial"})
+    Helpers.await_async(view)
+
+    assert outcome_labels(render(view)) == ["Accepted", "Rejected · Request failed", "Rejected · Rate limited"]
+    assert has_element?(view, "[data-role='outcome-status'][data-status='err'].text-error", "Rejected · Rate limited")
+    assert has_element?(view, "[data-role='outcome-status'][data-status='err'].text-error", "Rejected · Request failed")
+    assert has_element?(view, "[data-role='outcome-status'][data-status='warn'].text-warning", "Accepted")
+    assert has_element?(view, "#observatory-fact-success", "0 succeeded · 2 failed")
+  end
+
   defp outcome_labels(html) do
     html
     |> LazyHTML.from_fragment()

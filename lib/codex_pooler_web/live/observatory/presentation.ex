@@ -328,7 +328,9 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
 
   defp status("succeeded"), do: %{data_status: "ok", tone: :success, label: "Succeeded"}
   defp status("failed"), do: %{data_status: "err", tone: :error, label: "Failed"}
+  defp status("rejected"), do: %{data_status: "err", tone: :error, label: "Rejected"}
 
+  defp status("accepted"), do: %{data_status: "warn", tone: :warning, label: "Accepted"}
   defp status("in_progress"), do: %{data_status: "warn", tone: :warning, label: "In progress"}
 
   defp status("client_cancelled"), do: %{data_status: "warn", tone: :warning, label: "Client cancelled"}

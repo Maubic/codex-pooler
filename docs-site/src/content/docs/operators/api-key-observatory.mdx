@@ -3,7 +3,7 @@ title: API Key Observatory
 description: Use the read-only Observatory to review sanitized, key-local usage without accessing the admin workspace.
 ---
 
-The API Key Observatory is a read-only view of activity for one Pool API key. It is useful when a key holder needs to check recent usage, latency, models, or outcomes without receiving access to the instance administration workspace.
+The API Key Observatory is a read-only view of activity for one Pool API key. It is useful when a key holder needs to check recent usage, cost, models, or outcomes without receiving access to the instance administration workspace.
 
 Dashboard access must be enabled for the key by the person who manages that key. It is separate from both runtime permission and the instance-admin browser session:
 
@@ -24,13 +24,15 @@ The access key is accepted in the form submission only. Do not place it in a URL
 
 Choose one of the fixed windows: `1h`, `5h`, `24h`, or `7d`. The page can show:
 
-- success rate, cache rate, cost, throughput, and latency summaries
+- success rate, cache rate, cost, and token summaries
 - model distribution and settled token totals
 - Traffic buckets with fresh and cached token values
 - interval or cumulative chart views
-- at most 12 recent outcomes with time, model, sanitized endpoint class, status, latency, tokens, and cost
+- at most 12 recent outcomes with time, model, sanitized endpoint class, status, tokens, and cost
 
 A request whose client closed the connection before the response finished, for example a client that interrupts a stream to send its next request, is shown as `Client cancelled` instead of a failure. The success rate leaves these requests out of both its counts, and its detail line says how many there were.
+
+Rejected requests appear as `Rejected` with a sanitized failure reason and count as failures. Requests awaiting execution appear as `Accepted`; requests already executing appear as `In progress`.
 
 The page refreshes while visible. You can pause and resume refresh, and a hidden or disconnected browser stops periodic refreshes until it becomes visible or connected again. The dashboard displays explicit loading, empty, partial-accounting, stale, disconnected, and temporary-error states instead of filling gaps with invented values.
 

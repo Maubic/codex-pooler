@@ -143,10 +143,10 @@ The dashboard session lasts at most 14 days, does not renew its expiry while idl
 
 The authenticated dashboard is read-only and scoped to the one API key used to sign in. It offers `1h`, `5h`, `24h`, and `7d` windows with:
 
-- success, cache, cost, throughput, and latency summaries
+- success rate, cache rate, cost, and token summaries
 - a model distribution based on settled token totals
 - Traffic buckets with fresh and cached token values, plus interval and cumulative views
-- at most 12 recent outcomes showing time, model, sanitized endpoint class, status, latency, tokens, and cost
+- at most 12 recent outcomes showing time, model, sanitized endpoint class, status, tokens, and cost
 
 Cost values are reporting estimates or settled accounting values, not provider invoices. Partial accounting, missing pricing, no activity, paused refresh, disconnection, and temporary read errors are shown as explicit states rather than invented totals.
 
