@@ -90,20 +90,26 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SettlementAmbiguousCommitTest
     Postgrex.query!(holder, "BEGIN", [])
     %{rows: [[holding_pid]]} = Postgrex.query!(holder, "SELECT pg_backend_pid()", [])
     Postgrex.query!(holder, "SELECT id FROM requests WHERE id=$1 FOR UPDATE", [Ecto.UUID.dump!(request.id)])
-    logs = with_info_log(fn ->
-      task = Task.async(fn -> AttemptSettlement.record_retryable_failure(request, attempt, %{now: at, response_status_code: 502, last_error_code: "upstream_5xx", error_message: "synthetic own failure", latency_ms: 23}) end)
-      backend = await_competing_waiter!(observer, holding_pid, System.monotonic_time(:millisecond) + 15_000)
-      assert %{rows: [[true]]} = Postgrex.query!(observer, "SELECT pg_cancel_backend($1)", [backend])
-      Postgrex.query!(holder, "COMMIT", [])
-      assert {:error, %{code: "attempt_already_finalized"}} = Task.await(task, 15_000)
-    end) |> elem(1)
+
+    logs =
+      with_info_log(fn ->
+        task = Task.async(fn -> AttemptSettlement.record_retryable_failure(request, attempt, %{now: at, response_status_code: 502, last_error_code: "upstream_5xx", error_message: "synthetic own failure", latency_ms: 23}) end)
+        backend = await_competing_waiter!(observer, holding_pid, System.monotonic_time(:millisecond) + 15_000)
+        assert %{rows: [[true]]} = Postgrex.query!(observer, "SELECT pg_cancel_backend($1)", [backend])
+        Postgrex.query!(holder, "COMMIT", [])
+        assert {:error, %{code: "attempt_already_finalized"}} = Task.await(task, 15_000)
+      end)
+      |> elem(1)
+
     assert logs =~ "retrying stage=record_retryable_failure"
     assert Repo.get!(Attempt, attempt.id) == original
   end
 
   defp await_competing_waiter!(observer, holder, deadline) do
     case Postgrex.query!(observer, "SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))", [holder]).rows do
-      [[backend]] -> backend
+      [[backend]] ->
+        backend
+
       [] ->
         assert System.monotonic_time(:millisecond) < deadline
         Process.sleep(5)

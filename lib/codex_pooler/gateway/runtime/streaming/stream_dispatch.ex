@@ -502,6 +502,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
 
   defp finalize_http_stream_failure(state, {:chunk, :visible_output_unavailable} = reason) do
     data = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"code\":\"gateway_accounting_failed\",\"message\":\"Visible output authorization unavailable\"}}\n\n"
+
     case write_downstream_chunk_preserving_state(discard_withheld_preamble(state), data) do
       {:ok, state} -> {:failure, state, "", reason}
       {:error, write_reason, _state} -> {:error, write_reason}

@@ -125,16 +125,20 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputMarkTransientDatabaseTest do
     opts = CodexPooler.Gateway.Payloads.RequestOptions.for_websocket(%{})
     context = %CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext{auth: fixture.auth, endpoint: fixture.request.endpoint, payload: %{}, model: fixture.model, reserved: %{request: fixture.request}, request_options: opts, assignment: fixture.assignment, identity: fixture.identity, index: 0, retry_count: 0, allow_retry?: false, routing_attempt_metadata: %{}, route_class: opts.transport.route_class, attempt: fixture.attempt, started: System.monotonic_time(:millisecond)}
     upstream = start_upstream(FakeUpstream.sse_stream([created_event(), delta_event(), completed_event()], done: false))
-    task = Task.async(fn ->
-      response = Req.get!(FakeUpstream.url(upstream), into: :self, retry: false)
-      CodexPooler.Gateway.Runtime.Streaming.OpenAIStreamCollector.collect_response(response, context, %{register_continuity: fn _, _, _ -> :ok end, stream_result: fn _, _ -> :ok end})
-    end)
+
+    task =
+      Task.async(fn ->
+        response = Req.get!(FakeUpstream.url(upstream), into: :self, retry: false)
+        CodexPooler.Gateway.Runtime.Streaming.OpenAIStreamCollector.collect_response(response, context, %{register_continuity: fn _, _, _ -> :ok end, stream_result: fn _, _ -> :ok end})
+      end)
+
     waiter = await_gate_waiter!(observer, gate, holder, 1)
     assert cancel_backend!(observer, waiter)
     assert {:error, %{status: 500, code: "gateway_accounting_failed"}} = Task.await(task, 15_000)
     release_gate!(holder)
     assert %CodexTurn{first_visible_output_at: nil} = Repo.get_by!(CodexTurn, request_id: fixture.request.id)
   end
+
   test "public Responses JSON returns an explicit accounting error on visibility exhaustion" do
     Application.put_env(:codex_pooler, SettlementRetry, window_ms: 0)
     {setup, observer, gate, holder} = fixture!()
@@ -149,7 +153,6 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputMarkTransientDatabaseTest do
     assert response.status == 500
     assert response.body["error"]["code"] == "gateway_accounting_failed"
   end
-
 
   @tag slow: "boots a real peer and cancels owner lifecycle authorization"
   test "remote lifecycle authorization failure ends once without retrying delivery or crashing its owner" do
@@ -190,7 +193,9 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputMarkTransientDatabaseTest do
 
   defp await_owner_query_wait!(observer, holder, deadline) do
     case Postgrex.query!(observer, "SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))", [holder]).rows do
-      [[backend] | _] -> backend
+      [[backend] | _] ->
+        backend
+
       [] ->
         assert System.monotonic_time(:millisecond) < deadline
         Process.sleep(5)

@@ -117,6 +117,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
   @spec record_retryable_failure(Request.t(), Attempt.t(), attrs()) :: settlement_result()
   def record_retryable_failure(request, attempt, attrs) do
     attrs = Map.put_new(attrs, :now, DateTime.utc_now() |> DateTime.truncate(:microsecond))
+
     :record_retryable_failure
     |> SettlementRetry.run(request, attempt, fn -> Accounting.record_retryable_attempt_failure(attempt, attrs) end, after_retry: &reconcile_retryable_failure(&1, attempt, attrs))
     |> accounting_result(:record_retryable_failure, request, attempt)
@@ -136,18 +137,21 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
     upstream_status = Map.get(attrs, :response_status_code)
     completed_at = Map.fetch!(attrs, :now)
 
-    result = Accounting.with_current_replay_generation(request, attempt, fn ->
-      case Repo.get(Attempt, attempt_id) do
-        %Attempt{status: "retryable_failed", retryable: true, completed_at: ^completed_at, network_error_code: ^code, upstream_status_code: ^upstream_status} = recorded when status == "retryable_failed" ->
-          latest = Repo.one(from current in Attempt, where: current.request_id == ^request.id, order_by: [desc: current.attempt_number], limit: 1, select: current.id)
-          usage = Map.get(attrs, :usage, %{})
-          served_model = CodexPooler.Accounting.Metadata.bounded_model_identifier(Map.get(usage, :served_model, Map.get(usage, "served_model")))
-          observation = CodexPooler.Accounting.ModelObservation.normalize(Map.get(usage, :model_observation, Map.get(usage, "model_observation")), served_model)
-          expected = %{error_message: blank_to_nil(Map.get(attrs, :error_message)), latency_ms: Map.get(attrs, :latency_ms), usage_status: Map.get(attrs, :usage_status, "usage_unknown"), served_model: served_model, model_observation: observation, response_metadata: CodexPooler.Accounting.Metadata.sanitize_metadata(Map.get(attrs, :attempt_metadata, %{}))}
-          if latest == recorded.id and Map.take(recorded, Map.keys(expected)) == expected, do: {:ok, recorded}, else: refused
-        _other -> refused
-      end
-    end)
+    result =
+      Accounting.with_current_replay_generation(request, attempt, fn ->
+        case Repo.get(Attempt, attempt_id) do
+          %Attempt{status: "retryable_failed", retryable: true, completed_at: ^completed_at, network_error_code: ^code, upstream_status_code: ^upstream_status} = recorded when status == "retryable_failed" ->
+            latest = Repo.one(from current in Attempt, where: current.request_id == ^request.id, order_by: [desc: current.attempt_number], limit: 1, select: current.id)
+            usage = Map.get(attrs, :usage, %{})
+            served_model = CodexPooler.Accounting.Metadata.bounded_model_identifier(Map.get(usage, :served_model, Map.get(usage, "served_model")))
+            observation = CodexPooler.Accounting.ModelObservation.normalize(Map.get(usage, :model_observation, Map.get(usage, "model_observation")), served_model)
+            expected = %{error_message: blank_to_nil(Map.get(attrs, :error_message)), latency_ms: Map.get(attrs, :latency_ms), usage_status: Map.get(attrs, :usage_status, "usage_unknown"), served_model: served_model, model_observation: observation, response_metadata: CodexPooler.Accounting.Metadata.sanitize_metadata(Map.get(attrs, :attempt_metadata, %{}))}
+            if latest == recorded.id and Map.take(recorded, Map.keys(expected)) == expected, do: {:ok, recorded}, else: refused
+
+          _other ->
+            refused
+        end
+      end)
 
     case result do
       {:ok, reconciled} -> reconciled
