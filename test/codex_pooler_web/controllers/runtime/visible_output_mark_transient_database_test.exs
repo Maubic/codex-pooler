@@ -27,8 +27,13 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputMarkTransientDatabaseTest do
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport
   alias CodexPooler.Accounting.{LedgerEntry, Request}
   alias CodexPooler.FakeUpstream
+  alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.CodexTurn
+  alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
   alias CodexPooler.Gateway.Runtime.Finalization.SettlementRetry
+  alias CodexPooler.Gateway.Runtime.Streaming.OpenAIStreamCollector
+  alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder.ERPCNodeClient
   alias CodexPooler.Repo
   alias CodexPooler.UnboxedFixture
   alias Ecto.Adapters.SQL.Sandbox
@@ -122,14 +127,14 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputMarkTransientDatabaseTest do
     gate = install_stamp_gate!(fixture.pool.id)
     observer = observer!()
     holder = hold_gate!(gate)
-    opts = CodexPooler.Gateway.Payloads.RequestOptions.for_websocket(%{})
-    context = %CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext{auth: fixture.auth, endpoint: fixture.request.endpoint, payload: %{}, model: fixture.model, reserved: %{request: fixture.request}, request_options: opts, assignment: fixture.assignment, identity: fixture.identity, index: 0, retry_count: 0, allow_retry?: false, routing_attempt_metadata: %{}, route_class: opts.transport.route_class, attempt: fixture.attempt, started: System.monotonic_time(:millisecond)}
+    opts = RequestOptions.for_websocket(%{})
+    context = %SelectedCandidateContext{auth: fixture.auth, endpoint: fixture.request.endpoint, payload: %{}, model: fixture.model, reserved: %{request: fixture.request}, request_options: opts, assignment: fixture.assignment, identity: fixture.identity, index: 0, retry_count: 0, allow_retry?: false, routing_attempt_metadata: %{}, route_class: opts.transport.route_class, attempt: fixture.attempt, started: System.monotonic_time(:millisecond)}
     upstream = start_upstream(FakeUpstream.sse_stream([created_event(), delta_event(), completed_event()], done: false))
 
     task =
       Task.async(fn ->
         response = Req.get!(FakeUpstream.url(upstream), into: :self, retry: false)
-        CodexPooler.Gateway.Runtime.Streaming.OpenAIStreamCollector.collect_response(response, context, %{register_continuity: fn _, _, _ -> :ok end, stream_result: fn _, _ -> :ok end})
+        OpenAIStreamCollector.collect_response(response, context, %{register_continuity: fn _, _, _ -> :ok end, stream_result: fn _, _ -> :ok end})
       end)
 
     waiter = await_gate_waiter!(observer, gate, holder, 1)
@@ -154,6 +159,22 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputMarkTransientDatabaseTest do
     assert response.body["error"]["code"] == "gateway_accounting_failed"
   end
 
+  test "public Images JSON returns an accounting error on visibility exhaustion with an eligible image model" do
+    Application.put_env(:codex_pooler, SettlementRetry, window_ms: 0)
+    {setup, observer, gate, holder} = fixture!()
+    metadata = setup.model.metadata |> Map.put("input_modalities", ["text", "image"]) |> put_in(["source_assignment_models", setup.assignment.id, "slug"], "gpt-image-1") |> put_in(["source_assignment_models", setup.assignment.id, "input_modalities"], ["text", "image"])
+    model = setup.model |> Ecto.Changeset.change(exposed_model_id: "gpt-image-1", upstream_model_id: "provider-host-responses-model", metadata: metadata) |> Repo.update!()
+    port = start_public_endpoint!()
+    thread = Ecto.UUID.generate()
+    client = Task.async(fn -> Req.post!("http://127.0.0.1:#{port}/v1/images/generations", json: %{"model" => model.exposed_model_id, "prompt" => "synthetic image authority"}, headers: [{"authorization", setup.authorization}, {"session-id", thread}], retry: false, receive_timeout: 15_000) end)
+    waiter = await_gate_waiter!(observer, gate, holder, 1)
+    assert cancel_backend!(observer, waiter)
+    response = Task.await(client, 15_000)
+    release_gate!(holder)
+    assert response.status == 500
+    assert response.body["error"]["code"] == "gateway_accounting_failed"
+  end
+
   @tag slow: "boots a real peer and cancels owner lifecycle authorization"
   test "remote lifecycle authorization failure ends once without retrying delivery or crashing its owner" do
     ensure_test_distribution_started!()
@@ -168,7 +189,7 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputMarkTransientDatabaseTest do
     peer = start_bridge_peer!(:current, setup.identity, repo: :real)
     thread = Ecto.UUID.generate()
     {session, owner} = start_remote_bridge_owner!(auth, thread, peer, :real)
-    {:ok, socket} = owner_socket(auth, "synthetic-lifecycle-fault", Ecto.UUID.generate(), session_header: thread, session_header_source: "x-session-id", websocket_owner_forwarder_opts: [node_client: CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder.ERPCNodeClient, app_node_names: [Atom.to_string(peer)]])
+    {:ok, socket} = owner_socket(auth, "synthetic-lifecycle-fault", Ecto.UUID.generate(), session_header: thread, session_header_source: "x-session-id", websocket_owner_forwarder_opts: [node_client: ERPCNodeClient, app_node_names: [Atom.to_string(peer)]])
     payload = websocket_input_payload(setup, native_text_input("synthetic lifecycle fault"))
     assert {:ok, socket} = CodexPoolerWeb.CodexResponsesSocket.handle_in({payload, [opcode: :text]}, socket)
     assert_receive {:fake_upstream_websocket_barrier, :before_init, server, ^release}, 15_000
@@ -215,7 +236,7 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputMarkTransientDatabaseTest do
     peer = start_bridge_peer!(:current, setup.identity, repo: :real)
     thread = Ecto.UUID.generate()
     {session, owner} = start_remote_bridge_owner!(auth, thread, peer, :real)
-    {:ok, socket} = owner_socket(auth, "synthetic-visible-peer", Ecto.UUID.generate(), session_header: thread, session_header_source: "x-session-id", websocket_owner_forwarder_opts: [node_client: CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder.ERPCNodeClient, app_node_names: [Atom.to_string(peer)]])
+    {:ok, socket} = owner_socket(auth, "synthetic-visible-peer", Ecto.UUID.generate(), session_header: thread, session_header_source: "x-session-id", websocket_owner_forwarder_opts: [node_client: ERPCNodeClient, app_node_names: [Atom.to_string(peer)]])
     gate = install_stamp_gate!(setup.pool.id)
     observer = observer!()
     holder = hold_gate!(gate)
@@ -224,7 +245,7 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputMarkTransientDatabaseTest do
     waiter = await_gate_waiter!(observer, gate, holder, 1)
     assert %{active_turn: %{visible_output?: false} = active} = :erpc.call(peer, :sys, :get_state, [owner, 1_000])
     authority = Map.take(active.descriptor, [:request_id, :attempt_id, :replay_generation])
-    discriminator = %CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator{}
+    discriminator = %TerminalDiscriminator{}
     forged = CodexPooler.JSON.encode!(%{"type" => "response.output_text.delta", "delta" => "synthetic forged output"})
     send(owner, {:websocket_owner_authorized_frame, active.ref, make_ref(), authority, forged, discriminator, :committed})
     # Barrier from this sender ensures the malformed capability was handled.

@@ -7,6 +7,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks do
   alias CodexPooler.Accounting.{ClientRetry, RequestReplayEntitlement}
   alias CodexPooler.Accounting.Request, as: AccountingRequest
   alias CodexPooler.Gateway.Persistence.SessionContinuity
+  alias CodexPooler.Gateway.Runtime.Finalization.SettlementRetry
   alias CodexPooler.Gateway.Runtime.RateLimitObserver
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request
@@ -571,7 +572,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks do
 
   defp with_visible_attempt(request_id, attempt, callback) do
     request = %AccountingRequest{id: request_id, transport: "websocket"}
-    result = CodexPooler.Gateway.Runtime.Finalization.SettlementRetry.run(:visible_output, request, attempt, fn -> SessionContinuity.authorize_codex_turn_visibility(request_id, attempt) end, subject: "visible output mark", fallback: "withheld_output")
+    result = SettlementRetry.run(:visible_output, request, attempt, fn -> SessionContinuity.authorize_codex_turn_visibility(request_id, attempt) end, subject: "visible output mark", fallback: "withheld_output")
 
     case result do
       {:ok, :committed} ->

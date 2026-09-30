@@ -9,7 +9,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
 
   import Ecto.Query
   alias CodexPooler.Accounting
-  alias CodexPooler.Accounting.{Attempt, Request}
+  alias CodexPooler.Accounting.{Attempt, Metadata, ModelObservation, Request}
   alias CodexPooler.Accounting.FailureResponse
   alias CodexPooler.Gateway.Contracts
   alias CodexPooler.Gateway.Persistence.CodexTurn
@@ -139,18 +139,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
 
     result =
       Accounting.with_current_replay_generation(request, attempt, fn ->
-        case Repo.get(Attempt, attempt_id) do
-          %Attempt{status: "retryable_failed", retryable: true, completed_at: ^completed_at, network_error_code: ^code, upstream_status_code: ^upstream_status} = recorded when status == "retryable_failed" ->
-            latest = Repo.one(from current in Attempt, where: current.request_id == ^request.id, order_by: [desc: current.attempt_number], limit: 1, select: current.id)
-            usage = Map.get(attrs, :usage, %{})
-            served_model = CodexPooler.Accounting.Metadata.bounded_model_identifier(Map.get(usage, :served_model, Map.get(usage, "served_model")))
-            observation = CodexPooler.Accounting.ModelObservation.normalize(Map.get(usage, :model_observation, Map.get(usage, "model_observation")), served_model)
-            expected = %{error_message: blank_to_nil(Map.get(attrs, :error_message)), latency_ms: Map.get(attrs, :latency_ms), usage_status: Map.get(attrs, :usage_status, "usage_unknown"), served_model: served_model, model_observation: observation, response_metadata: CodexPooler.Accounting.Metadata.sanitize_metadata(Map.get(attrs, :attempt_metadata, %{}))}
-            if latest == recorded.id and Map.take(recorded, Map.keys(expected)) == expected, do: {:ok, recorded}, else: refused
-
-          _other ->
-            refused
-        end
+        reconcile_recorded_failure(Repo.get(Attempt, attempt_id), request, attrs, refused, {status, code, upstream_status, completed_at})
       end)
 
     case result do
@@ -160,6 +149,21 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
   end
 
   defp reconcile_retryable_failure(result, _attempt, _attrs), do: result
+
+  defp reconcile_recorded_failure(%Attempt{status: "retryable_failed", retryable: true, completed_at: completed_at, network_error_code: code, upstream_status_code: upstream_status} = recorded, request, attrs, refused, {"retryable_failed", code, upstream_status, completed_at}) do
+    latest = Repo.one(from current in Attempt, where: current.request_id == ^request.id, order_by: [desc: current.attempt_number], limit: 1, select: current.id)
+    expected = persisted_failure_attributes(attrs)
+    if latest == recorded.id and Map.take(recorded, Map.keys(expected)) == expected, do: {:ok, recorded}, else: refused
+  end
+
+  defp reconcile_recorded_failure(_recorded, _request, _attrs, refused, _expected), do: refused
+
+  defp persisted_failure_attributes(attrs) do
+    usage = Map.get(attrs, :usage, %{})
+    served_model = Metadata.bounded_model_identifier(Map.get(usage, :served_model, Map.get(usage, "served_model")))
+    observation = ModelObservation.normalize(Map.get(usage, :model_observation, Map.get(usage, "model_observation")), served_model)
+    %{error_message: blank_to_nil(Map.get(attrs, :error_message)), latency_ms: Map.get(attrs, :latency_ms), usage_status: Map.get(attrs, :usage_status, "usage_unknown"), served_model: served_model, model_observation: observation, response_metadata: Metadata.sanitize_metadata(Map.get(attrs, :attempt_metadata, %{}))}
+  end
 
   defp blank_to_nil(value) when value in [nil, ""], do: nil
   defp blank_to_nil(value), do: value

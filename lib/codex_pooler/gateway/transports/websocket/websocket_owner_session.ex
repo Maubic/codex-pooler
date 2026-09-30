@@ -11,6 +11,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
   alias CodexPooler.Gateway.Persistence.SessionContinuity
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
+  alias CodexPooler.Gateway.Runtime.Finalization.SettlementRetry
   alias CodexPooler.Gateway.Transports.Streaming.RuntimeAdmissionProof
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Websocket.AbandonedSubmissions
@@ -43,6 +44,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   alias CodexPooler.Gateway.Websocket.OwnerCleanup
   alias CodexPooler.Platform.ForwardedGenerationEnds
   alias CodexPooler.Platform.InstancePresence
+  alias CodexPooler.Platform.TransientDatabaseError
 
   defmodule ForwardedSendWitnessState do
     @moduledoc false
@@ -2498,27 +2500,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
         %{active_turn: %{ref: ref, writer_capability: capability, descriptor: descriptor}} = state
       ) do
     expected = if is_map(descriptor), do: Map.take(descriptor, [:request_id, :attempt_id, :replay_generation]), else: %{}
-
-    result =
-      if authority == expected do
-        state = if visibility == :committed, do: put_in(state.active_turn.visible_output?, true), else: state
-        state = if visibility == :committed, do: put_in(state.active_turn.descriptor.visible_output?, true), else: state
-
-        case classify_terminal_delivery_frame(state.active_turn.terminal_forwarded?, TerminalDiscriminator.terminal?(discriminator)) do
-          :duplicate_terminal ->
-            {:noreply, state}
-
-          {:forward, terminal?} ->
-            case state do
-              %{active_turn: %{visible_output?: true, lost_to_unreachable_node?: true, descriptor: %{downstream_status: :lost}}} -> cancel_unreachable_lost_turn(state)
-              _other -> relay_authorized_frame(state, payload, terminal?, :writer_authorized)
-            end
-        end
-      else
-        {:noreply, state}
-      end
-
-    result
+    if authority == expected, do: relay_writer_authorized_frame(state, payload, discriminator, visibility), else: {:noreply, state}
   end
 
   def handle_info({:websocket_owner_authorized_frame, _ref, _capability, _authority, _payload, _discriminator, _visibility}, state), do: {:noreply, state}
@@ -3164,7 +3146,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       :stale_generation
 
     error in [DBConnection.ConnectionError, Postgrex.Error] ->
-      if CodexPooler.Platform.TransientDatabaseError.transient?(error), do: :stale_generation, else: reraise(error, __STACKTRACE__)
+      if TransientDatabaseError.transient?(error), do: :stale_generation, else: reraise(error, __STACKTRACE__)
   end
 
   defp authorize_visible_delivery(
@@ -3225,30 +3207,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
          },
          upstream_payload
        ) do
-    writer =
-      if collect? do
-        nil
-      else
-        fn frame, discriminator ->
-          authority = if is_map(descriptor), do: Map.take(descriptor, [:request_id, :attempt_id, :replay_generation]), else: %{}
-
-          deliver = fn visibility ->
-            if visibility == :committed, do: Process.put({__MODULE__, ref, :visible}, authority)
-            send_authorized_writer_frame(owner, ref, writer_capability, authority, frame, discriminator, visibility)
-          end
-
-          if Process.get({__MODULE__, ref, :visible}) == authority do
-            deliver.(:committed)
-          else
-            case authorize_writer_frame(authority, frame, deliver) do
-              {:ok, :delivered} -> :ok
-              {:ok, visibility} -> deliver.(visibility)
-              {:error, :stale_generation} -> :ok
-              {:error, :settlement_retry_exhausted} -> raise DBConnection.ConnectionError, message: "visible output authorization unavailable"
-            end
-          end
-        end
-      end
+    writer = owner_writer(collect?, owner, ref, writer_capability, descriptor)
 
     case sender.(upstream_pid, upstream_payload, writer) do
       {:error, response} when is_map(response) ->
@@ -3259,6 +3218,44 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     end
   end
 
+  defp owner_writer(true, _owner, _ref, _capability, _descriptor), do: nil
+
+  defp owner_writer(false, owner, ref, capability, descriptor) do
+    authority = if is_map(descriptor), do: Map.take(descriptor, [:request_id, :attempt_id, :replay_generation]), else: %{}
+    fn frame, discriminator -> write_owner_frame(owner, ref, capability, authority, frame, discriminator) end
+  end
+
+  defp write_owner_frame(owner, ref, capability, authority, frame, discriminator) do
+    deliver = fn visibility ->
+      if visibility == :committed, do: Process.put({__MODULE__, ref, :visible}, authority)
+      send_authorized_writer_frame(owner, ref, capability, authority, frame, discriminator, visibility)
+    end
+
+    if Process.get({__MODULE__, ref, :visible}) == authority do
+      deliver.(:committed)
+    else
+      case authorize_writer_frame(authority, frame, deliver) do
+        {:ok, :delivered} -> :ok
+        {:ok, visibility} -> deliver.(visibility)
+        {:error, :stale_generation} -> :ok
+        {:error, :settlement_retry_exhausted} -> raise DBConnection.ConnectionError, message: "visible output authorization unavailable"
+      end
+    end
+  end
+
+  defp relay_writer_authorized_frame(state, payload, discriminator, visibility) do
+    state = if visibility == :committed, do: put_in(state.active_turn.visible_output?, true), else: state
+    state = if visibility == :committed, do: put_in(state.active_turn.descriptor.visible_output?, true), else: state
+
+    case classify_terminal_delivery_frame(state.active_turn.terminal_forwarded?, TerminalDiscriminator.terminal?(discriminator)) do
+      :duplicate_terminal -> {:noreply, state}
+      {:forward, terminal?} -> relay_writer_current_frame(state, payload, terminal?)
+    end
+  end
+
+  defp relay_writer_current_frame(%{active_turn: %{visible_output?: true, lost_to_unreachable_node?: true, descriptor: %{downstream_status: :lost}}} = state, _payload, _terminal?), do: cancel_unreachable_lost_turn(state)
+  defp relay_writer_current_frame(state, payload, terminal?), do: relay_authorized_frame(state, payload, terminal?, :writer_authorized)
+
   defp authorize_writer_frame(%{request_id: request_id, attempt_id: attempt_id} = authority, frame, deliver)
        when is_binary(request_id) and is_binary(attempt_id) do
     request = %CodexPooler.Accounting.Request{id: request_id, transport: "websocket"}
@@ -3268,7 +3265,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       deliver.(:not_committed)
       {:ok, :delivered}
     else
-      CodexPooler.Gateway.Runtime.Finalization.SettlementRetry.run(:visible_output, request, attempt, fn -> SessionContinuity.authorize_codex_turn_visibility(request_id, attempt) end, subject: "visible output mark", fallback: "withheld_output", exhaustion: :return)
+      SettlementRetry.run(:visible_output, request, attempt, fn -> SessionContinuity.authorize_codex_turn_visibility(request_id, attempt) end, subject: "visible output mark", fallback: "withheld_output", exhaustion: :return)
     end
   end
 
