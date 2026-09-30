@@ -96,15 +96,17 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionResumeResendTest
       outcome =
         case resend_via do
           :same_socket ->
-            {_client, [frame]} = send_and_collect!(client, resume, 1)
-            websocket_outcome(frame)
+            {_client, [created, completed]} = send_and_collect!(client, resume, 2)
+            assert %{"type" => "response.completed", "response" => %{"id" => "resp_resend_admitted"}} = CodexPooler.JSON.decode!(completed)
+            websocket_outcome(created)
 
           :new_socket ->
             Mint.HTTP.close(client.conn)
             second = released_client_connect!(port, setup.authorization, thread, window_id(thread, 2))
-            {second, [frame]} = send_and_collect!(second, resume, 1)
+            {second, [created, completed]} = send_and_collect!(second, resume, 2)
+            assert %{"type" => "response.completed", "response" => %{"id" => "resp_resend_admitted"}} = CodexPooler.JSON.decode!(completed)
             Mint.HTTP.close(second.conn)
-            websocket_outcome(frame)
+            websocket_outcome(created)
 
           :http ->
             response =
@@ -130,6 +132,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketCompactionResumeResendTest
 
         _websocket ->
           assert {:admitted, "response.created"} = outcome
+          # Admission alone is lifecycle-only and remains replayable. Closing
+          # before the successor's terminal arms its pre-visible replay instead
+          # of settling it; terminal receipt is the completion oracle here.
           rows = settled_pool_requests!(setup.pool.id, 4)
           successor = List.last(rows)
           assert Repo.exists?(from(link in CodexPooler.Accounting.RequestClientRetryLink, where: link.predecessor_request_id == ^resume_row.id and link.successor_request_id == ^successor.id))
