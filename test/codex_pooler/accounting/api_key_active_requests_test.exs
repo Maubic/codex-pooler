@@ -540,14 +540,14 @@ defmodule CodexPooler.Accounting.APIKeyActiveRequestsTest do
 
     {:ok, :ok} =
       Repo.transaction(fn ->
-        Repo.insert_all(
-          Request,
-          Enum.map(ids, fn id ->
-            %{request_attrs | id: id, correlation_id: Ecto.UUID.generate()}
-          end)
-        )
+        ids
+        |> Enum.map(fn id -> %{request_attrs | id: id, correlation_id: Ecto.UUID.generate()} end)
+        |> Enum.chunk_every(500)
+        |> Enum.each(&Repo.insert_all(Request, &1))
 
-        Enum.each(ledger_batches, &Repo.insert_all(LedgerEntry, &1))
+        ledger_batches
+        |> Enum.flat_map(&Enum.chunk_every(&1, 500))
+        |> Enum.each(&Repo.insert_all(LedgerEntry, &1))
 
         :ok
       end)

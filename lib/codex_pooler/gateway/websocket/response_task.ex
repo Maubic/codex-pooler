@@ -4,6 +4,7 @@ defmodule CodexPooler.Gateway.Websocket.ResponseTask do
   alias CodexPooler.Gateway.Transports.Websocket.ActivityRegistry
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionTrace
   alias CodexPooler.Platform.ExecutionIdentity
+  alias CodexPooler.Platform.ExecutionRegistry
 
   @type activity_kind :: :direct | :proxy | :local_owner
   @type run_callback :: (pid() -> term())
@@ -350,6 +351,7 @@ defmodule CodexPooler.Gateway.Websocket.ResponseTask do
          kill_coordinator?,
          before_cancelled_coordinator_termination
        ) do
+    _marked = ExecutionRegistry.mark_interruption(coordinator, "owner_drained")
     _cancel_result = cancel_callback.(coordinator, :owner_drained)
     send(parent, {:websocket_response_activity, coordinator, token})
 
@@ -402,6 +404,7 @@ defmodule CodexPooler.Gateway.Websocket.ResponseTask do
     send(parent, {:codex_response_done, coordinator, {:error, :owner_drained}})
 
     if kill_coordinator? do
+      _marked = ExecutionRegistry.mark_interruption(coordinator, "owner_drained")
       run_before_cancelled_coordinator_termination(before_termination, token, coordinator)
       Process.exit(coordinator, :kill)
     else
@@ -446,6 +449,7 @@ defmodule CodexPooler.Gateway.Websocket.ResponseTask do
         if outcome == :completed, do: complete_delivered_execution(), else: :ok
 
       {:websocket_activity_cancel, ^token, :owner_drained} ->
+        _marked = ExecutionRegistry.mark_interruption(self(), "owner_drained")
         _cancel_result = cancel_callback.(self(), :owner_drained)
         send(parent, {:websocket_response_activity_cancelled, self(), token, :owner_drained})
         await_delivery(parent, parent_monitor, token, registry, cancel_callback, :aborted)

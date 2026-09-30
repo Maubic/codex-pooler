@@ -5,9 +5,11 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTaskFailureCleanupTest do
   alias CodexPooler.Accounting.{ClientRetry, LedgerEntry}
   alias CodexPooler.Gateway.Payloads.{RequestOptions, WebsocketTurnIdentity}
   alias CodexPooler.Gateway.Persistence.{CodexSession, SessionContinuity}
+  alias CodexPooler.Gateway.Runtime.Finalization.Interruption
   alias CodexPooler.Gateway.Transports.Websocket.ActivityRegistry
   alias CodexPooler.Gateway.Websocket, as: Gateway
   alias CodexPooler.Gateway.Websocket.DirectCleanup
+  alias CodexPooler.Platform.ExecutionIdentity
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
   @moduletag capture_log: true
@@ -41,6 +43,50 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTaskFailureCleanupTest do
              ),
              :count
            ) == 1
+  end
+
+  test "a delivered task failure retains its exact cause when proof recovery runs before socket cleanup" do
+    parent = self()
+
+    task =
+      start_supervised!(
+        {Task,
+         fn ->
+           fixture = fixture()
+           context = %DirectCleanup{registry: ActivityRegistry, task: self(), parent: parent, ref: make_ref(), session_id: fixture.session.id}
+           :ok = DirectCleanup.bind(context, fixture.request)
+           :ok = DirectCleanup.attempt_callback(context, fixture.request).(fixture.attempt)
+
+           assert_raise Postgrex.Error, fn ->
+             Repo.transaction(fn ->
+               Repo.query!("ALTER TABLE requests RENAME TO task_failure_unavailable_requests")
+               DirectCleanup.fail_task_exception(context, "owner_task_exception")
+             end)
+           end
+
+           send(parent, {:real_task_failure, fixture})
+
+           receive do
+             :delivered -> ExecutionIdentity.complete()
+           end
+         end}
+      )
+
+    monitor = Process.monitor(task)
+    assert_receive {:real_task_failure, fixture}, 15_000
+    assert fixture.attempt.owner_process_id == List.to_string(:erlang.pid_to_list(task))
+    assert Repo.reload!(fixture.request).status == "in_progress"
+    send(task, :delivered)
+    assert_receive {:DOWN, ^monitor, :process, ^task, :normal}, 15_000
+    :ok = CodexPooler.ExecutionProofSupport.publish_terminal!(fixture.attempt)
+    runner = start_supervised!({CodexPooler.Accounting.ExecutionRecovery, enabled: true, name: nil, interval_ms: 60_000})
+    :sys.get_state(runner)
+
+    assert Repo.reload!(fixture.request).status == "in_progress"
+    assert :ok = Interruption.finalize_task_exception_request(fixture.receipt, "owner_task_exception")
+    assert Repo.reload!(fixture.request).last_error_code == "owner_task_exception"
+    assert Repo.reload!(fixture.attempt).network_error_code == "owner_task_exception"
+    assert Repo.aggregate(from(e in LedgerEntry, where: e.request_id == ^fixture.request.id and e.entry_kind == "settlement" and e.amount_status == "recorded"), :count) == 1
   end
 
   test "ordinary cancellation preserves its settlement and admits an identical successor" do

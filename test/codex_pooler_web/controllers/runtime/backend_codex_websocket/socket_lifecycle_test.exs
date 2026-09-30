@@ -924,25 +924,36 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SocketLifecycleTest do
     refute log =~ "websocket native turn failed"
   end
 
-  test "websocket response task DOWN messages remove tasks that exit before done" do
-    pid =
-      spawn(fn ->
-        receive do
-          :stop -> :ok
-        end
-      end)
-
+  test "an unanswered native response task exit closes its socket without discarding cleanup authority" do
+    pid = spawn(fn -> receive do: (:stop -> :ok) end)
     monitor = Process.monitor(pid)
     state = %{tasks: MapSet.new([pid]), task_monitors: %{pid => monitor}}
-
     Process.exit(pid, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^pid, :killed}
 
-    assert {:ok, state} =
+    assert {:stop, :normal, {1011, "websocket response task failed"}, stopped} =
              CodexResponsesSocket.handle_info({:DOWN, monitor, :process, pid, :killed}, state)
 
-    assert state.tasks == MapSet.new()
-    assert state.task_monitors == %{}
+    assert stopped.tasks == state.tasks
+    assert stopped.task_monitors == state.task_monitors
+    assert stopped.socket_stopped?
+    assert {:ok, ^stopped} = CodexResponsesSocket.handle_info({:DOWN, monitor, :process, pid, :killed}, stopped)
+  end
+
+  test "stale and already answered native task exits do not close the socket" do
+    pid = self()
+    monitor = make_ref()
+    base = %{tasks: MapSet.new([pid]), task_monitors: %{pid => monitor}}
+
+    for state <- [
+          base,
+          %{base | tasks: MapSet.new()},
+          Map.put(base, :response_task_results_ready, MapSet.new([pid])),
+          Map.put(base, :response_task_terminals_accepted, MapSet.new([pid]))
+        ] do
+      down_ref = if state == base, do: make_ref(), else: monitor
+      assert {:ok, _state} = CodexResponsesSocket.handle_info({:DOWN, down_ref, :process, pid, :normal}, state)
+    end
   end
 
   test "late websocket success after disconnect promotes an interrupted turn" do

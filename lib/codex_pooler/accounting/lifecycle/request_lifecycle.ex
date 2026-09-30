@@ -167,6 +167,11 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   def recover_dead_execution_attempts(now \\ DateTime.utc_now(), opts \\ []),
     do: __MODULE__.DeadExecutionRecovery.recover(DateTime.truncate(now, :microsecond), opts)
 
+  @spec recover_admission_executions(DateTime.t(), keyword()) ::
+          {:ok, map()} | {:error, term(), map()}
+  def recover_admission_executions(now \\ DateTime.utc_now(), opts \\ []),
+    do: __MODULE__.AdmissionExecutionRecovery.recover(DateTime.truncate(now, :microsecond), opts)
+
   @spec create_attempt(Request.t(), PoolUpstreamAssignment.t(), map()) ::
           {:ok, Attempt.t()} | {:error, Ecto.Changeset.t() | accounting_error()}
   def create_attempt(%Request{} = request, %PoolUpstreamAssignment{} = assignment, attrs \\ %{}) do
@@ -538,10 +543,10 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   end
 
   @doc false
-  @spec recover_dead_execution(Request.t(), Attempt.t(), DateTime.t()) ::
+  @spec recover_dead_execution(Request.t(), Attempt.t(), DateTime.t(), keyword()) ::
           {:ok, :recovered | :noop} | {:error, term()}
-  def recover_dead_execution(request, candidate, timestamp) do
-    recover_execution(request, candidate, timestamp, :terminal, [])
+  def recover_dead_execution(request, candidate, timestamp, opts \\ []) do
+    recover_execution(request, candidate, timestamp, :terminal, opts)
   end
 
   @doc false
@@ -564,26 +569,31 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   def execution_recovery_authority(%Attempt{}), do: nil
 
   defp recover_execution(request, candidate, timestamp, authority, opts) do
-    Repo.transaction(fn ->
-      {request, attempt, _reservation, settlement, entitlement} =
-        lock_finalization_rows(request, candidate)
+    Repo.transaction(
+      fn ->
+        if Keyword.get(opts, :skip_locked, false), do: Repo.query!("SET LOCAL lock_timeout = '1ms'", [])
 
-      latest_id =
-        Repo.one(
-          from a in Attempt,
-            where: a.request_id == ^request.id,
-            order_by: [desc: a.attempt_number],
-            limit: 1,
-            select: a.id
-        )
+        {request, attempt, _reservation, settlement, entitlement} =
+          lock_finalization_rows(request, candidate)
 
-      if recoverable_execution?(request, attempt, candidate, latest_id, settlement, entitlement) and
-           execution_recovery_authorized?(attempt, authority, opts) do
-        finalize_dead_execution(request, attempt, timestamp, authority)
-      else
-        :noop
-      end
-    end)
+        latest_id =
+          Repo.one(
+            from a in Attempt,
+              where: a.request_id == ^request.id,
+              order_by: [desc: a.attempt_number],
+              limit: 1,
+              select: a.id
+          )
+
+        if recoverable_execution?(request, attempt, candidate, latest_id, settlement, entitlement) and
+             execution_recovery_authorized?(attempt, authority, opts) do
+          finalize_dead_execution(request, attempt, timestamp, authority)
+        else
+          :noop
+        end
+      end,
+      Keyword.take(opts, [:timeout, :deadline, :checkout_retries])
+    )
   end
 
   defp recoverable_execution?(request, attempt, candidate, latest_id, settlement, entitlement) do
@@ -593,8 +603,8 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
       is_nil(settlement) and is_nil(entitlement)
   end
 
-  defp execution_recovery_authorized?(attempt, :terminal, _opts),
-    do: ExecutionTerminalProofs.terminal?(attempt)
+  defp execution_recovery_authorized?(attempt, :terminal, opts),
+    do: ExecutionTerminalProofs.terminal?(attempt, opts)
 
   defp execution_recovery_authorized?(attempt, :absent, opts) do
     presence_now = InstancePresence.database_now()

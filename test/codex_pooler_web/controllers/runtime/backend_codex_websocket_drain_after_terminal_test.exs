@@ -164,6 +164,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDrainAfterTerminalTest do
   # An owner crash keeps the recovery for a lost executor; its arm is in
   # `dead_execution_resend_recovery_test.exs`.
   test "owner on this node: a drain cut keeps owner_drained when the cut task's end is proven before the owner interrupts its turn" do
+    start_supervised!({CodexPooler.Accounting.ExecutionRecovery, enabled: true})
     put_owner_forwarding!(true)
     put_owner_call_timeout!(1_500)
     turn = relayed_turn_held!(start_turn!())

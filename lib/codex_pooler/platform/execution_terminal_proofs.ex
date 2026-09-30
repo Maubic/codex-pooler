@@ -7,35 +7,44 @@ defmodule CodexPooler.Platform.ExecutionTerminalProofs do
 
   @retention_seconds 6 * 60 * 60
   @type terminal :: %{
-          owner_execution_id: Ecto.UUID.t(),
-          owner_instance_id: String.t(),
-          owner_instance_boot_id: String.t(),
-          owner_process_id: String.t(),
-          end_kind: String.t(),
-          ended_at: DateTime.t()
+          required(:owner_execution_id) => Ecto.UUID.t(),
+          required(:owner_instance_id) => String.t(),
+          required(:owner_instance_boot_id) => String.t(),
+          required(:owner_process_id) => String.t(),
+          required(:end_kind) => String.t(),
+          required(:ended_at) => DateTime.t(),
+          optional(:interruption_code) => String.t() | nil
         }
 
   @spec retention_seconds() :: pos_integer()
   def retention_seconds, do: @retention_seconds
 
-  @spec terminal?(map()) :: boolean()
-  def terminal?(identity) do
+  @spec terminal?(map(), keyword()) :: boolean()
+  def terminal?(identity, opts \\ []) do
     if valid_identity?(identity) do
-      Repo.exists?(
+      query =
         from proof in ExecutionTerminalProof,
           where:
             proof.execution_id == ^identity.owner_execution_id and
               proof.owner_instance_id == ^identity.owner_instance_id and
               proof.owner_instance_boot_id == ^identity.owner_instance_boot_id and
               proof.owner_process_id == ^identity.owner_process_id
-      )
+
+      query =
+        if Keyword.get(opts, :include_interrupted, true),
+          do: query,
+          else: where(query, [proof], is_nil(proof.interruption_code))
+
+      Repo.exists?(query, Keyword.take(opts, [:timeout, :deadline, :checkout_retries]))
     else
       false
     end
   end
 
-  @spec publish([terminal()]) :: {:ok, non_neg_integer()} | {:error, atom()}
-  def publish(proofs) when is_list(proofs) and length(proofs) <= 100 do
+  @spec publish([terminal()], keyword()) :: {:ok, non_neg_integer()} | {:error, atom()}
+  def publish(proofs, opts \\ [])
+
+  def publish(proofs, opts) when is_list(proofs) and length(proofs) <= 100 do
     if Enum.all?(proofs, &valid_terminal?/1) do
       rows =
         Enum.map(proofs, fn proof ->
@@ -45,33 +54,38 @@ defmodule CodexPooler.Platform.ExecutionTerminalProofs do
             :owner_instance_boot_id,
             :owner_process_id,
             :end_kind,
+            :interruption_code,
             :ended_at
           ])
           |> Map.put(:execution_id, proof.owner_execution_id)
+          |> Map.put(:interruption_code, Map.get(proof, :interruption_code))
         end)
 
-      publish_rows(rows)
+      publish_rows(rows, opts)
     else
       {:error, :invalid_execution_terminal_proof}
     end
   end
 
-  def publish(_proofs), do: {:error, :invalid_execution_terminal_proof}
+  def publish(_proofs, _opts), do: {:error, :invalid_execution_terminal_proof}
 
-  defp publish_rows(rows) do
-    Repo.transact(fn ->
-      Repo.insert_all(ExecutionTerminalProof, rows,
-        on_conflict: :nothing,
-        conflict_target: :execution_id
-      )
+  defp publish_rows(rows, opts) do
+    Repo.transact(
+      fn ->
+        Repo.insert_all(ExecutionTerminalProof, rows,
+          on_conflict: :nothing,
+          conflict_target: :execution_id
+        )
 
-      ids = Enum.map(rows, & &1.execution_id)
-      persisted = Repo.all(from p in ExecutionTerminalProof, where: p.execution_id in ^ids)
+        ids = Enum.map(rows, & &1.execution_id)
+        persisted = Repo.all(from p in ExecutionTerminalProof, where: p.execution_id in ^ids)
 
-      exact = Enum.all?(rows, &exact_row?(&1, persisted))
+        exact = Enum.all?(rows, &exact_row?(&1, persisted))
 
-      if exact, do: {:ok, length(rows)}, else: {:error, :execution_terminal_proof_conflict}
-    end)
+        if exact, do: {:ok, length(rows)}, else: {:error, :execution_terminal_proof_conflict}
+      end,
+      Keyword.take(opts, [:timeout, :deadline, :checkout_retries])
+    )
   end
 
   defp exact_row?(row, persisted),
@@ -107,6 +121,7 @@ defmodule CodexPooler.Platform.ExecutionTerminalProofs do
     do:
       valid_identity?(proof) and
         Map.get(proof, :end_kind) in ["completed", "process_down"] and
+        Map.get(proof, :interruption_code) in [nil, "client_disconnected", "owner_drained", "owner_task_exception", "unobserved_exit"] and
         match?(%DateTime{}, Map.get(proof, :ended_at))
 
   defp valid_uuid?(id) when is_binary(id), do: match?({:ok, ^id}, Ecto.UUID.cast(id))

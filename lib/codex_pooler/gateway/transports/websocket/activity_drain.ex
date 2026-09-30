@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ActivityDrain do
   @moduledoc false
 
   alias CodexPooler.Gateway.Transports.Websocket.ActivityRegistry
+  alias CodexPooler.Platform.ExecutionRegistry
 
   @poll_interval_ms 200
 
@@ -81,8 +82,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ActivityDrain do
 
   defp force_cancel(token, registry) do
     case ActivityRegistry.activities(name: registry) |> Enum.find(&(&1.token == token)) do
-      %{pid: pid} when is_pid(pid) -> Process.exit(pid, :kill)
-      _finished -> :ok
+      %{pid: pid} when is_pid(pid) ->
+        _marked = ExecutionRegistry.mark_interruption(pid, "owner_drained")
+        Process.exit(pid, :kill)
+
+      _finished ->
+        :ok
     end
 
     activity_outcome(token, registry)

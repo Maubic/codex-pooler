@@ -35,5 +35,10 @@ defmodule CodexPooler.Accounting.Request do
     field :native_client_retry_version, :integer
     field :native_client_retry_digest, :binary
     field :native_client_retry_auth_epoch, :integer
+    field :admission_instance_id, :string
+    field :admission_instance_boot_id, :string
+    field :admission_process_id, :string
+    field :admission_execution_id, :binary_id
+    field :admission_execution_checked_at, :utc_datetime_usec
   end
 end

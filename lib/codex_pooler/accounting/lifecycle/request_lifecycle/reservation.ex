@@ -29,6 +29,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
   alias CodexPooler.Gateway.Persistence.{CodexSession, CodexTurn, SessionContinuity}
+  alias CodexPooler.Platform.ExecutionTerminalProofs
   alias CodexPooler.Repo
 
   # The same NUMBER as `FailedPredecessorResend`'s own chain bound, and
@@ -1321,6 +1322,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
         admitted_at: context.timestamp
       }
       |> Map.merge(ClientRetry.request_attrs(attr(context.opts, :native_client_retry_witness)))
+      |> Map.merge(admission_execution_attrs(context.opts))
 
     request =
       case attr(context.opts, :turn_claim) do
@@ -1338,6 +1340,28 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
 
     :ok = bind_direct_cleanup(context.opts, request)
     request
+  end
+
+  # The gateway captures this identity in the process that actually reserves,
+  # not in a claim builder that can hand work to another executor. Admission
+  # authority never stands in for a recorded attempt or a replay generation.
+  defp admission_execution_attrs(opts) do
+    case attr(opts, :admission_execution) do
+      %{} = identity ->
+        if ExecutionTerminalProofs.valid_identity?(identity) do
+          %{
+            admission_instance_id: identity.owner_instance_id,
+            admission_instance_boot_id: identity.owner_instance_boot_id,
+            admission_process_id: identity.owner_process_id,
+            admission_execution_id: identity.owner_execution_id
+          }
+        else
+          %{}
+        end
+
+      _unknown ->
+        %{}
+    end
   end
 
   defp put_native_http_claim_arm(metadata, nil), do: metadata

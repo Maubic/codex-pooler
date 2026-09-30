@@ -87,6 +87,129 @@ defmodule CodexPooler.Accounting.DeadExecutionRecoveryTest do
     end
   end
 
+  test "a fresh terminal proof closes an executor on a live instance without a client resend or cleanup age" do
+    setup = accounting_setup()
+    {request, attempt} = proven_dead_candidate!(setup)
+    now = DateTime.utc_now()
+    {:ok, _} = InstancePresence.record_heartbeat()
+
+    assert {:ok, %{dead_execution_attempts_recovered: 0}} = DeadExecutionRecovery.recover(now)
+    assert Repo.reload!(request).status == "in_progress"
+
+    assert {:ok, %{dead_execution_attempts_recovered: 1}} =
+             DeadExecutionRecovery.recover_execution_ids([attempt.owner_execution_id], now, timeout: 500, checkout_retries: 0)
+
+    assert %Request{status: "failed", last_error_code: "dead_execution_recovered", usage_status: "usage_unknown"} = Repo.reload!(request)
+    assert %Attempt{status: "failed", network_error_code: "dead_execution_recovered", usage_status: "usage_unknown"} = Repo.reload!(attempt)
+    assert Enum.sort(Enum.map(Accounting.list_ledger_entries_for_request(request.id), & &1.entry_kind)) == ["release", "reservation", "settlement"]
+    assert {:ok, %{dead_execution_attempts_recovered: 0}} = DeadExecutionRecovery.recover_published(now)
+    assert length(Accounting.list_ledger_entries_for_request(request.id)) == 3
+  end
+
+  test "the durable publication scan ignores live executors and mismatched incarnations before its limit" do
+    setup = accounting_setup()
+    {live_request, live_attempt} = reserve_attempt(setup)
+    {request, attempt} = proven_dead_candidate!(setup)
+    proof = Repo.get!(CodexPooler.Platform.ExecutionTerminalProof, attempt.owner_execution_id)
+    proof |> Ecto.Changeset.change(owner_instance_boot_id: "foreign-boot") |> Repo.update!()
+
+    assert {:ok, %{dead_execution_attempts_recovered: 0}} = DeadExecutionRecovery.recover_published(DateTime.utc_now(), limit: 1)
+    assert Repo.reload!(request).status == "in_progress"
+    assert Repo.reload!(live_request).status == "in_progress"
+    assert is_nil(Repo.reload!(live_attempt).owner_execution_checked_at)
+
+    proof |> Repo.reload!() |> Ecto.Changeset.change(owner_instance_boot_id: attempt.owner_instance_boot_id) |> Repo.update!()
+    assert {:ok, %{dead_execution_attempts_recovered: 1}} = DeadExecutionRecovery.recover_published(DateTime.utc_now(), limit: 1)
+    assert Repo.reload!(live_request).status == "in_progress"
+  end
+
+  test "a published execution whose lifecycle is replay-owned remains replay-owned" do
+    setup = accounting_setup()
+    {request, attempt} = proven_dead_candidate!(setup)
+    attempt |> Ecto.Changeset.change(replay_generation: 1) |> Repo.update!()
+
+    assert {:ok, %{dead_execution_attempts_recovered: 0}} =
+             DeadExecutionRecovery.recover_execution_ids([attempt.owner_execution_id], DateTime.utc_now())
+
+    assert Repo.reload!(request).status == "in_progress"
+    assert Enum.map(Accounting.list_ledger_entries_for_request(request.id), & &1.entry_kind) == ["reservation"]
+  end
+
+  test "the durable scan skips a locked older attempt and recovers an unlocked later execution" do
+    %{user: owner} = CodexPooler.AccountsFixtures.committed_bootstrap_owner_fixture!()
+
+    setup =
+      UnboxedFixture.run_unboxed(fn ->
+        pool = CodexPooler.PoolerFixtures.pool_fixture(%{created_by_user_id: owner.id})
+        %{api_key: api_key} = CodexPooler.PoolerFixtures.active_api_key_fixture(pool, %{created_by_user_id: owner.id})
+        model = CodexPooler.PoolerFixtures.model_fixture(pool)
+        %{assignment: assignment} = CodexPooler.PoolerFixtures.upstream_assignment_fixture(pool)
+        %{auth: %{pool: pool, api_key: api_key}, model: model, assignment: assignment}
+      end)
+
+    older = committed_dead_attempt!(setup, :older_locked_executor)
+    later = committed_dead_attempt!(setup, :later_unlocked_executor)
+    parent = self()
+
+    holder =
+      start_supervised!(
+        {Task,
+         fn ->
+           Sandbox.unboxed_run(Repo, fn ->
+             Repo.transaction(fn ->
+               Repo.one!(from(a in Attempt, where: a.id == ^older.attempt.id, lock: "FOR UPDATE"))
+               send(parent, {:older_attempt_locked, self()})
+
+               receive do
+                 :release -> :ok
+               end
+             end)
+           end)
+         end},
+        id: :attempt_holder
+      )
+
+    holder_monitor = Process.monitor(holder)
+    assert_receive {:older_attempt_locked, ^holder}, 15_000
+    result = UnboxedFixture.run_unboxed(fn -> DeadExecutionRecovery.recover_published(DateTime.utc_now(), limit: 1, timeout: 500) end)
+    assert {:ok, %{dead_execution_attempts_recovered: 1}} = result
+
+    UnboxedFixture.run_unboxed(fn ->
+      assert Repo.reload!(older.request).status == "in_progress"
+      assert Repo.reload!(later.request).last_error_code == "dead_execution_recovered"
+      assert Enum.sort(Enum.map(Accounting.list_ledger_entries_for_request(later.request.id), & &1.entry_kind)) == ["release", "reservation", "settlement"]
+    end)
+
+    send(holder, :release)
+    assert_receive {:DOWN, ^holder_monitor, :process, ^holder, :normal}, 15_000
+    assert {:ok, %{dead_execution_attempts_recovered: 1}} = UnboxedFixture.run_unboxed(fn -> DeadExecutionRecovery.recover_published(DateTime.utc_now(), limit: 2, timeout: 500) end)
+  end
+
+  defp committed_dead_attempt!(setup, id) do
+    parent = self()
+
+    pid =
+      start_supervised!(
+        {Task,
+         fn ->
+           pair = Sandbox.unboxed_run(Repo, fn -> reserve_attempt(setup) end)
+           send(parent, {:committed_dead_candidate, id, pair})
+
+           receive do
+             :finish -> :ok
+           end
+         end},
+        id: id
+      )
+
+    monitor = Process.monitor(pid)
+    assert_receive {:committed_dead_candidate, ^id, {request, attempt}}, 15_000
+    send(pid, :finish)
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 15_000
+    CodexPooler.ExecutionProofSupport.publish_committed_terminal!(attempt)
+    %{request: request, attempt: attempt}
+  end
+
   test "unknown execution evidence leaves the persisted request, turn, and ledger untouched" do
     setup = accounting_setup()
     {request, attempt} = reserve_attempt(setup)

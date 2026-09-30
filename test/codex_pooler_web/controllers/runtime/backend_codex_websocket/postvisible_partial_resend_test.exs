@@ -144,6 +144,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisiblePartialResendT
     @tag transport: transport
     @tag slow: "a real socket cut after a completed item, the stopped task's proof published before the cleanup interrupts, and the resend"
     test "owner forwarding false: the #{transport} resend after a completed item is chained when the stopped task's end is proven before the cleanup interrupts it", %{transport: transport} do
+      start_supervised!({CodexPooler.Accounting.ExecutionRecovery, enabled: true})
+
       %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, proven_attempt_id: attempt_id} =
         scenario!(false, :item_done, :held, transport, proof_before_cleanup: true)
 

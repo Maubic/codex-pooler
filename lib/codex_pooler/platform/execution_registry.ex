@@ -23,6 +23,9 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
   @spec status(String.t(), pid(), GenServer.server()) :: :alive | :dead | :unknown
   def status(id, pid, server \\ __MODULE__), do: call(server, {:status, id, pid})
 
+  @spec mark_interruption(pid(), String.t(), GenServer.server()) :: :ok | :unknown
+  def mark_interruption(pid, code, server \\ __MODULE__), do: call(server, {:mark_interruption, pid, code})
+
   @spec pending(pos_integer(), GenServer.server()) ::
           [ExecutionTerminalProofs.terminal()] | :unknown
   def pending(limit, server \\ __MODULE__), do: call(server, {:pending, limit})
@@ -30,8 +33,8 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
   @spec acknowledge([String.t()], GenServer.server()) :: :ok | :unknown
   def acknowledge(ids, server \\ __MODULE__), do: call(server, {:acknowledge, ids})
 
-  # The caller (the proof publisher) is asked to publish early each time an
-  # execution ends `process_down`.
+  # Both delivered completion and process death end the execution. Either can
+  # leave accounting unfinished after a database outage.
   @spec subscribe(GenServer.server()) :: :ok | :unknown
   def subscribe(server \\ __MODULE__), do: call(server, :subscribe)
 
@@ -63,6 +66,8 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
          entries: %{},
          monitors: %{},
          owners: %{},
+         process_executions: %{},
+         interruptions: %{},
          pending: %{},
          subscribers: %{},
          overflow: false,
@@ -80,6 +85,7 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
             state
             | entries: Map.put(state.entries, id, {pid, ref}),
               owners: Map.put(state.owners, id, Identity.local()),
+              process_executions: Map.update(state.process_executions, pid, [id], &[id | &1]),
               monitors: Map.put(state.monitors, ref, id)
           }
 
@@ -95,6 +101,20 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
         {:reply, :unknown, state}
     end
   end
+
+  def handle_call({:mark_interruption, pid, code}, _from, state)
+      when is_pid(pid) and code in ["client_disconnected", "owner_drained", "owner_task_exception"] do
+    case Map.get(state.process_executions, pid, []) do
+      [] ->
+        {:reply, :unknown, state}
+
+      ids ->
+        interruptions = Enum.reduce(ids, state.interruptions, &Map.put_new(&2, &1, code))
+        {:reply, :ok, %{state | interruptions: interruptions}}
+    end
+  end
+
+  def handle_call({:mark_interruption, _pid, _code}, _from, state), do: {:reply, :unknown, state}
 
   def handle_call({:complete, id}, {pid, _}, state) do
     case Map.get(state.entries, id) do
@@ -115,7 +135,7 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
         if Process.alive?(pid) do
           {:reply, :alive, state}
         else
-          {:reply, :dead, retire(state, id, pid, ref, "process_down")}
+          {:reply, :dead, retire_observed_down(state, id, pid, ref)}
         end
 
       _ ->
@@ -140,7 +160,7 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
     state =
       Enum.reduce(state.entries, state, fn
         {id, {pid, ref}}, state when is_reference(ref) ->
-          if Process.alive?(pid), do: state, else: retire(state, id, pid, ref, "process_down")
+          if Process.alive?(pid), do: state, else: retire_observed_down(state, id, pid, ref, "unobserved_exit")
 
         _retired, state ->
           state
@@ -160,10 +180,10 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
   end
 
   @impl true
-  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+  def handle_info({:DOWN, ref, :process, pid, reason}, state) do
     case Map.get(state.monitors, ref) do
       nil -> {:noreply, %{state | subscribers: Map.delete(state.subscribers, ref)}}
-      id -> {:noreply, retire(state, id, pid, ref, "process_down")}
+      id -> {:noreply, retire(state, id, pid, ref, "process_down", interruption_code(reason))}
     end
   end
 
@@ -179,18 +199,22 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
        | entries: Map.delete(state.entries, id),
          owners: Map.delete(state.owners, id),
          pending: Map.delete(state.pending, id),
+         interruptions: Map.delete(state.interruptions, id),
          expired_warning: state.expired_warning or expired
      }}
   end
 
-  defp retire(state, id, pid, ref, end_kind) do
+  defp retire(state, id, pid, ref, end_kind, interruption_code \\ nil) do
     Process.demonitor(ref, [:flush])
     Process.send_after(self(), {:expire, id}, @retention_ms)
+    interruption_code = Map.get(state.interruptions, id, interruption_code)
 
     state = %{
       state
       | entries: Map.put(state.entries, id, {pid, :dead}),
-        monitors: Map.delete(state.monitors, ref)
+        monitors: Map.delete(state.monitors, ref),
+        interruptions: Map.delete(state.interruptions, id),
+        process_executions: drop_process_execution(state.process_executions, pid, id)
     }
 
     owner = Map.fetch!(state.owners, id)
@@ -201,11 +225,12 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
       owner_instance_boot_id: owner.boot_id,
       owner_process_id: List.to_string(:erlang.pid_to_list(pid)),
       end_kind: end_kind,
+      interruption_code: interruption_code,
       ended_at: DateTime.utc_now()
     }
 
     if map_size(state.pending) < @pending_limit do
-      if end_kind == "process_down", do: request_early_publication(state.subscribers, id)
+      request_early_publication(state.subscribers, id)
       %{state | pending: Map.put(state.pending, id, proof)}
     else
       unless state.overflow,
@@ -215,13 +240,33 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
     end
   end
 
-  # An execution that ended without delivering its result: a client's resend
-  # of its turn waits for this proof (findings#283). A completed execution
-  # stays on the publisher's tick. The owner-crash case gets here only because
-  # its response task ends `process_down`: its socket closes 1011 before the
-  # task hears that its error was delivered. Were the socket to confirm that
-  # delivery first, the task would complete and its proof would wait for the
-  # tick again.
+  defp drop_process_execution(executions, pid, id) do
+    case Map.get(executions, pid, []) -- [id] do
+      [] -> Map.delete(executions, pid)
+      ids -> Map.put(executions, pid, ids)
+    end
+  end
+
+  # Do not discard a queued monitor reason merely because another caller saw
+  # the process gone. A lost monitor can still prove death at shutdown, but
+  # cannot authorize prompt recovery over an intentional caller's cleanup.
+  defp retire_observed_down(state, id, pid, ref, missing_code \\ nil) do
+    receive do
+      {:DOWN, ^ref, :process, ^pid, reason} ->
+        retire(state, id, pid, ref, "process_down", interruption_code(reason))
+    after
+      0 ->
+        if missing_code, do: retire(state, id, pid, ref, "process_down", missing_code), else: state
+    end
+  end
+
+  defp interruption_code({:shutdown, :client_disconnected}), do: "client_disconnected"
+  defp interruption_code({:shutdown, :owner_drained}), do: "owner_drained"
+  defp interruption_code({:shutdown, :websocket_terminated}), do: "client_disconnected"
+  defp interruption_code(_reason), do: nil
+
+  # A completion acknowledges delivery, not an accounting commit. Publish both
+  # end kinds promptly so recovery never depends on how the socket ended.
   defp request_early_publication(subscribers, id),
     do: Enum.each(subscribers, fn {_ref, subscriber} -> send(subscriber, {:publish_early, id}) end)
 end

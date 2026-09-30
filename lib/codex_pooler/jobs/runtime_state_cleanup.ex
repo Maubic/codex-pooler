@@ -43,6 +43,7 @@ defmodule CodexPooler.Jobs.RuntimeStateCleanup do
       # gateway runtime cleanup: expired-owner interruption opens a reconnect
       # window, and running it first can shelter the same orphan from this pass.
       {:absent_instances, fn -> Accounting.recover_absent_instance_attempts(now) end},
+      {:admission_executions, fn -> Accounting.recover_admission_executions(now) end},
       {:gateway_runtime, fn -> RuntimeCleanup.cleanup_expired_runtime_state(now) end},
       {:dead_executions, fn -> Accounting.recover_dead_execution_attempts(now) end},
       {:execution_proofs, fn -> ExecutionTerminalProofs.prune(now) end},

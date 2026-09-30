@@ -269,6 +269,11 @@ defmodule CodexPooler.Accounting do
   defdelegate recover_dead_execution_attempts(now \\ DateTime.utc_now(), opts \\ []),
     to: RequestLifecycle
 
+  @spec recover_admission_executions(DateTime.t(), keyword()) ::
+          {:ok, map()} | {:error, term(), map()}
+  defdelegate recover_admission_executions(now \\ DateTime.utc_now(), opts \\ []),
+    to: RequestLifecycle
+
   @spec finalize_request(Request.t(), Attempt.t(), map()) :: request_result()
   defdelegate finalize_request(request, attempt, attrs \\ %{}), to: RequestLifecycle
 

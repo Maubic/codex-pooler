@@ -38,6 +38,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   alias CodexPooler.Gateway.Websocket.ResponseTask
   alias CodexPooler.InstanceSettings
   alias CodexPooler.InstanceSettings.Cache, as: InstanceSettingsCache
+  alias CodexPooler.Platform.ExecutionRegistry
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Plugs.RuntimeIngress.Firewall
   alias CodexPoolerWeb.WebsocketConnectionLogger
@@ -490,6 +491,11 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
           {:stop, :normal, {1011, "websocket response task failed"}, state}
 
+        unfinished_native_task_monitor?(state, pid, ref) ->
+          # A dead native task can never acknowledge its delivery activity. Do
+          # not keep the socket and queued work waiting for that handshake.
+          {:stop, :normal, {1011, "websocket response task failed"}, state}
+
         true ->
           state =
             state
@@ -651,6 +657,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     {remaining_tasks, state} =
       await_response_tasks(state, reason, remaining_tasks, response_task_drain_ms(state))
 
+    Enum.each(remaining_tasks, &ExecutionRegistry.mark_interruption(&1, "client_disconnected"))
     Enum.each(remaining_tasks, &Process.exit(&1, :kill))
     killed_tasks = remaining_tasks
 
@@ -889,6 +896,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     |> Map.put(:response_task_results_ready, MapSet.new())
     |> Map.put(:response_task_terminals_accepted, MapSet.new())
     |> Map.put(:response_task_completed_terminals, MapSet.new())
+    |> Map.put(:response_task_compaction_collectors, MapSet.new())
     |> Map.put(:response_task_cleanup_results, %{})
     |> Map.put(:native_owner_terminal_delivered?, false)
     |> Map.put(:downstream_delivery_evidence, %{})
@@ -2188,6 +2196,13 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
        when is_pid(pid) and is_reference(ref) do
     active_public_turn?(state, pid) and
       Map.get(Map.get(state, :task_monitors, %{}), pid) == ref
+  end
+
+  defp unfinished_native_task_monitor?(state, pid, ref) do
+    not Adapter.public_responses_stream?(state) and not socket_revoked?(state) and tracked_response_task?(state, pid) and
+      Map.get(Map.get(state, :task_monitors, %{}), pid) == ref and
+      not response_task_result_ready?(state, pid) and not response_task_terminal_accepted?(state, pid) and
+      not MapSet.member?(Map.get(state, :response_task_compaction_collectors, MapSet.new()), pid)
   end
 
   defp public_owner_turn_open?(state) do
@@ -3942,6 +3957,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         |> put_direct_context(pid, direct_ref, parent)
         |> put_response_task_model(pid, prepared)
         |> put_response_task_turn(pid, prepared)
+        |> put_response_task_compaction_collector(pid, prepared)
         |> maybe_open_public_turn(prepared, pid)
 
       {:error, reason} ->
@@ -3973,6 +3989,14 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     fn -> Websocket.sole_routable_assignment?(session, model) end
   end
 
+  # Collected compaction settles before its acknowledgement/confirmation. Its
+  # existing same-socket lost-ack recovery is not an unanswered stream death.
+  defp put_response_task_compaction_collector(state, pid, %PreparedWebsocketFrame{request_options: %RequestOptions{payload_context: %{compaction_result_mode: :native_websocket}}}) do
+    Map.update(state, :response_task_compaction_collectors, MapSet.new([pid]), &MapSet.put(&1, pid))
+  end
+
+  defp put_response_task_compaction_collector(state, _pid, _prepared), do: state
+
   defp put_response_task_model(state, pid, %PreparedWebsocketFrame{payload: %{"model" => model}}) when is_binary(model),
     do: Map.update(state, :response_task_models, %{pid => model}, &Map.put(&1, pid, model))
 
@@ -3982,6 +4006,11 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     do: %{state | response_task_models: Map.delete(models, pid)}
 
   defp forget_response_task_model(state, _pid), do: state
+
+  defp forget_response_task_compaction_collector(%{response_task_compaction_collectors: collectors} = state, pid),
+    do: %{state | response_task_compaction_collectors: MapSet.delete(collectors, pid)}
+
+  defp forget_response_task_compaction_collector(state, _pid), do: state
 
   # The turn a native request belongs to, so the response it completes on this
   # socket is known to be that turn's (findings#206 row 206-409).
@@ -5517,6 +5546,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
     state
     |> Map.update(:tasks, MapSet.new(), &MapSet.delete(&1, pid))
+    |> forget_response_task_compaction_collector(pid)
     |> forget_response_task_model(pid)
     |> forget_response_task_turn(pid)
     |> clear_direct_cleanup(pid)

@@ -6,6 +6,7 @@ defmodule CodexPooler.Gateway.Websocket.DirectCleanup do
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
   alias CodexPooler.Gateway.Transports.Websocket.ActivityRegistry
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
+  alias CodexPooler.Platform.ExecutionRegistry
 
   @task_receipt_key {__MODULE__, :task_receipt}
   @enforce_keys [:registry, :task, :ref, :parent, :session_id]
@@ -236,6 +237,8 @@ defmodule CodexPooler.Gateway.Websocket.DirectCleanup do
   # fails the request, attempt, and turn it bound.
   @spec fail_task_exception(t(), String.t()) :: cleanup_result()
   def fail_task_exception(%__MODULE__{} = context, reason) do
+    if self() == context.task, do: ExecutionRegistry.mark_interruption(self(), "owner_task_exception")
+
     case task_receipt(context) || registry_receipt(context) do
       {:ok, receipt} -> Interruption.finalize_task_exception_request(receipt, reason)
       :none -> :none

@@ -53,6 +53,8 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   alias CodexPooler.Gateway.Websocket.Adapter
   alias CodexPooler.Gateway.Websocket.DirectCleanup
   alias CodexPooler.Gateway.Websocket.NativeCompactionRefusalLog
+  alias CodexPooler.Platform.ExecutionIdentity
+  alias CodexPooler.Platform.InstancePresence.Identity, as: InstanceIdentity
   alias CodexPooler.Platform.TransientDatabaseError
   alias CodexPooler.Pools
   alias CodexPooler.Pools.{ModelServingMode, ModelServingOverride, Pool}
@@ -2181,6 +2183,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
       )
       |> Map.put(:reservation_estimate, AccountingReservation.reservation_estimate(route_state))
       |> Map.put(:turn_claim, turn_claim)
+      |> put_admission_execution(request_options)
 
     case request_options.runtime.replay_lifecycle_binding do
       %{client_retry_predecessor_request_id: predecessor_request_id}
@@ -2198,6 +2201,22 @@ defmodule CodexPooler.Gateway.Runtime.Service do
         end
     end
   end
+
+  # HTTP reservation and first-attempt insertion execute in this process. A
+  # websocket owner handoff has a different lifetime and is not admission-owned.
+  defp put_admission_execution(attrs, %RequestOptions{transport: %{transport: transport}})
+       when transport in ["http_sse", "http_json", "http_compact_json"] do
+    instance = InstanceIdentity.local()
+
+    execution =
+      ExecutionIdentity.local()
+      |> Map.put(:owner_instance_id, instance.node_name)
+      |> Map.put(:owner_instance_boot_id, instance.boot_id)
+
+    Map.put(attrs, :admission_execution, execution)
+  end
+
+  defp put_admission_execution(attrs, _request_options), do: attrs
 
   # A native Codex HTTP turn now reserves under the same turn claim a websocket
   # frame does, so its resend meets the resend policy inside the reservation

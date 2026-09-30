@@ -131,7 +131,7 @@ defmodule CodexPooler.Gateway.Websocket.ResponseTaskTest do
         parent,
         :proxy,
         fn _task_pid ->
-          send(parent, :proxy_upstream_started)
+          send(parent, {:proxy_upstream_started, ExecutionIdentity.local()})
 
           receive do
             :release_proxy_work -> :ok
@@ -141,7 +141,7 @@ defmodule CodexPooler.Gateway.Websocket.ResponseTaskTest do
         activity_registry: registry
       )
 
-    assert_receive :proxy_upstream_started
+    assert_receive {:proxy_upstream_started, execution}
     assert {_epoch, [%{token: token, pid: ^pid}]} = ActivityRegistry.begin_drain(name: registry)
     monitor = Process.monitor(pid)
     assert :ok = ActivityRegistry.cancel(token, :owner_drained, name: registry)
@@ -153,6 +153,9 @@ defmodule CodexPooler.Gateway.Websocket.ResponseTaskTest do
     assert :ok = ResponseTask.acknowledge_delivery(ack_pid, token)
     assert_receive {:codex_response_done, ^pid, {:error, :owner_drained}}
     assert_receive {:DOWN, ^monitor, :process, ^pid, :killed}
+    assert :dead = ExecutionRegistry.status(execution.owner_execution_id, pid)
+    [proof] = Enum.filter(ExecutionRegistry.pending(10_000), &(&1.owner_execution_id == execution.owner_execution_id))
+    assert proof.interruption_code == "owner_drained"
     assert {:finished, :aborted} = ActivityRegistry.status(token, name: registry)
     refute_received {:proxy_cancelled, ^pid, :owner_drained}
     refute_received {:codex_response_done, ^pid, {:error, :owner_drained}}

@@ -9,7 +9,6 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
 
   import ExUnit.CaptureLog
 
-  alias CodexPooler.ExecutionProofSupport
   alias CodexPooler.Platform.{ExecutionProofPublisher, ExecutionRegistry, ExecutionTerminalProof, ExecutionTerminalProofs}
   alias CodexPooler.Platform.InstancePresence.Identity
 
@@ -35,7 +34,7 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
   # oldest hundred at a time. It used to write the oldest hundred, so the
   # asking execution waited one tick per hundred older proofs (Drone 1707).
   test "an execution that ends without delivering is published ahead of an older backlog" do
-    {registry, publisher} = start_pair!()
+    registry = start_supervised!({ExecutionRegistry, name: nil})
 
     for _ <- 1..250 do
       id = Ecto.UUID.generate()
@@ -43,27 +42,21 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
       :ok = ExecutionRegistry.complete(id, registry)
     end
 
+    publisher = start_supervised!({ExecutionProofPublisher, enabled: true, name: nil, registry: registry, interval_ms: @tick_ms})
+    :sys.get_state(publisher)
     execution = start_execution!(registry)
     Process.exit(execution.pid, :kill)
 
     :ok = await_published!(execution.identity)
-    assert %{early: nil, early_ids: []} = :sys.get_state(publisher)
-    assert length(ExecutionRegistry.pending(10_000, registry)) == 250
   end
 
-  test "an execution that completes waits for the tick" do
-    {registry, publisher} = start_pair!()
+  test "a delivered execution is published without waiting for the tick" do
+    {registry, _publisher} = start_pair!()
     execution = start_execution!(registry)
 
-    # `complete/2` returns once the registry retired the execution, so any
-    # request for an early publication is already in the publisher's mailbox.
     send(execution.pid, :complete)
     assert_receive {:completed, _id}
-    assert %{early: nil} = :sys.get_state(publisher)
-    refute ExecutionTerminalProofs.terminal?(execution.identity)
-
-    # The tick still publishes it.
-    :ok = ExecutionProofSupport.await_terminal!(execution.identity, publisher)
+    :ok = await_published!(execution.identity)
     assert %ExecutionTerminalProof{end_kind: "completed"} = Repo.get!(ExecutionTerminalProof, execution.identity.owner_execution_id)
   end
 
@@ -86,7 +79,7 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
     assert publications.() in 1..2
   end
 
-  test "an end brings no publication forward while publication is failing" do
+  test "a failed older proof does not block a later exact executor proof" do
     {registry, publisher} = start_pair!()
 
     # A stored proof that disagrees with a pending one fails every publication.
@@ -105,9 +98,33 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
     assert log =~ "execution terminal proof publication unavailable; pending proofs retained"
 
     execution = start_execution!(registry)
+    monitor = Process.monitor(execution.pid)
     Process.exit(execution.pid, :kill)
-    assert :dead = ExecutionRegistry.status(execution.identity.owner_execution_id, execution.pid, registry)
-    assert %{early: nil, failed: true} = :sys.get_state(publisher)
+    assert_receive {:DOWN, ^monitor, :process, _pid, :killed}
+    :ok = await_published!(execution.identity)
+    assert ExecutionRegistry.pending_proofs([id], registry) != []
+    assert ExecutionRegistry.pending_proofs([execution.identity.owner_execution_id], registry) == []
+  end
+
+  test "a failed newer proof does not starve an older proof after the publisher restarts" do
+    registry = start_supervised!({ExecutionRegistry, name: nil})
+    older = start_execution!(registry)
+    send(older.pid, :complete)
+    assert_receive {:completed, _id}
+    newer = start_execution!(registry)
+    {id, identity} = Map.pop(newer.identity, :owner_execution_id)
+    Repo.insert_all(ExecutionTerminalProof, [Map.merge(identity, %{execution_id: id, end_kind: "process_down", ended_at: DateTime.add(DateTime.utc_now(), -60, :second)})])
+    send(newer.pid, :complete)
+    assert_receive {:completed, ^id}
+
+    log =
+      capture_log(fn ->
+        start_supervised!({ExecutionProofPublisher, enabled: true, name: nil, registry: registry, interval_ms: @tick_ms})
+        :ok = await_published!(older.identity)
+      end)
+
+    assert log =~ "execution terminal proof publication unavailable; pending proofs retained"
+    assert ExecutionRegistry.pending_proofs([id], registry) != []
   end
 
   # The publisher renews its subscription at every publication, so a registry

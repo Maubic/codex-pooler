@@ -168,6 +168,36 @@ defmodule CodexPooler.Platform.ExecutionTerminalProofsTest do
     assert [] = ExecutionRegistry.pending(100, registry)
   end
 
+  test "a bounded interruption proof cannot authorize prompt recovery or be rewritten after publication" do
+    registry = start_supervised!({ExecutionRegistry, name: nil})
+    id = Ecto.UUID.generate()
+    assert :ok = ExecutionRegistry.register(id, registry)
+    assert :ok = ExecutionRegistry.complete(id, registry)
+    [proof] = ExecutionRegistry.pending(100, registry)
+    proof = Map.put(proof, :interruption_code, "owner_drained")
+    assert {:ok, 1} = ExecutionTerminalProofs.publish([proof])
+    assert ExecutionTerminalProofs.terminal?(proof)
+    refute ExecutionTerminalProofs.terminal?(proof, include_interrupted: false)
+    assert {:error, :execution_terminal_proof_conflict} = ExecutionTerminalProofs.publish([%{proof | interruption_code: nil}])
+    assert {:error, :invalid_execution_terminal_proof} = ExecutionTerminalProofs.publish([%{proof | interruption_code: "arbitrary_shutdown"}])
+    assert Repo.get!(CodexPooler.Platform.ExecutionTerminalProof, id).interruption_code == "owner_drained"
+  end
+
+  test "an older publisher's omitted cause remains unknown rather than enabling prompt recovery" do
+    registry = start_supervised!({ExecutionRegistry, name: nil})
+    id = Ecto.UUID.generate()
+    assert :ok = ExecutionRegistry.register(id, registry)
+    assert :ok = ExecutionRegistry.complete(id, registry)
+    [proof] = ExecutionRegistry.pending(100, registry)
+
+    row = proof |> Map.drop([:owner_execution_id, :interruption_code]) |> Map.put(:execution_id, id)
+    Repo.insert_all(CodexPooler.Platform.ExecutionTerminalProof, [row])
+
+    assert ExecutionTerminalProofs.terminal?(proof)
+    refute ExecutionTerminalProofs.terminal?(proof, include_interrupted: false)
+    assert Repo.get!(CodexPooler.Platform.ExecutionTerminalProof, id).interruption_code == "unobserved_exit"
+  end
+
   test "queue saturation is bounded and warns once without inventing a proof" do
     registry = start_supervised!({ExecutionRegistry, name: nil})
 

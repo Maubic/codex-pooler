@@ -5,6 +5,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ActivityRegistry do
 
   alias __MODULE__.{Drain, Entry}
   alias CodexPooler.Gateway.Websocket.DirectCleanup
+  alias CodexPooler.Platform.ExecutionRegistry
 
   @spec begin_direct_cleanup(DirectCleanup.t()) :: :ok | {:error, :cancelled}
   def begin_direct_cleanup(context),
@@ -439,6 +440,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ActivityRegistry do
         {:reply, :terminal_delivered, state}
 
       %{status: status} = entry when status in [:registered, :admitted] ->
+        _marked = ExecutionRegistry.mark_interruption(entry.pid, "owner_drained")
         {cancel_pid, entry} = Entry.cancel(entry, reason)
         send(cancel_pid, {:websocket_activity_cancel, token, reason})
         activities = Map.put(state.activities, token, entry)
