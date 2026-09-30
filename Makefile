@@ -1,13 +1,15 @@
 SHELL := /bin/bash
 
-# The repository pins its Elixir/Erlang in mise.toml and CONTRIBUTING.md tells
-# contributors to use those versions, so every Mix invocation here goes through
-# mise when it is installed; otherwise it falls back to whatever is on PATH.
+# Use mise for the repository-pinned Elixir/Erlang toolchain when installed,
+# and launch npm through the same environment; Node/npm are not pinned here.
+# Without mise, fall back to the commands on PATH.
 MISE := $(shell command -v mise 2>/dev/null)
 ifeq ($(MISE),)
 MIX := mix
+NPM := npm
 else
 MIX := $(MISE) x -- mix
+NPM := $(MISE) x -- npm
 endif
 
 PORT ?= 4000
@@ -28,7 +30,7 @@ N ?= 4
 TEST_FAST_COMMAND ?= $(MIX) test.product
 TEST_FAST_DROP_COMMAND ?= $(MIX) ecto.drop --quiet
 
-.PHONY: dev dev-prepare dev-db dev-compile dev-assets dev-migrate dev-pricing dev-stop dev-status dev-logs precommit smoke test-db-prune test-fast
+.PHONY: dev dev-prepare dev-db dev-compile dev-assets dev-docs-deps dev-migrate dev-pricing dev-stop dev-status dev-logs precommit smoke test-db-prune test-fast
 
 dev: dev-prepare
 	@$(DEV_SECRET_ENV) $(DEV_DB_ENV) DEV_SERVER_PORT=$(PORT) DEV_SERVER_STATE_DIR=$(DEV_SERVER_STATE_DIR) DEV_SERVER_LOG=$(DEV_LOG) DEV_SERVER_CWD=$(CURDIR) DEV_SERVER_COMMAND='PORT=$(PORT) $(MIX) phx.server' $(DEV_SERVER_LIFECYCLE) start
@@ -38,6 +40,7 @@ dev-prepare:
 	@$(MAKE) --no-print-directory dev-db
 	@$(MAKE) --no-print-directory dev-compile
 	@$(MAKE) --no-print-directory dev-assets
+	@$(MAKE) --no-print-directory dev-docs-deps
 	@$(MAKE) --no-print-directory dev-migrate
 	@$(MAKE) --no-print-directory dev-pricing
 
@@ -66,6 +69,9 @@ dev-compile:
 dev-assets:
 	@$(MIX) assets.setup
 	@$(MIX) assets.build
+
+dev-docs-deps:
+	@$(NPM) ci --prefix docs-site
 
 dev-migrate:
 	@$(DEV_SECRET_ENV) $(DEV_DB_ENV) $(MIX) ecto.create --quiet

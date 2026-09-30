@@ -9,6 +9,8 @@ npm ci
 npm run dev      # http://localhost:4321/ and http://localhost:4321/docs/
 ```
 
+From the repository root, `make dev` also reinstalls this project's locked dependencies before starting Phoenix. Use `make dev-docs-deps` to refresh only the website dependencies; it does not start or build the website.
+
 ## Check and build
 
 ```sh

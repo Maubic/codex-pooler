@@ -38,6 +38,7 @@ defmodule CodexPooler.MixTasks.DevServerLifecycleTest do
              "compile",
              "assets_setup",
              "assets_build",
+             "docs_deps",
              "create",
              "migrate",
              "pricing",
@@ -53,6 +54,16 @@ defmodule CodexPooler.MixTasks.DevServerLifecycleTest do
     assert code != 0
     assert output =~ "asset installation failed"
     assert File.read!(fixture.event_log) |> String.split("\n", trim: true) == ["stop_started", "stop_completed", "db_up", "db_exec", "compile"]
+  end
+
+  test "make dev refuses to start with a failed locked docs dependency installation" do
+    fixture = parallel_make_fixture!()
+
+    {output, code} = System.cmd("make", ["-j4", "DEV_SERVER_LIFECYCLE=#{fixture.lifecycle_path}", "POSTGRES_PORT=#{fixture.postgres_port}", "dev"], cd: fixture.root, env: [{"PATH", "#{fixture.bin_dir}:#{System.fetch_env!("PATH")}"}, {"DEV_SERVER_EVENT_LOG", fixture.event_log}, {"DEV_SERVER_DOCS_DEPS_FAIL", "1"}], stderr_to_stdout: true)
+
+    assert code != 0
+    assert output =~ "docs dependency installation failed"
+    assert File.read!(fixture.event_log) |> String.split("\n", trim: true) == ["stop_started", "stop_completed", "db_up", "db_exec", "compile", "assets_setup", "assets_build"]
   end
 
   test "make dev imports websocket owner forwarding from the repository environment" do
@@ -521,6 +532,7 @@ defmodule CodexPooler.MixTasks.DevServerLifecycleTest do
         ;;
       start)
         grep -qx 'pricing' "$DEV_SERVER_EVENT_LOG"
+        grep -qx 'docs_deps' "$DEV_SERVER_EVENT_LOG"
         printf 'start_owner_forwarding=%s\n' "${CODEX_POOLER_WEBSOCKET_OWNER_FORWARDING:-absent}" >> "$DEV_SERVER_EVENT_LOG"
         ;;
       *) exit 2 ;;
@@ -553,6 +565,18 @@ defmodule CodexPooler.MixTasks.DevServerLifecycleTest do
     exec "$@"
     """)
 
+    File.write!(Path.join(bin_dir, "npm"), """
+    #!/bin/bash
+    set -euo pipefail
+    [ "$*" = 'ci --prefix docs-site' ]
+    grep -qx 'assets_build' "$DEV_SERVER_EVENT_LOG"
+    if [ "${DEV_SERVER_DOCS_DEPS_FAIL:-0}" = 1 ]; then
+      printf 'docs dependency installation failed\n' >&2
+      exit 1
+    fi
+    printf 'docs_deps\n' >> "$DEV_SERVER_EVENT_LOG"
+    """)
+
     File.write!(Path.join(bin_dir, "mix"), """
     #!/bin/bash
     set -euo pipefail
@@ -568,7 +592,7 @@ defmodule CodexPooler.MixTasks.DevServerLifecycleTest do
         event=assets_setup
         ;;
       'assets.build ') grep -qx 'assets_setup' "$DEV_SERVER_EVENT_LOG"; event=assets_build ;;
-      'ecto.create --quiet') grep -qx 'assets_build' "$DEV_SERVER_EVENT_LOG"; event=create ;;
+      'ecto.create --quiet') grep -qx 'docs_deps' "$DEV_SERVER_EVENT_LOG"; event=create ;;
       'run --no-start')
         [ "$#" -eq 4 ]
         [ "$3" = '-e' ]
@@ -587,7 +611,8 @@ defmodule CodexPooler.MixTasks.DevServerLifecycleTest do
         lifecycle_path,
         Path.join(bin_dir, "docker"),
         Path.join(bin_dir, "mix"),
-        Path.join(bin_dir, "mise")
+        Path.join(bin_dir, "mise"),
+        Path.join(bin_dir, "npm")
       ],
       &File.chmod!(&1, 0o700)
     )
