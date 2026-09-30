@@ -1245,6 +1245,44 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamLifecycleTest do
     end)
   end
 
+  # findings#294: with no attempt there is nothing to settle and the answer is
+  # the accounting failure either way; the route health it records is
+  # best-effort, so a transient database failure there is dropped instead of
+  # raising out of the connection process. PostgreSQL raises the failure
+  # itself from a trigger on the route-health tables, inside this test's
+  # sandbox transaction.
+  for {errcode, outcome} <- [{"query_canceled", :dropped}, {"check_violation", :raised}] do
+    test "an attemptless first-event failure whose route health meets #{errcode} is #{outcome}" do
+      {setup, _first_upstream, _second_upstream} = stream_retry_setup(FakeUpstream.sse_stream([]), FakeUpstream.sse_stream([]))
+      {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
+      payload = payload(setup)
+      request_options = request_options(auth, payload, setup)
+
+      {:ok, reserved} =
+        Accounting.reserve(auth, setup.model, payload, %{endpoint: @endpoint_path, transport: "http_sse", correlation_id: Ecto.UUID.generate(), request_metadata: %{}})
+
+      context = %ResponseContext{
+        context: retry_context(setup, auth, request_options, reserved.request, candidates: [{setup.assignment, setup.identity}], attempt: nil),
+        response: sse_response()
+      }
+
+      failure = %{code: "upstream_request_timeout", upstream_code: nil, event_type: "response.failed"}
+      fail_route_health_writes!(unquote(errcode))
+
+      case unquote(outcome) do
+        :dropped ->
+          {result, logs} = with_log([level: :warning], fn -> Streaming.finalize_first_event_failure("", failure, context) end)
+          assert {:error, %{status: 500, code: "gateway_accounting_failed"}} = result
+
+          assert logs =~
+                   "gateway route health dropped after a transient database failure stage=first_event_failure request_id=#{reserved.request.id} reason_class=postgres_query_canceled"
+
+        :raised ->
+          assert_raise Postgrex.Error, ~r/check_violation/, fn -> Streaming.finalize_first_event_failure("", failure, context) end
+      end
+    end
+  end
+
   test "HTTP stream settlement failure emits once after a real accounting rollback" do
     {setup, _first_upstream, _second_upstream} =
       stream_retry_setup(FakeUpstream.sse_stream([]), FakeUpstream.sse_stream([]))
@@ -3345,6 +3383,16 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamLifecycleTest do
       effective_model: setup.model.exposed_model_id,
       api_key_policy: policy
     )
+  end
+
+  defp fail_route_health_writes!(errcode) do
+    Repo.query!("CREATE FUNCTION stream_lifecycle_route_health_gate() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic route health failure' USING ERRCODE = '#{errcode}'; END $$")
+
+    for table <- ["bridge_demotions", "routing_circuit_states"] do
+      Repo.query!("CREATE TRIGGER stream_lifecycle_route_health_gate BEFORE INSERT OR UPDATE ON #{table} FOR EACH ROW EXECUTE FUNCTION stream_lifecycle_route_health_gate()")
+    end
+
+    :ok
   end
 
   defp invalid_request(id) do

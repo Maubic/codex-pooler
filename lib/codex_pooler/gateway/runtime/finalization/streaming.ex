@@ -1,6 +1,8 @@
 defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
   @moduledoc false
 
+  require Logger
+
   alias CodexPooler.Gateway.Routing.ModelMetadata
   alias CodexPooler.Gateway.Runtime.Dispatch.ResponseContext
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
@@ -25,6 +27,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
   alias CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream
   alias CodexPooler.Gateway.Transports.TransportFailureReason
   alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
+  alias CodexPooler.Platform.TransientDatabaseError
   alias CodexPooler.Quotas.Evidence.CodexParsers.RateLimitReachedType
 
   @type callbacks :: %{
@@ -187,7 +190,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
       ) do
     code = stream_failure_code(failure, context)
 
-    case record_terminal_health_failure(code, [], context) do
+    case record_attemptless_health_failure(code, context) do
       {:error, _gateway_error} = error ->
         error
 
@@ -244,6 +247,30 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
     emit_terminal_outcome(result, code, transports)
     normalize_stale_generation(result)
   end
+
+  # Without an attempt there is no settlement to protect and the answer is the
+  # accounting failure either way. The route health recorded here is
+  # best-effort (the next failure records it again), so a transient database
+  # failure drops it with one warning instead of ending the connection
+  # (findings#294). Any other exception still raises.
+  defp record_attemptless_health_failure(code, %SelectedCandidateContext{} = context) do
+    record_terminal_health_failure(code, [], context)
+  rescue
+    error in [DBConnection.ConnectionError, Postgrex.Error] ->
+      if TransientDatabaseError.transient?(error) do
+        Logger.warning(
+          "gateway route health dropped after a transient database failure " <>
+            "stage=first_event_failure request_id=#{attemptless_request_id(context)} reason_class=#{TransientDatabaseError.reason_class(error)}"
+        )
+
+        :ok
+      else
+        reraise error, __STACKTRACE__
+      end
+  end
+
+  defp attemptless_request_id(%SelectedCandidateContext{reserved: %{request: %{id: id}}}) when is_binary(id), do: id
+  defp attemptless_request_id(_context), do: "unknown"
 
   @spec first_event_attempt_metadata(ResponseContext.t(), map(), map(), String.t()) :: map()
   defp first_event_attempt_metadata(

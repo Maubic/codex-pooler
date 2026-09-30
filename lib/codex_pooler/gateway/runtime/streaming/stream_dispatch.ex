@@ -6,7 +6,6 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Gateway.Payloads.CompactionTrigger
   alias CodexPooler.Gateway.Payloads.RequestOptions
-  alias CodexPooler.Gateway.Persistence.SessionContinuity
   alias CodexPooler.Gateway.Routing.ModelMetadata
   alias CodexPooler.Gateway.Runtime.Dispatch.ResponseContext
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
@@ -20,6 +19,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   alias CodexPooler.Gateway.Runtime.Streaming.StreamLifecycle
   alias CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserver
   alias CodexPooler.Gateway.Runtime.Streaming.Types, as: StreamTypes
+  alias CodexPooler.Gateway.Runtime.Streaming.VisibleOutputMark
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl
   alias CodexPooler.Gateway.Transports.Streaming.DeferredStreamRegistry
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
@@ -267,20 +267,18 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
     request = context.reserved.request
 
     fn state, data ->
-      {data, state, _delivery} =
-        normalize_stream_data(response_context, state, data, &visible_websocket_data?/1)
+      case normalize_stream_data(response_context, state, data, &visible_websocket_data?/1) do
+        {:error, reason, _state} ->
+          {:error, reason}
 
-      {messages, websocket_sse_block_state} =
-        WebsocketCodec.stream_messages(request, data, websocket_sse_block_state(state))
+        {data, state, _delivery} ->
+          {messages, websocket_sse_block_state} =
+            WebsocketCodec.stream_messages(request, data, websocket_sse_block_state(state))
 
-      Enum.each(messages, writer)
-
-      {:ok, put_websocket_sse_block_state(state, websocket_sse_block_state)}
+          Enum.each(messages, writer)
+          {:ok, put_websocket_sse_block_state(state, websocket_sse_block_state)}
+      end
     end
-  end
-
-  defp mark_visible_output(request, attempt) do
-    SessionContinuity.mark_codex_turn_visible(request, attempt)
   end
 
   defp visible_websocket_data?(data), do: is_binary(data) and data != ""
@@ -499,6 +497,14 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
           |> DownstreamDeliveryEvidence.record_write_failure()
           |> finalize_http_stream_failure(reason)
       end
+    end
+  end
+
+  defp finalize_http_stream_failure(state, {:chunk, :visible_output_unavailable} = reason) do
+    data = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"code\":\"gateway_accounting_failed\",\"message\":\"Visible output authorization unavailable\"}}\n\n"
+    case write_downstream_chunk_preserving_state(discard_withheld_preamble(state), data) do
+      {:ok, state} -> {:failure, state, "", reason}
+      {:error, write_reason, _state} -> {:error, write_reason}
     end
   end
 
@@ -771,10 +777,10 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   # refused as a duplicate of output it was never shown (findings#225 row
   # 225-191).
   defp write_stream_data_preserving_state(%ResponseContext{} = response_context, conn, data) do
-    {downstream_data, conn, delivery} =
-      normalize_stream_data(response_context, conn, data, &StreamProtocol.stream_data_client_visible?/1)
-
-    write_normalized_stream_data_preserving_state(conn, downstream_data, delivery)
+    case normalize_stream_data(response_context, conn, data, &StreamProtocol.stream_data_client_visible?/1) do
+      {:error, reason, conn} -> {:error, reason, conn}
+      {downstream_data, conn, delivery} -> write_normalized_stream_data_preserving_state(conn, downstream_data, delivery)
+    end
   end
 
   defp write_normalized_stream_data_preserving_state(conn, downstream_data, nil) do
@@ -938,6 +944,9 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
 
       {:error, :stale_generation, state} ->
         {"", state, nil}
+
+      {:error, :visible_output_unavailable, state} ->
+        {:error, :visible_output_unavailable, state}
     end
   end
 
@@ -952,9 +961,10 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
 
   defp maybe_mark_visible_output(state, request, attempt, data, visible_data?) do
     if visible_data?.(data) do
-      case mark_visible_output(request, attempt) do
+      case VisibleOutputMark.mark(request, attempt) do
         :ok -> {:ok, Map.put(state, :visible_output_marked?, true)}
         {:error, :stale_generation} -> {:error, :stale_generation, state}
+        {:error, :visible_output_unavailable} -> {:error, :visible_output_unavailable, state}
       end
     else
       {:ok, state}

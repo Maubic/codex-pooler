@@ -31,6 +31,10 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SettlementRetry do
   connection still ends cleanly, and its row is left to execution recovery,
   as before; a websocket response task raises the last failure, so its own
   exception finalization settles the turn as before.
+
+  The relay's visible output mark (`Streaming.VisibleOutputMark`) uses the
+  same window: the mark is the turn's authority for resend fences, so it is
+  retried before the output is written rather than dropped (findings#294).
   """
 
   require Logger
@@ -44,25 +48,58 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SettlementRetry do
 
   @type stage :: atom()
 
+  @typedoc """
+  - `:subject` names the write in the log lines (default `"settlement"`).
+  - `:fallback` names, in the exhaustion warning, what an HTTP request does
+    once the window closed (default `"execution_recovery"`).
+  - `:after_retry` receives the result of every try after the first, which
+    ran after a failure whose COMMIT outcome the client could not see, and
+    may reconcile it (a `{:error, _}` that is the earlier try's own commit).
+  - `:exhaustion` overrides the transport default with `:return` or `:raise`.
+  """
+  @type option ::
+          {:subject, String.t()}
+          | {:fallback, String.t()}
+          | {:after_retry, (term() -> term())}
+          | {:exhaustion, :return | :raise}
+
   @doc """
   Runs `settle`, retrying it after a transient database failure within the
   window. Returns what `settle` returns, or `{:error, :settlement_retry_exhausted}`
   for an HTTP request whose window closed.
   """
-  @spec run(stage(), map() | nil, map() | nil, (-> result)) :: result | {:error, :settlement_retry_exhausted}
+  @spec run(stage(), map() | nil, map() | nil, (-> result), [option()]) :: result | {:error, :settlement_retry_exhausted}
         when result: term()
-  def run(stage, request, attempt, settle) when is_atom(stage) and is_function(settle, 0) do
+  def run(stage, request, attempt, settle, opts \\ []) when is_atom(stage) and is_function(settle, 0) and is_list(opts) do
     if Repo.in_transaction?() do
       settle.()
     else
-      settle(%{stage: stage, request: request, attempt: attempt, settle: settle, config: config(), try_number: 1, first_failure_ms: nil, started_ms: now_ms()})
+      settle(%{
+        stage: stage,
+        request: request,
+        attempt: attempt,
+        settle: settle,
+        subject: Keyword.get(opts, :subject, "settlement"),
+        fallback: Keyword.get(opts, :fallback, "execution_recovery"),
+        after_retry: Keyword.get(opts, :after_retry, &Function.identity/1),
+        exhaustion: Keyword.get(opts, :exhaustion, :transport),
+        config: config(),
+        try_number: 1,
+        first_failure_ms: nil,
+        started_ms: now_ms()
+      })
     end
   end
 
   defp settle(%{settle: settle} = run) do
     result = settle.()
-    if run.try_number > 1, do: log_settled_after_retry(run)
-    result
+
+    if run.try_number > 1 do
+      log_settled_after_retry(run)
+      run.after_retry.(result)
+    else
+      result
+    end
   rescue
     error in [DBConnection.ConnectionError, Postgrex.Error] ->
       if TransientDatabaseError.transient?(error),
@@ -88,6 +125,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SettlementRetry do
 
   # A websocket response task keeps its exception finalization; every other
   # transport settles in the HTTP connection process, whose response must end.
+  defp exhausted(%{exhaustion: :return}, _error, _stacktrace), do: {:error, :settlement_retry_exhausted}
+  defp exhausted(%{exhaustion: :raise}, error, stacktrace), do: reraise(error, stacktrace)
   defp exhausted(%{request: %{transport: "websocket"}}, error, stacktrace), do: reraise(error, stacktrace)
   defp exhausted(_run, _error, _stacktrace), do: {:error, :settlement_retry_exhausted}
 
@@ -101,7 +140,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SettlementRetry do
 
   defp log_retry(run, error, delay_ms) do
     Logger.info(
-      "gateway settlement met a transient database failure; retrying " <>
+      "gateway #{run.subject} met a transient database failure; retrying " <>
         "stage=#{run.stage} request_id=#{record_id(run.request)} attempt_id=#{record_id(run.attempt)} " <>
         "settlement_try=#{run.try_number} reason_class=#{TransientDatabaseError.reason_class(error)} retry_in_ms=#{delay_ms}"
     )
@@ -109,7 +148,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SettlementRetry do
 
   defp log_settled_after_retry(run) do
     Logger.info(
-      "gateway settlement completed after a transient database failure " <>
+      "gateway #{run.subject} completed after a transient database failure " <>
         "stage=#{run.stage} request_id=#{record_id(run.request)} attempt_id=#{record_id(run.attempt)} " <>
         "settlement_tries=#{run.try_number} elapsed_ms=#{now_ms() - run.started_ms}"
     )
@@ -117,15 +156,16 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SettlementRetry do
 
   defp log_exhausted(run, error, now) do
     Logger.warning(
-      "gateway settlement abandoned after transient database failures " <>
+      "gateway #{run.subject} abandoned after transient database failures " <>
         "stage=#{run.stage} request_id=#{record_id(run.request)} attempt_id=#{record_id(run.attempt)} " <>
         "settlement_tries=#{run.try_number} elapsed_ms=#{now - run.started_ms} " <>
-        "reason_class=#{TransientDatabaseError.reason_class(error)} fallback=#{fallback(run.request)}"
+        "reason_class=#{TransientDatabaseError.reason_class(error)} fallback=#{fallback(run)}"
     )
   end
 
-  defp fallback(%{transport: "websocket"}), do: "task_exception"
-  defp fallback(_request), do: "execution_recovery"
+  defp fallback(%{exhaustion: :return, fallback: fallback}), do: fallback
+  defp fallback(%{request: %{transport: "websocket"}}), do: "task_exception"
+  defp fallback(%{fallback: fallback}), do: fallback
 
   defp record_id(%{id: id}) when is_binary(id), do: id
   defp record_id(_record), do: "unknown"

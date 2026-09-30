@@ -481,7 +481,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks do
         if current_generation_snapshot?(request_id, attempt), do: callback.(authority), else: :ok
 
       true ->
-        with_visible_attempt(request_id, attempt, fn -> callback.(authority) end)
+        # Observation is best-effort; the actual writer owns the bounded
+        # authorization retry. Retrying here doubles that window because the
+        # upstream session deliberately rescues observer exceptions.
+        case SessionContinuity.authorize_codex_turn_visibility(request_id, attempt) do
+          {:ok, :committed} -> cache_committed_visibility(attempt); callback.(authority)
+          {:ok, _not_committed} -> callback.(authority)
+          {:error, :stale_generation} -> :ok
+        end
     end
   end
 
@@ -557,7 +564,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks do
   end
 
   defp with_visible_attempt(request_id, attempt, callback) do
-    case SessionContinuity.authorize_codex_turn_visibility(request_id, attempt) do
+    request = %AccountingRequest{id: request_id, transport: "websocket"}
+    result = CodexPooler.Gateway.Runtime.Finalization.SettlementRetry.run(:visible_output, request, attempt, fn -> SessionContinuity.authorize_codex_turn_visibility(request_id, attempt) end, subject: "visible output mark", fallback: "withheld_output")
+    case result do
       {:ok, :committed} ->
         cache_committed_visibility(attempt)
         callback.()
