@@ -101,9 +101,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
       @tag slow: "cuts a peer VM's owner off mid-turn, forces which finalization settles the turn and resends it"
       test "#{order}: the owner cancels a turn that showed output at once, and the client's resend of the settled turn is served once", ctx do
         proofs_before = Repo.all(from(proof in ExecutionTerminalProof, select: proof.execution_id))
+        :ok = register_proof_cleanup!(proofs_before)
         _publisher = start_supervised!({ExecutionProofPublisher, enabled: true})
         turn = start_turn!(ctx, :partition, successor: true)
-        :ok = register_proof_cleanup!(proofs_before)
         %{tasks: tasks} = socket_connection_state!(turn.client.socket)
         [task] = MapSet.to_list(tasks)
         held = hold_finalizer!(turn.client.socket, task, ctx.order)
@@ -157,7 +157,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
         assert %{"type" => "response.completed", "response" => %{"id" => "resp_unreachable_successor"}} = served
         Scenario.close!(%{retry | conn: conn, websocket: websocket})
         assert [%RequestClientRetryLink{successor_request_id: successor_id}] = Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^turn.request_id))
-        assert {"succeeded", 200, nil} == request_outcome(successor_id)
+        # The served resend's response task settles it after its terminal frame reached the client.
+        settled_successor = await_state!(fn -> request_outcome(successor_id) end, &(elem(&1, 0) not in ["accepted", "in_progress"]), "the served resend was never settled", System.monotonic_time(:millisecond) + @detection_timeout_ms)
+        assert {"succeeded", 200, nil} == settled_successor
         assert settled_cost(turn.request_id) == Decimal.new(0)
         assert Decimal.gt?(settled_cost(successor_id), 0)
         assert FakeUpstream.count(turn.upstream) == 3
