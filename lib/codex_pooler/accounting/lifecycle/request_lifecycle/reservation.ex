@@ -548,13 +548,24 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
       %Request{} = predecessor ->
         :ok = retire_forwarded_chain!(predecessor)
 
-        if delivered_provider_output?(predecessor) do
+        if unfinished_http_mailbox_predecessor?(predecessor, context) or delivered_provider_output?(predecessor) do
           resolve_native_turn_resend!(session, context, claim)
         else
           step_over_native_turn_predecessor(session, context, claim, predecessor, depth)
         end
     end
   end
+
+  # An actual mailbox preemption can resend before the HTTP executor enters
+  # settlement. Such a predecessor is still live, not proof of zero output:
+  # resolve its existing claim so the lifecycle fence refuses it until settled.
+  # Apply on every chain hop; generic zero-output retry policy stays separate.
+  defp unfinished_http_mailbox_predecessor?(%Request{transport: "http_sse", request_metadata: %{"native_http_claim_arm" => "post_compaction_resume"}} = request, %{opts: opts}) do
+    (is_nil(request.completed_at) or request.status in ["accepted", "in_progress"]) and
+      match?(%ClientRetry.OriginalWitness{mailbox: [_first | _rest]}, attr(opts, :native_client_retry_witness))
+  end
+
+  defp unfinished_http_mailbox_predecessor?(_predecessor, _context), do: false
 
   # With owner forwarding on, the owner's client-retry preflight chains a
   # websocket resend onto a request of this turn (`client-retry-v1:`), outside
