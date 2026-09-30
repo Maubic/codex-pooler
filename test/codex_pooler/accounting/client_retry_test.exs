@@ -227,6 +227,22 @@ defmodule CodexPooler.Accounting.ClientRetryTest do
   end
 
   describe "native HTTP resume progress" do
+    test "reasoning content absent upstream and null after a client round-trip have the same proof" do
+      delivered = %{"type" => "reasoning", "id" => "rs_http_progress", "summary" => [], "encrypted_content" => "synthetic-reasoning"}
+      retained = Map.put(delivered, "content", nil)
+
+      for {source, candidate} <- [{delivered, retained}, {retained, delivered}] do
+        progress = ClientRetry.new_native_http_progress() |> ClientRetry.observe_native_http_output_item(source)
+        metadata = ClientRetry.native_http_progress_metadata(progress)
+        assert ClientRetry.native_http_progress_matches?(metadata, [source])
+        matches = fn item -> Enum.any?(ClientRetry.native_http_mailbox_progress_candidates([item]), &(&1 == metadata)) end
+        assert matches.(candidate)
+        refute matches.(Map.put(candidate, "encrypted_content", "changed"))
+        refute matches.(Map.put(candidate, "content", [%{"type" => "reasoning_text", "text" => "changed"}]))
+        refute matches.(Map.put(candidate, "summary", [%{"type" => "summary_text", "text" => "changed"}]))
+      end
+    end
+
     test "matches delivered output while ignoring only Codex-local passthrough metadata" do
       delivered = %{
         "type" => "message",

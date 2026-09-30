@@ -14,6 +14,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
     RequestReplayEntitlement
   }
 
+  alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn}
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes
   alias CodexPooler.InstanceSettings.AppSecretCrypto
@@ -147,7 +148,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
             ending: mailbox_witnesses(),
             current?: boolean(),
             items: [String.t()],
-            http_progress: map()
+            http_progress: [map()]
           }
   end
 
@@ -183,12 +184,13 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defmodule NativeHttpProgress do
     @moduledoc false
     @enforce_keys [:version, :count, :digest]
-    defstruct version: 1, count: 0, digest: nil
+    defstruct version: 1, count: 0, digest: nil, mailbox_prefix: []
 
     @type t :: %__MODULE__{
             version: 1,
             count: non_neg_integer(),
-            digest: <<_::256>>
+            digest: <<_::256>>,
+            mailbox_prefix: [String.t()] | nil
           }
   end
 
@@ -956,12 +958,25 @@ defmodule CodexPooler.Accounting.ClientRetry do
           NativeHttpProgress.t() | nil
   def observe_native_http_output_item(%NativeHttpProgress{} = progress, %{} = item) do
     case native_http_progress_digest(progress.digest, item) do
-      {:ok, digest} -> %{progress | count: progress.count + 1, digest: digest}
-      {:error, _reason} -> nil
+      {:ok, digest} ->
+        %{progress | count: progress.count + 1, digest: digest, mailbox_prefix: append_http_mailbox_prefix(progress, item)}
+
+      {:error, _reason} ->
+        nil
     end
   end
 
   def observe_native_http_output_item(_progress, _item), do: nil
+
+  defp append_http_mailbox_prefix(%NativeHttpProgress{mailbox_prefix: nil}, _item), do: nil
+  defp append_http_mailbox_prefix(%NativeHttpProgress{count: count, mailbox_prefix: prefix}, _item) when count >= 4, do: prefix
+
+  defp append_http_mailbox_prefix(%NativeHttpProgress{mailbox_prefix: prefix}, item) do
+    case WebsocketTurnIdentity.completed_item_digest(item) do
+      {:ok, digest} -> prefix ++ [digest]
+      _invalid -> nil
+    end
+  end
 
   @spec native_http_progress_metadata(NativeHttpProgress.t() | nil) :: map()
   def native_http_progress_metadata(%NativeHttpProgress{version: 1, count: count, digest: digest})
@@ -974,6 +989,33 @@ defmodule CodexPooler.Accounting.ClientRetry do
   end
 
   def native_http_progress_metadata(_progress), do: %{}
+
+  @doc "Bounded ordered item identities for a mailbox cut where the client consumed fewer items than HTTP wrote."
+  @spec native_http_mailbox_prefix_metadata(NativeHttpProgress.t() | nil) :: map()
+  def native_http_mailbox_prefix_metadata(%NativeHttpProgress{count: count, mailbox_prefix: [_first | _rest] = prefix}) do
+    %{"version" => 1, "output_item_done_count" => count, "item_digests" => prefix}
+  end
+
+  def native_http_mailbox_prefix_metadata(_progress), do: %{}
+
+  @doc "Transient legacy HTTP proofs for the missing/null reasoning content shapes Codex reserializes."
+  @spec native_http_mailbox_progress_candidates([map()]) :: [map()]
+  def native_http_mailbox_progress_candidates(items) when is_list(items) and length(items) in 1..4 do
+    items
+    |> Enum.reduce([[]], fn item, prefixes ->
+      for prefix <- prefixes, variant <- reasoning_content_variants(item), do: prefix ++ [variant]
+    end)
+    |> Enum.map(&native_http_progress_metadata(observe_native_http_items(new_native_http_progress(), &1)))
+    |> Enum.uniq()
+  end
+
+  def native_http_mailbox_progress_candidates(_items), do: []
+
+  defp reasoning_content_variants(%{"type" => "reasoning"} = item) do
+    if Map.get(item, "content") == nil, do: [Map.delete(item, "content"), Map.put(item, "content", nil)], else: [item]
+  end
+
+  defp reasoning_content_variants(item), do: [item]
 
   @spec native_http_progress_matches?(map() | term(), [term()]) :: boolean()
   def native_http_progress_matches?(
@@ -1021,8 +1063,9 @@ defmodule CodexPooler.Accounting.ClientRetry do
   # Codex stamps completed response items with local turn/create metadata before
   # rebuilding a retry prompt, and clears that metadata again for some provider
   # paths. It is not provider output and cannot decide whether the retry history
-  # contains the item the Pooler delivered. Every substantive field remains in
-  # the HMAC projection.
+  # contains the item the Pooler delivered. Keep this v1 projection stable for
+  # receipts written by older replicas; mailbox verification supplies bounded
+  # missing/null reasoning alternatives without changing the recorded digest.
   defp normalize_native_http_progress_item(%{} = item),
     do: Map.delete(item, "internal_chat_message_metadata_passthrough")
 
@@ -2404,9 +2447,9 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defp mailbox_ending_matches?(%Request{} = successor, %{ending: ending}),
     do: original_witness_eligible?(successor) and mailbox_witness_matches?(successor, ending)
 
-  # New addressed mailbox input is a different continuation contract from a
-  # resend retaining only part of an answer. It requires the complete recorded
-  # output and an interrupted delivery, not the relaxed resend prefix proof.
+  # Websocket mailbox input requires the complete recorded output and an
+  # interrupted delivery. HTTP below can prove the nonempty prefix the client
+  # consumed before preemption from its separately bounded committed receipt.
   defp mailbox_output_matches?(
          turn,
          %Request{transport: "websocket"} = request,
@@ -2415,14 +2458,26 @@ defmodule CodexPooler.Accounting.ClientRetry do
        ),
        do: items == digests and verified_completed_item_resend?(turn, request, attempt, [candidate])
 
-  defp mailbox_output_matches?(%CodexTurn{transport_kind: "http_sse"}, %Request{transport: "http_sse"}, %Attempt{transport: "http_sse", response_metadata: %{"native_http_resume_progress" => recorded}}, %{http_progress: expected}) do
+  defp mailbox_output_matches?(%CodexTurn{transport_kind: "http_sse"}, %Request{transport: "http_sse"}, %Attempt{transport: "http_sse", response_metadata: metadata}, %{http_progress: candidates, items: items}) do
+    Enum.any?(candidates, &exact_http_mailbox_progress?(metadata["native_http_resume_progress"], &1)) or
+      http_mailbox_prefix?(metadata["native_http_mailbox_prefix"], items)
+  end
+
+  defp mailbox_output_matches?(_turn, _request, _attempt, _candidate), do: false
+
+  defp exact_http_mailbox_progress?(recorded, expected) do
     case {recorded, expected} do
       {%{"version" => 1, "output_item_done_count" => count, "digest" => digest}, %{"version" => 1, "output_item_done_count" => count, "digest" => expected_digest}} when count > 0 -> secure_compare(digest, expected_digest)
       _unproved -> false
     end
   end
 
-  defp mailbox_output_matches?(_turn, _request, _attempt, _candidate), do: false
+  defp http_mailbox_prefix?(%{"version" => 1, "output_item_done_count" => count, "item_digests" => digests}, [_first | _rest] = items)
+       when is_integer(count) and is_list(digests) and length(items) <= 4 and count >= length(items) do
+    length(digests) == min(count, 4) and Enum.take(digests, length(items)) == items
+  end
+
+  defp http_mailbox_prefix?(_recorded, _items), do: false
 
   defp latest_attempt?(%Attempt{} = attempt) do
     not Repo.exists?(

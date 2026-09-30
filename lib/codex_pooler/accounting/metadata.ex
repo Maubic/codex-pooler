@@ -411,6 +411,9 @@ defmodule CodexPooler.Accounting.Metadata do
       normalized == "native_http_resume_progress" ->
         sanitize_native_http_resume_progress(value)
 
+      normalized == "native_http_mailbox_prefix" ->
+        sanitize_native_http_mailbox_prefix(value)
+
       normalized == "native_http_turn_progress" ->
         sanitize_native_http_turn_progress(value)
 
@@ -605,6 +608,13 @@ defmodule CodexPooler.Accounting.Metadata do
   end
 
   defp sanitize_native_http_resume_progress(_value), do: %{}
+
+  defp sanitize_native_http_mailbox_prefix(%{"version" => 1, "output_item_done_count" => count, "item_digests" => digests} = value)
+       when map_size(value) == 3 and is_integer(count) and count in 1..65_535 and is_list(digests) do
+    if length(digests) == min(count, 4) and Enum.all?(digests, &(is_binary(&1) and byte_size(&1) == 12 and &1 =~ ~r/\A[0-9a-f]{12}\z/)), do: value, else: %{}
+  end
+
+  defp sanitize_native_http_mailbox_prefix(_value), do: %{}
 
   # The opaque progress digest a native HTTP opening request records
   # (`NativeTurnContinuation.turn_progress/1`, findings#206 row 206-403), and

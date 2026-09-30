@@ -93,6 +93,23 @@ defmodule CodexPooler.Accounting.MailboxResumeChainTest do
     assert_edge!(original, first)
   end
 
+  test "an HTTP consumed prefix requires its persisted prefix proof", %{fixture: fixture} do
+    original = admit!(fixture, fixture.payload, "http_sse")
+    first = reasoning("first")
+    second = reasoning("second")
+    cut!(fixture, original, first)
+    progress = ClientRetry.new_native_http_progress() |> ClientRetry.observe_native_http_output_item(first) |> ClientRetry.observe_native_http_output_item(second)
+    attempt = Repo.get_by!(Attempt, request_id: original.id)
+    metadata = Map.put(attempt.response_metadata, "native_http_resume_progress", ClientRetry.native_http_progress_metadata(progress))
+    attempt |> Ecto.Changeset.change(response_metadata: metadata) |> Repo.update!()
+    candidate = append(fixture.payload, [Map.put(first, "content", nil), mailbox(1)])
+    assert_http_refused!(fixture, candidate, :terminal_predecessor)
+    metadata = Map.put(metadata, "native_http_mailbox_prefix", ClientRetry.native_http_mailbox_prefix_metadata(progress))
+    attempt |> Ecto.Changeset.change(response_metadata: metadata) |> Repo.update!()
+    successor = admit!(fixture, candidate, "http_sse")
+    assert_edge!(original, successor)
+  end
+
   for live_row <- [:request, :attempt, :turn] do
     test "a live #{live_row} retains the duplicate fence", %{fixture: fixture} do
       original = admit!(fixture, fixture.payload, "websocket")

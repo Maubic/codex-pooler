@@ -291,7 +291,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
   def native_http_progress_metadata(%{native_http_progress: progress}) do
     case ClientRetry.native_http_progress_metadata(progress) do
       %{"output_item_done_count" => count} = metadata when count > 0 ->
-        %{"native_http_resume_progress" => metadata}
+        %{"native_http_resume_progress" => metadata, "native_http_mailbox_prefix" => ClientRetry.native_http_mailbox_prefix_metadata(progress)}
 
       _empty ->
         %{}

@@ -454,7 +454,10 @@ defmodule CodexPooler.CompatibilityMatrix do
           original_prefix: "codex-resume:",
           successor_prefix: "codex-request-retry:",
           requires_original_input_witness: true,
-          requires_exact_delivered_output: true,
+          requires_exact_delivered_output: false,
+          websocket_requires_exact_delivered_output: true,
+          http_requires_ordered_consumed_output_prefix: true,
+          http_reasoning_content_null_equivalent: true,
           requires_new_addressed_mailbox_input: true,
           preserves_existing_claim_chain: true,
           identical_retry_refused: false

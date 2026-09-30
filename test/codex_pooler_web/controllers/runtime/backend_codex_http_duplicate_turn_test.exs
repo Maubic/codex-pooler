@@ -1103,7 +1103,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
     assert {:ok, _closed} = stream.(%{stream_conn | adapter: {ClosingAdapter, closing}})
 
     mailbox = %{"type" => "agent_message", "author" => "/root/worker", "recipient" => "/root", "content" => [%{"type" => "input_text", "text" => "synthetic update"}]}
-    continuation = Map.update!(payload, "input", &(&1 ++ [output, mailbox]))
+    # Codex's ResponseItem::Reasoning round-trip writes absent content as null.
+    retained_output = Map.put(output, "content", nil)
+    continuation = Map.update!(payload, "input", &(&1 ++ [retained_output, mailbox]))
     post_continuation = fn body -> build_conn() |> put_req_header("authorization", setup.authorization) |> put_req_header(@session_header, session) |> put_req_header("content-type", "application/json") |> post("/backend-api/codex/responses", CodexPooler.JSON.encode!(body)) end
 
     assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(post_continuation.(put_in(continuation, ["input", Elixir.Access.at(-2), "encrypted_content"], "changed")), 409)

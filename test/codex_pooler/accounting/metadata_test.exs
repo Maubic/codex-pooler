@@ -133,6 +133,15 @@ defmodule CodexPooler.Accounting.MetadataTest do
       end
     end
 
+    test "native HTTP mailbox prefixes retain only bounded item identities" do
+      progress = %{"version" => 1, "output_item_done_count" => 6, "item_digests" => List.duplicate("0123456789ab", 4)}
+      assert Accounting.sanitize_metadata(%{"native_http_mailbox_prefix" => progress}) == %{"native_http_mailbox_prefix" => progress}
+
+      for invalid <- [Map.put(progress, "version", 2), Map.put(progress, "output_item_done_count", 0), Map.put(progress, "output_item_done_count", 65_536), Map.put(progress, "item_digests", ["invalid"]), Map.put(progress, "item_digests", List.duplicate("0123456789ab", 5)), Map.put(progress, "raw_item", "synthetic")] do
+        assert Accounting.sanitize_metadata(%{"native_http_mailbox_prefix" => invalid}) == %{"native_http_mailbox_prefix" => %{}}
+      end
+    end
+
     test "native HTTP resume progress keeps only a bounded HMAC receipt" do
       digest = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
 

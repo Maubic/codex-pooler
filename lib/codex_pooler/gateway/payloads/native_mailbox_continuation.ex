@@ -57,8 +57,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
 
     case {prefix, ending, output_digests(output)} do
       {%{} = prefix, %{} = ending, {:ok, items}} ->
-        progress = Enum.reduce(output, ClientRetry.new_native_http_progress(), &ClientRetry.observe_native_http_output_item(&2, &1))
-        candidate = %{prefix: prefix, ending: ending, current?: finish == length(input), items: items, http_progress: ClientRetry.native_http_progress_metadata(progress)}
+        candidate = %{prefix: prefix, ending: ending, current?: finish == length(input), items: items, http_progress: ClientRetry.native_http_mailbox_progress_candidates(output)}
         {[candidate | candidates], cache}
 
       _unproved ->
