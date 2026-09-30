@@ -7,6 +7,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
   sanitized failure logging.
   """
 
+  import Ecto.Query
   alias CodexPooler.Accounting
   alias CodexPooler.Accounting.{Attempt, Request}
   alias CodexPooler.Accounting.FailureResponse
@@ -15,6 +16,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
   alias CodexPooler.Gateway.Persistence.SessionContinuity
   alias CodexPooler.Gateway.Persistence.SessionContinuity.OwnerWitness
   alias CodexPooler.Gateway.Runtime.Finalization.SettlementRetry
+  alias CodexPooler.Repo
 
   @type attrs :: %{optional(atom()) => term()}
   @type usage :: %{optional(atom()) => term()} | %{optional(String.t()) => term()}
@@ -114,10 +116,49 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
 
   @spec record_retryable_failure(Request.t(), Attempt.t(), attrs()) :: settlement_result()
   def record_retryable_failure(request, attempt, attrs) do
+    attrs = Map.put_new(attrs, :now, DateTime.utc_now() |> DateTime.truncate(:microsecond))
     :record_retryable_failure
-    |> SettlementRetry.run(request, attempt, fn -> Accounting.record_retryable_attempt_failure(attempt, attrs) end)
+    |> SettlementRetry.run(request, attempt, fn -> Accounting.record_retryable_attempt_failure(attempt, attrs) end, after_retry: &reconcile_retryable_failure(&1, attempt, attrs))
     |> accounting_result(:record_retryable_failure, request, attempt)
   end
+
+  # A try after a transient failure can meet the earlier try's own COMMIT: the
+  # client saw the COMMIT fail, but PostgreSQL had committed it. The attempt
+  # then already carries the retryable failure this call records, so the
+  # request fails over as if the first try had answered, instead of ending
+  # with `attempt_already_finalized` (findings#294). Only the executor of the
+  # attempt records its retryable failure; any other terminal state keeps
+  # the refusal.
+  defp reconcile_retryable_failure({:error, %{code: :attempt_already_finalized}} = refused, %Attempt{id: attempt_id} = attempt, attrs) do
+    request = %Request{id: attempt.request_id}
+    status = Map.get(attrs, :attempt_status, "retryable_failed")
+    code = blank_to_nil(Map.get(attrs, :last_error_code))
+    upstream_status = Map.get(attrs, :response_status_code)
+    completed_at = Map.fetch!(attrs, :now)
+
+    result = Accounting.with_current_replay_generation(request, attempt, fn ->
+      case Repo.get(Attempt, attempt_id) do
+        %Attempt{status: "retryable_failed", retryable: true, completed_at: ^completed_at, network_error_code: ^code, upstream_status_code: ^upstream_status} = recorded when status == "retryable_failed" ->
+          latest = Repo.one(from current in Attempt, where: current.request_id == ^request.id, order_by: [desc: current.attempt_number], limit: 1, select: current.id)
+          usage = Map.get(attrs, :usage, %{})
+          served_model = CodexPooler.Accounting.Metadata.bounded_model_identifier(Map.get(usage, :served_model, Map.get(usage, "served_model")))
+          observation = CodexPooler.Accounting.ModelObservation.normalize(Map.get(usage, :model_observation, Map.get(usage, "model_observation")), served_model)
+          expected = %{error_message: blank_to_nil(Map.get(attrs, :error_message)), latency_ms: Map.get(attrs, :latency_ms), usage_status: Map.get(attrs, :usage_status, "usage_unknown"), served_model: served_model, model_observation: observation, response_metadata: CodexPooler.Accounting.Metadata.sanitize_metadata(Map.get(attrs, :attempt_metadata, %{}))}
+          if latest == recorded.id and Map.take(recorded, Map.keys(expected)) == expected, do: {:ok, recorded}, else: refused
+        _other -> refused
+      end
+    end)
+
+    case result do
+      {:ok, reconciled} -> reconciled
+      {:error, _reason} -> refused
+    end
+  end
+
+  defp reconcile_retryable_failure(result, _attempt, _attrs), do: result
+
+  defp blank_to_nil(value) when value in [nil, ""], do: nil
+  defp blank_to_nil(value), do: value
 
   @spec finalize_reservation_failure(Request.t(), attrs()) :: settlement_result()
   def finalize_reservation_failure(request, attrs) do
