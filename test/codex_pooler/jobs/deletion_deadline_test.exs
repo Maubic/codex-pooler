@@ -15,6 +15,8 @@ defmodule CodexPooler.Jobs.DeletionDeadlineTest do
   alias CodexPooler.Repo
   alias Ecto.Adapters.SQL.Sandbox
 
+  @detection_timeout_ms 15_000
+
   setup do
     name = String.to_atom("deletion_deadline_repo_#{System.unique_integer([:positive])}")
     config = Repo.config() |> Keyword.put(:name, name) |> Keyword.put(:pool, DBConnection.ConnectionPool) |> Keyword.put(:pool_size, 1)
@@ -61,22 +63,46 @@ defmodule CodexPooler.Jobs.DeletionDeadlineTest do
   end
 
   for target <- [:pool, :key] do
-    test "#{target} deadline stops the second batch and preserves the first committed batch" do
-      {pool, key, trigger} = fixture(unquote(target))
+    @tag slow: "holds the second batch's row lock until the two-second absolute deadline"
+    test "#{target} deadline stops the second batch and preserves the first committed batch", %{repo: repo} do
+      {pool, key, _trigger} = fixture(unquote(target))
       request = request_fixture(%{pool: pool, api_key: key})
       now = DateTime.utc_now()
       session = Repo.insert!(%CodexSession{pool_id: pool.id, api_key_id: key.id, session_key: "deadline-#{pool.id}", status: "active", created_at: now, updated_at: now})
-      operation = if unquote(target) == :pool, do: "DELETE", else: "UPDATE"
-      Repo.query!("CREATE FUNCTION #{trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.pool_id = '#{pool.id}'::uuid THEN PERFORM pg_sleep(0.2); END IF; IF TG_OP = 'UPDATE' THEN RETURN NEW; ELSE RETURN OLD; END IF; END $$")
-      Repo.query!("CREATE TRIGGER #{trigger}_requests BEFORE #{operation} ON requests FOR EACH ROW EXECUTE FUNCTION #{trigger}()")
-      Repo.query!("CREATE TRIGGER #{trigger}_sessions BEFORE DELETE ON codex_sessions FOR EACH ROW EXECUTE FUNCTION #{trigger}()")
+      config = Keyword.take(Repo.config(), [:hostname, :port, :database, :username, :password, :ssl])
+      holder = start_supervised!({Postgrex, config}, id: :second_batch_holder)
+      observer = start_supervised!({Postgrex, config}, id: :second_batch_observer)
+      supervisor = start_supervised!(Task.Supervisor)
+      Postgrex.query!(holder, "BEGIN", [])
+      %{rows: [[holder_backend]]} = Postgrex.query!(holder, "SELECT pg_backend_pid()", [])
+      Postgrex.query!(holder, "SELECT id FROM codex_sessions WHERE id = $1 FOR UPDATE", [Ecto.UUID.dump!(session.id)])
       id = if unquote(target) == :pool, do: pool.id, else: key.id
-      {result, _log} = with_log(fn -> continue(unquote(target), id, System.monotonic_time(:millisecond) + 300) end)
+
+      # A held row, not two competing sleeps, forces the deadline to cut the second batch.
+      # The two-second scenario budget leaves the first commit scheduling room under N=4.
+      {result, log} =
+        with_log(fn ->
+          runner =
+            Task.Supervisor.async_nolink(supervisor, fn ->
+              Repo.put_dynamic_repo(repo)
+              continue(unquote(target), id, System.monotonic_time(:millisecond) + 2_000)
+            end)
+
+          monitor = Process.monitor(runner.pid)
+          waiter = await_session_batch(observer, holder_backend, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+          refute waiter == holder_backend
+          %{rows: committed_rows} = Postgrex.query!(observer, "SELECT api_key_id FROM requests WHERE id = $1", [Ecto.UUID.dump!(request.id)])
+          assert committed_rows == if(unquote(target) == :pool, do: [], else: [[nil]])
+          result = Task.await(runner, @detection_timeout_ms)
+          assert_receive {:DOWN, ^monitor, :process, _, :normal}, @detection_timeout_ms
+          result
+        end)
+
       assert result == :more
+      assert log == "" or log =~ "timed out because it queued and checked out the connection"
       if unquote(target) == :pool, do: refute(Repo.get(Request, request.id)), else: assert(is_nil(Repo.get!(Request, request.id).api_key_id))
       assert Repo.get(CodexSession, session.id)
-      Repo.query!("DROP TRIGGER #{trigger}_requests ON requests")
-      Repo.query!("DROP TRIGGER #{trigger}_sessions ON codex_sessions")
+      Postgrex.query!(holder, "ROLLBACK", [])
       assert continue(unquote(target), id, System.monotonic_time(:millisecond) + 5_000) == :deleted
     end
   end
@@ -146,6 +172,20 @@ defmodule CodexPooler.Jobs.DeletionDeadlineTest do
     assert_receive {:DOWN, ^executor_monitor, :process, _, :killed}
     Process.demonitor(runner.ref, [:flush])
     assert Repo.query!("SELECT 1").rows == [[1]]
+  end
+
+  defp await_session_batch(observer, holder_backend, deadline) do
+    %{rows: rows} =
+      Postgrex.query!(observer, "SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)) AND query LIKE 'DELETE FROM codex_sessions %'", [holder_backend])
+
+    case rows do
+      [[waiter]] ->
+        waiter
+
+      [] ->
+        assert System.monotonic_time(:millisecond) < deadline, "deletion never reached the held second batch"
+        await_session_batch(observer, holder_backend, deadline)
+    end
   end
 
   defp trace_executor(parent) do

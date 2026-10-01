@@ -37,6 +37,16 @@ The 404 page (`src/content/docs/404.mdx`) serves the whole site and forwards lin
 
 The landing page carries one structured-data graph (Organization, WebSite, SoftwareApplication) that every docs page points at by `@id`. The docs use the same variable Roboto Condensed WOFF2 files as the landing page, from `@fontsource-variable/roboto-condensed`.
 
+## Social card rendering
+
+Docs social cards are rendered at build time by `src/og/card.ts`: the bundled Roboto Condensed 400 and 700 TTF files supply the glyph outlines, and sharp rasterizes the complete SVG into a 1200×630 JPEG. The renderer does not depend on system fonts or Pango.
+
+`opentype.js` remains pinned to 1.3.4. The published 2.0.0 release applies a `ccmp` composition lookup that requires GSUB chaining contextual substitution type 6, format 2, which it cannot execute. Both bundled fonts throw `substitutionType : 62 lookupType: 6 - substFormat: 2 is not yet supported` even when measuring `CODEX POOLER`; passing `features: { ccmp: false }` does not disable that lookup. Removing font lookup tables or bypassing word shaping is not a safe upgrade.
+
+The dependency update remains pending until a published release can execute these fonts' class-based chaining substitutions correctly. Before upgrading, verify glyph selection, advance widths, wrapping and SVG path placement with both weights; font changes or exception fallbacks must not hide an incompatibility.
+
+The other apparent updates have separate compatibility constraints: TypeScript stays on the newest 6.x release while `@astrojs/check` requires the TypeScript JavaScript API and accepts only `^5.0.0 || ^6.0.0`, and the Grafana Foundation SDK follows its `11-6-latest` channel rather than the older `latest` tag. Lock-file maintenance still refreshes compatible transitive dependencies without moving these exact pins.
+
 ## Landing page
 
 `src/pages/index.astro` assembles the sections from `src/landing/components/`:

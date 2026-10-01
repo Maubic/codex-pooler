@@ -111,7 +111,9 @@ if (mode === "relayed-failed") {
     "input_tokens_details",
     "output_tokens",
     "output_tokens_details",
+    "total_tokens",
   ]);
+  assert.equal(data?.response?.usage?.total_tokens, 10);
   assert.deepEqual(Object.keys(data?.response?.usage?.input_tokens_details ?? {}).sort(), [
     "cache_write_tokens",
     "cached_tokens",
@@ -211,10 +213,11 @@ function sequenceValid(parsed, expectedMode) {
 
   if (expectedMode === "relayed-failed") {
     return (
-      sequences.length === 1 &&
-      sequences[0] === 9 &&
-      parsed[0]?.type === "response.failed" &&
-      !parsed.some((event) => event.type === "response.completed")
+      sequences.length === 2 &&
+      sequences[0] === 0 &&
+      sequences[1] === 9 &&
+      parsed[0]?.type === "response.created" &&
+      parsed[1]?.type === "response.failed"
     );
   }
 

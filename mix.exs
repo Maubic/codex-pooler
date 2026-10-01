@@ -89,10 +89,10 @@ defmodule CodexPooler.MixProject do
       {:tz, "== 0.28.4"},
       {:credo, "== 1.7.19", only: [:dev, :test], runtime: false},
       {:dialyxir, "== 1.4.8", only: [:dev, :test], runtime: false},
-      {:sobelow, "== 0.15.0", only: [:dev, :test], runtime: false},
+      {:sobelow, "== 0.16.0", only: [:dev, :test], runtime: false},
       {:six, "== 0.4.1", only: :test},
       {:gettext, "== 1.0.2"},
-      {:dns_cluster, "== 0.3.0"},
+      {:dns_cluster, "== 0.3.1"},
       {:websock, "== 0.5.3"},
       {:websock_adapter, "== 0.6.0"},
       {:bandit, "== 1.12.5"}
