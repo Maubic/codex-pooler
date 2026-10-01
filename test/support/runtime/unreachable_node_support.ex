@@ -54,6 +54,86 @@ defmodule CodexPoolerWeb.Runtime.UnreachableNodeSupport do
     {peer, peer_node}
   end
 
+  # The probe lives on the owner's peer and is read over its TCP control channel,
+  # never over the distribution link the scenario cuts. It records the exact
+  # early-check messages and can hold the owner after its first renewal returns,
+  # so the socket releases the lease before the second check can handle it.
+  @spec start_lease_check_probe!(pid() | nil, pid(), keyword()) :: atom()
+  def start_lease_check_probe!(peer, owner, opts \\ []) do
+    name = :"unreachable_lease_probe_#{System.unique_integer([:positive])}"
+    release = make_ref()
+
+    on_exit(fn -> call_lease_probe(peer, :stop_lease_check_probe, [name, owner, release]) end)
+    :ok = call_lease_probe(peer, :install_lease_check_probe, [name, owner, release, Keyword.get(opts, :hold_first, false)])
+    name
+  end
+
+  defp call_lease_probe(nil, function, args), do: apply(__MODULE__, function, args)
+  defp call_lease_probe(peer, function, args), do: :peer.call(peer, __MODULE__, function, args, @detection_timeout_ms)
+
+  @doc false
+  def install_lease_check_probe(name, owner, release, hold_first) do
+    {:ok, _probe} = Agent.start(fn -> %{started: [], completed: [], held?: false, lost?: false, owner: owner, release: release} end, name: name)
+    :sys.install(owner, {&__MODULE__.lease_check_probe_hook/3, %{probe: name, current: nil, hold_first: hold_first}})
+  end
+
+  @doc false
+  def lease_check_probe_hook(probe, {:in, {:renew_owner_lease, :unreachable_downstream, check}}, _name) do
+    Agent.update(probe.probe, &%{&1 | started: &1.started ++ [check]})
+    %{probe | current: check}
+  end
+
+  def lease_check_probe_hook(probe, {:noreply, state}, _name) do
+    check = probe.current
+    lost? = match?(%{downstream: nil, active_turn: %{descriptor: %{downstream_status: :lost}}}, state)
+
+    Agent.update(probe.probe, fn observed ->
+      %{observed | completed: if(is_nil(check), do: observed.completed, else: observed.completed ++ [check]), held?: probe.hold_first and check == 1, lost?: observed.lost? or lost?}
+    end)
+
+    if probe.hold_first and check == 1 do
+      %{release: release} = lease_check_probe_state(probe.probe)
+
+      receive do
+        {^release, :release} -> :ok
+      after
+        @detection_timeout_ms -> exit(:lease_check_probe_not_released)
+      end
+
+      Agent.update(probe.probe, &%{&1 | held?: false})
+    end
+
+    %{probe | current: nil}
+  end
+
+  def lease_check_probe_hook(probe, _event, _name), do: probe
+
+  @spec lease_check_probe_state(atom()) :: map()
+  def lease_check_probe_state(probe), do: Agent.get(probe, & &1)
+
+  @spec release_lease_check_probe(atom()) :: :ok
+  def release_lease_check_probe(probe) do
+    %{owner: owner, release: release} = lease_check_probe_state(probe)
+    send(owner, {release, :release})
+    :ok
+  end
+
+  @doc false
+  def stop_lease_check_probe(probe, owner, release) do
+    send(owner, {release, :release})
+
+    if Process.alive?(owner) do
+      try do
+        :sys.remove(owner, &__MODULE__.lease_check_probe_hook/3)
+      catch
+        :exit, _reason -> :ok
+      end
+    end
+
+    if pid = Process.whereis(probe), do: Agent.stop(pid)
+    :ok
+  end
+
   @spec partition!(node()) :: :ok
   def partition!(peer_node) do
     true = :erlang.set_cookie(peer_node, :unreachable_node_partition)

@@ -3,6 +3,9 @@ defmodule CodexPooler.ExecutionProofSupport do
   import ExUnit.Assertions
   alias CodexPooler.Platform.{ExecutionIdentity, ExecutionRegistry, ExecutionTerminalProofs}
 
+  @identity_fields [:owner_execution_id, :owner_instance_id, :owner_instance_boot_id, :owner_process_id]
+  @terminal_readiness_timeout_ms 15_000
+
   @spec publish_committed_terminal!(map()) :: :ok
   def publish_committed_terminal!(identity) do
     CodexPooler.UnboxedFixture.register_unboxed_cleanup!(fn ->
@@ -22,9 +25,9 @@ defmodule CodexPooler.ExecutionProofSupport do
   def publish_terminal!(identity) do
     assert ExecutionIdentity.status(identity) == :dead
 
-    proof =
-      ExecutionRegistry.pending(10_000)
-      |> Enum.find(&(&1.owner_execution_id == identity.owner_execution_id))
+    # A dead PID can be observed before the registry receives its own DOWN.
+    # Publication needs its exact retained proof, not that liveness sample.
+    proof = await_pending_proof(identity, System.monotonic_time(:millisecond) + @terminal_readiness_timeout_ms)
 
     if proof do
       assert {:ok, 1} = ExecutionTerminalProofs.publish([proof])
@@ -33,6 +36,37 @@ defmodule CodexPooler.ExecutionProofSupport do
 
     assert ExecutionTerminalProofs.terminal?(identity)
     :ok
+  end
+
+  defp await_pending_proof(identity, deadline) do
+    case ExecutionRegistry.pending_proofs([identity.owner_execution_id]) do
+      [proof] ->
+        assert Map.take(proof, @identity_fields) == Map.take(identity, @identity_fields),
+               "pending terminal proof does not match the exact execution identity"
+
+        proof
+
+      [] ->
+        if ExecutionTerminalProofs.terminal?(identity) do
+          nil
+        else
+          assert ExecutionIdentity.status(identity) == :dead,
+                 "execution became alive or unknown while awaiting its retained terminal proof"
+
+          remaining = deadline - System.monotonic_time(:millisecond)
+
+          assert remaining > 0,
+                 "registry did not retain a terminal proof for execution #{identity.owner_execution_id} within #{@terminal_readiness_timeout_ms}ms"
+
+          receive do
+          after
+            min(10, remaining) -> await_pending_proof(identity, deadline)
+          end
+        end
+
+      :unknown ->
+        flunk("execution registry is unavailable while awaiting the exact terminal proof")
+    end
   end
 
   @spec await_terminal!(map(), pid() | nil) :: :ok

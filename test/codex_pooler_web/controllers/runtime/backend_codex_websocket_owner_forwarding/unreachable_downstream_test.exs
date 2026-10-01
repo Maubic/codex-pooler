@@ -51,6 +51,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   alias CodexPooler.Repo
   alias CodexPooler.UnboxedFixture
   alias CodexPoolerWeb.Runtime.OwnerLossScenario, as: Scenario
+  alias CodexPoolerWeb.Runtime.UnreachableNodeSupport
   alias Ecto.Adapters.SQL.Sandbox
 
   @moduletag capture_log: true
@@ -64,10 +65,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   # Frames the provider may still have sent before the owner heard of the cut
   # (at most one pacing interval and the one released at the cut).
   @frames_before_cancel 3
-  # When the owner checks its lease after the DOWN, and the detection margin
-  # past it.
-  @lease_check_ms InstancePresence.heartbeat_write_budget_ms()
-  @check_margin_ms 1_000
   @liveness_window_s InstancePresence.liveness_window_seconds()
 
   setup_all do
@@ -199,23 +196,27 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
     @tag slow: "cuts a peer VM's owner off mid-turn and waits for its lease check to stop it"
     test "the owner keeps a turn that showed nothing until its lease check finds the lease released", ctx do
       turn = start_turn!(ctx, :partition, deltas: 2, preamble: @long_preamble)
+      probe = start_lease_check_probe!(ctx.owner_peer, turn.owner)
 
       on_exit(fn -> heal!(ctx.owner_node) end)
       partition!(ctx.owner_node)
-      :ok = pace!(turn.pacer, @pace_ms)
-      cut_at = System.monotonic_time(:millisecond)
-      _lost = await_peer_state!(ctx.owner_peer, turn.owner, &lost_turn?/1, "the owner did not keep the turn for a resend")
+      _lost = await_lease_check_probe!(ctx.owner_peer, probe, & &1.lost?, "the owner did not keep the turn for a resend")
 
       {conn, _websocket, frames} = receive_frames_until_close!(turn.client.conn, turn.client.websocket, turn.client.ref)
       Mint.HTTP.close(conn)
       assert List.last(frames) == {:close, 1011, "websocket owner crashed"}
       :ok = await_lease_released!(turn.session_id)
 
-      # The first check, a write budget after the DOWN, finds the lease
-      # released: the owner stops, and the provider's generation with it.
-      :ok = await_peer_owner_stopped!(ctx.owner_peer, turn.owner, cut_at + @lease_check_ms + @check_margin_ms)
+      # Hold the provider before output so lease checks, not a paced first delta,
+      # decide this turn. The first actual early check must stop the owner.
+      :ok = await_peer_owner_stopped!(ctx.owner_peer, turn.owner, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+      assert %{started: [1], completed: []} = peer_lease_check_probe(ctx.owner_peer, probe)
+      # A held FakeUpstream handler reads no socket closure until its barrier is
+      # released. Pace only after owner termination, so provider output cannot
+      # be the cause of cancellation; its next push observes the closed socket.
+      :ok = pace!(turn.pacer, @pace_ms)
       %{frames: consumed} = await_connection_down!(turn.pacer)
-      assert consumed <= div(@lease_check_ms + @check_margin_ms, @pace_ms), "the owner went on generating: #{consumed} frames after the cut"
+      assert consumed <= @frames_before_cancel
     end
 
     @tag shown: :previsible
@@ -223,6 +224,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
     test "a lease the socket's node releases after the first check is found by the second", ctx do
       turn = start_turn!(ctx, :partition, deltas: 2, preamble: @long_preamble)
       [lease] = leases(turn.session_id)
+      probe = start_lease_check_probe!(ctx.owner_peer, turn.owner, hold_first: true)
 
       # The socket's node is slow to release: its socket takes the owner's
       # DOWN only after the owner's first check.
@@ -230,19 +232,25 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
       on_exit(fn -> resume_if_alive(turn.client.socket) end)
       on_exit(fn -> heal!(ctx.owner_node) end)
       partition!(ctx.owner_node)
-      :ok = pace!(turn.pacer, @pace_ms)
-      cut_at = System.monotonic_time(:millisecond)
-      _lost = await_peer_state!(ctx.owner_peer, turn.owner, &lost_turn?/1, "the owner did not keep the turn for a resend")
+      _held = await_lease_check_probe!(ctx.owner_peer, probe, & &1.held?, "the owner's first lease check never completed")
 
-      # The first check finds the lease still the owner's and renews it.
-      :ok = await_lease_renewals!(lease, 1, cut_at + @lease_check_ms + @check_margin_ms)
-      assert %{active_turn: %{descriptor: %{downstream_status: :lost}}} = :peer.call(ctx.owner_peer, :sys, :get_state, [turn.owner])
+      # The post-handler barrier observes the real first renewal and holds the
+      # owner there. A database expiry read alone can race its next check or a
+      # different lease write, and a state call can meet termination mid-cleanup.
+      assert %{started: [1], completed: [1], held?: true, lost?: true} = peer_lease_check_probe(ctx.owner_peer, probe)
+      current = Repo.get!(BridgeOwnerLease, lease.id)
+      assert %{status: "active", lease_token: token} = current
+      assert token == lease.lease_token
+      assert DateTime.compare(current.expires_at, lease.expires_at) == :gt
 
       :ok = :sys.resume(turn.client.socket)
       :ok = await_lease_released!(turn.session_id)
-      :ok = await_peer_owner_stopped!(ctx.owner_peer, turn.owner, cut_at + 2 * @lease_check_ms + @check_margin_ms)
+      :ok = :peer.call(ctx.owner_peer, UnreachableNodeSupport, :release_lease_check_probe, [probe], @detection_timeout_ms)
+      :ok = await_peer_owner_stopped!(ctx.owner_peer, turn.owner, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+      assert %{started: [1, 0], completed: [1]} = peer_lease_check_probe(ctx.owner_peer, probe)
+      :ok = pace!(turn.pacer, @pace_ms)
       %{frames: consumed} = await_connection_down!(turn.pacer)
-      assert consumed <= div(2 * @lease_check_ms + @check_margin_ms, @pace_ms), "the owner went on generating: #{consumed} frames after the cut"
+      assert consumed <= @frames_before_cancel
       Mint.HTTP.close(turn.client.conn)
     end
 
@@ -338,14 +346,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
     test "the owner keeps a turn that showed nothing, and the client's resend reattaches to it", ctx do
       turn = start_turn!(ctx, :death)
       [lease] = leases(turn.session_id)
+      probe = start_lease_check_probe!(nil, turn.owner)
 
       :ok = halt!(turn.app_peer.peer, turn.app_peer.node)
-      halted_at = System.monotonic_time(:millisecond)
       _lost = await_owner_state!(turn.owner, &lost_turn?/1, "the owner did not keep the turn for a resend")
 
-      # Nobody released the lease: both checks after the DOWN renew it, and the
-      # owner keeps the turn.
-      :ok = await_lease_renewals!(lease, 2, halted_at + 2 * @lease_check_ms + @check_margin_ms)
+      # Nobody released the lease: observe both actual handlers after the DOWN,
+      # rather than charging their database and scheduler latency to the cut.
+      _checks = await_lease_check_probe!(nil, probe, &(&1.completed == [1, 0]), "the owner's two early lease checks did not complete")
+      current = Repo.get!(BridgeOwnerLease, lease.id)
+      assert %{status: "active", lease_token: token} = current
+      assert token == lease.lease_token
+      assert DateTime.compare(current.expires_at, lease.expires_at) == :gt
       assert %{active_turn: %{descriptor: %{downstream_status: :lost}}} = :sys.get_state(turn.owner)
 
       # The released client's resend reaches this node before the turn's first
@@ -699,6 +711,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
     :exit, _reason -> :stopped
   end
 
+  defp peer_lease_check_probe(nil, probe), do: UnreachableNodeSupport.lease_check_probe_state(probe)
+  defp peer_lease_check_probe(peer, probe), do: :peer.call(peer, UnreachableNodeSupport, :lease_check_probe_state, [probe], @detection_timeout_ms)
+
+  defp await_lease_check_probe!(peer, probe, predicate, message) do
+    await_state!(fn -> peer_lease_check_probe(peer, probe) end, predicate, message, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+  end
+
   defp await_peer_owner_stopped!(peer, owner, deadline) do
     cond do
       not :peer.call(peer, Process, :alive?, [owner]) ->
@@ -717,32 +736,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
     deadline = System.monotonic_time(:millisecond) + @detection_timeout_ms
     _released = await_state!(fn -> leases(session_id) end, &match?([%BridgeOwnerLease{status: "released"}], &1), "the socket's node never released the owner's lease", deadline)
     :ok
-  end
-
-  # The lease was renewed `count` times by `deadline` since `lease` was read,
-  # and stayed the owner's active lease. A renewal is what moves its expiry;
-  # a turn's lifecycle writes touch `renewed_at` too.
-  defp await_lease_renewals!(%BridgeOwnerLease{} = lease, count, deadline) do
-    await_lease_renewals!(lease, [lease.expires_at], count, deadline)
-  end
-
-  defp await_lease_renewals!(lease, seen, count, deadline) do
-    current = Repo.get!(BridgeOwnerLease, lease.id)
-    assert %{status: "active", lease_token: token} = current
-    assert token == lease.lease_token
-    seen = if current.expires_at in seen, do: seen, else: [current.expires_at | seen]
-
-    cond do
-      length(seen) > count ->
-        :ok
-
-      System.monotonic_time(:millisecond) >= deadline ->
-        flunk("the lease was renewed #{length(seen) - 1} times, not #{count}")
-
-      true ->
-        Process.sleep(10)
-        await_lease_renewals!(lease, seen, count, deadline)
-    end
   end
 
   defp resume_if_alive(socket) do

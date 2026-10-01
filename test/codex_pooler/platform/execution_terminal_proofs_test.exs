@@ -2,6 +2,7 @@ defmodule CodexPooler.Platform.ExecutionTerminalProofsTest do
   use CodexPooler.DataCase, async: false
 
   alias CodexPooler.Platform.{ExecutionIdentity, ExecutionRegistry, ExecutionTerminalProofs}
+  alias CodexPooler.Platform.InstancePresence.Identity
 
   test "registry completion creates an immutable exact proof before any attempt exists" do
     registry = start_supervised!({ExecutionRegistry, name: nil})
@@ -66,6 +67,49 @@ defmodule CodexPooler.Platform.ExecutionTerminalProofsTest do
     assert {:ok, 1} = ExecutionTerminalProofs.publish([proof])
     assert ExecutionTerminalProofs.terminal?(proof)
     refute ExecutionTerminalProofs.terminal?(%{proof | owner_execution_id: live_id})
+  end
+
+  test "the proof helper rejects live and unknown executions and publishes only its exact completed identity" do
+    id = Ecto.UUID.generate()
+    on_exit(fn -> ExecutionRegistry.acknowledge([id]) end)
+    owner = Identity.local()
+    assert :ok = ExecutionRegistry.register(id)
+
+    identity = %{
+      owner_execution_id: id,
+      owner_process_id: List.to_string(:erlang.pid_to_list(self())),
+      owner_instance_id: owner.node_name,
+      owner_instance_boot_id: owner.boot_id
+    }
+
+    assert_raise ExUnit.AssertionError, fn -> CodexPooler.ExecutionProofSupport.publish_terminal!(identity) end
+    refute ExecutionTerminalProofs.terminal?(identity)
+    unknown = %{identity | owner_execution_id: Ecto.UUID.generate()}
+    assert_raise ExUnit.AssertionError, fn -> CodexPooler.ExecutionProofSupport.publish_terminal!(unknown) end
+    refute ExecutionTerminalProofs.terminal?(unknown)
+
+    assert :ok = ExecutionRegistry.complete(id)
+    assert Process.alive?(self())
+
+    for {field, replacement} <- [owner_instance_id: "foreign-instance@localhost", owner_instance_boot_id: "foreign-boot", owner_process_id: "<0.0.0>"] do
+      mismatched = Map.put(identity, field, replacement)
+      assert_raise ExUnit.AssertionError, fn -> CodexPooler.ExecutionProofSupport.publish_terminal!(mismatched) end
+      refute ExecutionTerminalProofs.terminal?(mismatched)
+    end
+
+    assert [retained] = ExecutionRegistry.pending_proofs([identity.owner_execution_id])
+    assert retained.end_kind == "completed"
+    assert :ok = CodexPooler.ExecutionProofSupport.publish_terminal!(identity)
+    assert ExecutionTerminalProofs.terminal?(identity)
+    assert [] = ExecutionRegistry.pending_proofs([identity.owner_execution_id])
+    published = Repo.get!(CodexPooler.Platform.ExecutionTerminalProof, identity.owner_execution_id)
+    assert published.end_kind == retained.end_kind
+    assert published.ended_at == retained.ended_at
+    assert published.owner_process_id == identity.owner_process_id
+    assert published.owner_instance_id == identity.owner_instance_id
+    assert published.owner_instance_boot_id == identity.owner_instance_boot_id
+    assert :ok = CodexPooler.ExecutionProofSupport.publish_terminal!(identity)
+    assert Repo.get!(CodexPooler.Platform.ExecutionTerminalProof, identity.owner_execution_id) == published
   end
 
   test "proof expiry preserves the full six-hour window and leaves stale recovery available" do

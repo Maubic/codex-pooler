@@ -16,6 +16,8 @@ A run with `CODEX_POOLER_TEST_RUN_NAMESPACE` and `MIX_TEST_PARTITION` set uses a
 
 Batch-deadline tests must observe the intended database phase before asserting partial progress. Hold the later batch on an owned row lock, verify the exact blocked backend and the earlier committed rows from a separate connection, and keep failure-detection budgets independent from the scenario deadline. Two timed sleeps do not prove which batch the deadline interrupted under four-partition scheduling pressure.
 
+Multi-node timer tests must observe the exact handler that performed the transition. A database timestamp change does not identify a particular renewal, a state call can race process termination, and a process monitor does not order a registry's own monitor delivery. Use bounded, process-scoped observation and barriers to force the intended interleaving; keep the provider held before output when proving that a lease check—not a later output frame—caused cancellation. Shared peer fixtures must stop background database writers before per-test snapshots, not only when the module eventually shuts down.
+
 Development tools, Mix tasks and test-infrastructure contracts run separately from the application tests. This profile also includes every `unix_integration` test: Bash lifecycle scripts, Makefile behavior, process signals, resource cleanup, source manifests, POSIX file operations and Docker Compose configuration merging. CI runs both product and tooling profiles:
 
 ```sh
