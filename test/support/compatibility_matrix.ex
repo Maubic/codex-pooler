@@ -1006,7 +1006,7 @@ defmodule CodexPooler.CompatibilityMatrix do
       ],
       future_routes: [],
       fixture: :responses_executable_custom_tools,
-      contract: "direct public Responses HTTP and websocket response.create accept executable custom tools with an exact nonblank name, optional description and defer_loading, nullable direct/programmatic allowed_callers, and omitted, text, lark-grammar, or regex-grammar input format; the same exact custom definition is accepted as a child of a nonblank namespace with a nonempty tool list alongside exact flat function children; translated Chat Completions accepts the official nested custom definition with nonblank name and optional description or format plus the official nested named custom choice, flattens both into the Responses request, and projects completed JSON and streamed custom_tool_call input back into the Chat custom shape without parsing free-form input as JSON; an exact typed custom choice resolves only a declared custom tool of the same name and kind, including a namespace child, is preserved in Full mode, and is rejected before upstream dispatch in Lite mode with unsupported_parameter for tool_choice; that Lite rejection is serving-mode driven and covers any map-shaped tool_choice on any lane dispatching to backend Responses, including translated Chat choices, while string choices such as auto remain accepted in both modes; executable names are collision-free across flat functions, namespace children, and custom tools; malformed and unrelated tool families remain rejected, custom replay is a separate input-item contract, provider execution availability depends on the selected model and upstream account, and no broad OpenAI tool parity is claimed"
+      contract: "direct public Responses HTTP and websocket response.create accept executable custom tools with an exact nonblank name, optional description and defer_loading, nullable direct/programmatic allowed_callers, and omitted, text, lark-grammar, or regex-grammar input format; the same exact custom definition is accepted as a child of a nonblank namespace with a nonempty tool list alongside exact flat function children; translated Chat Completions accepts the official nested custom definition with nonblank name and optional description or format plus the official nested named custom choice, flattens both into the Responses request, and projects completed JSON and streamed custom_tool_call input back into the Chat custom shape without parsing free-form input as JSON; an exact typed custom choice resolves only a declared custom tool of the same name and kind, including a namespace child, is preserved in Full mode, and is rejected before upstream dispatch in Lite mode with unsupported_parameter for tool_choice; that Lite rejection is serving-mode driven and covers map-shaped tool_choice other than an exact nonblank named function choice on any lane dispatching to backend Responses; named function choices, including translated Chat choices, and string choices such as auto are preserved in both modes; executable names are collision-free across flat functions, namespace children, and custom tools; malformed and unrelated tool families remain rejected, custom replay is a separate input-item contract, provider execution availability depends on the selected model and upstream account, and no broad OpenAI tool parity is claimed"
     },
     %{
       slug: :backend_agent_v2_handoffs,
@@ -3422,12 +3422,9 @@ defmodule CodexPooler.CompatibilityMatrix do
         resolves_same_kind: true,
         full_mode: "preserved",
         lite_mode: "rejected_unsupported_parameter_before_dispatch",
-        # The Lite rejection is serving-mode driven and applies to ANY map-shaped
-        # tool_choice on any gateway lane that dispatches to the backend
-        # Responses endpoint, not only to the typed custom choice on direct
-        # public Responses. Chat named-function choices translate to the same
-        # map form and are rejected identically on a Lite-served model.
-        lite_rejection_scope: "any_map_shaped_tool_choice",
+        # Named function choices resolve against Lite's additional_tools manifest,
+        # including translated Chat choices. Other map shapes remain rejected.
+        lite_rejection_scope: "map_shaped_tool_choice_except_named_function",
         lite_rejection_lanes: ["direct_public_responses", "chat_completions", "backend_codex"]
       },
       response_namespace_restoration: %{

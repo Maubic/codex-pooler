@@ -452,13 +452,10 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsControllerTest do
     end
   end
 
-  # The Lite typed-choice guard is driven by the model's serving mode, not by the
-  # endpoint, and Chat translates a named-function choice into the same map form
-  # that Responses sends. A Chat SDK client forcing a tool therefore meets the
-  # same pre-dispatch rejection on a Lite-served model, with no upstream call and
-  # no accounting side effects.
+  # Chat's translated custom choice retains the Lite restriction; named function
+  # choices are covered by the Full/Lite HTTP boundary matrix.
   @tag :issue_241
-  test "public Chat rejects a named function choice on a Lite-served model before dispatch", %{
+  test "public Chat rejects a named custom choice on a Lite-served model before dispatch", %{
     conn: conn
   } do
     upstream = start_upstream(public_chat_mode_matrix_upstream())
@@ -470,16 +467,13 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsControllerTest do
       chat_payload(setup)
       |> Map.put("tools", [
         %{
-          "type" => "function",
-          "function" => %{
-            "name" => "responses_tool_chat_tool",
-            "parameters" => %{"type" => "object", "properties" => %{}}
-          }
+          "type" => "custom",
+          "custom" => %{"name" => "responses_tool_chat_tool"}
         }
       ])
       |> Map.put("tool_choice", %{
-        "type" => "function",
-        "function" => %{"name" => "responses_tool_chat_tool"}
+        "type" => "custom",
+        "custom" => %{"name" => "responses_tool_chat_tool"}
       })
 
     response =

@@ -2640,6 +2640,40 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizerTest do
       assert upstream["instructions"] == "synthetic base instructions"
     end
 
+    test "preserves a forced function choice through Full and Lite HTTP and websocket normalization" do
+      endpoint = "/backend-api/codex/responses"
+      tool = %{"type" => "function", "name" => "finish_report", "parameters" => %{"type" => "object", "properties" => %{}}}
+      choice = %{"type" => "function", "name" => tool["name"]}
+      payload = %{"model" => "sample-model", "input" => native_text_input("synthetic tool request"), "tools" => [tool], "tool_choice" => choice}
+
+      for mode <- ["full", "lite"], transport <- ["http", "websocket"] do
+        options = RequestOptions.build(serving_mode_opts(mode), endpoint, payload)
+        options = if transport == "websocket", do: RequestOptions.for_websocket(options, payload), else: options
+
+        assert :ok = PayloadNormalizer.validate(payload, options)
+        assert {:ok, encoded} = PayloadNormalizer.upstream_payload(payload, %Model{upstream_model_id: "provider-model"}, endpoint, options)
+        upstream = CodexPooler.JSON.decode!(encoded)
+        assert upstream["tool_choice"] === choice
+
+        if mode == "lite" do
+          refute Map.has_key?(upstream, "tools")
+          assert [%{"type" => "additional_tools", "tools" => [^tool]} | _] = upstream["input"]
+        else
+          assert upstream["tools"] == [tool]
+        end
+      end
+    end
+
+    test "keeps malformed named function choices rejected in Lite" do
+      endpoint = "/backend-api/codex/responses"
+
+      for choice <- [%{"type" => "function"}, %{"type" => "function", "name" => ""}, %{"type" => "function", "name" => " "}, %{"type" => "function", "name" => 1}, %{"type" => "function", "name" => "finish_report", "extra" => true}] do
+        payload = %{"tool_choice" => choice}
+        options = RequestOptions.build(serving_mode_opts("lite"), endpoint, payload)
+        assert {:error, %{code: "unsupported_parameter", param: "tool_choice"}} = PayloadNormalizer.validate(payload, options)
+      end
+    end
+
     test "preserves typed custom tool choice for full, rejects it for Lite, and keeps Lite scalar choices" do
       endpoint = "/backend-api/codex/responses"
       custom_tool = %{"type" => "custom", "name" => "custom_choice_fixture"}

@@ -133,12 +133,14 @@ and globally colliding executable-name shapes are rejected before dispatch.
 
 An exact typed custom `tool_choice` resolves only a declared same-kind, same-name
 custom definition, including an accepted namespace child. Full mode preserves
-that choice. Lite mode rejects every map-shaped `tool_choice` before upstream
-dispatch with `unsupported_parameter` and `param: "tool_choice"`. Keep this
-separate from accepted custom-tool replay input. Chat does not accept executable
-custom definitions or choices. Provider execution availability remains selected
-model and account dependent; smoke verification records metadata only. Never
-claim backend, Chat, or broad OpenAI tool parity.
+that choice. Lite preserves exact nonblank named function choices against its
+`additional_tools` manifest, including translated Chat function choices; other
+map-shaped choices still fail before upstream dispatch with `unsupported_parameter`
+and `param: "tool_choice"`. Keep this separate from accepted custom-tool replay
+input. Chat translates supported nested function/custom declarations and named
+choices into the Responses subset. Provider execution availability remains
+selected model and account dependent; smoke verification records metadata only.
+Never claim broad OpenAI tool parity.
 
 For those accepted namespace children, public Responses HTTP, SSE, and direct or
 owner-forwarded websocket output restore a missing or null `custom_tool_call`

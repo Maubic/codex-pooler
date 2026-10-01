@@ -995,7 +995,7 @@ defmodule CodexPooler.CompatibilityMatrixTest do
                resolves_same_kind: true,
                full_mode: "preserved",
                lite_mode: "rejected_unsupported_parameter_before_dispatch",
-               lite_rejection_scope: "any_map_shaped_tool_choice",
+               lite_rejection_scope: "map_shaped_tool_choice_except_named_function",
                lite_rejection_lanes: [
                  "direct_public_responses",
                  "chat_completions",

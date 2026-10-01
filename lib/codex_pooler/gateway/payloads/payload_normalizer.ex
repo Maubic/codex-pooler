@@ -229,12 +229,19 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
 
   defp validate_tool_choice(%{"tool_choice" => tool_choice}, request_options)
        when is_map(tool_choice) do
-    if RequestOptions.use_responses_lite?(request_options),
+    if RequestOptions.use_responses_lite?(request_options) and not named_function_choice?(tool_choice),
       do: {:error, Error.unsupported_parameter("tool_choice")},
       else: :ok
   end
 
   defp validate_tool_choice(_payload, _request_options), do: :ok
+
+  # The provider resolves a named function against Lite's additional_tools manifest.
+  defp named_function_choice?(%{"type" => "function", "name" => name} = choice)
+       when map_size(choice) == 2 and is_binary(name),
+       do: String.trim(name) != ""
+
+  defp named_function_choice?(_choice), do: false
 
   defp json_payload(payload, model, endpoint, %RequestOptions{} = request_options, opts) do
     payload =

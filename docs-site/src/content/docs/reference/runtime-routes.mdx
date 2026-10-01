@@ -497,12 +497,13 @@ across top-level and namespace children.
 
 A typed custom `tool_choice` resolves only a declared same-kind custom tool with
 the same exact name, whether it is top-level or an accepted namespace child.
-Full mode preserves that typed choice. Lite mode rejects every map-shaped
+Full mode preserves that typed custom choice. Lite mode rejects that custom
 `tool_choice` before upstream dispatch with `unsupported_parameter` and
-`param: "tool_choice"`; use automatic or explicit Full mode when a client needs
-forced typed selection. That rejection follows the model's serving mode rather
-than the endpoint, so any map-shaped `tool_choice` is rejected on a Lite-served
-model, including a Chat Completions named-function choice. See
+`param: "tool_choice"`; use automatic or explicit Full mode for forced custom
+selection. Named function choices with exactly `type: "function"` and a nonblank
+`name` are preserved in both modes, including translated Chat Completions choices.
+Lite resolves the function against its `additional_tools` manifest. Other
+map-shaped choices, including `allowed_tools`, remain rejected in Lite. See
 [Responses Lite and Full](/reference/responses-lite-vs-full/) for what the two
 serving modes change on the outgoing request. String choices such
 as `auto` are accepted in both modes. This is separate from accepted
