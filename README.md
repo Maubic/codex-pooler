@@ -687,12 +687,15 @@ modelRoles:
   designer: codex-pooler/gpt-6-astra:high
 compaction:
   enabled: true
-  thresholdPercent: 95
+  thresholdPercent: 80
   reserveTokens: 128000
   remoteStreamingV2Enabled: true
   midTurnEnabled: true
   handoffSaveToDisk: true
+  methodOrder: [remote, soft]
 ```
+
+The 80% trigger leaves room for compaction instructions and recent tool results. Keep `reserveTokens` aligned with the output budget. For an existing session already near its limit, see the [compaction recovery notes](https://www.codex-pooler.com/docs/clients/omp/#troubleshooting).
 
 Then start OMP:
 

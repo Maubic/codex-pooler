@@ -676,12 +676,15 @@ modelRoles:
   designer: codex-pooler/gpt-6-astra:high
 compaction:
   enabled: true
-  thresholdPercent: 95
+  thresholdPercent: 80
   reserveTokens: 128000
   remoteStreamingV2Enabled: true
   midTurnEnabled: true
   handoffSaveToDisk: true
+  methodOrder: [remote, soft]
 ```
+
+80% 的触发阈值为压缩指令和最近的工具结果预留空间。保持 `reserveTokens` 与输出预算一致。对于已经接近上下文上限的现有会话，请参阅[压缩恢复说明](https://www.codex-pooler.com/docs/clients/omp/#troubleshooting)。
 
 然后启动 OMP：
 

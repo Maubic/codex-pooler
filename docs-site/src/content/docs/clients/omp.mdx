@@ -115,7 +115,7 @@ For local setup, change `baseUrl` to `http://localhost:4000/v1`, `remoteCompacti
 
 Current OMP derives an effort thinking surface, including `xhigh`, for custom `openai-responses` models that set `reasoning: true`. Add an explicit `thinking` block only when you want to override the inferred effort list, wire mapping, or per-model default level.
 
-OMP accepts `contextWindow` and `maxTokens` in `models.yml`; it does not accept `contextTokens`. The `828400` values above are long-profile examples for models whose selected Pool catalog source reports an 872000-token raw ceiling. Provider accounts can temporarily report different ceilings for the same model; a selected 272000-token profile exposes `258400` instead. Use each model's `/v1/models.context_length` as the authoritative `contextWindow`, with an independent 128000-token output budget. For the long-profile example, `compaction.thresholdPercent: 95` starts automatic compaction at 786980 tokens; `reserveTokens: 128000` configures the prompt-fit and recovery reserve and does not replace that percentage trigger.
+OMP accepts `contextWindow` and `maxTokens` in `models.yml`; it does not accept `contextTokens`. The `828400` values above are long-profile examples for models whose selected Pool catalog source reports an 872000-token raw ceiling. Provider accounts can temporarily report different ceilings for the same model; a selected 272000-token profile exposes `258400` instead. Use each model's `/v1/models.context_length` as the authoritative `contextWindow`, with an independent 128000-token output budget. For the long-profile example, `compaction.thresholdPercent: 80` starts automatic compaction at 662720 tokens, leaving room for compaction instructions, tool definitions and recent results. `reserveTokens: 128000` configures the prompt-fit and recovery reserve and does not replace an explicit percentage trigger. Leave `compaction.thresholdTokens` unset unless you intentionally want an absolute threshold to override the percentage.
 
 ### Default model roles
 
@@ -143,12 +143,13 @@ modelRoles:
   commit: codex-pooler/gpt-6-luna:minimal
   designer: codex-pooler/gpt-6-astra:high
 compaction:
-  thresholdPercent: 95
+  thresholdPercent: 80
   reserveTokens: 128000
   enabled: true
   remoteStreamingV2Enabled: true
   midTurnEnabled: true
   handoffSaveToDisk: true
+  methodOrder: [remote, soft]
 ```
 
 `startup.setupWizard: false` keeps OMP from opening the initial setup flow after the provider and roles are already configured.
@@ -187,6 +188,12 @@ Keep `remoteCompaction` under the `codex-pooler` provider. Its `endpoint` is the
 Both V2 switches are required. Set provider-level `remoteCompaction.v2StreamingEnabled: true` in `models.yml` to make the model V2-capable, and keep global `compaction.remoteStreamingV2Enabled: true` in `config.yml` to allow OMP to select that capability. OMP sends a normal backend Responses request with a terminal `compaction_trigger` to `remoteCompaction.v2Endpoint`. If V2 is unavailable or fails, OMP can use the configured direct compact endpoint before falling back to its local compaction behavior.
 
 ## Troubleshooting
+
+`Remote compaction input exceeds the context window` is OMP's local size check before a request reaches Codex Pooler. The prepared compaction input can be larger than the last reported conversational context. Trigger maintenance earlier instead of inflating `contextWindow` beyond the Pool catalog value. The 80% threshold helps future turns; it cannot shrink an already oversized session.
+
+If `Auto context-full maintenance` keeps retrying, distinguish native compaction from the `soft` fallback. Soft compaction is an ordinary summarization request through `/v1/responses`. In OMP 18.4.10 it inherits the active session's reasoning effort; a low-effort helper role or a `compactionModel` selector does not independently lower that effort. For a session already stuck, cancel maintenance, temporarily lower the active model's effort, and retry with `/compact soft`. Restore your preferred effort after it succeeds. OMP 18.4.10 watches `config.yml` in interactive sessions, but an already running maintenance pass can retain the settings it started with; cancel that pass before retrying, or resume the session.
+
+Repeated socket closures at the same total duration while output is still streaming indicate a transport deadline to investigate, rather than an idle watchdog. Operators using Traefik should configure the entrypoints carrying these requests with `transport.respondingTimeouts.writeTimeout: 0s`; this disables the total response deadline without disabling request-read or keep-alive idle limits. See [streaming ingress timeouts](/deployment/helm/#streaming-ingress-timeouts). A client restart or a Full/Lite switch does not change that ingress deadline.
 
 For long tool-heavy OMP sessions, keep mid-turn compaction enabled and persist handoff material to disk. Those settings reduce context-overflow risk, but they cannot repair an OMP client bug that skips its own mid-run compaction check. If an OMP plan appears to restart work after a very large turn, upgrade OMP when a newer release is available and restart or resume the session before treating it as a Codex Pooler routing issue.
 

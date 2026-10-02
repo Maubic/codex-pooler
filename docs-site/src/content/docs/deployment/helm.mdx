@@ -96,6 +96,26 @@ ingress:
 
 Public client examples should use `https://codex-pooler.example.com` as the deployed base URL.
 
+### Streaming ingress timeouts
+
+Long reasoning and compaction requests can stream for more than ten minutes. Configure the ingress controller so active SSE responses are not cut off by a total response-write deadline. This applies to Full and Lite alike; client idle-timeout settings and SSE heartbeats do not extend a fixed response deadline.
+
+For Traefik, set the following in the **Traefik chart's values**, on every entrypoint carrying Codex Pooler traffic:
+
+```yaml
+ports:
+  web:
+    transport:
+      respondingTimeouts:
+        writeTimeout: 0s
+  websecure:
+    transport:
+      respondingTimeouts:
+        writeTimeout: 0s
+```
+
+Keep request-read and keep-alive idle limits appropriate for your installation. `writeTimeout: 0s` disables only the total response-write deadline. These are controller settings, not Codex Pooler chart values or backend `ServersTransport` timeouts; changing shared entrypoints affects every route on them. Verify the rendered arguments and all ingress replicas after rollout. A fixed-duration `client_disconnected` request with streamed deltas but no terminal is a useful diagnostic signal; confirm the client and edge timestamps before attributing the closure.
+
 ## Role topology
 
 The default topology is conservative:
