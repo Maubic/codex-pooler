@@ -336,6 +336,20 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollectorTest do
     end
   end
 
+  test "quota terminals retain websocket failure semantics and poison never becomes quota" do
+    quota = provider_failure_event("response.failed", "insufficient_quota", nil, "synthetic private quota message")
+    assert {:provider_failure, failure} = CompactionResultCollector.collect_websocket_body(websocket_body([quota]))
+    assert %{"type" => "response.failed", "response" => %{"error" => %{"code" => "insufficient_quota", "message" => "upstream rejected the compact request"}}} = CompactionResultCollector.provider_failure_websocket_event(failure)
+
+    overflow = CollectedBody.empty() |> CollectedBody.append(:binary.copy("x", CollectedBody.max_bytes() + 1)) |> CollectedBody.read()
+
+    for body <- [websocket_body([quota, unrelated_event()]), websocket_body([quota]) <> "data: malformed", overflow <> websocket_body([quota])] do
+      capture_log(fn ->
+        assert {:error, %{status: 502, code: "invalid_compaction_response"}} = CompactionResultCollector.collect_websocket_body(body)
+      end)
+    end
+  end
+
   defp event_count(log, message), do: length(String.split(log, message)) - 1
 
   defp provider_failure_status(code, upstream_code)

@@ -179,6 +179,29 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
     }
   end
 
+  # Preserve the native client's fatal quota meaning on the HTTP boundary.
+  # The saved terminal failure still owns the existing accounting and circuit
+  # classification; only a complete, unpoisoned provider terminal is projected.
+  defp compact_result(%{
+         collection:
+           %{
+             item_mode: :native,
+             invalid_reason: {:provider_failure, _, _, _},
+             provider_failure: %{upstream_code: "insufficient_quota", event_type: type, data_type: type} = failure
+           } = collection
+       })
+       when type in ["response.failed", "error"] do
+    log_provider_terminal(collection, failure, elapsed_ms(collection), :provider_terminal, 429)
+
+    {:error,
+     %{
+       status: 429,
+       code: "insufficient_quota",
+       message: "upstream rejected the compact request",
+       compaction_invalid_reason: "provider_failure"
+     }}
+  end
+
   defp compact_result(%{collection: %{invalid_reason: nil} = collection}) do
     case compact_response(collection) do
       {:ok, response} ->
@@ -270,6 +293,20 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
       write_keepalive: fn state -> {:ok, state} end,
       keepalive_interval_ms: 0
     }
+  end
+
+  defp collect_sse_data(%{collection: %{provider_failure: %{} = failure} = collection} = state, data)
+       when data != "" do
+    {:ok,
+     %{
+       state
+       | collection: %{
+           collection
+           | invalid_reason: :invalid_after_provider_failure,
+             provider_terminal_witness: failure,
+             provider_failure: nil
+         }
+     }}
   end
 
   defp collect_sse_data(%{sse: sse, collection: collection} = state, data) do
@@ -671,14 +708,14 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
     end)
   end
 
-  defp log_provider_terminal(collection, failure, elapsed_ms, terminal_source) do
+  defp log_provider_terminal(collection, failure, elapsed_ms, terminal_source, status \\ nil) do
     {param_state, param} = provider_param(failure, collection.provider_terminal_param_state)
 
     Logger.warning(fn ->
       "compact terminal decision " <>
         "source_stage=#{terminal_source} " <>
         "code=#{DiagnosticTaxonomy.identifier(failure.code) || "upstream_terminal_failure"} " <>
-        "status=#{provider_failure_status(failure)} " <>
+        "status=#{status || provider_failure_status(failure)} " <>
         "terminal_type=#{failure.event_type || "provider_terminal"} " <>
         "reason_code=#{provider_terminal_reason_code(failure)} " <>
         "param_state=#{param_state}" <>
