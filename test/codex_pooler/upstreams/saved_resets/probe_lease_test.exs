@@ -4,13 +4,17 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
   import CodexPooler.PoolerFixtures
 
   alias CodexPooler.Gateway.Payloads.RequestOptions.ResetProbe
+  alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
+  alias CodexPooler.ProviderCreditsFixtures
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
+  alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
   alias CodexPooler.Upstreams.SavedResets.ProbeLease
   alias CodexPooler.Upstreams.SavedResets.RedemptionLifecycle
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
   @generation 3
-  @attempt "attempt-abc"
+  @attempt "c40c9d68-fdcc-4b25-a2c0-d99728d5fd90"
 
   defp pending_fixture(opts \\ []) do
     consumed_at =
@@ -29,6 +33,7 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
         "trigger_kind" => "gateway_auto",
         "consumed_at" => DateTime.to_iso8601(consumed_at),
         "deadline_at" => consumed_at |> RedemptionLifecycle.deadline_at() |> DateTime.to_iso8601(),
+        "included_window_descriptors" => [%{"window_kind" => "secondary", "window_minutes" => 10_080}],
         "result" => %{"code" => "reset", "applied" => true}
       }
       |> Map.merge(Keyword.get(opts, :extra, %{}))
@@ -39,6 +44,59 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
   end
 
   defp identity_with_pending(opts \\ []), do: pending_fixture(opts).identity
+
+  defp verified_fixture(now) do
+    fixture = pending_fixture(consumed_at: now)
+    identity = ProviderCreditsFixtures.persist_usage!(fixture.identity, ProviderCreditsFixtures.usage_payload(:weekly_credit_only, now: now, credits: :none), now)
+    Map.put(fixture, :identity, identity)
+  end
+
+  defp verified_confirmation(identity, probe) do
+    %ProbeLease.VerifiedConfirmation{
+      credential_epoch: CredentialFencing.credential_epoch(identity),
+      probe: probe,
+      upstream_model: "gpt-6-sol",
+      serving_mode: :full,
+      transport: :http_json
+    }
+  end
+
+  defp admitted_confirmation!(assignment, identity, probe) do
+    assert {:ok, context} =
+             ProviderCreditsAdmission.new_context(%{
+               version: 1,
+               pool_id: assignment.pool_id,
+               pool_upstream_assignment_id: assignment.id,
+               upstream_identity_id: identity.id,
+               credential_epoch: CredentialFencing.credential_epoch(identity),
+               model: probe.effective_model,
+               upstream_model: "gpt-6-sol",
+               serving_mode: :full,
+               transport: :http_json,
+               route_class: probe.route_class,
+               request_id: Ecto.UUID.generate(),
+               attempt_id: Ecto.UUID.generate(),
+               reset_probe: probe,
+               redemption_generation: @generation,
+               redemption_attempt_id: @attempt
+             })
+
+    assert {:ok, receipt} = ProviderCreditsAdmission.admit(context)
+    assert receipt.non_credit_guarded_probe
+
+    %ProbeLease.VerifiedConfirmation{
+      credential_epoch: receipt.context.credential_epoch,
+      probe: receipt.context.reset_probe,
+      upstream_model: receipt.context.upstream_model,
+      serving_mode: receipt.context.serving_mode,
+      transport: receipt.context.transport
+    }
+  end
+
+  defp grace_scope(assignment, identity, probe),
+    do: %{pool_upstream_assignment_id: assignment.id, upstream_identity_id: identity.id, model: probe.effective_model, upstream_model: "gpt-6-sol", route_class: probe.route_class, serving_mode: :full, transport: :http_json}
+
+  defp snapshot(identity, now), do: Map.fetch!(RoutingQuotaSnapshot.load_by_identity_ids([identity.id], now), identity.id)
 
   defp bound_probe(assignment, identity, overrides \\ []) do
     assert {:ok, probe} =
@@ -391,6 +449,7 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
              ProbeLease.confirm_upstream(identity, "legacy-token", DateTime.add(now, 1, :second))
 
     assert phase(identity) == "confirmed_by_upstream"
+    refute Map.has_key?(redemption(identity), "non_credit_confirmation")
   end
 
   test "v2 confirmation requires generation, attempt, token, version, and every exact scope dimension" do
@@ -421,10 +480,11 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
     ]
 
     for {dimension, mismatch} <- cases do
-      %{assignment: assignment, identity: identity} = pending_fixture()
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      %{assignment: assignment, identity: identity} = verified_fixture(now)
       probe = bound_probe(assignment, identity)
 
-      assert {:ok, :claimed} = ProbeLease.claim(identity, @generation, @attempt, probe)
+      assert {:ok, :claimed} = ProbeLease.claim(identity, @generation, @attempt, probe, now)
       persisted = redemption(identity)
       {generation, attempt, confirmation_probe} = mismatch.(@generation, @attempt, probe)
 
@@ -433,7 +493,7 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
                  identity,
                  generation,
                  attempt,
-                 confirmation_probe
+                 verified_confirmation(identity, confirmation_probe)
                ),
              "expected #{dimension} mismatch to fail closed"
 
@@ -449,7 +509,7 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
                identity,
                @generation,
                @attempt,
-               probe,
+               verified_confirmation(identity, probe),
                DateTime.add(now, 1, :second)
              )
 
@@ -478,21 +538,22 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
     ]
 
     for malformed_probe <- malformed_probes do
-      %{assignment: assignment, identity: identity} = pending_fixture()
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      %{assignment: assignment, identity: identity} = verified_fixture(now)
       probe = bound_probe(assignment, identity)
       original = redemption(identity)
       malformed = Map.put(original, "probe", malformed_probe)
       persist_redemption!(identity, malformed)
 
       assert {:ok, :unchanged} =
-               ProbeLease.confirm_upstream(identity, @generation, @attempt, probe)
+               ProbeLease.confirm_upstream(identity, @generation, @attempt, verified_confirmation(identity, probe), now)
 
       assert redemption(identity) == malformed
     end
   end
 
   test "v2 confirmation fails closed for terminal, duplicate, exact-deadline, and late events" do
-    now = ~U[2026-07-21 12:00:00.000000Z]
+    now = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.truncate(:microsecond)
 
     cases = [
       {:terminal, "confirmed_by_quota", DateTime.add(now, 1, :second)},
@@ -501,7 +562,7 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
     ]
 
     for {event, phase, confirmation_time} <- cases do
-      %{assignment: assignment, identity: identity} = pending_fixture(consumed_at: now)
+      %{assignment: assignment, identity: identity} = verified_fixture(now)
       probe = bound_probe(assignment, identity)
 
       assert {:ok, :claimed} = ProbeLease.claim(identity, @generation, @attempt, probe, now)
@@ -525,7 +586,7 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
                  identity,
                  @generation,
                  @attempt,
-                 probe,
+                 verified_confirmation(identity, probe),
                  confirmation_time
                ),
              "expected #{event} confirmation to fail closed"
@@ -533,7 +594,7 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
       assert redemption(identity) == persisted
     end
 
-    %{assignment: assignment, identity: identity} = pending_fixture(consumed_at: now)
+    %{assignment: assignment, identity: identity} = verified_fixture(now)
     probe = bound_probe(assignment, identity)
     assert {:ok, :claimed} = ProbeLease.claim(identity, @generation, @attempt, probe, now)
 
@@ -542,7 +603,7 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
                identity,
                @generation,
                @attempt,
-               probe,
+               verified_confirmation(identity, probe),
                now |> DateTime.add(15, :minute) |> DateTime.add(-1, :microsecond)
              )
 
@@ -553,7 +614,7 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
                identity,
                @generation,
                @attempt,
-               probe,
+               verified_confirmation(identity, probe),
                DateTime.add(now, 2, :second)
              )
 
@@ -561,10 +622,10 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
   end
 
   test "v2 confirmation fails closed when the persisted deadline is malformed or missing" do
-    now = ~U[2026-07-21 12:00:00.000000Z]
+    now = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.truncate(:microsecond)
 
     for {deadline_name, deadline_at} <- [{:malformed, "not-a-datetime"}, {:missing, nil}] do
-      %{assignment: assignment, identity: identity} = pending_fixture(consumed_at: now)
+      %{assignment: assignment, identity: identity} = verified_fixture(now)
       probe = bound_probe(assignment, identity)
 
       assert {:ok, :claimed} = ProbeLease.claim(identity, @generation, @attempt, probe, now)
@@ -582,12 +643,132 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
                  identity,
                  @generation,
                  @attempt,
-                 probe,
+                 verified_confirmation(identity, probe),
                  DateTime.add(now, 1, :second)
                ),
              "expected #{deadline_name} deadline to fail closed"
 
       assert redemption(identity) == corrupted
+    end
+  end
+
+  @tag :credits_negative
+  test "a bare bound probe cannot manufacture verified non-credit confirmation" do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    %{assignment: assignment, identity: identity} = verified_fixture(now)
+    probe = bound_probe(assignment, identity)
+    assert {:ok, :claimed} = ProbeLease.claim(identity, @generation, @attempt, probe, now)
+    pending = redemption(identity)
+
+    assert {:ok, :unchanged} = ProbeLease.confirm_upstream(identity, @generation, @attempt, probe, now)
+    assert redemption(identity) == pending
+  end
+
+  @tag :credits_negative
+  test "actual admitted non-credit proof remains request-scoped and stops at the original grace deadline" do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    %{assignment: assignment, identity: identity} = verified_fixture(now)
+    probe = bound_probe(assignment, identity)
+    assert {:ok, :claimed} = ProbeLease.claim(identity, @generation, @attempt, probe, now)
+    confirmation = admitted_confirmation!(assignment, identity, probe)
+    refute inspect(confirmation) =~ probe.token
+    confirmed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    assert {:ok, :confirmed} = ProbeLease.confirm_upstream(identity, @generation, @attempt, confirmation, confirmed_at)
+    scope = grace_scope(assignment, identity, probe)
+    confirmed = redemption(identity)
+    proof = confirmed["non_credit_confirmation"]
+    refute CodexPooler.JSON.encode!(proof) =~ probe.token
+    refute Map.has_key?(proof, "request_id")
+    refute Map.has_key?(proof, "raw_payload")
+    assert ProbeLease.verified_grace?(snapshot(identity, confirmed_at), scope)
+
+    for mismatch <- [
+          %{scope | model: "gpt-6-luna"},
+          %{scope | upstream_model: "gpt-6-luna"},
+          %{scope | route_class: "proxy_stream"},
+          %{scope | serving_mode: :lite},
+          %{scope | transport: :native_websocket},
+          %{scope | pool_upstream_assignment_id: Ecto.UUID.generate()},
+          %{scope | upstream_identity_id: Ecto.UUID.generate()},
+          Map.delete(scope, :model),
+          Map.delete(scope, :pool_upstream_assignment_id),
+          Map.delete(scope, :upstream_identity_id)
+        ] do
+      refute ProbeLease.verified_grace?(snapshot(identity, confirmed_at), mismatch)
+    end
+
+    {:ok, deadline, 0} = DateTime.from_iso8601(confirmed["deadline_at"])
+    assert ProbeLease.verified_grace?(snapshot(identity, DateTime.add(deadline, -1, :microsecond)), scope)
+    refute ProbeLease.verified_grace?(snapshot(identity, deadline), scope)
+    refute ProbeLease.verified_grace?(snapshot(identity, DateTime.add(deadline, 1, :microsecond)), scope)
+  end
+
+  @tag :credits_negative
+  test "legacy upstream confirmation cannot gain grace from a newly observed zero credit balance" do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    %{assignment: assignment, identity: identity} = verified_fixture(now)
+    probe = bound_probe(assignment, identity)
+    persist_redemption!(Repo.reload!(identity), Map.put(redemption(identity), "probe", legacy_probe("legacy-token", now)))
+    assert {:ok, :confirmed} = ProbeLease.confirm_upstream(identity, "legacy-token", now)
+
+    refute Map.has_key?(redemption(identity), "non_credit_confirmation")
+    refute ProbeLease.verified_grace?(snapshot(identity, now), grace_scope(assignment, identity, probe))
+  end
+
+  @tag :credits_negative
+  test "a later available or unknown credit receipt revokes verified non-credit grace" do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    %{assignment: assignment, identity: identity} = verified_fixture(now)
+    probe = bound_probe(assignment, identity)
+    assert {:ok, :claimed} = ProbeLease.claim(identity, @generation, @attempt, probe, now)
+    confirmation = admitted_confirmation!(assignment, identity, probe)
+    confirmed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    assert {:ok, :confirmed} = ProbeLease.confirm_upstream(identity, @generation, @attempt, confirmation, confirmed_at)
+    scope = grace_scope(assignment, identity, probe)
+    assert ProbeLease.verified_grace?(snapshot(identity, confirmed_at), scope)
+
+    for credits <- [:full, :unknown] do
+      observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      identity = ProviderCreditsFixtures.persist_usage!(Repo.reload!(identity), ProviderCreditsFixtures.usage_payload(:weekly_credit_only, now: observed_at, credits: credits), observed_at)
+      refute ProbeLease.verified_grace?(snapshot(identity, observed_at), scope)
+      assert redemption(identity)["phase"] == "confirmed_by_upstream"
+    end
+  end
+
+  @tag :credits_negative
+  test "verified non-credit proof cannot survive a new credential epoch or altered resource binding" do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    %{assignment: assignment, identity: identity} = verified_fixture(now)
+    probe = bound_probe(assignment, identity)
+    assert {:ok, :claimed} = ProbeLease.claim(identity, @generation, @attempt, probe, now)
+    confirmation = admitted_confirmation!(assignment, identity, probe)
+    confirmed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    assert {:ok, :confirmed} = ProbeLease.confirm_upstream(identity, @generation, @attempt, confirmation, confirmed_at)
+    scope = grace_scope(assignment, identity, probe)
+    original = Repo.reload!(identity)
+    original_snapshot = snapshot(identity, confirmed_at)
+    assert ProbeLease.verified_grace?(snapshot(identity, confirmed_at), scope)
+
+    for mutation <- [
+          Map.update!(original.metadata, "saved_reset_redemption", &Map.delete(&1, "non_credit_confirmation")),
+          put_in(original.metadata, ["saved_reset_redemption", "included_window_descriptors"], [%{"window_kind" => "primary", "window_minutes" => 43_200}]),
+          put_in(original.metadata, ["saved_reset_redemption", "generation"], @generation + 1),
+          put_in(original.metadata, ["saved_reset_redemption", "attempt_id"], Ecto.UUID.generate()),
+          put_in(original.metadata, ["saved_reset_redemption", "non_credit_confirmation", "extra"], true),
+          put_in(original.metadata, ["saved_reset_redemption", "non_credit_confirmation", "confirmed_at"], DateTime.to_iso8601(DateTime.add(confirmed_at, 1, :second))),
+          CredentialFencing.advance_credential_epoch(original)
+        ] do
+      original |> Ecto.Changeset.change(metadata: mutation) |> Repo.update!()
+      refute ProbeLease.verified_grace?(snapshot(identity, confirmed_at), scope)
+    end
+
+    for unverified <- [
+          %{original_snapshot | capacity_facts: nil},
+          %{original_snapshot | capacity_facts: %{original_snapshot.capacity_facts | observed_at: DateTime.add(confirmed_at, -3_600, :second)}},
+          %{original_snapshot | capacity_facts: %{original_snapshot.capacity_facts | observed_at: DateTime.add(confirmed_at, 1, :second)}},
+          %{original_snapshot | raw_windows: []}
+        ] do
+      refute ProbeLease.verified_grace?(unverified, scope)
     end
   end
 
@@ -599,6 +780,7 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
 
     assert {:ok, :confirmed} = ProbeLease.confirm_upstream(identity, "token-A")
     assert phase(identity) == "confirmed_by_upstream"
+    refute Map.has_key?(redemption(identity), "non_credit_confirmation")
   end
 
   test "a non-holding token cannot confirm the probe" do

@@ -83,7 +83,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.EarlierReleaseFirstCompactCol
     request = earlier_request_v3(active_upstream_identity_fixture().id, provenance)
     admission = :sys.get_state(armed.owner).native_compaction_admission
 
-    assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.remote_submit_request_v3(armed.codex_session_id, armed.downstream, request)
+    assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.remote_submit_request_v8(armed.codex_session_id, armed.downstream, request)
 
     assert %{active_turn: nil, native_compaction_admission: ^admission} = :sys.get_state(armed.owner)
     assert WebsocketOwnerNodeHarness.fake_upstream_frames(armed.upstream_pid) == []

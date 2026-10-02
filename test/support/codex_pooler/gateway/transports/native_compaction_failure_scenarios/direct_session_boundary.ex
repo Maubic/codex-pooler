@@ -13,6 +13,7 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionFailureScenarios.Direct
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission.Topology.Direct
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request
+  alias CodexPooler.ProviderCreditsDispatchSupport
 
   @detection_timeout_ms 15_000
   @post_accounting_variants [
@@ -418,6 +419,7 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionFailureScenarios.Direct
       native_compaction_capability: capability,
       expected_connection_lifecycle: lifecycle
     }
+    |> ProviderCreditsDispatchSupport.wire_request!()
   end
 
   defp observe(session, upstream, baseline, accounting, metadata) do

@@ -15,6 +15,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ResponseProcessedTest do
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request, as: WireRequest
   alias CodexPooler.Pools
+  alias CodexPooler.ProviderCreditsDispatchSupport
 
   @endpoint "/backend-api/codex/responses"
 
@@ -303,9 +304,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ResponseProcessedTest do
 
     on_exit(fn -> FakeUpstream.stop(upstream) end)
     session = start_supervised!(UpstreamWebsocketSession)
+    context = ProviderCreditsDispatchSupport.context!()
 
     assert {:ok, %{terminal: "response.completed"}} =
              UpstreamWebsocketSession.request(session, %WireRequest{
+               provider_credits_context: context,
                url: FakeUpstream.url(upstream) <> @endpoint,
                headers: [],
                payload: "{}",

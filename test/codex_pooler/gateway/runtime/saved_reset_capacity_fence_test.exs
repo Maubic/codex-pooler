@@ -173,6 +173,11 @@ defmodule CodexPooler.Gateway.Runtime.SavedResetCapacityFenceTest do
     outside_identity_id = Ecto.UUID.generate()
 
     invalid_contexts = [
+      Map.put(context, :credit_request_contexts, %{}),
+      put_in(context, [:credit_request_contexts, setup.assignment.id, :transport], :invalid),
+      put_in(context, [:credit_request_contexts, setup.assignment.id, :serving_mode], :invalid),
+      put_in(context, [:credit_request_contexts, setup.assignment.id, :upstream_model], "different-model"),
+      put_in(context, [:credit_request_contexts, setup.assignment.id, :qualified_credit_scopes], []),
       Map.delete(context, :capacity_identity_ids),
       Map.update!(context, :capacity_assignment_ids, &[Ecto.UUID.generate() | &1]),
       context

@@ -3,7 +3,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
 
   alias CodexPooler.Jobs
   alias CodexPooler.Platform.OutboundHTTP
-  alias CodexPooler.Quotas.{AccountAvailability, Evidence}
+  alias CodexPooler.Quotas.{AccountAvailability, CapacityFacts, Evidence}
   alias CodexPooler.Quotas.Evidence.CodexParsers
   alias CodexPooler.Quotas.Evidence.Descriptors
   alias CodexPooler.Upstreams.Auth.{AccessTokenExpiry, TokenRefresh, TokenRefreshMetadata}
@@ -19,6 +19,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
 
   @account_quota_key "account"
   @usage_auth_refresh_skew_seconds 5 * 60
+  @capacity_reset_rounding_seconds 5
   @chatgpt_usage_paths [
     "/backend-api/wham/usage",
     "/backend-api/codex/usage"
@@ -32,7 +33,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
   defmodule Result do
     @moduledoc false
 
-    alias CodexPooler.Quotas.{AccountAvailability, Evidence}
+    alias CodexPooler.Quotas.{AccountAvailability, CapacityFacts, Evidence}
 
     @enforce_keys [
       :payload,
@@ -41,7 +42,10 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
       :windows,
       :covered_descriptors,
       :account_availability,
-      :observed_at
+      :capacity_facts,
+      :capacity_observations,
+      :observed_at,
+      :usable_authority?
     ]
     defstruct [
       :payload,
@@ -49,7 +53,10 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
       :usage_path,
       :credential_fence,
       :account_availability,
+      :capacity_facts,
+      :capacity_observations,
       :observed_at,
+      :usable_authority?,
       windows: [],
       covered_descriptors: MapSet.new()
     ]
@@ -60,7 +67,10 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
             usage_path: String.t(),
             credential_fence: CredentialFencing.fence() | nil,
             account_availability: AccountAvailability.t() | nil,
+            capacity_facts: CapacityFacts.t(),
+            capacity_observations: [CapacityFacts.t()],
             observed_at: DateTime.t(),
+            usable_authority?: boolean(),
             windows: [map()],
             covered_descriptors: MapSet.t(Evidence.descriptor_key())
           }
@@ -72,7 +82,8 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
            origin_key: String.t() | nil
          }
 
-  @type usage_fetch_result :: {:ok, Result.t()} | {:error, term()}
+  @type unusable_capacity_error :: {:capacity_observation_unusable, Result.t()} | {:capacity_observation_unusable, Result.t(), CredentialFencing.fence()}
+  @type usage_fetch_result :: {:ok, Result.t()} | {:error, unusable_capacity_error() | term()}
   @type usage_probe_result ::
           {:ok, Result.t()}
           | :not_found
@@ -87,6 +98,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
           {:usage, UpstreamIdentity.t(), Result.t()}
           | {:usage_rejected, UpstreamIdentity.t(), CredentialFencing.fence()}
           | {:usage_unavailable, term(), CredentialFencing.fence()}
+          | {:usage_unavailable_capacity, Result.t(), CredentialFencing.fence()}
           | {:auth_unavailable, CredentialFencing.fence()}
           | :auth_unavailable
   def reconciliation_source(%UpstreamIdentity{} = identity, assignment, opts) do
@@ -116,6 +128,9 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
     case fetch(identity, assignment, access_token, observed_at, opts) do
       {:ok, %Result{} = result} ->
         {:usage, identity, %{result | credential_fence: fence}}
+
+      {:error, {:capacity_observation_unusable, %Result{} = result}} ->
+        {:usage_unavailable_capacity, %{result | credential_fence: fence}, fence}
 
       {:error, :definitive_provider_auth_rejected} ->
         {:usage_rejected, identity, fence}
@@ -151,6 +166,9 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
            ) do
         {:ok, %Result{} = result} ->
           {:ok, %{result | credential_fence: fence}}
+
+        {:error, {:capacity_observation_unusable, %Result{} = result}} ->
+          {:error, {:capacity_observation_unusable, %{result | credential_fence: fence}, fence}}
 
         {:error, :definitive_provider_auth_rejected} ->
           {:error, {:definitive_provider_auth_rejected, fence}}
@@ -338,6 +356,9 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
         case fetch(fenced_identity, assignment, access_token, retry_observed_at(opts), opts) do
           {:ok, %Result{} = result} ->
             {:usage, fenced_identity, %{result | credential_fence: fence}}
+
+          {:error, {:capacity_observation_unusable, %Result{} = result}} ->
+            {:usage_unavailable_capacity, %{result | credential_fence: fence}, fence}
 
           {:error, :definitive_provider_auth_rejected} ->
             {:usage_rejected, fenced_identity, fence}
@@ -622,6 +643,9 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
     end
   end
 
+  defp finalize_usage_probe_result({:ok, %Result{usable_authority?: false} = result}, _paths),
+    do: {:error, {:capacity_observation_unusable, result}}
+
   defp finalize_usage_probe_result(result, _paths), do: result
 
   defp decoded_json_object?(%{}), do: true
@@ -665,64 +689,35 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
         ) :: usage_probe_result()
   defp usage_probe_success(body, identity, url, observed_at, timeout, headers, cooldown) do
     case CodexParsers.parse_codex_usage_result(body, observed_at) do
-      {:ok, %{windows: windows, account_availability: account_availability}}
-      when windows != [] or not is_nil(account_availability) ->
-        windows = suppress_conflicted_account_windows(windows, account_availability)
+      {:ok, %{windows: windows, account_availability: availability, capacity_facts: facts}} ->
+        facts = %{facts | source_kind: CapacityFacts.source_for_path(URI.parse(url).path), credential_epoch: CredentialFencing.credential_epoch(identity)}
+        windows = suppress_conflicted_account_windows(windows, availability)
 
-        body =
-          SavedResetUsageEnrichment.enrich(
-            identity,
-            body,
-            url,
-            observed_at,
-            timeout,
-            headers,
-            cooldown
-          )
+        windows =
+          if windows == [] and is_nil(availability) and not CapacityFacts.authority_observed?(facts),
+            do: CodexParsers.legacy_usage_windows_for_strict_result(body, observed_at),
+            else: windows
+
+        usable_authority? = windows != [] or not is_nil(availability) or CapacityFacts.authority_observed?(facts)
+
+        enriched =
+          if usable_authority?,
+            do: SavedResetUsageEnrichment.enrich(identity, body, url, observed_at, timeout, headers, cooldown),
+            else: body
 
         {:ok,
          %Result{
-           payload: body,
+           payload: enriched,
            usage_url: url,
            usage_path: URI.parse(url).path,
            windows: windows,
-           account_availability: account_availability,
+           account_availability: availability,
+           capacity_facts: facts,
+           capacity_observations: [facts],
+           usable_authority?: usable_authority?,
            observed_at: observed_at,
-           covered_descriptors: covered_descriptors(body, windows, account_availability, observed_at)
+           covered_descriptors: covered_descriptors(body, windows, availability, observed_at)
          }}
-
-      {:ok, %{windows: [], account_availability: nil}} ->
-        case CodexParsers.legacy_usage_windows_for_strict_result(body, observed_at) do
-          [] ->
-            {:continue_error,
-             %{
-               code: :upstream_quota_unusable,
-               message: "upstream quota payload had no usable windows"
-             }}
-
-          windows ->
-            body =
-              SavedResetUsageEnrichment.enrich(
-                identity,
-                body,
-                url,
-                observed_at,
-                timeout,
-                headers,
-                cooldown
-              )
-
-            {:ok,
-             %Result{
-               payload: body,
-               usage_url: url,
-               usage_path: URI.parse(url).path,
-               windows: windows,
-               account_availability: nil,
-               observed_at: observed_at,
-               covered_descriptors: covered_descriptors(body, windows, nil, observed_at)
-             }}
-        end
 
       {:error, reason} ->
         {:continue_error, reason}
@@ -849,13 +844,52 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
     %Result{} = selected = if preferred == :current, do: current, else: previous
     windows = merge_usage_windows(previous.windows, current.windows, preferred)
     account_availability = reduce_account_availability(previous, current)
+    observations = Enum.take(previous.capacity_observations ++ current.capacity_observations, length(@codex_api_usage_paths))
+    capacity_facts = reduce_capacity_facts(observations)
 
     %Result{
       selected
       | windows: windows,
         account_availability: account_availability,
+        capacity_facts: capacity_facts,
+        capacity_observations: observations,
+        usable_authority?: previous.usable_authority? or current.usable_authority?,
         covered_descriptors: merge_covered_descriptors(previous, current, windows, account_availability)
     }
+  end
+
+  # Choose one complete receipt, never a conjunction of unrelated endpoints.
+  # Stronger denials survive payload preference and incomplete/equal conflicts
+  # cannot create the missing spend/window evidence of another receipt.
+  defp reduce_capacity_facts(observations) do
+    strongest = Enum.max_by(observations, &capacity_strength/1)
+    peers = Enum.filter(observations, &(capacity_strength(&1) == capacity_strength(strongest)))
+
+    cond do
+      strongest.denial_category in [:workspace_limit, :model_limit, :malformed, :spend_limit] -> strongest
+      Enum.any?(observations, &(&1.credit_permission == :unknown and &1.denial_category == :unknown)) -> CapacityFacts.revoke(strongest)
+      Enum.all?(peers, &same_capacity_envelope?(&1, strongest)) -> strongest
+      true -> CapacityFacts.revoke(strongest)
+    end
+  end
+
+  defp capacity_strength(%CapacityFacts{denial_category: :workspace_limit}), do: 6
+  defp capacity_strength(%CapacityFacts{denial_category: :model_limit}), do: 5
+  defp capacity_strength(%CapacityFacts{denial_category: :malformed}), do: 4
+  defp capacity_strength(%CapacityFacts{denial_category: :spend_limit}), do: 3
+  defp capacity_strength(%CapacityFacts{credit_permission: :available}), do: 2
+  defp capacity_strength(%CapacityFacts{included_permission: :available}), do: 2
+  defp capacity_strength(_facts), do: 1
+
+  defp same_capacity_envelope?(left, right) do
+    Map.drop(Map.from_struct(left), [:source_kind, :account_windows]) == Map.drop(Map.from_struct(right), [:source_kind, :account_windows]) and
+      length(left.account_windows) == length(right.account_windows) and
+      Enum.all?(left.account_windows, fn window ->
+        Enum.any?(right.account_windows, fn other ->
+          Map.delete(window, :reset_at) == Map.delete(other, :reset_at) and
+            abs(DateTime.diff(window.reset_at, other.reset_at, :microsecond)) <= @capacity_reset_rounding_seconds * 1_000_000
+        end)
+      end)
   end
 
   defp covered_descriptors(payload, windows, account_availability, observed_at) do
@@ -955,8 +989,6 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
 
     account_descriptors ++ additional_descriptors(payload["additional_rate_limits"])
   end
-
-  defp raw_descriptors(_payload), do: []
 
   defp additional_descriptors(limits) when is_list(limits) do
     Enum.flat_map(limits, fn

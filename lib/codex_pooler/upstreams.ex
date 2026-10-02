@@ -15,6 +15,7 @@ defmodule CodexPooler.Upstreams do
     Import,
     OAuth,
     PreparedAccount,
+    ProviderCreditsPolicy,
     SavedResetPolicy,
     SavedResetRedemptionEnqueue,
     SecretStore,
@@ -271,6 +272,15 @@ defmodule CodexPooler.Upstreams do
   defdelegate update_saved_reset_policy_for_scope(scope, identity_or_id, attrs),
     to: SavedResetPolicy,
     as: :update_for_scope
+
+  @spec update_provider_credits_policy_for_scope(Scope.t(), identity_ref(), map()) ::
+          ProviderCreditsPolicy.update_result()
+  defdelegate update_provider_credits_policy_for_scope(scope, identity_or_id, attrs),
+    to: ProviderCreditsPolicy,
+    as: :update_for_scope
+
+  @spec provider_credits_decision(CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot.t(), map() | keyword()) :: ProviderCreditsPolicy.decision()
+  defdelegate provider_credits_decision(snapshot, context), to: ProviderCreditsPolicy, as: :evaluate
 
   @spec enqueue_saved_reset_redemption_for_scope(
           Scope.t(),

@@ -15,7 +15,6 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLiveTest do
   alias CodexPooler.InstanceSettings.Settings
   alias CodexPooler.Pools
   alias CodexPooler.Repo
-  alias CodexPoolerWeb.Admin.AuditLogsComponents.Prose
 
   setup :register_and_log_in_user
 
@@ -903,11 +902,75 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLiveTest do
            "#{length(missing)} audit events were reachable on no page at all"
   end
 
-  test "every supported audit action reads as handcrafted prose" do
-    supported = Audit.action_options() |> Enum.map(fn {_label, action} -> action end)
-    covered = Prose.covered_actions()
+  test "provider credits policy audit entries expose safe changes and filterable entities", %{
+    conn: conn,
+    scope: scope,
+    user: user
+  } do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "audit-provider-credits", name: "Audit Provider Credits"})
+    %{identity: identity} = upstream_assignment_fixture(pool, %{account_label: "Audited credit account"})
+    sensitive_marker = "audit-provider-credit-secret-do-not-render"
+    action = "upstream_account.provider_credits_policy_update"
 
-    assert Enum.sort(covered) == Enum.sort(supported)
+    assert {:ok, event} =
+             Audit.record_user_event(user, %{
+               pool_id: pool.id,
+               action: action,
+               target_type: "upstream_identity",
+               target_id: identity.id,
+               details: %{
+                 "label" => identity.account_label,
+                 "previous_allow_provider_credits" => true,
+                 "allow_provider_credits" => false,
+                 "access_token" => sensitive_marker
+               }
+             })
+
+    {:ok, view, html} = live(conn, ~p"/admin/audit-logs")
+    row = "#audit-log-row-#{event.id}"
+
+    assert has_element?(view, "#{row} [data-role='audit-prose-actor']", user.email)
+    assert has_element?(view, "#{row} [data-role='audit-prose-named-target']", identity.account_label)
+    assert has_element?(view, "#{row} [data-role='audit-prose-pool']", pool.name)
+    refute html =~ sensitive_marker
+
+    view
+    |> element("#audit-log-action-filter button[data-action='#{action}']")
+    |> render_click()
+
+    assert_patch(view, ~p"/admin/audit-logs?action=#{action}")
+    assert has_element?(view, "#filters_action[value='#{action}']")
+    assert render(view) |> LazyHTML.from_fragment() |> LazyHTML.query("[id^='audit-log-row-']") |> Enum.count() == 1
+    assert has_element?(view, row)
+
+    view |> element("#{row} [data-role='audit-prose-actor']") |> render_click()
+    assert_patch(view)
+    assert has_element?(view, "#filters_actor[value='#{user.email}']")
+
+    view |> element("#{row} [data-role='audit-prose-pool']") |> render_click()
+    assert_patch(view)
+    assert has_element?(view, "#filters_pool_id[value='#{pool.id}']")
+    assert has_element?(view, row)
+
+    view |> element("#audit-log-time-#{event.id}") |> render_click()
+    assert has_element?(view, "#audit-event-details-sidebar[role='dialog']")
+    assert has_element?(view, "#audit-event-detail-summary", action)
+
+    drawer_html = view |> element("#audit-event-details-sidebar") |> render()
+
+    detail_values =
+      drawer_html
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query("#audit-event-detail-metadata dl > div")
+      |> Map.new(fn detail ->
+        label = detail |> LazyHTML.query("dt") |> LazyHTML.text() |> String.trim()
+        value = detail |> LazyHTML.query("dd") |> LazyHTML.text() |> String.trim()
+        {label, value}
+      end)
+
+    assert detail_values["Previous allow provider credits"] == "true"
+    assert detail_values["Allow provider credits"] == "false"
+    refute drawer_html =~ sensitive_marker
   end
 
   test "prose entities drive the page filters", %{conn: conn, scope: scope, user: user} do

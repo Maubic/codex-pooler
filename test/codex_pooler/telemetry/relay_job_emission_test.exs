@@ -505,7 +505,7 @@ defmodule CodexPooler.Telemetry.RelayJobEmissionTest do
     upstream =
       fake_upstream!(%{
         "/api/codex/rate-limit-reset-credits/consume" => {200, %{"code" => "reset"}},
-        "/api/codex/usage" => {200, primary_usage_payload(as_of)}
+        "/api/codex/usage" => {200, put_in(usage_payload(as_of, 25), ["rate_limit_reset_credits", "available_count"], 0)}
       })
 
     fixture =
@@ -657,27 +657,16 @@ defmodule CodexPooler.Telemetry.RelayJobEmissionTest do
   defp usage_payload(as_of, used_percent) do
     %{
       "plan_type" => "pro",
+      "credits" => %{"has_credits" => false, "unlimited" => false, "balance" => "0"},
+      "spend_control" => %{"reached" => false},
       "rate_limit" => %{
+        "allowed" => true,
+        "limit_reached" => false,
         "secondary_window" => %{
           "used_percent" => used_percent,
           "limit_window_seconds" => 604_800,
           "reset_after_seconds" => 7_200,
           "reset_at" => as_of |> DateTime.add(7_200, :second) |> DateTime.to_unix()
-        }
-      },
-      "rate_limit_reset_credits" => %{"available_count" => 1}
-    }
-  end
-
-  defp primary_usage_payload(as_of) do
-    %{
-      "plan_type" => "pro",
-      "rate_limit" => %{
-        "primary_window" => %{
-          "used_percent" => 10,
-          "limit_window_seconds" => 18_000,
-          "reset_after_seconds" => 3_600,
-          "reset_at" => as_of |> DateTime.add(3_600, :second) |> DateTime.to_unix()
         }
       },
       "rate_limit_reset_credits" => %{"available_count" => 1}

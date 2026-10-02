@@ -10,6 +10,7 @@ defmodule CodexPooler.Gateway.Routing.AccountDenialBoundaryTest do
   alias CodexPooler.Gateway.Routing.CandidateEligibility.Quota
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Quotas.Evidence
+  alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
   alias CodexPooler.Upstreams.Quota.AccountAvailabilityStore
   alias CodexPooler.Upstreams.Quota.Windows
 
@@ -27,7 +28,7 @@ defmodule CodexPooler.Gateway.Routing.AccountDenialBoundaryTest do
       assert window.metadata["rate_limit_error_code"] == unquote(code)
       {input, state} = filter_context(ctx, [ctx.denied], ctx.now)
       assert {:ok, input.candidates} == AccountDenial.filter_candidates(input, input.candidates, nil, state)
-      refute AccountDenial.candidate_exclusion(hd(input.candidates), state)
+      refute AccountDenial.candidate_exclusion(hd(input.candidates), state, input.model, input.request_options)
     end
   end
 
@@ -48,7 +49,7 @@ defmodule CodexPooler.Gateway.Routing.AccountDenialBoundaryTest do
     assert {:error, %{code: "quota_exhausted"}} = AccountDenial.filter_candidates(input, input.candidates, nil, state)
   end
 
-  test "a confirmed reset candidate does not exempt its workspace-denied sibling", ctx do
+  test "a legacy confirmed phase without verified proof exempts neither workspace-denied candidate", ctx do
     consumed_at = DateTime.add(ctx.now, -60, :second)
 
     probe =
@@ -70,11 +71,12 @@ defmodule CodexPooler.Gateway.Routing.AccountDenialBoundaryTest do
     assert {:ok, [_]} = write_denial(ctx.denied.identity, ctx.now, nil, "workspace_member_credits_depleted")
     assert {:ok, [_]} = write_denial(probe.identity, ctx.now, nil, "workspace_member_credits_depleted", "usage_limit_reached", "10080", "100")
     {input, state} = filter_context(ctx, [ctx.denied, probe], ctx.now)
-    assert {:ok, candidates, decision} = Quota.filter_quota_eligible_candidates(input, state)
-    assert decision["reset_probe_candidate_count"] == 1
-    assert length(candidates) == 2
-    assert {:ok, [{assignment, _identity}]} = AccountDenial.filter_candidates(input, candidates, decision, state)
-    assert assignment.id == probe.assignment.id
+    assert {:refreshable_quota, %{candidate_exclusions: quota_exclusions, refreshable_candidates: []}} = Quota.filter_quota_eligible_candidates(input, state)
+    assert Enum.sort(Enum.map(quota_exclusions, & &1.pool_upstream_assignment_id)) == Enum.sort([ctx.denied.assignment.id, probe.assignment.id])
+    refute state.reset_probe
+    assert {:error, %{code: "quota_exhausted", candidate_exclusions: exclusions}} = AccountDenial.filter_candidates(input, input.candidates, nil, state)
+    assert Enum.sort(Enum.map(exclusions, & &1.pool_upstream_assignment_id)) == Enum.sort([ctx.denied.assignment.id, probe.assignment.id])
+    refute get_in(Repo.reload!(probe.identity).metadata, ["saved_reset_redemption", "non_credit_confirmation"])
   end
 
   test "a bound reset probe only exempts its own assignment and identity", ctx do
@@ -99,13 +101,13 @@ defmodule CodexPooler.Gateway.Routing.AccountDenialBoundaryTest do
     available_at = DateTime.add(ctx.now, 60, :second)
 
     ctx.denied.identity
-    |> Ecto.Changeset.change(metadata: Map.put(ctx.denied.identity.metadata, AccountAvailabilityStore.metadata_key(), AccountAvailabilityStore.encode!(:available, available_at, 1)))
+    |> Ecto.Changeset.change(metadata: Map.put(ctx.denied.identity.metadata, AccountAvailabilityStore.metadata_key(), AccountAvailabilityStore.encode!(:available, available_at, CredentialFencing.credential_epoch(ctx.denied.identity))))
     |> Repo.update!()
 
     {input, fresh} = filter_context(ctx, [ctx.denied], available_at)
     assert {:ok, input.candidates} == AccountDenial.filter_candidates(input, input.candidates, nil, fresh)
     {input, stale} = filter_context(ctx, [ctx.denied], DateTime.add(available_at, Evidence.freshness_ttl_seconds() + 1, :second))
-    refute AccountAvailabilityStore.available?(stale.quota_snapshots[ctx.denied.identity.id].availability, 1, stale.quota_snapshots[ctx.denied.identity.id].as_of)
+    refute AccountAvailabilityStore.available?(stale.quota_snapshots[ctx.denied.identity.id].availability, CredentialFencing.credential_epoch(ctx.denied.identity), stale.quota_snapshots[ctx.denied.identity.id].as_of)
     assert {:error, %{code: "quota_exhausted"}} = AccountDenial.filter_candidates(input, input.candidates, nil, stale)
   end
 

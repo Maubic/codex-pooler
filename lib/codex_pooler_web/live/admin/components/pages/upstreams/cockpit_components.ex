@@ -6,6 +6,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents do
   alias CodexPoolerWeb.Admin.Components, as: AdminComponents
   alias CodexPoolerWeb.Admin.RequestLogDetailDrawer
   alias CodexPoolerWeb.Admin.UpstreamCockpitComponents.{Charts, Dialogs, Sections, Summary}
+  alias CodexPoolerWeb.Admin.UpstreamPageComponents
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.AuthJsonDialog
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.ReconciliationStatus
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.UsagePollPause
@@ -26,6 +27,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents do
   attr :deleting_account, :map, default: nil
   attr :delete_account_form, :any, required: true
   attr :saved_reset_policy_form, :any, required: true
+  attr :editing_provider_credits_policy, :map, default: nil
+  attr :provider_credits_policy_form, :any, default: nil
   attr :confirming_saved_reset_redemption, :map, default: nil
   attr :selected_request_log, :map, default: nil
   attr :refresh_data_message, :string, default: nil
@@ -111,6 +114,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents do
                 saved_reset_policy_form={@saved_reset_policy_form}
                 datetime_preferences={@datetime_preferences}
               />
+              <UpstreamPageComponents.provider_credits_policy_dialog account={@editing_provider_credits_policy} form={@provider_credits_policy_form} />
               <Charts.request_section
                 cockpit={@cockpit}
                 refresh_data_message={@refresh_data_message}

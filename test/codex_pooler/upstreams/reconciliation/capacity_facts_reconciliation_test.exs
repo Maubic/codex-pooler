@@ -1,0 +1,474 @@
+defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest do
+  use CodexPooler.DataCase, async: false
+
+  import CodexPooler.PoolerFixtures
+
+  alias CodexPooler.{FakeUpstream, Repo, Upstreams}
+  alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
+  alias CodexPooler.Upstreams.Quota.{CapacityFactsStore, RoutingQuotaSnapshot}
+  alias CodexPooler.Upstreams.Reconciliation.{PoolReconciliation, UsageProbe}
+
+  @paths ["/backend-api/wham/usage", "/backend-api/codex/usage"]
+
+  test "real usage reconciliation preserves fractional credits separate from exhausted included capacity" do
+    {fake, identity, assignment} = setup_upstream(Map.new(@paths, &{&1, {200, credit_payload()}}))
+    assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+    assert {:ok, facts} = CapacityFactsStore.load(refreshed.metadata)
+    assert facts.balance == "0.125"
+    assert facts.included_permission == :exhausted
+    assert facts.credit_permission == :available
+    assert facts.credential_epoch == CredentialFencing.credential_epoch(refreshed)
+    snapshot = RoutingQuotaSnapshot.load_by_identity_ids([identity.id], DateTime.utc_now())[identity.id]
+    assert snapshot.capacity_facts == facts
+    assert snapshot.allow_provider_credits
+    assert requested_paths(fake) == @paths
+  end
+
+  for seconds <- [0, 1, 5, 6] do
+    @tag credits_negative: true
+    test "queried weekly credit receipts retain bounded #{seconds}-second reset rounding without merging other facts" do
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+      first = credit_payload() |> put_account_window(604_800, 100, now)
+      second = update_in(first, ["rate_limit", "primary_window", "reset_at"], &(&1 + unquote(seconds)))
+      {_fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, [{200, first}, {200, second}])))
+      assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+      assert {:ok, facts} = CapacityFactsStore.load(refreshed.metadata)
+      assert facts.credit_permission == :available == unquote(seconds) <= 5
+      assert facts.source_kind == :wham_usage
+      assert facts.balance == "0.125"
+      assert [%{reset_at: reset}] = facts.account_windows
+      assert DateTime.to_unix(reset) == get_in(first, ["rate_limit", "primary_window", "reset_at"])
+    end
+  end
+
+  @tag credits_multi_path: true
+  @tag credits_negative: true
+  test "queried spend and workspace blockers beat coherent credit grants in either response order" do
+    grant = credit_payload()
+
+    for blocker <- [%{"spend_control" => %{"reached" => true}}, %{"rate_limit_reached_type" => %{"type" => "workspace_owner_credits_depleted"}}],
+        reverse <- [false, true] do
+      denied = Map.merge(grant, blocker)
+      payloads = if reverse, do: [denied, grant], else: [grant, denied]
+      routes = Map.new(Enum.zip(@paths, Enum.map(payloads, &{200, &1})))
+      {fake, identity, assignment} = setup_upstream(routes)
+      assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+      assert {:ok, facts} = CapacityFactsStore.load(refreshed.metadata)
+      assert facts.credit_permission == :unavailable
+      assert facts.denial_category in [:spend_limit, :workspace_limit]
+      assert requested_paths(fake) == @paths
+    end
+  end
+
+  @tag credits_multi_path: true
+  @tag credits_negative: true
+  test "split-source credits and spend clearance never assemble authority" do
+    credits_only = Map.delete(credit_payload(), "spend_control")
+    spend_only = %{"plan_type" => "synthetic", "rate_limit" => %{"allowed" => false, "limit_reached" => true}, "spend_control" => %{"reached" => false}}
+    {fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, [{200, credits_only}, {200, spend_only}])))
+    assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+    assert {:ok, facts} = CapacityFactsStore.load(refreshed.metadata)
+    refute facts.credit_permission == :available
+    assert requested_paths(fake) == @paths
+  end
+
+  @tag credits_multi_path: true
+  @tag credits_negative: true
+  test "equal-strength conflicting grants stay unknown independent of selected display payload" do
+    first = credit_payload()
+    second = put_in(first, ["credits", "balance"], "0.25")
+
+    for payloads <- [[first, second], [second, first]] do
+      {fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, Enum.map(payloads, &{200, &1}))))
+      assert {:ok, result} = UsageProbe.fetch_from_identity(identity, assignment, DateTime.utc_now(), [])
+      assert result.usage_path == hd(@paths)
+      assert result.capacity_facts.credit_permission == :unknown
+      assert Enum.map(result.capacity_observations, & &1.balance) == Enum.map(payloads, &(get_in(&1, ["credits", "balance"]) |> Decimal.new() |> Decimal.normalize() |> Decimal.to_string(:normal)))
+      assert requested_paths(fake) == @paths
+      assert {:ok, identity} = PoolReconciliation.refresh_quota_from_usage(Repo.reload!(identity), assignment)
+      assert {:ok, facts} = CapacityFactsStore.load(identity.metadata)
+      assert facts.credit_permission == :unknown
+    end
+  end
+
+  @tag credits_multi_path: true
+  test "coherent credit-only zero-window receipt without legacy availability reaches Result and persistence" do
+    payload = Map.delete(credit_payload(), "plan_type") |> Map.delete("rate_limit")
+    {fake, identity, assignment} = setup_upstream(Map.new(@paths, &{&1, {200, payload}}))
+    assert {:ok, result} = UsageProbe.fetch_from_identity(identity, assignment, DateTime.utc_now(), [])
+    assert result.windows == []
+    assert result.account_availability == nil
+    assert result.capacity_facts.credit_permission == :available
+    assert Enum.map(result.capacity_observations, & &1.source_kind) == [:wham_usage, :codex_usage]
+    assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(Repo.reload!(identity), assignment)
+    assert {:ok, facts} = CapacityFactsStore.load(refreshed.metadata)
+    assert facts.account_windows == []
+    assert facts.included_permission == :unknown
+    assert facts.credit_permission == :available
+    assert Enum.uniq(requested_paths(fake)) == @paths
+  end
+
+  @tag credits_negative: true
+  test "newer malformed full response revokes a previous grant without changing persisted policy" do
+    payload = credit_payload()
+    {fake, identity, assignment} = setup_upstream(Map.new(@paths, &{&1, {200, payload}}))
+    assert {:ok, identity} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+    identity = Repo.update!(Ecto.Changeset.change(identity, allow_provider_credits: false))
+    malformed = Map.put(payload, "spend_control", %{"reached" => "false"})
+    FakeUpstream.set_mode(fake, {:path_json, Map.new(@paths, &{&1, {200, malformed}})})
+    assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+    assert {:ok, facts} = CapacityFactsStore.load(refreshed.metadata)
+    assert facts.denial_category == :malformed
+    refute facts.credit_permission == :available
+    refute refreshed.allow_provider_credits
+  end
+
+  @tag credits_negative: true
+  test "complete zero-authority response revokes prior credits while remaining unusable" do
+    {fake, identity, assignment} = setup_upstream(Map.new(@paths, &{&1, {200, credit_payload()}}))
+    assert {:ok, identity} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+    FakeUpstream.set_mode(fake, {:path_json, Map.new(@paths, &{&1, {200, %{}}})})
+    assert {:error, %{code: :upstream_quota_unusable}} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+    assert {:ok, facts} = CapacityFactsStore.load(Repo.reload!(identity).metadata)
+    assert facts.credit_permission == :unknown
+    assert facts.included_permission == :unknown
+  end
+
+  for first_source <- [:wham_usage, :codex_usage] do
+    @tag credits_multi_path: true
+    @tag credits_negative: true
+    test "unusable queried malformed receipts retain both source fences through #{first_source}-first clearance" do
+      now = DateTime.utc_now() |> DateTime.add(-4, :second) |> DateTime.truncate(:second)
+      malformed = %{"credits" => %{"balance" => "0.125", "has_credits" => true, "unlimited" => false}, "spend_control" => %{"reached" => "false"}}
+      {fake, identity, assignment} = setup_upstream(Map.new(@paths, &{&1, {200, malformed}}))
+      assert {:error, %{code: :upstream_quota_unusable}} = refresh_at(identity, assignment, now)
+      identity = Repo.reload!(identity)
+      assert {:ok, %{denial_category: :malformed, included_permission: :unknown, credit_permission: :unknown}} = CapacityFactsStore.load(identity.metadata)
+      assert {:ok, %{observations: retained, overflowed?: false}} = CapacityFactsStore.load_blockers(identity.metadata)
+      assert Enum.sort(Enum.map(retained, & &1.source_kind)) == [:codex_usage, :wham_usage]
+      refute public_decision(identity, now).credit_available?
+
+      FakeUpstream.set_mode(fake, {:path_json, routes_for(unquote(first_source), credit_payload())})
+      assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 1))
+      assert {:ok, %{credit_permission: :available}} = CapacityFactsStore.load(identity.metadata)
+      assert {:ok, %{observations: [remaining], overflowed?: false}} = CapacityFactsStore.load_blockers(identity.metadata)
+      assert remaining.source_kind != unquote(first_source)
+      assert remaining.denial_category == :malformed
+      decision = public_decision(identity, DateTime.add(now, 1))
+      refute decision.credit_available?
+      refute decision.eligible?
+
+      FakeUpstream.set_mode(fake, {:path_json, routes_for(remaining.source_kind, credit_payload())})
+      assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 2))
+      assert CapacityFactsStore.load_blockers(identity.metadata) == :error
+      assert_credit_authority(identity, DateTime.add(now, 2), remaining.source_kind, [])
+    end
+  end
+
+  for {replacement, source, window_seconds} <- [
+        {:spend, :wham_usage, nil},
+        {:spend, :codex_usage, nil},
+        {:malformed, :codex_usage, nil},
+        {:workspace, :wham_usage, 18_000}
+      ] do
+    @tag credits_negative: true
+    test "a retained weekly workspace denial survives newer #{replacement} from #{source} and unrelated clearance" do
+      now = DateTime.utc_now() |> DateTime.add(-5, :second) |> DateTime.truncate(:second)
+      original = included_payload() |> put_account_window(604_800, 100, now) |> Map.put("rate_limit_reached_type", %{"type" => "workspace_owner_usage_limit_reached"})
+      {fake, identity, assignment} = setup_upstream(routes_for(:codex_usage, original))
+      assert {:ok, identity} = refresh_at(identity, assignment, now)
+      assert {:ok, %{observations: [blocker], overflowed?: false}} = CapacityFactsStore.load_blockers(identity.metadata)
+      assert blocker.denial_category == :workspace_limit
+      assert blocker.source_kind == :codex_usage
+      assert [{"secondary", 10_080}] == Enum.map(blocker.account_windows, &{&1.window_kind, &1.window_minutes})
+      refute public_decision(identity, now).eligible?
+
+      replaced_payload =
+        included_payload()
+        |> put_account_window(unquote(window_seconds), 25, now)
+        |> blocking_payload(unquote(replacement))
+
+      FakeUpstream.set_mode(fake, {:path_json, routes_for(unquote(source), replaced_payload)})
+      assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 1))
+      assert {:ok, facts} = CapacityFactsStore.load(identity.metadata)
+      assert facts.denial_category == %{spend: :spend_limit, malformed: :malformed, workspace: :workspace_limit}[unquote(replacement)]
+      assert facts.source_kind == unquote(source)
+      assert {:ok, %{observations: retained}} = CapacityFactsStore.load_blockers(identity.metadata)
+      assert blocker in retained
+      decision = public_decision(identity, DateTime.add(now, 1))
+      refute decision.eligible?
+      assert "provider_denied" in decision.reason_codes
+
+      unrelated = included_payload() |> put_account_window(unquote(window_seconds), 25, now)
+      FakeUpstream.set_mode(fake, {:path_json, routes_for(unquote(source), unrelated)})
+      assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 2))
+      assert {:ok, %{included_permission: :available}} = CapacityFactsStore.load(identity.metadata)
+      assert {:ok, %{observations: [^blocker]}} = CapacityFactsStore.load_blockers(identity.metadata)
+      decision = public_decision(identity, DateTime.add(now, 2))
+      refute decision.eligible?
+      assert "provider_denied" in decision.reason_codes
+
+      compatible = included_payload() |> put_account_window(604_800, 25, now)
+      FakeUpstream.set_mode(fake, {:path_json, routes_for(:codex_usage, compatible)})
+      assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 3))
+      assert CapacityFactsStore.load_blockers(identity.metadata) == :error
+      decision = public_decision(identity, DateTime.add(now, 3))
+      assert decision.eligible?
+      assert decision.capacity_basis == :included_window
+    end
+  end
+
+  for credit_blocker <- [:spend, :malformed], first_clear <- [:credit, :hard] do
+    @tag credits_negative: true
+    test "queried #{credit_blocker} weekly and incompatible workspace fences require both clearances in #{first_clear}-first order" do
+      now = DateTime.utc_now() |> DateTime.add(-7, :second) |> DateTime.truncate(:second)
+      original = credit_payload() |> put_account_window(604_800, 100, now) |> blocking_payload(unquote(credit_blocker))
+      {fake, identity, assignment} = setup_upstream(routes_for(:codex_usage, original))
+      assert {:ok, identity} = refresh_at(identity, assignment, now)
+      assert {:ok, %{observations: [credit_fence], overflowed?: false}} = CapacityFactsStore.load_blockers(identity.metadata)
+      assert credit_fence.source_kind == :codex_usage
+      assert credit_fence.denial_category == %{spend: :spend_limit, malformed: :malformed}[unquote(credit_blocker)]
+
+      workspace = credit_payload() |> put_account_window(604_860, 100, now) |> blocking_payload(:workspace)
+      FakeUpstream.set_mode(fake, {:path_json, routes_for(:wham_usage, workspace)})
+      assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 1))
+      assert {:ok, %{observations: [^credit_fence, hard_fence], overflowed?: false}} = CapacityFactsStore.load_blockers(identity.metadata)
+      assert hard_fence.denial_category == :workspace_limit
+      assert hard_fence.source_kind == :wham_usage
+      decision = public_decision(identity, DateTime.add(now, 1))
+      refute decision.eligible?
+      refute decision.credit_available?
+      assert "provider_denied" in decision.reason_codes
+
+      {first_source, first_seconds, remaining} =
+        if unquote(first_clear) == :credit, do: {:codex_usage, 604_800, hard_fence}, else: {:wham_usage, 604_860, credit_fence}
+
+      cleared_payload = credit_payload() |> put_account_window(first_seconds, 100, now)
+      FakeUpstream.set_mode(fake, {:path_json, routes_for(first_source, cleared_payload)})
+      assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 2))
+      assert {:ok, %{credit_permission: :available}} = CapacityFactsStore.load(identity.metadata)
+      assert {:ok, %{observations: [^remaining], overflowed?: false}} = CapacityFactsStore.load_blockers(identity.metadata)
+      decision = public_decision(identity, DateTime.add(now, 2))
+      refute decision.eligible?
+      refute decision.credit_available?
+
+      FakeUpstream.set_mode(fake, {:path_json, routes_for(first_source, %{})})
+      assert {:error, %{code: :upstream_quota_unusable}} = refresh_at(identity, assignment, DateTime.add(now, 3))
+      identity = Repo.reload!(identity)
+      assert {:ok, %{observations: [^remaining], overflowed?: false}} = CapacityFactsStore.load_blockers(identity.metadata)
+      refute public_decision(identity, DateTime.add(now, 3)).eligible?
+
+      {last_source, last_seconds} = if unquote(first_clear) == :credit, do: {:wham_usage, 604_860}, else: {:codex_usage, 604_800}
+      complete = credit_payload() |> put_account_window(last_seconds, 100, now)
+      FakeUpstream.set_mode(fake, {:path_json, routes_for(last_source, complete)})
+      assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 4))
+      assert CapacityFactsStore.load_blockers(identity.metadata) == :error
+      window_kind = if last_seconds == 604_800, do: "secondary", else: "primary"
+      assert_credit_authority(identity, DateTime.add(now, 4), last_source, [{window_kind, div(last_seconds, 60)}])
+    end
+  end
+
+  for credit_blocker <- [:spend, :malformed], first_clear <- [:credit, :hard] do
+    @tag credits_multi_path: true
+    @tag credits_negative: true
+    test "one queried multi-path receipt set retains #{credit_blocker} alongside workspace through #{first_clear}-first clearance" do
+      now = DateTime.utc_now() |> DateTime.add(-4, :second) |> DateTime.truncate(:second)
+      credit_denial = credit_payload() |> put_account_window(604_800, 100, now) |> blocking_payload(unquote(credit_blocker))
+      workspace = credit_payload() |> put_account_window(604_860, 100, now) |> blocking_payload(:workspace)
+      {fake, identity, assignment} = setup_upstream(%{hd(@paths) => {200, workspace}, List.last(@paths) => {200, credit_denial}})
+      assert {:ok, identity} = refresh_at(identity, assignment, now)
+      assert {:ok, %{denial_category: :workspace_limit, source_kind: :wham_usage}} = CapacityFactsStore.load(identity.metadata)
+      assert {:ok, %{observations: retained, overflowed?: false}} = CapacityFactsStore.load_blockers(identity.metadata)
+      assert Enum.any?(retained, &(&1.source_kind == :wham_usage and &1.denial_category == :workspace_limit))
+      assert Enum.any?(retained, &(&1.source_kind == :codex_usage and &1.denial_category == %{spend: :spend_limit, malformed: :malformed}[unquote(credit_blocker)]))
+
+      {first_source, first_seconds, remaining_source} = if unquote(first_clear) == :credit, do: {:codex_usage, 604_800, :wham_usage}, else: {:wham_usage, 604_860, :codex_usage}
+      FakeUpstream.set_mode(fake, {:path_json, routes_for(first_source, credit_payload() |> put_account_window(first_seconds, 100, now))})
+      assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 1))
+      assert {:ok, %{observations: [remaining]}} = CapacityFactsStore.load_blockers(identity.metadata)
+      assert remaining.source_kind == remaining_source
+      refute public_decision(identity, DateTime.add(now, 1)).credit_available?
+
+      last_seconds = if remaining_source == :codex_usage, do: 604_800, else: 604_860
+      FakeUpstream.set_mode(fake, {:path_json, routes_for(remaining_source, credit_payload() |> put_account_window(last_seconds, 100, now))})
+      assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 2))
+      assert CapacityFactsStore.load_blockers(identity.metadata) == :error
+      window_kind = if last_seconds == 604_800, do: "secondary", else: "primary"
+      assert_credit_authority(identity, DateTime.add(now, 2), remaining_source, [{window_kind, div(last_seconds, 60)}])
+    end
+  end
+
+  @tag credits_negative: true
+  test "a queried envelope at the exact witness cap remains valid and the next source-bound fence fails closed until credential cutover" do
+    now = DateTime.utc_now() |> DateTime.add(-1, :second) |> DateTime.truncate(:second)
+    seed = credit_payload() |> put_account_window(604_800, 100, now) |> blocking_payload(:workspace)
+    {fake, identity, assignment} = setup_upstream(routes_for(:codex_usage, seed))
+
+    identity =
+      Enum.reduce(0..15, identity, fn offset, identity ->
+        payload = credit_payload() |> put_account_window(604_800 + offset * 60, 100, now) |> blocking_payload(:workspace)
+        FakeUpstream.set_mode(fake, {:path_json, routes_for(:codex_usage, payload)})
+        assert {:ok, refreshed} = refresh_at(identity, assignment, DateTime.add(now, offset, :microsecond))
+        refreshed
+      end)
+
+    assert {:ok, %{observations: witnesses, overflowed?: false}} = CapacityFactsStore.load_blockers(identity.metadata)
+    assert Enum.map(witnesses, fn facts -> hd(facts.account_windows).window_minutes end) == Enum.to_list(10_080..10_095)
+    refute public_decision(identity, DateTime.add(now, 15, :microsecond)).eligible?
+
+    payload = credit_payload() |> put_account_window(605_760, 100, now) |> blocking_payload(:workspace)
+    FakeUpstream.set_mode(fake, {:path_json, routes_for(:codex_usage, payload)})
+    assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 16, :microsecond))
+    assert {:ok, %{observations: ^witnesses, overflowed?: true}} = CapacityFactsStore.load_blockers(identity.metadata)
+
+    identity =
+      Enum.reduce(0..15, identity, fn offset, identity ->
+        payload = included_payload() |> put_account_window(604_800 + offset * 60, 25, now)
+        FakeUpstream.set_mode(fake, {:path_json, routes_for(:codex_usage, payload)})
+        assert {:ok, refreshed} = refresh_at(identity, assignment, DateTime.add(now, 17 + offset, :microsecond))
+        refreshed
+      end)
+
+    assert {:ok, %{observations: [], overflowed?: true}} = CapacityFactsStore.load_blockers(identity.metadata)
+    decision = public_decision(identity, DateTime.add(now, 33, :microsecond))
+    refute decision.eligible?
+    refute decision.credit_available?
+    assert "provider_denied" in decision.reason_codes
+
+    epoch = CredentialFencing.credential_epoch(identity)
+    identity = Repo.update!(Ecto.Changeset.change(identity, metadata: Map.put(identity.metadata, "credential_epoch", epoch + 1)))
+    FakeUpstream.set_mode(fake, {:path_json, routes_for(:codex_usage, included_payload())})
+    assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 34, :microsecond))
+    assert CapacityFactsStore.load_blockers(identity.metadata) == :error
+    decision = public_decision(identity, DateTime.add(now, 34, :microsecond))
+    assert decision.eligible?
+    assert decision.capacity_basis == :windowless_provider_permission
+  end
+
+  for malformed <- [nil, %{"version" => 1, "credential_epoch" => 1, "overflowed" => "false", "observations" => []}] do
+    @tag credits_negative: true
+    test "malformed retained metadata #{inspect(malformed)} cannot become included authority after a queried affirmative receipt" do
+      now = DateTime.utc_now() |> DateTime.add(-1, :second) |> DateTime.truncate(:second)
+      {_fake, identity, assignment} = setup_upstream(routes_for(:codex_usage, included_payload()))
+      identity = Repo.update!(Ecto.Changeset.change(identity, metadata: Map.put(identity.metadata, "quota_capacity_blocker", unquote(Macro.escape(malformed)))))
+      assert {:ok, identity} = refresh_at(identity, assignment, now)
+      assert {:ok, %{observations: [], overflowed?: true}} = CapacityFactsStore.load_blockers(identity.metadata)
+      decision = public_decision(identity, now)
+      refute decision.eligible?
+      refute decision.credit_available?
+      assert "provider_denied" in decision.reason_codes
+    end
+  end
+
+  for malformed_receipt <- [:oversized_window, :contradictory_reached_type] do
+    @tag credits_negative: true
+    test "a queried #{malformed_receipt} receipt revokes previous included authority under the credential fence" do
+      now = DateTime.utc_now() |> DateTime.add(-5, :second) |> DateTime.truncate(:second)
+      {fake, identity, assignment} = setup_upstream(Map.new(@paths, &{&1, {200, included_payload()}}))
+      assert {:ok, identity} = refresh_at(identity, assignment, now)
+      identity = Repo.update!(Ecto.Changeset.change(identity, allow_provider_credits: false))
+      assert public_decision(identity, now).eligible?
+
+      malformed =
+        case unquote(malformed_receipt) do
+          :oversized_window -> included_payload() |> put_account_window(31_536_001, 25, now)
+          :contradictory_reached_type -> Map.put(included_payload(), "rate_limit_reached_type", %{"type" => "rate_limit_reached"})
+        end
+
+      FakeUpstream.set_mode(fake, {:path_json, Map.new(@paths, &{&1, {200, malformed}})})
+      assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 1))
+      persisted = Repo.reload!(identity)
+      assert {:ok, facts} = CapacityFactsStore.load(persisted.metadata)
+      assert facts.observed_at == DateTime.add(now, 1)
+      assert facts.credential_epoch == CredentialFencing.credential_epoch(persisted)
+      assert facts.included_permission == :unknown
+      assert facts.credit_permission == :unknown
+      assert facts.denial_category == :malformed
+      assert facts.account_windows == []
+      refute persisted.allow_provider_credits
+      decision = public_decision(persisted, DateTime.add(now, 1))
+      refute decision.eligible?
+      refute decision.credit_available?
+
+      FakeUpstream.set_mode(fake, {:path_json, Map.new(@paths, &{&1, {200, included_payload()}})})
+      assert {:ok, identity} = refresh_at(persisted, assignment, DateTime.add(now, 2))
+      assert CapacityFactsStore.load_blockers(identity.metadata) == :error
+      decision = public_decision(identity, DateTime.add(now, 2))
+      assert decision.eligible?
+      assert decision.capacity_basis == :windowless_provider_permission
+    end
+  end
+
+  defp setup_upstream(routes) do
+    name = :"capacity_facts_fake_#{System.unique_integer([:positive])}"
+
+    on_exit(fn ->
+      if pid = Process.whereis(name), do: FakeUpstream.stop(%FakeUpstream{supervisor: pid})
+    end)
+
+    {:ok, fake} = FakeUpstream.start_link({:path_json, routes}, supervisor_name: name)
+    Process.unlink(fake.supervisor)
+    pool = pool_fixture()
+
+    %{identity: identity, assignment: assignment} =
+      active_upstream_assignment_fixture(
+        pool,
+        %{metadata: %{"usage_base_url" => FakeUpstream.url(fake)}}
+      )
+
+    {fake, identity, assignment}
+  end
+
+  defp refresh_at(identity, assignment, observed_at), do: PoolReconciliation.refresh_quota_from_usage(identity, assignment, observed_at: observed_at)
+
+  defp public_decision(identity, as_of) do
+    snapshot = RoutingQuotaSnapshot.load_by_identity_ids([identity.id], as_of)[identity.id]
+    Upstreams.provider_credits_decision(snapshot, %{model: "gpt-6-luna", serving_mode: :full, transport: :http_json})
+  end
+
+  defp assert_credit_authority(identity, observed_at, source_kind, account_windows) do
+    persisted = Repo.reload!(identity)
+    assert persisted.allow_provider_credits
+    assert {:ok, facts} = CapacityFactsStore.load(persisted.metadata)
+    assert facts.observed_at == observed_at
+    assert facts.credential_epoch == CredentialFencing.credential_epoch(persisted)
+    assert facts.source_kind == source_kind
+    assert facts.included_permission == :exhausted
+    assert facts.credit_permission == :available
+    assert facts.denial_category == :included_limit
+    assert Enum.map(facts.account_windows, &{&1.window_kind, &1.window_minutes}) == account_windows
+
+    decision = public_decision(persisted, observed_at)
+    assert decision.credit_available?
+    assert decision.eligible?
+    assert decision.capacity_basis == :provider_credits
+    assert decision.reason_codes == []
+    assert %{status: :provider_attested, scope: scope} = decision.qualification
+    assert scope.model == "gpt-6-luna"
+    assert scope.serving_mode == :full
+    assert scope.transport == :http_json
+    assert scope.source_kind == source_kind
+    assert scope.account_windows == account_windows
+  end
+
+  defp routes_for(:wham_usage, payload), do: %{hd(@paths) => {200, payload}, List.last(@paths) => {404, %{}}}
+  defp routes_for(:codex_usage, payload), do: %{hd(@paths) => {404, %{}}, List.last(@paths) => {200, payload}}
+
+  defp included_payload, do: put_in(credit_payload(), ["rate_limit"], %{"allowed" => true, "limit_reached" => false})
+
+  defp put_account_window(payload, nil, _percent, _now), do: payload
+
+  defp put_account_window(payload, seconds, percent, now) do
+    put_in(payload, ["rate_limit", "primary_window"], %{"used_percent" => percent, "limit_window_seconds" => seconds, "reset_after_seconds" => 3_600, "reset_at" => DateTime.to_unix(DateTime.add(now, 3_600))})
+  end
+
+  defp blocking_payload(payload, :spend), do: Map.put(payload, "spend_control", %{"reached" => true})
+  defp blocking_payload(payload, :malformed), do: Map.put(payload, "spend_control", %{"reached" => "false"})
+  defp blocking_payload(payload, :workspace), do: Map.put(payload, "rate_limit_reached_type", %{"type" => "workspace_owner_usage_limit_reached"})
+
+  defp credit_payload do
+    %{"plan_type" => "synthetic", "rate_limit" => %{"allowed" => false, "limit_reached" => true}, "credits" => %{"balance" => "0.12500", "has_credits" => true, "unlimited" => false}, "spend_control" => %{"reached" => false}}
+  end
+
+  defp requested_paths(fake), do: Enum.map(FakeUpstream.requests(fake), & &1.path)
+end

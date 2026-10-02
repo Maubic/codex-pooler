@@ -45,7 +45,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.QuotaConvergenceBoundaryTest do
       {:json, 200, %{"rate_limit" => %{}, "additional_rate_limits" => []}}
     )
 
-    assert {:error, %{code: :upstream_quota_unusable}} =
+    assert {:error, %{code: "observation_failed", status: "failed"}} =
              QuotaConvergenceVerifier.run(
                candidate_source: [candidate],
                samples: 2,
@@ -58,7 +58,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.QuotaConvergenceBoundaryTest do
     candidate = candidate(fixture)
     FakeUpstream.set_mode(fake, {:json_error, 503, %{}})
 
-    assert {:error, %{code: "observation_failed", message: "unknown"}} =
+    assert {:error, %{code: "observation_failed", status: "failed"}} =
              QuotaConvergenceVerifier.run(
                candidate_source: [candidate],
                samples: 2,

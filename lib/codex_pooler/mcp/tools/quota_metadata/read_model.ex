@@ -48,6 +48,7 @@ defmodule CodexPooler.MCP.Tools.QuotaMetadata.ReadModel do
   @source_precisions ~w(authoritative observed inferred unknown)
 
   @type list_opts :: keyword() | map()
+  @type capacity_decision :: %{capacity_basis: CodexPooler.Upstreams.Quota.CapacityAssessment.capacity_basis(), qualification: :established | :provider_attested | :supported | :unverified | :legacy_attested | :not_applicable, routing_usable: boolean(), reason_codes: [String.t()], scope: String.t()}
 
   @spec list_accounts(term(), list_opts()) :: map()
   def list_accounts(scope, opts \\ [])
@@ -114,6 +115,8 @@ defmodule CodexPooler.MCP.Tools.QuotaMetadata.ReadModel do
     returned_windows = Enum.take(all_windows, @max_windows_per_account)
 
     %{
+      allow_provider_credits: snapshot.allow_provider_credits,
+      capacity_decision: PrivacyMatrix.project!(:upstream_quotas, %{capacity_decision: capacity_decision(snapshot)}).capacity_decision,
       id: identity.id,
       label: safe_label(identity.account_label),
       stored_account_id: present_string(identity.chatgpt_account_id),
@@ -182,9 +185,15 @@ defmodule CodexPooler.MCP.Tools.QuotaMetadata.ReadModel do
     }
   end
 
+  @spec capacity_decision(RoutingQuotaSnapshot.t()) :: capacity_decision()
+  def capacity_decision(snapshot) do
+    decision = Upstreams.provider_credits_decision(snapshot, %{account_only: true})
+    %{capacity_basis: decision.capacity_basis, qualification: decision.qualification.status, routing_usable: decision.eligible?, reason_codes: decision.reason_codes, scope: "account"}
+  end
+
   defp quota_summary(snapshot, windows) do
-    eligibility =
-      Quota.Windows.routing_quota_eligibility_from_snapshot(snapshot, account_only: true)
+    decision = Upstreams.provider_credits_decision(snapshot, %{account_only: true})
+    eligibility = decision.eligibility
 
     account_windows = Enum.filter(windows, &(&1.quota_scope == "account"))
     has_stale = Enum.any?(account_windows, &(&1.freshness_status == @freshness_stale))
@@ -203,8 +212,8 @@ defmodule CodexPooler.MCP.Tools.QuotaMetadata.ReadModel do
       window_count: length(windows),
       truncated: length(windows) > @max_windows_per_account,
       freshness_status: freshness_status,
-      routing_usable: eligibility.eligible?,
-      has_unknown: has_unknown or (account_windows == [] and not eligibility.eligible?),
+      routing_usable: decision.eligible?,
+      has_unknown: has_unknown or (account_windows == [] and not decision.eligible?),
       has_stale: has_stale
     }
   end

@@ -15,6 +15,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.UpstreamAttempt do
   alias CodexPooler.Gateway.Runtime.Streaming.StreamDispatch
   alias CodexPooler.Gateway.Runtime.Streaming.StreamLifecycle
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl.TurnSnapshot
+  alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.UpstreamDispatch
   alias CodexPooler.Gateway.Transports.UpstreamDispatch.Request, as: DispatchRequest
 
@@ -158,6 +159,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.UpstreamAttempt do
         WebsocketBridge.log_fallback(prepared_context, reason)
         dispatch_http(prepared_context, callbacks)
 
+      {:error, %{reason: :provider_credits_policy_denied} = denial} ->
+        Finalization.finalize_policy_denial(denial, prepared_context.context, elapsed_ms(prepared_context.context.started))
+
       {:error, :owner_unavailable} ->
         Finalization.Websocket.finalize_failed(prepared_context.context, %{
           reason: :owner_unavailable,
@@ -227,9 +231,10 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.UpstreamAttempt do
       upstream_payload: prepared_context.upstream_payload,
       original_payload: Keyword.get(opts, :original_payload, context.payload),
       identity: context.identity,
+      provider_credits_context: ProviderCreditsAdmission.from_selected(context),
       routing_hint_authorized?: prepared_context.routing_hint_authorized?,
-      accounting_request: Keyword.get(opts, :accounting_request),
-      accounting_attempt: Keyword.get(opts, :accounting_attempt),
+      accounting_request: Keyword.get(opts, :accounting_request, context.reserved.request),
+      accounting_attempt: Keyword.get(opts, :accounting_attempt, context.attempt),
       writer: Keyword.get(opts, :writer),
       assignment_advertised?: ModelMetadata.assignment_source?(context.model, context.assignment.id),
       native_codex_response_control: native_codex_response_control(context),

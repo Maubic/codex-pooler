@@ -14,11 +14,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession}
   alias CodexPooler.Gateway.Runtime.Service
   alias CodexPooler.Gateway.Transports.OrdinarySuccessTestSeed
+  alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.Streaming.RuntimeAdmissionProof
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesSequence
   alias CodexPooler.Gateway.Transports.Streaming.WebsocketCodec
-  alias CodexPooler.Gateway.Transports.Websocket.ForwardedOwnerRequestHandoff
   alias CodexPooler.Gateway.Transports.Websocket.ForwardedSendWitnessV1
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.NativeReplayAdmission
@@ -33,6 +33,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
   alias CodexPooler.Gateway.Transports.WebsocketRolloutDrainSupport
   alias CodexPooler.Gateway.Websocket, as: Gateway
+  alias CodexPooler.ProviderCreditsDispatchSupport
   alias CodexPoolerWeb.CodexResponsesSocket
 
   @detection_timeout_ms 15_000
@@ -418,6 +419,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
       message_mapper: &StreamProtocol.canonicalize_native_codex_responses_json_message/1
     }
 
+    request = ProviderCreditsDispatchSupport.wire_request!(request)
+
     assert {:ok, %{first_compact_result: compact_receipt}} = WebsocketOwnerSession.submit_request(owner, replacement, request)
 
     assert {:ok, _provenance} =
@@ -528,9 +531,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
   test "forwarded admission preserves the current capability after a stale reserve control",
        context do
-    upstream = WebsocketOwnerNodeHarness.fake_upstream_boundary(self(), return_request_result?: true)
-    {owner, seed_url} = start_seeded_owner(context, upstream)
-    assert_receive {:websocket_owner_harness_upstream_started, upstream_pid}
+    {owner, upstream, seed_url} = start_physical_owner(context)
 
     assert {:ok, downstream} =
              WebsocketOwnerSession.attach_downstream(owner, downstream_target("stale-reserve"))
@@ -605,13 +606,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
         },
         effective_serving_mode: "full",
         websocket_delivery_mode: :collect_compaction,
+        url: seed_url <> "/backend-api/codex/responses",
+        payload: CodexPooler.JSON.encode!(%{"model" => "ordinary-authority-seed", "input" => []}),
+        timeouts: %{connect_timeout_ms: 5_000, receive_timeout_ms: 5_000},
         writer: nil
     }
 
-    assert {:ok, %{terminal: "response.completed"}} = WebsocketOwnerSession.submit_request(owner, downstream, request)
-    assert_receive {:websocket_owner_harness_upstream_sent, ^upstream_pid}, 15_000
-    assert [forwarded_request] = WebsocketOwnerNodeHarness.fake_upstream_frames(upstream_pid)
-    assert %ForwardedOwnerRequestHandoff{} = forwarded_request.forwarded_owner_send_handoff
+    request = ProviderCreditsDispatchSupport.wire_request!(request)
+
+    assert {:ok, %{terminal: "response.completed", provider_credits_admission: admission}} = WebsocketOwnerSession.submit_request(owner, downstream, request)
+    assert ProviderCreditsAdmission.valid_receipt?(admission)
+    assert :sys.get_state(owner).forwarded_send_witness.status == :redeemed
+    assert FakeUpstream.count(upstream) == 2
 
     assert NativeCompactionAdmission.phase(:sys.get_state(owner).native_compaction_admission) ==
              :collected_unconfirmed
@@ -682,6 +688,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
       timeouts: %{connect_timeout_ms: 5_000, receive_timeout_ms: 5_000},
       message_mapper: &StreamProtocol.canonicalize_native_codex_responses_json_message/1
     }
+
+    request = ProviderCreditsDispatchSupport.wire_request!(request)
 
     assert {:ok, %{first_compact_result: receipt}} =
              WebsocketOwnerSession.submit_request(owner, downstream, request)
@@ -869,18 +877,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
   test "capability owner submission carries one opaque physical-send handoff",
        context do
     observer = attach_native_compaction_observer()
-    parent = self()
-
-    upstream = %{
-      start: fn -> Agent.start_link(fn -> :ready end) end,
-      send: fn _upstream_pid, request, _writer ->
-        send(parent, {:forwarded_handoff_request, request})
-        {:ok, %{body: "", terminal: "response.completed", status: 200, headers: [], websocket_frame_headers: %{}}}
-      end,
-      close: fn pid -> if Process.alive?(pid), do: Agent.stop(pid) end
-    }
-
-    {owner, seed_url} = start_seeded_owner(context, upstream)
+    {owner, upstream, seed_url} = start_physical_owner(context)
 
     assert {:ok, downstream} =
              WebsocketOwnerSession.attach_downstream(
@@ -912,22 +909,25 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
         },
         effective_serving_mode: "full",
         websocket_delivery_mode: :collect_compaction,
+        url: seed_url <> "/backend-api/codex/responses",
+        payload: CodexPooler.JSON.encode!(%{"model" => "ordinary-authority-seed", "input" => []}),
+        timeouts: %{connect_timeout_ms: 5_000, receive_timeout_ms: 5_000},
         writer: nil
     }
 
-    assert {:ok, %{terminal: "response.completed"}} = WebsocketOwnerSession.submit_request(owner, downstream, request)
+    request = ProviderCreditsDispatchSupport.wire_request!(request)
 
-    assert_receive {:forwarded_handoff_request, forwarded_request}
-    assert %ForwardedOwnerRequestHandoff{} = forwarded_request.forwarded_owner_send_handoff
-    assert forwarded_request.native_compaction_capability == nil
-    assert forwarded_request.expected_connection_lifecycle == nil
-
-    refute inspect(forwarded_request.forwarded_owner_send_handoff) =~ context.owner_lease_token
-    refute inspect(forwarded_request.forwarded_owner_send_handoff) =~ context.owner_instance_id
-    assert :sys.get_state(owner).forwarded_send_witness.status == :issued
-
-    assert NativeCompactionAdmission.phase(:sys.get_state(owner).native_compaction_admission) ==
-             :collected_unconfirmed
+    assert {:ok, %{terminal: "response.completed", provider_credits_admission: admission}} = WebsocketOwnerSession.submit_request(owner, downstream, request)
+    assert ProviderCreditsAdmission.valid_receipt?(admission)
+    witness = :sys.get_state(owner).forwarded_send_witness
+    assert witness.status == :redeemed
+    refute inspect(admission) =~ context.owner_lease_token
+    refute inspect(admission) =~ context.owner_instance_id
+    refute inspect(witness.binding.topology) =~ context.owner_lease_token
+    assert FakeUpstream.count(upstream) == 2
+    assert NativeCompactionAdmission.phase(:sys.get_state(owner).native_compaction_admission) == :collected_unconfirmed
+    assert {:error, :invalid_transition} = WebsocketOwnerSession.admission_control(owner, admission_control(:mark_accounting_started, downstream, capability: capability, now_ms: now))
+    assert FakeUpstream.count(upstream) == 2
 
     assert observer.() == %{
              compact_owner_issued: 1,
@@ -7623,6 +7623,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
       timeouts: %{},
       writer: fn _frame -> :ok end
     }
+    |> ProviderCreditsDispatchSupport.wire_request!()
   end
 
   # An owner with a forwarded native compaction admission armed in
@@ -7671,6 +7672,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     do: send(test, {:admission_clear, observation})
 
   def forward_admission_clear(_event, _measurements, _observation, _config), do: :ok
+
+  defp start_physical_owner(context) do
+    terminal = CodexPooler.JSON.encode!(%{"type" => "response.completed", "response" => %{"id" => "resp_physical_capability", "status" => "completed"}})
+    {:ok, upstream} = FakeUpstream.start_link(FakeUpstream.websocket_text_frames([terminal]))
+    on_exit(fn -> FakeUpstream.stop(upstream) end)
+    assert {:ok, owner} = start_owner(context, [])
+    {owner, upstream, FakeUpstream.url(upstream)}
+  end
 
   defp start_seeded_owner(context, upstream, opts \\ []) do
     {boundary, url} = OrdinarySuccessTestSeed.boundary(upstream)

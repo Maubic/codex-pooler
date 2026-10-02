@@ -876,7 +876,7 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibilityTest do
                )
     end
 
-    test "quota classification orders precise credit-backed and weekly probe candidates" do
+    test "quota classification preserves compatible non-credit order without an unqualified credit grant" do
       precise_identity = upstream_identity("precise-identity")
       credit_identity = upstream_identity("credit-identity")
       weekly_identity = upstream_identity("weekly-identity")
@@ -913,18 +913,14 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibilityTest do
 
       assert candidate_ids(candidates) == [
                "precise-assignment",
-               "credit-assignment",
                "weekly-assignment"
              ]
 
       assert decision["routing_state"] == "precise"
       assert decision["precise_candidate_count"] == 1
-      assert decision["credit_backed_probe_candidate_count"] == 1
+      assert decision["credit_backed_probe_candidate_count"] == 0
       assert decision["weekly_probe_candidate_count"] == 1
-      assert decision["eligible_candidate_count"] == 3
-
-      assert decision["summary"] ==
-               "allowed by fresh, credit-backed secondary, and weekly quota evidence"
+      assert decision["eligible_candidate_count"] == 2
     end
 
     test "quota eligibility excludes a post-snapshot observation until the snapshot instant advances" do
@@ -1025,6 +1021,7 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibilityTest do
             second.assignment.id => true
           }
         })
+        |> RouteState.put_quota_snapshots(RouteState.load_quota_snapshots(candidates))
 
       assert {:ok, %RoutingSelection{} = selection} =
                RoutingSelection.select_and_begin_circuit(%{

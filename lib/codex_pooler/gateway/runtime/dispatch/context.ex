@@ -56,6 +56,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.Context do
       |> Map.fetch!(:request_options)
       |> RequestOptions.put_runtime_context(compaction_retry_submit_hold: Map.get(input.reserved, :compaction_retry_submit_hold))
 
+    route_state = RouteState.preload_routing_snapshots(input.route_state, input.auth, input.model, request_options)
+
     route_plan =
       BridgeRing.plan_route(%{
         auth: input.auth,
@@ -63,7 +65,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.Context do
         candidates: input.candidates,
         route_plan_input: RoutePlanInput.from_reserved(input.reserved),
         request_options: request_options,
-        route_state: input.route_state
+        route_state: route_state
       })
 
     case Accounting.accumulate_request_metadata(
@@ -80,7 +82,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.Context do
            reserved: %{input.reserved | request: request},
            candidates: input.candidates,
            request_options: request_options,
-           route_state: input.route_state,
+           route_state: route_state,
            route_plan: route_plan,
            route_class: request_options.transport.route_class,
            client_retry_dispatch_authority: Map.get(input.reserved, :dispatch_authority)

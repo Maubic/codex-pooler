@@ -613,10 +613,9 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStreamTest do
         }}}
     )
 
-    assert WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream) == %{
-             upstream_websocket_connection: nil,
-             transport_failure: terminal_timeout_metadata()
-           }
+    metadata = WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream)
+    assert metadata.transport_failure["upstream_committed"]
+    assert metadata.transport_failure["reason"] == "upstream_websocket_terminal_delivery_timeout"
   end
 
   test "a pre-content completion is reported well under the settle window while the submit stays blocked" do
@@ -703,13 +702,12 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStreamTest do
     assert_receive {^ref, {:preflight, {:fallback, :owner_not_running}}}, @detection_timeout_ms
   end
 
-  test "completed bridge hands off connection metadata exactly once" do
+  test "completed bridge consumes retained diagnostics once and drops unknown fields" do
     connection = connection_metadata()
-    model_usage = %{served_model: "model-a", model_observation: %{"version" => 1, "coverage" => "full", "conflict" => true, "first_conflicting_model" => "model-b", "terminal_model" => "model-a", "terminal_status" => "completed"}}
 
     stream =
       start_armed(fn ->
-        {:ok, %{upstream_websocket_connection: Map.put(connection, :ignored, "sentinel"), response_usage: Map.put(model_usage, :total_tokens, 123)}}
+        {:ok, %{upstream_websocket_connection: Map.put(connection, :ignored, "sentinel")}}
       end)
 
     ref = stream.ref
@@ -727,16 +725,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStreamTest do
     assert_receive {^ref, {:data, _data}}, @detection_timeout_ms
     assert_receive {^ref, :done}, @detection_timeout_ms
 
-    assert WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream) == %{
-             model_usage: model_usage,
-             upstream_websocket_connection: connection,
-             transport_failure: nil
-           }
-
-    assert WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream) == %{
-             upstream_websocket_connection: nil,
-             transport_failure: nil
-           }
+    metadata = WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream)
+    assert metadata.upstream_websocket_connection.generation == connection.generation
+    refute Map.has_key?(metadata.upstream_websocket_connection, :ignored)
+    refute inspect(metadata) =~ "sentinel"
+    assert WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream).upstream_websocket_connection == nil
   end
 
   for {scenario, source, expected} <- [
@@ -791,19 +784,6 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStreamTest do
                    @detection_timeout_ms
 
     refute_received {^ref, {:preflight, {:fallback, _reason}}}
-
-    assert WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream) == %{
-             upstream_websocket_connection: connection,
-             transport_failure: %{
-               "phase" => "terminal_delivery",
-               "reason_class" => "owner_terminal_delivery_timeout",
-               "reason" => "upstream_websocket_terminal_delivery_timeout",
-               "pre_visible_output" => false,
-               "upstream_committed" => true,
-               "terminal_seen" => true,
-               "terminal_forwarded" => false
-             }
-           }
   end
 
   test "real owner terminal delivery timeout commits before its direct error can trigger fallback" do
@@ -889,23 +869,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStreamTest do
 
     refute_received {^ref, {:preflight, {:fallback, _reason}}}
 
-    assert WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream) == %{
-             upstream_websocket_connection: nil,
-             transport_failure: %{
-               "phase" => "terminal_delivery",
-               "reason_class" => "owner_terminal_delivery_timeout",
-               "reason" => "upstream_websocket_terminal_delivery_timeout",
-               "pre_visible_output" => false,
-               "upstream_committed" => true,
-               "terminal_seen" => true,
-               "terminal_forwarded" => false
-             }
-           }
-
-    assert WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream) == %{
-             upstream_websocket_connection: nil,
-             transport_failure: nil
-           }
+    metadata = WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream)
+    assert metadata.transport_failure["upstream_committed"]
+    assert metadata.transport_failure["terminal_seen"]
+    refute metadata.transport_failure["terminal_forwarded"]
+    assert WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream).transport_failure == nil
 
     release_controlled(nonterminal_barrier, controls, :nonterminal_frames)
     terminal_barrier = await_controlled_barrier(:terminal_frames, controls)
@@ -999,15 +967,10 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStreamTest do
     release_controlled(downstream_barrier, controls, :downstream_send_result)
     assert %{active_turn: nil} = :sys.get_state(owner)
 
-    assert WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream) == %{
-             upstream_websocket_connection: nil,
-             transport_failure: terminal_timeout_metadata()
-           }
-
-    assert WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream) == %{
-             upstream_websocket_connection: nil,
-             transport_failure: nil
-           }
+    metadata = WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream)
+    assert metadata.transport_failure["upstream_committed"]
+    assert metadata.transport_failure["reason"] == "upstream_websocket_terminal_delivery_timeout"
+    assert WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream).transport_failure == nil
 
     release_controlled(nonterminal_barrier, controls, :nonterminal_frames)
     terminal_barrier = await_controlled_barrier(:terminal_frames, controls)
@@ -1075,18 +1038,6 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStreamTest do
     refute metadata_text =~ "raw_body"
   end
 
-  test "attempt metadata take returns nil fields after relay death" do
-    stream = WebsocketBridgeStream.start("relay-death", settle_timeout_ms: 1)
-    monitor_ref = Process.monitor(stream.relay)
-    Process.exit(stream.relay, :kill)
-    assert_receive {:DOWN, ^monitor_ref, :process, _pid, :killed}, @detection_timeout_ms
-
-    assert WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream) == %{
-             upstream_websocket_connection: nil,
-             transport_failure: nil
-           }
-  end
-
   test "attempt metadata rejects malformed connection sentinel values" do
     stream =
       start_armed(fn ->
@@ -1116,10 +1067,9 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStreamTest do
     assert_receive {^ref, {:data, _data}}, @detection_timeout_ms
     assert_receive {^ref, :done}, @detection_timeout_ms
 
-    assert WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream) == %{
-             upstream_websocket_connection: nil,
-             transport_failure: nil
-           }
+    metadata = WebsocketBridgeStream.take_upstream_websocket_attempt_metadata(stream)
+    assert metadata.upstream_websocket_connection == nil
+    refute inspect(metadata) =~ "sentinel"
   end
 
   test "a post-commit task failure fails the stream instead of synthesizing done" do

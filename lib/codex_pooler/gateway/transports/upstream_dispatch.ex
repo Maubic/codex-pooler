@@ -19,6 +19,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   alias CodexPooler.Gateway.Persistence.SessionContinuity, as: PersistenceSessionContinuity
   alias CodexPooler.Gateway.Transports.BoundedResponseBody
   alias CodexPooler.Gateway.Transports.MisalignmentPolicyViolation
+  alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.RejectionBody
   alias CodexPooler.Gateway.Transports.RetryAfter
   alias CodexPooler.Gateway.Transports.Streaming.RuntimeAdmissionProof
@@ -36,6 +37,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV5
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV6
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV7
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks
   alias CodexPooler.Gateway.Websocket.DirectCleanup
   alias CodexPooler.Platform.OutboundHTTP
@@ -50,7 +52,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   # needs `:body`, `WebsocketAttempt` dispatches on `:terminal`, and
   # `Finalization.Websocket` destructures `:status` and `:headers`. Extend this
   # list whenever a consumer starts requiring another field.
-  @owner_success_fields [:body, :terminal, :status, :headers]
+  @owner_success_fields [:body, :terminal, :status, :headers, :provider_credits_admission]
 
   @regular_runtime_metadata_endpoints [
     "/backend-api/codex/responses",
@@ -77,6 +79,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
           required(:identity) => UpstreamIdentity.t(),
           required(:observation) => WebsocketOwnerRequest.observation(),
           required(:reset_probe) => ResetProbe.t() | nil,
+          required(:provider_credits_context) => ProviderCreditsAdmission.Context.t(),
           required(:native_codex_response_control) => CodexPooler.Gateway.Transports.NativeCodexResponseControl.TurnSnapshot.t() | nil,
           required(:assignment_advertised?) => boolean(),
           required(:connection_bound_continuation?) => boolean(),
@@ -105,6 +108,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
     alias CodexPooler.Gateway.Payloads.RequestOptions
     alias CodexPooler.Gateway.Payloads.RequestOptions.Transport
     alias CodexPooler.Gateway.Transports.NativeCodexResponseControl.TurnSnapshot
+    alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
     alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
     defstruct [
@@ -113,6 +117,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       :upstream_payload,
       :original_payload,
       :identity,
+      :provider_credits_context,
       :routing_hint_authorized?,
       :accounting_request,
       :accounting_attempt,
@@ -129,6 +134,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
             upstream_payload: binary() | {:multipart, list()},
             original_payload: map() | nil,
             identity: UpstreamIdentity.t(),
+            provider_credits_context: ProviderCreditsAdmission.Context.t() | nil,
             routing_hint_authorized?: boolean(),
             accounting_request: AccountingRequest.t() | nil,
             accounting_attempt: AccountingAttempt.t() | nil,
@@ -378,13 +384,15 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
     do: TransportEnvelope.bounded_forwarded_metadata_header(name, value)
 
   @spec http_request(DispatchRequest.t()) :: {:ok, Req.Response.t()} | {:error, map()}
-  def http_request(%DispatchRequest{
-        url: url,
-        token: token,
-        upstream_payload: {:multipart, fields},
-        identity: identity,
-        request_options: %RequestOptions{} = opts
-      }) do
+  def http_request(
+        %DispatchRequest{
+          url: url,
+          token: token,
+          upstream_payload: {:multipart, fields},
+          identity: identity,
+          request_options: %RequestOptions{} = opts
+        } = dispatch_request
+      ) do
     timeouts = configured_timeouts(opts)
 
     request_options =
@@ -403,12 +411,16 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       ]
       |> Keyword.merge(TransportEnvelope.req_timeout_options(timeouts, url))
 
-    result = OutboundHTTP.post(url, request_options)
-    CloudflareCookies.store_from_result(url, result)
-    result = result |> RetryAfter.capture() |> maybe_drain_rejection_body(opts)
+    with {:ok, receipt} <- admit_http(dispatch_request) do
+      result = OutboundHTTP.post(url, request_options)
+      CloudflareCookies.store_from_result(url, result)
 
-    result
-    |> normalize_upstream_transport_result(identity, opts)
+      result
+      |> RetryAfter.capture()
+      |> maybe_drain_rejection_body(opts)
+      |> normalize_upstream_transport_result(identity, opts)
+      |> ProviderCreditsAdmission.attach_http_receipt(receipt)
+    end
   rescue
     exception in [
       Req.TransportError,
@@ -422,15 +434,17 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       {:error, upstream_transport_error(exception)}
   end
 
-  def http_request(%DispatchRequest{
-        url: url,
-        token: token,
-        upstream_payload: body,
-        original_payload: payload,
-        identity: identity,
-        routing_hint_authorized?: routing_hint_authorized?,
-        request_options: %RequestOptions{} = opts
-      }) do
+  def http_request(
+        %DispatchRequest{
+          url: url,
+          token: token,
+          upstream_payload: body,
+          original_payload: payload,
+          identity: identity,
+          routing_hint_authorized?: routing_hint_authorized?,
+          request_options: %RequestOptions{} = opts
+        } = dispatch_request
+      ) do
     timeouts = configured_timeouts(opts)
 
     upstream_header_list =
@@ -475,12 +489,16 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
         )
       end
 
-    result = OutboundHTTP.post(url, request_options)
-    CloudflareCookies.store_from_result(url, result)
-    result = result |> RetryAfter.capture() |> maybe_drain_rejection_body(opts)
+    with {:ok, receipt} <- admit_http(dispatch_request) do
+      result = OutboundHTTP.post(url, request_options)
+      CloudflareCookies.store_from_result(url, result)
 
-    result
-    |> normalize_upstream_transport_result(identity, opts)
+      result
+      |> RetryAfter.capture()
+      |> maybe_drain_rejection_body(opts)
+      |> normalize_upstream_transport_result(identity, opts)
+      |> ProviderCreditsAdmission.attach_http_receipt(receipt)
+    end
   rescue
     exception in [
       Req.TransportError,
@@ -494,12 +512,19 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       {:error, upstream_transport_error(exception)}
   end
 
+  defp admit_http(%DispatchRequest{provider_credits_context: context, url: url}) do
+    if not is_nil(context) or ProviderCreditsAdmission.generation_endpoint?(URI.parse(url).path),
+      do: ProviderCreditsAdmission.admit(context),
+      else: {:ok, nil}
+  end
+
   @spec websocket_request(DispatchRequest.t()) :: {:ok, map()} | {:error, map()}
   def websocket_request(%DispatchRequest{
         url: url,
         token: token,
         upstream_payload: payload_body,
         identity: identity,
+        provider_credits_context: provider_credits_context,
         routing_hint_authorized?: routing_hint_authorized?,
         accounting_request: request,
         accounting_attempt: attempt,
@@ -535,6 +560,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       timeouts: timeouts,
       mapper: websocket_message_mapper(request_options),
       identity: identity,
+      provider_credits_context: provider_credits_context,
       observation: observation,
       reset_probe: request_options.routing.reset_probe,
       native_codex_response_control: native_codex_response_control,
@@ -637,7 +663,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
           owner_request_forwarder_opts(forwarder_opts, request_options),
           request_options
         )
-        |> owner_request_result(identity, request, attempt, request_options)
+        |> owner_request_result(identity, request, attempt, request_options, request_data.provider_credits_context)
 
       {:error, reason} ->
         owner_request_result({:error, reason}, identity, request, attempt, request_options)
@@ -864,7 +890,9 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
           submission_notification?: is_function(request_options.transport.websocket_owner_submission_observer, 0)
         }
 
-        owner_request_envelope(attrs, request_data, request_options)
+        with {:ok, request} <- owner_request_envelope(attrs, request_data, request_options) do
+          WebsocketOwnerRequestV8.new(%{version: 8, request: request, provider_credits_context: request_data.provider_credits_context})
+        end
 
       _invalid_identity ->
         {:error, {:invalid_field, :upstream_identity_id}}
@@ -1299,23 +1327,29 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
 
   defp owner_instance_matches?(_owner_instance_id, _owner_session), do: false
 
-  defp owner_request_result(:ok, _identity, request, attempt, _request_options) do
-    {:ok, %{body: "", terminal: "response.completed", status: 200, headers: []}}
-    |> mark_upstream_websocket_body_visible(request, attempt)
-  end
-
   # An owner success reply crosses a node boundary, so validate the producer's
   # contract before any consumer destructures or combines its values. A bad
   # shape settles as one normal owner-crash failure without logging the reply.
-  defp owner_request_result({:ok, result}, _identity, request, attempt, request_options) do
-    case owner_reply_problem(result) do
-      :ok ->
+  defp owner_request_result({:ok, result}, identity, request, attempt, request_options, expected_context) do
+    case owner_reply_problem(result, expected_context) do
+      :unsent_continuation_guard ->
         mark_upstream_websocket_body_visible({:ok, result}, request, attempt)
+
+      :ok ->
+        receipt = result.provider_credits_admission
+
+        if receipt.context == expected_context and receipt.context.upstream_identity_id == identity.id and
+             receipt.context.request_id == multi_agent_round_request_id(request, request_options) and receipt.context.attempt_id == (attempt && attempt.id),
+           do: mark_upstream_websocket_body_visible({:ok, result}, request, attempt),
+           else: contain_malformed_owner_reply({:invalid, ["provider_credits_admission"]}, request_options)
 
       problem ->
         contain_malformed_owner_reply(problem, request_options)
     end
   end
+
+  defp owner_request_result(result, identity, request, attempt, request_options, _expected_context),
+    do: owner_request_result(result, identity, request, attempt, request_options)
 
   # An owner's error reply also crosses a node boundary. The owner's own
   # failure for a turn whose upstream connection process exited carries no
@@ -1334,6 +1368,9 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   defp owner_request_result({:error, reason}, _identity, _request, _attempt, _request_options) do
     {:error, %{body: "", reason: reason, headers: [], started: false}}
   end
+
+  defp owner_request_result(:ok, _identity, _request, _attempt, _request_options),
+    do: {:error, %{body: "", reason: :owner_unavailable, headers: [], started: false}}
 
   # The observer tells the socket that the owner's `:complete` will follow the
   # result, and the socket waits for it before it releases the response task.
@@ -1363,6 +1400,8 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
 
   defp observe_owner_request_submission(result, %RequestOptions{}, _owner_request), do: result
 
+  defp owner_completion_follows?(%WebsocketOwnerRequestV8{request: request}), do: owner_completion_follows?(request)
+
   defp owner_completion_follows?(owner_request),
     do: Map.get(owner_request, :websocket_delivery_mode, :relay) == :relay
 
@@ -1389,6 +1428,27 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
     {:error, %{body: "", reason: :owner_crashed, headers: [], started: false}}
   end
 
+  defp owner_reply_problem(%{transport_failure: transport_failure} = reply, _expected_context) do
+    if map_size(TransportFailureReason.sanitize_continuation_generation_guard_metadata(transport_failure)) > 0 do
+      owner_reply_shape_problem(reply, [:body, :terminal, :status, :headers])
+    else
+      owner_reply_problem(reply)
+    end
+  end
+
+  defp owner_reply_problem(reply, _expected_context), do: owner_reply_problem(reply)
+
+  defp owner_reply_shape_problem(reply, fields) do
+    case Enum.reject(fields, &Map.has_key?(reply, &1)) do
+      [] ->
+        invalid = owner_reply_invalid_fields(Map.put(reply, :provider_credits_admission, nil)) -- ["provider_credits_admission"]
+        if invalid == [], do: :unsent_continuation_guard, else: {:invalid, invalid}
+
+      missing ->
+        {:missing, missing}
+    end
+  end
+
   defp owner_reply_problem(reply) when is_map(reply) do
     case Enum.reject(@owner_success_fields, &Map.has_key?(reply, &1)) do
       [] ->
@@ -1410,6 +1470,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       {:terminal, not clean_binary?(reply.terminal)},
       {:status, reply.status != 200},
       {:headers, not owner_response_headers?(reply.headers)},
+      {:provider_credits_admission, not ProviderCreditsAdmission.valid_receipt?(reply.provider_credits_admission)},
       {:response_id, invalid_optional_owner_field?(reply, :response_id, &clean_binary?/1)},
       {:upstream_websocket_connection, invalid_optional_owner_field?(reply, :upstream_websocket_connection, &is_map/1)},
       {:websocket_frame_headers, invalid_optional_owner_field?(reply, :websocket_frame_headers, &is_map/1)},

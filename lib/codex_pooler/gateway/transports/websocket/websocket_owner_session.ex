@@ -12,6 +12,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   alias CodexPooler.Gateway.Persistence.SessionContinuity
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
   alias CodexPooler.Gateway.Runtime.Finalization.SettlementRetry
+  alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.Streaming.RuntimeAdmissionProof
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Websocket.AbandonedSubmissions
@@ -1288,6 +1289,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     )
   end
 
+  @spec authorize_generation_send(GenServer.server(), UpstreamWebsocketSession.Request.t(), ProviderCreditsAdmission.Receipt.t()) :: {:ok, UpstreamWebsocketSession.Request.t()} | {:error, :owner_unavailable}
+  def authorize_generation_send(owner, request, receipt) do
+    GenServer.call(owner, {:authorize_generation_send_v1, request, receipt}, owner_call_timeout())
+  catch
+    :exit, _reason -> {:error, :owner_unavailable}
+  end
+
   defp submit_upstream(owner, downstream, upstream_payload)
        when is_map(downstream) do
     GenServer.call(owner, {:submit_upstream, downstream, upstream_payload}, :infinity)
@@ -1766,6 +1774,21 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     end
   end
 
+  def handle_call({:authorize_generation_send_v1, request, %ProviderCreditsAdmission.Receipt{} = receipt}, {caller, _tag}, %{upstream_pid: caller, active_turn: active} = state) when not is_nil(active) do
+    if receipt.context == request.provider_credits_context and
+         receipt.context.request_id == active.admission_request_id and
+         receipt.context.attempt_id == active.admission_attempt_id do
+      case authorize_owner_generation_now(state, request) do
+        {:ok, authorized, next_state} -> {:reply, {:ok, authorized}, next_state}
+        {:error, _reason, next_state} -> {:reply, {:error, :owner_unavailable}, next_state}
+      end
+    else
+      {:reply, {:error, :owner_unavailable}, state}
+    end
+  end
+
+  def handle_call({:authorize_generation_send_v1, _request, _receipt}, _from, state), do: {:reply, {:error, :owner_unavailable}, state}
+
   def handle_call(
         {:issue_forwarded_send_witness_v1, downstream, capability, now_ms},
         _from,
@@ -2098,6 +2121,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
         visible_output?: false,
         upstream_pid: state.upstream_pid,
         admission_phase: admission_phase,
+        admission_request_id: admission_request_id(upstream_payload),
+        admission_attempt_id: admission_attempt_id(upstream_payload),
         first_compact_request_identity: NativeCompactionAdmission.FirstCompactResult.request_identity(upstream_payload),
         ordinary_request_identity: ordinary_request_identity(upstream_payload),
         task_settled?: false,
@@ -2147,7 +2172,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
          when generation == binding.owner_process_generation <- state.suspended_replay,
          true <- secure_digest_match?(expected_token, token),
          true <- consume == NativeReplayAdmission.consume_binding(binding) do
-      mark_owner_replay_started(state, request, consume)
+      {:ok, %{request | forwarded_owner: self()}, state, :native_replay}
     else
       _invalid -> {:error, :owner_unavailable, state}
     end
@@ -2161,23 +2186,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
            forwarded_owner_send_handoff: nil
          } = request
        ) do
-    now_ms = System.system_time(:millisecond)
-
-    case issue_forwarded_send_witness_now(state, downstream, capability, now_ms) do
-      {:ok, witness, next_state} ->
-        handoff = ForwardedOwnerRequestHandoff.new(self(), witness)
-
-        request = %{
-          request
-          | native_compaction_capability: nil,
-            expected_connection_lifecycle: nil,
-            forwarded_owner_send_handoff: handoff
-        }
-
-        {:ok, request, next_state, capability.phase}
-
-      {:error, _reason, next_state} ->
-        {:error, :native_compaction_capability_rejected, next_state}
+    with :ok <- require_admission_downstream(state, downstream),
+         true <- capability.binding == state.native_compaction_admission.binding do
+      request = %{request | native_compaction_capability: nil, expected_connection_lifecycle: nil, forwarded_owner_capability: capability, forwarded_owner: self()}
+      {:ok, request, state, capability.phase}
+    else
+      _rejected -> {:error, :native_compaction_capability_rejected, state}
     end
   end
 
@@ -2216,6 +2230,26 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
   defp prepare_owner_admission_submission(state, _downstream, upstream_payload),
     do: {:ok, upstream_payload, state, nil}
+
+  defp authorize_owner_generation_now(state, %UpstreamWebsocketSession.Request{forwarded_owner_capability: %NativeCompactionAdmission.Capability{} = capability} = request) do
+    case issue_forwarded_send_witness_now(state, state.active_turn.downstream, capability, System.system_time(:millisecond)) do
+      {:ok, witness, next_state} ->
+        handoff = ForwardedOwnerRequestHandoff.new(self(), witness)
+        {:ok, %{request | forwarded_owner_send_handoff: handoff, forwarded_owner_capability: nil, forwarded_owner: nil}, next_state}
+
+      {:error, reason, next_state} ->
+        {:error, reason, next_state}
+    end
+  end
+
+  defp authorize_owner_generation_now(state, %UpstreamWebsocketSession.Request{native_replay_binding: %NativeReplayAdmission.Binding{} = binding} = request) do
+    case mark_owner_replay_started(state, request, NativeReplayAdmission.consume_binding(binding)) do
+      {:ok, authorized, next_state, :native_replay} -> {:ok, %{authorized | forwarded_owner: nil}, next_state}
+      {:error, reason, next_state} -> {:error, reason, next_state}
+    end
+  end
+
+  defp authorize_owner_generation_now(state, request), do: {:ok, %{request | forwarded_owner: nil}, state}
 
   defp mark_owner_replay_started(state, request, consume) do
     case CodexPooler.Accounting.mark_request_replay_started(consume) do
@@ -3935,6 +3969,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     do: {request_id, attempt_id}
 
   defp ordinary_request_identity(_payload), do: nil
+  defp admission_request_id(%UpstreamWebsocketSession.Request{request_id: request_id}), do: request_id
+  defp admission_request_id(_control_frame), do: nil
+
+  defp admission_attempt_id(%UpstreamWebsocketSession.Request{attempt_id: attempt_id}), do: attempt_id
+  defp admission_attempt_id(_control_frame), do: nil
 
   defp cleanup_replay_generation(
          %{native_replay_binding: %NativeReplayAdmission.Binding{replay_generation: generation}},
@@ -6097,6 +6136,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       {:error, %{upstream_websocket_connection: connection} = response}
       when is_map(connection) ->
         {:error, response}
+
+      {:error, %{reason: :provider_credits_policy_denied} = denial} ->
+        {:error, denial}
 
       {:error, %{reason: reason}} when is_atom(reason) ->
         {:error, reason}

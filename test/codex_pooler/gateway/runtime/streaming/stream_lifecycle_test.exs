@@ -2786,6 +2786,8 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamLifecycleTest do
         {setup.fallback_assignment, setup.fallback_identity}
       ])
 
+    route_state = RouteState.new(%{visible_model: setup.model, candidates: candidates}) |> RouteState.preload_routing_snapshots(auth, setup.model, request_options)
+
     %SelectedCandidateContext{
       auth: auth,
       endpoint: endpoint,
@@ -2793,13 +2795,15 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamLifecycleTest do
       model: setup.model,
       reserved: %{request: request},
       request_options: request_options,
+      route_state: route_state,
       route_plan:
         BridgeRing.plan_route(%{
           auth: auth,
           model: setup.model,
           candidates: candidates,
           route_plan_input: RoutePlanInput.from_reserved(%{request: request}),
-          request_options: request_options
+          request_options: request_options,
+          route_state: route_state
         }),
       assignment: setup.assignment,
       identity: setup.identity,

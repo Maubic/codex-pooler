@@ -3,6 +3,7 @@ defmodule CodexPooler.MCP.PrivacyMatrixTest do
 
   alias CodexPooler.MCP.MetadataSanitizer
   alias CodexPooler.MCP.PrivacyMatrix
+  alias CodexPooler.MCP.Tools.ReadableText
   alias CodexPooler.Upstreams.Reconciliation.UsagePollCooldown
 
   @entity_families [
@@ -318,6 +319,60 @@ defmodule CodexPooler.MCP.PrivacyMatrixTest do
     assert window.source_precision == "observed"
     refute Map.has_key?(window, :evidence)
     refute Map.has_key?(window, :provider_json)
+  end
+
+  @tag credits_negative: true
+  test "credit decision metadata bounds enums and reasons and removes raw facts in structured and text output" do
+    sentinel = "synthetic-capacity-secret"
+
+    for entity <- [:upstreams, :upstream_quotas] do
+      source = %{
+        allow_provider_credits: false,
+        quota_capacity_facts: %{balance: sentinel},
+        quota_capacity_blocker: %{scope: sentinel},
+        capacity_decision: %{
+          capacity_basis: :provider_credits,
+          qualification: :unverified,
+          routing_usable: false,
+          reason_codes: ["provider_credits_disabled", sentinel, "provider_credits_disabled"],
+          scope: %{model: sentinel, transport: sentinel},
+          raw_facts: sentinel,
+          access_token: sentinel
+        }
+      }
+
+      projected = PrivacyMatrix.project!(entity, source)
+      assert projected.allow_provider_credits == false
+      assert projected.capacity_decision == %{capacity_basis: "provider_credits", qualification: "unverified", routing_usable: false, reason_codes: ["provider_credits_disabled"], scope: "account"}
+      text_row = Map.update!(projected.capacity_decision, :reason_codes, &Enum.join(&1, ", "))
+      text = ReadableText.detail("capacity", text_row, [{:capacity_basis, "basis"}, {:qualification, "qualification"}, {:scope, "scope"}, {:reason_codes, "reasons"}])
+      assert text =~ "basis=provider_credits"
+      assert text =~ "reasons=provider_credits_disabled"
+      refute text =~ sentinel
+      refute inspect(projected) =~ sentinel
+      refute Map.has_key?(projected, :quota_capacity_facts)
+      refute Map.has_key?(projected, :quota_capacity_blocker)
+    end
+  end
+
+  test "provider permission and attestation stay bounded without a billing claim" do
+    for basis <- [:windowless_provider_permission, :provider_credits] do
+      projected = PrivacyMatrix.project!(:upstream_quotas, %{capacity_decision: %{capacity_basis: basis, qualification: :provider_attested, routing_usable: true, reason_codes: []}})
+      assert projected.capacity_decision.capacity_basis == Atom.to_string(basis)
+      assert projected.capacity_decision.qualification == "provider_attested"
+      assert projected.capacity_decision.scope == "account"
+      refute Map.has_key?(projected.capacity_decision, :billing_source)
+    end
+  end
+
+  @tag credits_negative: true
+  test "unknown credit decision strings and malformed metadata never pass the privacy allowlist" do
+    projected = PrivacyMatrix.project!(:upstream_quotas, %{allow_provider_credits: "synthetic-secret", capacity_decision: %{capacity_basis: "synthetic-secret", qualification: "synthetic-secret", routing_usable: "true", reason_codes: %{"raw" => "synthetic-secret"}}})
+    assert projected.allow_provider_credits == nil
+    assert projected.capacity_decision == %{capacity_basis: "none", qualification: "unverified", routing_usable: false, reason_codes: [], scope: "account"}
+    refute inspect(projected) =~ "synthetic-secret"
+    sanitized = MetadataSanitizer.safe_metadata(%{"quota_capacity_facts" => %{"balance" => "synthetic-secret"}, "nested" => %{"quota_capacity_blocker" => %{"scope" => "synthetic-secret"}, "status" => "safe"}})
+    assert sanitized == %{"nested" => %{"status" => "safe"}}
   end
 
   test "projection rejects raw domain structs so future tools must present explicit maps" do

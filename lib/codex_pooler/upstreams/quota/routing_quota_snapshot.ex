@@ -9,6 +9,7 @@ defmodule CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot do
   alias CodexPooler.Upstreams.Quota.{
     AccountAvailabilityStore,
     AccountQuotaWindow,
+    CapacityFactsStore,
     CreditBalanceStore,
     WindowSelector
   }
@@ -24,7 +25,7 @@ defmodule CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot do
     :credential_epoch,
     :as_of
   ]
-  defstruct @enforce_keys ++ [credit_balance: nil, credit_balance_reported?: false]
+  defstruct @enforce_keys ++ [credit_balance: nil, credit_balance_reported?: false, capacity_facts: nil, capacity_facts_reported?: false, capacity_blockers: [], capacity_blockers_overflowed?: false, capacity_blocker_reported?: false, allow_provider_credits: true, redemption: nil]
 
   @type t :: %__MODULE__{
           upstream_identity_id: Ecto.UUID.t(),
@@ -33,6 +34,13 @@ defmodule CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot do
           credential_epoch: pos_integer(),
           credit_balance: CreditBalanceStore.snapshot() | nil,
           credit_balance_reported?: boolean(),
+          capacity_facts: CodexPooler.Quotas.CapacityFacts.t() | nil,
+          capacity_blockers: [CodexPooler.Quotas.CapacityFacts.t()],
+          capacity_blockers_overflowed?: boolean(),
+          capacity_facts_reported?: boolean(),
+          capacity_blocker_reported?: boolean(),
+          allow_provider_credits: boolean(),
+          redemption: map() | nil,
           as_of: DateTime.t()
         }
 
@@ -47,16 +55,23 @@ defmodule CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot do
   @spec from_identity(UpstreamIdentity.t(), [AccountQuotaWindow.t()], DateTime.t()) :: t()
   def from_identity(%UpstreamIdentity{} = identity, raw_windows, %DateTime{} = as_of)
       when is_list(raw_windows) do
+    epoch = identity.metadata |> CredentialFencing.initialize_metadata() |> Map.fetch!("credential_epoch")
+    {blockers, overflowed?} = decode_capacity_blockers(identity.metadata, epoch)
+
     %__MODULE__{
       upstream_identity_id: identity.id,
       raw_windows: raw_windows,
       availability: decode_availability(identity.metadata),
       credit_balance: credit_balance(identity.metadata, as_of),
       credit_balance_reported?: CreditBalanceStore.reported?(identity.metadata),
-      credential_epoch:
-        identity.metadata
-        |> CredentialFencing.initialize_metadata()
-        |> Map.fetch!("credential_epoch"),
+      capacity_facts: decode_capacity_facts(identity.metadata),
+      capacity_blockers: blockers,
+      capacity_blockers_overflowed?: overflowed?,
+      capacity_facts_reported?: metadata_reported?(identity.metadata, "quota_capacity_facts"),
+      capacity_blocker_reported?: metadata_reported?(identity.metadata, "quota_capacity_blocker"),
+      allow_provider_credits: identity.allow_provider_credits,
+      redemption: redemption(identity.metadata),
+      credential_epoch: epoch,
       as_of: as_of
     }
   end
@@ -114,6 +129,7 @@ defmodule CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot do
         select: %{
           upstream_identity_id: identity.id,
           metadata: identity.metadata,
+          allow_provider_credits: identity.allow_provider_credits,
           window: window
         }
     )
@@ -124,6 +140,8 @@ defmodule CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot do
     |> Enum.group_by(& &1.upstream_identity_id)
     |> Map.new(fn {identity_id, identity_rows} ->
       metadata = identity_rows |> hd() |> Map.fetch!(:metadata)
+      epoch = metadata |> CredentialFencing.initialize_metadata() |> Map.fetch!("credential_epoch")
+      {blockers, overflowed?} = decode_capacity_blockers(metadata, epoch)
 
       {identity_id,
        %__MODULE__{
@@ -132,7 +150,14 @@ defmodule CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot do
          availability: decode_availability(metadata),
          credit_balance: credit_balance(metadata, as_of),
          credit_balance_reported?: CreditBalanceStore.reported?(metadata),
-         credential_epoch: metadata |> CredentialFencing.initialize_metadata() |> Map.fetch!("credential_epoch"),
+         capacity_facts: decode_capacity_facts(metadata),
+         capacity_blockers: blockers,
+         capacity_blockers_overflowed?: overflowed?,
+         capacity_facts_reported?: metadata_reported?(metadata, "quota_capacity_facts"),
+         capacity_blocker_reported?: metadata_reported?(metadata, "quota_capacity_blocker"),
+         allow_provider_credits: hd(identity_rows).allow_provider_credits,
+         redemption: redemption(metadata),
+         credential_epoch: epoch,
          as_of: as_of
        }}
     end)
@@ -152,4 +177,26 @@ defmodule CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot do
       :error -> nil
     end
   end
+
+  defp decode_capacity_facts(metadata) do
+    case CapacityFactsStore.load(metadata) do
+      {:ok, facts} -> facts
+      :error -> nil
+    end
+  end
+
+  defp decode_capacity_blockers(metadata, epoch) do
+    case CapacityFactsStore.load_blockers(metadata) do
+      {:ok, %{credential_epoch: ^epoch, observations: observations, overflowed?: overflowed?}} -> {observations, overflowed?}
+      {:ok, %{credential_epoch: previous}} when previous < epoch -> {[], false}
+      {:ok, _future_epoch} -> {[], true}
+      :error -> {[], metadata_reported?(metadata, "quota_capacity_blocker")}
+    end
+  end
+
+  defp metadata_reported?(metadata, key) when is_map(metadata), do: Map.has_key?(metadata, key)
+  defp metadata_reported?(_metadata, _key), do: false
+
+  defp redemption(metadata) when is_map(metadata), do: Map.get(metadata, "saved_reset_redemption")
+  defp redemption(_metadata), do: nil
 end

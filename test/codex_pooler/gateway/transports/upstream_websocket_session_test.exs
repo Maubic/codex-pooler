@@ -1,5 +1,5 @@
 defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest do
-  use ExUnit.Case, async: false
+  use CodexPooler.DataCase, async: false
 
   @moduletag capture_log: true
 
@@ -2356,8 +2356,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
       :telemetry.attach(
         handler_id,
         [:codex_pooler, :repo, :query],
-        fn _event, _measurements, _metadata, %{parent: parent, session: session} ->
-          if self() == session, do: send(parent, :t7_frame_sql_query)
+        fn _event, _measurements, metadata, %{parent: parent, session: session} ->
+          if self() == session do
+            if String.contains?(metadata.query, ~s("allow_provider_credits")), do: send(parent, :t7_admission_sql_query), else: send(parent, :t7_frame_sql_query)
+          end
         end,
         %{parent: parent, session: session}
       )
@@ -2384,6 +2386,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     assert metadata["terminal_seen"] == false
     assert metadata["terminal_candidate_seen"] == false
     refute inspect(metadata) =~ "private reasoning fragment"
+    assert_received :t7_admission_sql_query
     refute_received :t7_frame_sql_query
   end
 
@@ -3442,6 +3445,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     :ok = UpstreamWebsocketSession.close(session)
 
     request = %Request{
+      provider_credits_context: CodexPooler.ProviderCreditsDispatchSupport.context!(),
       url: "https://example.com/backend-api/codex/responses",
       headers: [],
       payload: "{}",
@@ -3533,6 +3537,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
 
     request =
       %Request{
+        provider_credits_context: CodexPooler.ProviderCreditsDispatchSupport.context!(),
         url: FakeUpstream.url(upstream) <> "/backend-api/codex/responses",
         headers: [{"authorization", "Bearer synthetic-upstream-token"}],
         payload:
@@ -3643,6 +3648,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
 
     request = fn label, bearer, content ->
       %Request{
+        provider_credits_context: CodexPooler.ProviderCreditsDispatchSupport.context!(),
         url: url,
         headers: [{"authorization", "Bearer #{bearer}"}],
         payload:
@@ -5021,6 +5027,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     {:ok, session} = UpstreamWebsocketSession.start_link([])
 
     request = %Request{
+      provider_credits_context: CodexPooler.ProviderCreditsDispatchSupport.context!(),
       url: FakeUpstream.url(upstream) <> "/backend-api/codex/responses",
       headers: [{"authorization", "Bearer synthetic-upstream-token"}],
       payload:
@@ -5089,6 +5096,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     {:ok, session} = UpstreamWebsocketSession.start_link([])
 
     request = %Request{
+      provider_credits_context: CodexPooler.ProviderCreditsDispatchSupport.context!(),
       url: FakeUpstream.url(upstream) <> "/backend-api/codex/responses",
       headers: [{"authorization", "Bearer synthetic-upstream-token"}],
       payload:
@@ -5416,6 +5424,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     parent = self()
 
     request = %Request{
+      provider_credits_context: CodexPooler.ProviderCreditsDispatchSupport.context!(),
       url: FakeUpstream.url(upstream) <> "/backend-api/codex/responses",
       headers: [{"authorization", "Bearer synthetic-upstream-token"}],
       payload: "{}",
@@ -6197,6 +6206,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
       end
 
     %Request{
+      provider_credits_context: CodexPooler.ProviderCreditsDispatchSupport.context!(),
       url: url,
       headers: [],
       payload: "{}",
@@ -6644,6 +6654,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
 
   defp raw_websocket_request(url, owner) do
     %Request{
+      provider_credits_context: CodexPooler.ProviderCreditsDispatchSupport.context!(),
       url: url,
       headers: [{"authorization", "Bearer synthetic-upstream-token"}],
       payload:

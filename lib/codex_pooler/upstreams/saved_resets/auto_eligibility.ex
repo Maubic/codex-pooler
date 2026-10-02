@@ -6,8 +6,10 @@ defmodule CodexPooler.Upstreams.SavedResets.AutoEligibility do
   alias CodexPooler.Quotas.WindowClassifier
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
+  alias CodexPooler.Upstreams.Quota.CapacityAssessment
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
   alias CodexPooler.Upstreams.Quota.Windows
+  alias CodexPooler.Upstreams.Quota.Windows.Routing
   alias CodexPooler.Upstreams.Quota.WindowSelector
   alias CodexPooler.Upstreams.SavedResets
   alias CodexPooler.Upstreams.SavedResets.AutoEligibility.Context
@@ -146,6 +148,7 @@ defmodule CodexPooler.Upstreams.SavedResets.AutoEligibility do
       |> Map.get(identity.id, [])
       |> Windows.reject_superseded_primary_windows(timestamp)
       |> WindowSelector.logical_windows(timestamp)
+      |> Routing.included_only_windows()
 
     windows =
       raw
@@ -550,20 +553,35 @@ defmodule CodexPooler.Upstreams.SavedResets.AutoEligibility do
       |> Windows.list_evidence()
       |> Enum.reject(&(&1.source_precision == "unknown"))
 
-    eligibility =
-      identity
-      |> RoutingQuotaSnapshot.from_identity(windows, timestamp)
-      |> Windows.routing_quota_eligibility_from_snapshot(Map.to_list(quota_scope))
+    snapshot = RoutingQuotaSnapshot.from_identity(identity, windows, timestamp)
+    assessment = CapacityAssessment.physical_non_credit_assessment(snapshot, quota_scope)
 
-    eligibility.eligible? and
-      (eligibility.routing_state in [:provider_available, :windowless_provider_available] or
-         Enum.any?(eligibility.selection.routing_windows, fn window ->
-           account_window?(window) and
-             Windows.usable_window?(window, timestamp, Map.to_list(quota_scope))
+    assessment.eligible? and assessment.capacity_basis not in [:unknown_legacy, :none] and
+      (assessment.capacity_basis in [:ordinary_provider_permission, :model_allowance, :windowless_provider_permission, :recovered_included] or
+         Enum.any?(assessment.eligibility.selection.routing_windows, fn window ->
+           account_window?(window) and Windows.usable_window?(window, timestamp, Map.to_list(quota_scope))
          end))
   end
 
   def locked_sibling_usable_capacity?(_identity, _context, _timestamp), do: false
+
+  @spec locked_request_usable_capacity?(UpstreamIdentity.t(), context(), Ecto.UUID.t(), DateTime.t(), boolean()) :: boolean()
+  def locked_request_usable_capacity?(%UpstreamIdentity{status: @identity_active} = identity, context, assignment_id, timestamp, own_reservation?) do
+    case Map.get(context.credit_request_contexts, assignment_id) do
+      request_context when is_map(request_context) ->
+        snapshot = RoutingQuotaSnapshot.from_identity(identity, Windows.list_evidence(identity), timestamp)
+        # The caller already validated this exact in-flight claim. Its own
+        # consuming marker must not hide capacity that appeared before send.
+        snapshot = if own_reservation?, do: %{snapshot | redemption: %{}}, else: snapshot
+        decision = CodexPooler.Upstreams.provider_credits_decision(snapshot, request_context)
+        decision.eligible?
+
+      nil ->
+        locked_sibling_usable_capacity?(identity, context, timestamp)
+    end
+  end
+
+  def locked_request_usable_capacity?(_identity, _context, _assignment_id, _timestamp, _own_reservation?), do: false
 
   defp account_window?(%AccountQuotaWindow{quota_scope: scope}),
     do: scope in [nil, "account"]
@@ -804,12 +822,9 @@ defmodule CodexPooler.Upstreams.SavedResets.AutoEligibility do
   end
 
   defp provider_permits_account?(identity, windows, timestamp) do
-    eligibility =
-      identity
-      |> RoutingQuotaSnapshot.from_identity(Enum.filter(windows, &account_window?/1), timestamp)
-      |> Windows.routing_quota_eligibility_from_snapshot()
-
-    eligibility.routing_state in [:provider_available, :windowless_provider_available]
+    identity
+    |> RoutingQuotaSnapshot.from_identity(Enum.filter(windows, &account_window?/1), timestamp)
+    |> CapacityAssessment.non_credit_usable?(account_only: true)
   end
 
   defp unavailable_snapshot_result(%{in_progress?: true}), do: {:error, :redemption_in_progress}
@@ -1301,7 +1316,7 @@ defmodule CodexPooler.Upstreams.SavedResets.AutoEligibility do
   defp long_window_exhausted?(window, timestamp) do
     WindowClassifier.saved_reset_window?(window) and match?(%DateTime{}, window.reset_at) and
       used_percent_exhausted?(window.used_percent) and
-      "exhausted" in Windows.routing_window_reason_codes(window, timestamp)
+      "exhausted" in Windows.routing_window_reason_codes(hd(Routing.included_only_windows([window])), timestamp)
   end
 
   defp used_percent_at_or_above?(%Decimal{} = used_percent, threshold) when is_integer(threshold),

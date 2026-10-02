@@ -1,11 +1,12 @@
 defmodule CodexPooler.Gateway.NativeCompactionStaleControlTest do
-  use ExUnit.Case, async: false
+  use CodexPooler.DataCase, async: false
 
   @moduletag capture_log: true
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission, as: Admission
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession, as: Owner
+  alias CodexPooler.ProviderCreditsDispatchSupport
   alias Owner.Request
 
   for action <- [:accounting, :cancel, :ack] do
@@ -91,6 +92,8 @@ defmodule CodexPooler.Gateway.NativeCompactionStaleControlTest do
       writer: fn _frame -> :ok end,
       message_mapper: &StreamProtocol.canonicalize_native_codex_responses_json_message/1
     }
+
+    request = ProviderCreditsDispatchSupport.wire_request!(request)
 
     assert {:ok, result} = Owner.request(owner, request)
     lifecycle = Owner.connection_lifecycle_snapshot(owner)

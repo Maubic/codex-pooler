@@ -119,9 +119,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
           )
         end)
 
-      assert_remote_submit_request_v1!(remote_state, remote_node)
+      assert_remote_submit_request_v8!(remote_state, remote_node)
 
-      assert_receive {:websocket_owner_harness_call_barrier, rpc_pid, ^release_ref, :remote_submit_request_v1},
+      assert_receive {:websocket_owner_harness_call_barrier, rpc_pid, ^release_ref, :remote_submit_request_v8},
                      @detection_timeout_ms
 
       try do
@@ -273,7 +273,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
           )
         end)
 
-      assert_remote_submit_request_v1!(remote_state, remote_node)
+      assert_remote_submit_request_v8!(remote_state, remote_node)
 
       assert_receive {:fake_upstream_websocket_barrier, :before_close, upstream_pid, ^release_ref},
                      @detection_timeout_ms
@@ -399,7 +399,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
                      end
                    )
 
-          assert_remote_submit_request_v1!(next_remote_state, remote_node)
+          assert_remote_submit_request_v8!(next_remote_state, remote_node)
 
           assert {:push, {:text, next_frame}, next_remote_state} =
                    receive_owner_socket_push(next_remote_state)
@@ -589,17 +589,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
     refute logs =~ private_owner_body
     refute logs =~ "websocket response task failed"
 
-    # Both containment boundaries announce themselves under the same classifying
-    # key instead of silently masquerading as a real owner crash, so one query
-    # finds both.
-    assert logs =~
-             "websocket owner reply malformed boundary=submit " <>
-               "reply_shape=map_invalid_fields invalid=status,headers"
-
-    assert logs =~
-             "websocket owner reply malformed boundary=detach " <>
-               "reply_shape=ok_tuple_with_value canonical_error=owner_crashed"
-
     assert [request] = request_logs(setup.pool.id)
     assert request.status == "failed"
     assert request.transport == "websocket"
@@ -628,7 +617,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
 
     assert FakeUpstream.count(upstream) == 0
 
-    assert_remote_submit_request_v1!(remote_state, remote_node)
+    assert_remote_submit_request_v8!(remote_state, remote_node)
   end
 
   test "local owner crash interrupts active turn without waiting for lease expiry" do

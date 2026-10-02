@@ -16,6 +16,7 @@ defmodule CodexPooler.Gateway.Runtime.NativeCompactionPreflightTest do
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request,
     as: OwnerRequest
 
+  alias CodexPooler.ProviderCreditsDispatchSupport
   alias CodexPooler.Repo
 
   test "validated native compaction stays outside exact original retry classification" do
@@ -217,6 +218,7 @@ defmodule CodexPooler.Gateway.Runtime.NativeCompactionPreflightTest do
         owner_module.request(
           owner,
           %OwnerRequest{
+            provider_credits_context: ProviderCreditsDispatchSupport.context!(setup.identity, model: original["model"], upstream_model: original["model"], request_id: request.id, attempt_id: attempt.id),
             url: CodexPooler.FakeUpstream.url(upstream) <> "/backend-api/codex/responses",
             headers: [],
             payload: CodexPooler.JSON.encode!(original),

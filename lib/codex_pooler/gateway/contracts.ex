@@ -35,6 +35,7 @@ defmodule CodexPooler.Gateway.Contracts do
           optional(:candidate_exclusions) => [map()],
           optional(:continuity_denial) => map(),
           optional(:quota_refresh_attempted) => boolean(),
+          optional(:non_credit_recovery_outcome) => String.t(),
           optional(:route_class) => String.t(),
           optional(:accounting_disposition) => :zero_work,
           optional(:internal_reason) => String.t(),

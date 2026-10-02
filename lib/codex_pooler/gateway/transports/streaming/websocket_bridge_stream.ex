@@ -78,11 +78,13 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
   @type decision ::
           :stream
           | {:fallback, term()}
+          | {:policy_denied, CodexPooler.Gateway.Transports.ProviderCreditsAdmission.denial()}
           | {:rejected, 400..499, binary()}
           | {:rejected, 429, binary(), [{String.t(), String.t()}]}
   @type part :: {:data, binary()} | :done | {:bridge_error, term()}
   @type attempt_metadata :: %{
           optional(:model_usage) => map(),
+          optional(:provider_credits_admission) => CodexPooler.Gateway.Transports.ProviderCreditsAdmission.Receipt.t() | nil,
           upstream_websocket_connection: map() | nil,
           transport_failure: map() | nil
         }
@@ -161,6 +163,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
           upstream_websocket_connection: nil,
           model_usage: nil,
           transport_failure: nil,
+          provider_credits_admission: nil,
+          policy_denial: nil,
           quota_rejection: nil,
           upstream_committed: false
         })
@@ -340,6 +344,9 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
         state = put_submit_result_and_clear_task(state, result)
 
         cond do
+          state.policy_denial ->
+            report_policy_denial(state)
+
           quota_rejection?(state) ->
             report_quota_rejection(state)
 
@@ -575,6 +582,9 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
     reason = owner_error_reason(error)
 
     cond do
+      state.policy_denial ->
+        report_policy_denial(state)
+
       quota_rejection?(state) ->
         report_quota_rejection(state)
 
@@ -590,7 +600,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
   defp preflight_complete(state) do
     state = settle_owner_terminal_task(state)
 
-    if quota_rejection?(state), do: report_quota_rejection(state), else: preflight_complete_failure(state)
+    cond do
+      state.policy_denial -> report_policy_denial(state)
+      quota_rejection?(state) -> report_quota_rejection(state)
+      true -> preflight_complete_failure(state)
+    end
   end
 
   defp preflight_complete_failure(state) do
@@ -859,7 +873,9 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
         state
         | upstream_websocket_connection: connection || state.upstream_websocket_connection,
           model_usage: model_usage(result),
-          transport_failure: nonempty_map(transport_failure) || state.transport_failure
+          transport_failure: nonempty_map(transport_failure) || state.transport_failure,
+          provider_credits_admission: Map.get(result, :provider_credits_admission),
+          policy_denial: if(Map.get(result, :reason) == :provider_credits_policy_denied, do: result)
       },
       {status, result}
     )
@@ -875,6 +891,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
   defp model_usage(%{body: body}) when is_binary(body), do: ResponseUsage.legacy_websocket_model_usage(body)
 
   defp model_usage(_result), do: nil
+
+  defp report_policy_denial(state) do
+    send(state.parent, {state.ref, {:preflight, {:policy_denied, state.policy_denial}}})
+    metadata_loop(state)
+  end
 
   defp quota_rejection?(%{quota_rejection: {429, _body, _headers}, upstream_committed: false}), do: true
   defp quota_rejection?(_state), do: false
@@ -1013,7 +1034,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
   defp attempt_metadata(state) do
     %{
       upstream_websocket_connection: state.upstream_websocket_connection,
-      transport_failure: state.transport_failure
+      transport_failure: state.transport_failure,
+      provider_credits_admission: state.provider_credits_admission
     }
     |> then(fn metadata -> if state.model_usage, do: Map.put(metadata, :model_usage, state.model_usage), else: metadata end)
   end

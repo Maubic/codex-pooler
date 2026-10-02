@@ -16,6 +16,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
   alias CodexPooler.Upstreams.Assignments, as: UpstreamAssignments
   alias CodexPooler.Upstreams.Auth.{AccessTokenExpiry, TokenRefresh, TokenRefreshMetadata}
   alias CodexPooler.Upstreams.OAuth, as: UpstreamOAuth
+  alias CodexPooler.Upstreams.ProviderCreditsPolicy
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
   alias CodexPooler.Upstreams.SavedResets
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
@@ -126,6 +127,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
           required(:assignments) => [assignment_snapshot()],
           required(:quota_readiness) => quota_readiness(),
           required(:routing_readiness) => routing_readiness(),
+          required(:provider_credits_policy) => %{allow_provider_credits: boolean()},
+          required(:provider_credits_summary) => QuotaProjection.provider_credits_summary(),
+          required(:can_manage_provider_credits?) => boolean(),
           required(:quota_limits) => [quota_limit_row()],
           required(:identity_observability) => identity_observability(),
           required(:usage_poll_pause) => usage_poll_pause() | nil
@@ -207,6 +211,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
     identity_ids = Enum.map(identities, & &1.id)
     deletion_permissions = Upstreams.account_deletion_permissions(scope, identity_ids)
     deletion_states = Upstreams.account_deletion_states(identity_ids)
+    credit_policy_permissions = ProviderCreditsPolicy.management_permissions(scope, identity_ids)
 
     snapshot_at = DateTime.utc_now()
 
@@ -221,6 +226,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
 
       identity
       |> account_snapshot(assignments, token_burns, datetime_preferences, Map.fetch!(quota_snapshots, identity.id))
+      |> Map.put(:can_manage_provider_credits?, Map.get(credit_policy_permissions, identity.id, false))
       |> Map.put(:deletion_state, deletion_state)
       |> Map.put(:can_delete?, Map.get(deletion_permissions, identity.id, false) and deletion_state != :in_progress)
     end)
@@ -483,12 +489,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       assignments: identity_assignments,
       quota_readiness: quota_readiness,
       routing_readiness: routing_readiness,
+      provider_credits_policy: %{allow_provider_credits: quota_snapshot.allow_provider_credits},
+      provider_credits_summary: QuotaProjection.provider_credits_summary(quota_snapshot),
       quota_limits:
         QuotaProjection.quota_limit_rows(
           quota_windows,
           datetime_preferences,
           snapshot_at,
-          quota_snapshot.credit_balance,
           raw_quota_windows
         ),
       identity_observability: identity_observability,

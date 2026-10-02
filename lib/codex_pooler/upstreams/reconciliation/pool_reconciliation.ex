@@ -13,6 +13,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
   alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
   alias CodexPooler.Upstreams.Quota
   alias CodexPooler.Upstreams.Quota.AccountAvailabilityStore
+  alias CodexPooler.Upstreams.Quota.CapacityFactsStore
   alias CodexPooler.Upstreams.Quota.CreditBalanceStore
   alias CodexPooler.Upstreams.Reconciliation.UsageProbe
   alias CodexPooler.Upstreams.SavedResets
@@ -51,6 +52,8 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
              required(:usage_url) => String.t() | nil,
              required(:covered_descriptors) => MapSet.t(),
              required(:account_availability) => CodexPooler.Quotas.AccountAvailability.t() | nil,
+             required(:capacity_facts) => CodexPooler.Quotas.CapacityFacts.t() | nil,
+             required(:capacity_observations) => [CodexPooler.Quotas.CapacityFacts.t()],
              required(:observed_at) => DateTime.t()
            },
            required(:credential_fence) => map() | nil,
@@ -401,6 +404,12 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
       {:definitive_provider_auth_rejected, fence} ->
         promote_definitive_provider_auth_rejection(identity, fence)
 
+      {:usage_unavailable_capacity, %UsageProbe.Result{} = probe, fence} ->
+        persist_unusable_capacity(identity, probe, fence)
+
+        step_result(:failed, "quota_refresh_unavailable", "quota windows were not available (upstream_quota_unusable)")
+        |> put_credential_fence(fence)
+
       {:usage_unavailable, reason, fence} ->
         step_result(
           :failed,
@@ -426,6 +435,8 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
             usage_url: nil,
             covered_descriptors: MapSet.new(),
             account_availability: nil,
+            capacity_facts: nil,
+            capacity_observations: [],
             observed_at: now()
           },
           credential_fence: nil,
@@ -443,6 +454,8 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
             usage_url: probe.usage_url,
             covered_descriptors: probe.covered_descriptors,
             account_availability: probe.account_availability,
+            capacity_facts: probe.capacity_facts,
+            capacity_observations: probe.capacity_observations,
             observed_at: probe.observed_at
           },
           credential_fence: probe.credential_fence,
@@ -497,6 +510,8 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
              usage_url: usage_url,
              covered_descriptors: covered_descriptors,
              account_availability: account_availability,
+             capacity_facts: capacity_facts,
+             capacity_observations: capacity_observations,
              observed_at: provider_observed_at
            },
            credential_fence: credential_fence
@@ -516,6 +531,8 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
             usage_url: usage_url,
             covered_descriptors: covered_descriptors,
             account_availability: account_availability,
+            capacity_facts: capacity_facts,
+            capacity_observations: capacity_observations,
             broadcast?: false
           })
         end)
@@ -600,7 +617,9 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
              payload: payload,
              usage_url: usage_url,
              covered_descriptors: covered_descriptors,
-             account_availability: account_availability
+             account_availability: account_availability,
+             capacity_facts: capacity_facts,
+             capacity_observations: capacity_observations
            },
            expected_credential_epoch: expected_credential_epoch
          },
@@ -621,6 +640,8 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
             usage_url: usage_url,
             covered_descriptors: covered_descriptors,
             account_availability: account_availability,
+            capacity_facts: capacity_facts,
+            capacity_observations: capacity_observations,
             broadcast?: false
           })
 
@@ -665,9 +686,22 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
       {:error, {:definitive_provider_auth_rejected, fence}} ->
         apply_refresh_usage_rejection(identity, fence)
 
+      {:error, {:capacity_observation_unusable, %UsageProbe.Result{} = probe, fence}} ->
+        persist_unusable_capacity(identity, probe, fence)
+        {:error, %{code: :upstream_quota_unusable, message: "upstream quota payload had no usable windows"}}
+
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp persist_unusable_capacity(identity, %UsageProbe.Result{capacity_facts: facts, capacity_observations: observations}, fence) do
+    CredentialFencing.apply_usage_success(identity, fence, fn locked ->
+      epoch = CredentialFencing.credential_epoch(locked)
+      metadata = CapacityFactsStore.transition(locked.metadata, facts, epoch)
+      metadata = CapacityFactsStore.record_observations(metadata, observations, epoch)
+      {:ok, Repo.update!(Ecto.Changeset.change(locked, metadata: metadata))}
+    end)
   end
 
   defp apply_refresh_usage_success(identity, probe, fence) do
@@ -680,6 +714,8 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
         usage_url: probe.usage_url,
         covered_descriptors: probe.covered_descriptors,
         account_availability: probe.account_availability,
+        capacity_facts: probe.capacity_facts,
+        capacity_observations: probe.capacity_observations,
         broadcast?: false
       })
     end)
@@ -706,8 +742,17 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
          usage_url: usage_url,
          covered_descriptors: covered_descriptors,
          account_availability: account_availability,
+         capacity_facts: capacity_facts,
+         capacity_observations: capacity_observations,
          broadcast?: broadcast?
        }) do
+    credential_epoch = CredentialFencing.credential_epoch(identity)
+
+    windows =
+      Enum.map(windows, fn attrs ->
+        Map.update(attrs, :metadata, %{"credential_epoch" => credential_epoch}, &Map.put(&1 || %{}, "credential_epoch", credential_epoch))
+      end)
+
     case Quota.Windows.upsert_quota_windows(identity, windows,
            delete_missing?: true,
            covered_descriptors: covered_descriptors,
@@ -729,6 +774,13 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
             observed_at,
             CredentialFencing.credential_epoch(identity)
           )
+
+        metadata =
+          if capacity_facts,
+            do: CapacityFactsStore.transition(metadata, capacity_facts, CredentialFencing.credential_epoch(identity)),
+            else: metadata
+
+        metadata = CapacityFactsStore.record_observations(metadata, capacity_observations, credential_epoch)
 
         identity = identity |> Ecto.Changeset.change(metadata: metadata) |> Repo.update!()
 

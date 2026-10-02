@@ -137,7 +137,8 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
           required(:filter_input) => FilterInput.t(),
           required(:candidate_exclusions) => [map()],
           required(:refreshable_candidates) => [candidate()],
-          optional(:route_state) => RouteState.t()
+          optional(:route_state) => RouteState.t(),
+          optional(:capacity_band) => :non_credit
         }
   @type quota_filter_result ::
           {:ok, [candidate()], quota_decision()}

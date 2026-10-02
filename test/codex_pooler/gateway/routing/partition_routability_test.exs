@@ -49,7 +49,8 @@ defmodule CodexPooler.Gateway.Routing.PartitionRoutabilityTest do
       count_repo_commands(fn ->
         PartitionRoutability.routable_assignment_ids_by_model_id(
           [routable_model, exhausted_model],
-          candidates_by_model_id
+          candidates_by_model_id,
+          %{}
         )
       end)
 

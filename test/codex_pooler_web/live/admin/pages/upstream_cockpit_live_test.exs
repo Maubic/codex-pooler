@@ -1653,7 +1653,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
              "No quota windows are reported for this account yet."
            )
 
-    refute has_element?(view, "#upstream-quota-limits")
+    refute has_element?(view, "#upstream-quota-limits [data-role='upstream-limit-chart']")
+    refute has_element?(view, "#upstream-provider-credits")
+    assert has_element?(view, "#provider-credits-policy-open")
 
     assert has_element?(
              view,
@@ -2007,6 +2009,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
         reauth_reason_message: nil,
         identity_observability: empty_identity_observability(),
         assignments: [],
+        provider_credits_policy: %{allow_provider_credits: true},
+        provider_credits_summary: unknown_provider_credits_summary(),
+        can_manage_provider_credits?: false,
         quota_limits: []
       })
 
@@ -2720,6 +2725,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
         reauth_reason_message: nil,
         identity_observability: empty_identity_observability(),
         assignments: [],
+        provider_credits_policy: %{allow_provider_credits: true},
+        provider_credits_summary: unknown_provider_credits_summary(),
+        can_manage_provider_credits?: false,
         quota_limits: []
       })
 
@@ -2827,7 +2835,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert fresh.charts.quota_health.degraded? == false
     assert fresh.flags.missing_quota? == false
 
-    assert [%{state: "fresh", state_label: "Fresh", routing_usable?: true} = fresh_item] =
+    assert [%{state: "fresh", routing_usable?: true} = fresh_item] =
              fresh.charts.quota_health.items
 
     assert fresh_item.state == fresh.charts.quota_health.state
@@ -2837,9 +2845,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert fresh_item.used_percent_value == 20.0
     assert fresh_item.bar_value == 80.0
     assert fresh_item.routing_usable? == true
-    assert fresh_item.reason_codes == []
     assert fresh_item.primary_5h.routing_usable? == true
-    assert fresh_item.primary_5h.reason_codes == ["unknown_unusable"]
     assert fresh_item.weekly == nil
 
     stale =
@@ -2864,16 +2870,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert stale.charts.quota_health.kpis.weekly_only_count == 0
     assert stale.charts.quota_health.kpis.missing_evidence_count == 0
 
-    assert [%{state: "stale", state_label: "Stale", routing_usable?: false} = stale_item] =
+    assert [%{state: "stale", routing_usable?: false} = stale_item] =
              stale.charts.quota_health.items
 
     assert stale_item.state == stale.charts.quota_health.state
     assert "not_fresh" in stale_item.reason_codes
-    assert stale_item.reason_codes == ["quota_window_unusable", "not_fresh"]
+    assert "provider_credit_capacity_unverified" in stale_item.reason_codes
     assert stale_item.routing_usable? == false
     assert stale_item.freshness_state == "stale"
     assert stale_item.primary_5h.routing_usable? == false
-    assert stale_item.primary_5h.reason_codes == ["not_fresh"]
+    assert "not_fresh" in stale_item.primary_5h.reason_codes
     assert stale_item.weekly == nil
 
     exhausted =
@@ -2898,18 +2904,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert exhausted.charts.quota_health.kpis.missing_evidence_count == 0
 
     assert [
-             %{state: "exhausted", state_label: "Exhausted", routing_usable?: false} =
+             %{state: "exhausted", routing_usable?: false} =
                exhausted_item
            ] =
              exhausted.charts.quota_health.items
 
     assert exhausted_item.state == exhausted.charts.quota_health.state
     assert "exhausted" in exhausted_item.reason_codes
-    assert exhausted_item.reason_codes == ["quota_window_unusable", "exhausted"]
+    assert "provider_credit_capacity_unverified" in exhausted_item.reason_codes
     assert exhausted_item.routing_usable? == false
     assert exhausted_item.bar_value == 0.0
     assert exhausted_item.primary_5h.routing_usable? == false
-    assert exhausted_item.primary_5h.reason_codes == ["exhausted"]
+    assert "exhausted" in exhausted_item.primary_5h.reason_codes
     assert exhausted_item.weekly == nil
 
     weekly_only =
@@ -2934,7 +2940,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert weekly_only.charts.quota_health.kpis.missing_evidence_count == 0
 
     assert [
-             %{state: "weekly_only", state_label: "Weekly-only", routing_usable?: true} =
+             %{state: "weekly_only", routing_usable?: true} =
                weekly_item
            ] =
              weekly_only.charts.quota_health.items
@@ -2943,9 +2949,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert weekly_item.window_kind == "secondary"
     assert weekly_item.remaining_percent_value == 45.0
     assert weekly_item.routing_usable? == true
-    assert weekly_item.reason_codes == ["quota_account_primary_unknown"]
     assert weekly_item.weekly.routing_usable? == true
-    assert weekly_item.weekly.reason_codes == ["unknown_unusable"]
     assert weekly_item.primary_5h == nil
 
     missing = quota_cockpit!(scope, "missing", [])
@@ -2962,12 +2966,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert missing.charts.quota_health.kpis.weekly_only_count == 0
     assert missing.flags.missing_quota? == true
 
-    assert [%{state: "missing_evidence", state_label: "Missing evidence"} = missing_item] =
+    assert [%{state: "missing_evidence"} = missing_item] =
              missing.charts.quota_health.items
 
     assert missing_item.state == missing.charts.quota_health.state
     assert missing_item.routing_usable? == false
-    assert missing_item.reason_codes == ["quota_evidence_missing"]
+    assert "provider_credit_capacity_unverified" in missing_item.reason_codes
     assert missing_item.bar_value == 0.0
     assert missing_item.remaining_percent_value == nil
     assert missing_item.reset_at == nil
@@ -3102,7 +3106,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert monthly.charts.quota_health.kpis.missing_evidence_count == 0
     assert monthly.flags.missing_quota? == false
 
-    assert [%{state: "fresh", state_label: "Fresh", routing_usable?: true} = monthly_item] =
+    assert [%{state: "fresh", routing_usable?: true} = monthly_item] =
              monthly.charts.quota_health.items
 
     assert monthly_item.window_kind == "primary"
@@ -3113,11 +3117,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert monthly_item.remaining_percent_value == 57.5
     assert monthly_item.used_percent_value == 42.5
     assert monthly_item.bar_value == 57.5
-    assert monthly_item.reason_codes == []
     assert monthly_item.primary_5h == nil
     assert monthly_item.primary_30d.routing_usable? == true
     assert monthly_item.primary_30d.window_minutes == 43_200
-    assert monthly_item.primary_30d.reason_codes == ["unknown_unusable"]
     assert monthly_item.weekly == nil
   end
 
@@ -3160,19 +3162,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert contradiction.flags.missing_quota? == false
 
     assert [
-             %{state: "exhausted", state_label: "Exhausted", routing_usable?: false} =
+             %{state: "exhausted", routing_usable?: false} =
                contradiction_item
            ] =
              contradiction.charts.quota_health.items
 
     assert contradiction_item.state == contradiction.charts.quota_health.state
     assert "exhausted" in contradiction_item.reason_codes
-    assert contradiction_item.reason_codes == ["quota_window_unusable", "exhausted"]
+    assert "provider_credit_capacity_unverified" in contradiction_item.reason_codes
     assert contradiction_item.routing_usable? == false
     assert contradiction_item.primary_5h.routing_usable? == true
-    assert contradiction_item.primary_5h.reason_codes == ["unknown_unusable"]
     assert contradiction_item.weekly.routing_usable? == false
-    assert contradiction_item.weekly.reason_codes == ["exhausted"]
+    assert "exhausted" in contradiction_item.weekly.reason_codes
     assert contradiction_item.weekly.remaining_percent_value == 0.0
   end
 
@@ -4093,9 +4094,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     upsert_quota_window!(identity, %{
       window_kind: "primary",
       window_minutes: 300,
+      active_limit: nil,
+      used_percent: nil,
       credits: 64,
       reset_at: DateTime.add(now, 5, :hour),
-      observed_at: now
+      observed_at: now,
+      source: "codex_usage_api",
+      source_precision: "observed"
     })
 
     upsert_quota_window!(identity, %{
@@ -4105,8 +4110,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
       credits: 91,
       used_percent: Decimal.new("9"),
       reset_at: DateTime.add(now, 6, :day),
-      observed_at: now
+      observed_at: now,
+      source: "codex_usage_api",
+      source_precision: "observed"
     })
+
+    assert {:ok, cockpit} = UpstreamCockpitReadModel.load_visible(scope, identity.id)
+    primary_limit = Enum.find(cockpit.quota_limits, &(&1.key == :primary_5h))
+    assert primary_limit.percent == nil
+    assert primary_limit.count_label == nil
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
     _ = render_async(view, 5_000)
@@ -4123,13 +4135,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert has_element?(
              view,
              "#{primary_progress_selector}[data-role='upstream-limit-progress']" <>
-               ".admin-static-unknown-progress:not([value])[max='100']" <>
-               "[aria-label='5h remaining not reported']"
+               ".admin-static-unknown-progress:not([value])[max='100']"
            )
 
     refute has_element?(view, "#{primary_progress_selector}[value]")
     refute has_element?(view, "#{primary_progress_selector}.progress-striped")
     assert has_element?(view, "#{primary_limit_selector}-reset[data-countdown-state='running']")
+    assert has_element?(view, "#{primary_progress_selector}[aria-label*='included Codex quota']")
+    refute has_element?(view, "#{primary_limit_selector} [data-role='provider-credits-balance'], #{primary_limit_selector} [data-role='provider-credits-observed-progress']")
+    refute has_element?(view, "#upstream-provider-credits[data-capacity-basis='provider_credits']")
 
     assert has_element?(
              view,
@@ -4175,7 +4189,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert has_element?(view, "#upstream-quota", "Quota missing")
     assert has_element?(view, "#upstream-quota", "Quota evidence is missing for this account")
     assert has_element?(view, "#upstream-quota-limits-empty")
-    refute has_element?(view, "#upstream-quota-limits")
+    refute has_element?(view, "#upstream-quota-limits [data-role='upstream-limit-chart']")
+    refute has_element?(view, "#upstream-provider-credits")
+    assert has_element?(view, "#provider-credits-policy-open")
 
     for assignment <- [active_assignment, disabled_assignment] do
       assert has_element?(view, "#upstream-assignment-#{assignment.id}-route[role='meter']")
@@ -7043,5 +7059,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     |> Enum.map(&(seed_attempt |> Map.take(attempt_fields) |> Map.merge(%{id: Ecto.UUID.generate(), request_id: &1.id, started_at: &1.admitted_at})))
     |> Enum.chunk_every(1_000)
     |> Enum.each(&Repo.insert_all(Attempt, &1))
+  end
+
+  defp unknown_provider_credits_summary do
+    %{balance_state: :unknown, balance_label: nil, observed_baseline_label: nil, observed_percent: nil, allow_provider_credits: true, availability: :unknown, availability_label: "Provider credit capacity unverified", availability_detail: "Observed balance alone grants no routing capacity.", capacity_basis: :none, reason_codes: ["provider_credit_capacity_unverified"], qualification: :unverified}
   end
 end

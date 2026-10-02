@@ -6,7 +6,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
   alias CodexPooler.Gateway.Contracts
   alias CodexPooler.Gateway.OpenAICompatibility.NativeImageResult
   alias CodexPooler.Gateway.Payloads.{CompactionTrigger, RequestOptions}
-  alias CodexPooler.Gateway.Payloads.RequestOptions.OpenAICompatibility
+  alias CodexPooler.Gateway.Payloads.RequestOptions.{OpenAICompatibility, ResetProbe}
   alias CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback
   alias CodexPooler.Gateway.Runtime.Dispatch.ResponseContext
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
@@ -27,7 +27,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
     Websocket
   }
 
-  alias CodexPooler.Gateway.Routing.CandidateEligibility.PoolReturn
+  alias CodexPooler.Gateway.Routing.CandidateEligibility.{FilterInput, PoolReturn, Quota}
   alias CodexPooler.Gateway.Routing.CircuitRetryAfter
   alias CodexPooler.Gateway.Routing.ModelMetadata
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
@@ -36,6 +36,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
   alias CodexPooler.Gateway.Transports.{
     MisalignmentPolicyViolation,
     ModelUnavailability,
+    ProviderCreditsAdmission,
     RetryAfter,
     TransportFailureReason
   }
@@ -232,8 +233,62 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
     end
   end
 
+  @spec finalize_policy_denial(ProviderCreditsAdmission.denial(), SelectedCandidateContext.t(), non_neg_integer()) :: {:ok, map()} | {:error, map()} | {:retry, term()}
+  def finalize_policy_denial(denial, %SelectedCandidateContext{} = context, latency) do
+    input =
+      FilterInput.new(%{
+        auth: context.auth,
+        model: context.model,
+        endpoint: context.endpoint,
+        payload: context.payload,
+        request_options: context.request_options,
+        candidates: [{context.assignment, context.identity}]
+      })
+
+    {:error, public_error} = Quota.quota_unavailable_error(input, denial.candidate_exclusions, false)
+    code = if "provider_credits_disabled" in denial.reason_codes, do: "provider_credits_disabled", else: "provider_credit_capacity_unverified"
+
+    metadata =
+      Metadata.route_attempt_metadata(context.request_options)
+      |> Map.put("provider_credits_admission", %{"version" => 1, "capacity_basis" => Atom.to_string(denial.capacity_basis), "reason_codes" => denial.reason_codes, "sent" => false})
+
+    attrs = %{response_status_code: public_error.status, last_error_code: code, error_message: public_error.message, latency_ms: latency, usage: ResponseUsage.undispatched(), usage_status: "not_applicable", attempt_metadata: metadata, before_finalize: fn -> DispatchLifecycle.neutral_completion(context) end}
+
+    settle_policy_denial(context, attrs, public_error, code, metadata, latency)
+  end
+
+  defp settle_policy_denial(context, attrs, public_error, code, metadata, latency) do
+    if retry_policy_denial?(context) do
+      retry_policy_denial_result(AttemptSettlement.record_retryable_failure(context.reserved.request, context.attempt, attrs))
+    else
+      failure = SettlementAttrs.failure(context, public_error.status, code, public_error.message, metadata, latency_ms: latency, usage: ResponseUsage.undispatched(), before_finalize: attrs.before_finalize)
+      result = AttemptSettlement.finalize_failure(context.reserved.request, context.attempt, failure, context.request_options.runtime.session_owner_witness)
+      final_policy_denial_result(result, public_error)
+    end
+  end
+
+  defp retry_policy_denial?(context),
+    do: context.allow_retry? and not RequestOptions.connection_bound_compaction?(context.request_options) and not bound_policy_probe?(context)
+
+  defp retry_policy_denial_result({:ok, _attempt}), do: {:retry, :provider_credits_policy_denied}
+  defp retry_policy_denial_result({:stale_generation, finalized}), do: {:ok, finalized}
+  defp retry_policy_denial_result({:error, error}), do: {:error, error}
+  defp final_policy_denial_result({:ok, _finalized}, public_error), do: {:error, public_error}
+  defp final_policy_denial_result({:stale_generation, finalized}, _public_error), do: {:ok, finalized}
+  defp final_policy_denial_result({:error, error}, _public_error), do: {:error, error}
+
+  defp bound_policy_probe?(context) do
+    case context.request_options.routing.reset_probe do
+      %ResetProbe{} = probe -> ResetProbe.bound?(probe)
+      nil -> false
+    end
+  end
+
   @spec handle_dispatch_error(term(), SelectedCandidateContext.t(), non_neg_integer()) ::
           {:error, map()} | {:retry, term()}
+  def handle_dispatch_error(%{reason: :provider_credits_policy_denied} = denial, %SelectedCandidateContext{} = context, latency),
+    do: finalize_policy_denial(denial, context, latency)
+
   def handle_dispatch_error(reason, %SelectedCandidateContext{} = context, latency) do
     %{
       request_options: request_options
@@ -687,8 +742,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
   defp relayed_usage_limit_metadata(:unknown), do: %{}
 
   # The Pool's other candidates, as route filtering classified them (findings#206 row 206-545).
-  defp other_candidates_return(%SelectedCandidateContext{model: model, route_state: route_state, assignment: assignment}),
-    do: PoolReturn.others(model, RouteState.route_filter_candidates(route_state), assignment.id, DateTime.utc_now())
+  defp other_candidates_return(%SelectedCandidateContext{model: model, route_state: route_state, assignment: assignment, request_options: request_options}),
+    do: PoolReturn.others(model, RouteState.route_filter_candidates(route_state), assignment.id, DateTime.utc_now(), request_options)
 
   defp apply_failure_settlement_options(attrs, opts) do
     attrs =
@@ -1377,6 +1432,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
          body,
          callbacks
        ) do
+    context = %{context | provider_credits_admission: Req.Response.get_private(response, :provider_credits_admission)}
+
     %{
       reserved: reserved,
       attempt: attempt,

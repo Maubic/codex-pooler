@@ -10,6 +10,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   alias CodexPoolerWeb.Admin.UpstreamOAuthDialogComponents
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.AuthJsonDialog
+  alias CodexPoolerWeb.Admin.UpstreamPageComponents.ProviderCreditsComponents
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetComponents
   alias CodexPoolerWeb.RelativeTime
   alias Phoenix.HTML.Form
@@ -43,6 +44,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   attr :delete_account_form, :any, required: true
   attr :editing_saved_reset_policy, :map, default: nil
   attr :saved_reset_policy_form, :any, required: true
+  attr :editing_provider_credits_policy, :map, default: nil
+  attr :provider_credits_policy_form, :any, default: nil
   attr :confirming_saved_reset_redemption, :map, default: nil
   attr :account_panel_views, :map, required: true
   attr :upstream_accounts, :list, required: true
@@ -100,6 +103,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         confirming_saved_reset_redemption={@confirming_saved_reset_redemption}
         datetime_preferences={@datetime_preferences}
       />
+      <.provider_credits_policy_dialog account={@editing_provider_credits_policy} form={@provider_credits_policy_form} />
 
       <section id="upstream-account-surface" class="grid min-w-0 gap-4">
         <.upstream_filter_form
@@ -620,6 +624,43 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
       </div>
       <form method="dialog" class="modal-backdrop">
         <button type="button" phx-click="cancel_delete_account">close</button>
+      </form>
+    </dialog>
+    """
+  end
+
+  attr :account, :map, default: nil
+  attr :form, :any, default: nil
+
+  def provider_credits_policy_dialog(assigns) do
+    ~H"""
+    <dialog :if={@account && @form} id="provider-credits-policy-dialog" class="modal modal-bottom overflow-x-hidden sm:modal-middle" aria-labelledby="provider-credits-policy-dialog-title" aria-modal="true" phx-window-keydown="cancel_provider_credits_policy" phx-key="escape" phx-remove={JS.pop_focus()} open>
+      <.focus_wrap id="provider-credits-policy-dialog-panel" class="modal-box sm:max-w-xl border border-base-300 bg-base-100 p-0 shadow-2xl" phx-mounted={JS.focus(to: "#provider-credits-enabled")}>
+        <div class="border-b border-base-300 px-5 py-4">
+          <p class="text-xs font-semibold uppercase tracking-wide text-primary">Upstream account</p>
+          <h2 id="provider-credits-policy-dialog-title" class="mt-1 text-xl font-bold text-base-content">Provider credits</h2>
+          <p class="mt-1 text-xs leading-5 text-base-content/60">Balance and admission policy for every Pool using this upstream.</p>
+        </div>
+        <div class="grid gap-4 p-5">
+          <ProviderCreditsComponents.provider_credits_policy_form form={@form} />
+          <details :if={Map.has_key?(@account, :provider_credits_summary)} id="provider-credits-observation-details" class="group border-t border-base-300 pt-4" data-preserve-open>
+            <summary class="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-semibold text-base-content transition-colors hover:bg-base-200/50 [&::-webkit-details-marker]:hidden">
+              Balance and availability <.icon name="hero-chevron-right" class="size-4 text-base-content/50 transition-transform group-open:rotate-90" />
+            </summary>
+            <div class="pt-4">
+              <ProviderCreditsComponents.provider_credits_details summary={@account.provider_credits_summary} />
+            </div>
+          </details>
+        </div>
+        <AdminComponents.dialog_footer id="provider-credits-policy-dialog-footer">
+          <:actions>
+            <AdminComponents.action_button id="provider-credits-policy-cancel" label="Cancel" variant={:ghost} phx-click="cancel_provider_credits_policy" />
+            <AdminComponents.action_button id="provider-credits-save" label="Save policy" icon="hero-check" type="submit" form="provider-credits-policy-form" variant={:primary} phx-disable-with="Saving…" />
+          </:actions>
+        </AdminComponents.dialog_footer>
+      </.focus_wrap>
+      <form method="dialog" class="modal-backdrop">
+        <button id="provider-credits-policy-backdrop" type="button" phx-click="cancel_provider_credits_policy">close</button>
       </form>
     </dialog>
     """

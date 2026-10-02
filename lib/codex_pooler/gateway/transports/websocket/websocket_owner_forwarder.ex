@@ -24,12 +24,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerAdmissionControlV1
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequest
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV2
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV3
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV4
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV5
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV6
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV7
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks
   alias CodexPooler.Repo
@@ -154,40 +152,26 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
           CodexSession.t(),
           binary(),
           WebsocketOwnerSession.downstream(),
-          UpstreamWebsocketSession.Request.t()
-          | WebsocketOwnerRequest.t()
-          | WebsocketOwnerRequestV2.t()
-          | WebsocketOwnerRequestV3.t()
-          | WebsocketOwnerRequestV4.t()
-          | WebsocketOwnerRequestV6.t()
-          | WebsocketOwnerRequestV7.t()
-          | WebsocketOwnerRequestV5.t(),
+          UpstreamWebsocketSession.Request.t() | WebsocketOwnerRequestV8.t(),
           submit_opts()
         ) ::
           submitted_request_result()
+  def submit_request(session, token, downstream, request, opts \\ [])
+
   def submit_request(
         %CodexSession{} = session,
         owner_lease_token,
         downstream,
         request,
-        opts \\ []
+        opts
       )
       when is_binary(owner_lease_token) and is_map(downstream) and
              is_struct(request) and
-             request.__struct__ in [
-               UpstreamWebsocketSession.Request,
-               WebsocketOwnerRequest,
-               WebsocketOwnerRequestV2,
-               WebsocketOwnerRequestV3,
-               WebsocketOwnerRequestV4,
-               WebsocketOwnerRequestV5,
-               WebsocketOwnerRequestV6,
-               WebsocketOwnerRequestV7
-             ] do
+             request.__struct__ in [UpstreamWebsocketSession.Request, WebsocketOwnerRequestV8] do
     with :ok <- SessionContinuity.validate_owner_token(session, owner_lease_token),
          {:ok, owner} <- resolve_owner(session, opts) do
       opts =
-        if is_struct(request, WebsocketOwnerRequestV4) do
+        if match?(%WebsocketOwnerRequestV8{request: %WebsocketOwnerRequestV4{}}, request) do
           Keyword.put(opts, :replay_owner_lease_token, owner_lease_token)
         else
           opts
@@ -198,6 +182,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  def submit_request(_session, _token, _downstream, _request, _opts), do: {:error, :owner_unavailable}
 
   @spec reconnect_control(
           reconnect_action(),
@@ -901,206 +887,49 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   end
 
   @doc false
-  @spec remote_submit_request(
-          binary(),
-          WebsocketOwnerSession.downstream(),
-          UpstreamWebsocketSession.Request.t(),
-          submit_opts()
-        ) ::
-          submitted_request_result()
-  def remote_submit_request(_codex_session_id, _downstream, _request, _opts \\ []),
-    do: {:error, :owner_unavailable}
-
-  @doc false
-  @spec remote_submit_request_v1(
-          binary(),
-          WebsocketOwnerSession.downstream(),
-          WebsocketOwnerRequest.t()
-        ) :: submitted_request_result()
-  def remote_submit_request_v1(codex_session_id, downstream, owner_request)
+  @spec remote_submit_request_v8(binary(), WebsocketOwnerSession.downstream(), WebsocketOwnerRequestV8.t()) :: submitted_request_result()
+  def remote_submit_request_v8(codex_session_id, downstream, %WebsocketOwnerRequestV8{} = envelope)
       when is_binary(codex_session_id) and is_map(downstream) do
-    with {:ok, owner_request} <- validate_owner_request(owner_request),
-         opts = remote_submission_opts(owner_request, codex_session_id, downstream),
-         {:ok, {owner_pid, downstream}} <- ensure_remote_owner(codex_session_id, downstream, owner_request, opts),
-         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil) do
-      submit_remote_owner_request(
-        owner_pid,
-        codex_session_id,
-        downstream,
-        request,
-        owner_request.submission_notification?,
-        opts
-      )
-    else
-      {:error, {:invalid_owner_request, _reason}} -> {:error, :owner_unavailable}
-      {:error, :upstream_identity_not_found} -> {:error, :owner_unavailable}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  @doc false
-  @spec remote_submit_request_v6(
-          binary(),
-          WebsocketOwnerSession.downstream(),
-          WebsocketOwnerRequestV6.t()
-        ) :: submitted_request_result()
-  def remote_submit_request_v6(codex_session_id, downstream, owner_request)
-      when is_binary(codex_session_id) and is_map(downstream) do
-    with :ok <- validate_owner_request_v6(owner_request),
+    with :ok <- WebsocketOwnerRequestV8.validate(envelope),
          :ok <- refuse_abandoned_submission(codex_session_id, downstream),
-         {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id),
-         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil),
+         {:ok, {owner_pid, downstream, opts}} <- gated_owner(envelope.request, codex_session_id, downstream),
+         {:ok, request} <- WebsocketRequestCallbacks.materialize(envelope, nil),
          :ok <- refuse_abandoned_submission(codex_session_id, downstream) do
-      submit_collect_owner_request(
-        owner_pid,
-        downstream,
-        request,
-        owner_request.submission_notification?
-      )
+      submit_gated_owner(owner_pid, codex_session_id, downstream, request, envelope.request, opts)
     else
+      {:error, {:invalid_field, _field}} -> {:error, :owner_unavailable}
+      {:error, {:unknown_fields, _fields}} -> {:error, :owner_unavailable}
       {:error, {:invalid_owner_request, _reason}} -> {:error, :owner_unavailable}
       {:error, :upstream_identity_not_found} -> {:error, :owner_unavailable}
       {:error, _reason} = error -> error
-    end
-  end
-
-  @spec remote_submit_request_v7(
-          binary(),
-          WebsocketOwnerSession.downstream(),
-          WebsocketOwnerRequestV7.t()
-        ) :: submitted_request_result()
-  def remote_submit_request_v7(codex_session_id, downstream, owner_request)
-      when is_binary(codex_session_id) and is_map(downstream) do
-    with :ok <- validate_owner_request_v7(owner_request),
-         :ok <- refuse_abandoned_submission(codex_session_id, downstream),
-         {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id),
-         %CompactionRetrySubmitHold{owner: ^owner_pid} = hold <-
-           Map.get(owner_request, :compaction_retry_submit_hold),
-         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil),
-         :ok <- refuse_abandoned_submission(codex_session_id, downstream) do
-      WebsocketOwnerSession.submit_compaction_retry(
-        owner_pid,
-        downstream,
-        request,
-        owner_request.submission_notification?,
-        hold
-      )
-    else
-      {:error, {:invalid_owner_request, _reason}} -> {:error, :owner_unavailable}
-      {:error, :upstream_identity_not_found} -> {:error, :owner_unavailable}
-      {:error, _reason} = error -> error
-      _invalid_hold -> {:error, :owner_unavailable}
     end
   catch
     :exit, _reason -> {:error, :owner_crashed}
   end
 
-  @doc false
-  @spec remote_submit_request_v2(
-          binary(),
-          WebsocketOwnerSession.downstream(),
-          WebsocketOwnerRequestV2.t()
-        ) :: submitted_request_result()
-  def remote_submit_request_v2(codex_session_id, downstream, owner_request)
-      when is_binary(codex_session_id) and is_map(downstream) do
-    with :ok <- validate_owner_request_v2(owner_request),
-         :ok <- refuse_abandoned_submission(codex_session_id, downstream),
-         {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id),
-         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil),
-         :ok <- refuse_abandoned_submission(codex_session_id, downstream) do
-      submit_collect_owner_request(
-        owner_pid,
-        downstream,
-        request,
-        owner_request.submission_notification?
-      )
-    else
-      {:error, {:invalid_owner_request, _reason}} -> {:error, :owner_unavailable}
-      {:error, :upstream_identity_not_found} -> {:error, :owner_unavailable}
-      {:error, _reason} = error -> error
-    end
+  def remote_submit_request_v8(_session_id, _downstream, _envelope), do: {:error, :owner_unavailable}
+
+  defp gated_owner(request, session_id, downstream) when is_struct(request, WebsocketOwnerRequest) or is_struct(request, WebsocketOwnerRequestV5) do
+    opts = remote_submission_opts(request, session_id, downstream)
+
+    with {:ok, {pid, downstream}} <- ensure_remote_owner(session_id, downstream, request, opts),
+         do: {:ok, {pid, downstream, opts}}
   end
 
-  @doc false
-  @spec remote_submit_request_v3(
-          binary(),
-          WebsocketOwnerSession.downstream(),
-          WebsocketOwnerRequestV3.t()
-        ) :: submitted_request_result()
-  def remote_submit_request_v3(codex_session_id, downstream, owner_request)
-      when is_binary(codex_session_id) and is_map(downstream) do
-    with :ok <- validate_owner_request_v3(owner_request),
-         :ok <- refuse_abandoned_submission(codex_session_id, downstream),
-         {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id),
-         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil),
-         :ok <- refuse_abandoned_submission(codex_session_id, downstream) do
-      submit_collect_owner_request(
-        owner_pid,
-        downstream,
-        request,
-        owner_request.submission_notification?
-      )
-    else
-      {:error, {:invalid_owner_request, _reason}} -> {:error, :owner_unavailable}
-      {:error, :upstream_identity_not_found} -> {:error, :owner_unavailable}
-      {:error, _reason} = error -> error
-    end
+  defp gated_owner(_request, session_id, downstream) do
+    with {:ok, pid} <- WebsocketOwnerSession.lookup(session_id), do: {:ok, {pid, downstream, []}}
   end
 
-  @doc false
-  @spec remote_submit_request_v4(
-          binary(),
-          WebsocketOwnerSession.downstream(),
-          WebsocketOwnerRequestV4.t()
-        ) :: submitted_request_result()
-  def remote_submit_request_v4(codex_session_id, downstream, owner_request)
-      when is_binary(codex_session_id) and is_map(downstream) do
-    with :ok <- validate_owner_request_v4(owner_request),
-         :ok <- refuse_abandoned_submission(codex_session_id, downstream),
-         {:ok, owner_pid} <- WebsocketOwnerSession.lookup(codex_session_id),
-         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil),
-         :ok <- refuse_abandoned_submission(codex_session_id, downstream) do
-      submit_collect_owner_request(
-        owner_pid,
-        downstream,
-        request,
-        owner_request.submission_notification?
-      )
-    else
-      {:error, {:invalid_owner_request, _reason}} -> {:error, :owner_unavailable}
-      {:error, :upstream_identity_not_found} -> {:error, :owner_unavailable}
-      {:error, _reason} = error -> error
-    end
-  end
+  defp submit_gated_owner(owner, _session_id, downstream, request, %WebsocketOwnerRequestV7{compaction_retry_submit_hold: %CompactionRetrySubmitHold{owner: owner} = hold, submission_notification?: notify?}, _opts),
+    do: WebsocketOwnerSession.submit_compaction_retry(owner, downstream, request, notify?, hold)
 
-  @doc false
-  @spec remote_submit_request_v5(
-          binary(),
-          WebsocketOwnerSession.downstream(),
-          WebsocketOwnerRequestV5.t()
-        ) :: submitted_request_result()
-  def remote_submit_request_v5(codex_session_id, downstream, owner_request)
-      when is_binary(codex_session_id) and is_map(downstream) do
-    with :ok <- validate_owner_request_v5(owner_request),
-         :ok <- refuse_abandoned_submission(codex_session_id, downstream),
-         opts = remote_submission_opts(owner_request, codex_session_id, downstream),
-         {:ok, {owner_pid, downstream}} <- ensure_remote_owner(codex_session_id, downstream, owner_request, opts),
-         {:ok, request} <- WebsocketRequestCallbacks.materialize(owner_request, nil),
-         :ok <- refuse_abandoned_submission(codex_session_id, downstream) do
-      submit_remote_owner_request(
-        owner_pid,
-        codex_session_id,
-        downstream,
-        request,
-        owner_request.submission_notification?,
-        opts
-      )
-    else
-      {:error, {:invalid_owner_request, _reason}} -> {:error, :stale_owner}
-      {:error, :upstream_identity_not_found} -> {:error, :stale_owner}
-      {:error, _reason} = error -> error
-    end
-  end
+  defp submit_gated_owner(_owner, _session_id, _downstream, _request, %WebsocketOwnerRequestV7{}, _opts), do: {:error, :owner_unavailable}
+
+  defp submit_gated_owner(owner, session_id, downstream, request, inner, opts) when is_struct(inner, WebsocketOwnerRequest) or is_struct(inner, WebsocketOwnerRequestV5),
+    do: submit_remote_owner_request(owner, session_id, downstream, request, inner.submission_notification?, opts)
+
+  defp submit_gated_owner(owner, _session_id, downstream, request, inner, _opts),
+    do: submit_collect_owner_request(owner, downstream, request, inner.submission_notification?)
 
   @doc false
   @spec remote_push_downstream(binary(), WebsocketOwnerContract.downstream_payload()) ::
@@ -1469,72 +1298,29 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
     call_remote(node, :remote_admission_control_v1, [codex_session_id, control], opts)
   end
 
-  defp dispatch_submit_request(
-         {:local, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequestV5{} = owner_request,
-         _opts
-       ),
-       do: remote_submit_request_v5(codex_session_id, downstream, owner_request)
+  defp dispatch_submit_request({:local, _instance}, session_id, downstream, %WebsocketOwnerRequestV8{} = request, _opts),
+    do: remote_submit_request_v8(session_id, downstream, request)
 
-  defp dispatch_submit_request(
-         {:local, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequestV4{} = owner_request,
-         _opts
-       ),
-       do: remote_submit_request_v4(codex_session_id, downstream, owner_request)
+  defp dispatch_submit_request({:remote, node, _instance}, session_id, downstream, %WebsocketOwnerRequestV8{} = request, opts) do
+    submitter = self()
 
-  defp dispatch_submit_request(
-         {:local, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequestV3{} = owner_request,
-         _opts
-       ) do
-    remote_submit_request_v3(codex_session_id, downstream, owner_request)
-  end
+    watcher =
+      case request.request do
+        %WebsocketOwnerRequestV4{} = replay -> start_remote_replay_cancellation_watcher(submitter, node, session_id, replay, opts)
+        _ordinary -> start_remote_cancellation_watcher(submitter, node, session_id, downstream, opts)
+      end
 
-  defp dispatch_submit_request(
-         {:local, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequestV6{} = owner_request,
-         _opts
-       ) do
-    remote_submit_request_v6(codex_session_id, downstream, owner_request)
-  end
+    result = call_remote_submission(node, :remote_submit_request_v8, [session_id, downstream, request], opts)
+    stop_remote_cancellation_watcher(watcher, submitter)
 
-  defp dispatch_submit_request(
-         {:local, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequestV7{} = owner_request,
-         _opts
-       ) do
-    remote_submit_request_v7(codex_session_id, downstream, owner_request)
-  end
+    if result == {:error, :owner_forward_timeout} do
+      case request.request do
+        %WebsocketOwnerRequestV4{} = replay -> reconcile_remote_v4_timeout(node, session_id, replay, opts)
+        _ordinary -> best_effort_abandon_turn(node, session_id, downstream, opts)
+      end
+    end
 
-  defp dispatch_submit_request(
-         {:local, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequestV2{} = owner_request,
-         _opts
-       ) do
-    remote_submit_request_v2(codex_session_id, downstream, owner_request)
-  end
-
-  defp dispatch_submit_request(
-         {:local, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequest{} = owner_request,
-         _opts
-       ) do
-    remote_submit_request_v1(codex_session_id, downstream, owner_request)
+    result
   end
 
   defp dispatch_submit_request(
@@ -1555,223 +1341,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
         opts
       )
     end
-  end
-
-  defp dispatch_submit_request(
-         {:remote, node, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequestV5{} = owner_request,
-         opts
-       ) do
-    submitter = self()
-
-    cancellation_watcher =
-      start_remote_cancellation_watcher(submitter, node, codex_session_id, downstream, opts)
-
-    result =
-      call_remote_submission(
-        node,
-        :remote_submit_request_v5,
-        [codex_session_id, downstream, owner_request],
-        opts
-      )
-
-    stop_remote_cancellation_watcher(cancellation_watcher, submitter)
-
-    # The owner still takes a client-retry turn after its budget expired, as
-    # any turn (findings#206 rows 206-306, 206-315).
-    if result == {:error, :owner_forward_timeout} do
-      best_effort_abandon_turn(node, codex_session_id, downstream, opts)
-    end
-
-    result
-  end
-
-  defp dispatch_submit_request(
-         {:remote, node, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequestV4{} = owner_request,
-         opts
-       ) do
-    submitter = self()
-
-    cancellation_watcher =
-      start_remote_replay_cancellation_watcher(
-        submitter,
-        node,
-        codex_session_id,
-        owner_request,
-        opts
-      )
-
-    result =
-      call_remote_submission(
-        node,
-        :remote_submit_request_v4,
-        [codex_session_id, downstream, owner_request],
-        opts
-      )
-
-    stop_remote_cancellation_watcher(cancellation_watcher, submitter)
-
-    if result == {:error, :owner_forward_timeout} do
-      reconcile_remote_v4_timeout(node, codex_session_id, owner_request, opts)
-    end
-
-    result
-  end
-
-  defp dispatch_submit_request(
-         {:remote, node, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequestV3{} = owner_request,
-         opts
-       ) do
-    submitter = self()
-
-    cancellation_watcher =
-      start_remote_cancellation_watcher(submitter, node, codex_session_id, downstream, opts)
-
-    result =
-      call_remote_submission(
-        node,
-        :remote_submit_request_v3,
-        [codex_session_id, downstream, owner_request],
-        opts
-      )
-
-    stop_remote_cancellation_watcher(cancellation_watcher, submitter)
-
-    if result == {:error, :owner_forward_timeout} do
-      best_effort_abandon_turn(node, codex_session_id, downstream, opts)
-    end
-
-    result
-  end
-
-  defp dispatch_submit_request(
-         {:remote, node, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequestV6{} = owner_request,
-         opts
-       ) do
-    submitter = self()
-
-    cancellation_watcher =
-      start_remote_cancellation_watcher(submitter, node, codex_session_id, downstream, opts)
-
-    result =
-      call_remote_submission(
-        node,
-        :remote_submit_request_v6,
-        [codex_session_id, downstream, owner_request],
-        opts
-      )
-
-    stop_remote_cancellation_watcher(cancellation_watcher, submitter)
-
-    if result == {:error, :owner_forward_timeout} do
-      best_effort_abandon_turn(node, codex_session_id, downstream, opts)
-    end
-
-    result
-  end
-
-  defp dispatch_submit_request(
-         {:remote, node, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequestV7{} = owner_request,
-         opts
-       ) do
-    submitter = self()
-
-    cancellation_watcher =
-      start_remote_cancellation_watcher(submitter, node, codex_session_id, downstream, opts)
-
-    result =
-      call_remote_submission(
-        node,
-        :remote_submit_request_v7,
-        [codex_session_id, downstream, owner_request],
-        opts
-      )
-
-    stop_remote_cancellation_watcher(cancellation_watcher, submitter)
-
-    if result == {:error, :owner_forward_timeout} do
-      best_effort_abandon_turn(node, codex_session_id, downstream, opts)
-    end
-
-    result
-  end
-
-  defp dispatch_submit_request(
-         {:remote, node, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequestV2{} = owner_request,
-         opts
-       ) do
-    submitter = self()
-
-    cancellation_watcher =
-      start_remote_cancellation_watcher(submitter, node, codex_session_id, downstream, opts)
-
-    result =
-      call_remote_submission(
-        node,
-        :remote_submit_request_v2,
-        [codex_session_id, downstream, owner_request],
-        opts
-      )
-
-    stop_remote_cancellation_watcher(cancellation_watcher, submitter)
-
-    if result == {:error, :owner_forward_timeout} do
-      best_effort_abandon_turn(node, codex_session_id, downstream, opts)
-    end
-
-    result
-  end
-
-  defp dispatch_submit_request(
-         {:remote, node, _owner_instance_id},
-         codex_session_id,
-         downstream,
-         %WebsocketOwnerRequest{} = owner_request,
-         opts
-       ) do
-    submitter = self()
-
-    cancellation_watcher =
-      start_remote_cancellation_watcher(
-        submitter,
-        node,
-        codex_session_id,
-        downstream,
-        opts
-      )
-
-    result =
-      call_remote_submission(
-        node,
-        :remote_submit_request_v1,
-        [codex_session_id, downstream, owner_request],
-        opts
-      )
-
-    stop_remote_cancellation_watcher(cancellation_watcher, submitter)
-
-    if result == {:error, :owner_forward_timeout} do
-      best_effort_abandon_turn(node, codex_session_id, downstream, opts)
-    end
-
-    result
   end
 
   defp dispatch_submit_request(
@@ -2068,80 +1637,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
 
   defp submission_notification?(%UpstreamWebsocketSession.Request{submission_observer: observer}),
     do: is_function(observer, 0)
-
-  defp validate_owner_request(%WebsocketOwnerRequest{} = owner_request) do
-    case WebsocketOwnerRequest.validate(owner_request) do
-      :ok -> {:ok, owner_request}
-      {:error, reason} -> {:error, {:invalid_owner_request, reason}}
-    end
-  end
-
-  defp validate_owner_request(owner_request) do
-    case WebsocketOwnerRequest.new(owner_request) do
-      {:ok, owner_request} -> {:ok, owner_request}
-      {:error, reason} -> {:error, {:invalid_owner_request, reason}}
-    end
-  end
-
-  defp validate_owner_request_v6(%WebsocketOwnerRequestV6{} = owner_request) do
-    case WebsocketOwnerRequestV6.validate(owner_request) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:invalid_owner_request, reason}}
-    end
-  end
-
-  defp validate_owner_request_v6(_owner_request),
-    do: {:error, {:invalid_owner_request, {:invalid_field, :envelope}}}
-
-  defp validate_owner_request_v7(%WebsocketOwnerRequestV7{} = owner_request) do
-    case WebsocketOwnerRequestV7.validate(owner_request) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:invalid_owner_request, reason}}
-    end
-  end
-
-  defp validate_owner_request_v7(_owner_request),
-    do: {:error, {:invalid_owner_request, {:invalid_field, :envelope}}}
-
-  defp validate_owner_request_v2(%WebsocketOwnerRequestV2{} = owner_request) do
-    case WebsocketOwnerRequestV2.validate(owner_request) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:invalid_owner_request, reason}}
-    end
-  end
-
-  defp validate_owner_request_v2(_owner_request),
-    do: {:error, {:invalid_owner_request, {:invalid_field, :envelope}}}
-
-  defp validate_owner_request_v3(%WebsocketOwnerRequestV3{} = owner_request) do
-    case WebsocketOwnerRequestV3.validate(owner_request) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:invalid_owner_request, reason}}
-    end
-  end
-
-  defp validate_owner_request_v3(_owner_request),
-    do: {:error, {:invalid_owner_request, {:invalid_field, :envelope}}}
-
-  defp validate_owner_request_v4(%WebsocketOwnerRequestV4{} = owner_request) do
-    case WebsocketOwnerRequestV4.validate(owner_request) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:invalid_owner_request, reason}}
-    end
-  end
-
-  defp validate_owner_request_v4(_owner_request),
-    do: {:error, {:invalid_owner_request, {:invalid_field, :envelope}}}
-
-  defp validate_owner_request_v5(%WebsocketOwnerRequestV5{} = owner_request) do
-    case WebsocketOwnerRequestV5.validate(owner_request) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:invalid_owner_request, reason}}
-    end
-  end
-
-  defp validate_owner_request_v5(_owner_request),
-    do: {:error, {:invalid_owner_request, {:invalid_field, :envelope}}}
 
   defp validate_admission_control(%WebsocketOwnerAdmissionControlV1{} = control) do
     case WebsocketOwnerAdmissionControlV1.validate(control) do
@@ -2645,20 +2140,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
 
   defp normalize_returned_remote_failure({:error, reason}, module, function, args) do
     cond do
-      missing_remote_submit_v1?(reason, module, function, args) ->
-        log_protocol_incompatibility(:v1)
-        {:error, :owner_unavailable}
-
-      version = missing_full_history_submit_version(reason, module, function, args) ->
-        log_protocol_incompatibility(version)
-        {:error, :owner_unavailable}
-
-      missing_remote_submit_v2?(reason, module, function, args) ->
-        log_protocol_incompatibility(:v2)
-        {:error, :owner_unavailable}
-
-      missing_remote_submit_v3?(reason, module, function, args) ->
-        log_protocol_incompatibility(:v3)
+      missing_remote_submit_v8?(reason, module, function, args) ->
+        log_protocol_incompatibility(:v8)
         {:error, :owner_unavailable}
 
       unsupported = unsupported_remote_cancel(reason, module, function, args) ->
@@ -2736,24 +2219,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
 
   defp normalize_protocol_failure(:error, reason, module, function, args) do
     cond do
-      missing_remote_submit_v1?(reason, module, function, args) ->
-        log_protocol_incompatibility(:v1)
-        :owner_unavailable
-
-      version = missing_full_history_submit_version(reason, module, function, args) ->
-        log_protocol_incompatibility(version)
-        :owner_unavailable
-
-      missing_remote_submit_v2?(reason, module, function, args) ->
-        log_protocol_incompatibility(:v2)
-        :owner_unavailable
-
-      missing_remote_submit_v3?(reason, module, function, args) ->
-        log_protocol_incompatibility(:v3)
-        :owner_unavailable
-
-      missing_remote_submit_v5?(reason, module, function, args) ->
-        log_protocol_incompatibility(:v5)
+      missing_remote_submit_v8?(reason, module, function, args) ->
+        log_protocol_incompatibility(:v8)
         :owner_unavailable
 
       unsupported = unsupported_remote_cancel(reason, module, function, args) ->
@@ -2771,20 +2238,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   defp normalize_protocol_failure(kind, reason, module, function, args)
        when kind in [:exit, :throw] do
     cond do
-      version = missing_full_history_submit_version(reason, module, function, args) ->
-        log_protocol_incompatibility(version)
-        :owner_unavailable
-
-      missing_remote_submit_v2?(reason, module, function, args) ->
-        log_protocol_incompatibility(:v2)
-        :owner_unavailable
-
-      missing_remote_submit_v3?(reason, module, function, args) ->
-        log_protocol_incompatibility(:v3)
-        :owner_unavailable
-
-      missing_remote_submit_v5?(reason, module, function, args) ->
-        log_protocol_incompatibility(:v5)
+      missing_remote_submit_v8?(reason, module, function, args) ->
+        log_protocol_incompatibility(:v8)
         :owner_unavailable
 
       missing_remote_reconnect_control_v1?(reason, module, function, args) ->
@@ -2839,73 +2294,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
     ] or match?({:nodedown, _node}, reason) or match?({:noproc, _details}, reason)
   end
 
-  defp missing_remote_submit_v1?(
-         {:exception, :undef, [{module, :remote_submit_request_v1, remote_args, _location} | _stack]},
+  defp missing_remote_submit_v8?(
+         {:exception, :undef, [{module, :remote_submit_request_v8, remote_args, _location} | _stack]},
          module,
-         :remote_submit_request_v1,
+         :remote_submit_request_v8,
          args
        ),
        do: remote_args == args and length(remote_args) == 3
 
-  defp missing_remote_submit_v1?(_reason, _module, _function, _args), do: false
-
-  defp missing_full_history_submit_version(reason, module, function, args) do
-    cond do
-      missing_remote_submit_v7?(reason, module, function, args) -> :v7
-      missing_remote_submit_v6?(reason, module, function, args) -> :v6
-      true -> nil
-    end
-  end
-
-  defp missing_remote_submit_v6?(
-         {:exception, :undef, [{module, :remote_submit_request_v6, remote_args, _location} | _stack]},
-         module,
-         :remote_submit_request_v6,
-         args
-       ),
-       do: remote_args == args and length(remote_args) == 3
-
-  defp missing_remote_submit_v6?(_reason, _module, _function, _args), do: false
-
-  defp missing_remote_submit_v7?(
-         {:exception, :undef, [{module, :remote_submit_request_v7, remote_args, _location} | _stack]},
-         module,
-         :remote_submit_request_v7,
-         args
-       ),
-       do: remote_args == args and length(remote_args) == 3
-
-  defp missing_remote_submit_v7?(_reason, _module, _function, _args), do: false
-
-  defp missing_remote_submit_v2?(
-         {:exception, :undef, [{module, :remote_submit_request_v2, remote_args, _location} | _stack]},
-         module,
-         :remote_submit_request_v2,
-         args
-       ),
-       do: remote_args == args and length(remote_args) == 3
-
-  defp missing_remote_submit_v2?(_reason, _module, _function, _args), do: false
-
-  defp missing_remote_submit_v3?(
-         {:exception, :undef, [{module, :remote_submit_request_v3, remote_args, _location} | _stack]},
-         module,
-         :remote_submit_request_v3,
-         args
-       ),
-       do: remote_args == args and length(remote_args) == 3
-
-  defp missing_remote_submit_v3?(_reason, _module, _function, _args), do: false
-
-  defp missing_remote_submit_v5?(
-         {:exception, :undef, [{module, :remote_submit_request_v5, remote_args, _location} | _stack]},
-         module,
-         :remote_submit_request_v5,
-         args
-       ),
-       do: remote_args == args and length(remote_args) == 3
-
-  defp missing_remote_submit_v5?(_reason, _module, _function, _args), do: false
+  defp missing_remote_submit_v8?(_reason, _module, _function, _args), do: false
 
   # An owner node that predates a versioned cancel entrypoint answers `undef`;
   # its caller then falls back to the legacy detach.
@@ -2987,12 +2384,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
     )
   end
 
-  defp log_protocol_incompatibility(version) when version in [:v1, :v2, :v3, :v5, :v6, :v7] do
+  defp log_protocol_incompatibility(:v8) do
     require Logger
 
     Logger.warning(
       "websocket owner protocol incompatible event=owner_protocol_incompatible " <>
-        "boundary=submit protocol=#{version} " <>
+        "boundary=submit protocol=v8 " <>
         "canonical_error=owner_unavailable"
     )
   end

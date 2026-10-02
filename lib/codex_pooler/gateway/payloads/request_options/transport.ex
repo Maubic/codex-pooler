@@ -15,12 +15,15 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions.Transport do
     :websocket_response_task_drain_ms,
     :websocket_owner_response_task_drain_ms,
     :route_class,
+    :upstream_websocket_bridge_plan,
     forwarded_metadata_headers: [],
     upstream_websocket_bridge?: false,
     websocket_delivery_mode: :relay
   ]
 
   @type websocket_writer :: (binary() -> any()) | nil
+  @type upstream_transport :: :http_sse | :http_json | :native_websocket | :bridged_websocket
+  @type bridge_plan :: :all | Ecto.UUID.t() | nil
 
   @type t :: %__MODULE__{
           transport: String.t() | nil,
@@ -34,6 +37,7 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions.Transport do
           websocket_owner_response_task_drain_ms: pos_integer() | nil,
           route_class: String.t() | nil,
           upstream_websocket_bridge?: boolean(),
+          upstream_websocket_bridge_plan: bridge_plan(),
           websocket_delivery_mode: :relay | :collect_compaction | :collect_full_history
         }
 
@@ -106,9 +110,25 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions.Transport do
       transport
       | transport: transport_name,
         upstream_endpoint: endpoint,
-        route_class: route_class(%{transport: transport_name}, endpoint, payload)
+        route_class: route_class(%{transport: transport_name}, endpoint, payload),
+        upstream_websocket_bridge_plan: nil
     }
   end
+
+  @doc "Actual upstream send scope; a routing bridge plan never grants physical admission."
+  @spec upstream_transport(t()) :: upstream_transport() | nil
+  def upstream_transport(%__MODULE__{upstream_websocket_bridge?: true}), do: :bridged_websocket
+  def upstream_transport(%__MODULE__{transport: "websocket"}), do: :native_websocket
+  def upstream_transport(%__MODULE__{transport: "http_sse"}), do: :http_sse
+  def upstream_transport(%__MODULE__{transport: transport}) when transport in ["http_json", "http_compact_json", "http_multipart"], do: :http_json
+  def upstream_transport(%__MODULE__{}), do: nil
+
+  @doc "Candidate routing scope captured only by the trusted HTTP bridge planner."
+  @spec upstream_transport(t(), Ecto.UUID.t() | nil) :: upstream_transport() | nil
+  def upstream_transport(%__MODULE__{transport: "http_sse", upstream_websocket_bridge_plan: plan}, assignment_id)
+      when is_binary(assignment_id) and (plan == :all or plan == assignment_id), do: :bridged_websocket
+
+  def upstream_transport(%__MODULE__{} = transport, _assignment_id), do: upstream_transport(transport)
 
   @spec route_class(map() | keyword(), String.t(), map()) :: String.t() | nil
   def route_class(opts, endpoint, payload) when is_map(payload) do

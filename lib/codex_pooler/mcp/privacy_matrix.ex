@@ -218,6 +218,7 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
         :workspace_label,
         :onboarding_method,
         :status,
+        :allow_provider_credits,
         :plan_family,
         :plan_label,
         :auth_fresh_at,
@@ -231,9 +232,11 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
         :updated_at
       ],
       masked: [:account_email, :upstream_account_email],
-      summarized: [:quota_summary, :assignment_summary, :metadata],
+      summarized: [:quota_summary, :assignment_summary, :metadata, :capacity_decision],
       omitted: [
         :workspace_id,
+        :quota_capacity_facts,
+        :quota_capacity_blocker,
         :upstream_auth_json,
         :auth_json,
         :access_token,
@@ -258,19 +261,22 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
         :workspace_ref,
         :workspace_label,
         :status,
+        :allow_provider_credits,
         :plan_family,
         :assignment_summary,
         :quota_summary,
         :quota_windows
       ],
       masked: [],
-      summarized: [],
+      summarized: [:capacity_decision],
       omitted: [
         :account_email,
         :upstream_account_email,
         :workspace_id,
         :metadata,
         :raw_metadata,
+        :quota_capacity_facts,
+        :quota_capacity_blocker,
         :evidence,
         :raw_evidence,
         :provider_payload,
@@ -495,6 +501,8 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
     raise ArgumentError, "MCP privacy projection requires an explicit map"
   end
 
+  defp transform(:allowed, :allow_provider_credits, value) when is_boolean(value), do: value
+  defp transform(:allowed, :allow_provider_credits, _value), do: nil
   defp transform(:allowed, _field, value), do: value
   defp transform(:masked, field, value), do: mask(field, value)
   defp transform(:summarized, field, value), do: summarize(field, value)
@@ -528,8 +536,34 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
     |> Enum.join(" ")
   end
 
+  defp summarize(:capacity_decision, value) when is_map(value) and not is_struct(value) do
+    %{
+      capacity_basis: bounded_enum(value, :capacity_basis, ~w(included_window ordinary_provider_permission model_allowance windowless_provider_permission recovered_included provider_credits unknown_legacy none), "none"),
+      qualification: bounded_enum(value, :qualification, ~w(established provider_attested supported unverified legacy_attested not_applicable), "unverified"),
+      scope: "account",
+      routing_usable: fetch_summary(value, :routing_usable) == true,
+      reason_codes: bounded_capacity_reasons(fetch_summary(value, :reason_codes))
+    }
+  end
+
+  defp summarize(:capacity_decision, _value), do: %{}
   defp summarize(_field, value) when is_map(value), do: Map.take(value, safe_summary_keys(value))
   defp summarize(_field, value), do: value
+
+  defp bounded_enum(value, key, allowed, fallback) do
+    candidate = fetch_summary(value, key)
+    candidate = if is_atom(candidate), do: Atom.to_string(candidate), else: candidate
+    if candidate in allowed, do: candidate, else: fallback
+  end
+
+  defp fetch_summary(value, key), do: Map.get(value, key, Map.get(value, Atom.to_string(key)))
+
+  defp bounded_capacity_reasons(reasons) when is_list(reasons) do
+    allowed = ~w(exhausted not_fresh expired reset_missing unknown_unusable provider_denied provider_credits_disabled provider_credit_capacity_unverified capacity_basis_unknown non_credit_capacity_unverified saved_reset_probe_pending saved_reset_recovery_unavailable)
+    reasons |> Enum.filter(&(&1 in allowed)) |> Enum.uniq() |> Enum.take(12)
+  end
+
+  defp bounded_capacity_reasons(_reasons), do: []
 
   defp fetch_field(attrs, field) do
     cond do

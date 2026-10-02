@@ -38,7 +38,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback do
 
     fallback != [] and is_nil(context.client_retry_dispatch_authority) and
       not RequestOptions.connection_bound_compaction?(context.request_options) and
-      PoolReturn.any_routable?(context.auth, context.model, fallback, context.route_class)
+      PoolReturn.any_routable?(context.auth, context.model, fallback, context.request_options)
   end
 
   @doc """

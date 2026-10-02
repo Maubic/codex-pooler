@@ -3,6 +3,8 @@ defmodule CodexPooler.Gateway.Runtime.WebsocketQuotaDenialTest do
 
   import CodexPooler.PoolerFixtures
 
+  alias CodexPooler.Catalog.Model
+  alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Routing.CandidateEligibility.AccountDenial
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
@@ -100,7 +102,7 @@ defmodule CodexPooler.Gateway.Runtime.WebsocketQuotaDenialTest do
     refute eligibility(context).eligible?
     denied_snapshot = Windows.load_routing_quota_snapshots([context.identity.id], DateTime.utc_now())
     denied_state = %RouteState{visible_model: nil, quota_snapshots: denied_snapshot}
-    assert AccountDenial.candidate_exclusion({context.assignment, context.identity}, denied_state)
+    assert AccountDenial.candidate_exclusion({context.assignment, context.identity}, denied_state, %Model{exposed_model_id: "sample-model", upstream_model_id: "sample-model"}, RequestOptions.for_websocket(%{}, %{}))
     recovered_at = DateTime.add(reset_at, 1, :second)
 
     recovered_headers =
@@ -125,7 +127,7 @@ defmodule CodexPooler.Gateway.Runtime.WebsocketQuotaDenialTest do
 
     assert Windows.routing_quota_eligibility_from_snapshot(snapshot).eligible?
     recovered_state = %RouteState{visible_model: nil, quota_snapshots: %{context.identity.id => snapshot}}
-    refute AccountDenial.candidate_exclusion({context.assignment, context.identity}, recovered_state)
+    refute AccountDenial.candidate_exclusion({context.assignment, context.identity}, recovered_state, %Model{exposed_model_id: "sample-model", upstream_model_id: "sample-model"}, RequestOptions.for_websocket(%{}, %{}))
   end
 
   test "denial does not attach to a non-exhausted window in the same observation" do

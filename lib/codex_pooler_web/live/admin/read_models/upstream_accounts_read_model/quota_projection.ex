@@ -4,7 +4,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
   alias CodexPooler.Admin.UpstreamQuotaReadiness
   alias CodexPooler.Quotas.Evidence
   alias CodexPooler.Quotas.ModelWeeklyResetSemantics
+  alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Quota
+  alias CodexPooler.Upstreams.Quota.CapacityFactsStore
   alias CodexPooler.Upstreams.Quota.Charts.Measurements
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
   alias CodexPooler.Upstreams.Quota.WindowSelector
@@ -52,7 +54,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
           required(:percent_label) => String.t(),
           required(:count_label) => String.t() | nil,
           required(:count_title) => String.t() | nil,
-          required(:burning_credits) => boolean(),
           required(:evidence_state) => evidence_state(),
           required(:meter_state) => meter_state(),
           required(:freshness_label) => String.t(),
@@ -153,7 +154,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
     put_quota_priming(assignment, "weekly_only_probe")
   end
 
-  defp put_derived_quota_priming(assignment, %{state: "provider_available_no_windows"}) do
+  defp put_derived_quota_priming(assignment, %{state: state}) when state in ["provider_available_no_windows", "capacity_basis_unknown"] do
     put_quota_priming(assignment, "known")
   end
 
@@ -225,68 +226,146 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
     ] ++ additional_limits
   end
 
-  @spec quota_limit_rows(
-          [Quota.AccountQuotaWindow.t()],
-          DateTimeDisplay.preferences(),
-          DateTime.t(),
-          CodexPooler.Upstreams.Quota.CreditBalanceStore.snapshot() | nil
-        ) :: [quota_limit_row()]
-  def quota_limit_rows(windows, datetime_preferences, snapshot_at, credit_balance) do
+  @spec quota_limit_rows([Quota.AccountQuotaWindow.t()], DateTimeDisplay.preferences(), DateTime.t(), [Quota.AccountQuotaWindow.t()]) :: [quota_limit_row()]
+  def quota_limit_rows(windows, preferences, snapshot_at, raw_windows) do
     windows
-    |> quota_limit_rows(datetime_preferences, snapshot_at)
-    |> Enum.map(&put_account_credit_balance(&1, windows, snapshot_at, credit_balance))
-  end
-
-  @spec quota_limit_rows(
-          [Quota.AccountQuotaWindow.t()],
-          DateTimeDisplay.preferences(),
-          DateTime.t(),
-          CodexPooler.Upstreams.Quota.CreditBalanceStore.snapshot() | nil,
-          [Quota.AccountQuotaWindow.t()]
-        ) :: [quota_limit_row()]
-  def quota_limit_rows(windows, preferences, snapshot_at, credit_balance, raw_windows) do
-    windows
-    |> quota_limit_rows(preferences, snapshot_at, credit_balance)
+    |> quota_limit_rows(preferences, snapshot_at)
     |> QuotaObservations.attach(raw_windows, preferences, snapshot_at)
   end
 
-  defp put_account_credit_balance(%{key: key} = row, windows, snapshot_at, credit_balance)
-       when key in [:primary_5h, :primary_30d, :weekly] do
-    descriptor =
-      case key do
-        :weekly -> "secondary"
-        :primary_30d -> :monthly_primary
-        :primary_5h -> :primary_5h
-      end
+  @type provider_credits_summary :: %{
+          balance_state: :finite | :unlimited | :unknown,
+          display_row?: boolean(),
+          balance_label: String.t() | nil,
+          balance_exact_label: String.t() | nil,
+          observed_baseline_label: String.t() | nil,
+          observed_percent: Decimal.t() | nil,
+          allow_provider_credits: boolean(),
+          availability: :available | :conditional | :disabled | :unavailable | :unknown,
+          availability_label: String.t(),
+          availability_detail: String.t(),
+          capacity_basis: CodexPooler.Upstreams.Quota.CapacityAssessment.capacity_basis(),
+          reason_codes: [String.t()],
+          qualification: :established | :provider_attested | :supported | :unverified | :legacy_attested | :not_applicable
+        }
 
-    case quota_account_window(windows, descriptor, snapshot_at) do
-      nil -> row
-      window -> put_credit_balance(row, credit_balance, window)
+  @spec provider_credits_summary(RoutingQuotaSnapshot.t()) :: provider_credits_summary()
+  def provider_credits_summary(%RoutingQuotaSnapshot{} = snapshot) do
+    decision = Upstreams.provider_credits_decision(snapshot, %{account_only: true})
+    {balance_state, balance} = observed_credit_balance(snapshot)
+    baseline = if balance_state == :finite, do: observed_credit_baseline(snapshot)
+    {availability, label, detail} = credit_capacity_explanation(snapshot, decision)
+
+    %{
+      balance_state: balance_state,
+      display_row?: balance_state == :unlimited or (balance_state == :finite and Decimal.positive?(balance)),
+      balance_label: if(balance, do: compact_credit_balance_label(balance)),
+      balance_exact_label: if(balance, do: format_credit_decimal(balance)),
+      observed_baseline_label: if(baseline, do: compact_credit_balance_label(baseline)),
+      observed_percent: if(balance && baseline, do: balance |> Decimal.mult(100) |> Decimal.div(baseline) |> decimal_clamp_percent() |> Decimal.round(3, :down)),
+      allow_provider_credits: snapshot.allow_provider_credits,
+      availability: availability,
+      availability_label: label,
+      availability_detail: detail,
+      capacity_basis: decision.capacity_basis,
+      reason_codes: decision.reason_codes,
+      qualification: decision.qualification.status
+    }
+  end
+
+  defp observed_credit_balance(snapshot) do
+    facts = snapshot.capacity_facts
+    fresh? = CapacityFactsStore.fresh?(facts, snapshot.credential_epoch, snapshot.as_of)
+
+    cond do
+      fresh? and facts.unlimited == true -> {:unlimited, nil}
+      fresh? and is_binary(facts.balance) -> {:finite, Decimal.new(facts.balance)}
+      fresh? and facts.denial_category == :malformed -> {:unknown, nil}
+      true -> legacy_observed_balance(snapshot.credit_balance)
     end
   end
 
-  defp put_account_credit_balance(row, _windows, _snapshot_at, _credit_balance), do: row
+  defp legacy_observed_balance(%{unlimited: true}), do: {:unlimited, nil}
+  defp legacy_observed_balance(%{balance: balance}) when is_integer(balance), do: {:finite, Decimal.new(balance)}
+  defp legacy_observed_balance(_balance), do: {:unknown, nil}
 
-  defp put_credit_balance(row, %{balance: balance}, window) do
-    count_label = "#{Formatting.format_integer(balance)} credits"
-    credit_window = %{window | source: "codex_usage_api", credits: balance}
-    burning = burning_credits?(credit_window)
-
-    %{
-      row
-      | count_label: count_label,
-        count_title: quota_count_title(credit_window, count_label, burning),
-        burning_credits: burning
-    }
+  defp observed_credit_baseline(snapshot) do
+    snapshot
+    |> RoutingQuotaSnapshot.time_visible_raw_windows()
+    |> Enum.filter(fn window ->
+      account_quota_window?(window) and window.source == "codex_usage_api" and
+        is_integer(window.active_limit) and window.active_limit > 0 and
+        Evidence.current_freshness_state(window, snapshot.as_of) == "fresh" and
+        current_baseline_epoch?(window, snapshot)
+    end)
+    |> Enum.max_by(&{DateTime.to_unix(&1.observed_at, :microsecond), &1.window_kind}, fn -> nil end)
+    |> case do
+      nil -> nil
+      window -> Decimal.new(window.active_limit)
+    end
   end
 
-  defp put_credit_balance(row, nil, _window) do
-    %{
-      row
-      | count_label: nil,
-        count_title: nil,
-        burning_credits: false
-    }
+  defp current_baseline_epoch?(window, snapshot) do
+    case Map.get(window.metadata || %{}, "credential_epoch") do
+      epoch when is_integer(epoch) -> epoch == snapshot.credential_epoch
+      nil -> not snapshot.capacity_facts_reported?
+      _malformed -> false
+    end
+  end
+
+  defp format_credit_decimal(decimal) do
+    case String.split(decimal |> Decimal.normalize() |> Decimal.to_string(:normal), ".", parts: 2) do
+      [whole] -> Formatting.format_integer(String.to_integer(whole))
+      [whole, fraction] -> "#{Formatting.format_integer(String.to_integer(whole))}.#{fraction}"
+    end
+  end
+
+  defp compact_credit_balance_label(balance) do
+    truncated = Decimal.round(balance, 0, :down)
+
+    if Decimal.positive?(balance) and Decimal.equal?(truncated, Decimal.new(0)) do
+      "<1"
+    else
+      format_credit_decimal(truncated)
+    end
+  end
+
+  defp credit_capacity_explanation(snapshot, decision) do
+    cond do
+      "saved_reset_probe_pending" in decision.reason_codes ->
+        {:unavailable, "Banked-reset recovery pending", "Recovery is not yet confirmed. Provider credits on this identity cannot confirm included quota restoration."}
+
+      not snapshot.allow_provider_credits ->
+        {:disabled, "Provider credits disabled", "Observed balance remains separate. Independently valid included capacity, exact-model allowances and permitted banked-reset recovery remain available."}
+
+      true ->
+        effective_credit_explanation(decision)
+    end
+  end
+
+  defp effective_credit_explanation(%{eligible?: true, capacity_basis: :provider_credits}),
+    do: {:available, "Provider credits available", "Compatible included capacity is considered first, then usable provider credits, before blocked-request banked-reset recovery. Each request still checks its model, transport and serving mode; this does not establish a credit debit."}
+
+  defp effective_credit_explanation(%{eligible?: true, capacity_basis: :unknown_legacy}),
+    do: {:unknown, "Capacity basis unknown", "Legacy provider availability is preserved with this policy enabled. It does not prove included quota or provider credit capacity for every model or transport."}
+
+  defp effective_credit_explanation(%{eligible?: true}),
+    do: {:conditional, "Provider permission available", "Current evidence permits routing independently of the credit option. The account summary does not establish the billing source or permission for every model, transport and serving mode."}
+
+  defp effective_credit_explanation(decision) do
+    cond do
+      "saved_reset_recovery_unavailable" in decision.reason_codes ->
+        {:unavailable, "Banked-reset recovery unavailable", "Existing reset recovery restrictions remain in force; a provider credit balance cannot clear the recovery latch."}
+
+      decision.capacity_basis == :provider_credits ->
+        {:unavailable, "Provider credit capacity unverified", "The observed balance does not grant routing. Current evidence does not establish usable provider credit permission; included capacity, ordinary provider permission and authorized reset recovery are evaluated separately."}
+
+      "provider_denied" in decision.reason_codes ->
+        {:unavailable, "Provider capacity blocked", "A provider workspace or model denial remains in force. Provider credits do not bypass that denial."}
+
+      true ->
+        {:unknown, "Provider credit capacity unverified", "A balance or unknown observation grants no new routing capacity. Current included evidence and permitted banked-reset recovery are evaluated independently."}
+    end
   end
 
   defp put_quota_priming(assignment, status) do
@@ -527,14 +606,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
          datetime_preferences,
          snapshot_at
        ) do
-    remaining_percent = quota_remaining_percent(window)
+    remaining_percent = included_remaining_percent(window)
     evidence_state = quota_evidence_state(window, snapshot_at)
 
     {reset_semantics, reset_display_state, reset_at, reset_label, reset_title} =
       quota_reset_presentation(window, evidence_state, datetime_preferences, snapshot_at)
 
     count_label = quota_count_label(window)
-    burning_credits = burning_credits?(window)
     {freshness_label, freshness_title} = freshness_presentation(evidence_state)
 
     {observed_label, observed_title} =
@@ -554,8 +632,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
       percent_value: quota_percent_value(remaining_percent),
       percent_label: quota_percent_label(remaining_percent),
       count_label: count_label,
-      count_title: quota_count_title(window, count_label, burning_credits),
-      burning_credits: burning_credits,
+      count_title: nil,
       evidence_state: evidence_state,
       meter_state: quota_meter_state(evidence_state, remaining_percent),
       freshness_label: freshness_label,
@@ -583,7 +660,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
       percent_label: "not reported",
       count_label: nil,
       count_title: nil,
-      burning_credits: false,
       evidence_state: :unknown,
       meter_state: :unknown,
       freshness_label: "freshness unknown",
@@ -607,6 +683,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
   end
 
   defp measurement_pending_presentation(_observation), do: {false, nil, nil}
+
+  defp included_remaining_percent(%Quota.AccountQuotaWindow{quota_key: "account", quota_scope: "account"} = window),
+    do: quota_remaining_percent(%{window | credits: nil, active_limit: nil})
+
+  defp included_remaining_percent(window), do: quota_remaining_percent(window)
 
   defp quota_remaining_percent(
          %Quota.AccountQuotaWindow{
@@ -662,23 +743,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
   defp quota_percent_label(%Decimal{} = percent), do: "#{quota_percent_value(percent)}%"
   defp quota_percent_label(_percent), do: "not reported"
 
-  defp quota_count_label(%Quota.AccountQuotaWindow{
-         quota_key: "account",
-         quota_scope: "account",
-         source: "codex_usage_api",
-         credits: credits
-       })
-       when is_integer(credits) and credits >= 0 do
-    "#{Formatting.format_integer(credits)} credits"
-  end
-
-  defp quota_count_label(%Quota.AccountQuotaWindow{
-         quota_key: "account",
-         quota_scope: "account",
-         source: "codex_usage_api",
-         credits: nil
-       }),
-       do: nil
+  defp quota_count_label(%Quota.AccountQuotaWindow{quota_key: "account", quota_scope: "account"}), do: nil
 
   defp quota_count_label(%Quota.AccountQuotaWindow{credits: credits, active_limit: active_limit})
        when is_integer(credits) and is_integer(active_limit) and active_limit > 0 do
@@ -710,43 +775,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
   defp quota_count_label(%Quota.AccountQuotaWindow{used_percent: %Decimal{}}), do: nil
 
   defp quota_count_label(%Quota.AccountQuotaWindow{}), do: nil
-
-  defp quota_count_title(
-         %Quota.AccountQuotaWindow{
-           quota_key: "account",
-           quota_scope: "account",
-           source: "codex_usage_api",
-           credits: credits
-         },
-         count_label,
-         burning_credits
-       )
-       when is_integer(credits) and is_binary(count_label) do
-    cond do
-      burning_credits ->
-        "#{count_label}. Credit balance currently being consumed because included Codex quota is exhausted; it is not a currency amount."
-
-      credits == 0 ->
-        "#{count_label}. Credit balance is depleted; it is not a currency amount or a total capacity."
-
-      true ->
-        "#{count_label}. Credit balance is separate from included Codex quota remaining; it is not a currency amount."
-    end
-  end
-
-  defp quota_count_title(_window, _count_label, _burning_credits), do: nil
-
-  defp burning_credits?(%Quota.AccountQuotaWindow{
-         quota_key: "account",
-         quota_scope: "account",
-         source: "codex_usage_api",
-         credits: credits,
-         used_percent: %Decimal{} = used_percent
-       })
-       when is_integer(credits) and credits > 0,
-       do: Decimal.compare(used_percent, Decimal.new(100)) != :lt
-
-  defp burning_credits?(_window), do: false
 
   defp quota_reset_presentation(window, evidence_state, datetime_preferences, snapshot_at) do
     {reset_semantics, reset_at, reset_label, reset_title} =

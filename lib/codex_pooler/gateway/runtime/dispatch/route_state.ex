@@ -169,7 +169,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.RouteState do
   """
   @spec route_filter_candidates(t() | term()) :: [candidate()]
   def route_filter_candidates(%__MODULE__{candidates: candidates, extensions: extensions}) when is_list(candidates),
-    do: candidates ++ Map.get(extensions, :route_filter_dropped, []) ++ Map.get(extensions, :partition_fallback, [])
+    do: candidates ++ Map.get(extensions, :route_filter_dropped, []) ++ Map.get(extensions, :partition_fallback, []) ++ Map.get(extensions, :attempted_capacity_candidates, [])
 
   def route_filter_candidates(_route_state), do: []
 
@@ -208,7 +208,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.RouteState do
   def take_partition_fallback(%__MODULE__{} = route_state, auth, %Model{} = model, %RequestOptions{} = request_options) do
     fallback = partition_fallback(route_state)
 
-    %{route_state | extensions: Map.delete(route_state.extensions, :partition_fallback), quota_snapshots: %{}}
+    extensions = route_state.extensions |> Map.delete(:partition_fallback) |> Map.delete(:route_filter_dropped)
+
+    %{route_state | extensions: extensions, quota_snapshots: %{}}
     |> put_saved_reset_auto_capacity(fallback)
     |> put_candidates(fallback)
     |> preload_routing_snapshots(auth, model, request_options)

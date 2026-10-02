@@ -12,6 +12,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
   alias CodexPoolerWeb.Admin.PoolEventSubscriptions
   alias CodexPoolerWeb.Admin.PoolFilterComponents
   alias CodexPoolerWeb.Admin.PoolWizardComponents
+  alias CodexPoolerWeb.Admin.ProviderCreditsWorkflow
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel
   alias CodexPoolerWeb.Admin.UpstreamAuthJsonImport
   alias CodexPoolerWeb.Admin.UpstreamFilterForm
@@ -77,6 +78,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
       )
       |> assign(PoolEditorWorkflow.initial_assigns())
       |> assign(InviteWorkflow.initial_assigns())
+      |> assign(ProviderCreditsWorkflow.initial_assigns())
       |> allow_upload(:auth_json,
         accept: ~w(.json),
         max_entries: 1,
@@ -102,6 +104,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
   end
 
   @impl true
+  def handle_info({Events, %{topics: topics, reason: "upstream_account_provider_credits_policy_updated"}}, socket) do
+    if "upstreams" in topics, do: {:noreply, reload_upstreams(socket)}, else: {:noreply, socket}
+  end
+
   def handle_info({Events, %{topics: topics}}, socket) do
     if "upstreams" in topics do
       {:noreply, schedule_upstreams_reload(socket)}
@@ -344,6 +350,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
         {:noreply,
          socket
          |> close_saved_reset_policy_dialog()
+         |> ProviderCreditsWorkflow.close()
          |> assign(
            renaming_account: account,
            rename_account_form: rename_account_form(identity)
@@ -376,6 +383,23 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
 
   def handle_event("confirm_delete_account", %{"upstream_delete" => delete_params}, socket) do
     {:noreply, AccountLifecycleWorkflow.confirm_delete(socket, delete_params, &reload_upstreams/1)}
+  end
+
+  def handle_event("open_provider_credits_policy", %{"id" => identity_id}, socket) do
+    socket = socket |> close_account_workflow_dialogs() |> reload_upstreams()
+    {:noreply, ProviderCreditsWorkflow.open(socket, find_account(socket.assigns.upstream_accounts, identity_id))}
+  end
+
+  def handle_event("cancel_provider_credits_policy", _params, socket) do
+    {:noreply, socket |> ProviderCreditsWorkflow.close() |> flush_deferred_upstreams_reload()}
+  end
+
+  def handle_event("validate_provider_credits_policy", params, socket) do
+    {:noreply, ProviderCreditsWorkflow.validate(socket, Map.get(params, "provider_credits_policy"))}
+  end
+
+  def handle_event("save_provider_credits_policy", params, socket) do
+    {:noreply, ProviderCreditsWorkflow.save(socket, Map.get(params, "provider_credits_policy"), &reload_upstreams/1)}
   end
 
   def handle_event("open_saved_reset_policy", %{"id" => identity_id}, socket) do
@@ -599,6 +623,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
         delete_account_form={@delete_account_form}
         editing_saved_reset_policy={@editing_saved_reset_policy}
         saved_reset_policy_form={@saved_reset_policy_form}
+        editing_provider_credits_policy={@editing_provider_credits_policy}
+        provider_credits_policy_form={@provider_credits_policy_form}
         confirming_saved_reset_redemption={@confirming_saved_reset_redemption}
         account_panel_views={@account_panel_views}
         upstream_accounts={@upstream_accounts}
@@ -675,6 +701,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
       upstreams_loaded?: true,
       account_panel_views: prune_account_panel_views(socket.assigns.account_panel_views, upstream_accounts)
     )
+    |> ProviderCreditsWorkflow.refresh(upstream_accounts)
   end
 
   defp request_upstreams_reload(socket) do
@@ -964,6 +991,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
     |> AccountLifecycleWorkflow.close_delete()
     |> OAuthWorkflow.close()
     |> close_saved_reset_policy_dialog()
+    |> ProviderCreditsWorkflow.close()
   end
 
   defp close_lost_account_dialogs(socket) do
@@ -974,10 +1002,21 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
     {socket, false}
     |> close_if(lost?.(socket.assigns.renaming_account), &close_rename_account_dialog/1)
     |> close_if(lost?.(socket.assigns.deleting_account), &AccountLifecycleWorkflow.close_delete/1)
+    |> close_if(provider_credits_control_lost?(socket), &ProviderCreditsWorkflow.close/1)
     |> close_if(lost?.(socket.assigns.editing_saved_reset_policy), &close_saved_reset_policy_dialog/1)
     |> close_if(lost?.(socket.assigns.confirming_saved_reset_redemption), &assign(&1, :confirming_saved_reset_redemption, nil))
     |> close_if(socket.assigns.oauth_linking and (lost?.(socket.assigns.oauth_link_target_account) or no_pools?), &OAuthWorkflow.close/1)
     |> close_if(socket.assigns.importing_auth_json and no_pools?, &AuthJsonWorkflow.close/1)
+  end
+
+  defp provider_credits_control_lost?(socket) do
+    case socket.assigns.editing_provider_credits_policy do
+      %{identity: %{id: identity_id}} ->
+        not Enum.any?(socket.assigns.upstream_accounts, &(&1.identity.id == identity_id and &1.can_manage_provider_credits?))
+
+      nil ->
+        false
+    end
   end
 
   defp url_dialog_lost?(%{assigns: %{editing_pool: %{id: pool_id}, current_scope: scope}}),

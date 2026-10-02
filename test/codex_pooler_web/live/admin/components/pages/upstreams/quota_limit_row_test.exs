@@ -4,8 +4,11 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
   import Phoenix.LiveViewTest
 
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
+  alias CodexPooler.Upstreams.Quota.{CreditBalanceStore, RoutingQuotaSnapshot}
+  alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaLimitRow
+  alias CodexPoolerWeb.Admin.UpstreamPageComponents.ProviderCreditsComponents
   alias CodexPoolerWeb.DateTimeDisplay
 
   test "opens observations without changing the compact meter and renders a closed accessible dialog" do
@@ -79,7 +82,7 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
     refute html =~ "sources differ"
   end
 
-  test "keeps the existing quota-meter ids, determinate value, threshold tone, stripes, and reset hook" do
+  test "keeps quota-meter ids, determinate value, threshold tone and reset hook" do
     html =
       render_component(&QuotaLimitRow.quota_limit_row/1, %{
         id: "quota-row-baseline",
@@ -88,7 +91,6 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
           percent: Decimal.new(75),
           percent_value: 75,
           percent_label: "75%",
-          burning_credits: true,
           count_label: "500 credits",
           count_title: "Credit balance",
           reset_label: "in 6d 23h",
@@ -104,7 +106,7 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
 
     assert LazyHTML.query(
              document,
-             "#quota-row-baseline-progress[data-role='upstream-limit-progress'][value='75'][max='100'].progress-success.progress-striped"
+             "#quota-row-baseline-progress[data-role='upstream-limit-progress'][value='75'][max='100'].progress-success"
            ) != []
 
     assert LazyHTML.query(
@@ -114,6 +116,48 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
 
     assert LazyHTML.query(document, "#quota-row-baseline-count") |> LazyHTML.text() =~
              "500 credits"
+  end
+
+  test "credit precision agrees in the visible label, progress value and accessible label" do
+    now = ~U[2026-09-07 12:00:00Z]
+
+    window = %AccountQuotaWindow{
+      quota_key: "account",
+      quota_scope: "account",
+      quota_family: "account",
+      source: "codex_usage_api",
+      source_precision: "observed",
+      window_kind: "secondary",
+      window_minutes: 10_080,
+      used_percent: Decimal.new(100),
+      active_limit: 12_500,
+      credits: 12_497,
+      observed_at: now,
+      last_sync_at: now,
+      freshness_state: "fresh",
+      reset_at: DateTime.add(now, 86_400),
+      merge_precedence: 60
+    }
+
+    limit =
+      QuotaProjection.quota_limit_rows(
+        [window],
+        DateTimeDisplay.preferences_for_user(nil),
+        now
+      )
+      |> Enum.find(&(&1.key == :weekly))
+
+    metadata = CreditBalanceStore.transition(%{"credential_epoch" => 1}, %{"credits" => %{"balance" => 12_497}}, now, 1)
+    snapshot = RoutingQuotaSnapshot.from_identity(%UpstreamIdentity{id: Ecto.UUID.generate(), metadata: metadata}, [window], now)
+    summary = QuotaProjection.provider_credits_summary(snapshot)
+    included = limit |> render_quota_row() |> LazyHTML.from_fragment()
+    document = render_component(&ProviderCreditsComponents.provider_credits_summary/1, %{id: "credits", summary: summary}) |> LazyHTML.from_fragment()
+
+    refute Enum.empty?(LazyHTML.query(included, "#quota-row-progress[value='0']"))
+    refute Enum.empty?(LazyHTML.query(included, "#quota-row-progress[aria-label='Weekly included Codex quota remaining 0%']"))
+    assert Enum.empty?(LazyHTML.query(included, ".progress-striped, #quota-row-count"))
+    assert LazyHTML.query(document, "#credits-percent") |> LazyHTML.text() =~ "99.976%"
+    refute Enum.empty?(LazyHTML.query(document, "#credits-progress[value='99.976'][aria-valuetext='99.976% of observed baseline'].progress-striped"))
   end
 
   test "qualifies a retained zero-percent measurement pending provider confirmation through the existing compact trigger" do

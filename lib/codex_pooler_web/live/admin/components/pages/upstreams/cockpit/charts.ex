@@ -8,6 +8,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
   alias CodexPoolerWeb.Admin.UpstreamAccountActions
   alias CodexPoolerWeb.Admin.UpstreamCockpitComponents.Formatting
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.{QuotaLimitRow, SavedResetMeter}
+  alias CodexPoolerWeb.Admin.UpstreamPageComponents.ProviderCreditsComponents
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetComponents
   alias Phoenix.HTML.Form
 
@@ -44,7 +45,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
       </header>
 
       <div
-        :if={@reported_limits != []}
+        :if={@reported_limits != [] or Map.get(@cockpit.provider_credits_summary, :display_row?, false)}
         id="upstream-quota-limits"
         class="grid gap-4 p-4 md:grid-cols-2"
       >
@@ -52,6 +53,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
           :for={limit <- @reported_limits}
           id={"upstream-quota-limit-#{limit.key}"}
           limit={limit}
+        />
+        <ProviderCreditsComponents.provider_credits_summary
+          id="upstream-provider-credits"
+          summary={@cockpit.provider_credits_summary}
+          trigger_id="provider-credits-policy-open"
+          open_policy={if @cockpit.can_manage_provider_credits? and @cockpit.identity.status != "deleted", do: JS.push_focus() |> JS.push("open_provider_credits_policy")}
         />
       </div>
       <p
@@ -61,6 +68,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
       >
         No quota windows are reported for this account yet.
       </p>
+      <div :if={not Map.get(@cockpit.provider_credits_summary, :display_row?, false) and @cockpit.can_manage_provider_credits? and @cockpit.identity.status != "deleted"} class="px-4 pb-4">
+        <AdminComponents.action_button
+          id="provider-credits-policy-open"
+          label="Provider credits policy"
+          icon="hero-currency-dollar"
+          phx-click={JS.push_focus() |> JS.push("open_provider_credits_policy")}
+          aria-controls="provider-credits-policy-dialog"
+          aria-haspopup="dialog"
+          variant={:secondary}
+        />
+      </div>
 
       <details
         id="saved-reset-bank-disclosure"

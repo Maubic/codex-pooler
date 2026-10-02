@@ -24,10 +24,17 @@ defmodule CodexPoolerWeb.Runtime.PartitionUsageLimitFailoverTest do
   import Ecto.Query
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
 
+  alias CodexPooler.Access
+  alias CodexPooler.Accounting
   alias CodexPooler.Accounting.{Attempt, Request}
   alias CodexPooler.FakeUpstream
+  alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.RoutingCircuitState
+  alias CodexPooler.Gateway.Runtime.Service
+  alias CodexPooler.Pools.ModelServingOverride
+  alias CodexPooler.ProviderCreditsFixtures
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
   @moduletag capture_log: true
 
@@ -159,6 +166,200 @@ defmodule CodexPoolerWeb.Runtime.PartitionUsageLimitFailoverTest do
     refute_received :fallback_query
   end
 
+  for stream? <- [true, false] do
+    @tag credits_negative: true
+    test "scoped recovered stream=#{stream?}: real confirmation permits the held-back partition fallback" do
+      pool = confirmed_split_pool!(unquote(stream?))
+
+      response = post_native(pool, "confirmed-partition-fallback", unquote(stream?))
+
+      assert response.status == 200
+      assert [probe, request] = rows!(pool)
+      assert probe.status == "succeeded"
+      assert request.status == "succeeded"
+      assert request.retry_count == 1
+      assert %{"partition_count" => 2, "selected_count" => 2, "filtered_count" => 1} = request.request_metadata["canonical_partition"]
+      assert attempts!(request, pool) == [{"retryable_failed", 429, :refusing}, {"succeeded", 200, :other_partition}]
+      assert [_, fallback] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id, order_by: [asc: a.attempt_number]))
+      assert %{"capacity_basis" => "recovered_included", "non_credit_guarded_probe" => false} = fallback.response_metadata["provider_credits_admission"]
+      refute Accounting.reservation_outstanding?(request)
+      assert {model_posts(pool.refusing_upstream), model_posts(pool.exhausted_upstream), model_posts(pool.other_upstream)} == {1, 0, 2}
+      assert_no_extra_reset_consume!(pool)
+    end
+  end
+
+  @tag credits_negative: true
+  test "scoped recovered fallback is spent once even when its next provider answer is a usage limit" do
+    pool = confirmed_split_pool!(false)
+    resets_at = DateTime.to_unix(DateTime.utc_now()) + 1_800
+    FakeUpstream.set_mode(pool.other_upstream, {:json_headers, 429, %{"error" => %{"type" => "usage_limit_reached", "message" => "synthetic provider text", "resets_at" => resets_at}}, []})
+
+    response = post_native(pool, "confirmed-partition-once", false)
+
+    assert response.status == 429
+    assert [_, request] = rows!(pool)
+    assert request.status == "failed"
+    assert attempts!(request, pool) == [{"retryable_failed", 429, :refusing}, {"failed", 429, :other_partition}]
+    refute Accounting.reservation_outstanding?(request)
+    assert {model_posts(pool.refusing_upstream), model_posts(pool.exhausted_upstream), model_posts(pool.other_upstream)} == {1, 0, 2}
+    assert_no_extra_reset_consume!(pool)
+  end
+
+  @tag credits_negative: true
+  test "another serving mode cannot borrow the held-back partition's real scoped confirmation" do
+    pool = confirmed_split_pool!(false)
+    override = Repo.get_by!(ModelServingOverride, pool_id: pool.setup.pool.id, exposed_model_id: pool.setup.model.exposed_model_id)
+    Repo.update!(Ecto.Changeset.change(override, mode: "full"))
+
+    response = post_native(pool, "confirmed-partition-wrong-mode", false)
+
+    assert response.status == 429
+    assert [_, request] = rows!(pool)
+    assert attempts!(request, pool) == [{"failed", 429, :refusing}]
+    refute Accounting.reservation_outstanding?(request)
+    assert {model_posts(pool.refusing_upstream), model_posts(pool.exhausted_upstream), model_posts(pool.other_upstream)} == {1, 0, 1}
+    assert_no_extra_reset_consume!(pool)
+  end
+
+  @tag credits_negative: true
+  test "HTTP SSE cannot borrow the held-back partition's real HTTP JSON confirmation" do
+    pool = confirmed_split_pool!(false)
+
+    response = post_native(pool, "confirmed-partition-wrong-transport", true)
+
+    assert response.status == 429
+    assert [_, request] = rows!(pool)
+    assert attempts!(request, pool) == [{"failed", 429, :refusing}]
+    refute Accounting.reservation_outstanding?(request)
+    assert {model_posts(pool.refusing_upstream), model_posts(pool.exhausted_upstream), model_posts(pool.other_upstream)} == {1, 0, 1}
+    assert_no_extra_reset_consume!(pool)
+  end
+
+  @tag credits_negative: true
+  test "a circuit-blocked scoped recovered candidate keeps Pool return advice unknown without taking a hop" do
+    pool = confirmed_split_pool!(false)
+    open_circuit!(pool, pool.other.assignment)
+
+    response = post_native(pool, "confirmed-partition-circuit", false)
+
+    assert response.status == 429
+    refute response.resp_body =~ @message
+    assert [_, request] = rows!(pool)
+    assert attempts!(request, pool) == [{"failed", 429, :refusing}]
+    refute Accounting.reservation_outstanding?(request)
+    assert {model_posts(pool.refusing_upstream), model_posts(pool.exhausted_upstream), model_posts(pool.other_upstream)} == {1, 0, 1}
+    assert_no_extra_reset_consume!(pool)
+  end
+
+  @tag credits_negative: true
+  test "a different trusted route class cannot borrow the held-back partition's real confirmation" do
+    pool = confirmed_split_pool!(false)
+    {:ok, auth} = Access.authenticate_authorization_header(pool.setup.authorization)
+    payload = %{"model" => pool.setup.model.exposed_model_id, "input" => native_text_input("synthetic route scope"), "stream" => false}
+    options = RequestOptions.build(%{transport: "http_json", upstream_endpoint: @turn_endpoint}, @turn_endpoint, payload) |> RequestOptions.put_transport(route_class: "proxy_control")
+
+    assert {:error, %{status: 429}} = Service.execute(auth, @turn_endpoint, payload, options)
+
+    assert [_, request] = rows!(pool)
+    assert attempts!(request, pool) == [{"failed", 429, :refusing}]
+    refute Accounting.reservation_outstanding?(request)
+    assert {model_posts(pool.refusing_upstream), model_posts(pool.exhausted_upstream), model_posts(pool.other_upstream)} == {1, 0, 1}
+    assert_no_extra_reset_consume!(pool)
+  end
+
+  @tag credits_negative: true
+  test "fresh independent account exhaustion refuses an earlier scoped recovered partition" do
+    pool = confirmed_split_pool!(false)
+    prime_exhausted_routing_quota!(pool.other.identity)
+
+    response = post_native(pool, "confirmed-partition-new-exhaustion", false)
+
+    assert response.status == 429
+    assert [_, request] = rows!(pool)
+    assert attempts!(request, pool) == [{"failed", 429, :refusing}]
+    refute Accounting.reservation_outstanding?(request)
+    assert {model_posts(pool.refusing_upstream), model_posts(pool.exhausted_upstream), model_posts(pool.other_upstream)} == {1, 0, 1}
+    assert_no_extra_reset_consume!(pool)
+  end
+
+  defp confirmed_split_pool!(stream?) do
+    pool = split_pool!(:unobserved)
+    now = DateTime.utc_now()
+    Repo.insert!(%ModelServingOverride{pool_id: pool.setup.pool.id, exposed_model_id: pool.setup.model.exposed_model_id, mode: "lite", created_at: now, updated_at: now})
+
+    usage_upstream =
+      start_upstream(
+        {:path_json,
+         %{
+           "/api/codex/rate-limit-reset-credits/consume" => {200, %{"code" => "reset"}},
+           "/api/codex/usage" => {200, %{"plan_type" => "synthetic", "rate_limit_reset_credits" => %{"available_count" => 0}, "credits" => %{"balance" => "0", "has_credits" => false, "unlimited" => false}, "spend_control" => %{"reached" => false}}}
+         }}
+      )
+
+    identity =
+      pool.other.identity
+      |> UpstreamIdentity.changeset(%{
+        metadata: Map.merge(pool.other.identity.metadata || %{}, saved_reset_metadata(usage_upstream, 1)),
+        saved_reset_auto_redeem_enabled: true,
+        saved_reset_auto_redeem_min_blocked_minutes: 60,
+        saved_reset_auto_redeem_keep_credits: 0
+      })
+      |> Ecto.Changeset.change(allow_provider_credits: false)
+      |> Repo.update!()
+
+    identity = ProviderCreditsFixtures.persist_usage!(identity, ProviderCreditsFixtures.usage_payload(:weekly_credit_only, credits: :none), now)
+    CodexPooler.SavedResetConfirmationFixtures.confirm_automatic_pressure!(identity)
+    probe_model = put_model_source_assignments!(pool.setup.model, [pool.other.assignment])
+    probe_pool = %{pool | setup: %{pool.setup | model: probe_model}}
+
+    probe_response = post_native(probe_pool, "confirmed-partition-probe", stream?)
+
+    assert probe_response.status == 200,
+           inspect(%{
+             status: probe_response.status,
+             error: probe_response.resp_body |> CodexPooler.JSON.decode() |> probe_error_code(),
+             consumes: FakeUpstream.physical_counts(usage_upstream).consume,
+             redemption_phase: get_in(Repo.reload!(identity).metadata, ["saved_reset_redemption", "phase"]),
+             requests: Enum.map(rows!(pool), &Map.take(&1, [:status, :last_error_code]))
+           })
+
+    assert [request] = rows!(pool)
+    assert attempts!(request, pool) == [{"succeeded", 200, :other_partition}]
+    assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
+    assert %{"capacity_basis" => "recovered_included", "non_credit_guarded_probe" => true} = attempt.response_metadata["provider_credits_admission"]
+    refute Accounting.reservation_outstanding?(request)
+
+    redemption = Repo.reload!(identity).metadata["saved_reset_redemption"]
+    assert redemption["phase"] == "confirmed_by_upstream"
+    assert redemption["probe"]["version"] == 2
+    assert redemption["non_credit_confirmation"]["version"] == 1
+
+    assert redemption["non_credit_confirmation"]["scope"] == %{
+             "pool_upstream_assignment_id" => pool.other.assignment.id,
+             "upstream_identity_id" => identity.id,
+             "effective_model" => pool.setup.model.exposed_model_id,
+             "upstream_model" => pool.setup.model.upstream_model_id,
+             "serving_mode" => "lite",
+             "transport" => if(stream?, do: "http_sse", else: "http_json"),
+             "route_class" => if(stream?, do: "proxy_stream", else: "proxy_http")
+           }
+
+    restored_model = probe_model |> Repo.reload!() |> Ecto.Changeset.change(metadata: pool.setup.model.metadata, source_assignment_count: pool.setup.model.source_assignment_count) |> Repo.update!()
+    pool = Map.merge(pool, %{setup: %{pool.setup | model: restored_model}, other: %{pool.other | identity: Repo.reload!(identity)}, usage_upstream: usage_upstream})
+    assert_no_extra_reset_consume!(pool)
+    pool
+  end
+
+  defp assert_no_extra_reset_consume!(pool) do
+    assert FakeUpstream.physical_counts(pool.usage_upstream).consume == 1
+    assert FakeUpstream.physical_counts(pool.refusing_upstream).consume == 0
+    assert FakeUpstream.physical_counts(pool.exhausted_upstream).consume == 0
+    assert FakeUpstream.physical_counts(pool.other_upstream).consume == 0
+  end
+
+  defp probe_error_code({:ok, %{"error" => error}}), do: Map.take(error, ["code", "type"])
+  defp probe_error_code(_result), do: nil
+
   defp split_pool!(other_quota, transport \\ :http, opts \\ []) do
     resets_at = DateTime.to_unix(DateTime.utc_now()) + 3 * 86_400
 
@@ -181,6 +382,7 @@ defmodule CodexPoolerWeb.Runtime.PartitionUsageLimitFailoverTest do
     prime_exhausted_routing_quota!(exhausted.identity, %{reset_at: reset_in(7_200)})
 
     case other_quota do
+      :unobserved -> :ok
       :routable -> prime_routing_quota!(other.identity)
       {:exhausted, seconds} -> prime_exhausted_routing_quota!(other.identity, %{reset_at: reset_in(seconds)})
     end

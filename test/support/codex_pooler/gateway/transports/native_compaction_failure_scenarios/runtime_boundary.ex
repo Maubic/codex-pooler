@@ -32,6 +32,7 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionFailureScenarios.Runtim
 
   alias CodexPooler.Gateway.Websocket
   alias CodexPooler.Gateway.Websocket.ResponseTask
+  alias CodexPooler.ProviderCreditsDispatchSupport
   alias CodexPooler.Repo
   alias CodexPooler.RouteClass
   alias CodexPoolerWeb.Runtime.BackendCodexTestSupport
@@ -511,13 +512,17 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionFailureScenarios.Runtim
 
     on_exit(fn -> FakeUpstream.stop(upstream) end)
 
+    request_id = Ecto.UUID.generate()
+    attempt_id = Ecto.UUID.generate()
+
     {:ok, result} =
       UpstreamWebsocketSession.request(owner, %WebsocketRequest{
+        provider_credits_context: ProviderCreditsDispatchSupport.context!(nil, model: "sample-model", upstream_model: "sample-model", request_id: request_id, attempt_id: attempt_id),
         url: FakeUpstream.url(upstream) <> @endpoint,
         headers: [],
         payload: CodexPooler.JSON.encode!(%{"model" => "sample-model"}),
-        request_id: Ecto.UUID.generate(),
-        attempt_id: Ecto.UUID.generate(),
+        request_id: request_id,
+        attempt_id: attempt_id,
         effective_serving_mode: "full",
         timeouts: %{connect_timeout_ms: 5_000, receive_timeout_ms: 5_000},
         writer: fn _frame -> :ok end,

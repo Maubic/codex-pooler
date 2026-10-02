@@ -36,7 +36,7 @@ defmodule CodexPoolerWeb.Runtime.PinnedWebsocketQuotaScenario do
 
     {_server, port} = start_public_endpoint_with_server!()
     window = Ecto.UUID.generate()
-    peer = if Map.has_key?(context, :peer_node), do: BackendCodexWebsocketOwnerForwardingSupport.start_shared_peer_session_owner!(setup, %{accepted_turn_state: window}, context.peer_node, [sibling.identity])
+    peer = if Map.has_key?(context, :peer_node), do: BackendCodexWebsocketOwnerForwardingSupport.start_shared_peer_session_owner!(setup, %{accepted_turn_state: window}, context.peer_node)
     {conn, websocket, ref} = public_websocket_connect!(port, setup, window)
     thread = Ecto.UUID.generate()
     {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, turn_payload(setup, thread, "opening", native_text_input("synthetic opening")))

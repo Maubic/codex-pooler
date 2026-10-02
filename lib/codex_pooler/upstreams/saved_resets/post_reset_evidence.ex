@@ -38,8 +38,10 @@ defmodule CodexPooler.Upstreams.SavedResets.PostResetEvidence do
 
   alias CodexPooler.Upstreams.Quota.AccountAvailabilityStore
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
+  alias CodexPooler.Upstreams.Quota.CapacityAssessment
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
   alias CodexPooler.Upstreams.Quota.Windows
+  alias CodexPooler.Upstreams.Quota.Windows.Routing
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
   @account_quota_key "account"
@@ -62,6 +64,7 @@ defmodule CodexPooler.Upstreams.SavedResets.PostResetEvidence do
   def classify(windows, %DateTime{} = consumed_at, %DateTime{} = now) when is_list(windows) do
     fresh_account_windows =
       windows
+      |> Routing.included_only_windows()
       |> Enum.filter(&observed_at_or_after?(&1, consumed_at))
       |> Windows.effective_quota_windows(now)
       |> Enum.filter(fn window -> account_window?(window) and parse_safe?(window) end)
@@ -84,22 +87,56 @@ defmodule CodexPooler.Upstreams.SavedResets.PostResetEvidence do
     ordinary = classify(fresh_windows, consumed_at, now)
 
     snapshot = RoutingQuotaSnapshot.from_identity(identity, fresh_windows, now)
-    eligibility = Windows.routing_quota_eligibility_from_snapshot(snapshot)
+    eligibility = Routing.included_only_eligibility_from_snapshot(snapshot)
 
     cond do
-      ordinary == :pending ->
+      ordinary == :pending or not matching_reset_resources?(identity, fresh_windows, now) ->
         :pending
 
       AccountAvailabilityStore.blocked?(snapshot.availability, snapshot.credential_epoch, now) ->
         :reblocked
 
-      ordinary == :reblocked and eligibility.routing_state == :provider_available ->
-        :confirmed
-
       true ->
-        ordinary
+        classify_permission(ordinary, snapshot, eligibility, consumed_at)
     end
   end
+
+  defp classify_permission(:reblocked, snapshot, %{routing_state: :provider_available}, consumed_at),
+    do: if(included_permission_confirms?(snapshot, consumed_at), do: :confirmed, else: :pending)
+
+  defp classify_permission(ordinary, _snapshot, _eligibility, _consumed_at), do: ordinary
+
+  defp included_permission_confirms?(snapshot, consumed_at),
+    do:
+      CapacityAssessment.fresh_included?(snapshot) and not CapacityAssessment.credit_ambiguous?(snapshot) and
+        DateTime.compare(snapshot.capacity_facts.observed_at, consumed_at) != :lt
+
+  defp matching_reset_resources?(identity, windows, now) do
+    expected = get_in(identity.metadata || %{}, ["saved_reset_redemption", "included_window_descriptors"])
+    effective = Windows.effective_quota_windows(windows, now)
+
+    case expected do
+      [_ | _] = descriptors when length(descriptors) <= 2 ->
+        Enum.all?(descriptors, &matching_reset_descriptor?(&1, effective))
+
+      nil ->
+        true
+
+      _invalid ->
+        false
+    end
+  end
+
+  @spec matching_reset_descriptor?(term(), [AccountQuotaWindow.t()]) :: boolean()
+  defp matching_reset_descriptor?(%{"window_kind" => kind, "window_minutes" => minutes} = descriptor, windows) do
+    map_size(descriptor) == 2 and kind in ["primary", "secondary"] and minutes in [10_080, 43_200] and
+      Enum.any?(windows, fn window ->
+        window.window_kind == kind and window.window_minutes == minutes and
+          window.quota_key == @account_quota_key and window.quota_scope == "account" and window.quota_family == "account" and parse_safe?(window)
+      end)
+  end
+
+  defp matching_reset_descriptor?(_invalid, _windows), do: false
 
   defp account_window?(%AccountQuotaWindow{quota_key: @account_quota_key}), do: true
   defp account_window?(_window), do: false

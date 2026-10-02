@@ -7,8 +7,10 @@ defmodule CodexPooler.MCP.UpstreamsToolsTest do
   alias CodexPooler.InstanceSettings
   alias CodexPooler.MCP
   alias CodexPooler.MCP.{OperatorMCPKey, OperatorMCPSettings, Redaction, ToolDispatch}
+  alias CodexPooler.ProviderCreditsFixtures
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Assignments.PoolAssignments
+  alias CodexPooler.Upstreams.Quota.Windows
 
   setup do
     reset_bootstrap_state_fixture!()
@@ -85,6 +87,55 @@ defmodule CodexPooler.MCP.UpstreamsToolsTest do
     refute inspect(result) =~ "access_token"
     refute inspect(result) =~ "refresh_token"
     assert :ok = Redaction.assert_mcp_output_safe!(result)
+  end
+
+  @tag credits_negative: true
+  test "upstream and quota tools expose only readonly bounded credit decisions in structured and readable output", %{auth: auth} do
+    pool = pool_fixture()
+    %{identity: identity} = upstream_assignment_fixture(pool, %{identity_metadata: %{"credential_epoch" => 1}})
+    now = DateTime.utc_now()
+    payload = CodexPooler.ProviderCreditsFixtures.usage_payload(:windowless_credit_only, now: now)
+    identity = CodexPooler.ProviderCreditsFixtures.persist_usage!(identity, payload, now)
+    sentinel = Redaction.forbidden_sentinel!(:access_token)
+    identity = identity |> Ecto.Changeset.change(allow_provider_credits: false, metadata: Map.put(identity.metadata, "unclassified_capacity_note", sentinel)) |> Repo.update!()
+
+    for {tool, kind} <- [{"codex_pooler_get_upstream", "upstream"}, {"codex_pooler_get_upstream_quota", "upstream_quota"}] do
+      assert {:ok, result} = ToolDispatch.call(tool, %{"selector" => identity.id}, %{auth: auth})
+      assert result["isError"] == false
+      assert result["structuredContent"]["kind"] == kind
+      item = result["structuredContent"]["item"]
+      assert item["allow_provider_credits"] == false
+      assert item["capacity_decision"] == %{"capacity_basis" => "provider_credits", "qualification" => "unverified", "reason_codes" => ["provider_credits_disabled"], "routing_usable" => false, "scope" => "account"}
+      assert [%{"type" => "text", "text" => text}] = result["content"]
+      assert text =~ "provider_credits"
+      assert text =~ "disabled"
+      assert text =~ "unverified"
+      refute text =~ sentinel
+      refute inspect(result["structuredContent"]) =~ sentinel
+      refute inspect(result) =~ "quota_capacity_facts"
+      refute inspect(result) =~ "quota_capacity_blocker"
+      assert :ok = Redaction.assert_mcp_output_safe!(result)
+    end
+  end
+
+  @tag credits_negative: true
+  test "current runtime workspace denial vetoes included readiness in upstream and quota metadata", %{auth: auth} do
+    pool = pool_fixture()
+    %{identity: identity} = active_upstream_assignment_fixture(pool)
+    now = DateTime.utc_now()
+    identity = ProviderCreditsFixtures.persist_usage!(identity, ProviderCreditsFixtures.usage_payload(:included, now: now, credits: :none), now)
+    denied_at = DateTime.utc_now()
+    headers = [{"x-codex-secondary-used-percent", "12"}, {"x-codex-secondary-window-minutes", "10080"}, {"x-codex-secondary-reset-at", Integer.to_string(DateTime.to_unix(DateTime.add(denied_at, 7_200, :second)))}, {"x-codex-rate-limit-reached-type", "workspace_member_credits_depleted"}]
+    assert {:ok, [_]} = Windows.upsert_quota_windows_from_codex_headers(identity, headers, denied_at)
+
+    for name <- ["codex_pooler_get_upstream", "codex_pooler_get_upstream_quota"] do
+      assert {:ok, result} = ToolDispatch.call(name, %{"selector" => identity.id}, %{auth: auth})
+      decision = result["structuredContent"]["item"]["capacity_decision"]
+      assert decision["routing_usable"] == false
+      assert decision["capacity_basis"] == "none"
+      assert "provider_denied" in decision["reason_codes"]
+      assert :ok = Redaction.assert_mcp_output_safe!(result)
+    end
   end
 
   test "gets one upstream by stored account id", %{auth: auth} do

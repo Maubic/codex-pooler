@@ -30,6 +30,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SocketLifecycleTest do
 
   alias CodexPooler.Gateway.Websocket, as: Gateway
   alias CodexPooler.Gateway.Websocket.ResponseTask
+  alias CodexPooler.ProviderCreditsDispatchSupport
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.WebsocketConnectionLogger
@@ -1147,11 +1148,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SocketLifecycleTest do
     {:ok, upstream_websocket_session} = UpstreamWebsocketSession.start_link()
     on_exit(fn -> UpstreamWebsocketSession.close(upstream_websocket_session) end)
 
+    context = ProviderCreditsDispatchSupport.context!(setup.identity, model: setup.model.exposed_model_id, upstream_model: setup.model.upstream_model_id, request_id: reserved.request.id, attempt_id: attempt.id)
+
     {:ok, task} =
       Task.start(fn ->
         UpstreamWebsocketSession.request(
           upstream_websocket_session,
           %UpstreamWebsocketRequest{
+            provider_credits_context: context,
+            request_id: reserved.request.id,
+            attempt_id: attempt.id,
             url: FakeUpstream.url(upstream) <> "/backend-api/codex/responses",
             headers: [],
             payload: "{}",

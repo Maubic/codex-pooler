@@ -1762,7 +1762,8 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
              locked_cohort,
              gateway_auto_context,
              current_capacity,
-             evaluated_at
+             evaluated_at,
+             stage
            ) do
       confirmation_fence(locked_identity, gateway_auto_context, evaluated_at)
     end
@@ -1923,9 +1924,34 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
   defp sibling_usable_capacity_fence(
          locked_identity,
          locked_cohort,
+         %{trigger: :blocked_weekly_exhaustion} = context,
+         %{routable_assignment_ids: routable_ids},
+         timestamp,
+         stage
+       ) do
+    usable? =
+      context.candidate_assignment_ids
+      |> Enum.zip(context.candidate_identity_ids)
+      |> Enum.any?(fn {assignment_id, identity_id} ->
+        identity = Map.get(locked_cohort, identity_id)
+
+        allowed_by_continuity? = not context.hard_pinned_continuity? or identity_id == locked_identity.id
+        own_reservation? = stage == :reservation and identity_id == locked_identity.id
+
+        allowed_by_continuity? and MapSet.member?(routable_ids, assignment_id) and
+          AutoEligibility.locked_request_usable_capacity?(identity, context, assignment_id, timestamp, own_reservation?)
+      end)
+
+    if usable?, do: {:noop, "gateway_auto_sibling_usable_capacity"}, else: :ok
+  end
+
+  defp sibling_usable_capacity_fence(
+         locked_identity,
+         locked_cohort,
          %{trigger: :threshold_pressure, hard_pinned_continuity?: false} = gateway_auto_context,
          current_capacity,
-         timestamp
+         timestamp,
+         _stage
        ) do
     if current_usable_sibling_capacity?(
          locked_identity,
@@ -1945,7 +1971,8 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
          _locked_cohort,
          _context,
          _current_capacity,
-         _timestamp
+         _timestamp,
+         _stage
        ),
        do: :ok
 
@@ -2110,6 +2137,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
           |> put_trigger_detail(trigger_detail)
           |> put_scheduled_decision_evidence(scheduled_decision_evidence)
           |> put_carried_applied_consume(metadata["saved_reset_redemption"] || %{})
+          |> put_claim_confirmation_resources(metadata["saved_reset_redemption"] || %{}, locked_identity, started_at)
 
         {metadata, claim} =
           put_provider_replay_contract(metadata, claim, locked_identity, assignment, started_at)
@@ -2136,6 +2164,34 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
            assignment,
            "scheduled_expiry_decision_evidence_invalid"
          )}
+    end
+  end
+
+  defp reset_confirmation_descriptors(identity, timestamp) do
+    identity
+    |> Windows.list_evidence()
+    |> Windows.effective_quota_windows(timestamp)
+    |> Enum.filter(fn window ->
+      window.quota_key == "account" and window.quota_scope == "account" and window.window_minutes in [10_080, 43_200] and
+        window.source == "codex_usage_api" and window.source_precision in ["authoritative", "observed"]
+    end)
+    |> Enum.map(&%{"window_kind" => &1.window_kind, "window_minutes" => &1.window_minutes})
+    |> Enum.uniq()
+    |> Enum.take(2)
+  end
+
+  defp put_claim_confirmation_resources(claim, redemption, identity, timestamp) do
+    if claim["attempt_id"] == redemption["attempt_id"] and claim["generation"] == redemption["generation"] do
+      put_captured_confirmation_resources(claim, redemption)
+    else
+      Map.put(claim, "included_window_descriptors", reset_confirmation_descriptors(identity, timestamp))
+    end
+  end
+
+  defp put_captured_confirmation_resources(base, redemption) do
+    case Map.fetch(redemption, "included_window_descriptors") do
+      {:ok, descriptors} -> Map.put(base, "included_window_descriptors", descriptors)
+      :error -> base
     end
   end
 
@@ -2460,7 +2516,20 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
             }
         end
 
-      code in ["no_credit", "nothing_to_reset"] ->
+      code == "no_credit" ->
+        observed_at = claim[:finished_at] || now()
+
+        %{
+          status: :noop,
+          applied?: false,
+          code: code,
+          available_count_before: available_count_before,
+          available_count_after: 0,
+          http_status: status,
+          saved_reset_observation: no_credit_observation_intent(SavedResets.snapshot(identity, observed_at), 0, observed_at)
+        }
+
+      code == "nothing_to_reset" ->
         %{
           status: :noop,
           applied?: false,
@@ -2934,6 +3003,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
       |> put_scheduled_decision_evidence(claim[:scheduled_decision_evidence])
       |> put_carried_applied_consume(redemption)
       |> put_provider_replay_history(redemption)
+      |> put_captured_confirmation_resources(redemption)
       |> Map.merge(redemption_lifecycle_fields(finalized_result))
       |> put_finalizer_confirmation_metadata(
         finalized_result,
@@ -3379,6 +3449,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
         }
       }
       |> put_carried_applied_consume(redemption)
+      |> put_captured_confirmation_resources(redemption)
     )
   end
 

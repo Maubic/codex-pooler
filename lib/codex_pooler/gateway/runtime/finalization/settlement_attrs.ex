@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SettlementAttrs do
   @moduledoc false
 
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
+  alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
 
   @type attrs :: map()
   @type opts :: keyword()
@@ -12,7 +13,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SettlementAttrs do
       response_status_code: status,
       retry_count: context.retry_count || context.index,
       latency_ms: latency(context, opts),
-      attempt_metadata: attempt_metadata
+      attempt_metadata: put_admission_metadata(attempt_metadata, context)
     }
 
     put_before_finalize(attrs, Keyword.get(opts, :before_finalize))
@@ -101,6 +102,13 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.SettlementAttrs do
   end
 
   defp elapsed_ms(started), do: max(System.monotonic_time(:millisecond) - started, 0)
+
+  defp put_admission_metadata(metadata, context) do
+    case ProviderCreditsAdmission.metadata(context.provider_credits_admission) do
+      projection when map_size(projection) > 0 -> Map.put(metadata, "provider_credits_admission", projection)
+      _none -> metadata
+    end
+  end
 
   defp put_before_finalize(attrs, callback) when is_function(callback, 0),
     do: Map.put(attrs, :before_finalize, callback)

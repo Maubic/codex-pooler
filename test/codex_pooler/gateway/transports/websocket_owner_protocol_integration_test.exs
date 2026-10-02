@@ -29,6 +29,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
   alias CodexPooler.Gateway.Websocket, as: Gateway
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
+  alias CodexPooler.Upstreams.SavedResets.{ProbeLease, RedemptionLifecycle}
   alias Ecto.Adapters.SQL.Sandbox
 
   # Failure-detection budget for cross-process signals that follow a kill, shutdown, or
@@ -89,8 +90,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
           exposed_model_id: "protocol-#{mapper}-#{System.unique_integer([:positive])}"
         })
 
-      quota_handler_id = attach_quota_commit_barrier!(identity.id)
-      on_exit(fn -> :telemetry.detach(quota_handler_id) end)
       reset_at = DateTime.utc_now() |> DateTime.add(900, :second) |> DateTime.truncate(:second)
       rate_limit = CodexPooler.JSON.encode!(rate_limit_event(reset_at))
       terminal = terminal_frame("resp_protocol_#{mapper}")
@@ -124,6 +123,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
                )
 
       reset_probe = bound_reset_probe(assignment, identity, model.exposed_model_id)
+      quota_handler_id = attach_quota_commit_barrier!(identity.id)
+      on_exit(fn -> :telemetry.detach(quota_handler_id) end)
       parent = self()
 
       submitter =
@@ -207,19 +208,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
       refute_received {:submission_observed, ^mapper, _duplicate}
 
       assert_receive {:websocket_owner_harness_request,
-                      %WebsocketOwnerRequest{
-                        version: 1,
-                        mapper: ^mapper,
-                        reset_probe: ^reset_probe,
-                        upstream_identity_id: identity_id,
-                        submission_notification?: true
+                      %CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8{
+                        request: %WebsocketOwnerRequest{mapper: ^mapper, reset_probe: ^reset_probe, upstream_identity_id: identity_id, submission_notification?: true}
                       }}
 
       assert identity_id == identity.id
 
-      assert_receive {:websocket_owner_harness_node_call, %{function: :remote_submit_request_v1, arity: 3}}
+      assert_receive {:websocket_owner_harness_node_call, %{function: :remote_submit_request_v8, arity: 3}}
 
-      refute_received {:websocket_owner_harness_node_call, %{function: :remote_submit_request_v1, arity: 3}}
+      refute_received {:websocket_owner_harness_node_call, %{function: :remote_submit_request_v8, arity: 3}}
 
       expected_rate_limit_message =
         owner_data_message(mapper, stable_downstream, submitter.pid, expected_rate_limit)
@@ -782,7 +779,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
     assert_failed_accounting!(fixture.accounting, "failed", "owner_crashed")
   end
 
-  test "v1 bound reset probe scope mismatches recover a missing owner", %{auth: auth} do
+  test "bound reset probe scope mismatches refuse a missing owner without generation", %{auth: auth} do
     for mismatch <- [:assignment, :identity, :model, :route_class] do
       terminal = terminal_frame("resp_reset_probe_mismatch_#{mismatch}")
       recovery_upstream = start_fake_upstream(FakeUpstream.websocket_text_frames([terminal]))
@@ -835,20 +832,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
           fixture.payload
         )
 
-      assert {:ok, %{status: 200, websocket_messages: []}} =
-               finalized_websocket_request(prepared_context, request, [])
-
-      assert_receive {:websocket_owner_frame, ^correlation_id, 1, {:data, ^terminal}}
-      assert_receive {:websocket_owner_frame, ^correlation_id, 1, :complete}
-      assert FakeUpstream.count(recovery_upstream) == 1
-      assert {:ok, recovered_owner} = WebsocketOwnerSession.lookup(fixture.session.id)
-
-      assert %{active_turn: nil, downstream: ^downstream} =
-               :sys.get_state(recovered_owner)
-
+      assert {:error, %{code: "owner_unavailable", status: 503}} = finalized_websocket_request(prepared_context, request, [])
+      assert FakeUpstream.count(recovery_upstream) == 0
+      assert {:ok, untouched_owner} = WebsocketOwnerSession.lookup(fixture.session.id)
+      assert :sys.get_state(untouched_owner).active_turn == nil
       assert_unchanged_owner_lease!(fixture.session, fixture.lease_token)
-      assert_successful_accounting!(fixture.accounting)
-      refute_received {:websocket_owner_runtime_recovered, ^correlation_id, 1, _duplicate}
+      assert Repo.reload!(fixture.accounting.request).status == "failed"
+      assert Repo.reload!(fixture.accounting.attempt).status == "failed"
+      refute_received {:websocket_owner_frame, ^correlation_id, 1, _frame}
+      refute_received {:websocket_owner_runtime_recovered, ^correlation_id, 1, _recovery}
     end
   end
 
@@ -1805,6 +1797,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
       request_options: request_options,
       native_codex_response_control: nil
     }
+    |> CodexPooler.ProviderCreditsDispatchSupport.attach!()
   end
 
   defp runtime_dispatch_fixture(
@@ -2004,6 +1997,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
                "proxy_websocket"
              )
 
+    now = DateTime.utc_now()
+    identity = CodexPooler.ProviderCreditsFixtures.persist_usage!(Repo.reload!(identity), CodexPooler.ProviderCreditsFixtures.usage_payload(:included, now: now, credits: :none), now)
+    redemption = %{"phase" => "consumed_pending_probe", "status" => "redeeming", "attempt_id" => Ecto.UUID.generate(), "generation" => 1, "started_at" => DateTime.to_iso8601(now), "consumed_at" => DateTime.to_iso8601(now), "deadline_at" => DateTime.to_iso8601(RedemptionLifecycle.deadline_at(now)), "result" => %{"applied" => true}}
+    identity = Repo.update!(Ecto.Changeset.change(identity, metadata: Map.put(identity.metadata, "saved_reset_redemption", redemption)))
+    assert {:ok, :claimed} = ProbeLease.claim(identity, 1, redemption["attempt_id"], probe)
     probe
   end
 

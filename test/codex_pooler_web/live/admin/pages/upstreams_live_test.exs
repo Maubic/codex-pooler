@@ -103,7 +103,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     {:ok, view, html} = live(conn, ~p"/admin/upstreams")
 
     expected = %{
-      available: {"provider_available_no_windows", "Provider available", "warning", "true"},
+      available: {"capacity_basis_unknown", "Conditional provider availability", "warning", "true"},
       blocked: {"blocked", "Quota blocked", "warning", "false"},
       unknown: {"missing_evidence", "Quota missing", "warning", "false"}
     }
@@ -113,7 +113,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
       prefix = "upstream-account-#{identity.id}"
 
       routing_state =
-        if state == :available, do: "provider_available_no_windows", else: "quota_blocked"
+        if state == :available, do: "capacity_basis_unknown", else: "quota_blocked"
 
       card_html = view |> element("##{prefix}") |> render()
       assert card_html =~ ~s(data-routing-state="#{routing_state}")
@@ -3705,13 +3705,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(
              view,
              "#{primary_progress_selector}[data-role='upstream-limit-progress']" <>
-               ".admin-static-unknown-progress:not([value])[max='100']" <>
-               "[aria-label='5h remaining not reported']"
+               ".admin-static-unknown-progress:not([value])[max='100']"
            )
 
     refute has_element?(view, "#{primary_progress_selector}[value]")
     refute has_element?(view, "#{primary_progress_selector}.progress-striped")
     assert has_element?(view, "#{primary_limit_selector}-reset[data-countdown-state='running']")
+    assert has_element?(view, "#{primary_progress_selector}[aria-label*='included Codex quota']")
+    refute has_element?(view, "#{primary_limit_selector}-count")
+    refute has_element?(view, "#upstream-account-#{identity.id}-limit-weekly-progress[value]")
 
     assert has_element?(
              view,
@@ -4027,11 +4029,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(list_view, "##{prefix}-primary_5h[data-evidence-state='fresh']", "64%")
     assert has_element?(list_view, "##{prefix}-weekly[data-evidence-state='fresh']", "90%")
 
-    assert has_element?(
-             list_view,
-             "##{prefix}-primary_30d[data-evidence-state='fresh']",
-             "601 credits"
-           )
+    assert has_element?(list_view, "##{prefix}-primary_30d[data-evidence-state='fresh']", "97%")
+    assert has_element?(list_view, "##{prefix}-primary_30d-progress[value='97'][max='100']")
+    refute has_element?(list_view, "##{prefix}-primary_30d-count")
+    assert has_element?(list_view, "#upstream-account-#{identity.id}-provider-credits-balance", "601")
+    refute has_element?(list_view, "#upstream-account-#{identity.id}-provider-credits[data-capacity-basis='provider_credits']")
 
     assert has_element?(
              list_view,
@@ -4072,6 +4074,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     {:ok, cockpit_view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
 
+    assert has_element?(cockpit_view, "#upstream-quota-limit-primary_30d-progress[value='97'][max='100']")
+    refute has_element?(cockpit_view, "#upstream-quota-limit-primary_30d-count")
+    assert has_element?(cockpit_view, "#upstream-provider-credits-balance", "601")
+
     assert has_element?(
              cockpit_view,
              "#upstream-quota-limit-primary_5h-progress.progress-warning[value='64']"
@@ -4108,7 +4114,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
   @tag :upstream_quota_evidence_stability
   @tag :quota_runtime_source_transition
-  test "account quota stays solid until included quota is exhausted, then stripes credit burn", %{
+  test "included quota remains separate from striped observed credit baseline", %{
     conn: conn,
     scope: scope
   } do
@@ -4227,40 +4233,19 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(view, "#{quota_selector}-progress[value='97']")
     refute has_element?(view, "#{quota_selector}-progress.progress-striped")
-    assert has_element?(view, "#{quota_selector}-count", "601 credits")
+    assert has_element?(view, "#upstream-account-#{quota_identity.id}-provider-credits-balance", "601")
+    refute has_element?(view, "#{quota_selector}-count")
 
-    assert has_element?(
-             view,
-             "#{quota_selector}-count[title*='separate from included Codex quota remaining'][title*='not a currency amount'][aria-label*='separate from included Codex quota remaining'][aria-label*='not a currency amount']"
-           )
-
-    refute render(view) =~ "601 / 601 credits"
-
-    assert has_element?(view, "#{credit_selector}-progress[value='83'].progress-striped")
-    assert has_element?(view, "#{credit_selector}-count", "500 credits")
-
-    assert has_element?(
-             view,
-             "#{credit_selector}-count[aria-label*='currently being consumed because included Codex quota is exhausted'][aria-label*='not a currency amount']"
-           )
-
-    assert has_element?(
-             view,
-             "#{credit_selector}-progress[aria-label*='credit balance'][aria-label*='credits in use'][title*='Striped while credits are being consumed']"
-           )
-
-    refute render(view) =~ "500 / 601 credits"
+    assert has_element?(view, "#{credit_selector}-progress[value='0']")
+    assert has_element?(view, "#upstream-account-#{credit_identity.id}-provider-credits-progress[value='83.194'].progress-striped")
+    assert has_element?(view, "#upstream-account-#{credit_identity.id}-provider-credits-percent", "83.194%")
+    assert has_element?(view, "#upstream-account-#{credit_identity.id}-provider-credits-balance", "500")
+    assert has_element?(view, "#upstream-account-#{credit_identity.id}-provider-credits-baseline", "601")
 
     assert has_element?(view, "#{depleted_selector}-progress[value='0']")
     refute has_element?(view, "#{depleted_selector}-progress.progress-striped")
-    assert has_element?(view, "#{depleted_selector}-count", "0 credits")
-
-    assert has_element?(
-             view,
-             "#{depleted_selector}-count[title*='balance is depleted'][title*='not a currency amount or a total capacity'][aria-label*='balance is depleted'][aria-label*='not a currency amount or a total capacity']"
-           )
-
-    refute render(view) =~ "0 / 601 credits"
+    refute has_element?(view, "#upstream-account-#{depleted_identity.id}-provider-credits")
+    refute has_element?(view, "#{depleted_selector}-count")
 
     refute has_element?(view, "#{unreported_selector}-count")
     assert has_element?(view, "#{unreported_selector}-reset")
@@ -4414,54 +4399,27 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert Decimal.equal?(primary.percent, Decimal.new("100"))
     assert primary.percent_value == 100
     assert primary.percent_label == "100%"
-    assert weekly.percent == Decimal.new("85.000")
+    assert Decimal.equal?(weekly.percent, Decimal.new("85"))
     assert weekly.percent_value == 85
     assert weekly.percent_label == "85%"
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
-    violations =
-      [
-        account.quota_readiness.state == "weekly_only_probe" ||
-          "expected zero/zero primary plus nonzero weekly evidence to project weekly_only_probe readiness",
-        account.quota_readiness.label == "Weekly quota probe" ||
-          "expected zero/zero primary plus nonzero weekly evidence to render Weekly quota probe",
-        account.quota_readiness.tone == :warning ||
-          "expected zero/zero primary plus nonzero weekly evidence to render warning tone",
-        account.quota_readiness.routing_ready_now? ||
-          "expected zero/zero primary plus nonzero weekly evidence to stay routing-eligible",
-        has_element?(
-          view,
-          "#upstream-account-#{identity.id}-limit-primary_5h [data-role='upstream-limit-title']",
-          "5h"
-        ) ||
-          "expected zero/zero usage API account evidence to keep the 5h quota row visible",
-        has_element?(
-          view,
-          "#upstream-account-#{identity.id}-limit-primary_5h",
-          "100%"
-        ) ||
-          "expected observed zero-use account evidence to render the 5h quota as 100% remaining",
-        has_element?(
-          view,
-          "#upstream-account-#{identity.id}-limit-primary_5h-progress[value='100']"
-        ) ||
-          "expected observed zero-use account evidence to render a full 5h quota meter",
-        has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h-reset") ||
-          "expected observed zero-use account evidence to retain the provider reset countdown",
-        has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "85%") ||
-          "expected nonzero weekly usage API account evidence to render 85% remaining",
-        not has_element?(
-          view,
-          "#upstream-account-#{identity.id}-routing-readiness [data-role='upstream-routing-cell']",
-          "Quota ready"
-        ) ||
-          "expected zero/zero primary plus nonzero weekly evidence not to render clean Quota ready"
-      ]
-      |> Enum.reject(&(&1 == true))
+    assert account.quota_readiness.state == "weekly_only_probe"
+    assert account.quota_readiness.routing_ready_now?
 
-    assert violations == [],
-           "expected observed zero-use account quota card semantics; violations: #{Enum.join(violations, "; ")}"
+    primary_selector = "#upstream-account-#{identity.id}-limit-primary_5h"
+    weekly_selector = "#upstream-account-#{identity.id}-limit-weekly"
+
+    assert has_element?(view, "#upstream-account-#{identity.id}-quota-readiness-state", "weekly_only_probe")
+    assert has_element?(view, "#upstream-account-#{identity.id}-quota-readiness-contract[data-routing-ready-now='true']")
+    assert has_element?(view, "#{primary_selector} [data-role='upstream-limit-title']", "5h")
+    assert has_element?(view, primary_selector, "100%")
+    assert has_element?(view, "#{primary_selector}-progress[value='100'][max='100']")
+    assert has_element?(view, "#{primary_selector}-reset[data-countdown-state='running']")
+    assert has_element?(view, weekly_selector, "85%")
+    assert has_element?(view, "#{weekly_selector}-progress[value='85'][max='100']")
+    refute has_element?(view, "#{primary_selector}-count, #{weekly_selector}-count")
   end
 
   test "account quota rows show reset-bearing observed zero-use evidence as fully remaining", %{
@@ -4681,8 +4639,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     [account] = UpstreamAccountsReadModel.list_visible_accounts(scope, [pool])
     monthly = Enum.find(account.quota_limits, &(&1.key == :primary_30d))
 
-    assert monthly.percent_label == "not reported"
-    assert monthly.count_label == "3,817 credits"
+    assert monthly.percent_label == "0%"
+    assert monthly.count_label == nil
+    assert account.provider_credits_summary.balance_label == "3,817"
+    assert account.provider_credits_summary.observed_baseline_label == nil
+    assert account.provider_credits_summary.observed_percent == nil
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
@@ -4691,13 +4652,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(
              view,
              "#upstream-account-#{identity.id}-limit-primary_30d",
-             "not reported"
+             "0%"
            )
 
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-primary_30d-count",
-             "3,817 credits"
+             "#upstream-account-#{identity.id}-provider-credits-balance",
+             "3,817"
            )
   end
 

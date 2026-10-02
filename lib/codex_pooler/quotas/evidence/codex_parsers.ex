@@ -7,7 +7,7 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
   """
 
   alias CodexPooler.Accounting.Metadata, as: AccountingMetadata
-  alias CodexPooler.Quotas.{AccountAvailability, Evidence}
+  alias CodexPooler.Quotas.{AccountAvailability, CapacityFacts, Evidence}
 
   alias CodexPooler.Quotas.Evidence.CodexParsers.{
     RateLimitEvents,
@@ -23,7 +23,8 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
 
   @type usage_result :: %{
           required(:windows) => [Evidence.t()],
-          required(:account_availability) => AccountAvailability.t() | nil
+          required(:account_availability) => AccountAvailability.t() | nil,
+          required(:capacity_facts) => CapacityFacts.t()
         }
 
   @spec parse_codex_usage_result(term(), DateTime.t()) ::
@@ -43,14 +44,25 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
       |> dedupe_by_identity()
       |> attest_spark_permission(payload)
 
+    availability =
+      if Enum.any?(windows, &invalid_capacity_account_descriptor?/1),
+        do: AccountAvailability.new!(:unknown, :conflict, :unknown),
+        else: account_availability(payload, account_window_selection)
+
     {:ok,
      %{
        windows: windows,
-       account_availability: account_availability(payload, account_window_selection)
+       account_availability: availability,
+       capacity_facts: CapacityFacts.from_usage(payload, windows, account_window_selection, observed_at)
      }}
   end
 
   def parse_codex_usage_result(_payload, _observed_at), do: unusable_usage_payload()
+
+  defp invalid_capacity_account_descriptor?(%{quota_key: "account", quota_scope: "account", window_minutes: minutes}),
+    do: not (is_integer(minutes) and minutes in 1..525_600)
+
+  defp invalid_capacity_account_descriptor?(_window), do: false
 
   @spec parse_codex_usage_payload(term(), DateTime.t()) ::
           {:ok, [Evidence.t()]}

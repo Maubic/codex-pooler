@@ -14,6 +14,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
       auth: 2,
       gateway_setup: 1,
       gateway_setup: 2,
+      gateway_upstream: 4,
       native_text_input: 1,
       pricing_config: 1,
       pricing_snapshot!: 2,
@@ -44,8 +45,14 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
   alias CodexPooler.Gateway.Transports.Websocket.{RolloutDrain, WebsocketOwnerContract}
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.WebsocketRolloutDrainSupport
+  alias CodexPooler.Pools.ModelServingOverride
+  alias CodexPooler.ProviderCreditsFixtures
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams.Quota.{CapacityAssessment, CapacityFactsStore, RoutingQuotaSnapshot}
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
+  alias CodexPooler.Upstreams.Quota.Windows.Routing
+  alias CodexPooler.Upstreams.Reconciliation.PoolReconciliation
+  alias CodexPooler.Upstreams.SavedResets.{AutoEligibility, AutomaticConfirmation}
   alias CodexPoolerWeb.CodexResponsesSocket
 
   @api_key_revocation_close {:close, 1008, "api key is no longer active"}
@@ -355,6 +362,262 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketBridgeTest do
           end
         end
     end
+  end
+
+  for mode <- ["full", "lite"] do
+    @tag credits_negative: true
+    @tag provider_credit_cases: ["R6", "T5", "B4"]
+    test "HTTP SSE bridge confirms and reuses exhausted weekly non-credit recovery in #{mode}", %{conn: conn} do
+      fixture = bridge_reset_fixture(unquote(mode))
+      {first, confirmed} = confirm_bridge_reset!(conn, fixture)
+
+      second = post_stream(conn, fixture.setup, fixture.session, stream_payload(fixture.setup, "synthetic recovered bridge turn"))
+      assert second.status == 200
+      assert completed_id(second.resp_body) == "resp_bridge_recovered"
+
+      request = latest_request(fixture.setup.pool)
+      assert request.id != first.id
+      assert request.status == "succeeded"
+      assert request.transport == "http_sse"
+      assert [attempt] = attempts_for(request)
+      assert attempt.status == "succeeded"
+      assert attempt.transport == "websocket"
+      assert attempt.response_metadata["upstream_websocket_bridge"] == true
+      assert attempt.response_metadata["provider_credits_admission"] == %{"version" => 1, "capacity_basis" => "recovered_included", "reason_codes" => [], "non_credit_guarded_probe" => false}
+      assert settlement_count(request) == 1
+      assert Repo.reload!(fixture.setup.identity).metadata["saved_reset_redemption"] == confirmed
+      assert %{http_generation: 0, websocket_generation: 2, consume: 0} = FakeUpstream.physical_counts(fixture.dispatch_upstream)
+      assert FakeUpstream.physical_counts(fixture.usage_upstream).consume == 1
+      assert :ok = FakeUpstream.verify!(fixture.dispatch_upstream)
+      assert_weekly_still_exhausted!(fixture.setup)
+    end
+  end
+
+  for control <- [:forwarding_off, :session_absent, :native_sse, :http_json, :wrong_mode, :missing_proof, :compact_route] do
+    @tag credits_negative: true
+    @tag provider_credit_cases: ["R6", "B4"]
+    test "HTTP bridge recovery never authorizes #{control}", %{conn: conn} do
+      fixture = bridge_reset_fixture("full")
+      {_first, _confirmed} = confirm_bridge_reset!(conn, fixture)
+      FakeUpstream.set_mode(fixture.dispatch_upstream, {:strict_sequence, []})
+      setup = fixture.setup
+      payload = stream_payload(setup, "synthetic nonmatching bridge scope")
+
+      {session, endpoint, payload} =
+        case unquote(control) do
+          :forwarding_off ->
+            Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, false)
+            {fixture.session, "/v1/responses", payload}
+
+          :session_absent ->
+            {nil, "/v1/responses", payload}
+
+          :native_sse ->
+            {fixture.session, "/backend-api/codex/responses", Map.put(payload, "input", native_text_input("synthetic native SSE scope"))}
+
+          :http_json ->
+            {fixture.session, "/v1/responses", Map.put(payload, "stream", false)}
+
+          :wrong_mode ->
+            override = Repo.get_by!(ModelServingOverride, pool_id: setup.pool.id, exposed_model_id: setup.model.exposed_model_id)
+            Repo.update!(Ecto.Changeset.change(override, mode: "lite"))
+            {fixture.session, "/v1/responses", payload}
+
+          :missing_proof ->
+            identity = Repo.reload!(setup.identity)
+            redemption = Map.delete(identity.metadata["saved_reset_redemption"], "non_credit_confirmation")
+            Repo.update!(Ecto.Changeset.change(identity, metadata: Map.put(identity.metadata, "saved_reset_redemption", redemption)))
+            {fixture.session, "/v1/responses", payload}
+
+          :compact_route ->
+            {fixture.session, "/backend-api/codex/responses/compact", payload |> Map.delete("stream") |> Map.put("input", native_text_input("synthetic compact scope"))}
+        end
+
+      request_conn = conn |> recycle() |> auth(setup) |> put_req_header("x-upstream-websocket-bridge", "true") |> put_req_header("x-upstream-websocket-bridge-plan", "all")
+      request_conn = if session, do: put_req_header(request_conn, "x-session-id", session), else: request_conn
+      response = post(request_conn, endpoint, payload)
+      assert response.status == 429
+      request = latest_request(setup.pool)
+      assert request.status == "rejected"
+      assert attempts_for(request) == []
+      assert settlement_count(request) == 0
+      assert %{http_generation: 0, websocket_generation: 1, consume: 0} = FakeUpstream.physical_counts(fixture.dispatch_upstream)
+      assert FakeUpstream.physical_counts(fixture.usage_upstream).consume == 1
+      assert :ok = FakeUpstream.verify!(fixture.dispatch_upstream)
+      refute Repo.reload!(setup.identity).allow_provider_credits
+      assert_weekly_still_exhausted!(setup)
+    end
+  end
+
+  @tag credits_negative: true
+  @tag provider_credit_cases: ["R6", "B4"]
+  test "a failed bridged handshake rechecks direct SSE instead of using planned bridge grace", %{conn: conn} do
+    fixture = bridge_reset_fixture("full")
+    {first, confirmed} = confirm_bridge_reset!(conn, fixture)
+    turn = Repo.one!(from t in CodexTurn, where: t.request_id == ^first.id)
+    assert {:ok, owner} = WebsocketOwnerSession.lookup(turn.codex_session_id)
+    assert %{active_turn: nil, downstream: nil} = await_owner_bridge_idle(owner)
+    owner_monitor = Process.monitor(owner)
+    assert :ok = GenServer.stop(owner, :shutdown, @detection_timeout_ms)
+    assert_receive {:DOWN, ^owner_monitor, :process, ^owner, :shutdown}, @detection_timeout_ms
+
+    FakeUpstream.set_mode(fixture.dispatch_upstream, FakeUpstream.strict_sequence([FakeUpstream.expect_request(method: "GET", respond: FakeUpstream.websocket_upgrade_error(%{"error" => %{"code" => "bad_gateway"}}, status: 502))]))
+
+    response = post_stream(conn, fixture.setup, fixture.session, stream_payload(fixture.setup, "synthetic direct fallback recheck"))
+    assert response.status == 429
+    request = latest_request(fixture.setup.pool)
+    assert request.status == "failed"
+    assert request.transport == "http_sse"
+    assert [attempt] = attempts_for(request)
+    assert attempt.transport == "http_sse"
+    assert attempt.status == "failed"
+    assert attempt.response_metadata["provider_credits_admission"]["reason_codes"] != []
+    assert_no_upstream_websocket_metadata(attempt)
+    assert settlement_count(request) == 1
+    assert %{http_generation: 0, websocket_generation: 1, consume: 0} = FakeUpstream.physical_counts(fixture.dispatch_upstream)
+    assert FakeUpstream.physical_counts(fixture.usage_upstream).consume == 1
+    assert Repo.reload!(fixture.setup.identity).metadata["saved_reset_redemption"] == confirmed
+    assert :ok = FakeUpstream.verify!(fixture.dispatch_upstream)
+  end
+
+  @tag credits_negative: true
+  @tag provider_credit_cases: ["R6", "B4"]
+  test "a session pinned to another assignment cannot use bridged recovery for this HTTP SSE candidate", %{conn: conn} do
+    fixture = bridge_reset_fixture("full")
+    {first, _confirmed} = confirm_bridge_reset!(conn, fixture)
+    setup = fixture.setup
+    turn = Repo.one!(from t in CodexTurn, where: t.request_id == ^first.id)
+    session = Repo.get!(CodexSession, turn.codex_session_id)
+    other = gateway_upstream(setup.pool, fixture.dispatch_upstream, "synthetic-other-bridge-assignment", [])
+    Repo.update!(Ecto.Changeset.change(session, pool_upstream_assignment_id: other.assignment.id))
+    FakeUpstream.set_mode(fixture.dispatch_upstream, {:strict_sequence, []})
+
+    response = post_stream(conn, setup, fixture.session, stream_payload(setup, "synthetic assignment-ineligible bridge turn"))
+    assert response.status == 429
+    request = latest_request(setup.pool)
+    assert request.status == "rejected"
+    assert attempts_for(request) == []
+    assert %{http_generation: 0, websocket_generation: 1, consume: 0} = FakeUpstream.physical_counts(fixture.dispatch_upstream)
+    assert FakeUpstream.physical_counts(fixture.usage_upstream).consume == 1
+    assert :ok = FakeUpstream.verify!(fixture.dispatch_upstream)
+    assert_weekly_still_exhausted!(setup)
+  end
+
+  for boundary <- [:untrusted_options, :retargeted_plan] do
+    @tag credits_negative: true
+    @tag provider_credit_cases: ["R6", "B4"]
+    test "#{boundary} cannot grant direct SSE the genuine HTTP bridge confirmation", %{conn: conn} do
+      fixture = bridge_reset_fixture("full")
+      {_first, _confirmed} = confirm_bridge_reset!(conn, fixture)
+      setup = fixture.setup
+      FakeUpstream.set_mode(fixture.dispatch_upstream, {:strict_sequence, []})
+      assert {:ok, authenticated} = Access.authenticate_authorization_header(setup.authorization)
+      assert {:ok, policy} = Access.normalize_api_key_policy(authenticated.api_key)
+      endpoint = "/backend-api/codex/responses"
+      payload = stream_payload(setup, native_text_input("synthetic untrusted direct SSE scope"))
+
+      options =
+        case unquote(boundary) do
+          :untrusted_options ->
+            RequestOptions.build(%{api_key_policy: policy, session_header: fixture.session, upstream_websocket_bridge?: true, upstream_websocket_bridge_plan: :all}, endpoint, payload)
+
+          :retargeted_plan ->
+            planned = RequestOptions.build(%{api_key_policy: policy, session_header: fixture.session}, "/v1/responses", payload) |> RequestOptions.put_transport(upstream_websocket_bridge_plan: :all)
+            RequestOptions.retarget(planned, endpoint, payload)
+        end
+
+      assert {:error, %{status: 429}} = RuntimeGateway.execute(authenticated, endpoint, payload, options)
+      request = latest_request(setup.pool)
+      assert request.status == "rejected"
+      assert attempts_for(request) == []
+      assert %{http_generation: 0, websocket_generation: 1, consume: 0} = FakeUpstream.physical_counts(fixture.dispatch_upstream)
+      assert FakeUpstream.physical_counts(fixture.usage_upstream).consume == 1
+      assert :ok = FakeUpstream.verify!(fixture.dispatch_upstream)
+    end
+  end
+
+  defp bridge_reset_fixture(mode) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+    usage = ProviderCreditsFixtures.usage_payload(:included, now: now, credits: :none) |> put_in(["rate_limit", "secondary_window", "used_percent"], 95) |> Map.put("rate_limit_reset_credits", %{"available_count" => 1})
+    usage_upstream = start_upstream({:path_json, ProviderCreditsFixtures.usage_routes(usage)})
+    dispatch_upstream = start_upstream(FakeUpstream.strict_sequence([strict_bridge_turn(1, websocket_frames([completed_event("resp_bridge_guarded")])), strict_bridge_turn(1, websocket_frames([completed_event("resp_bridge_recovered")]))]))
+    setup = gateway_setup(dispatch_upstream, quota?: false, compact?: true, exposed_model_id: "synthetic-bridge-credit-#{System.unique_integer([:positive])}", upstream_model_id: "synthetic-bridge-credit")
+    timestamp = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    Repo.insert!(%ModelServingOverride{pool_id: setup.pool.id, exposed_model_id: setup.model.exposed_model_id, mode: mode, created_at: timestamp, updated_at: timestamp})
+
+    metadata = Map.merge(setup.identity.metadata, %{"usage_base_url" => FakeUpstream.url(usage_upstream), "usage_path" => "/api/codex/usage"})
+    identity = Repo.update!(Ecto.Changeset.change(setup.identity, metadata: metadata, allow_provider_credits: false, saved_reset_auto_redeem_enabled: true, saved_reset_auto_redeem_min_blocked_minutes: 60, saved_reset_auto_redeem_keep_credits: 0))
+
+    # Three actual loopback Usage API receipts establish a same-cycle pressure
+    # approach followed by two newer exhausted observations. Countdown clocks
+    # are safely in the past, so no sleep or manufactured persisted proof is needed.
+    exhausted = usage |> put_in(["rate_limit", "allowed"], false) |> put_in(["rate_limit", "limit_reached"], true) |> put_in(["rate_limit", "secondary_window", "used_percent"], 100) |> Map.put("rate_limit_reached_type", %{"type" => "rate_limit_reached"})
+
+    identity =
+      Enum.reduce([{usage, 3}, {exhausted, 2}, {exhausted, 1}], identity, fn {payload, behind}, identity ->
+        payload = update_in(payload, ["rate_limit", "secondary_window", "reset_after_seconds"], &(&1 + behind))
+        FakeUpstream.set_mode(usage_upstream, {:path_json, ProviderCreditsFixtures.usage_routes(payload)})
+        assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(identity, setup.assignment)
+        refreshed
+      end)
+
+    assert [weekly] = QuotaWindows.list_quota_windows(identity)
+    assert weekly.metadata[AutomaticConfirmation.metadata_key()]["state"] == "confirmed"
+    assert Decimal.equal?(weekly.used_percent, 100)
+
+    # The fake consume succeeds but its real post-consume usage omits the quota
+    # window. Only the ensuing bound physical probe may create recovery grace.
+    pending_usage = %{"plan_type" => "synthetic", "rate_limit_reset_credits" => %{"available_count" => 0}, "credits" => %{"balance" => "0", "has_credits" => false, "unlimited" => false}, "spend_control" => %{"reached" => false}}
+    routes = Map.put(ProviderCreditsFixtures.usage_routes(pending_usage), "/api/codex/rate-limit-reset-credits/consume", {200, %{"code" => "reset"}})
+    FakeUpstream.set_mode(usage_upstream, {:path_json, routes})
+    %{setup: %{setup | identity: identity}, usage_upstream: usage_upstream, dispatch_upstream: dispatch_upstream, session: "synthetic-bridge-reset-#{System.unique_integer([:positive])}", mode: mode}
+  end
+
+  defp bridge_reset_denial(fixture, response) do
+    identity = Repo.reload!(fixture.setup.identity)
+    request = latest_request(fixture.setup.pool)
+    snapshot = RoutingQuotaSnapshot.load_by_identity_ids([identity.id], DateTime.utc_now())[identity.id]
+    pressure = AutoEligibility.confirmation_refs(:blocked_weekly_exhaustion, identity, [identity.id], DateTime.utc_now())
+    redemption = Map.take(identity.metadata["saved_reset_redemption"] || %{}, ["phase", "result"])
+    inspect(%{status: response.status, request_error: request.last_error_code, quota_decision: request.request_metadata["quota_decision"], exclusions: request.request_metadata["candidate_exclusions"], phase: redemption, pressure_refs: pressure, credit_ambiguous: CapacityAssessment.credit_ambiguous?(snapshot), usage_counts: FakeUpstream.physical_counts(fixture.usage_upstream), generation_counts: FakeUpstream.physical_counts(fixture.dispatch_upstream)})
+  end
+
+  defp confirm_bridge_reset!(conn, fixture) do
+    response = post_stream(conn, fixture.setup, fixture.session, stream_payload(fixture.setup, "synthetic guarded bridge turn"))
+    assert response.status == 200, bridge_reset_denial(fixture, response)
+    assert completed_id(response.resp_body) == "resp_bridge_guarded"
+    request = latest_request(fixture.setup.pool)
+    assert request.status == "succeeded"
+    assert request.transport == "http_sse"
+    assert [attempt] = attempts_for(request)
+    assert attempt.status == "succeeded"
+    assert attempt.transport == "websocket"
+    assert attempt.response_metadata["upstream_websocket_bridge"] == true
+    assert attempt.response_metadata["provider_credits_admission"] == %{"version" => 1, "capacity_basis" => "recovered_included", "reason_codes" => [], "non_credit_guarded_probe" => true}
+    assert settlement_count(request) == 1
+    assert %{http_generation: 0, websocket_generation: 1, consume: 0} = FakeUpstream.physical_counts(fixture.dispatch_upstream)
+    assert FakeUpstream.physical_counts(fixture.usage_upstream).consume == 1
+
+    identity = Repo.reload!(fixture.setup.identity)
+    refute identity.allow_provider_credits
+    assert {:ok, %{credit_permission: :unavailable}} = CapacityFactsStore.load(identity.metadata)
+    confirmed = identity.metadata["saved_reset_redemption"]
+    assert confirmed["phase"] == "confirmed_by_upstream"
+    assert confirmed["non_credit_confirmation"]["version"] == 1
+    assert confirmed["non_credit_confirmation"]["scope"] == %{"pool_upstream_assignment_id" => fixture.setup.assignment.id, "upstream_identity_id" => identity.id, "effective_model" => fixture.setup.model.exposed_model_id, "upstream_model" => fixture.setup.model.upstream_model_id, "route_class" => "proxy_stream", "serving_mode" => fixture.mode, "transport" => "bridged_websocket"}
+    assert confirmed["probe"]["scope"]["pool_upstream_assignment_id"] == fixture.setup.assignment.id
+    assert confirmed["probe"]["scope"]["route_class"] == "proxy_stream"
+    assert_weekly_still_exhausted!(fixture.setup)
+    {request, confirmed}
+  end
+
+  defp assert_weekly_still_exhausted!(setup) do
+    assert [weekly] = QuotaWindows.list_quota_windows(setup.identity)
+    assert weekly.window_kind == "secondary"
+    assert weekly.window_minutes == 10_080
+    assert Decimal.equal?(weekly.used_percent, 100)
+    snapshot = RoutingQuotaSnapshot.load_by_identity_ids([setup.identity.id], DateTime.utc_now())[setup.identity.id]
+    refute Routing.included_only_eligibility_from_snapshot(snapshot, model: setup.model.exposed_model_id).eligible?
   end
 
   test "three healthy sessioned turns reuse one websocket lifecycle and generation", %{

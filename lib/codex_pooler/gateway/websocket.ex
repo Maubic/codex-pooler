@@ -335,7 +335,8 @@ defmodule CodexPooler.Gateway.Websocket do
       websocket_owner_proxy_instance_id: Atom.to_string(node()),
       websocket_owner_instance_id: owner_instance_id(session),
       websocket_owner_forwarder_opts: owner_forwarder_opts(owner_websocket_opts(opts)),
-      upstream_websocket_bridge?: true
+      upstream_websocket_bridge?: true,
+      upstream_websocket_bridge_plan: nil
     )
   end
 

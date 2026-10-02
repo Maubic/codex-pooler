@@ -20,6 +20,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
   alias CodexPooler.Gateway.Runtime.Finalization.{AttemptSettlement, Metadata, ProviderUsageLimit}
   alias CodexPooler.Gateway.Runtime.Finalization.SideEffects
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl
+  alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Streaming.WebsocketCodec
   alias CodexPooler.Gateway.Transports.UpstreamDispatch
@@ -845,7 +846,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
 
   defp other_candidates_return(%{model: model, route_state: route_state, assignment: assignment} = context) do
     candidates = if native_anchored_continuation?(context), do: RouteState.usage_limit_capacity(route_state), else: RouteState.route_filter_candidates(route_state)
-    PoolReturn.others(model, candidates, assignment.id, DateTime.utc_now())
+    PoolReturn.others(model, candidates, assignment.id, DateTime.utc_now(), context.request_options)
   end
 
   defp sanitize_retry_terminal(frame) do
@@ -910,6 +911,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
         upstream_payload: prepared_context.upstream_payload,
         original_payload: context.payload,
         identity: context.identity,
+        provider_credits_context: ProviderCreditsAdmission.from_selected(context),
         accounting_attempt: context.attempt,
         request_options: context.request_options
     }

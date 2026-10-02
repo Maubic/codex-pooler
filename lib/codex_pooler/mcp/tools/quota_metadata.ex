@@ -397,9 +397,12 @@ defmodule CodexPooler.MCP.Tools.QuotaMetadata do
     header =
       "- account #{text_value(account["label"])} status #{text_value(account["status"])} account #{text_value(account["stored_account_id"])} plan #{text_value(account["plan_family"])}"
 
+    capacity = account["capacity_decision"] || %{}
+    policy_line = "  - provider credits policy #{if(account["allow_provider_credits"] == true, do: "enabled", else: "disabled")}; capacity #{text_value(capacity["capacity_basis"])}; qualification #{text_value(capacity["qualification"])}; account scope (request permission and billing source not guaranteed); reasons #{text_value(Enum.join(capacity["reason_codes"] || [], ", "))}"
+
     quota_lines = Enum.map(account["quota_windows"] || [], &quota_line/1)
 
-    Enum.join([header | quota_lines], "\n")
+    Enum.join([header, policy_line | quota_lines], "\n")
   end
 
   defp quota_line(window) do

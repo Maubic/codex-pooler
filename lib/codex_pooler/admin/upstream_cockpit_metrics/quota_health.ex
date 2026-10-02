@@ -10,6 +10,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.QuotaHealth do
   alias CodexPooler.Upstreams.Quota.Charts.Measurements
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
+  alias CodexPooler.Upstreams.Quota.Windows.Routing
 
   @spec quota_health(
           Scope.t(),
@@ -115,6 +116,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.QuotaHealth do
     |> Map.put(:state, state)
     |> Map.put(:state_label, quota_state_label(state))
     |> Map.put(:routing_usable?, routing_readiness.routing_ready_now?)
+    |> Map.put(:routing_conditional?, routing_readiness.routing_ready_now? and Map.get(readiness, :conditional?, false))
     |> Map.merge(Common.routing_readiness_contract(routing_readiness))
     |> Map.put(:window_kind, display_window && display_window.window_kind)
     |> Map.put(:window_minutes, display_window && display_window.window_minutes)
@@ -146,6 +148,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.QuotaHealth do
     %{}
     |> Map.put(:assignment_count, length(items))
     |> Map.put(:routing_usable_count, Enum.count(items, & &1.routing_usable?))
+    |> Map.put(:routing_conditional_count, Enum.count(items, & &1.routing_conditional?))
     |> Map.put(:fresh_count, Map.get(counts, "fresh", 0))
     |> Map.put(:stale_count, Map.get(counts, "stale", 0))
     |> Map.put(:missing_evidence_count, Map.get(counts, "missing_evidence", 0))
@@ -163,7 +166,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.QuotaHealth do
 
   defp quota_health_degraded?(kpis) do
     kpis.stale_or_missing_count > 0 or kpis.exhausted_count > 0 or kpis.blocked_count > 0 or
-      kpis.routing_usable_count < kpis.assignment_count
+      kpis.routing_usable_count < kpis.assignment_count or kpis.routing_conditional_count > 0
   end
 
   defp quota_health_state(%{assignment_count: 0}), do: "empty"
@@ -186,18 +189,30 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.QuotaHealth do
   defp quota_health_state(_kpis), do: "unknown"
 
   defp quota_assignment_state(%{state: "ready"}), do: "fresh"
+
+  defp quota_assignment_state(%{included_quota_state: state} = readiness) do
+    readiness |> Map.delete(:included_quota_state) |> Map.put(:state, state) |> quota_assignment_state()
+  end
+
   defp quota_assignment_state(%{state: "weekly_only_probe"}), do: "weekly_only"
   defp quota_assignment_state(%{state: "provider_available_no_windows"}), do: "fresh"
   defp quota_assignment_state(%{state: state}), do: state
 
-  defp quota_measurements(%Quota.AccountQuotaWindow{} = window),
-    do:
-      window
-      |> Measurements.for_window()
-      |> Map.put(:remaining_percent, Measurements.meter_remaining_percent(window))
+  defp quota_measurements(%Quota.AccountQuotaWindow{quota_scope: "account"} = window) do
+    [included] = Routing.included_only_windows([window])
+    quota_measurements_for_window(included)
+  end
+
+  defp quota_measurements(%Quota.AccountQuotaWindow{} = window), do: quota_measurements_for_window(window)
 
   defp quota_measurements(_window),
     do: %{remaining: nil, capacity: nil, used: nil, used_percent: nil, remaining_percent: nil}
+
+  defp quota_measurements_for_window(window) do
+    window
+    |> Measurements.for_window()
+    |> Map.put(:remaining_percent, Measurements.meter_remaining_percent(window))
+  end
 
   defp quota_window_contract(nil, _as_of), do: nil
 

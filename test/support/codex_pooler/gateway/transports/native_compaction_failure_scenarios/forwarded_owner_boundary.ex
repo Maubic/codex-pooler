@@ -19,6 +19,7 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionFailureScenarios.Forwar
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
   alias CodexPooler.Gateway.Websocket
+  alias CodexPooler.ProviderCreditsDispatchSupport
   alias CodexPooler.Repo
 
   @detection_timeout_ms 15_000
@@ -476,6 +477,7 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionFailureScenarios.Forwar
       writer: fn _frame -> :ok end,
       message_mapper: &StreamProtocol.canonicalize_native_codex_responses_json_message/1
     }
+    |> ProviderCreditsDispatchSupport.wire_request!()
   end
 
   defp observe_survivor(fixture) do

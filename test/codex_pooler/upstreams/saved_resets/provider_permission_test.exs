@@ -11,13 +11,13 @@ defmodule CodexPooler.Upstreams.SavedResets.ProviderPermissionTest do
 
   @now ~U[2026-09-07 10:00:00.000000Z]
 
-  test "persisted full-percent available sibling fences automatic redemption" do
+  test "persisted full-percent available sibling fences redemption without proving non-credit recovery" do
     identity = identity_with_permission(:available, @now, 1)
     windows = put_window(identity, @now)
     assert AutoEligibility.locked_sibling_usable_capacity?(identity, %{quota_scope: %{}}, @now)
 
     assert PostResetEvidence.classify(identity, windows, DateTime.add(@now, -60), @now) ==
-             :confirmed
+             :pending
   end
 
   test "blocked, stale and credential-mismatched permissions cannot attest capacity" do

@@ -60,6 +60,7 @@ defmodule CodexPooler.Gateway.Transports.OrdinarySuccessTestSeed do
 
   def request(owner, downstream, binding, url) do
     request = %Upstream.Request{
+      provider_credits_context: CodexPooler.ProviderCreditsDispatchSupport.context!(),
       url: url <> "/backend-api/codex/responses",
       headers: [],
       payload: CodexPooler.JSON.encode!(%{"model" => "ordinary-authority-seed", "input" => []}),

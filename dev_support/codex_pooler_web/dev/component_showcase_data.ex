@@ -205,18 +205,17 @@ defmodule CodexPoolerWeb.Dev.ComponentShowcaseData do
 
   def quota_limits do
     [
-      quota_limit("success", "Weekly", "82%", "82", Decimal.new("82"), nil, false),
-      quota_limit("warning", "Five hour", "48%", "48", Decimal.new("48"), nil, false),
-      quota_limit("error", "Burst", "18%", "18", Decimal.new("18"), nil, false),
-      quota_limit("neutral", "Unreported", "–", "0", nil, nil, false),
+      quota_limit("success", "Weekly", "82%", "82", Decimal.new("82"), nil),
+      quota_limit("warning", "Five hour", "48%", "48", Decimal.new("48"), nil),
+      quota_limit("error", "Burst", "18%", "18", Decimal.new("18"), nil),
+      quota_limit("neutral", "Unreported", "–", "0", nil, nil),
       quota_limit(
         "credit",
-        "Credits in use",
+        "Observed balance",
         "64%",
         "64",
         Decimal.new("64"),
-        "64 credits",
-        true
+        "64 credits"
       )
     ]
     |> List.update_at(0, &Map.merge(&1, QuotaObservationsFixture.limit()))
@@ -280,8 +279,7 @@ defmodule CodexPoolerWeb.Dev.ComponentShowcaseData do
          percent_label,
          percent_value,
          percent,
-         count_label,
-         burning_credits
+         count_label
        ) do
     %{
       id: id,
@@ -291,7 +289,6 @@ defmodule CodexPoolerWeb.Dev.ComponentShowcaseData do
       percent_value: percent_value,
       percent: percent,
       count_label: count_label,
-      burning_credits: burning_credits,
       reset_label: nil,
       reset_title: nil
     }

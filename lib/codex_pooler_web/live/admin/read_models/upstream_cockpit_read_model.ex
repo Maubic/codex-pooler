@@ -161,6 +161,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
           required(:saved_reset_confirmation) => QuotaProjection.saved_reset_confirmation() | nil,
           required(:quota_limits) => [UpstreamAccountsReadModel.quota_limit_row()],
           required(:quota_readiness) => UpstreamAccountsReadModel.quota_readiness(),
+          required(:provider_credits_policy) => %{allow_provider_credits: boolean()},
+          required(:provider_credits_summary) => QuotaProjection.provider_credits_summary(),
+          required(:can_manage_provider_credits?) => boolean(),
           required(:usage_poll_pause) => UpstreamAccountsReadModel.usage_poll_pause() | nil,
           required(:flags) => flags()
         }
@@ -340,6 +343,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
       saved_reset_confirmation: saved_reset_confirmation,
       quota_limits: quota_limits(account),
       quota_readiness: quota_readiness,
+      provider_credits_policy: account.provider_credits_policy,
+      provider_credits_summary: account.provider_credits_summary,
+      can_manage_provider_credits?: account.can_manage_provider_credits?,
       usage_poll_pause: Map.get(account, :usage_poll_pause),
       oauth_flows: oauth_flows,
       sections: sections,

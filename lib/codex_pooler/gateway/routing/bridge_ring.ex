@@ -26,7 +26,7 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
 
   alias CodexPooler.Gateway.Routing.AffinityTelemetry
   alias CodexPooler.Gateway.Routing.BridgeRing.{Metadata, Status}
-  alias CodexPooler.Gateway.Routing.CandidateEligibility.Quota, as: QuotaEligibility
+  alias CodexPooler.Gateway.Routing.ProviderCredits
   alias CodexPooler.Gateway.Routing.RoutePlanInput
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Pools.{Pool, RoutingSettings}
@@ -764,21 +764,22 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
     |> Map.new(&{&1.pool_upstream_assignment_id, &1})
   end
 
-  # The windowless provider-availability tier is a quota tier and demotion is an
-  # ordering-only penalty inside each tier: ordinary_active ++ ordinary_demoted
-  # ++ windowless_active ++ windowless_demoted. One stable sort on both keys keeps
-  # the strategy, locality, affinity, and session order inside each group, so the
-  # precedence cannot flip with the position of separate pipeline steps.
+  # Capacity basis is outermost; affinity, strategy and demotion never promote
+  # a credit-dependent candidate above a compatible non-credit candidate.
   defp apply_quota_tier_and_demotions(candidates, demotions, %Model{} = model, route_state) do
     Enum.sort_by(candidates, fn {assignment, _identity} = candidate ->
-      {windowless_tier?(model, candidate, route_state), Map.has_key?(demotions, assignment.id)}
+      {capacity_tier(model, candidate, route_state), Map.has_key?(demotions, assignment.id)}
     end)
   end
 
-  defp windowless_tier?(%Model{}, _candidate, nil), do: false
+  defp capacity_tier(%Model{}, _candidate, nil), do: 0
 
-  defp windowless_tier?(%Model{} = model, candidate, %RouteState{} = route_state),
-    do: QuotaEligibility.windowless_candidate?(model, candidate, route_state)
+  defp capacity_tier(%Model{} = model, {_assignment, identity}, %RouteState{} = route_state) do
+    snapshot = RouteState.quota_snapshot_for_identity(route_state, identity)
+    context = ProviderCredits.request_context(model)
+    eligibility = ProviderCredits.eligibility(snapshot, context)
+    if ProviderCredits.non_credit_basis?(eligibility.capacity_basis), do: 0, else: ProviderCredits.tier(eligibility)
+  end
 
   # One affinity row is one event record: the assignment, the identity, the
   # metadata and the timestamps all describe the same completed turn, so one

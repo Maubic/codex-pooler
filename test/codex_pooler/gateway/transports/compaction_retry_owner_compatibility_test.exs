@@ -13,6 +13,7 @@ defmodule CodexPooler.Gateway.Transports.CompactionRetryOwnerCompatibilityTest d
   alias CodexPooler.Gateway.Transports.Streaming.WebsocketCodec
   alias CodexPooler.Gateway.Transports.Websocket.CompactionRetrySubmitHold
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV7
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Websocket
   alias CodexPooler.Gateway.Websocket.DirectCleanup
@@ -226,7 +227,7 @@ defmodule CodexPooler.Gateway.Transports.CompactionRetryOwnerCompatibilityTest d
       {:ok, hold}
     end
 
-    def call_owner(_node, _module, :remote_submit_request_v7, args, _timeout) do
+    def call_owner(_node, _module, :remote_submit_request_v8, [_session_id, _downstream, %WebsocketOwnerRequestV8{request: %WebsocketOwnerRequestV7{}}] = args, _timeout) do
       send(self(), {:compatible_owner_submission, args})
       {:websocket_owner_submission_accepted, {:error, :owner_drained}}
     end
@@ -287,7 +288,7 @@ defmodule CodexPooler.Gateway.Transports.CompactionRetryOwnerCompatibilityTest d
     assert error.code == "owner_unavailable"
     assert error.status == 503
     assert_received {:old_owner_rpc, :remote_reserve_compaction_retry_v7}
-    refute_received {:old_owner_rpc, :remote_submit_request_v7}
+    refute_received {:old_owner_rpc, :remote_submit_request_v8}
     assert counts() == before
     assert FakeUpstream.count(upstream) == 0
 
@@ -311,13 +312,14 @@ defmodule CodexPooler.Gateway.Transports.CompactionRetryOwnerCompatibilityTest d
 
     assert_received {:compatible_owner_hold, hold}
 
-    assert_received {:compatible_owner_submission, [_session_id, _downstream, %WebsocketOwnerRequestV7{} = envelope]}
+    assert_received {:compatible_owner_submission, [_session_id, _downstream, %WebsocketOwnerRequestV8{request: %WebsocketOwnerRequestV7{} = inner} = envelope]}
 
-    assert envelope.compaction_retry_submit_hold == hold
+    assert :ok = WebsocketOwnerRequestV8.validate(envelope)
+    assert inner.compaction_retry_submit_hold == hold
 
     assert [link] = Repo.all(RequestClientRetryLink)
     assert link.predecessor_request_id == predecessor.id
-    assert link.successor_request_id == envelope.observation.request_id
+    assert link.successor_request_id == inner.observation.request_id
     assert Repo.aggregate(Request, :count) == before.requests + 1
     assert Repo.aggregate(Attempt, :count) == before.attempts + 1
     assert Repo.aggregate(CodexTurn, :count) == before.turns + 1
@@ -337,7 +339,7 @@ defmodule CodexPooler.Gateway.Transports.CompactionRetryOwnerCompatibilityTest d
     # next resend of the compaction chains from it, not from the original
     # predecessor, which already has its successor (findings#270 row
     # 270-237). Preparing it creates nothing and submits nothing.
-    retry_id = envelope.observation.request_id
+    retry_id = inner.observation.request_id
 
     assert {:ok, %{intent: :fresh, lifecycle: %{client_retry_predecessor_request_id: ^retry_id}}} =
              Service.prepare_replay_intent(auth, next_resend)
@@ -394,9 +396,10 @@ defmodule CodexPooler.Gateway.Transports.CompactionRetryOwnerCompatibilityTest d
     assert transport_error.code == "owner_drained"
     assert_received {:compatible_owner_hold, hold}
 
-    assert_received {:compatible_owner_submission, [_session_id, _downstream, %WebsocketOwnerRequestV7{} = envelope]}
+    assert_received {:compatible_owner_submission, [_session_id, _downstream, %WebsocketOwnerRequestV8{request: %WebsocketOwnerRequestV7{} = inner} = envelope]}
 
-    assert envelope.compaction_retry_submit_hold == hold
+    assert :ok = WebsocketOwnerRequestV8.validate(envelope)
+    assert inner.compaction_retry_submit_hold == hold
     assert [link] = Repo.all(RequestClientRetryLink)
     assert link.predecessor_request_id == predecessor.id
   end

@@ -15,6 +15,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
   alias CodexPooler.Gateway.Runtime.RateLimitObserver
   alias CodexPooler.Jobs.UpstreamEnqueue
   alias CodexPooler.Pools.Pool
+  alias CodexPooler.ProviderCreditsFixtures
   alias CodexPooler.Quotas.Evidence
   alias CodexPooler.Repo
   alias CodexPooler.SavedResetConfirmationFixtures
@@ -27,6 +28,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
   alias CodexPooler.Upstreams.SavedResetRedemption
   alias CodexPooler.Upstreams.SavedResets
   alias CodexPooler.Upstreams.SavedResets.AutoEligibility
+  alias CodexPooler.Upstreams.SavedResets.Convergence
   alias CodexPooler.Upstreams.SavedResets.ProbeLease
   alias CodexPooler.Upstreams.SavedResets.RedemptionLifecycle
   alias CodexPooler.Upstreams.Schemas.{EncryptedSecret, PoolUpstreamAssignment, UpstreamIdentity}
@@ -798,19 +800,21 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
       usable_now = DateTime.add(usable_fixture.last_provider_dispatched_at, 60, :second)
       usable_fixture = make_recovery_due!(usable_fixture, usable_now)
 
-      assert {:ok, [_window]} =
-               QuotaWindows.upsert_quota_windows(usable_fixture.identity, [
-                 weekly_quota_attrs(Decimal.new("10"),
-                   observed_at: usable_now,
-                   last_sync_at: usable_now,
-                   reset_at: DateTime.add(usable_now, 2, :hour)
-                 )
-               ])
+      observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
-      assert {:ok, %{status: :succeeded, applied?: true, code: "reset"}} =
-               resume_recovery(usable_fixture, usable_now)
+      payload =
+        ProviderCreditsFixtures.usage_payload(:included, now: observed_at, credits: :none, reset_after: 14_400)
+        |> Map.put("rate_limit_reset_credits", %{"available_count" => 0})
 
-      assert FakeUpstream.count(usable_fixture.fake) == 1
+      FakeUpstream.set_mode(usable_fixture.fake, {:path_json, ProviderCreditsFixtures.usage_routes(payload)})
+
+      assert {:ok, _identity} = PoolReconciliation.refresh_quota_from_usage(usable_fixture.identity, usable_fixture.assignment, observed_at: observed_at)
+      next_observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      assert {:ok, _identity} = PoolReconciliation.refresh_quota_from_usage(Repo.reload!(usable_fixture.identity), usable_fixture.assignment, observed_at: next_observed_at)
+      assert Enum.any?(QuotaWindows.list_evidence(usable_fixture.identity), &(&1.window_minutes == 10_080 and QuotaWindows.usable_window?(&1, usable_now)))
+
+      assert {:ok, %{status: :succeeded, applied?: true, code: "reset"}} = resume_recovery(usable_fixture, usable_now)
+      assert FakeUpstream.physical_counts(usable_fixture.fake).consume == 1
 
       exhausted_fixture = ambiguous_codex_recovery_fixture!()
       exhausted_now = DateTime.add(exhausted_fixture.last_provider_dispatched_at, 60, :second)
@@ -833,6 +837,26 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
       redemption = Repo.reload!(exhausted_fixture.identity).metadata["saved_reset_redemption"]
       assert redemption["status"] == "redeeming"
       assert redemption["provider_replay"]["provider_dispatches"] == 2
+    end
+
+    test "stale Codex recovery never settles a captured weekly consume from fresh unrelated 5h evidence" do
+      fixture = ambiguous_codex_recovery_fixture!()
+      recovery_at = DateTime.add(fixture.last_provider_dispatched_at, 60, :second)
+      fixture = make_recovery_due!(fixture, recovery_at)
+      descriptors = Repo.reload!(fixture.identity).metadata["saved_reset_redemption"]["included_window_descriptors"]
+      assert descriptors == [%{"window_kind" => "secondary", "window_minutes" => 10_080}]
+
+      assert {:ok, [_window]} =
+               QuotaWindows.upsert_quota_windows(fixture.identity, [
+                 weekly_quota_attrs(Decimal.new("10"), window_kind: "primary", window_minutes: 300, observed_at: recovery_at, last_sync_at: recovery_at, reset_at: DateTime.add(recovery_at, 2, :hour))
+               ])
+
+      assert {:snooze, 300} = resume_recovery(fixture, recovery_at)
+      persisted = Repo.reload!(fixture.identity).metadata["saved_reset_redemption"]
+      assert persisted["phase"] == "consuming"
+      assert persisted["included_window_descriptors"] == descriptors
+      assert persisted["provider_replay"]["provider_dispatches"] == 2
+      assert FakeUpstream.physical_counts(fixture.fake).consume == 2
     end
 
     test "stale recovery enforces every persisted replay delay at the exact boundary" do
@@ -2066,10 +2090,18 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
           )
 
         on_exit(fn -> FakeUpstream.stop(fake) end)
-        %{assignment: assignment} = assignment_with_fake(fake, "/api/codex/usage", "codex_api")
+        %{assignment: assignment, identity: identity} = assignment_with_fake(fake, "/api/codex/usage", "codex_api")
 
         assert {:ok, %{status: ^expected_status, applied?: ^applied?, code: ^code}} =
                  SavedResetRedemption.redeem(assignment)
+
+        if code == "no_credit" do
+          assert Repo.reload!(identity).metadata["saved_resets"]["available_count"] == 0
+        end
+
+        if code == "nothing_to_reset" do
+          assert Repo.reload!(identity).metadata["saved_resets"]["available_count"] == 1
+        end
       end
     end
 
@@ -2821,12 +2853,17 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
     end
 
     test "stale admin in-progress redemption is recovered by manual attempt" do
+      observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
       {:ok, fake} =
         FakeUpstream.start_link(
           {:path_json,
            %{
              "/api/codex/rate-limit-reset-credits/consume" => {200, %{"code" => "reset"}},
-             "/api/codex/usage" => {200, usage_payload(0)}
+             "/api/codex/usage" =>
+               {200,
+                ProviderCreditsFixtures.usage_payload(:included, now: observed_at, credits: :none, reset_after: 14_400)
+                |> Map.put("rate_limit_reset_credits", %{"available_count" => 0})}
            }}
         )
 
@@ -2848,13 +2885,22 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
           }
         )
 
+      assert {:ok, [_window]} =
+               QuotaWindows.upsert_quota_windows(identity, [
+                 weekly_quota_attrs(Decimal.new("100"), observed_at: observed_at, last_sync_at: observed_at, reset_at: DateTime.add(observed_at, 2, :hour))
+               ])
+
       assert {:ok, %{status: :succeeded, applied?: true, code: "reset"}} =
                SavedResetRedemption.redeem(assignment)
 
-      assert [consume_request, usage_request] = FakeUpstream.requests(fake)
+      assert FakeUpstream.physical_counts(fake).consume == 1
 
-      assert consume_request.path == "/api/codex/rate-limit-reset-credits/consume"
-      assert usage_request.path == "/api/codex/usage"
+      first_observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      assert {:ok, _identity} = PoolReconciliation.refresh_quota_from_usage(Repo.reload!(identity), assignment, observed_at: first_observed_at)
+      second_observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      assert {:ok, refreshed_identity} = PoolReconciliation.refresh_quota_from_usage(Repo.reload!(identity), assignment, observed_at: second_observed_at)
+      assert {:ok, _outcome} = Convergence.converge(refreshed_identity, second_observed_at, "reconciliation")
+      assert FakeUpstream.physical_counts(fake).consume == 1
 
       persisted = Repo.reload!(identity)
       assert get_in(persisted.metadata, ["saved_reset_redemption", "status"]) == "succeeded"
@@ -7358,6 +7404,13 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
     %{identity: identity, assignment: assignment} =
       assignment_with_fake(fake, "/api/codex/usage", "codex_api")
 
+    observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    assert {:ok, [_window]} =
+             QuotaWindows.upsert_quota_windows(identity, [
+               weekly_quota_attrs(Decimal.new("100"), observed_at: observed_at, last_sync_at: observed_at)
+             ])
+
     assert {:error, :saved_reset_consume_outcome_ambiguous} =
              SavedResetRedemption.redeem(assignment)
 
@@ -8348,6 +8401,11 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
             }
           }
         })
+
+      observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      assert {:ok, [_window]} =
+               QuotaWindows.upsert_quota_windows(identity, [weekly_quota_attrs(Decimal.new("100"), observed_at: observed_at, last_sync_at: observed_at)])
 
       %{assignment_id: assignment.id, identity_id: identity.id, pool_id: pool.id}
     end)
@@ -9524,7 +9582,8 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
       BEGIN
         IF NEW.id = '#{identity_id}'::uuid
            AND OLD.metadata #>> '{saved_reset_redemption,provider_replay,provider_dispatches}' = '1'
-           AND NEW.metadata #>> '{saved_reset_redemption,status}' <> 'redeeming' THEN
+           AND OLD.metadata #>> '{saved_reset_redemption,phase}' = 'consuming'
+           AND NEW.metadata #>> '{saved_reset_redemption,phase}' IS DISTINCT FROM 'consuming' THEN
           RAISE EXCEPTION 'synthetic saved-reset finalization failure';
         END IF;
 

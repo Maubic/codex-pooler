@@ -56,6 +56,10 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
         callbacks,
         stream_state \\ nil
       ) do
+    attempt_metadata = upstream_websocket_attempt_metadata(response_context)
+    receipt = Map.get(attempt_metadata, :provider_credits_admission) || Req.Response.get_private(response, :provider_credits_admission)
+    context = %{context | provider_credits_admission: receipt}
+
     %{
       reserved: reserved,
       attempt: attempt,
@@ -64,7 +68,6 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
       request_options: request_options
     } = context
 
-    attempt_metadata = upstream_websocket_attempt_metadata(response_context)
     usage = stream_usage(body, stream_state) |> merge_model_observation(attempt_metadata)
     upstream_websocket_connection = attempt_metadata.upstream_websocket_connection
     transports = resolved_transports(response_context, attempt_metadata)

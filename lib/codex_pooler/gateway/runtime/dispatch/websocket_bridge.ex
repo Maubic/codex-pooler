@@ -24,6 +24,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketBridge do
   alias CodexPooler.Gateway.Persistence.CodexSession
   alias CodexPooler.Gateway.Routing.ModelMetadata
   alias CodexPooler.Gateway.Runtime.Dispatch.PreparedContext
+  alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream
   alias CodexPooler.Gateway.Transports.TransportFailureReason
   alias CodexPooler.Gateway.Transports.UpstreamDispatch
@@ -33,28 +34,37 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketBridge do
 
   @default_preflight_timeout_ms 15_000
 
-  @spec eligible?(PreparedContext.t()) :: boolean()
-  def eligible?(%PreparedContext{context: context}) do
-    opts = context.request_options
-
-    opts.transport.transport == "http_sse" and
-      is_nil(opts.transport.websocket_writer) and
-      opts.openai_compatibility.public_openai_responses_stream == true and
-      RouteClass.streaming?(context.payload) and
-      Websocket.websocket_owner_forwarding_enabled?() and
-      session_assignment_ok?(opts.continuity.codex_session, context.assignment)
+  @doc "Captures candidate-scoped upstream intent without changing downstream HTTP transport or granting a send receipt."
+  @spec plan(RequestOptions.t(), map()) :: RequestOptions.t()
+  def plan(%RequestOptions{} = options, payload) when is_map(payload) do
+    RequestOptions.put_transport(options, upstream_websocket_bridge_plan: bridge_plan(options, payload))
   end
 
-  defp session_assignment_ok?(%CodexSession{pool_upstream_assignment_id: nil}, _assignment),
-    do: true
+  @spec eligible?(PreparedContext.t()) :: boolean()
+  def eligible?(%PreparedContext{context: context}) do
+    plan = bridge_plan(context.request_options, context.payload)
+    plan == :all or plan == context.assignment.id
+  end
 
-  defp session_assignment_ok?(
-         %CodexSession{pool_upstream_assignment_id: assignment_id},
-         %{id: assignment_id}
-       ),
-       do: true
+  # Both the early quota scope and the selected physical attempt use this same
+  # predicate. Opening the owner still rechecks the live forwarding/session state.
+  @spec bridge_plan(RequestOptions.t(), map()) :: CodexPooler.Gateway.Payloads.RequestOptions.Transport.bridge_plan()
+  defp bridge_plan(options, payload) do
+    if options.transport.transport == "http_sse" and
+         options.transport.route_class == RouteClass.proxy_stream() and
+         is_nil(options.transport.websocket_writer) and
+         options.openai_compatibility.public_openai_responses_stream == true and
+         RouteClass.streaming?(payload) and
+         Websocket.websocket_owner_forwarding_enabled?() do
+      session_bridge_plan(options.continuity.codex_session)
+    else
+      nil
+    end
+  end
 
-  defp session_assignment_ok?(_session, _assignment), do: false
+  defp session_bridge_plan(%CodexSession{pool_upstream_assignment_id: nil}), do: :all
+  defp session_bridge_plan(%CodexSession{pool_upstream_assignment_id: assignment_id}) when is_binary(assignment_id), do: assignment_id
+  defp session_bridge_plan(_session), do: nil
 
   @doc """
   Runs the bridged turn. Returns `{:ok, prepared_context, response}` once the
@@ -65,6 +75,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketBridge do
   @spec open(PreparedContext.t()) ::
           {:ok, PreparedContext.t(), Req.Response.t()}
           | {:fallback, term()}
+          | {:error, CodexPooler.Gateway.Transports.ProviderCreditsAdmission.denial()}
           | {:error, :owner_unavailable}
   def open(%PreparedContext{context: context} = prepared_context) do
     correlation_id = Ecto.UUID.generate()
@@ -142,6 +153,11 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketBridge do
       {^ref, {:preflight, {:rejected, status, body, headers}}} ->
         Process.demonitor(monitor_ref, [:flush])
         {:ok, put_bridged_options(prepared_context, options), rejection_response(stream, status, body, headers)}
+
+      {^ref, {:preflight, {:policy_denied, denial}}} ->
+        Process.demonitor(monitor_ref, [:flush])
+        WebsocketBridgeStream.cancel(stream)
+        {:error, denial}
 
       {^ref, {:preflight, {:fallback, reason}}} ->
         Process.demonitor(monitor_ref, [:flush])
@@ -256,6 +272,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketBridge do
       upstream_payload: ws_payload,
       original_payload: nil,
       identity: context.identity,
+      provider_credits_context: ProviderCreditsAdmission.from_selected(context, bridged_options),
       routing_hint_authorized?: prepared_context.routing_hint_authorized?,
       accounting_request: context.reserved.request,
       accounting_attempt: context.attempt,

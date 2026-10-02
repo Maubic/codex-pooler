@@ -11,6 +11,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   alias CodexPooler.Gateway.Runtime.Streaming.ModelDeclarationObserver
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl.TurnSnapshot
+  alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.Streaming.CollectedBody
   alias CodexPooler.Gateway.Transports.Streaming.RetainedBody
   alias CodexPooler.Gateway.Transports.Streaming.RuntimeAdmissionProof
@@ -41,6 +42,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketFrameWriter
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV6
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks
   alias CodexPooler.RouteClass
 
@@ -87,6 +89,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
           required(:terminal) => binary(),
           required(:status) => 200,
           required(:headers) => response_headers(),
+          required(:provider_credits_admission) => ProviderCreditsAdmission.Receipt.t(),
           optional(:response_id) => String.t(),
           optional(:response_usage) => ResponseUsage.usage() | nil,
           optional(:ordinary_success_result) => OrdinarySuccessResult.t(),
@@ -1125,9 +1128,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp send_request_payload(state, %Request{} = request, receive_state, connection_usage) do
     state = state |> Map.delete(:first_compact_result) |> Map.delete(:ordinary_success_result)
 
-    {state, receive_state} =
-      begin_connection_request(state, receive_state, connection_usage)
-
     if request_caller_down?(receive_state) do
       result = request_caller_down_result(state, receive_state)
       state = state |> invalidate_cancelled_request(receive_state, :before_payload) |> complete_connection_request()
@@ -1138,7 +1138,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   defp send_authorized_request_payload(state, request, receive_state, connection_usage) do
-    with {:ok, state, consumed_phase} <- consume_request_capability(state, request),
+    with {:ok, receipt} <- ProviderCreditsAdmission.admit(request.provider_credits_context),
+         :ok <- require_live_request_caller(receive_state),
+         {:ok, request} <- authorize_forwarded_generation(request, receipt),
+         :ok <- require_live_request_caller(receive_state),
+         {state, receive_state} <- begin_connection_request(state, receive_state, connection_usage),
+         {:ok, state, consumed_phase} <- consume_request_capability(state, request),
+         :ok <- require_live_request_caller(receive_state),
          :ok <- trace_physical_send(:physical_send_started, request, :started),
          {:ok, state} <- send_text(state, request.payload),
          :ok <- trace_physical_send(:physical_send_finished, request, :ok) do
@@ -1152,8 +1158,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
         |> maybe_record_successful_serving_mode(result, receive_state)
         |> complete_connection_request()
 
+      result = put_admission_receipt(result, receipt)
       {:ok, put_result_connection_metadata(result, state, connection_usage), state}
     else
+      {:error, :client_disconnected} ->
+        result = request_caller_down_result(state, receive_state)
+        state = state |> invalidate_cancelled_request(receive_state, :before_payload) |> complete_connection_request()
+        {:ok, put_result_connection_metadata(result, state, connection_usage), state}
+
+      {:error, %{reason: :provider_credits_policy_denied} = denial} ->
+        {:ok, {:error, Map.merge(denial, %{body: "", headers: []})}, state}
+
+      {:error, :owner_unavailable} ->
+        {:ok, {:error, %{reason: :owner_unavailable, body: "", headers: [], started: false}}, state}
+
       {:error, state} ->
         :ok =
           trace_physical_send(:physical_send_finished, request, {:error, :capability_rejected})
@@ -1172,6 +1190,17 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
         {:error, reason, state}
     end
   end
+
+  defp require_live_request_caller(receive_state),
+    do: if(request_caller_down?(receive_state), do: {:error, :client_disconnected}, else: :ok)
+
+  defp authorize_forwarded_generation(%Request{forwarded_owner: owner} = request, receipt) when is_pid(owner),
+    do: WebsocketOwnerSession.authorize_generation_send(owner, request, receipt)
+
+  defp authorize_forwarded_generation(%Request{} = request, _receipt), do: {:ok, request}
+
+  defp put_admission_receipt({tag, result}, receipt) when tag in [:ok, :error] and is_map(result),
+    do: {tag, Map.put(result, :provider_credits_admission, receipt)}
 
   defp retain_first_compact_result({:ok, result} = response, state, request) do
     case FirstCompactResult.from_collection(request, result, connection_lifecycle_state(state)) do

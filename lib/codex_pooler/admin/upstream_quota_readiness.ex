@@ -4,6 +4,7 @@ defmodule CodexPooler.Admin.UpstreamQuotaReadiness do
   """
 
   alias CodexPooler.Quotas.WindowClassifier
+  alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Quota
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
@@ -21,7 +22,11 @@ defmodule CodexPooler.Admin.UpstreamQuotaReadiness do
           required(:reason_codes) => [String.t()],
           required(:primary_window) => window() | nil,
           required(:primary_30d_window) => window() | nil,
-          required(:weekly_window) => window() | nil
+          required(:weekly_window) => window() | nil,
+          optional(:capacity_basis) => CodexPooler.Upstreams.Quota.CapacityAssessment.capacity_basis(),
+          optional(:qualification) => :established | :provider_attested | :supported | :unverified | :legacy_attested | :not_applicable,
+          optional(:conditional?) => boolean(),
+          optional(:included_quota_state) => String.t()
         }
 
   @spec from_windows([window()], DateTime.t()) :: t()
@@ -57,17 +62,55 @@ defmodule CodexPooler.Admin.UpstreamQuotaReadiness do
 
   @spec from_snapshot(RoutingQuotaSnapshot.t()) :: t()
   def from_snapshot(%RoutingQuotaSnapshot{} = snapshot) do
-    routing_snapshot = %{
-      snapshot
-      | raw_windows: Enum.reject(snapshot.raw_windows, &usage_zero_capacity_primary_window?/1)
-    }
-
-    eligibility =
-      QuotaWindows.routing_quota_eligibility_from_snapshot(routing_snapshot, account_only: true)
+    decision = Upstreams.provider_credits_decision(snapshot, %{account_only: true})
 
     snapshot
     |> RoutingQuotaSnapshot.effective_windows()
-    |> project_readiness(eligibility, snapshot.as_of)
+    |> project_readiness(readiness_eligibility(snapshot, decision.eligibility), snapshot.as_of)
+    |> with_capacity_decision(decision)
+  end
+
+  defp readiness_eligibility(snapshot, eligibility) do
+    windows = RoutingQuotaSnapshot.effective_windows(snapshot)
+
+    if Enum.any?(windows, &usage_zero_capacity_primary_window?/1) do
+      windows |> Enum.filter(&account_window?/1) |> Enum.reject(&usage_zero_capacity_primary_window?/1) |> QuotaWindows.routing_quota_eligibility_from_windows(at: snapshot.as_of)
+    else
+      eligibility
+    end
+  end
+
+  defp with_capacity_decision(readiness, decision) do
+    projection = capacity_projection(readiness, decision)
+
+    readiness
+    |> Map.merge(projection)
+    |> Map.merge(%{capacity_basis: decision.capacity_basis, qualification: decision.qualification.status, reason_codes: decision.reason_codes, conditional?: decision.capacity_basis == :unknown_legacy, included_quota_state: readiness.state})
+  end
+
+  defp capacity_projection(_readiness, %{eligible?: true, capacity_basis: :unknown_legacy}),
+    do: %{state: "capacity_basis_unknown", label: "Conditional provider availability", tone: :warning, routing_ready_now?: true}
+
+  defp capacity_projection(_readiness, %{eligible?: true, capacity_basis: :provider_credits}),
+    do: %{state: "provider_credits_ready", label: "Routing ready via credits", tone: :success, routing_ready_now?: true}
+
+  defp capacity_projection(readiness, %{eligible?: true}),
+    do: Map.take(readiness, [:state, :label, :tone]) |> Map.put(:routing_ready_now?, true)
+
+  defp capacity_projection(_readiness, decision) do
+    cond do
+      "saved_reset_probe_pending" in decision.reason_codes ->
+        %{state: "saved_reset_probe_pending", label: "Banked-reset recovery pending", tone: :warning, routing_ready_now?: false}
+
+      "provider_credits_disabled" in decision.reason_codes ->
+        %{state: "provider_credits_disabled", label: "Provider credits disabled", tone: :warning, routing_ready_now?: false}
+
+      decision.capacity_basis == :provider_credits ->
+        %{state: "provider_credit_capacity_unverified", label: "Provider credit capacity unverified", tone: :warning, routing_ready_now?: false}
+
+      true ->
+        %{routing_ready_now?: false}
+    end
   end
 
   defp project_readiness(windows, eligibility, as_of) do

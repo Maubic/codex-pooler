@@ -1,10 +1,11 @@
 defmodule CodexPooler.Gateway.Transports.UpstreamWebsocketProxyTest do
-  use ExUnit.Case, async: false
+  use CodexPooler.DataCase, async: false
 
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request
   alias CodexPooler.Platform.OutboundHTTP
+  alias CodexPooler.ProviderCreditsDispatchSupport
 
   @timeouts %{connect_timeout_ms: 1_000, receive_timeout_ms: 1_000}
 
@@ -28,8 +29,11 @@ defmodule CodexPooler.Gateway.Transports.UpstreamWebsocketProxyTest do
       }
     )
 
+    context = ProviderCreditsDispatchSupport.context!()
+
     assert {:error, _reason} =
              UpstreamWebsocketSession.request_once(%Request{
+               provider_credits_context: context,
                url: "https://unresolvable.invalid/backend-api/codex/responses",
                headers: [],
                payload: "{}",
@@ -97,9 +101,11 @@ defmodule CodexPooler.Gateway.Transports.UpstreamWebsocketProxyTest do
     )
 
     parent = self()
+    context = ProviderCreditsDispatchSupport.context!()
 
     assert {:ok, _result} =
              UpstreamWebsocketSession.request_once(%Request{
+               provider_credits_context: context,
                url: "https://upstream.invalid/backend-api/codex/responses",
                headers: [],
                payload: CodexPooler.JSON.encode!(%{"type" => "response.create"}),

@@ -22,6 +22,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
   alias CodexPooler.Gateway.Persistence.CodexSession
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Gateway.Runtime.Service
+  alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
@@ -165,7 +166,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
 
     assert_receive {:replay_remote_owner_call, ^remote_node, :remote_prepare_next_replay_descriptor}
 
-    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v1}
+    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v8}
     assert %{active_turn: %{descriptor: %{replay_generation: 0}}} = :sys.get_state(owner_pid)
 
     assert Gateway.detach_websocket_owner_downstream(
@@ -206,7 +207,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
 
     assert_receive {:replay_remote_owner_call, ^remote_node, :remote_prepare_next_replay_descriptor}
 
-    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v4}
+    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v8}
 
     assert {:push, {:text, replay_frame}, replay_state} = receive_owner_socket_push(replay_state)
     assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(replay_frame)
@@ -370,7 +371,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
     assert {:ok, remote_state} =
              CodexResponsesSocket.handle_in({payload, [opcode: :text]}, remote_state)
 
-    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v1},
+    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v8},
                    @handoff_detection_timeout_ms
 
     {remote_state, seen_types, error_frame} = receive_owner_frames_until_error(remote_state, [])
@@ -416,7 +417,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
         assert {:ok, retry_state} =
                  CodexResponsesSocket.handle_in({payload, [opcode: :text]}, retry_state)
 
-        assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v1},
+        assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v8},
                        @handoff_detection_timeout_ms
 
         assert {:push, {:text, completed_frame}, retry_state} =
@@ -2201,7 +2202,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
     assert_receive {:fake_upstream_websocket_barrier, :before_close, upstream_pid, ^release_ref},
                    @handoff_detection_timeout_ms
 
-    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v1}
+    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v8}
     flush_remote_owner_calls(remote_node)
     assert %{active_turn: %{descriptor: %{replay_generation: 0}}} = :sys.get_state(owner_pid)
 
@@ -2909,7 +2910,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
 
     %{
       start: fn -> Agent.start_link(fn -> :ready end) end,
-      send: fn _upstream_pid, _request, _writer ->
+      send: fn _upstream_pid, request, writer ->
+        {:ok, receipt} = ProviderCreditsAdmission.admit(request.provider_credits_context)
         :ok = :counters.add(counter, 1, 1)
         count = :counters.get(counter, 1)
 
@@ -2925,7 +2927,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
           end
         else
           send(test_pid, {:controller_handoff_replacement_started, count})
-          :ok
+          terminal = CodexPooler.JSON.encode!(%{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_handoff_#{count}", "status" => "completed", "output" => []}})
+          writer.(terminal, TerminalDiscriminator.classify(terminal))
+          {:ok, %{body: "event: response.completed\ndata: #{terminal}\n\n", terminal: "response.completed", status: 200, headers: [], websocket_frame_headers: %{}, provider_credits_admission: receipt}}
         end
       end,
       invalidate: fn _upstream_pid -> :ok end,

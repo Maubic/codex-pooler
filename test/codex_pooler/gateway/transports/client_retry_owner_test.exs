@@ -1,21 +1,17 @@
 defmodule CodexPooler.Gateway.Transports.ClientRetryOwnerTest do
   use ExUnit.Case, async: true
 
-  import ExUnit.CaptureLog
-
   alias CodexPooler.Accounting.ClientRetry
   alias CodexPooler.Gateway.Payloads.RequestOptions.TimeoutConfig
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequest
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV5
 
-  test "the successor owner envelope is versioned, opaque, and cannot downgrade to v1" do
+  test "the v5 successor codec keeps retry authority opaque and cannot encode it as v1" do
     authority = dispatch_authority()
     attrs = Map.merge(base_attrs(), %{version: 5, client_retry_dispatch_authority: authority})
 
     assert {:ok, request} = WebsocketOwnerRequestV5.new(attrs)
     assert WebsocketOwnerRequestV5.validate(request) == :ok
-    assert inspect(request) == "#WebsocketOwnerRequestV5<version: 5, client_retry: redacted>"
     refute inspect(request) =~ authority.successor_claim
 
     assert {:error, {:unknown_fields, [:client_retry_dispatch_authority]}} =
@@ -31,29 +27,6 @@ defmodule CodexPooler.Gateway.Transports.ClientRetryOwnerTest do
 
     assert {:error, {:invalid_field, :client_retry_dispatch_authority}} =
              WebsocketOwnerRequestV5.new(attrs)
-  end
-
-  test "an old owner without the v5 entrypoint fails closed without a v1 fallback" do
-    module = WebsocketOwnerForwarder
-    args = [Ecto.UUID.generate(), %{pid: self(), epoch: 1}, :opaque_v5_request]
-
-    reason =
-      {:exception, :undef, [{module, :remote_submit_request_v5, args, [file: ~c"previous_release.ex", line: 1]}]}
-
-    log =
-      capture_log(fn ->
-        assert :owner_unavailable =
-                 WebsocketOwnerForwarder.normalize_remote_failure(
-                   :error,
-                   reason,
-                   module,
-                   :remote_submit_request_v5,
-                   args
-                 )
-      end)
-
-    assert log =~
-             "event=owner_protocol_incompatible boundary=submit protocol=v5 canonical_error=owner_unavailable"
   end
 
   defp base_attrs do

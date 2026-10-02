@@ -103,36 +103,86 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
          saved_reset_scan_at,
          saved_reset_opts
        ) do
-    case Plan.filter_eligible_candidates(filter_input, route_state) do
-      {:refreshable_quota, refresh_plan} ->
-        refreshed_result = Executor.refresh_stale_candidates(refresh_plan)
+    {result, route_state, refresh_attempted?} = refresh_non_credit_candidates(filter_input, route_state)
+    recovery_plan = %{filter_input: filter_input, route_state: route_state, capacity_band: :non_credit}
+    result = SavedResetAutoRedeem.maybe_redeem_before_quota_exhaustion(result, recovery_plan, quota_mode, saved_reset_scan_at, saved_reset_opts)
 
-        refreshed_result
-        |> SavedResetAutoRedeem.maybe_redeem_before_quota_exhaustion(
-          refresh_plan,
-          quota_mode,
-          saved_reset_scan_at,
-          saved_reset_opts
-        )
-        |> SavedResetAutoRedeem.maybe_redeem_after_quota_exhaustion(
-          refresh_plan,
-          quota_mode,
-          saved_reset_scan_at,
-          saved_reset_opts
-        )
-        |> maybe_allow_missing_quota(filter_input, quota_mode, route_state)
-
-      {:ok, _candidates, _decision} = result ->
-        result
-        |> SavedResetAutoRedeem.maybe_redeem_before_quota_exhaustion(
-          %{filter_input: filter_input, route_state: route_state},
-          quota_mode,
-          saved_reset_scan_at,
-          saved_reset_opts
-        )
-        |> maybe_allow_missing_quota(filter_input, quota_mode, route_state)
+    case result do
+      {:error, _error} -> recover_or_defer_capacity(result, recovery_plan, quota_mode, saved_reset_scan_at, saved_reset_opts, refresh_attempted?)
+      admitted -> admit_servable_capacity(admitted, filter_input, quota_mode, route_state, refresh_attempted?)
     end
   end
+
+  defp admit_servable_capacity(admitted, input, quota_mode, state, refresh_attempted?) do
+    {:ok, candidates, decision, selected_state} = maybe_allow_missing_quota(admitted, input, quota_mode, state)
+
+    case filter_account_denied_candidates(input, candidates, decision, selected_state, quota_mode) do
+      {:ok, servable} -> {:ok, servable, decision, selected_state}
+      {:error, _} = denied -> deferred_capacity(denied, input, selected_state, quota_mode, refresh_attempted?)
+    end
+  end
+
+  defp refresh_non_credit_candidates(filter_input, route_state) do
+    case Plan.filter_non_credit_candidates(filter_input, route_state) do
+      {:ok, _candidates, _decision} = result ->
+        {result, route_state, false}
+
+      {:refreshable_quota, refresh_plan} ->
+        if refresh_plan.refreshable_candidates == [] do
+          {CandidateEligibility.quota_unavailable_error(filter_input, refresh_plan.candidate_exclusions, false), route_state, false}
+        else
+          result = Executor.refresh_stale_candidates(refresh_plan)
+          {result, RouteState.refresh_quota_snapshots(route_state), true}
+        end
+    end
+  end
+
+  defp recover_or_defer_capacity(result, recovery_plan, quota_mode, scan_at, opts, refresh_attempted?) do
+    %{filter_input: input, route_state: state} = recovery_plan
+
+    case Plan.filter_eligible_candidates(input, state) do
+      {:ok, candidates, decision} ->
+        {:ok, candidates, decision, state}
+
+      {:refreshable_quota, _plan} ->
+        recover_unavailable_capacity(result, recovery_plan, quota_mode, scan_at, opts, refresh_attempted?)
+    end
+  end
+
+  defp recover_unavailable_capacity(result, recovery_plan, quota_mode, scan_at, opts, refresh_attempted?) do
+    %{filter_input: input, route_state: state} = recovery_plan
+    recovery = %{candidate_exclusions: non_credit_exclusions(input, state), result: result}
+    recovered = SavedResetAutoRedeem.recover_non_credit_exhaustion(recovery, recovery_plan, quota_mode, scan_at, opts)
+
+    case recovered do
+      {:error, _error} -> deferred_capacity(recovered, input, state, quota_mode, refresh_attempted?)
+      admitted -> maybe_allow_missing_quota(admitted, input, quota_mode, state)
+    end
+  end
+
+  defp non_credit_exclusions(input, state) do
+    case Plan.filter_non_credit_candidates(input, state) do
+      {:refreshable_quota, plan} -> plan.candidate_exclusions
+      {:ok, _candidates, _decision} -> []
+    end
+  end
+
+  defp deferred_capacity(recovered, input, state, quota_mode, refresh_attempted?) do
+    outcome = SavedResetAutoRedeem.recovery_outcome(recovered)
+    refreshed_state = if outcome in [:failed, :not_applied, :pending, :confirmed], do: RouteState.refresh_quota_snapshots(state), else: state
+
+    case Plan.filter_eligible_candidates(input, refreshed_state) do
+      {:ok, candidates, decision} ->
+        {:ok, candidates, Map.put(decision, "non_credit_recovery_outcome", Atom.to_string(outcome)), refreshed_state}
+
+      {:refreshable_quota, plan} ->
+        CandidateEligibility.quota_unavailable_error(input, plan.candidate_exclusions, refresh_attempted?)
+        |> put_recovery_outcome(outcome)
+        |> maybe_allow_missing_quota(input, quota_mode, refreshed_state)
+    end
+  end
+
+  defp put_recovery_outcome({:error, error}, outcome), do: {:error, Map.put(error, :non_credit_recovery_outcome, Atom.to_string(outcome))}
 
   # A workspace-level provider denial removes the account for every model and
   # Pool (findings#206 row 206-509). It runs after the saved-reset decisions so

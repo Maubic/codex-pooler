@@ -54,7 +54,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaLimitRow 
         data-meter-state={quota_limit_meter_state(@limit)}
         aria-label={quota_limit_progress_label(@limit)}
         aria-describedby={if measurement_pending?(@limit), do: pending_description_id(@id)}
-        title={quota_limit_progress_title(@limit)}
         class={quota_limit_progress_class(@limit)}
         value={if is_nil(@limit.percent), do: nil, else: @limit.percent_value}
         max="100"
@@ -188,35 +187,24 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaLimitRow 
         end
       end
 
-    "progress admin-live-progress #{tone_class}#{credit_burning_class(limit)} h-1.5 w-full"
+    "progress admin-live-progress #{tone_class} h-1.5 w-full"
   end
 
-  defp quota_limit_progress_class(limit),
-    do: "progress admin-live-progress admin-static-unknown-progress progress-neutral#{credit_burning_class(limit)} h-1.5 w-full"
-
-  defp credit_burning_class(%{burning_credits: true}), do: " progress-striped"
-  defp credit_burning_class(_limit), do: ""
+  defp quota_limit_progress_class(_limit),
+    do: "progress admin-live-progress admin-static-unknown-progress progress-neutral h-1.5 w-full"
 
   defp quota_limit_progress_label(limit) do
     cond do
       measurement_pending?(limit) ->
         "#{limit.label} remaining #{limit.percent_label}; #{measurement_pending_detail(limit)}"
 
-      limit[:burning_credits] == true ->
-        "#{limit.label} credit balance remaining #{limit.percent_label}; credits in use"
-
-      is_binary(limit[:count_title]) ->
+      Map.get(limit, :key) in [:primary_5h, :primary_30d, :weekly] ->
         "#{limit.label} included Codex quota remaining #{limit.percent_label}"
 
       true ->
         "#{limit.label} remaining #{limit.percent_label}"
     end
   end
-
-  defp quota_limit_progress_title(%{burning_credits: true}),
-    do: "Striped while credits are being consumed after included Codex quota is exhausted."
-
-  defp quota_limit_progress_title(_limit), do: nil
 
   defp quota_limit_evidence_state(%{evidence_state: state})
        when state in [:fresh, :stale, :unknown],

@@ -7,11 +7,12 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
   alias CodexPooler.Gateway.Payloads.RequestOptions.ResetProbe
   alias CodexPooler.Gateway.Persistence.RoutingCircuitState
   alias CodexPooler.Gateway.Routing.CandidateEligibility
+  alias CodexPooler.Gateway.Routing.ProviderCredits
   alias CodexPooler.Gateway.Routing.QuotaRefresh.{Executor, Plan}
   alias CodexPooler.Gateway.Routing.SessionContinuity
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Quotas.WindowClassifier
-  alias CodexPooler.Upstreams.Quota.Windows
+  alias CodexPooler.Upstreams.Quota.{CapacityAssessment, RoutingQuotaSnapshot, Windows}
   alias CodexPooler.Upstreams.SavedResetRedemption
   alias CodexPooler.Upstreams.SavedResets
   alias CodexPooler.Upstreams.SavedResets.AutoEligibility
@@ -22,6 +23,24 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
   @type refilter_clock :: (-> DateTime.t())
   @type refilter_option :: {:refilter_clock, refilter_clock()}
   @type refilter_options :: [refilter_option()]
+
+  @type non_credit_recovery_input :: %{candidate_exclusions: [map()], result: term()}
+  @type recovery_outcome :: :confirmed | :pending | :disabled | :unavailable | :not_applied | :failed
+
+  @spec recovery_outcome(term()) :: recovery_outcome()
+  def recovery_outcome({:error, error}), do: decode_recovery_outcome(Map.get(error, :non_credit_recovery_outcome))
+  def recovery_outcome({:ok, _candidates, decision}), do: decode_recovery_outcome(decision["non_credit_recovery_outcome"])
+  def recovery_outcome({:ok, _candidates, decision, _state}), do: decode_recovery_outcome(decision["non_credit_recovery_outcome"])
+  def recovery_outcome(_result), do: :unavailable
+  @doc "Attempts existing reset recovery from actual included-only exclusions, never a policy-created pressure error."
+  @spec recover_non_credit_exhaustion(non_credit_recovery_input(), map(), :required | :optional, DateTime.t(), refilter_options()) :: term()
+  def recover_non_credit_exhaustion(%{candidate_exclusions: exclusions, result: result}, plan, :required, timestamp, opts) do
+    %{candidate_exclusions: exclusions}
+    |> long_window_exhausted_candidates(plan)
+    |> maybe_redeem_candidate(result, plan, :blocked_weekly_exhaustion, timestamp, opts)
+  end
+
+  def recover_non_credit_exhaustion(%{result: result}, _plan, _mode, _timestamp, _opts), do: result
 
   @spec maybe_redeem_after_quota_exhaustion(term(), map(), :required | :optional) :: term()
   def maybe_redeem_after_quota_exhaustion(result, refresh_plan, quota_mode) do
@@ -150,7 +169,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
         redeem_and_refilter(result, refresh_plan, assignment, identity, trigger, timestamp, opts)
 
       nil ->
-        result
+        put_recovery_outcome(result, unattempted_recovery_outcome(candidates, refresh_plan))
     end
   end
 
@@ -220,10 +239,11 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
           scan_timestamp,
           opts
         )
+        |> put_recovery_outcome(if(pending_probe?(redeem_result), do: :pending, else: :confirmed))
 
       {:ok, %{applied?: applied?, code: code}} ->
         log_redemption(assignment, identity, "gateway_auto", trigger_detail, code, applied?)
-        result
+        put_recovery_outcome(result, if(code in ["no_credit", "nothing_to_reset"], do: :not_applied, else: :failed))
 
       {:error, reason} ->
         log_redemption(
@@ -235,7 +255,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
           false
         )
 
-        result
+        put_recovery_outcome(result, :failed)
     end
   rescue
     exception in [DBConnection.ConnectionError, Ecto.QueryError, Postgrex.Error] ->
@@ -248,7 +268,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
         false
       )
 
-      result
+      put_recovery_outcome(result, :failed)
   end
 
   # A confirmed redemption (fresh usable quota) can route through the normal
@@ -287,7 +307,10 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
   defp claim_probe(refresh_plan, assignment, %UpstreamIdentity{} = identity) do
     redemption = (identity.metadata || %{})["saved_reset_redemption"] || %{}
 
-    with %ResetProbe{} = probe <- reset_probe(refresh_plan),
+    snapshot = RoutingQuotaSnapshot.load_by_identity_ids([identity.id], now())[identity.id]
+
+    with true <- CapacityAssessment.guarded_probe_permitted?(snapshot, quota_scope(refresh_plan) || %{}),
+         %ResetProbe{} = probe <- reset_probe(refresh_plan),
          {:ok, bound_probe} <-
            ResetProbe.bind(
              probe,
@@ -332,9 +355,11 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
     %{
       "allowed" => true,
       "routing_state" => "reset_probe",
-      "summary" => "guarded probe after saved reset pending confirmation",
+      "summary" => "guarded non-credit probe after saved reset pending confirmation",
       "reset_probe_candidate_count" => 1,
-      "eligible_candidate_count" => 1
+      "eligible_candidate_count" => 1,
+      "capacity_basis" => "recovered_included",
+      "non_credit_guarded_probe" => true
     }
   end
 
@@ -359,7 +384,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
         refreshed_route_state =
           refresh_route_state_quota(route_state, refilter_timestamp)
 
-        case Plan.filter_eligible_candidates(input, refreshed_route_state) do
+        case filter_recovery_band(input, refreshed_route_state, plan) do
           {:refreshable_quota, remaining_plan} ->
             Executor.refresh_stale_candidates(remaining_plan)
 
@@ -375,7 +400,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
           })
           |> refresh_route_state_quota(refilter_timestamp)
 
-        case Plan.filter_eligible_candidates(input, refreshed_route_state) do
+        case filter_recovery_band(input, refreshed_route_state, plan) do
           {:refreshable_quota, remaining_plan} ->
             remaining_plan
             |> Executor.refresh_stale_candidates()
@@ -384,6 +409,35 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
           {:ok, candidates, decision} ->
             {:ok, candidates, decision}
         end
+    end
+  end
+
+  defp filter_recovery_band(input, state, %{capacity_band: :non_credit}), do: Plan.filter_non_credit_candidates(input, state)
+  defp filter_recovery_band(input, state, _plan), do: Plan.filter_eligible_candidates(input, state)
+
+  defp put_recovery_outcome({:error, error}, outcome), do: {:error, Map.put(error, :non_credit_recovery_outcome, Atom.to_string(outcome))}
+  defp put_recovery_outcome({:ok, candidates, decision}, outcome), do: {:ok, candidates, Map.put(decision, "non_credit_recovery_outcome", Atom.to_string(outcome))}
+  defp put_recovery_outcome({:ok, candidates, decision, state}, outcome), do: {:ok, candidates, Map.put(decision, "non_credit_recovery_outcome", Atom.to_string(outcome)), state}
+  defp put_recovery_outcome(result, _outcome), do: result
+
+  defp decode_recovery_outcome("confirmed"), do: :confirmed
+  defp decode_recovery_outcome("pending"), do: :pending
+  defp decode_recovery_outcome("disabled"), do: :disabled
+  defp decode_recovery_outcome("not_applied"), do: :not_applied
+  defp decode_recovery_outcome("failed"), do: :failed
+  defp decode_recovery_outcome(_value), do: :unavailable
+
+  defp unattempted_recovery_outcome(candidates, plan) do
+    snapshots =
+      case Map.get(plan, :route_state) do
+        %RouteState{quota_snapshots: snapshots} -> Map.values(snapshots)
+        _missing -> []
+      end
+
+    cond do
+      Enum.any?(snapshots, &CapacityAssessment.recovery_pending?/1) -> :pending
+      candidates != [] and Enum.all?(candidates, fn {_assignment, identity} -> not SavedResets.auto_policy(identity).enabled? end) -> :disabled
+      true -> :unavailable
     end
   end
 
@@ -510,9 +564,18 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
       transient_circuit_exclusions: transient_circuit_exclusions(refresh_plan),
       automatic_confirmation_refs: AutoEligibility.confirmation_refs(trigger, identity, candidate_identity_ids, timestamp),
       quota_scope: quota_scope(refresh_plan),
+      credit_request_contexts: credit_request_contexts(refresh_plan, candidates),
       hard_pinned_continuity?: hard_pinned_continuity?(refresh_plan)
     }
   end
+
+  defp credit_request_contexts(%{filter_input: %{model: model, request_options: options}}, candidates) do
+    Map.new(candidates, fn {assignment, _identity} ->
+      {assignment.id, ProviderCredits.request_context(model, options, assignment.id)}
+    end)
+  end
+
+  defp credit_request_contexts(_plan, _candidates), do: %{}
 
   defp transient_circuit_exclusions(%{route_state: %RouteState{} = route_state} = refresh_plan) do
     routable_assignment_ids =

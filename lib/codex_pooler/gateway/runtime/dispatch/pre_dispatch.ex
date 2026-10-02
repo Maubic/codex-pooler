@@ -21,6 +21,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
   alias CodexPooler.Gateway.Routing.SessionContinuity
   alias CodexPooler.Gateway.Runtime.Dispatch.AccountingReservation
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
+  alias CodexPooler.Gateway.Runtime.Dispatch.WebsocketBridge
   alias CodexPooler.Gateway.Transports.Streaming.PreparedWebsocketFrame.ValidationClaim
   alias CodexPooler.Gateway.Transports.Streaming.WebsocketCodec
   alias CodexPooler.Pools
@@ -138,6 +139,21 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
          :ok <- validate_payload_once(payload, request_options, validation_authority),
          {:ok, candidate_snapshots} <-
            CandidateEligibility.routable_candidates(visible_model_context, model),
+         {:ok, candidates} <-
+           CandidateEligibility.filter_runtime_compatible_candidates(
+             CandidateEligibility.FilterInput.new(%{
+               auth: auth,
+               model: model,
+               endpoint: endpoint,
+               payload: payload,
+               has_input_image?: has_input_image?,
+               request_options: request_options,
+               candidates: candidate_snapshots
+             })
+           ),
+         {:ok, request_options} <-
+           SessionContinuity.attach_codex_session(auth, payload, request_options),
+         request_options = WebsocketBridge.plan(request_options, payload),
          quota_snapshots =
            RouteState.load_quota_snapshots(
              quota_snapshot_candidates(
@@ -151,7 +167,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
            put_selected_partition_assignment_ids(
              visible_model_context,
              model,
-             quota_snapshots
+             quota_snapshots,
+             request_options
            ),
          request_options =
            put_canonical_partition_metadata(request_options, visible_model_context),
@@ -167,21 +184,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
              routing_settings: PoolRouting.routing_settings_with_defaults(auth.pool)
            })
            |> maybe_put_codex_models_etag(endpoint, request_options),
-         {:ok, candidates} <-
-           CandidateEligibility.filter_runtime_compatible_candidates(
-             CandidateEligibility.FilterInput.new(%{
-               auth: auth,
-               model: model,
-               endpoint: endpoint,
-               payload: payload,
-               has_input_image?: has_input_image?,
-               request_options: request_options,
-               candidates: candidate_snapshots
-             })
-           ),
          route_state = RouteState.put_saved_reset_auto_cohort(route_state, candidates),
-         {:ok, request_options} <-
-           SessionContinuity.attach_codex_session(auth, payload, request_options),
          canonical_filter_input_candidates = candidates,
          allowed_canonical_assignment_ids =
            allowed_canonical_assignment_ids(visible_model_context, request_options, model, payload, candidates),
@@ -341,7 +344,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
   defp put_selected_partition_assignment_ids(
          visible_model_context,
          %Model{} = model,
-         quota_snapshots
+         quota_snapshots,
+         request_options
        ) do
     candidates_by_model_id = Map.get(visible_model_context, :candidates_by_model_id, %{})
 
@@ -352,7 +356,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
           PartitionRoutability.routable_assignment_ids_by_model_id(
             [model],
             candidates_by_model_id,
-            quota_snapshots
+            quota_snapshots,
+            request_options
           )
         end
       )
@@ -625,7 +630,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
             PartitionRoutability.routable_assignment_ids_by_model_id(
               visible_models,
               candidates_by_model_id,
-              route_state.quota_snapshots
+              route_state.quota_snapshots,
+              request_options
             )
           end,
           # Same representation the client's own catalog fetch selected, or

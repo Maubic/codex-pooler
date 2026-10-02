@@ -1,9 +1,10 @@
 defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketUsageAttributionTest do
-  use ExUnit.Case, async: false
+  use CodexPooler.DataCase, async: false
 
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request
+  alias CodexPooler.ProviderCreditsDispatchSupport
 
   @timeouts %{connect_timeout_ms: 1_000, receive_timeout_ms: 1_000}
   @usage %{"input_tokens" => 7, "output_tokens" => 3, "total_tokens" => 10}
@@ -64,6 +65,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketUsageAttribu
       writer: fn text -> send(observer, {:frame_digest, digest(text)}) end
     }
 
+    request = ProviderCreditsDispatchSupport.wire_request!(request)
+
     assert {:ok, first_result} = UpstreamWebsocketSession.request(session, request)
     assert first_result.response_usage.status == "usage_known"
     assert first_result.response_usage.total_tokens == 10
@@ -110,6 +113,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketUsageAttribu
       writer: fn text -> send(observer, {:frame_digest, digest(text)}) end
     }
 
+    request = ProviderCreditsDispatchSupport.wire_request!(request)
+
     assert {:ok, result} = UpstreamWebsocketSession.request(session, request)
     assert result.response_usage.total_tokens == 10
     assert_receive {:frame_digest, delivered}
@@ -146,6 +151,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketUsageAttribu
         timeouts: @timeouts,
         writer: fn _text -> :ok end
       }
+
+      request = ProviderCreditsDispatchSupport.wire_request!(request)
 
       assert {:ok, result} = UpstreamWebsocketSession.request(session, request)
       assert result.response_usage.status == "usage_known"

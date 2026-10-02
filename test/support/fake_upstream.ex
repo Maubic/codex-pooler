@@ -89,7 +89,9 @@ defmodule CodexPooler.FakeUpstream do
   @doc "Starts a local fake upstream server for the given response mode."
   def start_link(mode, opts \\ []) do
     validate_mode!(mode)
-    {:ok, supervisor} = CodexPooler.FakeUpstream.Supervisor.start_link()
+    {supervisor_name, opts} = Keyword.pop(opts, :supervisor_name)
+    supervisor_opts = if supervisor_name, do: [name: supervisor_name], else: []
+    {:ok, supervisor} = CodexPooler.FakeUpstream.Supervisor.start_link(supervisor_opts)
 
     {:ok, pid} =
       Supervisor.start_child(
@@ -138,6 +140,34 @@ defmodule CodexPooler.FakeUpstream do
 
   @doc "Returns the captured request count."
   def count(fake), do: fake |> requests() |> length()
+
+  @type physical_receipt :: %{
+          ordinal: pos_integer(),
+          kind: :generation | :usage | :consume | :other,
+          transport: :http | :websocket,
+          path: String.t(),
+          connection_id: pos_integer() | nil,
+          model_fingerprint: String.t() | nil,
+          identity_fingerprint: String.t() | nil
+        }
+
+  @doc "Returns ordered metadata-only receipts for physical HTTP requests and websocket generation frames."
+  @spec physical_receipts(t()) :: [physical_receipt()]
+  def physical_receipts(%__MODULE__{pid: pid}) do
+    Agent.get(pid, fn state -> Enum.reverse(state.physical_receipts) end)
+  end
+
+  @doc "Counts generation separately from usage, reset consumption and control-plane requests."
+  @spec physical_counts(t()) :: %{required(atom()) => non_neg_integer()}
+  def physical_counts(fake) do
+    Enum.reduce(physical_receipts(fake), %{http_generation: 0, websocket_generation: 0, usage: 0, consume: 0, other: 0}, fn receipt, counts ->
+      key = if receipt.kind == :generation, do: generation_counter(receipt.transport), else: receipt.kind
+      Map.update!(counts, key, &(&1 + 1))
+    end)
+  end
+
+  defp generation_counter(:http), do: :http_generation
+  defp generation_counter(:websocket), do: :websocket_generation
 
   @doc "Builds a finite response sequence whose entries are consumed exactly once."
   @spec strict_sequence([mode()]) :: mode()
@@ -208,7 +238,7 @@ defmodule CodexPooler.FakeUpstream do
   def take_response_mode(pid, request) when is_pid(pid) and is_map(request) do
     Agent.get_and_update(pid, fn state ->
       {mode, state} = take_response_mode_from_state(state, request)
-      {mode, %{state | requests: [request | state.requests]}}
+      {mode, record_physical_request(state, request)}
     end)
   end
 
@@ -882,6 +912,8 @@ defmodule CodexPooler.FakeUpstream do
     %{
       mode: mode,
       requests: [],
+      physical_receipts: [],
+      physical_ordinal: 0,
       route_counts: %{},
       websocket_connection_count: 0,
       websocket_connection_ids: [],
@@ -1100,8 +1132,46 @@ defmodule CodexPooler.FakeUpstream do
   end
 
   defp record_rejected_request(pid, request) do
-    Agent.update(pid, fn state -> %{state | requests: [request | state.requests]} end)
+    Agent.update(pid, &record_physical_request(&1, request))
   end
+
+  defp record_physical_request(state, request) do
+    ordinal = state.physical_ordinal + 1
+    transport = if request.method == "WEBSOCKET", do: :websocket, else: :http
+    json = if is_map(request.json), do: request.json, else: %{}
+    headers = Map.new(request.headers, fn {key, value} -> {String.downcase(key), value} end)
+
+    receipt = %{
+      ordinal: ordinal,
+      kind: physical_request_kind(request, json),
+      transport: transport,
+      path: request.path,
+      connection_id: Map.get(request, :websocket_connection_id),
+      model_fingerprint: physical_fingerprint(json["model"]),
+      identity_fingerprint: physical_fingerprint(headers["chatgpt-account-id"])
+    }
+
+    %{state | requests: [request | state.requests], physical_receipts: [receipt | state.physical_receipts], physical_ordinal: ordinal}
+  end
+
+  defp physical_request_kind(%{method: "WEBSOCKET"}, %{"type" => type})
+       when type in ["response.create", "response.compact", "response.steer"], do: :generation
+
+  defp physical_request_kind(%{method: "WEBSOCKET"}, _json), do: :other
+
+  defp physical_request_kind(%{method: "POST", path: path}, _json)
+       when path in ["/backend-api/codex/responses", "/backend-api/codex/responses/compact", "/v1/responses", "/v1/responses/compact"], do: :generation
+
+  defp physical_request_kind(%{method: "POST", path: path}, _json)
+       when path in ["/backend-api/wham/rate-limit-reset-credits/consume", "/wham/rate-limit-reset-credits/consume", "/api/codex/rate-limit-reset-credits/consume", "/backend-api/codex/rate-limit-reset-credits/consume"], do: :consume
+
+  defp physical_request_kind(%{method: "GET", path: path}, _json)
+       when path in ["/api/codex/usage", "/backend-api/codex/usage", "/backend-api/wham/usage", "/wham/usage"], do: :usage
+
+  defp physical_request_kind(_request, _json), do: :other
+
+  defp physical_fingerprint(value) when is_binary(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+  defp physical_fingerprint(_value), do: nil
 
   defp respond_http_previous_response_id_rejection(conn) do
     conn
@@ -2010,8 +2080,8 @@ defmodule CodexPooler.FakeUpstream do
 
     use Elixir.Supervisor
 
-    def start_link do
-      Elixir.Supervisor.start_link(__MODULE__, :ok)
+    def start_link(opts \\ []) do
+      Elixir.Supervisor.start_link(__MODULE__, :ok, opts)
     end
 
     @impl Elixir.Supervisor

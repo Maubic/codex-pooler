@@ -117,7 +117,8 @@ defmodule CodexPooler.Gateway.Metadata do
           routable_assignment_ids_by_model_id: fn ->
             PartitionRoutability.routable_assignment_ids_by_model_id(
               visible_models,
-              hydration.candidates_by_model_id
+              hydration.candidates_by_model_id,
+              %{}
             )
           end,
           representation: representation

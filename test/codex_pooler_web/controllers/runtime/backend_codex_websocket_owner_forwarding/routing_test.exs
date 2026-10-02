@@ -21,8 +21,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RoutingTes
   alias CodexPooler.Gateway.Routing.SessionContinuity
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
   alias CodexPooler.Gateway.Websocket, as: Gateway
+  alias CodexPooler.ProviderCreditsFixtures
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
+  alias CodexPooler.Upstreams.Reconciliation.PoolReconciliation
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport.ReplayRemoteNodeClient
@@ -223,7 +225,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RoutingTes
 
     usage_upstream = reset_probe_usage_upstream()
     setup = gateway_setup(dispatch_upstream, quota?: false)
-    identity = enable_reset_probe!(setup.identity, usage_upstream)
+    identity = enable_reset_probe!(setup.identity, setup.assignment, usage_upstream)
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
     {:ok, state} = owner_socket(auth, "ws-owner-reset-probe-success", "owner-reset-probe-success")
     remote_node = :"codex_pooler@remote-reset-probe-success.example"
@@ -256,7 +258,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RoutingTes
       assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(completed_frame)
       assert {:ok, _state} = receive_owner_socket_complete(remote_state)
 
-      assert_remote_submit_request_v1!(remote_state, remote_node, :success)
+      assert_remote_submit_request_v8!(remote_state, remote_node, :success)
 
       refute_received {:websocket_owner_harness_node_call, _duplicate}
     after
@@ -388,7 +390,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RoutingTes
 
       assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(completed_frame)
       assert {:ok, _state} = receive_owner_socket_complete(remote_state)
-      assert_remote_submit_request_v1!(remote_state, remote_node, :success)
+      assert_remote_submit_request_v8!(remote_state, remote_node, :success)
     after
       CodexResponsesSocket.terminate(:closed, remote_state)
     end
@@ -437,7 +439,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RoutingTes
 
     usage_upstream = reset_probe_usage_upstream()
     setup = gateway_setup(dispatch_upstream, quota?: false)
-    identity = enable_reset_probe!(setup.identity, usage_upstream)
+    identity = enable_reset_probe!(setup.identity, setup.assignment, usage_upstream)
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
     {:ok, state} = owner_socket(auth, "ws-owner-reset-probe-failure", "owner-reset-probe-failure")
     remote_node = :"codex_pooler@remote-reset-probe-failure.example"
@@ -467,7 +469,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RoutingTes
           assert %{"type" => "response.failed"} = CodexPooler.JSON.decode!(terminal_frame)
           assert {:ok, _state} = receive_owner_socket_complete(remote_state)
 
-          assert_remote_submit_request_v1!(remote_state, remote_node, :success)
+          assert_remote_submit_request_v8!(remote_state, remote_node, :success)
 
           refute_received {:websocket_owner_harness_node_call, _duplicate}
         after
@@ -587,9 +589,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RoutingTes
           )
         end)
 
-      assert_remote_submit_request_v1!(remote_state, remote_node)
+      assert_remote_submit_request_v8!(remote_state, remote_node)
 
-      assert_receive {:websocket_owner_harness_call_barrier, rpc_pid, ^release_ref, :remote_submit_request_v1},
+      assert_receive {:websocket_owner_harness_call_barrier, rpc_pid, ^release_ref, :remote_submit_request_v8},
                      @handoff_detection_timeout_ms
 
       try do
@@ -624,7 +626,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RoutingTes
                  end
                )
 
-      assert_remote_submit_request_v1!(remote_state, remote_node)
+      assert_remote_submit_request_v8!(remote_state, remote_node)
 
       assert {:push, {:text, full_frame}, remote_state} =
                receive_owner_socket_push(remote_state)
@@ -811,12 +813,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RoutingTes
       {:path_json,
        %{
          "/api/codex/rate-limit-reset-credits/consume" => {200, %{"code" => "reset"}},
-         "/api/codex/usage" => {200, %{"plan_type" => "pro", "rate_limit_reset_credits" => %{"available_count" => 0}}}
+         "/api/codex/usage" => {200, ProviderCreditsFixtures.usage_payload(:weekly_credit_only, credits: :none) |> Map.put("rate_limit_reset_credits", %{"available_count" => 0})}
        }}
     )
   end
 
-  defp enable_reset_probe!(identity, usage_upstream) do
+  defp enable_reset_probe!(identity, assignment, usage_upstream) do
     identity =
       identity
       |> UpstreamIdentity.changeset(%{
@@ -828,8 +830,30 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RoutingTes
       })
       |> Repo.update!()
 
+    payload = ProviderCreditsFixtures.usage_payload(:weekly_credit_only, credits: :none) |> Map.put("rate_limit_reset_credits", %{"available_count" => 1})
+
+    FakeUpstream.set_mode(
+      usage_upstream,
+      {:path_json,
+       %{
+         "/api/codex/rate-limit-reset-credits/consume" => {200, %{"code" => "reset"}},
+         "/api/codex/usage" => {200, payload}
+       }}
+    )
+
+    assert {:ok, identity} = PoolReconciliation.refresh_quota_from_usage(Repo.reload!(identity), assignment)
     prime_weekly_exhausted_quota!(identity)
-    identity
+
+    FakeUpstream.set_mode(
+      usage_upstream,
+      {:path_json,
+       %{
+         "/api/codex/rate-limit-reset-credits/consume" => {200, %{"code" => "reset"}},
+         "/api/codex/usage" => {200, Map.put(payload, "rate_limit_reset_credits", %{"available_count" => 0})}
+       }}
+    )
+
+    Repo.reload!(identity)
   end
 
   defp put_owner_capacity_quota!(identity, used_percent) do

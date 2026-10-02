@@ -36,6 +36,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics do
           required(:state) => String.t(),
           required(:state_label) => String.t(),
           required(:routing_usable?) => boolean(),
+          optional(:routing_conditional?) => boolean(),
           required(:routing_readiness_state) => String.t(),
           required(:routing_readiness_label) => String.t(),
           required(:routing_readiness_reason) => String.t(),
@@ -56,6 +57,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics do
   @type quota_health_kpis :: %{
           required(:assignment_count) => non_neg_integer(),
           required(:routing_usable_count) => non_neg_integer(),
+          optional(:routing_conditional_count) => non_neg_integer(),
           required(:stale_or_missing_count) => non_neg_integer(),
           required(:exhausted_count) => non_neg_integer(),
           required(:blocked_count) => non_neg_integer(),

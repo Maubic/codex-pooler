@@ -5,10 +5,12 @@ defmodule CodexPooler.MCP.Tools.PoolMetadata.Upstreams do
   alias CodexPooler.MCP.ToolRegistry
   alias CodexPooler.MCP.Tools.DetailEnvelope
   alias CodexPooler.MCP.Tools.PoolMetadata.Common
+  alias CodexPooler.MCP.Tools.QuotaMetadata.ReadModel, as: QuotaReadModel
   alias CodexPooler.MCP.Tools.ReadableText
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Assignments, as: UpstreamAssignments
+  alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
   @spec tools() :: [map()]
@@ -23,14 +25,16 @@ defmodule CodexPooler.MCP.Tools.PoolMetadata.Upstreams do
       limit = Common.bounded_limit(arguments)
       pool_lookup = Map.new(pools, &{&1.id, &1})
 
-      items =
+      identities =
         scope
         |> Upstreams.list_visible_upstream_identities()
         |> filter_for_pool(pool_filter)
         |> Common.filter_by_status(Map.get(arguments, "status"))
         |> Common.filter_by_query(Map.get(arguments, "query"), &search_text/1)
         |> Enum.take(limit)
-        |> Enum.map(&item(&1, pool_lookup))
+
+      snapshots = RoutingQuotaSnapshot.load_by_identity_ids(Enum.map(identities, & &1.id), DateTime.utc_now())
+      items = Enum.map(identities, &item(&1, pool_lookup, Map.fetch!(snapshots, &1.id)))
 
       structured = %{
         "status" => "ok",
@@ -75,7 +79,12 @@ defmodule CodexPooler.MCP.Tools.PoolMetadata.Upstreams do
 
   @spec item(UpstreamIdentity.t(), map()) :: map()
   def item(%UpstreamIdentity{} = identity, pool_lookup) do
-    presenter = presenter(identity, pool_lookup)
+    snapshot = RoutingQuotaSnapshot.load_by_identity_ids([identity.id], DateTime.utc_now()) |> Map.fetch!(identity.id)
+    item(identity, pool_lookup, snapshot)
+  end
+
+  defp item(identity, pool_lookup, snapshot) do
+    presenter = presenter(identity, pool_lookup, snapshot)
 
     :upstreams
     |> PrivacyMatrix.project!(presenter)
@@ -93,7 +102,7 @@ defmodule CodexPooler.MCP.Tools.PoolMetadata.Upstreams do
     }
   end
 
-  defp presenter(identity, pool_lookup) do
+  defp presenter(identity, pool_lookup, snapshot) do
     assignments = visible_assignments_for_identity(identity, pool_lookup)
     active_count = Enum.count(assignments, &(&1.status == "active"))
 
@@ -106,6 +115,8 @@ defmodule CodexPooler.MCP.Tools.PoolMetadata.Upstreams do
       workspace_label: Common.safe_label(identity.workspace_label),
       onboarding_method: identity.onboarding_method,
       status: identity.status,
+      allow_provider_credits: snapshot.allow_provider_credits,
+      capacity_decision: QuotaReadModel.capacity_decision(snapshot),
       plan_family: identity.plan_family,
       plan_label: identity.plan_label,
       auth_fresh_at: Common.timestamp(identity.auth_fresh_at),
@@ -212,17 +223,27 @@ defmodule CodexPooler.MCP.Tools.PoolMetadata.Upstreams do
       {:account, "account", required: true},
       {:workspace, "workspace", required: true},
       {:plan, "plan", required: true},
-      {:assignments, "assignments", required: true}
+      {:assignments, "assignments", required: true},
+      {:provider_credits_policy, "provider_credits_policy", required: true},
+      {:capacity_basis, "capacity_basis", required: true},
+      {:qualification, "qualification", required: true},
+      {:capacity_reasons, "capacity_reasons"}
     ]
   end
 
   defp text_row(item) do
+    capacity = Map.get(item, "capacity_decision", %{})
+
     item
     |> Map.take(["id", "account_label", "status"])
     |> Map.put("account", Map.get(item, "account_email") || Map.get(item, "chatgpt_account_id"))
     |> Map.put("workspace", Map.get(item, "workspace_label") || Map.get(item, "workspace_ref"))
     |> Map.put("plan", Map.get(item, "plan_label") || Map.get(item, "plan_family"))
     |> Map.put("assignments", Common.summary_text(item, "assignment_summary"))
+    |> Map.put("provider_credits_policy", if(item["allow_provider_credits"] == true, do: "enabled", else: "disabled"))
+    |> Map.put("capacity_basis", capacity["capacity_basis"])
+    |> Map.put("qualification", capacity["qualification"])
+    |> Map.put("capacity_reasons", Enum.join(capacity["reason_codes"] || [], ", "))
   end
 
   defp list_tool do

@@ -6,6 +6,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
 
   alias CodexPooler.Upstreams.Quota.{
     AccountAvailabilityStore,
+    CapacityFactsStore,
     RoutingQuotaSnapshot,
     WindowSelector
   }
@@ -78,6 +79,41 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
         availability_fallback(snapshot, raw_windows, ordinary)
     end
   end
+
+  @doc "Physical quota view that never counts provider credits as included capacity."
+  @spec included_only_eligibility_from_snapshot(RoutingQuotaSnapshot.t(), keyword()) :: map()
+  def included_only_eligibility_from_snapshot(%RoutingQuotaSnapshot{} = snapshot, opts \\ []) do
+    included_snapshot = %{snapshot | raw_windows: included_only_windows(snapshot.raw_windows)}
+
+    eligibility_from_snapshot(included_snapshot, opts)
+    |> suppress_credit_only_availability(snapshot)
+  end
+
+  @spec included_only_windows([Quota.AccountQuotaWindow.t()]) :: [Quota.AccountQuotaWindow.t()]
+  def included_only_windows(windows) do
+    Enum.map(windows, fn
+      %Quota.AccountQuotaWindow{source: "codex_usage_api", quota_scope: "account"} = window -> %{window | credits: nil, active_limit: nil}
+      %Quota.AccountQuotaWindow{quota_scope: "account", active_limit: 0} = window -> %{window | credits: 0}
+      %Quota.AccountQuotaWindow{} = window -> %{window | credits: nil}
+    end)
+  end
+
+  defp suppress_credit_only_availability(%{routing_state: state} = eligibility, snapshot)
+       when state in [:provider_available, :windowless_provider_available] do
+    facts = snapshot.capacity_facts
+
+    reported? = snapshot.capacity_facts_reported? or snapshot.capacity_blocker_reported? or not is_nil(facts)
+
+    if state == :windowless_provider_available and reported? and
+         not (CapacityFactsStore.fresh?(facts, snapshot.credential_epoch, snapshot.as_of) and
+                facts.included_permission == :available) do
+      %{eligibility | eligible?: false, routing_state: :blocked, exclusions: [%{code: "quota_window_unusable", reason_codes: ["non_credit_capacity_unverified"], quota_key: "account", quota_scope: "account", quota_family: "account"}]}
+    else
+      eligibility
+    end
+  end
+
+  defp suppress_credit_only_availability(eligibility, _snapshot), do: eligibility
 
   defp applicable_model_denial?(selection, as_of) do
     Enum.any?(selection.routing_windows, fn window ->

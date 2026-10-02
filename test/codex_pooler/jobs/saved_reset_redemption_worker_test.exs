@@ -282,14 +282,16 @@ defmodule CodexPooler.Jobs.SavedResetRedemptionWorkerTest do
       assert :ok =
                perform_scheduled_job(assignment.id, identity.id)
 
-      assert [
-               %{method: "POST", path: "/api/codex/rate-limit-reset-credits/consume"},
-               %{method: "GET", path: "/api/codex/usage"}
-             ] = FakeUpstream.requests(fake)
+      requests = FakeUpstream.requests(fake)
+      assert Enum.count(requests, &(&1.method == "POST" and &1.path == "/api/codex/rate-limit-reset-credits/consume")) == 1
+      assert Enum.any?(requests, &(&1.method == "GET" and &1.path == "/api/codex/usage"))
+      assert Enum.all?(requests, &(&1.path == "/api/codex/rate-limit-reset-credits/consume" or String.ends_with?(&1.path, "/usage")))
 
       redemption = Repo.reload!(identity).metadata["saved_reset_redemption"]
       assert redemption["status"] == "succeeded"
       assert redemption["trigger_kind"] == "scheduled_expiry_rescue"
+      assert redemption["phase"] == "confirmed_by_quota"
+      assert redemption["included_window_descriptors"] == [%{"window_kind" => "secondary", "window_minutes" => 10_080}]
       refute Map.has_key?(redemption, "probe")
     end
 
@@ -585,16 +587,20 @@ defmodule CodexPooler.Jobs.SavedResetRedemptionWorkerTest do
   end
 
   defp usage_payload(available_count) do
-    reset_at = System.system_time(:second) + 900
+    reset_at = System.system_time(:second) + 7_200
 
     %{
       "plan_type" => "pro",
       "rate_limit_reset_credits" => %{"available_count" => available_count},
+      "credits" => %{"has_credits" => false, "unlimited" => false, "balance" => "0"},
+      "spend_control" => %{"reached" => false},
       "rate_limit" => %{
+        "allowed" => true,
+        "limit_reached" => false,
         "primary_window" => %{
-          "used_percent" => 10,
-          "limit_window_seconds" => 18_000,
-          "reset_after_seconds" => 900,
+          "used_percent" => 25,
+          "limit_window_seconds" => 604_800,
+          "reset_after_seconds" => 7_200,
           "reset_at" => reset_at
         }
       }

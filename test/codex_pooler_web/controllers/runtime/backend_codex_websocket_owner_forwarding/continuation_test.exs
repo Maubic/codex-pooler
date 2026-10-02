@@ -15,6 +15,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.BridgeSessionAlias
   alias CodexPooler.Gateway.Persistence.CodexTurn
+  alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
@@ -585,7 +586,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
 
   test "queued owner-forwarded continuations retarget only when popped to start" do
     release_ref = make_ref()
-    upstream_boundary = blocking_owner_upstream_boundary(self(), release_ref)
+    upstream_boundary = completed_blocking_owner_boundary(self(), release_ref)
 
     upstream =
       start_upstream(
@@ -790,6 +791,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
         assert length(FakeUpstream.requests(upstream)) == 2
 
         send(active_worker_pid, {:blocking_owner_upstream_release, release_ref})
+        assert {:push, {:text, active_terminal}, origin_state} = receive_owner_socket_push(origin_state)
+        assert CodexPooler.JSON.decode!(active_terminal)["id"] == "resp_owner_queue_active"
         assert {:ok, queued_a_state} = receive_socket_done(origin_state)
         assert queued_a_state.codex_session.id == target_a_session.id
         refute queued_a_state.codex_session.id == origin_session.id
@@ -1532,6 +1535,30 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
     assert correlation_id =~ ~r/\Acodex-request:[A-Za-z0-9_-]{43}\z/
   end
 
+  defp completed_blocking_owner_boundary(test_pid, release_ref) do
+    %{
+      start: fn -> Agent.start_link(fn -> :ready end) end,
+      send: fn _upstream_pid, request, writer ->
+        {:ok, receipt} = ProviderCreditsAdmission.admit(request.provider_credits_context)
+        send(test_pid, {:blocking_owner_upstream_received, self(), release_ref})
+
+        receive do
+          {:blocking_owner_upstream_release, ^release_ref} -> primitive_generation_reply(request, writer, "resp_owner_queue_active", receipt)
+        after
+          60_000 -> exit(:blocking_owner_upstream_timeout)
+        end
+      end,
+      close: fn upstream_pid -> Agent.stop(upstream_pid) end
+    }
+  end
+
+  defp primitive_generation_reply(request, writer, response_id, receipt \\ nil) do
+    {:ok, receipt} = if receipt, do: {:ok, receipt}, else: ProviderCreditsAdmission.admit(request.provider_credits_context)
+    frame = CodexPooler.JSON.encode!(%{"id" => response_id, "object" => "response"})
+    writer.(frame, TerminalDiscriminator.classify(frame))
+    {:ok, %{body: "data: " <> frame <> "\n\n", terminal: "response.completed", response_id: response_id, status: 200, headers: [], websocket_frame_headers: %{}, provider_credits_admission: receipt}}
+  end
+
   defp chained_owner_upstream_boundary(test_pid, release_ref) do
     %{
       start: fn -> Agent.start_link(fn -> %{count: 0} end) end,
@@ -1542,15 +1569,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
           end)
 
         case {count, upstream_payload} do
-          {1, %CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request{}} ->
-            frame =
-              CodexPooler.JSON.encode!(%{
-                "id" => "resp_owner_queue_first",
-                "object" => "response"
-              })
-
-            writer.(frame, TerminalDiscriminator.classify(frame))
-            :ok
+          {1, %UpstreamWebsocketSession.Request{} = request} ->
+            primitive_generation_reply(request, writer, "resp_owner_queue_first")
 
           {2, payload} when is_binary(payload) ->
             send(test_pid, {:chained_owner_upstream_processed_blocked, self(), release_ref})
@@ -1561,14 +1581,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
               5_000 -> exit(:chained_owner_upstream_timeout)
             end
 
-          {3, %CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request{}} ->
+          {3, %UpstreamWebsocketSession.Request{} = request} ->
             send(test_pid, {:chained_owner_upstream_tool_started, release_ref})
-
-            frame =
-              CodexPooler.JSON.encode!(%{"id" => "resp_owner_queue_tool", "object" => "response"})
-
-            writer.(frame, TerminalDiscriminator.classify(frame))
-            :ok
+            primitive_generation_reply(request, writer, "resp_owner_queue_tool")
         end
       end,
       close: fn upstream_pid -> Agent.stop(upstream_pid) end

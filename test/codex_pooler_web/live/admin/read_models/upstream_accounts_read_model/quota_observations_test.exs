@@ -26,7 +26,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
           [selected],
           DateTimeDisplay.preferences_for_user(nil),
           @now,
-          nil,
           Enum.reverse(raw)
         )
 
@@ -44,7 +43,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
     older = window("codex_response_headers", DateTime.add(@now, -60, :second), "90")
     newer = window("codex_usage_api", @now, "20")
     preferences = DateTimeDisplay.preferences_for_user(nil)
-    rows = QuotaProjection.quota_limit_rows([older], preferences, @now, nil, [older, newer])
+    rows = QuotaProjection.quota_limit_rows([older], preferences, @now, [older, newer])
     row = Enum.find(rows, &(&1.key == :weekly))
     assert [selected, latest] = row.observations
     assert latest.source == "Usage API"
@@ -61,8 +60,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
     raw = [stale, future, selected]
     effective = WindowSelector.logical_windows(raw, @now)
     preferences = DateTimeDisplay.preferences_for_user(nil)
-    baseline = QuotaProjection.quota_limit_rows(effective, preferences, @now, nil)
-    actual = QuotaProjection.quota_limit_rows(effective, preferences, @now, nil, raw)
+    baseline = QuotaProjection.quota_limit_rows(effective, preferences, @now)
+    actual = QuotaProjection.quota_limit_rows(effective, preferences, @now, raw)
 
     assert Enum.map(actual, &Map.delete(&1, :observations)) ==
              Enum.map(baseline, &Map.delete(&1, :observations))
@@ -88,7 +87,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
         WindowSelector.logical_windows(raw, @now),
         DateTimeDisplay.preferences_for_user(nil),
         @now,
-        nil,
         raw
       )
 
@@ -119,7 +117,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
         [chosen],
         DateTimeDisplay.preferences_for_user(nil),
         @now,
-        nil,
         [chosen, legacy, elapsed]
       )
 
@@ -170,7 +167,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
         [selected],
         DateTimeDisplay.preferences_for_user(nil),
         @now,
-        nil,
         [selected, stale_runtime, stale_headers]
       )
 
@@ -193,7 +189,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
         [nonzero_selected],
         DateTimeDisplay.preferences_for_user(nil),
         @now,
-        nil,
         [nonzero_selected]
       )
       |> Enum.filter(&(&1.key == :weekly))

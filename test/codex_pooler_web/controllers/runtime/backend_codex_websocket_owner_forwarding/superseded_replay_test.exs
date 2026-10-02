@@ -316,7 +316,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Superseded
 
     assert {:ok, remote_state} = CodexResponsesSocket.handle_in({cut_payload, [opcode: :text]}, remote_state)
     assert_receive {:fake_upstream_websocket_barrier, :before_close, upstream_pid, ^release_ref}, @detection_timeout_ms
-    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v1}, @detection_timeout_ms
+    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v8}, @detection_timeout_ms
 
     assert Gateway.detach_websocket_owner_downstream(session, remote_state.websocket_owner_lease_token, remote_state.websocket_owner_downstream, remote_state.opts) in [
              :suspended,
@@ -334,7 +334,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Superseded
     assert next_state.websocket_owner_downstream.epoch == 2
     assert {:ok, next_state} = CodexResponsesSocket.handle_in({next_payload, [opcode: :text]}, next_state)
     assert_receive {:replay_remote_owner_call, ^remote_node, :remote_reconnect_control_v2}, @detection_timeout_ms
-    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v1}, @detection_timeout_ms
+    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v8}, @detection_timeout_ms
     assert {:push, {:text, frame}, next_state} = receive_owner_socket_push(next_state)
     assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(frame)
     assert {:ok, next_state} = receive_owner_socket_complete(next_state)

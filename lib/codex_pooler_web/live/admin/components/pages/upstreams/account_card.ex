@@ -18,6 +18,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
   }
 
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.{
+    ProviderCreditsComponents,
     ReconciliationStatus,
     ReinviteLink,
     RoutePath,
@@ -175,6 +176,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
                 :for={limit <- @reported_quota_limits}
                 id={"upstream-account-#{@account.identity.id}-limit-#{limit.key}"}
                 limit={limit}
+              />
+              <ProviderCreditsComponents.provider_credits_summary
+                :if={Map.has_key?(@account, :provider_credits_summary)}
+                id={"upstream-account-#{@account.identity.id}-provider-credits"}
+                summary={@account.provider_credits_summary}
+                open_policy={if @account.can_manage_provider_credits? and @account.identity.status != "deleted", do: JS.push_focus() |> JS.push("open_provider_credits_policy", value: %{id: @account.identity.id})}
               />
               <SavedResetMeter.saved_reset_meter
                 :if={@account.identity.status != "deleted" and saved_reset_panel_available?(@saved_resets, @saved_reset_confirmation)}
@@ -714,6 +721,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
             phx-value-id={@account.identity.id}
             disabled={@assignment_unavailable_reason != nil or !refreshable?(@account.identity.status)}
             title={@assignment_unavailable_reason}
+          />
+        </li>
+        <li :if={Map.get(@account, :can_manage_provider_credits?, false) and @account.identity.status != "deleted"}>
+          <AdminComponents.dropdown_action_item
+            id={"provider-credits-policy-upstream-account-#{@account.identity.id}"}
+            icon="hero-currency-dollar"
+            label="Provider credits"
+            phx-click={JS.push_focus() |> JS.push("open_provider_credits_policy")}
+            phx-value-id={@account.identity.id}
+            aria-controls="provider-credits-policy-dialog"
+            aria-haspopup="dialog"
           />
         </li>
         <li :if={@account.identity.status != "deleted"}>

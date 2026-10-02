@@ -5,7 +5,7 @@ defmodule CodexPooler.Gateway.Runtime.DispatchTest do
   import ExUnit.CaptureLog
 
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
-    only: [gateway_setup: 1, start_upstream: 1]
+    only: [gateway_setup: 1, prime_routing_quota!: 1, start_upstream: 1]
 
   import CodexPooler.PoolerFixtures, only: [active_upstream_assignment_fixture: 2]
 
@@ -408,6 +408,8 @@ defmodule CodexPooler.Gateway.Runtime.DispatchTest do
         base_url: FakeUpstream.url(second_upstream)
       })
 
+    prime_routing_quota!(second_identity)
+
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
     candidates = [{setup.assignment, setup.identity}, {second_assignment, second_identity}]
 
@@ -574,6 +576,8 @@ defmodule CodexPooler.Gateway.Runtime.DispatchTest do
       active_upstream_assignment_fixture(setup.pool, %{
         account_label: "Resolved snapshot fallback upstream"
       })
+
+    prime_routing_quota!(fallback_identity)
 
     model =
       setup.model

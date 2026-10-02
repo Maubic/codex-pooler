@@ -54,7 +54,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.IdentityLockOrderTest do
 
   @detection_timeout_ms 15_000
   @probe_generation 3
-  @probe_attempt_id "attempt-lock-order"
+  @probe_attempt_id "171f2d6e-209a-4345-8c28-ced9a3c3c1ce"
 
   describe "advisory-first writers" do
     setup do
@@ -248,9 +248,19 @@ defmodule CodexPooler.Upstreams.Quota.Windows.IdentityLockOrderTest do
                  ProbeLease.claim(identity, @probe_generation, @probe_attempt_id, probe)
                end)
 
+      confirmation =
+        unboxed(fn ->
+          current = Repo.reload!(identity)
+          now = DateTime.utc_now()
+          current = CodexPooler.ProviderCreditsFixtures.persist_usage!(current, CodexPooler.ProviderCreditsFixtures.usage_payload(:weekly_credit_only, now: now, credits: :none), now)
+          redemption = current.metadata["saved_reset_redemption"] |> Map.put("included_window_descriptors", [%{"window_kind" => "secondary", "window_minutes" => 10_080}])
+          Repo.update!(Ecto.Changeset.change(current, metadata: Map.put(current.metadata, "saved_reset_redemption", redemption)))
+          %ProbeLease.VerifiedConfirmation{credential_epoch: CredentialFencing.credential_epoch(current), probe: probe, upstream_model: "gpt-6-sol", serving_mode: :full, transport: :http_json}
+        end)
+
       results =
         assert_row_only_leaf(identity, fn ->
-          ProbeLease.confirm_upstream(identity.id, @probe_generation, @probe_attempt_id, probe)
+          ProbeLease.confirm_upstream(identity.id, @probe_generation, @probe_attempt_id, confirmation)
         end)
 
       assert results == %{row: {:ok, :confirmed}, advisory: {:ok, :unchanged}}

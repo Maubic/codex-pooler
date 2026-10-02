@@ -15,7 +15,7 @@ defmodule CodexPoolerWeb.Runtime.RemoteOwnerUsageLimitTest do
   import Ecto.Query
   import ExUnit.CaptureLog
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
-  import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [enter_peer_owner_topology!: 0, start_shared_bridge_peer!: 0, start_shared_peer_session_owner!: 4]
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [enter_peer_owner_topology!: 0, start_shared_bridge_peer!: 0, start_shared_peer_session_owner!: 3]
 
   alias CodexPooler.Accounting.{Attempt, Request}
   alias CodexPooler.FakeUpstream
@@ -61,7 +61,7 @@ defmodule CodexPoolerWeb.Runtime.RemoteOwnerUsageLimitTest do
       prime_routing_quota!(sibling.identity, %{used_percent: Decimal.new("90")})
       pool = pool_with_sibling!(setup, @mode, upstream, sibling, sibling_upstream)
       turn_state = "remote-handoff-#{System.unique_integer([:positive])}"
-      peer = start_shared_peer_session_owner!(pool, %{accepted_turn_state: turn_state}, peer_node, [sibling.identity])
+      peer = start_shared_peer_session_owner!(pool, %{accepted_turn_state: turn_state}, peer_node)
       port = start_public_endpoint!()
       {conn, websocket, ref} = public_websocket_connect!(port, pool, turn_state)
 
@@ -105,7 +105,7 @@ defmodule CodexPoolerWeb.Runtime.RemoteOwnerUsageLimitTest do
     test "public /v1 websocket #{mode}: a failover the sibling serves reaches the client", %{peer_node: peer_node} do
       pool = failover_pool!(@mode, served_frames())
       turn_state = "remote-owner-served-#{System.unique_integer([:positive])}"
-      peer = start_shared_peer_session_owner!(pool, %{accepted_turn_state: turn_state}, peer_node, [pool.sibling.identity])
+      peer = start_shared_peer_session_owner!(pool, %{accepted_turn_state: turn_state}, peer_node)
 
       {event, elapsed_ms} = public_turn!(pool, turn_state)
 
@@ -120,7 +120,7 @@ defmodule CodexPoolerWeb.Runtime.RemoteOwnerUsageLimitTest do
     test "public /v1 websocket #{mode}: the last candidate's usage limit goes out at once", %{peer_node: peer_node} do
       pool = failover_pool!(@mode, [provider_frame(reset_at())])
       turn_state = "remote-owner-refused-#{System.unique_integer([:positive])}"
-      peer = start_shared_peer_session_owner!(pool, %{accepted_turn_state: turn_state}, peer_node, [pool.sibling.identity])
+      peer = start_shared_peer_session_owner!(pool, %{accepted_turn_state: turn_state}, peer_node)
 
       {event, elapsed_ms} = public_turn!(pool, turn_state)
 
@@ -140,7 +140,7 @@ defmodule CodexPoolerWeb.Runtime.RemoteOwnerUsageLimitTest do
       resets_at = reset_at()
       pool = withheld_pool!(@mode, FakeUpstream.websocket_text_frames([provider_frame(resets_at)]))
       thread_id = Ecto.UUID.generate()
-      peer = start_shared_peer_session_owner!(pool, window_session(thread_id), peer_node, [pool.sibling.identity])
+      peer = start_shared_peer_session_owner!(pool, window_session(thread_id), peer_node)
 
       # The line is logged after the frame went out: the capture waits for the
       # settled row.
@@ -164,7 +164,7 @@ defmodule CodexPoolerWeb.Runtime.RemoteOwnerUsageLimitTest do
       prime_routing_quota!(pool.identity)
       put_serving_mode!(pool, @mode)
       thread_id = Ecto.UUID.generate()
-      peer = start_shared_peer_session_owner!(pool, window_session(thread_id), peer_node, [])
+      peer = start_shared_peer_session_owner!(pool, window_session(thread_id), peer_node)
 
       {{event, rows}, log} = with_log([level: :info], fn -> {native_turn!(Map.put(pool, :mode, @mode), thread_id), settled_rows!(pool)} end)
 
@@ -182,7 +182,7 @@ defmodule CodexPoolerWeb.Runtime.RemoteOwnerUsageLimitTest do
     test "bridged /v1 #{mode}: a withheld-advice usage limit answers the /v1 relayed 429 with the circuit wait", %{conn: conn, peer_node: peer_node} do
       pool = withheld_pool!(@mode, FakeUpstream.websocket_text_frames([provider_frame(reset_at())]))
       session_id = "remote-owner-bridge-#{System.unique_integer([:positive])}"
-      peer = start_shared_peer_session_owner!(pool, %{session_header: session_id, session_header_source: "x-session-id"}, peer_node, [pool.sibling.identity])
+      peer = start_shared_peer_session_owner!(pool, %{session_header: session_id, session_header_source: "x-session-id"}, peer_node)
 
       bridged =
         conn
@@ -209,7 +209,7 @@ defmodule CodexPoolerWeb.Runtime.RemoteOwnerUsageLimitTest do
     test "native websocket #{mode}: the refused first frame moves the turn to the held-back partition", %{peer_node: peer_node} do
       pool = split_pool!(@mode)
       thread_id = Ecto.UUID.generate()
-      peer = start_shared_peer_session_owner!(pool, window_session(thread_id), peer_node, [pool.exhausted.identity, pool.other.identity])
+      peer = start_shared_peer_session_owner!(pool, window_session(thread_id), peer_node)
 
       event = native_turn!(pool, thread_id)
 

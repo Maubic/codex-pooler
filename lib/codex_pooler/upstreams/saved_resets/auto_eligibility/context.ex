@@ -31,6 +31,7 @@ defmodule CodexPooler.Upstreams.SavedResets.AutoEligibility.Context do
           required(:transient_circuit_exclusions) => [transient_circuit_exclusion()],
           required(:automatic_confirmation_refs) => [confirmation_ref()],
           optional(:quota_scope) => quota_scope() | nil,
+          optional(:credit_request_contexts) => %{Ecto.UUID.t() => map()},
           optional(:hard_pinned_continuity?) => boolean()
         }
 
@@ -87,6 +88,7 @@ defmodule CodexPooler.Upstreams.SavedResets.AutoEligibility.Context do
          route_class when is_binary(route_class) and route_class != "" <-
            context_value(context, :route_class),
          {:ok, quota_scope} <- normalize_quota_scope(context_value(context, :quota_scope)),
+         {:ok, credit_request_contexts} <- normalize_credit_request_contexts(context_value(context, :credit_request_contexts), candidate_assignment_ids, quota_scope),
          {:ok, hard_pinned_continuity?} <-
            normalize_boolean(context_value(context, :hard_pinned_continuity?), false),
          {:ok, transient_circuit_exclusions} <-
@@ -127,6 +129,7 @@ defmodule CodexPooler.Upstreams.SavedResets.AutoEligibility.Context do
          transient_circuit_exclusions: transient_circuit_exclusions,
          automatic_confirmation_refs: automatic_confirmation_refs,
          quota_scope: quota_scope,
+         credit_request_contexts: credit_request_contexts,
          hard_pinned_continuity?: hard_pinned_continuity?
        }}
     else
@@ -220,6 +223,30 @@ defmodule CodexPooler.Upstreams.SavedResets.AutoEligibility.Context do
   end
 
   defp normalize_quota_scope(_scope), do: :error
+
+  defp normalize_credit_request_contexts(nil, _assignment_ids, _scope), do: {:ok, %{}}
+
+  defp normalize_credit_request_contexts(contexts, assignment_ids, scope) when is_map(contexts) and is_map(scope) do
+    if Enum.sort(Map.keys(contexts)) == Enum.sort(assignment_ids) and
+         Enum.all?(contexts, fn {_id, context} -> valid_credit_request_context?(context, scope) end) do
+      {:ok, contexts}
+    else
+      :error
+    end
+  end
+
+  defp normalize_credit_request_contexts(_contexts, _assignment_ids, _scope), do: :error
+
+  defp valid_credit_request_context?(context, scope) when is_map(context) do
+    context[:requested_model] == scope.requested_model and
+      context[:upstream_model] == scope.upstream_model and
+      context[:upstream_model_id] == scope.upstream_model_id and
+      context[:serving_mode] in [:full, :lite, "full", "lite", nil] and
+      context[:transport] in [:http_sse, :http_json, :native_websocket, :bridged_websocket, nil] and
+      Map.keys(context) -- [:model, :requested_model, :upstream_model, :upstream_model_id, :serving_mode, :transport, :route_class] == []
+  end
+
+  defp valid_credit_request_context?(_context, _scope), do: false
 
   defp normalize_boolean(nil, default), do: {:ok, default}
   defp normalize_boolean(value, _default) when is_boolean(value), do: {:ok, value}

@@ -18,6 +18,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV5
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV6
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV7
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
@@ -57,6 +58,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks do
              | WebsocketOwnerRequestV4.validation_error()
              | WebsocketOwnerRequestV6.validation_error()
              | WebsocketOwnerRequestV7.validation_error()
+             | WebsocketOwnerRequestV8.validation_error()
              | WebsocketOwnerRequestV5.validation_error()}
 
   @spec mapper(WebsocketOwnerRequest.mapper() | term()) ::
@@ -79,11 +81,23 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks do
           | WebsocketOwnerRequestV4.t()
           | WebsocketOwnerRequestV6.t()
           | WebsocketOwnerRequestV7.t()
+          | WebsocketOwnerRequestV8.t()
           | WebsocketOwnerRequestV5.t()
           | map(),
           writer()
         ) ::
           {:ok, Request.t()} | {:error, materialize_error()}
+  def materialize(%WebsocketOwnerRequestV8{} = envelope, writer) do
+    with :ok <- WebsocketOwnerRequestV8.validate(envelope),
+         {:ok, request} <- materialize(envelope.request, writer) do
+      {:ok, %{request | provider_credits_context: envelope.provider_credits_context}}
+    else
+      {:error, {:invalid_field, _field} = reason} -> {:error, {:invalid_owner_request, reason}}
+      {:error, {:unknown_fields, _fields} = reason} -> {:error, {:invalid_owner_request, reason}}
+      {:error, _reason} = error -> error
+    end
+  end
+
   def materialize(%WebsocketOwnerRequestV3{} = owner_request, nil) do
     with :ok <- validate_v3(owner_request),
          %UpstreamIdentity{} = identity <-

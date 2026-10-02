@@ -6,6 +6,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
   alias CodexPooler.Accounting.ClientRetry
   alias CodexPooler.Gateway.Payloads.{CompactionTrigger, NativeCodexTurnMetadata, RequestOptions}
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
+  alias CodexPooler.Gateway.Runtime.Finalization
   alias CodexPooler.Gateway.Runtime.Routing.DispatchLifecycle
   alias CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector
 
@@ -96,6 +97,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
   end
 
   defp finalize_completed_success(context, finalization) do
+    context = %{context | provider_credits_admission: Map.get(finalization, :provider_credits_admission)}
+
     %{
       body: body,
       status: status,
@@ -1131,6 +1134,9 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
 
   @spec finalize_failed(SelectedCandidateContext.t(), map()) ::
           {:ok, map()} | {:error, map()} | {:retry, term()}
+  def finalize_failed(context, %{reason: :provider_credits_policy_denied} = denial),
+    do: Finalization.finalize_policy_denial(denial, context, max(System.monotonic_time(:millisecond) - denial.started, 0))
+
   def finalize_failed(context, %{reason: :client_disconnected} = finalization) do
     %{headers: headers, started: started} = finalization
 

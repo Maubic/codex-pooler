@@ -43,20 +43,19 @@ defmodule CodexPooler.Upstreams.Reconciliation.CreditBalanceReconciliationTest d
     [account] =
       UpstreamAccountsReadModel.list_visible_accounts(scope, [pool])
 
-    assert %{count_label: "0 credits"} = Enum.find(account.quota_limits, &(&1.key == :weekly))
+    assert account.provider_credits_summary.balance_label == "0"
+    refute account.provider_credits_summary.display_row?
+    assert Enum.find(account.quota_limits, &(&1.key == :weekly)).count_label == nil
 
     {:ok, list_view, _} = live(conn, ~p"/admin/upstreams")
     {:ok, cockpit_view, _} = live(conn, ~p"/admin/upstreams/#{identity.id}")
     render_async(list_view)
     render_async(cockpit_view)
 
-    assert has_element?(
-             list_view,
-             "#upstream-account-#{identity.id}-limit-weekly-count",
-             "0 credits"
-           )
-
-    assert has_element?(cockpit_view, "#upstream-quota-limit-weekly-count", "0 credits")
+    refute has_element?(list_view, "#upstream-account-#{identity.id}-provider-credits-balance")
+    refute has_element?(cockpit_view, "#upstream-provider-credits-balance")
+    assert has_element?(list_view, "#provider-credits-policy-upstream-account-#{identity.id}")
+    assert has_element?(cockpit_view, "#provider-credits-policy-open")
 
     {:ok, _} =
       Windows.record_evidence(identity, %{
@@ -83,12 +82,13 @@ defmodule CodexPooler.Upstreams.Reconciliation.CreditBalanceReconciliationTest d
       QuotaProjection.quota_limit_rows(
         RoutingQuotaSnapshot.effective_windows(snapshot),
         DateTimeDisplay.preferences_for_user(nil),
-        snapshot_at,
-        CreditBalanceStore.current(identity.metadata, epoch, snapshot_at)
+        snapshot_at
       )
 
-    assert %{count_label: "0 credits", percent_label: "70%"} =
+    assert %{count_label: nil, percent_label: "70%"} =
              Enum.find(rows, &(&1.key == :weekly))
+
+    assert %{balance_label: "0", display_row?: false} = QuotaProjection.provider_credits_summary(snapshot)
 
     assert {:ok, %{credits: %{balance: "0", has_credits: false}}} =
              Accounting.build_codex_usage_for_upstream_identity(identity)
@@ -98,13 +98,10 @@ defmodule CodexPooler.Upstreams.Reconciliation.CreditBalanceReconciliationTest d
     render_async(list_view)
     render_click(cockpit_view, "refresh_data")
 
-    assert has_element?(
-             list_view,
-             "#upstream-account-#{identity.id}-limit-weekly-count",
-             "0 credits"
-           )
-
-    assert has_element?(cockpit_view, "#upstream-quota-limit-weekly-count", "0 credits")
+    refute has_element?(list_view, "#upstream-account-#{identity.id}-provider-credits-balance")
+    refute has_element?(cockpit_view, "#upstream-provider-credits-balance")
+    assert has_element?(list_view, "#provider-credits-policy-upstream-account-#{identity.id}")
+    assert has_element?(cockpit_view, "#provider-credits-policy-open")
 
     FakeUpstream.set_mode(fake, {:path_json, paths(Map.delete(payload, "credits"))})
     assert {:ok, identity} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
@@ -144,6 +141,10 @@ defmodule CodexPooler.Upstreams.Reconciliation.CreditBalanceReconciliationTest d
     render_click(cockpit_view, "refresh_data")
     refute has_element?(list_view, "#upstream-account-#{identity.id}-limit-weekly-count")
     refute has_element?(cockpit_view, "#upstream-quota-limit-weekly-count")
+    refute has_element?(list_view, "#upstream-account-#{identity.id}-provider-credits-balance")
+    refute has_element?(cockpit_view, "#upstream-provider-credits-balance")
+    assert has_element?(list_view, "#provider-credits-policy-upstream-account-#{identity.id}")
+    assert has_element?(cockpit_view, "#provider-credits-policy-open")
     assert has_element?(list_view, "#upstream-account-#{identity.id}-limit-weekly-reset")
     assert has_element?(cockpit_view, "#upstream-quota-limit-weekly-reset")
 

@@ -88,6 +88,7 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountAudit do
       |> Map.put(:pool_assignment_ids, assignment_ids(result, pool_id))
       |> maybe_put_detail(:trigger_kind, Keyword.get(opts, :trigger_kind))
       |> maybe_put_detail(:job_conflict, Keyword.get(opts, :job_conflict?))
+      |> maybe_put_provider_credits_details(opts)
 
     %{
       pool_id: pool_id,
@@ -100,6 +101,16 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountAudit do
 
   defp maybe_put_detail(details, _key, nil), do: details
   defp maybe_put_detail(details, key, value), do: Map.put(details, key, value)
+
+  defp maybe_put_provider_credits_details(details, opts) do
+    case {Keyword.get(opts, :previous_allow_provider_credits), Keyword.get(opts, :allow_provider_credits)} do
+      {previous, current} when is_boolean(previous) and is_boolean(current) ->
+        Map.merge(details, %{previous_allow_provider_credits: previous, allow_provider_credits: current})
+
+      _values ->
+        details
+    end
+  end
 
   defp pool_ids(result, fallback_pool_ids) do
     result

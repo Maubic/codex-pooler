@@ -11,6 +11,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexResetProbeStreamTest do
   alias CodexPooler.Gateway
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.ProviderCreditsFixtures
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
@@ -261,7 +262,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexResetProbeStreamTest do
         {:path_json,
          %{
            "/api/codex/rate-limit-reset-credits/consume" => {200, %{"code" => "reset"}},
-           "/api/codex/usage" => {200, %{"plan_type" => "pro", "rate_limit_reset_credits" => %{"available_count" => 0}}}
+           "/api/codex/usage" => {200, %{"plan_type" => "pro", "rate_limit_reset_credits" => %{"available_count" => 0}, "credits" => %{"balance" => 0, "has_credits" => false, "unlimited" => false}, "spend_control" => %{"reached" => false}}}
          }}
       )
 
@@ -286,6 +287,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexResetProbeStreamTest do
       |> enable_saved_reset_auto_redeem!()
 
     prime_weekly_exhausted_quota!(identity)
+    ProviderCreditsFixtures.persist_usage!(Repo.reload!(identity), ProviderCreditsFixtures.usage_payload(:weekly_credit_only, credits: :none), DateTime.utc_now())
 
     %{
       setup: %{setup | identity: identity, model: model},

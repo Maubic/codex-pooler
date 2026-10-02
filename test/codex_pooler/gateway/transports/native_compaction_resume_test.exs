@@ -1,5 +1,5 @@
 defmodule CodexPooler.Gateway.Transports.NativeCompactionResumeTest do
-  use ExUnit.Case, async: false
+  use CodexPooler.DataCase, async: false
 
   @moduletag capture_log: true
   @detection_timeout_ms 15_000
@@ -14,6 +14,7 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionResumeTest do
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerAdmissionControlV1, as: Control
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
+  alias CodexPooler.ProviderCreditsDispatchSupport
 
   test "current direct request cleanup clears its own reserved admission" do
     with_direct(fn owner, upstream ->
@@ -188,6 +189,8 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionResumeTest do
       message_mapper: &StreamProtocol.canonicalize_native_codex_responses_json_message/1
     }
 
+    request = ProviderCreditsDispatchSupport.wire_request!(request)
+
     assert {:ok, result} = UpstreamWebsocketSession.request(owner, request)
     lifecycle = UpstreamWebsocketSession.connection_lifecycle_snapshot(owner)
 
@@ -325,6 +328,8 @@ defmodule CodexPooler.Gateway.Transports.NativeCompactionResumeTest do
       timeouts: %{connect_timeout_ms: 5000, receive_timeout_ms: 5000},
       message_mapper: &StreamProtocol.canonicalize_native_codex_responses_json_message/1
     }
+
+    request = ProviderCreditsDispatchSupport.wire_request!(request)
 
     {:ok, result} = WebsocketOwnerSession.submit_request(owner, downstream, request)
     receipt = result.ordinary_success_result

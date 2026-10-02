@@ -30,9 +30,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaObservati
           </p>
         </header>
         <div class="grid min-h-0 gap-4 overflow-y-auto px-5 py-4">
-          <p :if={Map.get(@limit, :burning_credits, false)} class="text-[11px] text-base-content/60">
-            Credit balance in use. Source percentages below describe included quota.
-          </p>
           <div>
             <p class="mb-3 flex justify-between gap-2 text-[11px] text-base-content/60">
               <span class="font-semibold uppercase tracking-wide">{length(@limit.observations)} retained records</span><span>Selected first, then newest</span>

@@ -209,7 +209,7 @@ animated):
   `--shine-delay` stagger and burn-scaled `--shine-period`. An unreported
   quota uses the component-scoped `admin-static-unknown-progress` treatment:
   native indeterminate semantics but no daisyUI gradient or animation, in
-  normal and reduced-motion sessions ([Upstream account card](#upstream-account-card)/[Quota progress row](#quota-progress-row-including-striped-credit-backed-state)).
+  normal and reduced-motion sessions ([Upstream account card](#upstream-account-card)/[Quota progress row](#quota-progress-row-and-provider-credits)).
 - Panel switcher: 150ms opacity ease-out with `motion-reduce:transition-none`.
 - Pool compat disclosure: 160ms slide/fade in (`pool-compat-panel-in`),
   disabled under reduced motion.
@@ -756,7 +756,7 @@ pools) inside `data-role="upstream-account-panel-switcher"` with
 `data-panel-view` reflecting the open one. The hidden panels use `max-h-0
 opacity-0 pointer-events-none` plus `aria-hidden` and `inert`; the visible one
 `max-h-[28rem] opacity-100` with a 150ms opacity transition
-(`motion-reduce:transition-none`). Usage panel holds the quota rows ([Quota progress row](#quota-progress-row-including-striped-credit-backed-state)) and
+(`motion-reduce:transition-none`). Usage panel holds the quota rows ([Quota progress row](#quota-progress-row-and-provider-credits)) and
 saved-reset meter ([Saved-reset badge and meter](#saved-reset-badge-and-meter)); tokens panel holds a model leaderboard list ([Compact and definition lists](#compact-and-definition-lists));
 pools panel renders per-assignment route chevrons:
 
@@ -850,7 +850,7 @@ all three facts remain readable inside the single-column phone card.
 token-burn shine active/idle, per-panel open state, deleted/paused disabling
 of actions, lifecycle warning block via `ReconciliationStatus`.
 
-### Quota progress row (including active credit burn)
+### Quota progress row and provider credits
 
 - **Source:** `quota_limit_row/1` in
   [`quota_limit_row.ex`](lib/codex_pooler_web/live/admin/components/pages/upstreams/account_card/quota_limit_row.ex);
@@ -867,47 +867,33 @@ of actions, lifecycle warning block via `ReconciliationStatus`.
   warning; below → error. Unreported remains `progress-neutral` with muted
   text and adds `admin-static-unknown-progress`; it is never presented as a
   determinate zero-value meter.
-- **Credit burn state:** a positive credit balance does not change the
-  quota meter while included Codex quota remains. The row continues to show
-  the provider's remaining quota percentage with a solid fill and may show the
-  current raw credit balance as secondary detail. Once provider usage reaches
-  100%, `burning_credits: true` appends
-  `progress-striped`; the fill then tracks the observed credit balance against
-  the last pre-burn balance baseline and the detail shows only the current
-  provider balance, such as `500 credits`. An explicit depleted balance remains
-  visible as `0 credits` without stripes; an omitted, stale, or unavailable
-  provider balance has no credit footer. The UI never
-  renders an inferred `balance / capacity` denominator.
+- **Included quota:** each account window always shows the provider's included-quota percentage with a solid fill. An exhausted Weekly remains `0%` even when provider credits can serve a request. Credit balance, baseline ratios and credit counts belong only to the distinct provider-credit row; do not restore `burning_credits` or reinterpret the Weekly meter as credit capacity.
+- **Provider credits:** `ProviderCreditsComponents.provider_credits_summary/1` sits in the same quota grid: Credits at top left, the observed percentage alone at top right, a 1.5-height striped bar, and the footer with Enabled/Disabled on the left and the numeric balance on the right, directly below the percentage. Percentages truncate to exactly three decimal places with a decimal point, such as `99.976%`. Use the same success >=70, warning >=30 and error <30 palette for text, bar and hover as included quota rows. Balance and baseline amounts truncate to whole numbers with comma grouping and no repeated unit suffix, such as `62,485`; positive balances below one display `<1`. Exact decimals remain in the source and optional native title, while dialog values also use whole numbers. The reference qualifier belongs in the tooltip, ARIA and details, not the visible percentage. The stripe describes an observed reference, never confirmed credit consumption or purchased allocation. Hide the Credits row for unknown/unreported balances and finite zero, keeping those facts distinct in the policy dialog. Show finite positive balances and explicit Unlimited independently of plan labels. An absent baseline or Unlimited state has no invented percentage or progress bar. Keep policy entry available in the list menu and cockpit action even when the row is hidden; those actions use the existing currency-dollar icon.
+- **Credit readiness and interaction:** fresh enabled usable credits produce the normal successful routing tone and Routing ready via credits label after identity/assignment checks; circuit protection still overrides that presentation. Included exhaustion remains a separate red 0% meter. Unknown, disabled and blocked states retain their own labels and tones. A native hover title gives availability and identifies the observed reference. Authorized operators click the row to open the existing provider-credit policy dialog; read-only viewers get no policy action. The dialog reuses the existing modal shell, eyebrow/title typography and shared footer, with Cancel followed by Save policy associated with the form. Extra balance, baseline and availability explanations stay in the collapsed Balance and availability disclosure. Credit expiry is unreported in the inspected provider facts; never borrow saved-reset expiry or quota reset time. Preserve the backend's cross-Pool mutation authorization and focus restoration.
 - **Motion:** known values use width/color transitions 260/180ms; cards with
   recent burn run the gloss sweep. An unreported value omits `value`, keeps
   native indeterminate semantics, and neutralizes daisyUI's indeterminate
   gradient/animation with `admin-static-unknown-progress`; it stays static in
   normal and `prefers-reduced-motion` sessions. Firefox falls back to a static
   bar for the known-value gloss; reduced motion disables known-value motion.
-- **A11y:** a solid included-quota `<progress>` carries `aria-label`
-  "{label} included Codex quota remaining {pct}". A striped burn meter carries
-  "{label} credit balance remaining {pct}; credits in use" and a
-  title explaining that stripes mean included quota is exhausted and credits
-  are being consumed. When a credit count is present, its `aria-label` and
-  title explain that the value is a credit balance, separate from
-  included Codex quota and not a currency amount. The visible percent remains
-  text beside the bar.
+- **A11y:** included-quota progress uses "{label} included Codex quota remaining {pct}". The separate credit progress uses "Observed provider credit balance relative to observed baseline", an `aria-valuetext` with the same three-decimal visible ratio and an associated description identifying the reference. The row action has a balance-bearing label, `aria-haspopup="dialog"` and the existing policy-dialog target. Do not claim credits are in use or equate provider units with currency.
 
 ```heex
-<%!-- Known credit-burn meter: numeric fill plus stripes, with current balance in details. --%>
+<%!-- Separate observed credit-reference meter; included quota has its own solid bar. --%>
 <progress
   id={"#{@id}-progress"}
-  data-role="upstream-limit-progress"
-  aria-label={"#{@limit.label} credit balance remaining #{@limit.percent_label}; credits in use"}
-  title="Striped while credits are being consumed after included Codex quota is exhausted."
-  class="progress admin-live-progress progress-warning progress-striped h-1.5 w-full"
-  value={@limit.percent_value}
+  data-role="provider-credits-observed-progress"
+  aria-label="Observed provider credit balance relative to observed baseline"
+  aria-valuetext={"#{@percent_label} of observed baseline"}
+  aria-describedby={"#{@id}-baseline-description"}
+  class={["progress admin-live-progress progress-striped h-1.5 w-full", progress_tone(@summary.observed_percent)]}
+  value={@percent_value}
   max="100"
 >
-  {@limit.percent_label}
+  {@percent_label}
 </progress>
 
-<%!-- Unknown meter: preserve id, role, ARIA, max, and any burn stripe; omit `value`. --%>
+<%!-- Unknown included meter: preserve id, role, ARIA and max; omit `value`. --%>
 <progress
   id={"#{@id}-progress"}
   data-role="upstream-limit-progress"
@@ -1569,7 +1555,7 @@ The API-key Limits panel uses a compact tonal key-wide control band, a bordered 
   the card. Cockpit labels never use the compact `Assign` form.
 - **Quota & banked resets** (`#upstream-quota`): account plus additional
   model, upstream-model, and feature window rows (reusing the index card's
-  `quota_limit_row`, [Quota progress row](#quota-progress-row-including-striped-credit-backed-state)).
+  `quota_limit_row`, [Quota progress row](#quota-progress-row-and-provider-credits)).
   Both current admin views apply the same snapshot-time rule: dynamically stale
   additional rows are omitted, while fixed account rows and fresh or
   unknown-freshness additional rows remain visible.

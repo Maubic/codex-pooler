@@ -15,6 +15,7 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV2
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV6
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV7
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks
 
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
@@ -37,20 +38,24 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
     def connected_app_nodes, do: [:"owner@app.example"]
     def app_node?(_node), do: true
 
+    def call_owner(_node, _module, :remote_submit_request_v8, [_session_id, _downstream, %WebsocketOwnerRequestV8{request: %WebsocketOwnerRequestV7{}}] = args, _timeout) do
+      send(self(), {:retry_owner_rpc, :remote_submit_request_v8, args})
+      {:websocket_owner_submission_accepted, {:error, :owner_drained}}
+    end
+
     def call_owner(_node, _module, function, args, _timeout) do
       send(self(), {:retry_owner_rpc, function, args})
-      {:websocket_owner_submission_accepted, {:error, :owner_drained}}
+      {:error, :owner_unavailable}
     end
   end
 
   test "v6 full-history collection is a distinct closed envelope and preserves wire bytes" do
     attrs = attrs()
     assert {:ok, request} = WebsocketOwnerRequestV6.new(attrs)
-    assert_abandoned_envelope(:remote_submit_request_v6, request)
+    assert_abandoned_envelope(request)
 
     assert request.version == 6
     assert request.payload == attrs.payload
-    assert inspect(request) == "#WebsocketOwnerRequestV6<version: 6>"
     assert :ok = WebsocketOwnerRequestV6.validate(request)
     refute Map.has_key?(request, :client_retry_dispatch_authority)
 
@@ -167,26 +172,30 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
         source: "override"
       })
 
-    request = %UpstreamDispatch.Request{
-      url: "https://upstream.example.com/backend-api/codex/responses",
-      token: "synthetic",
-      upstream_payload: CodexPooler.JSON.encode!(payload()),
-      original_payload: payload(),
-      identity: setup.identity,
-      accounting_request: successor,
-      accounting_attempt: attempt,
-      writer: nil,
-      assignment_advertised?: false,
-      request_options: options,
-      client_retry_dispatch_authority: authority
-    }
+    request =
+      %UpstreamDispatch.Request{
+        url: "https://upstream.example.com/backend-api/codex/responses",
+        token: "synthetic",
+        upstream_payload: CodexPooler.JSON.encode!(payload()),
+        original_payload: payload(),
+        identity: setup.identity,
+        accounting_request: successor,
+        accounting_attempt: attempt,
+        writer: nil,
+        assignment_advertised?: false,
+        request_options: options,
+        client_retry_dispatch_authority: authority
+      }
+      |> CodexPooler.ProviderCreditsDispatchSupport.attach!()
 
     assert {:error, %{reason: :owner_drained}} = UpstreamDispatch.websocket_request(request)
 
-    assert_received {:retry_owner_rpc, :remote_submit_request_v7, [_session_id, _downstream, %WebsocketOwnerRequestV7{} = envelope]}
+    assert_received {:retry_owner_rpc, :remote_submit_request_v8, [_session_id, _downstream, %WebsocketOwnerRequestV8{request: %WebsocketOwnerRequestV7{} = inner} = envelope]}
 
-    assert envelope.client_retry_dispatch_authority == authority
-    assert envelope.native_compaction_metadata == compaction_metadata()
+    assert :ok = WebsocketOwnerRequestV8.validate(envelope)
+    assert inner.client_retry_dispatch_authority == authority
+    assert inner.native_compaction_metadata == compaction_metadata()
+    refute_received {:retry_owner_rpc, :remote_submit_request_v7, _args}
     refute_received {:retry_owner_rpc, :remote_submit_request_v5, _args}
     session
   end
@@ -223,7 +232,7 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
       |> put_in([:observation, :attempt_id], attempt.id)
 
     assert {:ok, envelope} = WebsocketOwnerRequestV7.new(input)
-    assert_abandoned_envelope(:remote_submit_request_v7, envelope)
+    assert_abandoned_envelope(envelope)
 
     assert {:ok, full_history} = WebsocketOwnerRequestV7.full_history_request(envelope)
 
@@ -232,7 +241,7 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
              |> Map.drop([:client_retry_dispatch_authority, :compaction_retry_submit_hold])
              |> Map.put(:version, 6)
 
-    assert inspect(envelope) == "#WebsocketOwnerRequestV7<version: 7, client_retry: redacted>"
+    refute inspect(envelope) =~ authority.successor_claim
     assert {:ok, request} = WebsocketRequestCallbacks.materialize(envelope, nil)
     assert request.client_retry_dispatch_authority == authority
     assert request.websocket_delivery_mode == :collect_full_history
@@ -252,16 +261,13 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
     downstream = %{pid: self(), epoch: 1, correlation_id: "retry-old-owner"}
 
     assert {:error, :owner_unavailable} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               session.owner_lease_token,
-               downstream,
-               envelope,
+             WebsocketOwnerForwarder.submit_request(session, session.owner_lease_token, downstream, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(envelope),
                node_client: OldOwner,
                app_node_names: ["owner@app.example"]
              )
 
-    assert_received {:owner_rpc, :remote_submit_request_v7}
+    assert_received {:owner_rpc, :remote_submit_request_v8}
+    refute_received {:owner_rpc, :remote_submit_request_v7}
     refute_received {:owner_rpc, :remote_submit_request_v6}
     refute_received {:owner_rpc, :remote_submit_request_v5}
 
@@ -285,59 +291,33 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
     downstream = %{pid: self(), epoch: 1, correlation_id: "full-history"}
 
     assert {:error, :owner_unavailable} =
-             WebsocketOwnerForwarder.remote_submit_request_v6(
-               Ecto.UUID.generate(),
-               downstream,
-               attrs()
-             )
+             WebsocketOwnerForwarder.remote_submit_request_v8(Ecto.UUID.generate(), downstream, attrs())
 
     assert {:ok, envelope} = WebsocketOwnerRequestV6.new(attrs())
 
     assert {:error, :owner_unavailable} =
-             WebsocketOwnerForwarder.remote_submit_request_v6(
-               Ecto.UUID.generate(),
-               downstream,
-               envelope
-             )
+             WebsocketOwnerForwarder.remote_submit_request_v8(Ecto.UUID.generate(), downstream, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(envelope))
   end
 
-  test "missing v6 RPC fails closed for returned errors and every caught failure kind" do
-    module = WebsocketOwnerForwarder
-    args = [Ecto.UUID.generate(), %{pid: self(), epoch: 1}, :opaque_request]
-    reason = {:exception, :undef, [{module, :remote_submit_request_v6, args, []}]}
-
-    for kind <- [:error, :exit, :throw] do
-      assert :owner_unavailable =
-               module.normalize_remote_failure(
-                 kind,
-                 reason,
-                 module,
-                 :remote_submit_request_v6,
-                 args
-               )
-    end
-  end
-
-  test "remote dispatch targets only v6 and does not downgrade an old owner" do
+  test "full-history remote dispatch requires v8 and never downgrades an old owner" do
     session = session("owner@app.example")
     assert {:ok, envelope} = WebsocketOwnerRequestV6.new(attrs())
     downstream = %{pid: self(), epoch: 1, correlation_id: "v6-old-owner"}
 
     assert {:error, :owner_unavailable} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               session.owner_lease_token,
-               downstream,
-               envelope,
+             WebsocketOwnerForwarder.submit_request(session, session.owner_lease_token, downstream, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(envelope),
                node_client: OldOwner,
                app_node_names: ["owner@app.example"]
              )
 
-    assert_received {:owner_rpc, :remote_submit_request_v6}
+    assert_received {:owner_rpc, :remote_submit_request_v8}
     refute_received {:owner_rpc, :remote_submit_request_v1}
     refute_received {:owner_rpc, :remote_submit_request_v2}
+    refute_received {:owner_rpc, :remote_submit_request_v3}
     refute_received {:owner_rpc, :remote_submit_request_v4}
     refute_received {:owner_rpc, :remote_submit_request_v5}
+    refute_received {:owner_rpc, :remote_submit_request_v6}
+    refute_received {:owner_rpc, :remote_submit_request_v7}
   end
 
   test "local v6 owner submission rejects a stale token and downstream epoch before sending" do
@@ -382,30 +362,15 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
              )
 
     assert {:error, :stale_owner} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               Ecto.UUID.generate(),
-               downstream,
-               envelope
-             )
+             WebsocketOwnerForwarder.submit_request(session, Ecto.UUID.generate(), downstream, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(envelope))
 
     assert {:error, :stale_downstream} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               session.owner_lease_token,
-               %{downstream | epoch: downstream.epoch + 1},
-               envelope
-             )
+             WebsocketOwnerForwarder.submit_request(session, session.owner_lease_token, %{downstream | epoch: downstream.epoch + 1}, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(envelope))
 
     assert [] == WebsocketOwnerNodeHarness.fake_upstream_frames(upstream)
 
     assert :ok =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               session.owner_lease_token,
-               downstream,
-               envelope
-             )
+             WebsocketOwnerForwarder.submit_request(session, session.owner_lease_token, downstream, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(envelope))
 
     assert [request] = WebsocketOwnerNodeHarness.fake_upstream_frames(upstream)
     assert request.websocket_delivery_mode == :collect_full_history
@@ -427,14 +392,15 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
     session
   end
 
-  defp assert_abandoned_envelope(function, envelope) do
+  defp assert_abandoned_envelope(inner) do
     session_id = Ecto.UUID.generate()
     downstream = %{pid: self(), epoch: 1, correlation_id: "abandoned-full-history", owner_turn_id: self()}
     key = AbandonedSubmissions.key(session_id, downstream)
     on_exit(fn -> AbandonedSubmissions.consume(key) end)
     assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.remote_abandon_turn_v1(session_id, downstream)
     assert AbandonedSubmissions.recorded?(key)
-    assert {:error, :stale_downstream} = apply(WebsocketOwnerForwarder, function, [session_id, downstream, envelope])
+    envelope = CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(inner)
+    assert {:error, :stale_downstream} = WebsocketOwnerForwarder.remote_submit_request_v8(session_id, downstream, envelope)
     refute AbandonedSubmissions.recorded?(key)
   end
 
@@ -481,22 +447,20 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerFullHistoryContractTest d
     end
   end
 
-  test "v6 carries the post_turn phase and an owner that does not know a phase fails closed as owner_unavailable" do
+  test "v6 carries post_turn inside v8 and unknown compaction phases fail closed" do
     post_turn = %{compaction_metadata() | compaction: %{compaction_metadata().compaction | trigger: :auto, reason: :context_limit, phase: :post_turn}}
     assert {:ok, request} = WebsocketOwnerRequestV6.new(Map.put(attrs(), :native_compaction_metadata, post_turn))
     assert request.native_compaction_metadata.compaction.phase == :post_turn
 
-    # A node running a release that predates a phase validates the envelope
-    # against its own closed vocabulary. Stand in for it with a phase this
-    # release does not know: the owner answers the retryable owner_unavailable
-    # the socket already maps for an owner without the v6 entrypoint, never a
-    # crash or a terminal refusal.
+    envelope = CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request)
     unknown = %{post_turn | compaction: %{post_turn.compaction | phase: :future_phase}}
-    old_node_view = struct!(WebsocketOwnerRequestV6, Map.put(attrs(), :native_compaction_metadata, unknown))
+    invalid = %{envelope | request: %{request | native_compaction_metadata: unknown}}
     downstream = %{pid: self(), epoch: 1, correlation_id: "v6-unknown-phase"}
 
+    assert {:error, {:invalid_field, :native_compaction_metadata}} = WebsocketOwnerRequestV8.validate(invalid)
+
     assert {:error, :owner_unavailable} =
-             WebsocketOwnerForwarder.remote_submit_request_v6(Ecto.UUID.generate(), downstream, old_node_view)
+             WebsocketOwnerForwarder.remote_submit_request_v8(Ecto.UUID.generate(), downstream, invalid)
   end
 
   defp compaction_metadata do

@@ -9,13 +9,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract do
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Websocket.OwnerDefaults
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.CloseDiagnostics
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequest
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV2
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV3
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV4
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV5
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV6
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV7
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
 
   @type owner_key :: Ecto.UUID.t()
   @type owner_token :: Ecto.UUID.t()
@@ -23,14 +17,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract do
   @type downstream_epoch :: pos_integer()
   @type owner_turn_id :: pid()
   @type encoded_text_frame :: binary()
-  @type upstream_request ::
-          WebsocketOwnerRequest.t()
-          | WebsocketOwnerRequestV2.t()
-          | WebsocketOwnerRequestV3.t()
-          | WebsocketOwnerRequestV4.t()
-          | WebsocketOwnerRequestV6.t()
-          | WebsocketOwnerRequestV7.t()
-          | WebsocketOwnerRequestV5.t()
+  @type upstream_request :: WebsocketOwnerRequestV8.t()
 
   @type owner_error ::
           :owner_unavailable

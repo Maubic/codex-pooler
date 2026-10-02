@@ -12,7 +12,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.RequestOptions.{ResetProbe, TimeoutConfig}
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, SessionContinuity}
-  alias CodexPooler.Gateway.Runtime.Finalization.Metadata
   alias CodexPooler.Gateway.Transports.Streaming.RuntimeAdmissionProof
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Websocket.AbandonedSubmissions
@@ -30,13 +29,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV3
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV4
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV5
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
   alias CodexPooler.Gateway.Transports.WebsocketOwnerPreviousReleaseCaller
   alias CodexPooler.Gateway.Transports.WebsocketRolloutDrainSupport
   alias CodexPooler.Gateway.Websocket, as: Gateway
   alias CodexPooler.Gateway.Websocket.ResponseTask
+  alias CodexPooler.InstancePresencePeer
   alias CodexPooler.PeerRegistry
+  alias CodexPooler.UnboxedFixture
+  alias CodexPooler.Upstreams.SavedResets.{ProbeLease, RedemptionLifecycle}
+  alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport
 
@@ -45,14 +49,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   @stalled_owner_node_ms 1_200
   @timeouts %{connect_timeout_ms: 1_000, receive_timeout_ms: 1_000}
 
-  defmodule V2FailureKindNodeClient do
+  defmodule CurrentFailureKindNodeClient do
     @moduledoc false
 
     def connected_app_nodes, do: Process.get({__MODULE__, :nodes}, [])
     def app_node?(_node), do: true
 
     def call_owner(node, _module, function, args, _timeout) do
-      send(self(), {:v2_failure_kind_call, node, function, length(args)})
+      send(self(), {:current_failure_kind_call, node, function, length(args)})
 
       case Process.get({__MODULE__, :action}) do
         {:return, value} -> value
@@ -115,8 +119,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     def call_owner(
           _node,
           _module,
-          :remote_submit_request_v4,
-          [_session_id, _downstream, request],
+          :remote_submit_request_v8,
+          [_session_id, _downstream, %WebsocketOwnerRequestV8{request: %WebsocketOwnerRequestV4{} = request}],
           _
         ) do
       send(self(), {:replay_v4_submit, request.native_replay_binding.owner_process_generation})
@@ -157,8 +161,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     def call_owner(
           _node,
           _module,
-          :remote_submit_request_v4,
-          [_session_id, _downstream, request],
+          :remote_submit_request_v8,
+          [_session_id, _downstream, %WebsocketOwnerRequestV8{request: %WebsocketOwnerRequestV4{} = request}],
           _
         ) do
       notify({:replay_caller_death_submit, self()})
@@ -204,7 +208,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
 
     # A caller that set `:submit_times_out` reads the submission's own
     # `owner_forward_timeout`; any other caller blocks until it is killed.
-    def call_owner(_node, _module, :remote_submit_request_v4, [_session_id, _downstream, request], _timeout) do
+    def call_owner(_node, _module, :remote_submit_request_v8, [_session_id, _downstream, %WebsocketOwnerRequestV8{request: %WebsocketOwnerRequestV4{} = request}], _timeout) do
       notify({:slow_owner_submit, self()})
 
       if Process.get({__MODULE__, :submit_times_out}) do
@@ -280,10 +284,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     reset_bootstrap_state_fixture!()
     auth = auth_fixture()
     BackendCodexWebsocketOwnerForwardingSupport.stop_pool_owners_on_exit(auth.pool)
-    Process.put({__MODULE__, :upstream_identity}, active_upstream_identity_fixture())
+    identity = active_upstream_identity_fixture()
+    Process.put({__MODULE__, :upstream_identity}, identity)
+    context = CodexPooler.ProviderCreditsDispatchSupport.context!(identity, pool: auth.pool)
+    Process.put({__MODULE__, :provider_credits_context}, context)
 
     on_exit(fn ->
-      V2FailureKindNodeClient.reset()
+      CurrentFailureKindNodeClient.reset()
       ReplayTimeoutNodeClient.reset()
     end)
 
@@ -305,7 +312,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     assert {:ok, attached} = WebsocketOwnerSession.attach_downstream(owner, target)
     assert attached.epoch == target.epoch
     envelope = owner_request_v2(request("late-collect"))
-    assert {:error, :stale_downstream} = WebsocketOwnerForwarder.remote_submit_request_v2(session.id, target, envelope)
+    assert {:error, :stale_downstream} = WebsocketOwnerForwarder.remote_submit_request_v8(session.id, target, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(envelope))
     assert WebsocketOwnerNodeHarness.fake_upstream_frames(upstream_pid) == []
     refute AbandonedSubmissions.recorded?(key)
     assert :sys.get_state(owner).active_turn == nil
@@ -313,19 +320,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   end
 
   test "collected and replay submissions consume a node-level abandon before owner lookup" do
-    for {function, envelope} <- [
-          {:remote_submit_request_v2, owner_request_v2(request("abandoned-collect"))},
-          {:remote_submit_request_v3, abandoned_v3_request()},
-          {:remote_submit_request_v4, owner_request_v4(replay_binding(1))},
-          {:remote_submit_request_v5, abandoned_v5_request()}
-        ] do
+    for envelope <- [owner_request_v2(request("abandoned-collect")), abandoned_v3_request(), owner_request_v4(replay_binding(1)), abandoned_v5_request()] do
       session_id = Ecto.UUID.generate()
       target = %{pid: self(), epoch: 1, correlation_id: "abandoned", owner_turn_id: self()}
       key = AbandonedSubmissions.key(session_id, target)
       on_exit(fn -> AbandonedSubmissions.consume(key) end)
       assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.remote_abandon_turn_v1(session_id, target)
       assert AbandonedSubmissions.recorded?(key)
-      assert {:error, :stale_downstream} = apply(WebsocketOwnerForwarder, function, [session_id, target, envelope])
+      assert {:error, :stale_downstream} = WebsocketOwnerForwarder.remote_submit_request_v8(session_id, target, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(envelope))
       refute AbandonedSubmissions.recorded?(key)
       assert {:error, :owner_unavailable} = WebsocketOwnerSession.lookup(session_id)
     end
@@ -409,7 +411,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
 
   test "a client retry submission without a recoverable owner refuses instead of raising" do
     downstream = %{pid: self(), epoch: 1, correlation_id: "missing-retry-owner", owner_turn_id: self()}
-    assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.remote_submit_request_v5(Ecto.UUID.generate(), downstream, abandoned_v5_request())
+    assert {:error, :owner_unavailable} = WebsocketOwnerForwarder.remote_submit_request_v8(Ecto.UUID.generate(), downstream, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(abandoned_v5_request()))
   end
 
   test "dedicated V2 control has local and simulated remote parity", %{auth: auth} do
@@ -450,13 +452,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     opts = [node_client: ReplayTimeoutNodeClient, timeout: 25]
 
     assert {:error, :owner_forward_timeout} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               token,
-               downstream("replay-v4-started"),
-               request,
-               opts
-             )
+             WebsocketOwnerForwarder.submit_request(session, token, downstream("replay-v4-started"), CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request), opts)
 
     assert_receive {:replay_v4_submit, 37}
     assert_receive {:replay_v4_control, :provisional_query, provisional_token}
@@ -479,13 +475,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     opts = [node_client: ReplayTimeoutNodeClient, timeout: 25]
 
     assert {:error, :owner_forward_timeout} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               token,
-               downstream("replay-v4-unconsumed"),
-               request,
-               opts
-             )
+             WebsocketOwnerForwarder.submit_request(session, token, downstream("replay-v4-unconsumed"), CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request), opts)
 
     assert_receive {:replay_v4_control, :provisional_query, provisional_token}
     assert_receive {:replay_v4_control, :provisional_cancel, ^provisional_token}
@@ -509,16 +499,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       owner_session_fixture(auth, Atom.to_string(remote), "replay-caller-death-started")
 
     request = owner_request_v4(replay_binding(51), <<1::256>>)
+    envelope = CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request)
 
     caller =
       spawn(fn ->
-        WebsocketOwnerForwarder.submit_request(
-          session,
-          token,
-          downstream("replay-caller-death-started"),
-          request,
-          node_client: ReplayCallerDeathNodeClient
-        )
+        WebsocketOwnerForwarder.submit_request(session, token, downstream("replay-caller-death-started"), envelope, node_client: ReplayCallerDeathNodeClient)
       end)
 
     assert_receive {:replay_caller_death_submit, ^caller}
@@ -547,16 +532,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       owner_session_fixture(auth, Atom.to_string(remote), "replay-caller-death-unconsumed")
 
     request = owner_request_v4(replay_binding(53), <<2::256>>)
+    envelope = CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request)
 
     caller =
       spawn(fn ->
-        WebsocketOwnerForwarder.submit_request(
-          session,
-          token,
-          downstream("replay-caller-death-unconsumed"),
-          request,
-          node_client: ReplayCallerDeathNodeClient
-        )
+        WebsocketOwnerForwarder.submit_request(session, token, downstream("replay-caller-death-unconsumed"), envelope, node_client: ReplayCallerDeathNodeClient)
       end)
 
     assert_receive {:replay_caller_death_submit, ^caller}
@@ -588,16 +568,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       owner_session_fixture(auth, Atom.to_string(remote), "replay-caller-death-slow-owner")
 
     request = owner_request_v4(replay_binding(57), <<3::256>>)
+    envelope = CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request)
 
     caller =
       spawn(fn ->
-        WebsocketOwnerForwarder.submit_request(
-          session,
-          token,
-          downstream("replay-caller-death-slow-owner"),
-          request,
-          node_client: ReplayCallerDeathSlowOwnerNodeClient
-        )
+        WebsocketOwnerForwarder.submit_request(session, token, downstream("replay-caller-death-slow-owner"), envelope, node_client: ReplayCallerDeathSlowOwnerNodeClient)
       end)
 
     assert_receive {:slow_owner_submit, ^caller}
@@ -634,13 +609,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     request = owner_request_v4(replay_binding(59), <<4::256>>)
 
     assert {:error, :owner_forward_timeout} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               token,
-               downstream("replay-timeout-slow-owner"),
-               request,
-               node_client: ReplayCallerDeathSlowOwnerNodeClient
-             )
+             WebsocketOwnerForwarder.submit_request(session, token, downstream("replay-timeout-slow-owner"), CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request), node_client: ReplayCallerDeathSlowOwnerNodeClient)
 
     owner_budget = WebsocketOwnerContract.default_owner_call_timeout_ms()
     assert_received {:slow_owner_control_sent, :provisional_query, query_timeout}
@@ -709,11 +678,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       )
 
     assert {:ok, %{body: body, terminal: "response.completed", status: 200}} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               token,
-               downstream("corr-local-recovery-options"),
-               request("local-recovery-options"),
+             WebsocketOwnerForwarder.submit_request(session, token, downstream("corr-local-recovery-options"), CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request("local-recovery-options")),
                upstream: upstream,
                request_id: "local-recovery-options"
              )
@@ -742,11 +707,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       )
 
     assert {:ok, %{terminal: "response.completed", status: 200}} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               token,
-               downstream("corr-local-recovery-handoff"),
-               request("local-recovery-handoff"),
+             WebsocketOwnerForwarder.submit_request(session, token, downstream("corr-local-recovery-handoff"), CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request("local-recovery-handoff")),
                upstream: upstream,
                request_id: "local-recovery-handoff",
                handoff_soft_timeout_ms: handoff_soft_timeout_ms,
@@ -765,11 +726,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       owner_session_fixture(auth, local_node_string, "recovery-handoff-default")
 
     assert {:ok, %{terminal: "response.completed", status: 200}} =
-             WebsocketOwnerForwarder.submit_request(
-               default_session,
-               default_token,
-               downstream("corr-local-recovery-handoff-default"),
-               request("local-recovery-handoff-default"),
+             WebsocketOwnerForwarder.submit_request(default_session, default_token, downstream("corr-local-recovery-handoff-default"), CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request("local-recovery-handoff-default")),
                upstream: upstream,
                request_id: "local-recovery-handoff-default",
                handoff_soft_timeout_ms: "25",
@@ -800,11 +757,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     _marker_path = WebsocketRolloutDrainSupport.configure_drain_marker!()
 
     assert {:error, :owner_drained} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               token,
-               downstream("corr-marker-resurrection"),
-               request("marker-resurrection"),
+             WebsocketOwnerForwarder.submit_request(session, token, downstream("corr-marker-resurrection"), CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request("marker-resurrection")),
                upstream: upstream,
                request_id: "marker-resurrection"
              )
@@ -851,13 +804,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
         return_request_result?: true
       )
 
+    owner_request = request("marker-takeover")
+
     submitter =
       Task.async(fn ->
-        WebsocketOwnerForwarder.submit_request(
-          session,
-          token,
-          stable_downstream,
-          request("marker-takeover"),
+        WebsocketOwnerForwarder.submit_request(session, token, stable_downstream, owner_request,
           upstream: recovery_upstream,
           local_node_string: local_node_string,
           request_id: "marker-takeover"
@@ -891,22 +842,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     local_node_string = Atom.to_string(node())
     %{session: session} = owner_session_fixture(auth, local_node_string)
 
-    upstream =
+    _upstream =
       WebsocketOwnerNodeHarness.fake_upstream_boundary(self(),
         messages: [terminal_frame("resp_bound_missing_owner")],
         return_request_result?: true
       )
 
-    bound_request = %{request("bound-missing-owner") | reset_probe: bound_reset_probe()}
+    envelope = owner_request(%{request("bound-missing-owner") | reset_probe: bound_reset_probe()})
+    envelope = CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(envelope)
 
     assert {:error, :owner_unavailable} =
-             WebsocketOwnerForwarder.remote_submit_request(
+             WebsocketOwnerForwarder.remote_submit_request_v8(
                session.id,
                downstream("corr-bound-missing-owner"),
-               bound_request,
-               upstream: upstream,
-               local_node_string: local_node_string,
-               request_id: "bound-missing-owner"
+               envelope
              )
 
     assert {:error, :owner_unavailable} = WebsocketOwnerSession.lookup(session.id)
@@ -999,11 +948,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       |> Map.put(:owner_turn_id, owner_turn_id)
 
     assert {:ok, %{terminal: "response.completed", status: 200}} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               token,
-               per_call_downstream,
-               request("red-stable-restore"),
+             WebsocketOwnerForwarder.submit_request(session, token, per_call_downstream, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request("red-stable-restore")),
                upstream: upstream,
                local_node_string: local_node_string,
                request_id: "red-stable-restore"
@@ -1063,16 +1008,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
         return_request_result?: true
       )
 
+    owner_request = request("exit-after-submit")
+
     submitter =
       spawn(fn ->
         receive do
           {:submit_public_owner_request, downstream} ->
             result =
-              WebsocketOwnerForwarder.submit_request(
-                session,
-                token,
-                downstream,
-                request("exit-after-submit"),
+              WebsocketOwnerForwarder.submit_request(session, token, downstream, owner_request,
                 upstream: recovery_upstream,
                 local_node_string: local_node_string,
                 request_id: "exit-after-submit"
@@ -1147,15 +1090,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
         return_request_result?: true
       )
 
-    bound_request = %{request("bound-owner-crash") | reset_probe: bound_reset_probe()}
+    bound_request =
+      owner_request(%{request("bound-owner-crash") | reset_probe: bound_reset_probe()})
+      |> CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!()
 
     submitter =
       Task.async(fn ->
-        WebsocketOwnerForwarder.submit_request(
-          session,
-          token,
-          stable_downstream,
-          bound_request,
+        WebsocketOwnerForwarder.submit_request(session, token, stable_downstream, bound_request,
           upstream: recovery_upstream,
           local_node_string: local_node_string,
           request_id: "bound-owner-crash"
@@ -1257,17 +1198,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       )
 
     assert {:websocket_owner_submission_accepted, {:ok, %{body: body, terminal: "response.completed", status: 200}}} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               token,
-               recovered_downstream,
-               request,
-               opts
-             )
+             WebsocketOwnerForwarder.submit_request(session, token, recovered_downstream, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request), opts)
 
     assert body =~ "resp_recovered_owner"
 
-    assert_receive {:websocket_owner_harness_node_call, %{node: ^remote_node, function: :remote_submit_request_v1, arity: 3}}
+    assert_receive {:websocket_owner_harness_node_call, %{node: ^remote_node, function: :remote_submit_request_v8, arity: 3}}
 
     assert [%UpstreamWebsocketSession.Request{payload: "request-frame"}] =
              WebsocketOwnerNodeHarness.fake_upstream_frames(upstream_pid)
@@ -1300,17 +1235,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       )
 
     assert {:websocket_owner_submission_accepted, {:ok, %{body: new_body, terminal: "response.completed", status: 200}}} =
-             WebsocketOwnerForwarder.submit_request(
-               new_session,
-               new_token,
-               new_downstream,
-               request,
-               opts
-             )
+             WebsocketOwnerForwarder.submit_request(new_session, new_token, new_downstream, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request), opts)
 
     assert new_body =~ "resp_recovered_owner"
 
-    assert_receive {:websocket_owner_harness_node_call, %{node: ^remote_node, function: :remote_submit_request_v1, arity: 3}}
+    assert_receive {:websocket_owner_harness_node_call, %{node: ^remote_node, function: :remote_submit_request_v8, arity: 3}}
 
     assert [%UpstreamWebsocketSession.Request{payload: "request-frame"}] =
              WebsocketOwnerNodeHarness.fake_upstream_frames(new_upstream_pid)
@@ -1374,11 +1303,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       |> owner_request()
 
     assert {:websocket_owner_submission_accepted, {:ok, %{terminal: "response.completed", status: 200}}} =
-             WebsocketOwnerForwarder.submit_request(session, token, attached, request, opts)
+             WebsocketOwnerForwarder.submit_request(session, token, attached, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request), opts)
 
     assert_receive {:websocket_owner_harness_node_call, %{node: ^remote_node, function: :remote_attach_downstream, arity: 3}}
 
-    assert_receive {:websocket_owner_harness_node_call, %{node: ^remote_node, function: :remote_submit_request_v1, arity: 3}}
+    assert_receive {:websocket_owner_harness_node_call, %{node: ^remote_node, function: :remote_submit_request_v8, arity: 3}}
 
     assert [
              %UpstreamWebsocketSession.Request{
@@ -1417,45 +1346,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     request = owner_request(request("remote-acceptance"), submission_notification?: true)
 
     assert {:websocket_owner_submission_accepted, {:ok, %{terminal: "response.completed", status: 200}}} =
-             WebsocketOwnerForwarder.submit_request(session, token, attached, request, opts)
+             WebsocketOwnerForwarder.submit_request(session, token, attached, CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request), opts)
 
     refute_received {:remote_submission_observer_ran, _observer_pid}
 
-    assert_receive {:websocket_owner_harness_node_call, %{node: ^remote_node, function: :remote_submit_request_v1, arity: 3}}
+    assert_receive {:websocket_owner_harness_node_call, %{node: ^remote_node, function: :remote_submit_request_v8, arity: 3}}
   end
 
-  test "remote v1 submission sends only the data envelope", %{auth: auth} do
-    remote_node = :"codex_pooler@data-envelope-owner-app.example"
-    remote_node_string = Atom.to_string(remote_node)
-
-    %{session: session, token: token} =
-      owner_session_fixture(auth, remote_node_string, "data-envelope")
-
-    owner_request = owner_request(request("data-envelope"), submission_notification?: true)
-
-    opts =
-      WebsocketOwnerNodeHarness.node_client_opts([remote_node],
-        calls: %{remote_node => {:return, {:websocket_owner_submission_accepted, :ok}}},
-        capture_request_to: self()
-      )
-
-    assert {:websocket_owner_submission_accepted, :ok} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               token,
-               downstream("corr-data-envelope"),
-               owner_request,
-               opts
-             )
-
-    assert_receive {:websocket_owner_harness_request, captured_request}
-    assert captured_request == owner_request
-    refute contains_function?(captured_request)
-
-    assert_receive {:websocket_owner_harness_node_call, %{node: ^remote_node, function: :remote_submit_request_v1, arity: 3}}
-  end
-
-  test "exact missing v2 RPC fails closed for returned error and every caught failure kind", %{
+  test "exact missing v8 RPC fails closed for returned errors and every caught failure kind", %{
     auth: auth
   } do
     remote_node = :"codex_pooler@old-collect-owner-app.example"
@@ -1464,12 +1362,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     %{session: session, token: token} =
       owner_session_fixture(auth, remote_node_string, "collect-protocol-mismatch")
 
-    owner_request = owner_request_v2(request("collect-protocol-mismatch"))
+    owner_request = owner_request_v2(request("collect-protocol-mismatch")) |> CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!()
     downstream = downstream("corr-collect-protocol-mismatch")
     args = [session.id, downstream, owner_request]
 
     exact_undef =
-      {:exception, :undef, [{WebsocketOwnerForwarder, :remote_submit_request_v2, args, []}]}
+      {:exception, :undef, [{WebsocketOwnerForwarder, :remote_submit_request_v8, args, []}]}
 
     original_session = Repo.get!(CodexSession, session.id)
     original_lease = Repo.get_by!(BridgeOwnerLease, lease_token: token)
@@ -1480,20 +1378,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
           {:exit, exact_undef},
           {:throw, exact_undef}
         ] do
-      V2FailureKindNodeClient.configure([remote_node], action)
+      CurrentFailureKindNodeClient.configure([remote_node], action)
 
       assert {:error, :owner_unavailable} =
-               WebsocketOwnerForwarder.submit_request(
-                 session,
-                 token,
-                 downstream,
-                 owner_request,
-                 node_client: V2FailureKindNodeClient,
+               WebsocketOwnerForwarder.submit_request(session, token, downstream, owner_request,
+                 node_client: CurrentFailureKindNodeClient,
                  app_node_names: [remote_node_string]
                )
 
-      assert_receive {:v2_failure_kind_call, ^remote_node, :remote_submit_request_v2, 3}
-      refute_received {:v2_failure_kind_call, ^remote_node, :remote_submit_request_v1, _arity}
+      assert_receive {:current_failure_kind_call, ^remote_node, :remote_submit_request_v8, 3}
+
+      for obsolete <- [:remote_submit_request, :remote_submit_request_v1, :remote_submit_request_v2, :remote_submit_request_v3, :remote_submit_request_v4, :remote_submit_request_v5, :remote_submit_request_v6, :remote_submit_request_v7] do
+        refute_received {:current_failure_kind_call, ^remote_node, ^obsolete, _arity}
+      end
+
       assert {:error, :owner_unavailable} = WebsocketOwnerSession.lookup(session.id)
 
       assert Repo.get!(CodexSession, session.id).owner_lease_token ==
@@ -1506,27 +1404,23 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
           {:exception, :undef,
            [
              {WebsocketOwnerRequestV2, :nested_missing, [], []},
-             {WebsocketOwnerForwarder, :remote_submit_request_v2, args, []}
+             {WebsocketOwnerForwarder, :remote_submit_request_v8, args, []}
            ]},
           {:exception, :undef,
            [
-             {WebsocketOwnerForwarder, :remote_submit_request_v2, [session.id, downstream, %{version: 2}], []}
+             {WebsocketOwnerForwarder, :remote_submit_request_v8, [session.id, downstream, owner_request.request], []}
            ]}
         ] do
-      V2FailureKindNodeClient.configure([remote_node], {:exit, unrelated})
+      CurrentFailureKindNodeClient.configure([remote_node], {:exit, unrelated})
 
       assert {:error, :owner_crashed} =
-               WebsocketOwnerForwarder.submit_request(
-                 session,
-                 token,
-                 downstream,
-                 owner_request,
-                 node_client: V2FailureKindNodeClient,
+               WebsocketOwnerForwarder.submit_request(session, token, downstream, owner_request,
+                 node_client: CurrentFailureKindNodeClient,
                  app_node_names: [remote_node_string]
                )
 
-      assert_receive {:v2_failure_kind_call, ^remote_node, :remote_submit_request_v2, 3}
-      refute_received {:v2_failure_kind_call, ^remote_node, :remote_submit_request_v1, _arity}
+      assert_receive {:current_failure_kind_call, ^remote_node, :remote_submit_request_v8, 3}
+      refute_received {:current_failure_kind_call, ^remote_node, :remote_submit_request_v2, _arity}
       assert {:error, :owner_unavailable} = WebsocketOwnerSession.lookup(session.id)
 
       assert Repo.get!(CodexSession, session.id).owner_lease_token ==
@@ -1536,38 +1430,59 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     end
   end
 
-  test "legacy remote request rejects before owner submission", %{auth: auth} do
+  test "current remote entrypoint rejects unguarded inner requests before owner submission", %{auth: auth} do
     local_node_string = Atom.to_string(node())
     %{session: session} = owner_session_fixture(auth, local_node_string, "legacy-reject")
     upstream = WebsocketOwnerNodeHarness.fake_upstream_boundary(self())
     {:ok, owner} = start_owner(session, upstream)
     assert_receive {:websocket_owner_harness_upstream_started, upstream_pid}
 
-    assert {:error, :owner_unavailable} =
-             WebsocketOwnerForwarder.remote_submit_request(
-               session.id,
-               downstream("corr-legacy-reject"),
-               request("legacy-reject"),
-               upstream: upstream
-             )
+    inner = owner_request(request("legacy-reject"))
+    envelope = CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(inner)
+    assert :ok = WebsocketOwnerRequestV8.validate(envelope)
+
+    for invalid <- [
+          request("legacy-reject"),
+          inner,
+          Map.from_struct(inner),
+          Map.from_struct(envelope),
+          %{envelope | version: 7},
+          %{envelope | request: Map.from_struct(inner)},
+          %{envelope | provider_credits_context: nil},
+          %{envelope | provider_credits_context: Map.from_struct(envelope.provider_credits_context)},
+          %{envelope | provider_credits_context: %{envelope.provider_credits_context | request_id: Ecto.UUID.generate()}},
+          %{envelope | provider_credits_context: %{envelope.provider_credits_context | attempt_id: Ecto.UUID.generate()}},
+          %{envelope | provider_credits_context: %{envelope.provider_credits_context | serving_mode: :lite}},
+          %{envelope | provider_credits_context: %{envelope.provider_credits_context | upstream_identity_id: Ecto.UUID.generate()}}
+        ] do
+      assert {:error, :owner_unavailable} =
+               WebsocketOwnerForwarder.remote_submit_request_v8(
+                 session.id,
+                 downstream("corr-legacy-reject"),
+                 invalid
+               )
+    end
+
+    assert WebsocketOwnerNodeHarness.fake_upstream_frames(upstream_pid) == []
+    assert :ok = WebsocketOwnerForwarder.remote_submit_request_v8(session.id, attach_downstream(session.id, "corr-guarded-control"), envelope)
+    assert [%UpstreamWebsocketSession.Request{payload: "legacy-reject"}] = WebsocketOwnerNodeHarness.fake_upstream_frames(upstream_pid)
 
     assert Process.alive?(owner)
-    assert WebsocketOwnerNodeHarness.fake_upstream_frames(upstream_pid) == []
   end
 
-  test "only an exact top-frame missing v1 entrypoint maps to owner unavailable", %{auth: auth} do
+  test "only an exact top-frame missing v8 entrypoint maps to owner unavailable", %{auth: auth} do
     remote_node = :"codex_pooler@protocol-mismatch-owner-app.example"
     remote_node_string = Atom.to_string(remote_node)
 
     %{session: session, token: token} =
       owner_session_fixture(auth, remote_node_string, "protocol-mismatch")
 
-    owner_request = owner_request(request("protocol-mismatch"))
+    owner_request = owner_request(request("protocol-mismatch")) |> CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!()
     downstream = downstream("corr-protocol-mismatch")
     args = [session.id, downstream, owner_request]
 
     exact_undef =
-      {:exception, :undef, [{WebsocketOwnerForwarder, :remote_submit_request_v1, args, []}]}
+      {:exception, :undef, [{WebsocketOwnerForwarder, :remote_submit_request_v8, args, []}]}
 
     exact_opts =
       WebsocketOwnerNodeHarness.node_client_opts([remote_node],
@@ -1577,13 +1492,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     log =
       capture_log(fn ->
         assert {:error, :owner_unavailable} =
-                 WebsocketOwnerForwarder.submit_request(
-                   session,
-                   token,
-                   downstream,
-                   owner_request,
-                   exact_opts
-                 )
+                 WebsocketOwnerForwarder.submit_request(session, token, downstream, owner_request, exact_opts)
       end)
 
     assert log =~ "event=owner_protocol_incompatible"
@@ -1592,7 +1501,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
       {:exception, :undef,
        [
          {WebsocketOwnerRequest, :nested_missing_function, [], []},
-         {WebsocketOwnerForwarder, :remote_submit_request_v1, args, []}
+         {WebsocketOwnerForwarder, :remote_submit_request_v8, args, []}
        ]}
 
     inner_opts =
@@ -1603,13 +1512,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     inner_log =
       capture_log(fn ->
         assert {:error, :owner_crashed} =
-                 WebsocketOwnerForwarder.submit_request(
-                   session,
-                   token,
-                   downstream,
-                   owner_request,
-                   inner_opts
-                 )
+                 WebsocketOwnerForwarder.submit_request(session, token, downstream, owner_request, inner_opts)
       end)
 
     refute inner_log =~ "event=owner_protocol_incompatible"
@@ -1932,32 +1835,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     refute_received {:remote_reconnect_send, 3, _unexpected_turn_pid}
   end
 
-  test "legacy remote owner success remains causally marked as an accepted submission", %{
-    auth: auth
-  } do
-    remote_node = :"codex_pooler@legacy-acceptance-owner-app.example"
-    remote_node_string = Atom.to_string(remote_node)
-
-    for {suffix, legacy_result} <- [ok: :ok, structured: {:ok, %{status: 200}}] do
-      %{session: session, token: token} =
-        owner_session_fixture(auth, remote_node_string, "legacy-acceptance-#{suffix}")
-
-      opts =
-        WebsocketOwnerNodeHarness.node_client_opts([remote_node],
-          calls: %{remote_node => {:return, legacy_result}}
-        )
-
-      assert {:websocket_owner_submission_accepted, ^legacy_result} =
-               WebsocketOwnerForwarder.submit_request(
-                 session,
-                 token,
-                 downstream("corr-legacy-acceptance-#{suffix}"),
-                 owner_request(request("legacy-acceptance-#{suffix}")),
-                 opts
-               )
-    end
-  end
-
   test "accepted malformed remote owner results retain submission causality", %{auth: auth} do
     remote_node = :"codex_pooler@malformed-acceptance-owner-app.example"
     remote_node_string = Atom.to_string(remote_node)
@@ -1975,90 +1852,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
         )
 
       assert {:websocket_owner_submission_accepted, {:error, :owner_crashed}} =
-               WebsocketOwnerForwarder.submit_request(
-                 session,
-                 token,
-                 downstream("corr-malformed-acceptance-#{suffix}"),
-                 owner_request(request("malformed-acceptance-#{suffix}")),
-                 opts
-               )
+               WebsocketOwnerForwarder.submit_request(session, token, downstream("corr-malformed-acceptance-#{suffix}"), CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(owner_request(request("malformed-acceptance-#{suffix}"))), opts)
     end
-  end
-
-  test "remote request preserves structured upstream failure maps", %{auth: auth} do
-    remote_node = :"codex_pooler@structured-error-app.example"
-    remote_node_string = Atom.to_string(remote_node)
-
-    %{session: session, token: token} =
-      owner_session_fixture(auth, remote_node_string, "structured")
-
-    structured_error = %{
-      body: CodexPooler.JSON.encode!(%{"type" => "response.failed"}),
-      reason: {:auth_refresh_first_event, %{code: "invalid_api_key"}},
-      headers: [],
-      upstream_error_param: "reasoning.effort",
-      websocket_frame_headers: %{}
-    }
-
-    opts =
-      WebsocketOwnerNodeHarness.node_client_opts([remote_node],
-        calls: %{remote_node => {:return, {:error, structured_error}}}
-      )
-
-    request =
-      %UpstreamWebsocketSession.Request{
-        url: "https://example.com/backend-api/codex/responses",
-        headers: [],
-        payload: "request-frame",
-        timeouts: %{}
-      }
-      |> owner_request()
-
-    assert {:error, ^structured_error} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               token,
-               downstream("corr-structured-error"),
-               request,
-               opts
-             )
-  end
-
-  test "in-process remote owner forwarding preserves a structured response identity", %{
-    auth: auth
-  } do
-    remote_node = :"codex_pooler@structured-success-app.example"
-    remote_node_string = Atom.to_string(remote_node)
-
-    %{session: session, token: token} =
-      owner_session_fixture(auth, remote_node_string, "identity")
-
-    response_id = "resp_remote_harness_identity"
-
-    structured_result = %{
-      body: "",
-      terminal: "response.completed",
-      status: 200,
-      headers: [],
-      websocket_frame_headers: %{},
-      response_id: response_id
-    }
-
-    opts =
-      WebsocketOwnerNodeHarness.node_client_opts([remote_node],
-        calls: %{remote_node => {:return, {:ok, structured_result}}}
-      )
-
-    assert {:websocket_owner_submission_accepted, {:ok, ^structured_result}} =
-             WebsocketOwnerForwarder.submit_request(
-               session,
-               token,
-               downstream("corr-structured-success"),
-               owner_request(request("structured-success-request")),
-               opts
-             )
-
-    assert_receive {:websocket_owner_harness_node_call, %{node: ^remote_node, function: :remote_submit_request_v1, arity: 3}}
   end
 
   test "remote timeout maps to owner_forward_timeout within configured timeout", %{auth: auth} do
@@ -2200,7 +1995,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     remote_node_string = Atom.to_string(remote_node)
     %{session: session, token: token} = owner_session_fixture(auth, remote_node_string, "admission-refusal")
     downstream = downstream("corr-admission-refusal")
-    opts = [node_client: V2FailureKindNodeClient, app_node_names: [remote_node_string]]
+    opts = [node_client: CurrentFailureKindNodeClient, app_node_names: [remote_node_string]]
 
     assert {:ok, control} =
              WebsocketOwnerAdmissionControlV1.new(%{
@@ -2227,18 +2022,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     # The owner session's own refusals outside the admission (a stale or
     # drained owner) keep the owner vocabulary.
     for reason <- refusals ++ [:stale_downstream, :owner_drained, :owner_unavailable] do
-      V2FailureKindNodeClient.configure([remote_node], {:return, {:error, reason}})
+      CurrentFailureKindNodeClient.configure([remote_node], {:return, {:error, reason}})
       assert {:error, ^reason} = WebsocketOwnerForwarder.admission_control(session, token, control, opts)
-      assert_received {:v2_failure_kind_call, ^remote_node, :remote_admission_control_v1, 2}
+      assert_received {:current_failure_kind_call, ^remote_node, :remote_admission_control_v1, 2}
     end
 
     # Controls: an unknown reason from the admission call, and an admission
     # refusal answered by another remote call, still read `owner_crashed`.
-    V2FailureKindNodeClient.configure([remote_node], {:return, {:error, :not_an_admission_refusal}})
+    CurrentFailureKindNodeClient.configure([remote_node], {:return, {:error, :not_an_admission_refusal}})
     assert {:error, :owner_crashed} = WebsocketOwnerForwarder.admission_control(session, token, control, opts)
 
     for reason <- refusals do
-      V2FailureKindNodeClient.configure([remote_node], {:return, {:error, reason}})
+      CurrentFailureKindNodeClient.configure([remote_node], {:return, {:error, reason}})
 
       assert {:error, :owner_crashed} =
                WebsocketOwnerForwarder.call_remote(remote_node, :remote_attach_downstream, [session.id, downstream], opts)
@@ -2485,23 +2280,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     refute_received {:websocket_owner_harness_node_call, _call}
   end
 
-  test "remote attach args keep the two-argument shape for option-less attaches" do
-    downstream = %{pid: self(), correlation_id: "corr-rolling-deploy"}
-
-    # Rolling-deploy compatibility: an owner node on the previous release only
-    # exports remote_attach_downstream/2, so native attaches must not grow a
-    # third argument. Only option-carrying (bridge) attaches use arity 3.
-    assert WebsocketOwnerForwarder.remote_attach_args("session-a", downstream, []) ==
-             ["session-a", downstream]
-
-    assert WebsocketOwnerForwarder.remote_attach_args("session-a", downstream, reject_if_busy: true) ==
-             ["session-a", downstream, [reject_if_busy: true]]
-
-    Code.ensure_loaded!(WebsocketOwnerForwarder)
-    assert function_exported?(WebsocketOwnerForwarder, :remote_attach_downstream, 2)
-    assert function_exported?(WebsocketOwnerForwarder, :remote_attach_downstream, 3)
-  end
-
   @tag :continuation_generation_boundary
   test "real peer owner guards a replacement generation before proxy settlement" do
     peer_node = start_current_peer!("continuation_guard_owner")
@@ -2689,19 +2467,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     remote_cancel_request =
       request("remote-cancel") |> owner_request()
 
+    remote_cancel_request = CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(remote_cancel_request)
+
     submitter =
       Task.async(fn ->
         WebsocketOwnerNodeHarness.with_node_client(
           [remote_node],
           [calls: %{remote_node => :success}],
           fn task_opts ->
-            WebsocketOwnerForwarder.submit_request(
-              session,
-              token,
-              attached,
-              remote_cancel_request,
-              task_opts
-            )
+            WebsocketOwnerForwarder.submit_request(session, token, attached, remote_cancel_request, task_opts)
           end
         )
       end)
@@ -2761,13 +2535,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
 
     owner_turn_id = spawn(fn -> receive do: (:stop -> :ok) end)
     downstream = Map.put(stable_downstream, :owner_turn_id, owner_turn_id)
+    owner_request = request("remote-drain-cancel")
 
     submitter =
       Task.async(fn ->
         WebsocketOwnerSession.submit_request(
           owner_pid,
           downstream,
-          request("remote-drain-cancel"),
+          owner_request,
           true
         )
       end)
@@ -2809,9 +2584,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
                downstream("corr-drain-cancel-reuse")
              )
 
+    retry_request = request("retry")
+
     retry =
       Task.async(fn ->
-        WebsocketOwnerSession.submit_request(owner_pid, replacement_downstream, request("retry"))
+        WebsocketOwnerSession.submit_request(owner_pid, replacement_downstream, retry_request)
       end)
 
     assert_receive {:remote_drain_turn_started, retry_task, _request}
@@ -2866,6 +2643,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
 
     harness = WebsocketRolloutDrainSupport.start_rollout_drain_harness(self())
     response_task_parent = self()
+    owner_request = request("real-peer-rollout-proxy")
 
     {:ok, response_task} =
       ResponseTask.start(
@@ -2879,7 +2657,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
             peer_node,
             WebsocketOwnerSession,
             :submit_request,
-            [owner_pid, per_call_downstream, request("real-peer-rollout-proxy")],
+            [owner_pid, per_call_downstream, owner_request],
             @peer_detection_timeout_ms
           )
         end,
@@ -3269,11 +3047,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     request = request("real-peer-recovery-request")
 
     assert {:ok, %{status: 200, terminal: "response.completed"}} =
-             WebsocketOwnerForwarder.submit_request(
-               recovered_session,
-               recovered_session.owner_lease_token,
-               downstream("corr-real-peer-recovery"),
-               request,
+             WebsocketOwnerForwarder.submit_request(recovered_session, recovered_session.owner_lease_token, downstream("corr-real-peer-recovery"), CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!(request),
                upstream: recovery_upstream,
                local_node_string: Atom.to_string(node())
              )
@@ -3282,7 +3056,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     assert %{idle_shutdown_ms: ^recovery_timeout} = :sys.get_state(recovered_owner)
   end
 
-  test "current proxy serves a native turn from a real previous-release owner and bridge attach fails closed" do
+  test "current proxy rejects a frozen previous-release owner without sending a generation" do
     peer_node = start_current_peer!("previous_owner")
     terminal_frame = terminal_frame("resp_previous_owner")
 
@@ -3339,7 +3113,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
 
     opts = [node_client: WebsocketOwnerForwarder.ERPCNodeClient]
 
-    assert {:ok, %{epoch: epoch} = attached} =
+    assert {:ok, attached} =
              WebsocketOwnerForwarder.call_remote(
                peer_node,
                :remote_attach_downstream,
@@ -3347,29 +3121,23 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
                opts
              )
 
-    assert {:ok, old_result} =
+    envelope =
+      request("previous-owner-request")
+      |> owner_request()
+      |> CodexPooler.ProviderCreditsDispatchSupport.owner_envelope!()
+
+    assert {:error, :owner_unavailable} =
              WebsocketOwnerForwarder.call_remote(
                peer_node,
-               :remote_submit_request,
-               [session_id, attached, request("previous-owner-request"), []],
+               :remote_submit_request_v8,
+               [session_id, attached, envelope],
                opts
              )
 
-    assert %{status: 200, terminal: "response.completed"} = old_result
-
-    assert Map.keys(old_result) |> Enum.sort() ==
-             [:body, :headers, :status, :terminal, :websocket_frame_headers]
-
-    refute Map.has_key?(old_result, :upstream_websocket_connection)
-
-    assert %{} ==
-             Metadata.upstream_websocket_connection_attempt_metadata(Map.get(old_result, :upstream_websocket_connection))
-
-    assert_receive {:websocket_owner_harness_upstream_sent, ^upstream_pid}
-
-    assert_receive {:websocket_owner_frame, "corr-previous-owner", ^epoch, {:data, _data}}
-
-    assert_receive {:websocket_owner_frame, "corr-previous-owner", ^epoch, :complete}
+    assert :erpc.call(peer_node, WebsocketOwnerNodeHarness, :fake_upstream_frames, [upstream_pid]) == []
+    assert :erpc.call(peer_node, Process, :alive?, [owner_pid])
+    refute_received {:websocket_owner_harness_upstream_sent, ^upstream_pid}
+    refute_received {:websocket_owner_frame, "corr-previous-owner", _, _}
 
     bridge_args =
       WebsocketOwnerForwarder.remote_attach_args(
@@ -3423,22 +3191,23 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
 
     assert_receive {:websocket_owner_harness_upstream_started, upstream_pid}
 
-    Code.ensure_loaded!(WebsocketOwnerForwarder)
-    assert function_exported?(WebsocketOwnerForwarder, :remote_attach_downstream, 2)
-    assert function_exported?(WebsocketOwnerForwarder, :remote_submit_request, 4)
+    error =
+      assert_raise ErlangError, fn ->
+        :erpc.call(
+          caller_node,
+          WebsocketOwnerPreviousReleaseCaller,
+          :attach_and_submit,
+          [
+            node(),
+            session_id,
+            downstream("corr-previous-caller"),
+            request("previous-caller-request")
+          ]
+        )
+      end
 
-    assert {:error, :owner_unavailable} =
-             :erpc.call(
-               caller_node,
-               WebsocketOwnerPreviousReleaseCaller,
-               :attach_and_submit,
-               [
-                 node(),
-                 session_id,
-                 downstream("corr-previous-caller"),
-                 request("previous-caller-request")
-               ]
-             )
+    assert {:exception, {:exception, :undef, [{WebsocketOwnerForwarder, :remote_submit_request, _args, _location} | _inner_stack]}, _outer_stack} = error.original
+    assert WebsocketOwnerNodeHarness.fake_upstream_frames(upstream_pid) == []
 
     refute_received {:websocket_owner_previous_release_caller, ^caller_node, _keys}
     refute_received {:websocket_owner_harness_upstream_sent, ^upstream_pid}
@@ -3926,6 +3695,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
 
   defp request(payload) do
     %UpstreamWebsocketSession.Request{
+      provider_credits_context: request_context!(),
+      effective_serving_mode: "full",
       url: "https://example.com/backend-api/codex/responses",
       headers: [],
       payload: payload,
@@ -3935,11 +3706,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
 
   defp request(payload, base_url) do
     %UpstreamWebsocketSession.Request{
+      provider_credits_context: request_context!(),
+      effective_serving_mode: "full",
       url: base_url <> "/backend-api/codex/responses",
       headers: [],
       payload: payload,
       timeouts: @timeouts
     }
+  end
+
+  defp request_context! do
+    context = Process.get({__MODULE__, :peer_provider_credits_context}) || Process.get({__MODULE__, :provider_credits_context})
+    assert is_struct(context, CodexPooler.Gateway.Transports.ProviderCreditsAdmission.Context)
+    context
   end
 
   defp owner_request(%UpstreamWebsocketSession.Request{} = request, opts \\ []) do
@@ -4048,28 +3827,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   defp normalize_timeouts(%TimeoutConfig{} = timeouts), do: timeouts
   defp normalize_timeouts(timeouts), do: TimeoutConfig.build(timeouts)
 
-  defp contains_function?(value) when is_function(value), do: true
-
-  defp contains_function?(%_struct{} = value) do
-    value
-    |> Map.from_struct()
-    |> contains_function?()
-  end
-
-  defp contains_function?(value) when is_map(value) do
-    Enum.any?(value, fn {key, nested_value} ->
-      contains_function?(key) or contains_function?(nested_value)
-    end)
-  end
-
-  defp contains_function?(value) when is_list(value) or is_tuple(value) do
-    value
-    |> Enum.to_list()
-    |> Enum.any?(&contains_function?/1)
-  end
-
-  defp contains_function?(_value), do: false
-
   defp start_fake_upstream(mode) do
     {:ok, upstream} = FakeUpstream.start_link(mode)
     on_exit(fn -> FakeUpstream.stop(upstream) end)
@@ -4098,18 +3855,27 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   end
 
   defp bound_reset_probe do
-    probe = ResetProbe.new()
+    identity = Process.get({__MODULE__, :upstream_identity})
+    context = CodexPooler.ProviderCreditsDispatchSupport.context!(identity, model: "gpt-reset-probe-owner")
+    now = DateTime.utc_now()
+    identity = CodexPooler.ProviderCreditsFixtures.persist_usage!(Repo.reload!(identity), CodexPooler.ProviderCreditsFixtures.usage_payload(:weekly_credit_only, now: now, credits: :none), now)
 
-    assert {:ok, bound_probe} =
-             ResetProbe.bind(
-               probe,
-               Ecto.UUID.generate(),
-               Ecto.UUID.generate(),
-               "gpt-reset-probe-owner",
-               "proxy_websocket"
-             )
+    redemption = %{
+      "phase" => "consumed_pending_probe",
+      "status" => "redeeming",
+      "attempt_id" => Ecto.UUID.generate(),
+      "generation" => 1,
+      "started_at" => DateTime.to_iso8601(now),
+      "consumed_at" => DateTime.to_iso8601(now),
+      "deadline_at" => DateTime.to_iso8601(RedemptionLifecycle.deadline_at(now)),
+      "result" => %{"applied" => true}
+    }
 
-    bound_probe
+    identity = Repo.update!(Ecto.Changeset.change(identity, metadata: Map.put(identity.metadata, "saved_reset_redemption", redemption)))
+    assert {:ok, probe} = ResetProbe.bind(ResetProbe.new(), context.pool_upstream_assignment_id, identity.id, context.model, context.route_class)
+    assert {:ok, :claimed} = ProbeLease.claim(identity, redemption["generation"], redemption["attempt_id"], probe)
+    Process.put({__MODULE__, :upstream_identity}, Repo.reload!(identity))
+    probe
   end
 
   defp terminal_frame(response_id) do
@@ -4173,8 +3939,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
 
   defp start_current_peer_process!(prefix) do
     ensure_test_distribution_started!()
+    ensure_peer_request_scope!()
 
     peer_name = String.to_atom("#{prefix}_#{System.unique_integer([:positive])}")
+    boot_id = Ecto.UUID.generate()
+    on_exit(fn -> PeerRegistry.assert_peer_absent!(peer_name) end)
 
     assert {:ok, peer_pid, peer_node} =
              :peer.start_link(%{
@@ -4183,15 +3952,49 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
              })
 
     Process.unlink(peer_pid)
-    on_exit(fn -> stop_peer(peer_pid) end)
+
+    on_exit(fn ->
+      stop_peer(peer_pid)
+      PeerRegistry.assert_peer_absent!(peer_name, peer_node: peer_node)
+      UnboxedFixture.run_unboxed(fn -> InstancePresencePeer.assert_peer_connections_absent!(boot_id, @peer_detection_timeout_ms) end)
+    end)
 
     assert :ok = :erpc.call(peer_node, :code, :add_paths, [:code.get_path()])
+    os_pid = :erpc.call(peer_node, System, :pid, [])
+    os_identity = InstancePresencePeer.capture_os_process_identity!(os_pid)
 
-    assert {:ok, runtime_pid} =
-             :erpc.call(peer_node, WebsocketOwnerNodeHarness, :start_owner_runtime, [])
+    on_exit(fn ->
+      stop_peer(peer_pid)
+      InstancePresencePeer.assert_os_process_stopped!(os_identity, budget_ms: @peer_detection_timeout_ms)
+    end)
 
-    assert node(runtime_pid) == peer_node
+    repo_config = Repo.config() |> Keyword.merge(pool: DBConnection.ConnectionPool, pool_size: 2, parameters: [application_name: InstancePresencePeer.peer_application_name(boot_id)])
+    assert :ok = :erpc.call(peer_node, CodexPooler.ProviderCreditsFixtures, :start_peer_runtime!, [repo_config])
     {peer_pid, peer_node}
+  end
+
+  defp ensure_peer_request_scope! do
+    unless Process.get({__MODULE__, :peer_provider_credits_context}) do
+      pool_id = Ecto.UUID.generate()
+      identity_id = Ecto.UUID.generate()
+
+      UnboxedFixture.register_unboxed_cleanup!(fn ->
+        CodexPooler.PoolerFixtures.delete_committed_pools!([pool_id])
+        Repo.delete_all(from identity in UpstreamIdentity, where: identity.id == ^identity_id)
+      end)
+
+      context =
+        UnboxedFixture.run_unboxed(fn ->
+          now = DateTime.utc_now()
+          pool = Repo.insert!(%CodexPooler.Pools.Pool{id: pool_id, slug: "owner-scope-#{pool_id}", name: "Synthetic owner scope", status: "active", created_at: now, updated_at: now})
+          identity = %UpstreamIdentity{id: identity_id, chatgpt_account_id: "synthetic-#{identity_id}"}
+          CodexPooler.ProviderCreditsDispatchSupport.context!(identity, pool: pool)
+        end)
+
+      Process.put({__MODULE__, :peer_provider_credits_context}, context)
+    end
+
+    :ok
   end
 
   defp ensure_epmd_started! do

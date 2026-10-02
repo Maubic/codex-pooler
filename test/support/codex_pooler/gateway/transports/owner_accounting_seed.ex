@@ -10,6 +10,7 @@ defmodule CodexPooler.Gateway.Transports.OwnerAccountingSeed do
   alias CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Pools.Pool
+  alias CodexPooler.ProviderCreditsDispatchSupport
   alias CodexPooler.Repo
 
   def submit(owner, downstream, transport_request) do
@@ -20,7 +21,7 @@ defmodule CodexPooler.Gateway.Transports.OwnerAccountingSeed do
       submit_accounted(owner, downstream, transport_request, session)
     else
       _transport_only ->
-        WebsocketOwnerSession.submit_request(owner, downstream, transport_request)
+        WebsocketOwnerSession.submit_request(owner, downstream, ProviderCreditsDispatchSupport.wire_request!(transport_request))
     end
   end
 
@@ -36,7 +37,7 @@ defmodule CodexPooler.Gateway.Transports.OwnerAccountingSeed do
       key_prefix: key.key_prefix
     }
 
-    %{assignment: assignment} = upstream_assignment_fixture(pool)
+    %{assignment: assignment, identity: identity} = upstream_assignment_fixture(pool)
 
     model =
       model_fixture(pool, %{
@@ -90,6 +91,7 @@ defmodule CodexPooler.Gateway.Transports.OwnerAccountingSeed do
     assert {:ok, _turn} = SessionContinuity.start_codex_turn(session, request, opts)
     assert {:ok, _bound} = WebsocketOwnerBinding.bind(auth, request, attempt, opts)
     transport_request = %{transport_request | request_id: request.id, attempt_id: attempt.id}
+    transport_request = ProviderCreditsDispatchSupport.wire_request!(transport_request, identity: identity, pool: pool)
     result = WebsocketOwnerSession.submit_request(owner, downstream, transport_request)
     assert {:ok, _} = result
 

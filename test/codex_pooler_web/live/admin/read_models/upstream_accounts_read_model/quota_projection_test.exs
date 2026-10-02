@@ -1118,12 +1118,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
     assert Decimal.equal?(primary.percent, Decimal.new("97"))
     assert primary.percent_value == 97
     assert primary.percent_label == "97%"
-    assert primary.count_label == "601 credits"
-
-    assert primary.count_title ==
-             "601 credits. Credit balance is separate from included Codex quota remaining; it is not a currency amount."
-
-    refute primary.burning_credits
+    assert primary.count_label == nil
+    assert primary.count_title == nil
     assert primary.reset_label == nil
   end
 
@@ -1152,12 +1148,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
     assert Decimal.equal?(primary.percent, Decimal.new("0"))
     assert primary.percent_value == 0
     assert primary.percent_label == "0%"
-    assert primary.count_label == "0 credits"
-
-    assert primary.count_title ==
-             "0 credits. Credit balance is depleted; it is not a currency amount or a total capacity."
-
-    refute primary.burning_credits
+    assert primary.count_label == nil
+    assert primary.count_title == nil
   end
 
   @tag :quota_account_projection
@@ -1184,8 +1176,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
 
     assert is_nil(secondary.count_label)
     assert is_nil(secondary.count_title)
-
-    refute secondary.burning_credits
   end
 
   @tag :quota_spark_projection
@@ -1453,7 +1443,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
         [selected],
         DateTimeDisplay.preferences_for_user(nil),
         @snapshot_at,
-        nil,
         [selected, stale_runtime, stale_headers]
       )
 

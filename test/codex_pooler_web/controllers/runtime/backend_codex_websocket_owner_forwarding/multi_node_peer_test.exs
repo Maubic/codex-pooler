@@ -24,7 +24,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
   alias CodexPooler.Gateway.Transports.Websocket.RolloutDrain
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequest
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
   alias CodexPooler.Gateway.Websocket, as: Gateway
@@ -98,7 +98,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
       assert %{"id" => "resp_owner_remote_node_success"} = CodexPooler.JSON.decode!(frame)
       assert {:ok, _state} = receive_owner_socket_complete(remote_state)
 
-      assert_remote_submit_request_v1!(remote_state, remote_node, :success)
+      assert_remote_submit_request_v8!(remote_state, remote_node, :success)
 
       assert FakeUpstream.count(upstream) == 1
       assert [captured] = FakeUpstream.requests(upstream)
@@ -227,7 +227,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
     refute response.resp_body =~ marker
     refute logs =~ marker
     refute logs =~ setup.authorization
-    assert_bridge_v1_submission!(remote_node)
+    assert_bridge_v8_submission!(remote_node)
     assert FakeUpstream.count(upstream) == 1
     assert FakeUpstream.websocket_connection_count(upstream) == 1
     assert FakeUpstream.http_request_count(upstream) == 0
@@ -414,20 +414,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
     assert :ok = CodexPooler.Events.subscribe_pool(setup.pool)
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
     remote_node = start_bridge_peer!(:current, setup.identity, repo: :real)
-    # The default peer fixture recognizes one identity only. Account failover
-    # must exercise the real shared-database lookup for both assignments.
-    {CodexPooler.Upstreams, upstream_beam, upstream_file} =
-      :code.get_object_code(CodexPooler.Upstreams)
-
-    :erpc.call(remote_node, :code, :purge, [CodexPooler.Upstreams])
-    assert true = :erpc.call(remote_node, :code, :delete, [CodexPooler.Upstreams])
-
-    assert {:module, CodexPooler.Upstreams} =
-             :erpc.call(remote_node, :code, :load_binary, [
-               CodexPooler.Upstreams,
-               upstream_file,
-               upstream_beam
-             ])
 
     header = "native-peer-quota-#{System.unique_integer([:positive])}"
     {session, owner_pid} = start_remote_bridge_owner!(auth, header, remote_node, :real)
@@ -525,7 +511,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
 
       [task_pid] = MapSet.to_list(remote_state.tasks)
 
-      assert_receive {:turn_budget_remote_call, :remote_submit_request_v1, 1_801_000}
+      assert_receive {:turn_budget_remote_call, :remote_submit_request_v8, 1_801_000}
 
       assert_receive {:websocket_owner_frame, correlation_id, epoch, _owner_turn_id, {:data, ^terminal}} =
                        terminal_message
@@ -603,7 +589,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
 
     refute :erpc.call(remote_node, :erlang, :function_exported, [
              WebsocketOwnerForwarder,
-             :remote_submit_request_v1,
+             :remote_submit_request_v8,
              3
            ])
 
@@ -868,8 +854,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
     end)
   end
 
-  defp assert_bridge_v1_submission!(remote_node) do
-    assert_receive {:remote_forwarder_v1_call, remote_pid, [codex_session_id, downstream, %WebsocketOwnerRequest{version: 1} = request]}
+  defp assert_bridge_v8_submission!(remote_node) do
+    assert_receive {:remote_forwarder_v8_call, remote_pid, [codex_session_id, downstream, %WebsocketOwnerRequestV8{version: 8} = request]}
 
     assert node(remote_pid) == remote_node
     assert is_binary(codex_session_id)
@@ -877,7 +863,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
     assert is_pid(pid)
     assert is_binary(correlation_id)
     assert is_integer(epoch) and epoch > 0
-    assert :ok = WebsocketOwnerRequest.validate(request)
+    assert :ok = WebsocketOwnerRequestV8.validate(request)
     refute contains_function?(request)
     request
   end

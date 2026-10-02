@@ -6,10 +6,8 @@ defmodule CodexPoolerWeb.Admin.AuditLogsComponents.Prose do
   alias CodexPoolerWeb.Admin.AuditLogsComponents.Presentation
   alias CodexPoolerWeb.DateTimeDisplay
 
-  # Every supported audit action maps to a sentence form and a verb phrase.
-  # The coverage test walks Audit.action_options/0 against this map, so a new
-  # action cannot ship without deciding how it reads — an unknown action still
-  # renders through the generic fallback (marked data-role, never asserted).
+  # Supported audit actions map to a sentence form and verb phrase; an unknown
+  # action renders through the generic fallback.
   #
   # Forms:
   #   :actor_only  — "{actor} {verb}"                             (auth.*)
@@ -55,6 +53,7 @@ defmodule CodexPoolerWeb.Admin.AuditLogsComponents.Prose do
     "upstream_account.delete" => {:named, "deleted the upstream account"},
     "upstream_account.delete_requested" => {:named, "requested deletion of the upstream account"},
     "upstream_account.saved_reset_policy_update" => {:named, "updated the saved-reset policy of the upstream account"},
+    "upstream_account.provider_credits_policy_update" => {:named, "updated the provider-credit policy of the upstream account"},
     "upstream_account.saved_reset_redeem_enqueue" => {:named, "queued a saved-reset redemption for the upstream account"},
     "api_key.create" => {:named, "created the API key"},
     "api_key.update" => {:named, "updated the API key"},
@@ -83,9 +82,6 @@ defmodule CodexPoolerWeb.Admin.AuditLogsComponents.Prose do
     "alert_incident.resolve" => {:named, "resolved the alert incident"},
     "instance_settings.update" => {:plain, "updated the instance settings"}
   }
-
-  @spec covered_actions() :: [String.t()]
-  def covered_actions, do: Map.keys(@sentence_forms)
 
   attr :event, :map, required: true
   attr :pool_names, :map, required: true

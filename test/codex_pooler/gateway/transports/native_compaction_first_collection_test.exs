@@ -15,6 +15,7 @@ defmodule CodexPooler.Gateway.NativeCompactionFirstCollectionTest do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerAdmissionControlV1, as: Control
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession, as: Forwarded
   alias CodexPooler.Gateway.Websocket
+  alias CodexPooler.ProviderCreditsDispatchSupport
   alias Owner.Request
 
   test "late first collection cannot overwrite a replacement pending turn" do
@@ -101,6 +102,7 @@ defmodule CodexPooler.Gateway.NativeCompactionFirstCollectionTest do
           effective_serving_mode: "lite"
       }
 
+      request = ProviderCreditsDispatchSupport.wire_request!(request)
       assert {:ok, result} = Owner.request(owner, request)
       receipt = result.ordinary_success_result
       binding = ordinary_binding(receipt)
@@ -704,6 +706,7 @@ defmodule CodexPooler.Gateway.NativeCompactionFirstCollectionTest do
       native_compaction_metadata: metadata,
       message_mapper: &StreamProtocol.canonicalize_native_codex_responses_json_message/1
     }
+    |> ProviderCreditsDispatchSupport.wire_request!()
   end
 
   test "stale reservation cannot clear the current pending turn" do
@@ -733,6 +736,8 @@ defmodule CodexPooler.Gateway.NativeCompactionFirstCollectionTest do
       writer: fn _frame -> :ok end,
       message_mapper: &StreamProtocol.canonicalize_native_codex_responses_json_message/1
     }
+
+    request = ProviderCreditsDispatchSupport.wire_request!(request)
 
     assert {:ok, result} = Owner.request(owner, request)
     lifecycle = Owner.connection_lifecycle_snapshot(owner)

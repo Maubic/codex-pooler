@@ -11,8 +11,10 @@ defmodule CodexPooler.Gateway.Routing.PartitionRoutability do
   """
 
   alias CodexPooler.Catalog.Model
+  alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Routing.CandidateEligibility
   alias CodexPooler.Gateway.Routing.CandidateEligibility.Quota
+  alias CodexPooler.Gateway.Routing.ProviderCredits
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
 
@@ -30,12 +32,11 @@ defmodule CodexPooler.Gateway.Routing.PartitionRoutability do
   each model independently.
 
   Callers that already hold a snapshot covering the same candidates should use
-  `routable_assignment_ids_by_model_id/3` instead of paying for a second read.
+  `routable_assignment_ids_by_model_id/4` instead of paying for a second read.
   """
-  @spec routable_assignment_ids_by_model_id([Model.t()], candidates_by_model_id()) ::
-          routable_assignment_ids_by_model_id()
-  def routable_assignment_ids_by_model_id(models, candidates_by_model_id)
-      when is_list(models) and is_map(candidates_by_model_id) do
+  @spec routable_assignment_ids_by_model_id([Model.t()], candidates_by_model_id(), RequestOptions.t() | map()) :: routable_assignment_ids_by_model_id()
+  def routable_assignment_ids_by_model_id(models, candidates_by_model_id, request_context)
+      when is_list(models) and is_map(candidates_by_model_id) and is_map(request_context) do
     at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     identity_ids =
@@ -47,33 +48,43 @@ defmodule CodexPooler.Gateway.Routing.PartitionRoutability do
     routable_assignment_ids_by_model_id(
       models,
       candidates_by_model_id,
-      QuotaWindows.load_routing_quota_snapshots(identity_ids, at)
+      QuotaWindows.load_routing_quota_snapshots(identity_ids, at),
+      request_context
     )
   end
 
   @spec routable_assignment_ids_by_model_id(
           [Model.t()],
           candidates_by_model_id(),
-          quota_snapshots()
+          quota_snapshots(),
+          RequestOptions.t() | map()
         ) :: routable_assignment_ids_by_model_id()
   def routable_assignment_ids_by_model_id(
         models,
         candidates_by_model_id,
-        quota_snapshots
+        quota_snapshots,
+        request_context
       )
-      when is_list(models) and is_map(candidates_by_model_id) and is_map(quota_snapshots) do
+      when is_list(models) and is_map(candidates_by_model_id) and is_map(quota_snapshots) and is_map(request_context) do
     Map.new(models, fn %Model{} = model ->
       assignment_ids =
         for {assignment, identity} = candidate <-
               Map.get(candidates_by_model_id, model.id, []),
             snapshot = Map.fetch!(quota_snapshots, identity.id),
-            Quota.quota_routable?(model, candidate, snapshot, snapshot.as_of),
+            context = candidate_request_context(model, request_context, assignment.id),
+            Quota.quota_routable?(model, candidate, snapshot, context),
             into: MapSet.new(),
             do: assignment.id
 
       {model.id, assignment_ids}
     end)
   end
+
+  defp candidate_request_context(model, %RequestOptions{} = request_options, assignment_id),
+    do: ProviderCredits.request_context(model, request_options, assignment_id)
+
+  defp candidate_request_context(model, request_context, _assignment_id),
+    do: Map.merge(ProviderCredits.request_context(model), request_context)
 
   defp model_candidates(models, candidates_by_model_id) do
     Enum.flat_map(models, fn

@@ -25,6 +25,10 @@ defmodule CodexPooler.Gateway.Routing.QuotaRefresh.Plan do
     CandidateEligibility.filter_quota_eligible_candidates(filter_input, route_state)
   end
 
+  @spec filter_non_credit_candidates(CandidateEligibility.FilterInput.t(), RouteState.t()) :: CandidateEligibility.quota_filter_result()
+  def filter_non_credit_candidates(%CandidateEligibility.FilterInput{} = input, %RouteState{} = route_state),
+    do: CandidateEligibility.Quota.filter_non_credit_candidates(input, route_state)
+
   @type filter_after_refresh_result ::
           {:ok, [CandidateEligibility.candidate()], CandidateEligibility.quota_decision()}
           | {:ok, [CandidateEligibility.candidate()], CandidateEligibility.quota_decision(), RouteState.t()}
@@ -43,15 +47,17 @@ defmodule CodexPooler.Gateway.Routing.QuotaRefresh.Plan do
 
   @spec filter_after_refresh(CandidateEligibility.quota_refresh_plan()) ::
           filter_after_refresh_result()
-  def filter_after_refresh(%{
-        filter_input: %CandidateEligibility.FilterInput{} = filter_input,
-        route_state: %RouteState{} = route_state,
-        candidate_exclusions: exclusions,
-        refreshable_candidates: refreshable_candidates
-      }) do
+  def filter_after_refresh(
+        %{
+          filter_input: %CandidateEligibility.FilterInput{} = filter_input,
+          route_state: %RouteState{} = route_state,
+          candidate_exclusions: exclusions,
+          refreshable_candidates: refreshable_candidates
+        } = plan
+      ) do
     route_state = RouteState.refresh_quota_snapshots(route_state)
 
-    case CandidateEligibility.filter_quota_eligible_candidates(filter_input, route_state) do
+    case filter_band(filter_input, route_state, plan) do
       {:ok, refreshed_candidates, decision} ->
         {:ok, refreshed_candidates, Map.put(decision, "refreshed_stale_quota", true), route_state}
 
@@ -81,6 +87,9 @@ defmodule CodexPooler.Gateway.Routing.QuotaRefresh.Plan do
         )
     end
   end
+
+  defp filter_band(input, route_state, %{capacity_band: :non_credit}), do: filter_non_credit_candidates(input, route_state)
+  defp filter_band(input, route_state, _plan), do: CandidateEligibility.filter_quota_eligible_candidates(input, route_state)
 
   defp prioritize_candidates(
          candidates,

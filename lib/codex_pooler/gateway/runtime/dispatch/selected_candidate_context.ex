@@ -34,6 +34,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext do
     :attempt,
     :started,
     :auth_refresh_retry_attempted?,
+    :provider_credits_admission,
     :client_retry_dispatch_authority
   ]
 
@@ -58,6 +59,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext do
           attempt: Attempt.t() | nil,
           started: integer() | nil,
           auth_refresh_retry_attempted?: boolean() | nil,
+          provider_credits_admission: CodexPooler.Gateway.Transports.ProviderCreditsAdmission.Receipt.t() | nil,
           client_retry_dispatch_authority: CodexPooler.Accounting.ClientRetry.DispatchAuthority.t() | nil
         }
 

@@ -8,8 +8,9 @@ defmodule CodexPooler.Admin.UpstreamRoutingReadiness do
   """
 
   alias CodexPooler.Admin.{UpstreamCircuitReadiness, UpstreamQuotaReadiness}
+  alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Lifecycle.IdentityRouting
-  alias CodexPooler.Upstreams.Quota.{RoutingQuotaSnapshot, Windows}
+  alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
   alias CodexPooler.Upstreams.StatusVocabulary.Assignment, as: AssignmentStatus
 
@@ -141,19 +142,15 @@ defmodule CodexPooler.Admin.UpstreamRoutingReadiness do
           Enum.any?(Map.get(assignment, :models, []), &(&1.exposed_model_id == @spark_model))
       end)
 
-    eligibility =
-      Windows.routing_quota_eligibility_from_snapshot(snapshot,
-        model: @spark_model,
-        upstream_model: @spark_model
-      )
+    decision = Upstreams.provider_credits_decision(snapshot, %{model: @spark_model, upstream_model: @spark_model})
 
-    if advertised? and eligibility.eligible? and eligibility.routing_state == :provider_available do
+    if advertised? and decision.eligible? and decision.capacity_basis == :model_allowance do
       Map.merge(readiness, %{
         routing_ready_now?: true,
         state: "model_limited",
         label: "Limited model availability",
         tone: :warning,
-        reason: "Spark quota allows routing while ordinary account quota remains blocked.",
+        reason: "Only the independently evidenced Spark allowance permits model routing; ordinary account quota remains blocked.",
         reason_code: "spark_quota_available",
         recovery_action: "Use Spark or wait for ordinary account quota to recover."
       })
@@ -210,15 +207,26 @@ defmodule CodexPooler.Admin.UpstreamRoutingReadiness do
           recovery_action: nil
         })
 
-      Map.get(quota_readiness, :state) == "provider_available_no_windows" ->
+      Map.get(quota_readiness, :capacity_basis) == :provider_credits ->
         projection(%{
           routing_ready_now?: true,
-          state: "provider_available_no_windows",
-          label: "Provider available",
-          tone: :warning,
-          reason: "Provider availability allows routing without reported quota windows.",
-          reason_code: "provider_available_no_windows",
+          state: "ready",
+          label: "Routing ready via credits",
+          tone: :success,
+          reason: "Current provider credit permission, identity lifecycle and assignment availability allow routing. Each request still checks its model, transport and serving mode; this does not identify a billing debit.",
+          reason_code: "routing_ready",
           recovery_action: nil
+        })
+
+      Map.get(quota_readiness, :conditional?, false) ->
+        projection(%{
+          routing_ready_now?: true,
+          state: quota_readiness.state,
+          label: quota_readiness.label,
+          tone: :warning,
+          reason: "Availability is conditional on the request model, transport and serving mode. The account summary is not permission for every model or route.",
+          reason_code: quota_readiness.state,
+          recovery_action: "Check the request-specific capacity decision before relying on this account."
         })
 
       true ->
@@ -283,14 +291,27 @@ defmodule CodexPooler.Admin.UpstreamRoutingReadiness do
   defp quota_blocked_projection(quota_readiness) do
     quota_state = Map.get(quota_readiness, :state, "blocked")
     label = Map.get(quota_readiness, :label, "Quota blocked")
+    reason_codes = Map.get(quota_readiness, :reason_codes, [])
+
+    reason_code =
+      Enum.find(reason_codes, &(&1 in ["provider_credits_disabled", "saved_reset_probe_pending", "saved_reset_recovery_unavailable"])) ||
+        if(quota_state == "provider_credit_capacity_unverified", do: "provider_credit_capacity_unverified", else: "quota_#{quota_state}")
+
+    reason =
+      case reason_code do
+        "provider_credits_disabled" -> "Provider credit-dependent admission is disabled; independently valid included capacity, ordinary provider permission and authorized banked-reset recovery remain separate."
+        "provider_credit_capacity_unverified" -> "Observed balance does not grant routing; current account evidence does not establish usable provider credit permission."
+        "saved_reset_probe_pending" -> "Banked-reset recovery is pending and cannot be confirmed by a credit-backed success."
+        _other -> "Quota readiness blocks model routing: #{label}."
+      end
 
     projection(%{
       routing_ready_now?: false,
       state: "quota_blocked",
       label: label,
       tone: Map.get(quota_readiness, :tone, :warning),
-      reason: "Quota readiness blocks model routing: #{label}.",
-      reason_code: "quota_#{quota_state}",
+      reason: reason,
+      reason_code: reason_code,
       recovery_action: "Refresh quota evidence or wait for quota reset."
     })
   end

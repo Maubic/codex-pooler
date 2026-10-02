@@ -8,6 +8,8 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions.Routing do
     allowed
     summary
     routing_state
+    capacity_basis
+    non_credit_recovery_outcome
     precise_candidate_count
     credit_backed_probe_candidate_count
     weekly_probe_candidate_count

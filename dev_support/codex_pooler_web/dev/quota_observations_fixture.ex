@@ -43,7 +43,7 @@ defmodule CodexPoolerWeb.Dev.QuotaObservationsFixture do
 
     raw
     |> WindowSelector.logical_windows(now)
-    |> QuotaProjection.quota_limit_rows(DateTimeDisplay.preferences_for_user(nil), now, nil, raw)
+    |> QuotaProjection.quota_limit_rows(DateTimeDisplay.preferences_for_user(nil), now, raw)
     |> Enum.find(&(&1.key == :weekly))
   end
 end

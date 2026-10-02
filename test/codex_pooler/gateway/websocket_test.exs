@@ -15,7 +15,6 @@ defmodule CodexPooler.Gateway.WebsocketTest do
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, BridgeSessionAlias, CodexSession}
   alias CodexPooler.Gateway.Transports.Admission
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
   alias CodexPooler.Gateway.Transports.WebsocketRolloutDrainSupport
@@ -103,56 +102,6 @@ defmodule CodexPooler.Gateway.WebsocketTest do
 
     def call_owner(_node, _module, :remote_cancel_downstream, _args, _timeout),
       do: {:error, %{body: "", reason: "raw detach sentinel"}}
-  end
-
-  test "owner forwarding keeps the rolling RPC argument shapes" do
-    downstream = %{
-      pid: self(),
-      correlation_id: "owner-rpc-contract",
-      epoch: 1
-    }
-
-    assert WebsocketOwnerForwarder.remote_attach_args("session-contract", downstream, []) == [
-             "session-contract",
-             downstream
-           ]
-
-    assert WebsocketOwnerForwarder.remote_attach_args("session-contract", downstream, reject_if_busy: true) == ["session-contract", downstream, [reject_if_busy: true]]
-
-    assert function_exported?(WebsocketOwnerForwarder, :remote_attach_downstream, 2)
-    assert function_exported?(WebsocketOwnerForwarder, :remote_attach_downstream, 3)
-    assert function_exported?(WebsocketOwnerForwarder, :remote_submit_request, 4)
-    assert function_exported?(WebsocketOwnerForwarder, :remote_reconnect_control_v1, 1)
-
-    semantic_turn_key = :crypto.hash(:sha256, "opaque-turn")
-    control_ref = make_ref()
-
-    assert %{
-             version: 1,
-             action: :preflight,
-             codex_session_id: "session-contract",
-             downstream: ^downstream,
-             semantic_turn_key: ^semantic_turn_key,
-             control_ref: ^control_ref
-           } =
-             WebsocketOwnerForwarder.reconnect_control(
-               :preflight,
-               "session-contract",
-               downstream,
-               semantic_turn_key,
-               control_ref
-             )
-
-    assert Map.keys(
-             WebsocketOwnerForwarder.reconnect_control(
-               :preflight,
-               "session-contract",
-               Map.put(downstream, :active_turn_reconnect?, true),
-               semantic_turn_key,
-               control_ref
-             ).downstream
-           )
-           |> Enum.sort() == [:correlation_id, :epoch, :pid]
   end
 
   test "socket-only execution tags outer websocket admission rejection as local completion" do
@@ -275,7 +224,7 @@ defmodule CodexPooler.Gateway.WebsocketTest do
     assert request.status == "succeeded"
   end
 
-  test "socket-only execution keeps a previous-release remote owner behind its completion barrier" do
+  test "socket-only execution refuses a remote success without final admission" do
     upstream = start_upstream(FakeUpstream.json_response(%{"id" => "unused_remote_result"}))
     setup = gateway_setup(upstream)
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
@@ -312,13 +261,13 @@ defmodule CodexPooler.Gateway.WebsocketTest do
         "generate" => true
       })
 
-    assert {:socket_response_result, :owner_completion_pending, :ok} =
+    assert {:socket_response_result, _disposition, {:error, %{code: "owner_unavailable"}}} =
              Gateway.run_websocket_response_for_socket(auth, payload, opts, fn _frame -> :ok end)
 
     assert_receive {:websocket_owner_harness_node_call,
                     %{
                       node: ^remote_node,
-                      function: :remote_submit_request_v1,
+                      function: :remote_submit_request_v8,
                       arity: 3,
                       mode: {:return, :ok}
                     }}

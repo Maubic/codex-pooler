@@ -1496,6 +1496,32 @@ defmodule CodexPooler.MCP.QuotaMetadataTest do
     assert window.active_limit == 50
   end
 
+  @tag credits_negative: true
+  test "quota policy changes effective admission without rewriting observed quota DTOs", %{scope: scope, auth: auth} do
+    pool = pool_fixture()
+    %{identity: identity} = upstream_assignment_fixture(pool, %{identity_metadata: %{"credential_epoch" => 1}})
+    now = DateTime.utc_now()
+    identity = CodexPooler.ProviderCreditsFixtures.persist_usage!(identity, CodexPooler.ProviderCreditsFixtures.usage_payload(:weekly_credit_only, now: now), now)
+    before = ReadModel.account_summary(identity)
+    assert before.capacity_decision.reason_codes == []
+    assert before.capacity_decision.routing_usable
+    assert before.capacity_decision.qualification == "provider_attested"
+    assert before.capacity_decision.scope == "account"
+    assert {:ok, _} = CodexPooler.Upstreams.update_provider_credits_policy_for_scope(scope, identity.id, %{allow_provider_credits: false})
+    after_policy = ReadModel.account_summary(Repo.reload!(identity))
+    assert after_policy.quota_windows == before.quota_windows
+    assert after_policy.allow_provider_credits == false
+    assert after_policy.capacity_decision.reason_codes == ["provider_credits_disabled"]
+    assert {:ok, result} = ToolDispatch.call("codex_pooler_get_upstream_quota", %{"selector" => identity.id}, %{auth: auth})
+    assert result["structuredContent"]["item"]["capacity_decision"]["scope"] == "account"
+    assert result["structuredContent"]["item"]["quota_windows"] |> hd() |> Map.fetch!("credits") == 25
+    assert [%{"text" => text}] = result["content"]
+    assert text =~ "provider credits policy disabled"
+    assert text =~ "account scope (request permission and billing source not guaranteed)"
+    assert text =~ "provider_credits_disabled"
+    refute text =~ "quota_capacity_facts"
+  end
+
   defp assert_dto_keys(window) do
     assert Map.keys(window) |> Enum.sort() ==
              [

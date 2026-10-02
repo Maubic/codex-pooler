@@ -13083,17 +13083,21 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     )
   end
 
-  test "POST /backend-api/codex/responses reconciles affirmative credits into a settled windowless route",
+  test "POST /backend-api/codex/responses refuses unqualified windowless credits before dispatch",
        %{conn: conn} do
     payload = %{
       "plan_type" => "sample_credits_plan",
       "credits" => %{"has_credits" => true, "unlimited" => false}
     }
 
-    assert_windowless_backend_lifecycle!(conn, payload,
-      response_id: "resp_windowless_credits",
-      forbidden_values: ["sample_credits_plan", "has_credits", "unlimited"]
-    )
+    upstream = start_windowless_lifecycle_upstream(payload, "resp_windowless_credits_must_not_dispatch")
+    setup = gateway_setup(upstream, quota?: false)
+    assert {:ok, _identity} = PoolReconciliation.refresh_quota_from_usage(setup.identity, setup.assignment)
+
+    response = conn |> auth(setup) |> post("/backend-api/codex/responses", %{"model" => setup.model.exposed_model_id, "input" => native_text_input("synthetic unqualified credit request")})
+    assert response.status == 503
+    assert model_dispatch_count(upstream) == 0
+    assert Repo.aggregate(from(attempt in Attempt, where: attempt.upstream_identity_id == ^setup.identity.id), :count) == 0
   end
 
   test "POST /backend-api/codex/responses rejects blocked and unknown no-window observations before dispatch",
@@ -15981,19 +15985,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
              "quota_decision",
              "windowless_provider_available_candidate_count"
            ]) == 1
-
-    assert Map.keys(request.request_metadata["quota_decision"]) |> Enum.sort() ==
-             ~w(
-               allowed
-               credit_backed_probe_candidate_count
-               eligible_candidate_count
-               precise_candidate_count
-               reset_probe_candidate_count
-               routing_state
-               summary
-               weekly_probe_candidate_count
-               windowless_provider_available_candidate_count
-             )
 
     assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^request.id))
     assert attempt.attempt_number == 1

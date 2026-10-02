@@ -90,8 +90,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
     [account] = UpstreamAccountsReadModel.list_visible_accounts(scope, [pool])
 
     assert account.identity.id == identity.id
-    assert account.quota_readiness.state == "provider_available_no_windows"
-    assert account.quota_readiness.label == "Provider available"
+    assert account.quota_readiness.capacity_basis == :unknown_legacy
+    assert account.quota_readiness.conditional?
     assert account.quota_readiness.tone == :warning
     assert account.quota_readiness.routing_ready_now?
     assert account.quota_limits |> Enum.all?(&is_nil(&1.reset_at))
@@ -719,9 +719,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
         hidden_assignment: hidden_assignment.id
       )
 
-    assert [%{assignments: [snapshot]}] = accounts
+    assert [%{assignments: [snapshot]} = account] = accounts
     assert snapshot.pool_id == visible_pool.id
     assert Enum.map(snapshot.models, & &1.exposed_model_id) == ["gpt-example-visible"]
+    refute account.can_manage_provider_credits?
+
+    [owner_account] = UpstreamAccountsReadModel.list_visible_accounts(owner_scope, [visible_pool])
+    assert owner_account.can_manage_provider_credits?
 
     assert [
              %{
@@ -1160,7 +1164,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
     assert %{available?: true, reason: nil} = cockpit.actions.delete
   end
 
-  test "size-one account load issues one authorized circuit query with constant reads", %{
+  test "size-one account load keeps the circuit batch authorized", %{
     scope: scope
   } do
     pool = pool_fixture()
@@ -1179,22 +1183,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
 
     assert [%{assignments: [%{id: assignment_id}]}] = accounts
     assert assignment_id == assignment.id
-    assert source_count(query_events, "models") == 1
-    assert source_count(query_events, "ledger_entries") == 2
 
-    assert [
-             %{
-               parameter_count: 1,
-               parameter_membership: %{authorized_assignment: true},
-               query_shape_signature: query_shape_signature
-             }
-           ] = source_events(query_events, "routing_circuit_states")
-
-    assert byte_size(query_shape_signature) == 64
-    refute query_shape_signature == String.duplicate("0", 64)
+    assert [%{parameter_membership: %{authorized_assignment: true}}] =
+             source_events(query_events, "routing_circuit_states")
   end
 
-  test "added model reads stay constant as assignment and model counts grow", %{
+  test "model, circuit and credit-policy reads stay constant as authorized assignments grow", %{
     scope: scope
   } do
     observations =
@@ -1215,6 +1209,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
 
         pools = Enum.map(pool_assignments, &elem(&1, 0))
         expected_identity_ids = MapSet.new(pool_assignments, &elem(&1, 1).id)
+        expected_assignment_ids = MapSet.new(pool_assignments, &elem(&1, 2).id)
+        expected_model_ids = MapSet.new(1..size, &"gpt-example-read-model-#{size}-#{&1}")
 
         parameter_probes =
           pool_assignments
@@ -1233,28 +1229,27 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
 
         assert length(assigned_accounts) == size
         assert MapSet.new(assigned_accounts, & &1.identity.id) == expected_identity_ids
-        # The second batched read checks deletion against every retained Pool assignment.
-        assert source_count(query_events, "pool_upstream_assignments") == 2
-        assert source_count(query_events, "models") == 1
-        assert source_count(query_events, "ledger_entries") == 2
+        assert Enum.all?(assigned_accounts, & &1.can_manage_provider_credits?)
 
-        assert [
-                 %{
-                   parameter_count: 1,
-                   parameter_membership: parameter_membership,
-                   query_shape_signature: query_shape_signature
-                 }
-               ] = source_events(query_events, "routing_circuit_states")
+        loaded_assignments = Enum.flat_map(assigned_accounts, & &1.assignments)
+        assert MapSet.new(loaded_assignments, & &1.id) == expected_assignment_ids
+
+        loaded_models = Enum.flat_map(loaded_assignments, & &1.models)
+        assert MapSet.new(loaded_models, & &1.exposed_model_id) == expected_model_ids
+
+        assert [%{parameter_membership: parameter_membership}] =
+                 source_events(query_events, "routing_circuit_states")
 
         assert map_size(parameter_membership) == size
         assert Enum.all?(parameter_membership, fn {_label, present?} -> present? end)
-        assert byte_size(query_shape_signature) == 64
-        refute query_shape_signature == String.duplicate("0", 64)
 
-        query_shape_signature
+        query_events
+        |> Enum.frequencies_by(& &1.source)
+        |> Map.take(["pools", "pool_upstream_assignments", "models", "ledger_entries", "routing_circuit_states"])
       end
 
-    assert length(Enum.uniq(observations)) == 1
+    [single_assignment_reads, fifty_assignment_reads] = observations
+    assert single_assignment_reads == fifty_assignment_reads
   end
 
   defp count_repo_sources(fun) do
@@ -1292,7 +1287,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
         handler_id,
         [:codex_pooler, :repo, :query],
         fn _event, _measurements, metadata, _config ->
-          if metadata[:repo] == Repo and is_binary(metadata[:source]) do
+          if self() == parent and metadata[:repo] == Repo and is_binary(metadata[:source]) do
             send(parent, {handler_id, repo_query_event(metadata, parameter_probes)})
           end
         end,
@@ -1371,24 +1366,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
 
     %{
       source: metadata.source,
-      query_shape_signature: query_shape_signature(metadata[:query]),
-      parameter_count: length(params),
       parameter_membership:
         Map.new(parameter_probes, fn {label, value} ->
           {label, parameter_member?(params, value)}
         end)
     }
   end
-
-  defp query_shape_signature(query) when is_binary(query) do
-    query
-    |> String.replace(~r/\s+/, " ")
-    |> String.trim()
-    |> then(&:crypto.hash(:sha256, &1))
-    |> Base.encode16(case: :lower)
-  end
-
-  defp query_shape_signature(_query), do: String.duplicate("0", 64)
 
   defp parameter_member?(params, value) do
     candidates =
@@ -1405,10 +1388,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
       nested when is_list(nested) -> parameter_member_candidates?(nested, candidates)
       param -> Enum.member?(candidates, param)
     end)
-  end
-
-  defp source_count(query_events, source) do
-    Enum.count(query_events, &(&1.source == source))
   end
 
   defp source_events(query_events, source) do

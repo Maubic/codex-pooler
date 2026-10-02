@@ -618,7 +618,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatchTest do
           PartitionRoutability.routable_assignment_ids_by_model_id(
             [setup.model],
             route_state.visible_model_context.candidates_by_model_id,
-            route_state.quota_snapshots
+            route_state.quota_snapshots,
+            %{}
           )
         end
       )
@@ -1854,7 +1855,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatchTest do
         routable_assignment_ids_by_model_id: fn ->
           PartitionRoutability.routable_assignment_ids_by_model_id(
             context.visible_models,
-            context.candidates_by_model_id
+            context.candidates_by_model_id,
+            %{}
           )
         end
       )

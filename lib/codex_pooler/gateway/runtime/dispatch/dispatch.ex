@@ -12,14 +12,19 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch do
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.RequestOptions.ResetProbe
   alias CodexPooler.Gateway.Persistence.RoutingCircuitState
+  alias CodexPooler.Gateway.Routing.{CandidateEligibility, CircuitRetryAfter, ModelMetadata, RouteFiltering, RouteLifecycle, RoutingSelection}
   alias CodexPooler.Gateway.Routing.CandidateEligibility.Quota
-  alias CodexPooler.Gateway.Routing.{CircuitRetryAfter, ModelMetadata, RouteLifecycle, RoutingSelection}
+  alias CodexPooler.Gateway.Routing.ProviderCredits
   alias CodexPooler.Gateway.Runtime.Dispatch.Context
   alias CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback
   alias CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation
+  alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
   alias CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement
   alias CodexPooler.Gateway.Websocket.DirectCleanup
+  alias CodexPooler.Upstreams
+  alias CodexPooler.Upstreams.SavedResets
+  alias CodexPooler.Upstreams.SavedResets.AutoEligibility
 
   @type dispatch_callback ::
           (SelectedCandidateContext.t() ->
@@ -55,42 +60,126 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch do
           dispatch_result()
   def dispatch_from(context, start_index, transport_dispatch)
       when is_integer(start_index) and start_index >= 0 and is_function(transport_dispatch, 1) do
-    context.route_plan.candidates
-    |> Enum.with_index()
-    |> Enum.drop(start_index)
-    |> Enum.reduce_while({:retry, nil}, fn {{assignment, identity}, index}, _last ->
-      allow_retry? =
-        index < length(context.route_plan.candidates) - 1 and
-          not RequestOptions.connection_bound_compaction?(context.request_options) and
-          not client_retry_dispatch?(context)
+    resume_dispatch(context, start_index, transport_dispatch)
+  end
 
-      case dispatch_candidate(
-             context,
-             assignment,
-             identity,
-             index,
-             allow_retry?,
-             transport_dispatch
-           ) do
-        {:retry, reason} ->
-          dispatch_retry_reduction(context, reason)
+  defp resume_dispatch(%SelectedCandidateContext{assignment: assignment} = context, start_index, dispatch) when start_index > 0,
+    do: dispatch_refiltered(refilter_remaining_cohort(context, assignment.id), dispatch, {:retry, nil}, start_index)
 
-        {:ok, result} ->
-          {:halt, {:ok, result}}
+  defp resume_dispatch(context, start_index, dispatch) when start_index > 0 do
+    case Enum.at(context.route_plan.candidates, start_index - 1) do
+      {attempted, _identity} -> dispatch_refiltered(refilter_remaining_cohort(context, attempted.id), dispatch, {:retry, nil}, start_index)
+      nil -> {:retry, nil}
+    end
+  end
 
-        {:error, reason} ->
-          {:halt, {:error, reason}}
-      end
+  defp resume_dispatch(context, 0, dispatch), do: dispatch_at(context, 0, dispatch)
+
+  defp dispatch_at(%{route_plan: %{candidates: []}}, _index, _dispatch), do: {:retry, nil}
+
+  defp dispatch_at(context, index, dispatch) do
+    {assignment, identity} = hd(context.route_plan.candidates)
+    allow_retry? = retry_remaining?(context, assignment.id)
+    result = dispatch_candidate(context, assignment, identity, index, allow_retry?, dispatch)
+    retry_selected_result(result, context, assignment.id, allow_retry?, dispatch)
+  end
+
+  defp retry_remaining?(context, assignment_id),
+    do:
+      remaining_cohort(context, assignment_id) != [] and
+        not bound_reset_probe?(context.request_options.routing.reset_probe) and
+        not RequestOptions.connection_bound_compaction?(context.request_options) and not client_retry_dispatch?(context)
+
+  defp bound_reset_probe?(%ResetProbe{} = probe), do: ResetProbe.bound?(probe)
+  defp bound_reset_probe?(nil), do: false
+
+  defp retry_selected_result({:retry, _reason} = retry, context, assignment_id, true, dispatch),
+    do: dispatch_refiltered(refilter_remaining_cohort(context, assignment_id), dispatch, retry, length(Map.get(context.route_state.extensions, :attempted_capacity_assignments, [])) + 1)
+
+  defp retry_selected_result(result, _context, _assignment_id, _allowed?, _dispatch), do: result
+
+  defp dispatch_refiltered({:ok, context}, dispatch, _empty_result, index), do: dispatch_at(context, index, dispatch)
+  defp dispatch_refiltered({:error, error}, _dispatch, _empty_result, _index), do: {:error, error}
+  defp dispatch_refiltered(:empty, _dispatch, empty_result, _index), do: empty_result
+
+  defp remaining_cohort(context, attempted_id) do
+    attempted = MapSet.new([attempted_id | Map.get(context.route_state.extensions, :attempted_capacity_assignments, [])])
+    dropped = deferred_recovery_candidates(context)
+
+    (context.route_plan.candidates ++ dropped)
+    |> Enum.uniq_by(fn {assignment, _identity} -> assignment.id end)
+    |> Enum.reject(fn {assignment, _identity} -> MapSet.member?(attempted, assignment.id) end)
+  end
+
+  defp deferred_recovery_candidates(context) do
+    Enum.filter(Map.get(context.route_state.extensions, :route_filter_dropped, []), fn {assignment, identity} ->
+      snapshot = RouteState.quota_snapshot_for_identity(context.route_state, identity)
+      request_context = ProviderCredits.request_context(context.model, context.request_options, assignment.id) |> Map.merge(%{pool_upstream_assignment_id: assignment.id, upstream_identity_id: identity.id})
+      decision = Upstreams.provider_credits_decision(snapshot, request_context)
+      decision.capacity_basis == :provider_credits or AutoEligibility.gateway_auto_ready?(identity, SavedResets.auto_policy(identity), snapshot.as_of)
     end)
   end
 
-  defp dispatch_retry_reduction(context, reason) do
-    if client_retry_dispatch?(context),
-      do: {:halt, {:retry, reason}},
-      else: {:cont, {:retry, reason}}
+  defp refilter_remaining_cohort(context, attempted_id) do
+    remaining = remaining_cohort(context, attempted_id)
+
+    if remaining == [] do
+      :empty
+    else
+      extensions =
+        context.route_state.extensions
+        |> Map.put(:attempted_capacity_assignments, [attempted_id | Map.get(context.route_state.extensions, :attempted_capacity_assignments, [])])
+        |> Map.put(:attempted_capacity_candidates, attempted_advice_candidates(context, attempted_id))
+        |> Map.delete(:route_filter_dropped)
+
+      route_state =
+        %{context.route_state | candidates: remaining, saved_reset_auto_capacity: remaining, saved_reset_auto_cohort: remaining, extensions: extensions}
+        |> RouteState.refresh_quota_snapshots()
+        |> RouteState.preload_routing_snapshots(context.auth, context.model, context.request_options)
+
+      input = CandidateEligibility.FilterInput.new(%{auth: context.auth, model: context.model, endpoint: context.endpoint, payload: context.payload, request_options: context.request_options, candidates: remaining})
+
+      filtered_retry_context(RouteFiltering.filter_candidates_with_route_state(input, route_state), context, remaining)
+    end
+  end
+
+  defp attempted_advice_candidates(context, attempted_id) do
+    (Map.get(context.route_state.extensions, :attempted_capacity_candidates, []) ++ context.route_plan.candidates)
+    |> Enum.filter(fn {assignment, _identity} -> assignment.id == attempted_id or assignment.id in Map.get(context.route_state.extensions, :attempted_capacity_assignments, []) end)
+    |> Enum.uniq_by(fn {assignment, _identity} -> assignment.id end)
+  end
+
+  defp filtered_retry_context({:ok, candidates, options, state}, context, remaining) do
+    # Keep the original strategy/affinity order inside each basis; retries
+    # never broaden a partition, reselect a ring or change an anchor.
+    rank = Map.new(Enum.with_index(remaining), fn {{assignment, _identity}, index} -> {assignment.id, index} end)
+    capacity = options.routing.quota_decision["candidate_capacity"] || %{}
+
+    candidates =
+      Enum.sort_by(candidates, fn {assignment, _identity} ->
+        {capacity_retry_tier(capacity[assignment.id]["capacity_basis"]), rank[assignment.id]}
+      end)
+
+    plan = Map.merge(context.route_plan, %{candidates: candidates, selected_assignment_id: candidates |> hd() |> elem(0) |> Map.fetch!(:id)})
+    {:ok, %{context | route_plan: plan, request_options: options, route_state: state}}
+  end
+
+  defp filtered_retry_context({:error, error}, context, _remaining), do: finalize_retry_refusal(context, error)
+  defp capacity_retry_tier("provider_credits"), do: 1
+  defp capacity_retry_tier("unknown_legacy"), do: 2
+  defp capacity_retry_tier(_non_credit), do: 0
+
+  defp finalize_retry_refusal(context, %{status: status, code: code} = error) do
+    case AttemptSettlement.finalize_reservation_failure(context.reserved.request, %{response_status_code: status, last_error_code: to_string(code), usage_status: "not_applicable", pre_attempt_phase: PreAttemptRelease.routing_rejected()}) do
+      {:ok, _finalized} -> {:error, Map.delete(error, :accounting_disposition)}
+      {:error, gateway_error} -> {:error, gateway_error}
+    end
   end
 
   @spec candidate_available?(dispatch_context(), non_neg_integer()) :: boolean()
+  def candidate_available?(%SelectedCandidateContext{} = context, index) when is_integer(index) and index >= 0,
+    do: context.allow_retry? and remaining_cohort(context, context.assignment.id) != []
+
   def candidate_available?(context, index) when is_integer(index) and index >= 0 do
     index < length(context.route_plan.candidates)
   end

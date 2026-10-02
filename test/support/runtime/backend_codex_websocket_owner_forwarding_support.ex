@@ -28,9 +28,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Gateway.Persistence.RoutingCircuitState
   alias CodexPooler.Gateway.Transports.Admission
+  alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequest
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
   alias CodexPooler.Gateway.Transports.WebsocketOwnerPreviousReleaseFixture
@@ -135,7 +136,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
     def call_owner(_node, module, function, args, timeout) do
       send(state().notify, {:turn_budget_remote_call, function, timeout})
 
-      if function == :remote_submit_request_v1 and timeout <= state().minimum_timeout_ms do
+      if function == :remote_submit_request_v8 and timeout <= state().minimum_timeout_ms do
         {:error, :owner_forward_timeout}
       else
         apply(module, function, args)
@@ -256,13 +257,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
 
     case release do
       :current ->
-        assert {:module, CodexPooler.Upstreams} =
-                 WebsocketOwnerPreviousReleaseFixture.load_synthetic_identity_lookup(
-                   peer_node,
-                   identity.id
-                 )
-
-        trace_remote_v1_calls!(peer_node)
+        assert Keyword.get(opts, :repo) == :real
+        assert is_struct(:erpc.call(peer_node, Upstreams, :get_upstream_identity, [identity.id]), UpstreamIdentity)
+        trace_remote_v8_calls!(peer_node)
 
       :previous ->
         assert {:module, WebsocketOwnerForwarder} =
@@ -270,7 +267,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
 
         refute :erpc.call(peer_node, :erlang, :function_exported, [
                  WebsocketOwnerForwarder,
-                 :remote_submit_request_v1,
+                 :remote_submit_request_v8,
                  3
                ])
     end
@@ -394,25 +391,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
     start_peer_owner_on!(auth, session_attrs, peer_node)
   end
 
-  # `start_peer_window_owner!/2` on the module's shared peer
-  # (`start_shared_bridge_peer!/0`): the peer's identity lookup names this
-  # test's upstream identity, and the lifecycle relay this test attaches there
-  # is detached when it ends.
+  # `start_peer_window_owner!/2` on the module's shared Repo-backed peer.
+  # The lifecycle relay each test attaches there is detached when it ends.
   def start_shared_peer_window_owner!(setup, window_id, peer_node),
     do: start_shared_peer_session_owner!(setup, %{session_header: window_id, session_header_source: "x-codex-window-id"}, peer_node)
 
-  # The same for any session the socket's upgrade resolves (`session_attrs`,
-  # as for `start_peer_session_owner!/2`). `other_identities` are the Pool's
-  # other upstream identities the peer's owner must serve too, as when a turn
-  # fails over to another account (findings#206 row 206-600).
-  def start_shared_peer_session_owner!(%{authorization: authorization, identity: identity} = setup, session_attrs, peer_node, other_identities \\ []) do
+  # The same real Repo-backed owner for any session the socket's upgrade
+  # resolves, including other request-compatible identities in its Pool.
+  def start_shared_peer_session_owner!(%{authorization: authorization} = setup, session_attrs, peer_node) do
     BackendCodexTestSupport.register_unboxed_pool_cleanup!(setup)
     {:ok, auth} = Access.authenticate_authorization_header(authorization)
-    identity_ids = Enum.map([identity | other_identities], & &1.id)
-
-    assert {:module, CodexPooler.Upstreams} =
-             WebsocketOwnerPreviousReleaseFixture.load_synthetic_identity_lookup(peer_node, identity_ids)
-
     start_peer_owner_on!(auth, session_attrs, peer_node)
   end
 
@@ -445,16 +433,30 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
 
   def relay_native_compaction_lifecycle(_event, _measurements, _metadata, _test_pid), do: :ok
 
-  defp trace_remote_v1_calls!(peer_node) do
-    assert {:ok, tracer} =
-             :erpc.call(
-               peer_node,
-               WebsocketOwnerPreviousReleaseFixture,
-               :start_forwarder_v1_trace,
-               [self()]
-             )
+  @doc false
+  def start_forwarder_v8_trace(notify) when is_pid(notify) do
+    tracer = spawn(fn -> forwarder_v8_trace_loop(notify) end)
+    {:module, WebsocketOwnerForwarder} = Code.ensure_loaded(WebsocketOwnerForwarder)
+    :erlang.trace_pattern({WebsocketOwnerForwarder, :remote_submit_request_v8, 3}, true, [:local])
+    :erlang.trace(:all, true, [:call, {:tracer, tracer}])
+    :erlang.trace(:new, true, [:call, {:tracer, tracer}])
+    {:ok, tracer}
+  end
 
+  defp trace_remote_v8_calls!(peer_node) do
+    assert {:ok, tracer} = :erpc.call(peer_node, __MODULE__, :start_forwarder_v8_trace, [self()])
     assert node(tracer) == peer_node
+  end
+
+  defp forwarder_v8_trace_loop(notify) do
+    receive do
+      {:trace, pid, :call, {WebsocketOwnerForwarder, :remote_submit_request_v8, args}} ->
+        send(notify, {:remote_forwarder_v8_call, pid, args})
+        forwarder_v8_trace_loop(notify)
+
+      _other ->
+        forwarder_v8_trace_loop(notify)
+    end
   end
 
   def assert_forwarding_cardinality!(request, codex_session_id, status) do
@@ -690,14 +692,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
     decoded["id"] || get_in(decoded, ["response", "id"])
   end
 
-  def assert_remote_submit_request_v1!(state, remote_node, mode \\ nil, timeout \\ @handoff_detection_timeout_ms) do
+  def assert_remote_submit_request_v8!(state, remote_node, mode \\ nil, timeout \\ @handoff_detection_timeout_ms) do
     codex_session_id = state.codex_session.id
     downstream = state.websocket_owner_downstream
 
     assert_receive {:websocket_owner_harness_node_call,
                     %{
                       node: ^remote_node,
-                      function: :remote_submit_request_v1,
+                      function: :remote_submit_request_v8,
                       arity: 3,
                       codex_session_id: ^codex_session_id,
                       downstream: ^downstream
@@ -706,10 +708,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
 
     if mode, do: assert(call.mode == mode)
 
-    assert_receive {:websocket_owner_harness_request, %WebsocketOwnerRequest{version: 1} = owner_request},
+    assert_receive {:websocket_owner_harness_request, %WebsocketOwnerRequestV8{version: 8} = owner_request},
                    timeout
 
-    assert :ok = WebsocketOwnerRequest.validate(owner_request)
+    assert :ok = WebsocketOwnerRequestV8.validate(owner_request)
     refute contains_function?(owner_request)
     owner_request
   end
@@ -1418,12 +1420,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
   def blocking_owner_upstream_boundary(test_pid, release_ref) do
     %{
       start: fn -> Agent.start_link(fn -> %{received?: false, closed?: false} end) end,
-      send: fn upstream_pid, _request, _writer ->
+      send: fn upstream_pid, request, _writer ->
+        {:ok, receipt} = ProviderCreditsAdmission.admit(request.provider_credits_context)
         Agent.update(upstream_pid, fn state -> %{state | received?: true} end)
         send(test_pid, {:blocking_owner_upstream_received, self(), release_ref})
 
         receive do
-          {:blocking_owner_upstream_release, ^release_ref} -> :ok
+          {:blocking_owner_upstream_release, ^release_ref} -> {:ok, %{body: "", terminal: "response.completed", status: 200, headers: [], websocket_frame_headers: %{}, provider_credits_admission: receipt}}
         after
           5_000 -> exit(:blocking_owner_upstream_timeout)
         end

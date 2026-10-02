@@ -26,16 +26,18 @@ defmodule CodexPooler.Upstreams.Quota.Windows.AccountDenial do
   Once that reading expires it no longer overrides an unexpired denial. An
   observation without a reset instant holds only while it is fresh.
 
-  This is deliberately not part of `Windows.Routing` eligibility: that answer
-  also feeds the saved-reset sibling-capacity rule, the admin readiness pages
-  and the catalog partition choice, and none of them may change here. The
-  gateway applies it as its own candidate filter after quota eligibility and
-  the saved-reset decisions.
+  `active/1` retains the non-credit/reset denial contract. Credit-channel
+  consumers use `active_for_credits/1`: newer current-epoch finite weekly WHAM
+  authority can supersede an older ordinary weekly refusal, but never a workspace
+  marker or a same-clock/newer refusal. Policy qualification still decides whether
+  that physical credit channel can serve the exact request.
   """
 
+  alias CodexPooler.Quotas.CapacityFacts
   alias CodexPooler.Quotas.Evidence
   alias CodexPooler.Upstreams.Quota.AccountAvailabilityStore
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
+  alias CodexPooler.Upstreams.Quota.CapacityFactsStore
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
 
   @usage_limit_refusal_codes ~w(usage_limit_reached usage_limit_exceeded)
@@ -70,6 +72,34 @@ defmodule CodexPooler.Upstreams.Quota.Windows.AccountDenial do
   end
 
   def active(_snapshot), do: nil
+
+  @doc "Credit-channel denial: only newer same-epoch WHAM weekly authority can supersede an older ordinary included-limit refusal."
+  @spec active_for_credits(RoutingQuotaSnapshot.t() | nil) :: t() | nil
+  def active_for_credits(%RoutingQuotaSnapshot{as_of: %DateTime{} = as_of} = snapshot) do
+    windows = RoutingQuotaSnapshot.time_visible_raw_windows(snapshot)
+
+    windows
+    |> Enum.filter(&account_denial_window?/1)
+    |> Enum.reject(&(superseded?(&1, snapshot) or ordinary_weekly_credit_superseded?(&1, snapshot)))
+    |> latest_observation()
+    |> in_force(as_of)
+    |> put_hint_reset_at(windows, as_of)
+  end
+
+  def active_for_credits(_snapshot), do: nil
+
+  defp ordinary_weekly_credit_superseded?(%AccountQuotaWindow{quota_scope: "account", quota_family: "account", window_kind: "secondary", window_minutes: 10_080, metadata: metadata, observed_at: denied_at, reset_at: %DateTime{} = reset_at}, %RoutingQuotaSnapshot{capacity_facts: %CapacityFacts{} = facts} = snapshot) do
+    ordinary_refusal?(metadata) and observed_weekly_credits?(facts) and
+      CapacityFactsStore.fresh?(facts, snapshot.credential_epoch, snapshot.as_of) and DateTime.compare(facts.observed_at, denied_at) == :gt and
+      Enum.any?(facts.account_windows, &(&1.window_kind == "secondary" and &1.window_minutes == 10_080 and DateTime.compare(&1.reset_at, reset_at) == :eq))
+  end
+
+  defp ordinary_weekly_credit_superseded?(_window, _snapshot), do: false
+
+  defp ordinary_refusal?(metadata), do: metadata["rate_limit_error_code"] in @usage_limit_refusal_codes and metadata["rate_limit_reached_type"] in [nil, "rate_limit_reached"]
+
+  defp observed_weekly_credits?(facts),
+    do: facts.source_kind == :wham_usage and facts.included_permission == :exhausted and facts.credit_permission == :available and facts.denial_category == :included_limit and facts.has_credits == true and facts.unlimited == false and CapacityFacts.positive_balance?(facts)
 
   defp account_denial_window?(%AccountQuotaWindow{quota_scope: scope, metadata: %{"rate_limit_error_code" => code}, observed_at: %DateTime{}})
        when scope in ["account", "feature"] and code in @usage_limit_refusal_codes,

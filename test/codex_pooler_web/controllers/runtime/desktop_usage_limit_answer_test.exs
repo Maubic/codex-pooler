@@ -328,9 +328,9 @@ defmodule CodexPoolerWeb.Runtime.DesktopUsageLimitAnswerTest do
       # The turn's submission leaves from the socket's response task, a
       # sensitive process no trace can observe here, so it is read where it
       # arrives: the peer traces its forwarder's entry (`start_bridge_peer!/3`).
-      assert_receive {:remote_forwarder_v1_call, _pid, [_session_id, _downstream, _owner_request] = submission}, 15_000
+      assert_receive {:remote_forwarder_v8_call, _pid, [_session_id, _downstream, _owner_request] = submission}, 15_000
 
-      for crossing <- [{:received, :remote_submit_request_v1, submission} | crossings] do
+      for crossing <- [{:received, :remote_submit_request_v8, submission} | crossings] do
         assert :binary.match(:erlang.term_to_binary(crossing), marker) == :nomatch, "the originator crossed: #{inspect(crossing, limit: 8)}"
       end
     end

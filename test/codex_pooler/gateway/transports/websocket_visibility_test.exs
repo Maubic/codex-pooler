@@ -16,6 +16,7 @@ defmodule CodexPooler.Gateway.Transports.WebsocketVisibilityTest do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks
   alias CodexPooler.Gateway.Websocket
+  alias CodexPooler.ProviderCreditsDispatchSupport
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
   alias Ecto.Adapters.SQL.Sandbox
 
@@ -97,6 +98,8 @@ defmodule CodexPooler.Gateway.Transports.WebsocketVisibilityTest do
       frame_observer: observer,
       writer: fn _frame -> throw(:synthetic_writer_failure) end
     }
+
+    request = ProviderCreditsDispatchSupport.wire_request!(request, identity: fixture.identity)
 
     assert catch_throw(UpstreamWebsocketSession.request_once(request)) ==
              :synthetic_writer_failure
@@ -264,6 +267,7 @@ defmodule CodexPooler.Gateway.Transports.WebsocketVisibilityTest do
 
       result =
         WebsocketOwnerSession.submit_request(owner, downstream, %UpstreamWebsocketSession.Request{
+          provider_credits_context: ProviderCreditsDispatchSupport.context!(fixture.identity, request_id: fixture.request.id, attempt_id: fixture.attempt.id),
           url: FakeUpstream.url(upstream) <> "/backend-api/codex/responses",
           headers: [],
           payload: "{}",
@@ -339,6 +343,7 @@ defmodule CodexPooler.Gateway.Transports.WebsocketVisibilityTest do
       |> RequestOptions.for_websocket(%{"model" => "example-model"})
 
     UpstreamDispatch.websocket_request(%UpstreamDispatch.Request{
+      provider_credits_context: ProviderCreditsDispatchSupport.context!(fixture.identity, request_id: fixture.request.id, attempt_id: fixture.attempt.id),
       url: FakeUpstream.url(upstream) <> "/backend-api/codex/responses",
       token: "redacted",
       upstream_payload: "{}",

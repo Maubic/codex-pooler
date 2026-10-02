@@ -205,6 +205,36 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetricsTest do
     assert [%{assignment_state: "active", routing_usable?: true}] = contribution.items
   end
 
+  test "ready credit routing preserves included exhaustion in quota health" do
+    %{user: owner} = bootstrap_owner_fixture(%{"email" => unique_user_email()})
+    scope = Scope.for_user(owner)
+    pool = pool_fixture()
+    %{identity: identity, assignment: assignment} = upstream_assignment_fixture(pool)
+
+    readiness = %{
+      state: "provider_credits_ready",
+      label: "Routing ready via credits",
+      tone: :success,
+      routing_ready_now?: true,
+      conditional?: false,
+      capacity_basis: :provider_credits,
+      included_quota_state: "exhausted",
+      reason_codes: [],
+      primary_window: nil,
+      primary_30d_window: nil,
+      weekly_window: nil
+    }
+
+    health = UpstreamCockpitMetrics.quota_health_from_readiness(scope, identity, [assignment_summary(assignment, pool)], readiness)
+
+    assert health.kpis.exhausted_count == 1
+    assert health.kpis.routing_usable_count == 1
+    assert health.kpis.routing_conditional_count == 0
+    assert health.state == "exhausted"
+    assert health.degraded?
+    assert [%{state_label: "Exhausted", routing_conditional?: false, routing_usable?: true, routing_readiness_label: "Routing ready via credits"}] = health.items
+  end
+
   test "request aggregates count retried requests once and retain the lower median latency" do
     %{user: owner} = bootstrap_owner_fixture(%{"email" => unique_user_email()})
     scope = Scope.for_user(owner)
