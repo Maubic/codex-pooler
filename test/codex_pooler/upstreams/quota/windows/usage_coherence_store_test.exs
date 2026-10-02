@@ -3,6 +3,10 @@ defmodule CodexPooler.Upstreams.Quota.Windows.UsageCoherenceStoreTest do
 
   import CodexPooler.PoolerFixtures
 
+  alias CodexPooler.Gateway.Routing.CandidateEligibility.Quota, as: CandidateQuota
+  alias CodexPooler.Quotas.Evidence
+  alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
+  alias CodexPooler.Upstreams.Quota.{AccountAvailabilityStore, AccountQuotaWindow, CapacityFactsStore, RoutingQuotaSnapshot}
   alias CodexPooler.Upstreams.Quota.Windows
   alias CodexPooler.Upstreams.Quota.Windows.EvidenceStore
   alias CodexPooler.Upstreams.Quota.Windows.Routing
@@ -248,6 +252,146 @@ defmodule CodexPooler.Upstreams.Quota.Windows.UsageCoherenceStoreTest do
 
     assert Decimal.equal?(retained.used_percent, 22)
     assert DateTime.compare(retained.reset_at, reset_at) == :eq
+  end
+
+  for allowed <- [true, false] do
+    @tag :primary_idle_display
+    test "primary idle display proof survives freshness rollover with permission #{allowed}" do
+      allowed = unquote(allowed)
+      pool = pool_fixture()
+      %{identity: identity, assignment: assignment} = active_upstream_assignment_fixture(pool, %{})
+      model = model_fixture(pool)
+      t0 = DateTime.utc_now() |> DateTime.add(-20, :minute) |> DateTime.truncate(:second)
+
+      for offset <- [0, 60, 240, 901, 960] do
+        at = DateTime.add(t0, offset, :second)
+        {primary, result} = record_idle_payload!(identity, t0, at, allowed)
+
+        if offset >= 240, do: assert(primary.metadata["reset_state"] == "floating")
+        if offset < 240, do: refute(primary.metadata["reset_state"] == "floating")
+        assert Decimal.equal?(primary.used_percent, Decimal.new(0))
+        assert primary.metadata["rate_limit_allowed"] == allowed
+        assert primary.metadata["rate_limit_reached"] == not allowed
+
+        if offset == 240 do
+          assert DateTime.compare(primary.reset_at, DateTime.add(t0, 18_000, :second)) == :eq
+          assert DateTime.compare(primary.observed_at, expected_primary_observation(allowed, at, t0)) == :eq
+        end
+
+        snapshot = idle_routing_snapshot(identity, result, at)
+        without_display = %{snapshot | raw_windows: Enum.map(snapshot.raw_windows, fn window -> %{window | metadata: Map.drop(window.metadata, ["reset_state", "__quota_primary_idle_display_v1"])} end)}
+        context = %{model: model.exposed_model_id, upstream_model: model.upstream_model_id, serving_mode: "full", transport: "http"}
+        candidate = {assignment, identity}
+        routeable = CandidateQuota.quota_routable?(model, candidate, snapshot, context)
+        assert routeable == allowed
+        assert routeable == CandidateQuota.quota_routable?(model, candidate, without_display, context)
+      end
+    end
+  end
+
+  @tag :primary_idle_display
+  test "replayed and out-of-order idle receipts cannot establish floating primary display" do
+    %{identity: identity} = active_upstream_assignment_fixture(pool_fixture(), %{})
+    t0 = DateTime.utc_now() |> DateTime.add(-10, :minute) |> DateTime.truncate(:second)
+    record_idle_payload!(identity, t0, t0, false)
+    record_idle_payload!(identity, t0, DateTime.add(t0, 60, :second), false)
+
+    for {observed_offset, provider_offset} <- [{240, 0}, {30, 30}, {300, 0}] do
+      {primary, _} = record_idle_payload!(identity, t0, DateTime.add(t0, observed_offset, :second), false, DateTime.add(t0, provider_offset + 18_000, :second))
+      refute primary.metadata["reset_state"] == "floating"
+    end
+
+    {confirmed, _} = record_idle_payload!(identity, t0, DateTime.add(t0, 360, :second), false)
+    assert confirmed.metadata["reset_state"] == "floating"
+  end
+
+  @tag :primary_idle_display
+  test "a fixed zero-use countdown stays anchored and accepted positive use clears floating display" do
+    %{identity: anchored} = active_upstream_assignment_fixture(pool_fixture(), %{})
+    %{identity: floating} = active_upstream_assignment_fixture(pool_fixture(), %{})
+    t0 = DateTime.utc_now() |> DateTime.add(-10, :minute) |> DateTime.truncate(:second)
+    reset_at = DateTime.add(t0, 18_000, :second)
+
+    for offset <- [0, 60, 240] do
+      at = DateTime.add(t0, offset, :second)
+      {control, _} = record_idle_payload!(anchored, t0, at, true, reset_at, 0, 18_000 - offset)
+      refute control.metadata["reset_state"] == "floating"
+      record_idle_payload!(floating, t0, at, true)
+    end
+
+    assert primary_row!(floating).metadata["reset_state"] == "floating"
+    {used, _} = record_idle_payload!(floating, t0, DateTime.add(t0, 300, :second), true, reset_at, 10, 17_700)
+    assert Decimal.equal?(used.used_percent, Decimal.new(10))
+    refute used.metadata["reset_state"] == "floating"
+    refute Map.has_key?(used.metadata, "__quota_primary_idle_display_v1")
+  end
+
+  @tag :primary_idle_display
+  test "accepted fixed countdown clears idle display only after canonical evidence advances" do
+    %{identity: identity} = active_upstream_assignment_fixture(pool_fixture(), %{})
+    t0 = DateTime.utc_now() |> DateTime.add(-6, :hour) |> DateTime.truncate(:second)
+    for offset <- [0, 60, 240], do: record_idle_payload!(identity, t0, DateTime.add(t0, offset, :second), true)
+    assert primary_row!(identity).metadata["reset_state"] == "floating"
+
+    # The previous canonical cycle expired; the store accepts the provider's
+    # later fixed countdown. A rejected observation must not clear the proof.
+    at = DateTime.add(t0, 18_061, :second)
+    reset_at = DateTime.add(t0, 36_000, :second)
+    {anchored, _} = record_idle_payload!(identity, t0, at, true, reset_at, 0, 17_939)
+    assert DateTime.compare(anchored.observed_at, at) == :eq
+    assert DateTime.compare(anchored.reset_at, reset_at) == :eq
+    refute anchored.metadata["reset_state"] == "floating"
+    refute Map.has_key?(anchored.metadata, "__quota_primary_idle_display_v1")
+  end
+
+  @tag :primary_idle_display
+  test "idle-shaped receipts cannot replace an active positive primary with floating display" do
+    %{identity: identity} = active_upstream_assignment_fixture(pool_fixture(), %{})
+    t0 = DateTime.utc_now() |> DateTime.add(-10, :minute) |> DateTime.truncate(:second)
+    record_idle_payload!(identity, t0, t0, true, DateTime.add(t0, 18_000, :second), 20)
+
+    for offset <- [60, 240, 360] do
+      {current, _} = record_idle_payload!(identity, t0, DateTime.add(t0, offset, :second), true)
+      assert Decimal.equal?(current.used_percent, Decimal.new(20))
+      refute current.metadata["reset_state"] == "floating"
+      refute Map.has_key?(current.metadata, "__quota_primary_idle_display_v1")
+    end
+  end
+
+  defp expected_primary_observation(true, at, _t0), do: at
+  defp expected_primary_observation(false, _at, t0), do: t0
+
+  defp record_idle_payload!(identity, t0, at, allowed, reset_at \\ nil, used \\ 0, reset_after \\ 18_000) do
+    payload = %{
+      "plan_type" => "team",
+      "rate_limit" => %{
+        "allowed" => allowed,
+        "limit_reached" => not allowed,
+        "primary_window" => %{"used_percent" => used, "limit_window_seconds" => 18_000, "reset_after_seconds" => reset_after, "reset_at" => DateTime.to_unix(reset_at || DateTime.add(at, 18_000, :second))},
+        "secondary_window" => %{"used_percent" => 100, "limit_window_seconds" => 604_800, "reset_after_seconds" => DateTime.diff(DateTime.add(t0, 604_800, :second), at, :second), "reset_at" => DateTime.to_unix(DateTime.add(t0, 604_800, :second))}
+      },
+      "credits" => %{"has_credits" => false, "unlimited" => false, "balance" => nil},
+      "spend_control" => %{"reached" => false}
+    }
+
+    assert {:ok, result} = Evidence.CodexParsers.parse_codex_usage_result(payload, at)
+
+    for evidence <- result.windows do
+      assert {:ok, _} = EvidenceStore.record_evidence(identity, Evidence.to_window_attrs(evidence), at, at)
+    end
+
+    {primary_row!(identity), result}
+  end
+
+  defp primary_row!(identity) do
+    Repo.one!(from window in AccountQuotaWindow, where: window.upstream_identity_id == ^identity.id and window.window_kind == "primary" and window.source == "codex_usage_api")
+  end
+
+  defp idle_routing_snapshot(identity, result, at) do
+    epoch = CredentialFencing.credential_epoch(identity)
+    metadata = identity.metadata |> AccountAvailabilityStore.transition(result.account_availability, at, epoch) |> CapacityFactsStore.record_observations([result.capacity_facts], epoch)
+    windows = Repo.all(from window in AccountQuotaWindow, where: window.upstream_identity_id == ^identity.id)
+    RoutingQuotaSnapshot.from_identity(%{identity | metadata: metadata}, windows, at)
   end
 
   defp record!(identity, source, used_percent, reset_at, observed_at, metadata),

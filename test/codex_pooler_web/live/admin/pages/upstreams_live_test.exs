@@ -34,6 +34,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
   alias CodexPooler.Upstreams.OAuthFlows
   alias CodexPooler.Upstreams.Quota.AccountAvailabilityStore
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
+  alias CodexPooler.Upstreams.Quota.CapacityFactsStore
   alias CodexPooler.Upstreams.Quota.CreditBalanceStore
   alias CodexPooler.Upstreams.Quota.PrimingState
   alias CodexPooler.Upstreams.Quota.Windows.EvidenceStore
@@ -340,6 +341,48 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(view, "##{unknown_tokens_trigger_id}[aria-expanded='true']")
     assert has_element?(view, "##{unknown_card_id}-tokens-panel[aria-hidden='false']")
+  end
+
+  @tag :relative_countdown_contract
+  @tag :primary_idle_display
+  test "renders proven idle account primary without a ticking reset while weekly denial remains", %{conn: conn, scope: scope} do
+    pool = pool_fixture(%{name: "Idle window display Pool"})
+    %{identity: identity} = upstream_assignment_fixture(pool, %{account_label: "Idle window account", identity_metadata: %{"credential_epoch" => 1}})
+    t0 = DateTime.utc_now() |> DateTime.add(-901, :second) |> DateTime.truncate(:second)
+
+    for offset <- [0, 60, 240] do
+      at = DateTime.add(t0, offset, :second)
+
+      payload = %{
+        "plan_type" => "team",
+        "rate_limit_reached_type" => "workspace_member_credits_depleted",
+        "credits" => %{"has_credits" => false, "unlimited" => false, "balance" => nil},
+        "spend_control" => %{"reached" => false},
+        "rate_limit" => %{
+          "allowed" => false,
+          "limit_reached" => true,
+          "primary_window" => %{"used_percent" => 0, "limit_window_seconds" => 18_000, "reset_after_seconds" => 18_000, "reset_at" => DateTime.to_unix(DateTime.add(at, 18_000, :second))},
+          "secondary_window" => %{"used_percent" => 100, "limit_window_seconds" => 604_800, "reset_after_seconds" => DateTime.diff(DateTime.add(t0, 604_800, :second), at, :second), "reset_at" => DateTime.to_unix(DateTime.add(t0, 604_800, :second))}
+        }
+      }
+
+      assert {:ok, %{windows: windows} = result} = Evidence.CodexParsers.parse_codex_usage_result(payload, at)
+      metadata = identity.metadata |> AccountAvailabilityStore.transition(result.account_availability, at, 1) |> CapacityFactsStore.record_observations([result.capacity_facts], 1)
+      Repo.update!(Ecto.Changeset.change(identity, metadata: metadata))
+
+      for evidence <- windows do
+        assert {:ok, _} = EvidenceStore.record_evidence(identity, Evidence.to_window_attrs(evidence), at, at)
+      end
+    end
+
+    account = UpstreamAccountsReadModel.list_visible_accounts(scope, [pool]) |> Enum.find(&(&1.identity.id == identity.id))
+    assert Map.take(account.routing_readiness, [:label, :state, :reason_code]) == %{label: "Quota exhausted", state: "quota_blocked", reason_code: "quota_exhausted"}
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    primary_id = "upstream-account-#{identity.id}-limit-primary_5h-reset"
+    assert has_element?(view, "##{primary_id}[data-countdown-state='waiting']", "starts on use")
+    refute has_element?(view, "##{primary_id}[phx-hook]")
+    refute has_element?(view, "##{primary_id}[data-countdown-at]")
+    assert has_element?(view, "#upstream-account-#{identity.id}[data-routing-ready-now='false']", "Quota exhausted")
   end
 
   @tag :relative_countdown_contract

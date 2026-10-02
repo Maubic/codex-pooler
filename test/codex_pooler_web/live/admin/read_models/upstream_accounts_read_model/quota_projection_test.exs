@@ -13,6 +13,40 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
 
   @snapshot_at ~U[2026-07-25 12:00:00Z]
 
+  @tag :primary_idle_display
+  test "confirmed idle account primary retains starts-on-use presentation across stale evidence" do
+    t0 = DateTime.utc_now() |> DateTime.add(-20, :minute) |> DateTime.truncate(:second)
+    preferences = DateTimeDisplay.preferences_for_user(nil)
+
+    for allowed <- [true, false] do
+      %{identity: identity} = active_upstream_assignment_fixture(pool_fixture(), %{})
+
+      for offset <- [0, 60, 240] do
+        at = DateTime.add(t0, offset, :second)
+
+        payload = %{
+          "plan_type" => "team",
+          "rate_limit" => %{"allowed" => allowed, "limit_reached" => not allowed, "primary_window" => %{"used_percent" => 0, "limit_window_seconds" => 18_000, "reset_after_seconds" => 18_000, "reset_at" => DateTime.to_unix(DateTime.add(at, 18_000, :second))}}
+        }
+
+        assert {:ok, %{windows: [evidence]}} = Evidence.CodexParsers.parse_codex_usage_result(payload, at)
+        assert {:ok, _} = QuotaWindows.EvidenceStore.record_evidence(identity, Evidence.to_window_attrs(evidence), at, at)
+      end
+
+      window = Repo.one!(from window in AccountQuotaWindow, where: window.upstream_identity_id == ^identity.id)
+      assert window.metadata["reset_state"] == "floating"
+      assert DateTime.compare(window.reset_at, DateTime.add(t0, 18_000, :second)) == :eq
+
+      for offset <- [241, 901, 1141] do
+        row = QuotaProjection.quota_limit_rows([window], preferences, DateTime.add(t0, offset, :second)) |> Enum.find(&(&1.key == :primary_5h))
+        assert row.reset_semantics == :floating
+        assert row.reset_display_state == :static
+        assert row.reset_label == "starts on use"
+        assert row.permission_facts == %{allowed: allowed, limit_reached: not allowed}
+      end
+    end
+  end
+
   @tag :quota_projection
   test "keeps a valid post-consume candidate visible when the effective fold selects another source" do
     consumed_at = DateTime.add(@snapshot_at, -5, :minute)

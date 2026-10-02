@@ -31,6 +31,8 @@ defmodule CodexPooler.Upstreams.Quota.Windows.EvidenceStore do
   @equivalent_anchor_max_shift_seconds 5 * 60
   @account_snapshot_reset_tolerance_seconds 5
   @candidate_metadata_key "__quota_confirmed_candidate_v1"
+  @primary_idle_display_key "__quota_primary_idle_display_v1"
+  @primary_idle_confirmation_seconds 180
   @candidate_version 1
   @candidate_provider_status_metadata_key "__quota_candidate_provider_status_v1"
   @candidate_provider_status_version 1
@@ -438,6 +440,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.EvidenceStore do
     attrs
     |> put_timestamps(existing)
     |> put_accepted_positive_weekly_barrier(evidence, existing, timestamp)
+    |> put_primary_idle_display(existing, evidence, timestamp)
   end
 
   defp merge_attrs(
@@ -476,7 +479,110 @@ defmodule CodexPooler.Upstreams.Quota.Windows.EvidenceStore do
     merged_attrs
     |> maybe_upgrade_explicit_zero_capacity(evidence, existing, timestamp)
     |> put_accepted_positive_weekly_barrier(evidence, existing, timestamp)
+    |> put_primary_idle_display(existing, evidence, timestamp)
   end
+
+  # A confirmed idle primary is a display fact, not a new quota cycle. Keep
+  # this proof separate from canonical reset/observation and restart markers:
+  # denied receipts may prove a rolling clock without refreshing admission.
+  defp put_primary_idle_display(attrs, existing, %Evidence{source: "codex_usage_api", quota_key: "account", quota_scope: "account", quota_family: "account", window_kind: "primary", window_minutes: 300, used_percent: %Decimal{}} = evidence, timestamp) do
+    previous = (existing.metadata || %{})[@primary_idle_display_key]
+
+    cond do
+      accepted_primary_countdown_or_use?(attrs, evidence, timestamp) ->
+        clear_primary_idle_display(attrs, previous)
+
+      primary_idle_display_evidence?(attrs, evidence, timestamp) ->
+        observe_primary_idle_display(attrs, previous, evidence, timestamp)
+
+      is_map(previous) and previous["state"] == "floating" and zero_percent?(attrs.used_percent) ->
+        mark_floating_reset(attrs)
+
+      true ->
+        attrs
+    end
+  end
+
+  defp put_primary_idle_display(attrs, _existing, _evidence, _timestamp), do: attrs
+
+  defp accepted_primary_countdown_or_use?(attrs, evidence, timestamp) do
+    same_datetime?(attrs.observed_at, evidence.observed_at) and
+      same_datetime?(attrs.reset_at, evidence.reset_at) and
+      is_struct(attrs.used_percent, Decimal) and Decimal.equal?(attrs.used_percent, evidence.used_percent) and
+      Evidence.current_freshness_state(evidence, timestamp) == "fresh" and
+      (positive_percent?(evidence.used_percent) or
+         (RelativeLiveness.provider_proof_valid?(evidence, timestamp) and
+            match?({:ok, %{limit_window_seconds: 18_000, elapsed_seconds: seconds}} when seconds > 60, RelativeLiveness.countdown_timing(evidence.metadata))))
+  end
+
+  defp primary_idle_display_evidence?(attrs, evidence, timestamp) do
+    primary_idle_percent_only?(attrs, evidence) and full_window_idle_primary?(evidence) and
+      RelativeLiveness.countdown_timing(evidence.metadata) == {:ok, %{limit_window_seconds: 18_000, reset_after_seconds: 18_000, elapsed_seconds: 0}} and
+      RelativeLiveness.provider_proof_valid?(evidence, timestamp) and
+      Evidence.current_freshness_state(evidence, timestamp) == "fresh" and
+      {evidence.metadata["rate_limit_allowed"], evidence.metadata["rate_limit_reached"]} in [{true, false}, {false, true}]
+  end
+
+  defp primary_idle_percent_only?(attrs, evidence),
+    do: zero_percent?(attrs.used_percent) and zero_percent?(evidence.used_percent) and evidence.source_precision in ["observed", "authoritative"] and evidence.active_limit in [nil, 0] and evidence.credits in [nil, 0]
+
+  defp observe_primary_idle_display(attrs, previous, evidence, timestamp) do
+    {:ok, provider_at} = RelativeLiveness.provider_observed_at(evidence)
+
+    case primary_idle_display_proof(previous, timestamp) do
+      {:ok, first_at, last_at, last_observed_at} ->
+        advance_primary_idle_display(attrs, previous, evidence.observed_at, provider_at, first_at, last_at, last_observed_at)
+
+      :error ->
+        attrs
+        |> clear_primary_idle_display(previous)
+        |> put_primary_idle_display_proof(provider_at, provider_at, evidence.observed_at, "candidate")
+    end
+  end
+
+  defp advance_primary_idle_display(attrs, previous, observed_at, provider_at, first_at, last_at, last_observed_at) do
+    cond do
+      DateTime.compare(provider_at, last_at) == :gt and DateTime.compare(observed_at, last_observed_at) == :gt ->
+        state = if DateTime.diff(provider_at, first_at, :second) >= @primary_idle_confirmation_seconds, do: "floating", else: "candidate"
+        put_primary_idle_display_proof(attrs, first_at, provider_at, observed_at, state)
+
+      previous["state"] == "floating" ->
+        mark_floating_reset(attrs)
+
+      true ->
+        attrs
+    end
+  end
+
+  defp primary_idle_display_proof(%{"state" => state, "first_provider_at" => first, "last_provider_at" => last, "last_observed_at" => observed}, timestamp) when state in ["candidate", "floating"] do
+    with {:ok, first_at} <- parse_datetime(first),
+         {:ok, last_at} <- parse_datetime(last),
+         {:ok, observed_at} <- parse_datetime(observed),
+         true <- DateTime.compare(first_at, last_at) != :gt,
+         true <- DateTime.compare(last_at, timestamp) != :gt,
+         true <- DateTime.diff(timestamp, last_at, :second) <= Evidence.freshness_ttl_seconds() do
+      {:ok, first_at, last_at, observed_at}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp primary_idle_display_proof(_previous, _timestamp), do: :error
+
+  defp put_primary_idle_display_proof(attrs, first_at, last_at, observed_at, state) do
+    proof = %{"state" => state, "first_provider_at" => DateTime.to_iso8601(first_at), "last_provider_at" => DateTime.to_iso8601(last_at), "last_observed_at" => DateTime.to_iso8601(observed_at)}
+    attrs = Map.update!(attrs, :metadata, &Map.put(&1, @primary_idle_display_key, proof))
+    if state == "floating", do: mark_floating_reset(attrs), else: attrs
+  end
+
+  defp clear_primary_idle_display(attrs, previous) when is_map(previous) do
+    Map.update!(attrs, :metadata, fn metadata ->
+      metadata = Map.delete(metadata, @primary_idle_display_key)
+      if previous["state"] == "floating" and metadata["reset_state"] == "floating", do: Map.delete(metadata, "reset_state"), else: metadata
+    end)
+  end
+
+  defp clear_primary_idle_display(attrs, _previous), do: attrs
 
   defp maybe_upgrade_explicit_zero_capacity(attrs, evidence, existing, timestamp) do
     if explicit_zero_capacity_upgrade?(evidence, existing, timestamp) do
