@@ -797,7 +797,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
     {:error, error(400, "invalid_request", "websocket message must be a text JSON frame")}
   end
 
-  @type socket_completion_source :: :local_complete | :owner_completion_pending
+  @type socket_completion_source :: :local_complete | :control_complete | :owner_completion_pending
 
   @spec prepare_websocket_response(binary(), opts(), (binary() -> any())) ::
           {:ok, PreparedWebsocketFrame.t()} | {:error, gateway_error()}
@@ -1652,11 +1652,14 @@ defmodule CodexPooler.Gateway.Runtime.Service do
       receive do
         {:websocket_owner_request_submitted, ^submission_ref} -> :owner_completion_pending
       after
-        0 -> :local_complete
+        0 -> local_completion_source(prepared, result)
       end
 
     {:socket_response_result, completion_source, result}
   end
+
+  defp local_completion_source(%PreparedWebsocketFrame{variant: :response_processed}, :ok), do: :control_complete
+  defp local_completion_source(_prepared, _result), do: :local_complete
 
   defp update_prepared_request_options(%PreparedWebsocketFrame{} = prepared, update)
        when is_function(update, 1),

@@ -1963,7 +1963,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   defp socket_response_result({:socket_response_result, completion_source, result})
-       when completion_source in [:local_complete, :owner_completion_pending],
+       when completion_source in [:local_complete, :control_complete, :owner_completion_pending],
        do: {completion_source, result}
 
   defp socket_response_result(result), do: {:legacy, result}
@@ -1971,6 +1971,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp owner_completion_pending?(:owner_completion_pending, _state), do: true
   defp owner_completion_pending?(:legacy, state), do: owner_forwarded_socket?(state)
   defp owner_completion_pending?(:local_complete, _state), do: false
+  defp owner_completion_pending?(:control_complete, _state), do: false
 
   defp handle_public_owner_response_done(result, state) do
     if not Map.get(state, :public_turn_owner_complete?, false) and owner_liveness_error?(result) do
@@ -4509,6 +4510,10 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       end
     end)
   end
+
+  # A successful processed acknowledgement is deliberately silent; it has no
+  # generation terminal to deliver before releasing its tracked control task.
+  defp response_delivery_safe?(_result, _state, _pid, :control_complete), do: true
 
   # Prewarm completes on this socket even when inference belongs to a remote
   # owner. Its local terminal is the delivery witness; no owner :complete
