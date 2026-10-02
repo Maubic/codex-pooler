@@ -28,6 +28,7 @@ defmodule CodexPooler.Dev.SeedsTest do
   alias CodexPooler.Pools.{ModelServingOverride, OperatorPoolAssignment, Pool}
   alias CodexPooler.Quotas.Evidence
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
+  alias CodexPooler.Upstreams.Quota.CapacityFactsStore
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
   alias CodexPooler.Upstreams.SavedResets
   alias CodexPooler.Upstreams.Schemas.{EncryptedSecret, PoolUpstreamAssignment, UpstreamIdentity}
@@ -441,6 +442,11 @@ defmodule CodexPooler.Dev.SeedsTest do
              "Sample Provider Blocked" => {"blocked", "Quota blocked", :warning, false},
              "Sample Provider Unknown" => {"missing_evidence", "Quota missing", :warning, false}
            }
+
+    available_identity = Repo.get_by!(UpstreamIdentity, account_label: "Sample Provider Available")
+
+    assert {:ok, %{included_permission: :available, credit_permission: :unavailable, account_windows: [], credential_epoch: 1}} =
+             CapacityFactsStore.load(available_identity.metadata)
 
     seeded_jobs =
       Repo.all(from job in Oban.Job, where: job.meta["dev_seed"] == "codex_pooler_dev_seed")

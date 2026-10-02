@@ -13,10 +13,12 @@ defmodule CodexPooler.Dev.Seeds.Full do
   alias CodexPooler.Gateway.Persistence.RoutingCircuitState
   alias CodexPooler.InstanceSettings
   alias CodexPooler.Pools.{OperatorPoolAssignment, Pool}
+  alias CodexPooler.Quotas.Evidence.CodexParsers
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Quota.AccountAvailabilityStore
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
+  alias CodexPooler.Upstreams.Quota.CapacityFactsStore
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
 
   @typep quota_window_spec :: %{
@@ -1104,8 +1106,24 @@ defmodule CodexPooler.Dev.Seeds.Full do
         AccountAvailabilityStore.metadata_key(),
         AccountAvailabilityStore.encode!(availability_state, observed_at, 1)
       )
+      |> windowless_capacity_metadata(availability_state, observed_at)
     end)
   end
+
+  defp windowless_capacity_metadata(metadata, :available, observed_at) do
+    # Availability alone does not establish included capacity. Keep this ready
+    # fixture backed by a complete, non-credit synthetic usage observation.
+    payload = %{
+      "rate_limit" => %{"allowed" => true, "limit_reached" => false},
+      "spend_control" => %{"reached" => false},
+      "credits" => %{"balance" => "0", "has_credits" => false, "unlimited" => false}
+    }
+
+    {:ok, parsed} = CodexParsers.parse_codex_usage_result(payload, observed_at)
+    CapacityFactsStore.transition(metadata, parsed.capacity_facts, 1)
+  end
+
+  defp windowless_capacity_metadata(metadata, _availability_state, _observed_at), do: metadata
 
   defp expiry_fixture_identity_attrs(owner, account_id, label, fixture) do
     owner

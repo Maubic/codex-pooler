@@ -1,5 +1,5 @@
 defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
-  use ExUnit.Case, async: false
+  use CodexPooler.DataCase, async: false
 
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
@@ -24,7 +24,7 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
         ])
       )
 
-    assert {:ok, %{terminal: "response.completed", status: 200}} =
+    assert {:ok, %{terminal: "response.completed", status: 200, provider_credits_admission: %{capacity_basis: :windowless_provider_permission, context: %{model: "example-model", serving_mode: :full, transport: :native_websocket}}}} =
              UpstreamWebsocketSession.request(
                session,
                websocket_request(upstream, [], %{"type" => "response.create"})
@@ -129,14 +129,14 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
     request = %Request{
       url: FakeUpstream.url(upstream) <> "/backend-api/codex/responses",
       headers: [],
-      payload: "{}",
+      payload: CodexPooler.JSON.encode!(%{"model" => "example-model"}),
       timeouts: @timeouts,
       writer: fn _text -> :ok end,
       message_mapper: nil
     }
 
     assert {:ok, %{terminal: "response.completed", status: 200}} =
-             UpstreamWebsocketSession.request(session, request)
+             UpstreamWebsocketSession.request(session, CodexPooler.ProviderCreditsDispatchSupport.wire_request!(request))
 
     assert FakeUpstream.websocket_connection_count(upstream) == 1
     assert [connection_id] = FakeUpstream.websocket_connection_ids(upstream)
@@ -348,11 +348,12 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
     %Request{
       url: FakeUpstream.url(upstream) <> "/backend-api/codex/responses",
       headers: headers,
-      payload: CodexPooler.JSON.encode!(payload),
+      payload: CodexPooler.JSON.encode!(Map.put_new(payload, "model", "example-model")),
       timeouts: @timeouts,
       writer: fn _text -> :ok end,
       message_mapper: nil
     }
+    |> CodexPooler.ProviderCreditsDispatchSupport.wire_request!()
   end
 
   defp completed_event(id \\ "resp_contract") do

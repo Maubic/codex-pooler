@@ -1,5 +1,5 @@
 defmodule CodexPooler.Dev.NativeCompactionTraceTest do
-  use ExUnit.Case, async: false
+  use CodexPooler.DataCase, async: false
 
   alias CodexPooler.Dev.NativeCompactionTrace
   alias CodexPooler.Dev.NativeCompactionTrace.Plug, as: TracePlug
@@ -766,13 +766,15 @@ defmodule CodexPooler.Dev.NativeCompactionTraceTest do
     request = %Request{
       url: FakeUpstream.url(fake) <> "/backend-api/codex/responses",
       headers: [],
-      payload: CodexPooler.JSON.encode!(%{"type" => "response.create", "input" => []}),
+      payload: CodexPooler.JSON.encode!(%{"type" => "response.create", "model" => "example-model", "input" => []}),
       timeouts: %{connect_timeout_ms: 1_000, receive_timeout_ms: 1_000},
       writer: fn _frame -> :ok end,
       message_mapper: nil
     }
 
-    assert {:ok, _result} = UpstreamWebsocketSession.request(upstream_pid, request)
+    request = CodexPooler.ProviderCreditsDispatchSupport.wire_request!(request)
+
+    assert {:ok, %{provider_credits_admission: %{capacity_basis: :windowless_provider_permission}}} = UpstreamWebsocketSession.request(upstream_pid, request)
     assert Map.has_key?(:sys.get_state(upstream_pid), :conn)
     :ok = :sys.suspend(upstream_pid)
     monitor = Process.monitor(upstream_pid)
