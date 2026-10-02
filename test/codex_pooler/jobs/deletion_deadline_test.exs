@@ -126,8 +126,7 @@ defmodule CodexPooler.Jobs.DeletionDeadlineTest do
     holder_monitor = Process.monitor(holder.pid)
     on_exit(fn -> if Process.alive?(holder.pid), do: Process.exit(holder.pid, :kill) end)
     assert_receive :connection_held
-    tracer = spawn_link(fn -> trace_executor(parent) end)
-    tracer_monitor = Process.monitor(tracer)
+    {tracer, tracer_monitor} = Process.spawn(fn -> trace_executor(parent) end, [:link, :monitor])
     on_exit(fn -> if Process.alive?(tracer), do: Process.exit(tracer, :kill) end)
     :erlang.trace(self(), true, [:procs, {:tracer, tracer}])
     # The only connection stays held beyond this call's deadline.
