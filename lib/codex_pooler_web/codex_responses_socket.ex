@@ -242,6 +242,10 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   defp mark_stopped(result), do: result
 
+  # This callback runs after Bandit wrote the preceding push. The public
+  # handle_info entry confirms it only after the driver queue is empty.
+  defp handle_socket_info(:confirm_content_filter_terminal_write, state), do: {:ok, state}
+
   defp handle_socket_info(
          {InstanceSettingsCache, {:applied, applied_version}},
          state
@@ -621,6 +625,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   defp terminate_socket(reason, state) do
     :ok = record_written_error_frame_receipts(state)
+    :ok = confirm_written_delivery_evidence(state)
 
     _trace =
       NativeCompactionTrace.emit(:cleanup_finished, %{pid_role: :socket, outcome: :finished})
@@ -4596,7 +4601,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # delivery acknowledgement settles (naturally, on cancellation, or at socket
   # termination), which is after the gateway finalized the attempt row.
   defp new_downstream_delivery_evidence,
-    do: %{frames: 0, terminal_class: nil, pushed_at: nil, skipped?: false}
+    do: %{frames: 0, terminal_class: nil, pushed_at: nil, skipped?: false, completed_items: 0, completed_item_digests: []}
 
   defp downstream_delivery_evidence(state, pid) do
     state
@@ -4801,6 +4806,9 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   # A digest that could not be derived stays in the list as `nil` and is
   # dropped by the receipt, so the list no longer matches the count.
+  defp pushed_completed_items(%{completed_items: 0, completed_item_digests: [], terminal_class: "response.incomplete", incomplete_reason: "content_filter", skipped?: false}),
+    do: %{completed_items: 0, completed_item_digests: []}
+
   defp pushed_completed_items(%{completed_items: count, completed_item_digests: digests}) when is_integer(count) and count > 0,
     do: %{completed_items: count, completed_item_digests: Enum.reverse(digests)}
 
@@ -5019,12 +5027,22 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # 225-130 and 225-240, findings#206 row 206-598). Only the receipt changes.
   defp termination_receipt_outcome(state, pid, :aborted) do
     if MapSet.member?(Map.get(state, :response_task_completed_terminals, MapSet.new()), pid) or
-         MapSet.member?(Map.get(state, :public_pushed_terminals, MapSet.new()), pid),
+         MapSet.member?(Map.get(state, :public_pushed_terminals, MapSet.new()), pid) or
+         written_content_filter_terminal?(state, pid),
        do: :delivered,
        else: :aborted
   end
 
   defp termination_receipt_outcome(_state, _pid, outcome), do: outcome
+
+  # Codex closes immediately after reading a content-filter terminal, before
+  # settlement acknowledgement. That changes cleanup, not the written facts.
+  defp written_content_filter_terminal?(state, pid) do
+    case WebsocketDownstreamWriteWatch.confirmed() do
+      %{^pid => %{terminal_class: "response.incomplete", incomplete_reason: "content_filter", pushed_at: %DateTime{}, skipped?: false}} -> pushed_terminal_evidence?(written_delivery_evidence(pid, downstream_delivery_evidence(state, pid)))
+      _not_written -> false
+    end
+  end
 
   # The authoritative target with its registry status; a task the registry
   # does not track answers from the socket's own state.
@@ -5311,6 +5329,8 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # Why the pushed `response.incomplete` ended the response, for the receipt:
   # `interrupted` names a response the client stopped (findings#270 row 270-272).
   defp record_downstream_incomplete_reason(state, pid, %{event_type: "response.incomplete", incomplete_reason: reason}) when is_binary(reason) do
+    if reason == "content_filter", do: send(self(), :confirm_content_filter_terminal_write)
+
     if response_task_delivery_candidate?(state, pid),
       do: update_downstream_delivery_evidence(state, pid, &Map.put_new(&1, :incomplete_reason, reason)),
       else: state

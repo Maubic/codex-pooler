@@ -32,6 +32,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     RequestReplayEntitlement
   }
 
+  alias CodexPooler.Accounting.NativeContentFilterRetry
   alias CodexPooler.Accounting.NativeHttpToolObservation
   alias CodexPooler.Accounting.RequestLifecycle
   alias CodexPooler.Accounting.RequestLifecycle.DeadExecutionResendRecovery
@@ -90,6 +91,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           | :completed_item_resend
           | :unreceived_compaction
           | :mailbox_continuation
+          | :content_filter_retry
           | :anchor_refusal
           | :compaction_cut
 
@@ -332,6 +334,10 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     if chain_edges_only?(request, chain_edges), do: :ok, else: {:error, :terminal_predecessor}
   end
 
+  defp validate_semantic_retry(request, :content_filter_retry, _scope, chain_edges) do
+    if chain_edges_only?(request, chain_edges), do: :ok, else: {:error, :terminal_predecessor}
+  end
+
   defp validate_semantic_retry(request, :mailbox_continuation, _scope, chain_edges) do
     if chain_edges_only?(request, chain_edges), do: :ok, else: {:error, :terminal_predecessor}
   end
@@ -424,6 +430,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
       request.status in @live_request_statuses or is_nil(request.completed_at) ->
         {:error, :active_predecessor}
 
+      claimed_content_filter_edge?(request, scope) ->
+        {:error, :terminal_predecessor}
+
+      content_filter_retry?(request, scope) ->
+        admit_content_filter_predecessor(request, scope, now)
+
       mailbox_continuation?(request, scope) ->
         admit_mailbox_predecessor(request, scope, now)
 
@@ -453,6 +465,34 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
 
       true ->
         admit_predecessor(request, family, scope, now)
+    end
+  end
+
+  defp content_filter_retry?(request, scope) do
+    turn = lock_turn(request.id)
+    attempt = lock_final_attempt(turn, request.id)
+
+    match?(%CodexTurn{codex_session_id: id} when id == scope.codex_session_id, turn) and
+      NativeContentFilterRetry.verified?(turn, request, attempt, Map.get(scope, :native_client_retry_witness), Map.get(scope, :mailbox_successor))
+  end
+
+  defp claimed_content_filter_edge?(%Request{status: "succeeded", request_metadata: %{"client_resend" => %{"predecessor_shape" => "content_filter_retry"}}} = request, scope) do
+    case Map.get(scope, :native_client_retry_witness) do
+      %ClientRetry.OriginalWitness{digest: digest, alternates: alternates} -> ClientRetry.witness_matches?(request.native_client_retry_digest, digest, alternates)
+      _missing -> false
+    end
+  end
+
+  defp claimed_content_filter_edge?(_request, _scope), do: false
+
+  defp admit_content_filter_predecessor(request, scope, _now) do
+    attempt = lock_final_attempt(lock_turn(request.id), request.id)
+
+    cond do
+      live_turn?(request.id) or live_attempt?(request.id) -> {:error, :active_predecessor}
+      entitlement?(request.id) -> {:error, :entitlement_present}
+      not NativeContentFilterRetry.current_source?(attempt) -> {:error, :authorization_changed}
+      true -> with :ok <- validate_retry_window(request, attempt, db_now(), scope), do: {:ok, :content_filter_retry}
     end
   end
 

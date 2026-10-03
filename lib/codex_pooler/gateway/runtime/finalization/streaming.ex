@@ -3,6 +3,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
 
   require Logger
 
+  alias CodexPooler.Accounting.NativeContentFilterRetry
   alias CodexPooler.Gateway.Routing.ModelMetadata
   alias CodexPooler.Gateway.Runtime.Dispatch.ResponseContext
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
@@ -83,7 +84,9 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
              |> Metadata.response_metadata(nil, request_options)
              |> Metadata.merge_stream_state_metadata(stream_state)
              |> merge_usage_observation(stream_state)
-             |> merge_upstream_websocket_connection(upstream_websocket_connection),
+             |> merge_upstream_websocket_connection(upstream_websocket_connection)
+             |> NativeContentFilterRetry.observation_metadata(stream_state)
+             |> NativeContentFilterRetry.terminal_metadata(if(is_map(stream_state), do: Map.get(stream_state, :native_content_filter_outcome), else: StreamProtocol.terminal_outcome(body)), context),
              started: started,
              before_finalize: fn ->
                SideEffects.observe_stream_response(context, response, body, stream_state)

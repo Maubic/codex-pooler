@@ -31,6 +31,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy do
   # every shape `FailedPredecessorResend` admits, or the admission line reads
   # `predecessor_shape=unknown` for a known fact.
   @resend_predecessor_shapes ~w(
+    content_filter_retry
                                identical_resend
                                previsible_idle_timeout
                                provider_terminal

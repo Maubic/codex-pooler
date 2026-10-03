@@ -5,6 +5,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
 
   alias CodexPooler.Access
   alias CodexPooler.Accounting
+  alias CodexPooler.Accounting.ClientRetry
   alias CodexPooler.Catalog
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Gateway.Contracts
@@ -1152,6 +1153,15 @@ defmodule CodexPooler.Gateway.Runtime.Service do
     end
   end
 
+  defp classify_client_retry_intent(session, api_key, model, %{endpoint: "/backend-api/codex/responses", request_options: %RequestOptions{native_client_retry_witness: %ClientRetry.OriginalWitness{content_filter: [_ | _]} = witness}} = context, authorization_binding) do
+    input = %{endpoint: context.endpoint, requested_model: context.requested_model, semantic_turn_digest: context.semantic_turn_digest, native_client_retry_witness: witness}
+
+    case ClientRetry.content_filter_preflight(session, api_key, model, input) do
+      :ok -> replay_intent_result(:fresh, authorization_binding, nil)
+      {:error, reason} -> reject_replay_intent(context, session, reason)
+    end
+  end
+
   # A mailbox continuation keeps its original durable turn claim, like a
   # compaction resume. Its sealed candidates must reach that claim's resolver:
   # the ordinary owner retry policy only recognizes exact/grown payloads.
@@ -1162,7 +1172,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
          _session,
          _api_key,
          _model,
-         %{endpoint: "/backend-api/codex/responses", request_options: %RequestOptions{native_client_retry_witness: %CodexPooler.Accounting.ClientRetry.OriginalWitness{mailbox: [_first | _rest]}}},
+         %{endpoint: "/backend-api/codex/responses", request_options: %RequestOptions{native_client_retry_witness: %ClientRetry.OriginalWitness{mailbox: [_first | _rest]}}},
          authorization_binding
        ),
        do: replay_intent_result(:fresh, authorization_binding, nil)

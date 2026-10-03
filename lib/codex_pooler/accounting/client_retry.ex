@@ -4,6 +4,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
   import Ecto.Query
 
   alias CodexPooler.Access.APIKey
+  alias CodexPooler.Accounting.NativeContentFilterRetry
 
   alias CodexPooler.Accounting.{
     Attempt,
@@ -117,7 +118,10 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defmodule OriginalWitness do
     @moduledoc false
     @enforce_keys [:version, :digest, :auth_epoch]
-    defstruct [:version, :digest, :auth_epoch, alternates: [], grown: [], mailbox: []]
+    defstruct [:version, :digest, :auth_epoch, :content_filter_original, alternates: [], grown: [], mailbox: [], content_filter: []]
+
+    # CF retains a separate full-payload seal when the legacy HTTP resume
+    # witness binds only input. Only that opaque seal persists; candidates do not.
 
     # `alternates` never reaches a row: they are the digests the anchored
     # original of a full-history resend may have stored as `digest`
@@ -139,7 +143,9 @@ defmodule CodexPooler.Accounting.ClientRetry do
             auth_epoch: non_neg_integer(),
             alternates: [<<_::256>>],
             grown: [grown_candidate()],
-            mailbox: [mailbox_candidate()]
+            mailbox: [mailbox_candidate()],
+            content_filter: [map()],
+            content_filter_original: <<_::256>> | nil
           }
 
     @type mailbox_witnesses :: %{websocket: [<<_::256>>], http: <<_::256>>}
@@ -567,6 +573,30 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   def deterministic_compaction_successor_claim(_request, _turn, _replay),
     do: {:error, :payload_mismatch}
+
+  @doc "Advisory content-filter check; the original claim is revalidated under reservation locks."
+  @spec content_filter_preflight(CodexSession.t(), APIKey.t(), CodexPooler.Catalog.Model.t(), map()) :: :ok | {:error, atom()}
+  def content_filter_preflight(session, api_key, model, input) do
+    turn = Repo.one(from t in CodexTurn, where: t.codex_session_id == ^session.id and t.semantic_turn_digest == ^input.semantic_turn_digest, order_by: [desc: t.turn_sequence], limit: 1)
+
+    if is_nil(turn) do
+      :ok
+    else
+      request = Repo.get(Request, turn.request_id)
+      attempt = Repo.one(from a in Attempt, where: a.request_id == ^turn.request_id, order_by: [desc: a.attempt_number], limit: 1)
+
+      with %Request{} <- request,
+           :ok <- validate_authorization(session, api_key, model, request, input),
+           true <- NativeContentFilterRetry.verified?(turn, request, attempt, input.native_client_retry_witness, nil),
+           true <- NativeContentFilterRetry.current_source?(attempt),
+           false <- Repo.exists?(from e in RequestReplayEntitlement, where: e.request_id == ^request.id),
+           :ok <- validate_retry_window(request.completed_at, db_now(), @retry_window_seconds) do
+        :ok
+      else
+        _unsafe -> {:error, :terminal_predecessor}
+      end
+    end
+  end
 
   @spec preflight_snapshot(CodexSession.t(), APIKey.t(), CodexPooler.Catalog.Model.t(), map()) ::
           :none | {:ok, map()} | {:error, atom()}

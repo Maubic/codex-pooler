@@ -290,7 +290,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
   @spec native_http_progress_metadata(state()) :: map()
   def native_http_progress_metadata(%{native_http_progress: progress}) do
     case ClientRetry.native_http_progress_metadata(progress) do
-      %{"output_item_done_count" => count} = metadata when count > 0 ->
+      %{"output_item_done_count" => count} = metadata when count >= 0 ->
         %{"native_http_resume_progress" => metadata, "native_http_mailbox_prefix" => ClientRetry.native_http_mailbox_prefix_metadata(progress)}
 
       _empty ->
@@ -302,7 +302,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
 
   @spec enable_native_http_progress(state()) :: state()
   def enable_native_http_progress(state) when is_map(state),
-    do: Map.put(state, :native_http_progress, ClientRetry.new_native_http_progress())
+    do: state |> Map.put(:native_http_progress, ClientRetry.new_native_http_progress()) |> Map.put(:native_content_filter_observation, ClientRetry.new_observation())
 
   @spec commit_native_http_progress(state()) :: state()
   def commit_native_http_progress(
@@ -401,6 +401,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
         state
         |> Map.put(:codex_responses_sse_block_state, sse_block_state)
         |> observe_native_http_tool_blocks(parsed, buffered_size > StreamProtocol.max_incomplete_sse_block_bytes())
+        |> observe_content_filter_blocks(parsed, buffered_size > StreamProtocol.max_incomplete_sse_block_bytes())
         |> stage_native_http_progress(parsed)
         |> track_native_completion(parsed)
 
@@ -431,6 +432,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
         state
         |> Map.put(:codex_responses_sse_block_state, sse_block_state)
         |> observe_native_http_tool_blocks(parsed, false)
+        |> observe_content_filter_blocks(parsed, false)
         |> stage_native_http_progress(parsed)
         |> track_native_completion(parsed)
 
@@ -442,11 +444,20 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
 
   defp flush_codex_responses_sse_eof(_opts, state), do: {"", state, nil}
 
+  defp observe_content_filter_blocks(%{native_content_filter_observation: observation} = state, blocks, oversized?) do
+    observation = if oversized?, do: ClientRetry.observe_frame(observation, nil, DateTime.utc_now()), else: observation
+    observation = Enum.reduce(blocks, observation, fn block, acc -> if comment_block?(block.raw), do: acc, else: ClientRetry.observe_frame(acc, block.decoded, DateTime.utc_now()) end)
+    Map.put(state, :native_content_filter_observation, observation)
+  end
+
+  defp observe_content_filter_blocks(state, _blocks, _oversized?), do: state
+
   defp track_native_completion(%{target: :websocket} = state, _blocks), do: state
 
   defp track_native_completion(state, blocks) do
     Enum.reduce(blocks, state, fn block, state ->
       case NativeSSEBlock.outcome(block) do
+        {:ok, %{kind: :incomplete} = outcome} -> Map.put_new(state, :native_content_filter_outcome, {:ok, outcome})
         {:ok, %{kind: :completed}} -> Map.put(state, :native_terminal_outcome, :completed)
         _outcome -> state
       end

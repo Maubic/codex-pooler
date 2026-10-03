@@ -8,6 +8,9 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
 
   import Ecto.Query
 
+  alias CodexPooler.Accounting.NativeContentFilterRetry
+  alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
+
   alias CodexPooler.Accounting.{
     Attempt,
     ClientRetry,
@@ -1472,6 +1475,8 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
     %{identity: identity} = ReferenceLocks.lock_and_validate!(assignment.upstream_identity_id, assignment.id)
     ensure_upstream_not_deleting!(identity)
 
+    ensure_content_filter_dispatch!(request, assignment, identity, model, attrs)
+
     case Repo.insert(attempt_changes,
            on_conflict: {:replace, [:id]},
            conflict_target: :id,
@@ -1492,6 +1497,19 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
     do: Repo.rollback(Metadata.accounting_error(:upstream_account_deleting, "upstream account is being deleted"))
 
   defp ensure_upstream_not_deleting!(_identity), do: :ok
+
+  defp ensure_content_filter_dispatch!(request, assignment, identity, model, attrs) do
+    scope = %{
+      assignment_id: assignment.id,
+      identity_id: identity.id,
+      credential_epoch: CredentialFencing.credential_epoch(identity),
+      serving_mode: get_in(attrs, [:response_metadata, "routing", "model_serving_mode"]),
+      effective_model: request.request_metadata["effective_model"] || (model && model.exposed_model_id),
+      upstream_model: model && model.upstream_model_id
+    }
+
+    unless NativeContentFilterRetry.dispatch_allowed?(request, scope), do: Repo.rollback(Metadata.accounting_error(:invalid_content_filter_retry_binding, "content-filter retry binding changed"))
+  end
 
   # The dispatching instance owns this attempt until it settles. Recording it
   # here, before any upstream byte arrives, is what lets another replica recover

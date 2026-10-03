@@ -4,6 +4,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
   require Logger
 
   alias CodexPooler.Accounting.ClientRetry
+  alias CodexPooler.Accounting.NativeContentFilterRetry
   alias CodexPooler.Gateway.Payloads.{CompactionTrigger, NativeCodexTurnMetadata, RequestOptions}
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
   alias CodexPooler.Gateway.Runtime.Finalization
@@ -130,7 +131,9 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
                request_options,
                Map.get(finalization, :websocket_frame_headers, %{}),
                Map.get(finalization, :upstream_websocket_connection)
-             ),
+             )
+             |> NativeContentFilterRetry.observation_metadata(finalization)
+             |> NativeContentFilterRetry.terminal_metadata(StreamProtocol.terminal_outcome(body), context),
              started: started,
              before_finalize: fn ->
                SideEffects.observe_websocket_response(context, finalization)

@@ -3,6 +3,7 @@ defmodule CodexPooler.Accounting.Metadata do
 
   import Ecto.Query
 
+  alias CodexPooler.Accounting.NativeContentFilterRetry
   alias CodexPooler.Accounting.{Request, RequestLogFacts}
   alias CodexPooler.Events
   alias CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation
@@ -392,6 +393,15 @@ defmodule CodexPooler.Accounting.Metadata do
 
   defp sanitize_value(value, key) when key in [:usage_observation, "usage_observation"],
     do: sanitize_usage_observation(value)
+
+  defp sanitize_value(value, key) when key in [:native_content_filter_terminal, "native_content_filter_terminal"],
+    do: NativeContentFilterRetry.sanitize_terminal(value)
+
+  defp sanitize_value(value, key) when key in [:native_content_filter_original, "native_content_filter_original"],
+    do: NativeContentFilterRetry.sanitize_original(value)
+
+  defp sanitize_value(value, key) when key in [:native_content_filter_source, "native_content_filter_source", :native_content_filter_binding, "native_content_filter_binding"],
+    do: NativeContentFilterRetry.sanitize_source(value)
 
   # Reason: metadata dispatch deliberately preserves separate safe projections.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity

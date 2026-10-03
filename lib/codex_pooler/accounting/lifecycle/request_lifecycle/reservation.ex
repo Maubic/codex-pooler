@@ -7,6 +7,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   import Ecto.Query
 
   alias CodexPooler.Access
+  alias CodexPooler.Accounting.NativeContentFilterRetry
 
   alias CodexPooler.Accounting.{
     ClientRetry,
@@ -339,7 +340,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
 
   defp unreserved_turn_claim?(%Request{}), do: false
 
-  defp link_semantic_execution_retry!(_opts, %{predecessor_request_id: id, predecessor_shape: shape}, request, timestamp) when shape in [:previsible_idle_timeout, :identical_resend, :partial_http_tool_cut, :mailbox_continuation],
+  defp link_semantic_execution_retry!(_opts, %{predecessor_request_id: id, predecessor_shape: shape}, request, timestamp) when shape in [:previsible_idle_timeout, :identical_resend, :partial_http_tool_cut, :mailbox_continuation, :content_filter_retry],
     do: ClientRetry.insert_link!(%Request{id: id}, request, timestamp)
 
   defp link_semantic_execution_retry!(_opts, %{predecessor_request_id: id, execution_recovery?: true}, request, timestamp),
@@ -696,7 +697,13 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   defp witness_grown(_witness), do: []
 
   defp claim_request_metadata(opts, nil),
-    do: Metadata.sanitize_metadata(attr(opts, :request_metadata) || %{})
+    do: Metadata.sanitize_metadata(attr(opts, :request_metadata) || %{}) |> NativeContentFilterRetry.put_original_metadata(attr(opts, :native_client_retry_witness))
+
+  defp claim_request_metadata(opts, %{predecessor_shape: :content_filter_retry, predecessor_request_id: id} = resend) do
+    claim_request_metadata(opts, Map.delete(resend, :predecessor_shape))
+    |> put_in(["client_resend", "predecessor_shape"], "content_filter_retry")
+    |> Map.put("native_content_filter_binding", NativeContentFilterRetry.binding(%Request{id: id}))
+  end
 
   defp claim_request_metadata(opts, %{predecessor_request_id: predecessor_request_id}) do
     opts
@@ -1280,10 +1287,10 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
 
   defp preserve_client_resend_metadata(
          %{request_metadata: metadata} = attrs,
-         %Request{request_metadata: %{"client_resend" => client_resend}}
+         %Request{request_metadata: %{"client_resend" => client_resend} = original}
        )
        when is_map(metadata) and is_map(client_resend),
-       do: %{attrs | request_metadata: Map.put(metadata, "client_resend", client_resend)}
+       do: %{attrs | request_metadata: metadata |> Map.put("client_resend", client_resend) |> Map.merge(Map.take(original, ["native_content_filter_binding"]))}
 
   defp preserve_client_resend_metadata(attrs, _request), do: attrs
 
@@ -1291,6 +1298,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
     request_metadata =
       context.auth
       |> reserve_metadata(context.pricing, context.estimate, context.opts)
+      |> NativeContentFilterRetry.put_original_metadata(attr(context.opts, :native_client_retry_witness))
       |> put_client_resend_metadata(Map.get(context, :client_resend))
       |> put_native_http_claim_arm(Map.get(context, :native_http_claim_arm))
 
@@ -1368,6 +1376,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   defp put_native_http_claim_arm(metadata, arm) when is_binary(arm), do: Map.put(metadata, "native_http_claim_arm", arm)
 
   defp put_client_resend_metadata(metadata, nil), do: metadata
+
+  defp put_client_resend_metadata(metadata, %{predecessor_shape: :content_filter_retry, predecessor_request_id: id} = resend) do
+    put_client_resend_metadata(metadata, Map.delete(resend, :predecessor_shape))
+    |> put_in(["client_resend", "predecessor_shape"], "content_filter_retry")
+    |> Map.put("native_content_filter_binding", NativeContentFilterRetry.binding(%Request{id: id}))
+  end
 
   defp put_client_resend_metadata(metadata, %{predecessor_request_id: predecessor_request_id}) do
     Map.put(metadata, "client_resend", %{

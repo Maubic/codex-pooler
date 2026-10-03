@@ -43,6 +43,69 @@ defmodule CodexPooler.Gateway.Runtime.ProviderCreditsDispatchTest do
 
   @moduletag capture_log: true
 
+  for mode <- [:full, :lite], mutation <- [:none, :binding_removed, :binding_epoch, :binding_model, :credential_epoch, :capacity] do
+    @tag content_filter_boundary: true
+    test "content-filter successor #{mode} checks #{mutation} on the actual remote owner before send" do
+      fixture = open!(allow_provider_credits: true)
+      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :b, :legacy_windowless)
+      configure_runtime_mode!(setup, unquote(mode))
+      client = open_owned_socket!(fixture, setup)
+      metadata = native_metadata()
+      original = native_payload(setup, metadata, SocketSupport.native_text_input("synthetic content filter"))
+      original = if unquote(mode) == :lite, do: put_in(original, ["client_metadata", "ws_request_header_x_openai_internal_codex_responses_lite"], "true"), else: original
+      terminal = %{"type" => "response.incomplete", "response" => %{"id" => "resp_synthetic_filter", "status" => "incomplete", "incomplete_details" => %{"reason" => "content_filter"}, "output" => [], "usage" => %{"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}}}
+      FakeUpstream.set_mode(fixture.upstream, FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(terminal)]))
+      {client, first} = send_socket_turn!(client, original)
+      assert first["type"] == "response.incomplete"
+      assert generation_count(fixture) == 1
+      guidance = %{"type" => "message", "role" => "developer", "content" => [%{"type" => "input_text", "text" => "<content_filter_guidance>\nsynthetic guidance\n</content_filter_guidance>"}]}
+      successor = Map.update!(original, "input", &(&1 ++ [guidance]))
+      FakeUpstream.set_mode(fixture.upstream, native_completed("resp_synthetic_filter_successor", []))
+      selected = hold_socket_generation!(client, successor)
+      assert selected.summary.request_id != nil
+      assert selected.summary.attempt_id != nil
+
+      UnboxedFixture.run_unboxed(fn ->
+        request = Repo.get!(Accounting.Request, selected.summary.request_id)
+        assert request.request_metadata["native_content_filter_binding"]["version"] == 1
+
+        case unquote(mutation) do
+          :binding_removed ->
+            request |> Ecto.Changeset.change(request_metadata: Map.delete(request.request_metadata, "native_content_filter_binding")) |> Repo.update!()
+
+          :binding_epoch ->
+            request |> Ecto.Changeset.change(request_metadata: put_in(request.request_metadata, ["native_content_filter_binding", "credential_epoch"], 2)) |> Repo.update!()
+
+          :binding_model ->
+            request |> Ecto.Changeset.change(request_metadata: put_in(request.request_metadata, ["native_content_filter_binding", "upstream_model"], "synthetic-changed-model")) |> Repo.update!()
+
+          :credential_epoch ->
+            identity = Repo.get!(UpstreamIdentity, setup.identity.id)
+            identity |> Ecto.Changeset.change(metadata: CredentialFencing.advance_credential_epoch(identity)) |> Repo.update!()
+
+          _other ->
+            :ok
+        end
+      end)
+
+      if unquote(mutation) == :capacity, do: ProviderCreditsFixtures.commit_policy!(fixture, :legacy_windowless, false, fixture.peer.node)
+      send(selected.sender, {:provider_credits_owner_release, selected.reference})
+      {client, final} = receive_client_terminal(selected.client)
+
+      if unquote(mutation) == :none do
+        assert final["type"] == "response.completed"
+        assert generation_count(fixture) == 2
+      else
+        assert final["type"] in ["error", "response.failed"]
+        assert generation_count(fixture) == 1
+        assert_unsent_attempt!(selected.summary.attempt_id)
+      end
+
+      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+      close_client!(client)
+    end
+  end
+
   for mode <- [:full, :lite], transport <- [:http_json, :http_sse, :native_websocket, :bridged_websocket] do
     test "included capacity remains physically admitted with opt-out over #{transport} #{mode}" do
       fixture = open!()

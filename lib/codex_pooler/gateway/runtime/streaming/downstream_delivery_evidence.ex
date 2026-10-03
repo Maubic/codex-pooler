@@ -19,6 +19,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence do
   @type evidence :: %{
           frames: non_neg_integer(),
           terminal_class: String.t() | nil,
+          incomplete_reason: String.t() | nil,
           pushed_at: DateTime.t() | nil,
           write_failed?: boolean(),
           sse: StreamProtocol.sse_block_state()
@@ -29,6 +30,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence do
     %{
       frames: 0,
       terminal_class: nil,
+      incomplete_reason: nil,
       pushed_at: nil,
       write_failed?: false,
       sse: StreamProtocol.new_sse_block_state()
@@ -67,6 +69,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence do
     DeliveryReceipt.build(%{
       outcome: outcome(evidence),
       terminal_class: evidence.terminal_class,
+      incomplete_reason: evidence.incomplete_reason,
       pushed_at: evidence.pushed_at,
       frames_after_visible: evidence.frames,
       transport: @transport
@@ -93,9 +96,17 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence do
   end
 
   defp record_terminal(evidence, blocks) do
-    case Enum.find_value(blocks, &DeliveryReceipt.terminal_class(&1 <> "\n\n")) do
-      class when is_binary(class) ->
-        %{evidence | terminal_class: class, pushed_at: DateTime.utc_now()}
+    terminal =
+      Enum.find_value(blocks, fn block ->
+        case StreamProtocol.terminal_outcome(block <> "\n\n") do
+          {:ok, outcome} -> outcome
+          _unknown -> nil
+        end
+      end)
+
+    case terminal do
+      %{} = outcome ->
+        %{evidence | terminal_class: DeliveryReceipt.terminal_class_from_outcome(outcome), incomplete_reason: Map.get(outcome, :incomplete_reason), pushed_at: DateTime.utc_now()}
 
       nil ->
         evidence

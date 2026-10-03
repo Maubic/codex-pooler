@@ -8,6 +8,7 @@ defmodule CodexPooler.Gateway.Transports.ProviderCreditsAdmission do
 
   import Ecto.Query
 
+  alias CodexPooler.Accounting.NativeContentFilterRetry
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.RequestOptions.ResetProbe
   alias CodexPooler.Gateway.Payloads.RequestOptions.Transport
@@ -156,7 +157,7 @@ defmodule CodexPooler.Gateway.Transports.ProviderCreditsAdmission do
 
   @spec admit(Context.t() | nil) :: result()
   def admit(context) do
-    if valid_context?(context) and not Repo.in_transaction?() do
+    if valid_context?(context) and not Repo.in_transaction?() and NativeContentFilterRetry.dispatch_context_allowed?(context) do
       context |> load_current_rows() |> evaluate(context)
     else
       {:error, denial(context, :none, ["provider_credit_capacity_unverified"])}

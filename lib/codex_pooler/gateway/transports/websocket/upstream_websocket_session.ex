@@ -93,6 +93,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
           optional(:response_id) => String.t(),
           optional(:response_usage) => ResponseUsage.usage() | nil,
           optional(:ordinary_success_result) => OrdinarySuccessResult.t(),
+          optional(:native_client_retry_observation) => ClientRetry.Observation.t() | nil,
           optional(:first_compact_result) => FirstCompactResult.t(),
           optional(:upstream_websocket_connection) => upstream_websocket_connection(),
           optional(:websocket_frame_headers) => map(),
@@ -1944,6 +1945,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       %{
         body: terminal_body(receive_state),
         terminal: terminal,
+        native_client_retry_observation: final_client_retry_observation(receive_state),
         response_usage: receive_model_usage(receive_state),
         status: 200,
         headers: Map.get(state, :headers, []),

@@ -46,6 +46,26 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StalledReaderReceiptTest 
   @total_frames @deltas + 8
 
   for forwarding <- [true, false] do
+    @tag forwarding: forwarding, content_filter_write_failure: true
+    @tag slow: "actual socket buffer exhaustion and write timeout before content-filter terminal"
+    test "owner forwarding #{forwarding}: a failed CF terminal write cannot authorize guidance", %{forwarding: forwarding} do
+      %{setup: setup, upstream: upstream, port: port, turn_state: turn_state, raw_payload: raw_payload} = scenario!(forwarding, content_filter?: true)
+      %{request_id: request_id, receipt: receipt} = stall_until_write_failure!(port, setup, turn_state, raw_payload)
+      assert %{"outcome" => "aborted", "terminal_class" => "none", "write_failure" => "timeout"} = receipt
+      attempt = Repo.get_by!(Attempt, request_id: request_id)
+      assert attempt.response_metadata["native_content_filter_terminal"]["reason"] == "content_filter"
+      refute Map.has_key?(receipt, "completed_items")
+      guidance = %{"type" => "message", "role" => "developer", "content" => [%{"type" => "input_text", "text" => "<content_filter_guidance>\nsynthetic guidance\n</content_filter_guidance>"}]}
+      retained = stream_frames("resp_stalled_original") |> Enum.map(&CodexPooler.JSON.decode!/1) |> Enum.find(&(&1["type"] == "response.output_item.done")) |> Map.fetch!("item")
+      candidate = raw_payload |> CodexPooler.JSON.decode!() |> Map.update!("input", &(&1 ++ [retained, guidance])) |> CodexPooler.JSON.encode!()
+      refused = send_and_receive_terminal!(port, setup, turn_state, candidate)
+      assert refused["type"] == "error"
+      assert refused["error"]["code"] == "duplicate_turn"
+      assert FakeUpstream.count(upstream) == 1
+      assert length(pool_requests(setup.pool.id)) == 1
+      assert_one_settlement_each!([request_id])
+    end
+
     @tag forwarding: forwarding
     @tag slow: "a real listener write that has to time out after the client stopped reading, the recorded receipt and a second socket's resend"
     test "owner forwarding #{forwarding}: a client that stopped reading mid-turn gets an aborted receipt and its identical resend is served", %{forwarding: forwarding} do
@@ -211,7 +231,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StalledReaderReceiptTest 
     upstream =
       start_upstream(
         FakeUpstream.strict_sequence([
-          native_request(FakeUpstream.websocket_text_frames(stream_frames("resp_stalled_original"))),
+          native_request(FakeUpstream.websocket_text_frames(maybe_content_filter(stream_frames("resp_stalled_original"), opts))),
           native_request(FakeUpstream.websocket_text_frames(stream_frames("resp_stalled_successor")))
         ])
       )
@@ -221,6 +241,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StalledReaderReceiptTest 
     raw_payload = CodexPooler.JSON.encode!(native_turn_payload(Ecto.UUID.generate(), setup.model.exposed_model_id))
     port = start_stalling_endpoint!(Keyword.get(opts, :send_timeout, @send_timeout_ms))
     %{setup: setup, upstream: upstream, port: port, turn_state: Ecto.UUID.generate(), raw_payload: raw_payload}
+  end
+
+  defp maybe_content_filter(frames, opts) do
+    if Keyword.get(opts, :content_filter?, false) do
+      List.update_at(frames, -1, fn frame ->
+        frame |> CodexPooler.JSON.decode!() |> Map.put("type", "response.incomplete") |> put_in(["response", "status"], "incomplete") |> put_in(["response", "incomplete_details"], %{"reason" => "content_filter"}) |> CodexPooler.JSON.encode!()
+      end)
+    else
+      frames
+    end
   end
 
   # The shared helper's listener with a small send buffer and, unless

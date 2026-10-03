@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
   @moduledoc false
 
   alias CodexPooler.Accounting.ClientRetry
+  alias CodexPooler.Gateway.Payloads.NativeContentFilterRetry
   alias CodexPooler.Gateway.Payloads.NativeMailboxContinuation
 
   # The duplicate-turn fence was structurally websocket-only (findings#212): a
@@ -360,7 +361,9 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
              digest,
              request_options.runtime.api_key_runtime_epoch
            ) do
-      NativeMailboxContinuation.attach(witness, identity.semantic_turn_key, payload, request_options)
+      witness
+      |> NativeMailboxContinuation.attach(identity.semantic_turn_key, payload, request_options)
+      |> NativeContentFilterRetry.attach(identity.semantic_turn_key, payload, request_options)
     else
       _unavailable -> nil
     end
@@ -397,7 +400,9 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
              Enum.uniq(variant_digests ++ List.flatten(tail_digests)) -- [digest],
              List.flatten(grown)
            ) do
-      NativeMailboxContinuation.attach(witness, identity.semantic_turn_key, payload, request_options)
+      witness
+      |> NativeMailboxContinuation.attach(identity.semantic_turn_key, payload, request_options)
+      |> NativeContentFilterRetry.attach(identity.semantic_turn_key, payload, request_options)
     else
       _unavailable -> nil
     end
@@ -410,7 +415,9 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
        when is_list(input) do
     with {:ok, digest} <- WebsocketTurnIdentity.replay_claim_digest(identity.semantic_turn_key, payload),
          {:ok, witness} <- ClientRetry.original_witness(digest, request_options.runtime.api_key_runtime_epoch) do
-      NativeMailboxContinuation.attach(witness, identity.semantic_turn_key, payload, request_options)
+      witness
+      |> NativeMailboxContinuation.attach(identity.semantic_turn_key, payload, request_options)
+      |> NativeContentFilterRetry.attach(identity.semantic_turn_key, payload, request_options)
     else
       _unavailable -> nil
     end
