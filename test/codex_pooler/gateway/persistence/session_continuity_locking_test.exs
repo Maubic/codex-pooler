@@ -8,7 +8,9 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuityLockingTest do
   alias CodexPooler.Access
   alias CodexPooler.Gateway.Payloads.RequestOptions
 
-  alias CodexPooler.Accounting.Request
+  alias CodexPooler.Accounting.{Attempt, ClientRetry, LedgerEntry, Request, RequestClientRetryLink}
+  alias CodexPooler.Gateway.Persistence.CodexTurn
+  alias CodexPoolerWeb.Runtime.{BackendCodexTestSupport, MailboxPrefixRaceSupport}
 
   alias CodexPooler.Gateway.Persistence.{
     BridgeOwnerLease,
@@ -39,6 +41,276 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuityLockingTest do
   # renewal case waits it out once while the blocker holds its row, so a case
   # runs for about one second. The same window bounds the blocked observation.
   @bounded_renewal_lock_timeout_ms 1_000
+
+  for edges <- [1, 2, 3] do
+    @tag mailbox_lock_rediscovery: true, mailbox_peer_graph: true, slow: "boots a real second admission BEAM and observes committed graph rediscovery"
+    test "local and real peer admissions rediscover #{edges} reversed-id historical sessions" do
+      peer = MailboxPrefixRaceSupport.start_http_peer!()
+      observations = for target <- [node(), peer], do: exercise_peer_graph(target, unquote(edges))
+      assert Enum.uniq(Enum.map(observations, & &1.admission_node)) |> length() == 2
+      assert Enum.uniq(Enum.map(observations, & &1.admission_backend)) |> length() == 2
+      CodexPooler.TestDiagnostics.puts(fn -> CodexPooler.JSON.encode!(%{scenario: "two_beam_reversed_graph_rediscovery", inserted_edges: unquote(edges), actual_admission_nodes: 2, actual_postgres_backends: 2, results: Enum.map(observations, &Map.drop(&1, [:admission_node]))}) end)
+    end
+  end
+
+  @tag mailbox_lock_rediscovery: true, mailbox_peer_graph: true, slow: "boots a real second admission BEAM and observes PostgreSQL retry-window crossing"
+  test "local and peer admissions sample a fresh clock after their final-attempt lock wait" do
+    peer = MailboxPrefixRaceSupport.start_http_peer!()
+    observations = for target <- [node(), peer], do: exercise_peer_clock(target)
+    assert Enum.uniq(Enum.map(observations, & &1.admission_backend)) |> length() == 2
+    CodexPooler.TestDiagnostics.puts(fn -> CodexPooler.JSON.encode!(%{scenario: "two_beam_postlock_retry_clock", actual_admission_nodes: 2, actual_postgres_backends: 2, results: observations}) end)
+  end
+
+  defp peer_graph_fixture do
+    owner = committed_bootstrap_owner_fixture!().user
+
+    Sandbox.unboxed_run(Repo, fn ->
+      pool = pool_fixture(%{created_by_user_id: owner.id})
+      %{api_key: key} = active_api_key_fixture(pool, %{created_by_user_id: owner.id})
+      model = model_fixture(pool)
+      upstream = upstream_assignment_fixture(pool)
+      setup = Map.merge(upstream, %{pool: pool, api_key: key, model: model, pricing: BackendCodexTestSupport.pricing_snapshot!(model)})
+      BackendCodexTestSupport.register_unboxed_pool_cleanup!(setup)
+      auth = %{pool: pool, api_key: key}
+
+      sessions =
+        Enum.map(1..4, fn _ -> Ecto.UUID.generate() end)
+        |> Enum.sort(:desc)
+        |> Enum.map(fn id ->
+          now = peer_db_now()
+          Repo.insert!(%CodexSession{id: id, pool_id: pool.id, api_key_id: key.id, session_key: "synthetic-peer-graph-#{Ecto.UUID.generate()}", status: "active", created_at: now, updated_at: now})
+        end)
+
+      fixture = %{auth: auth, model: model, assignment: upstream.assignment, sessions: sessions}
+      original = peer_failed_request(fixture, hd(sessions), "codex-request:" <> Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false))
+      Map.merge(fixture, %{original: original, opts: %{endpoint: "/backend-api/codex/responses", correlation_id: original.correlation_id, codex_session: hd(sessions), request_metadata: %{}}})
+    end)
+  end
+
+  defp peer_failed_request(fixture, session, claim) do
+    now = peer_db_now()
+    request = request_fixture(fixture.auth, %{model_id: fixture.model.id, correlation_id: claim, transport: "websocket", status: "failed", usage_status: "usage_unknown", completed_at: now, last_error_code: "server_error"})
+    attempt = attempt_fixture(request, fixture.assignment, %{status: "failed", completed_at: now, network_error_code: "server_error", transport: "websocket", usage_status: "usage_unknown", response_metadata: %{"stream_terminal_type" => "response.failed", "error_kind" => "server_error"}})
+    Repo.insert!(%CodexTurn{codex_session_id: session.id, request_id: request.id, turn_sequence: 1, transport_kind: "websocket", semantic_turn_digest: :crypto.strong_rand_bytes(32), status: "failed", error_code: "server_error", final_attempt_id: attempt.id, started_at: now, completed_at: now, created_at: now, updated_at: now})
+    request
+  end
+
+  defp start_graph_actor(target, fixture, ref) do
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        call_graph_actor(target, fixture, parent, ref)
+      end)
+
+    on_exit(fn -> if Process.alive?(task.pid), do: Task.shutdown(task, :brutal_kill) end)
+    assert_receive {:graph_actor, ^ref, actor, actual_node, backend}, 15_000
+    assert actual_node == target
+
+    on_exit(fn -> stop_graph_actor(target, actor, ref) end)
+
+    {task, actor, backend}
+  end
+
+  defp stop_graph_actor(target, actor, ref) do
+    if target == node() or target in Node.list() do
+      :erpc.call(target, :telemetry, :detach, [{MailboxPrefixRaceSupport, ref}])
+      terminate_graph_actor(target, actor)
+    end
+  end
+
+  defp call_graph_actor(target, fixture, parent, ref) when target == node(),
+    do: Sandbox.unboxed_run(Repo, fn -> MailboxPrefixRaceSupport.graph_claim(fixture.auth, fixture.model, fixture.opts, parent, ref) end)
+
+  defp call_graph_actor(target, fixture, parent, ref),
+    do: :erpc.call(target, MailboxPrefixRaceSupport, :graph_claim, [fixture.auth, fixture.model, fixture.opts, parent, ref], 30_000)
+
+  defp terminate_graph_actor(target, actor) do
+    if :erpc.call(target, Process, :alive?, [actor]), do: :erpc.call(target, Process, :exit, [actor, :kill])
+  end
+
+  defp enter_graph_resend(actor, ref) do
+    for _ <- 1..2 do
+      assert_receive {:runtime_authorization_barrier, ^ref, :claim, :before, ^actor}, 15_000
+      send(actor, {:runtime_authorization_release, ref})
+    end
+  end
+
+  defp exercise_peer_graph(target, count) do
+    fixture = peer_graph_fixture()
+    parent = self()
+    ref = make_ref()
+    {task, actor, backend} = start_graph_actor(target, fixture, ref)
+    assert_receive {:runtime_authorization_barrier, ^ref, :claim, :before, ^actor}, 15_000
+    send(actor, {:runtime_authorization_release, ref})
+    assert_receive {:runtime_authorization_barrier, ^ref, :claim, :before, ^actor}, 15_000
+
+    holders =
+      Enum.map(Enum.take(fixture.sessions, count), fn session ->
+        holder = start_graph_holder(fixture, session, parent, ref)
+
+        on_exit(fn -> stop_owned_task(holder) end)
+        assert_receive {:peer_graph_held, ^ref, session_id, holder_backend}, 15_000
+        assert session_id == session.id
+        assert holder_backend != backend
+        %{task: holder, backend: holder_backend}
+      end)
+
+    send(actor, {:runtime_authorization_release, ref})
+
+    {_tail, waits} =
+      Enum.reduce(Enum.with_index(holders), {fixture.original, []}, fn {holder, index}, {previous, waits} ->
+        observation = await_peer_block(backend, holder.backend)
+        assert observation.relation == "codex_sessions"
+
+        assert_graph_transaction_exited!(fixture)
+
+        send(holder.task.pid, {:append_peer_graph, ref, previous, Enum.at(fixture.sessions, index + 1)})
+        assert {:ok, successor} = Task.await(holder.task, 15_000)
+        {successor, waits ++ [observation]}
+      end)
+
+    result = Task.await(task, 15_000)
+    if count == 3, do: assert({:error, %{code: :duplicate_request, mailbox_check: :session}} = result), else: assert({:ok, %{request: _accepted}} = result)
+    locks = collect_peer_locks(ref, [])
+    assert length(locks) >= count
+    assert Enum.all?(locks, & &1.sorted)
+    assert length(Enum.uniq(Enum.map(waits, & &1.transaction_start))) == count
+
+    Sandbox.unboxed_run(Repo, fn ->
+      assert Repo.aggregate(from(r in Request, where: r.pool_id == ^fixture.auth.pool.id), :count) == if(count == 3, do: count + 1, else: count + 2)
+      assert Repo.aggregate(from(l in RequestClientRetryLink, join: r in Request, on: r.id == l.predecessor_request_id, where: r.pool_id == ^fixture.auth.pool.id), :count) == count
+      refute Repo.exists?(from a in BridgeSessionAlias, where: a.pool_id == ^fixture.auth.pool.id)
+      refute Repo.exists?(from l in LedgerEntry, join: r in Request, on: r.id == l.request_id, where: r.pool_id == ^fixture.auth.pool.id)
+    end)
+
+    %{admission_node: target, admission_backend: backend, remote: target != node(), inserted_edges: count, exhaustion: count == 3, fully_exited_transactions: count, waits: waits, sorted_session_lock_receipts: locks, aliases: 0, reservations: 0}
+  end
+
+  defp exercise_peer_clock(target) do
+    fixture = peer_graph_fixture()
+    ref = make_ref()
+    parent = self()
+
+    deadline =
+      Sandbox.unboxed_run(Repo, fn ->
+        deadline = DateTime.add(peer_db_now(), 1_000, :millisecond)
+        completed = DateTime.add(deadline, -30, :second)
+        Repo.update_all(from(r in Request, where: r.id == ^fixture.original.id), set: [completed_at: completed])
+        Repo.update_all(from(a in Attempt, where: a.request_id == ^fixture.original.id), set: [completed_at: completed])
+        deadline
+      end)
+
+    holder =
+      Task.async(fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          hold_peer_attempt_transaction!(fixture.original.id, parent, ref)
+        end)
+      end)
+
+    on_exit(fn -> if Process.alive?(holder.pid), do: Task.shutdown(holder, :brutal_kill) end)
+    assert_receive {:peer_attempt_held, ^ref, holder_backend}, 15_000
+    {task, actor, backend} = start_graph_actor(target, fixture, ref)
+    enter_graph_resend(actor, ref)
+    assert_receive {:graph_clock, ^ref, before}, 15_000
+    assert DateTime.compare(before, deadline) == :lt
+    assert await_peer_block(backend, holder_backend).relation == "attempts"
+    await_peer_deadline(deadline)
+    send(holder.pid, {:release_peer_attempt, ref})
+    assert {:ok, :ok} = Task.await(holder, 15_000)
+    assert {:error, %{resend_disposition: :retry_expired}} = Task.await(task, 15_000)
+    assert_receive {:graph_clock, ^ref, after_wait}, 15_000
+    assert DateTime.compare(after_wait, deadline) != :lt
+    %{admission_backend: backend, blocker_backend: holder_backend, remote: target != node(), before_lock_wait: before, after_lock_wait: after_wait, deadline: deadline, disposition: "retry_expired"}
+  end
+
+  defp peer_db_now, do: Repo.query!("SELECT clock_timestamp()").rows |> hd() |> hd()
+
+  defp assert_graph_transaction_exited!(fixture) do
+    Sandbox.unboxed_run(Repo, fn ->
+      Repo.transaction(fn ->
+        Repo.one!(from r in Request, where: r.id == ^fixture.original.id, lock: "FOR UPDATE NOWAIT")
+        Repo.one!(from k in CodexPooler.Access.APIKey, where: k.id == ^fixture.auth.api_key.id, lock: "FOR UPDATE NOWAIT")
+      end)
+    end)
+  end
+
+  defp start_graph_holder(fixture, session, parent, ref),
+    do: Task.async(fn -> Sandbox.unboxed_run(Repo, fn -> hold_graph_edge_transaction!(fixture, session, parent, ref) end) end)
+
+  defp hold_graph_edge_transaction!(fixture, session, parent, ref),
+    do: Repo.transaction(fn -> append_graph_edge_under_lock!(fixture, session, parent, ref) end)
+
+  defp hold_peer_attempt_transaction!(request_id, parent, ref),
+    do: Repo.transaction(fn -> hold_peer_attempt!(request_id, parent, ref) end)
+
+  defp stop_owned_task(task), do: if(Process.alive?(task.pid), do: Task.shutdown(task, :brutal_kill))
+
+  defp append_graph_edge_under_lock!(fixture, session, parent, ref) do
+    Repo.one!(from s in CodexSession, where: s.id == ^session.id, lock: "FOR NO KEY UPDATE")
+    send(parent, {:peer_graph_held, ref, session.id, peer_backend()})
+
+    receive do
+      {:append_peer_graph, ^ref, predecessor, next_session} ->
+        {:ok, claim} = ClientRetry.deterministic_failed_predecessor_claim(predecessor.correlation_id, predecessor.id)
+        next = peer_failed_request(fixture, next_session, claim)
+        Repo.insert!(%RequestClientRetryLink{predecessor_request_id: predecessor.id, successor_request_id: next.id, created_at: peer_db_now()})
+        next
+    end
+  end
+
+  defp hold_peer_attempt!(request_id, parent, ref) do
+    Repo.one!(from a in Attempt, where: a.request_id == ^request_id, lock: "FOR UPDATE")
+    send(parent, {:peer_attempt_held, ref, peer_backend()})
+    receive do: ({:release_peer_attempt, ^ref} -> :ok)
+  end
+
+  defp peer_backend, do: Repo.query!("SELECT pg_backend_pid()").rows |> hd() |> hd()
+  defp await_peer_block(waiter, blocker), do: await_peer_block(waiter, blocker, System.monotonic_time(:millisecond) + 15_000)
+
+  defp await_peer_block(waiter, blocker, deadline) do
+    rows = Sandbox.unboxed_run(Repo, fn -> Repo.query!("SELECT DISTINCT a.xact_start::text, c.relname FROM pg_stat_activity a JOIN pg_locks held ON held.pid=$2 AND held.granted AND held.locktype='relation' JOIN pg_class c ON c.oid=held.relation JOIN pg_locks owning ON owning.pid=a.pid AND owning.granted AND owning.locktype='relation' AND owning.relation=held.relation WHERE a.pid=$1 AND $2=ANY(pg_blocking_pids(a.pid)) AND c.relname IN ('codex_sessions','attempts')", [waiter, blocker]).rows end)
+
+    case rows do
+      [[started, relation]] ->
+        %{transaction_start: started, blocker_backend: blocker, relation: relation}
+
+      [] ->
+        assert System.monotonic_time(:millisecond) < deadline, "peer admission did not wait on its expected independent backend"
+
+        receive do
+        after
+          10 -> await_peer_block(waiter, blocker, deadline)
+        end
+    end
+  end
+
+  defp await_peer_deadline(deadline), do: await_peer_deadline(deadline, System.monotonic_time(:millisecond) + 15_000)
+
+  defp await_peer_deadline(deadline, budget) do
+    now = Sandbox.unboxed_run(Repo, &peer_db_now/0)
+
+    if DateTime.compare(now, deadline) != :gt do
+      assert System.monotonic_time(:millisecond) < budget, "PostgreSQL did not cross the retry deadline"
+
+      receive do
+      after
+        10 -> await_peer_deadline(deadline, budget)
+      end
+    end
+  end
+
+  defp collect_peer_locks(ref, result) do
+    receive do
+      {:graph_session_lock, ^ref, _node, ordered, {:ok, %{columns: columns, rows: rows}}} ->
+        index = Enum.find_index(columns, &(&1 == "id"))
+        ids = Enum.map(rows, &Enum.at(&1, index))
+        assert ordered
+        collect_peer_locks(ref, result ++ [%{sorted: ids == Enum.sort(ids), count: length(ids)}])
+    after
+      0 -> result
+    end
+  end
 
   test "latency task cleanup leaves its linked caller alive" do
     parent = self()
@@ -465,7 +737,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuityLockingTest do
           )
         end)
 
-      assert {:ok, %CodexPooler.Gateway.Persistence.CodexTurn{turn_sequence: 1}} = result
+      assert {:ok, %CodexTurn{turn_sequence: 1}} = result
 
       assert Enum.any?(events, fn event ->
                event.command == "INSERT" and event.in_transaction? and
@@ -486,6 +758,9 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuityLockingTest do
 
       script = """
       alias CodexPooler.Accounting.Request
+      alias CodexPooler.Accounting.{Attempt, ClientRetry, LedgerEntry, RequestClientRetryLink}
+      alias CodexTurn
+      alias CodexPoolerWeb.Runtime.{BackendCodexTestSupport, MailboxPrefixRaceSupport}
       alias CodexPooler.Gateway.Payloads.RequestOptions
       alias CodexPooler.Gateway.Persistence.{CodexSession, SessionContinuity}
       alias CodexPooler.Repo
@@ -1270,7 +1545,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuityLockingTest do
       assert session.id == fixture.session.id
       assert request.id == fixture.predecessor_request.id
 
-      assert {:ok, {:ok, {:ok, %CodexPooler.Gateway.Persistence.CodexTurn{} = turn}}} =
+      assert {:ok, {:ok, {:ok, %CodexTurn{} = turn}}} =
                Task.await(replacement, 15_000)
 
       assert turn.request_id == fixture.replacement_request.id
@@ -1279,7 +1554,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuityLockingTest do
 
       assert Sandbox.unboxed_run(Repo, fn ->
                Repo.aggregate(
-                 from(turn in CodexPooler.Gateway.Persistence.CodexTurn,
+                 from(turn in CodexTurn,
                    where: turn.request_id == ^fixture.replacement_request.id
                  ),
                  :count

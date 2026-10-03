@@ -4,12 +4,151 @@ defmodule CodexPoolerWeb.Runtime.MailboxPrefixRaceSupport do
   import ExUnit.Assertions
   import ExUnit.Callbacks
 
+  alias CodexPooler.Accounting
+  alias CodexPooler.Accounting.RequestLifecycle.Reservation
   alias CodexPooler.PeerRegistry
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport
   alias Ecto.Adapters.SQL.Sandbox
 
   @budget 15_000
+
+  @spec hold_peer_checkout(pid(), reference()) :: {:ok, pid()}
+  def hold_peer_checkout(parent, ref) do
+    Task.Supervisor.start_child(CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.TaskSupervisor, fn ->
+      Repo.checkout(fn ->
+        [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+        send(parent, {:owned_peer_checkout, self(), ref, backend})
+        receive do: ({:release_owned_peer_checkout, ^ref} -> :ok)
+      end)
+    end)
+  end
+
+  @spec start_peer_lifecycle_services() :: {:ok, pid()} | {:error, term()}
+  def start_peer_lifecycle_services do
+    {:ok, _applications} = Application.ensure_all_started(:phoenix_pubsub)
+
+    case Supervisor.start_link([{Phoenix.PubSub, name: CodexPooler.PubSub}], strategy: :one_for_one) do
+      {:ok, supervisor} = result ->
+        Process.unlink(supervisor)
+        result
+
+      error ->
+        error
+    end
+  end
+
+  @spec graph_claim(map(), struct(), map(), pid(), reference()) :: term()
+  def graph_claim(auth, model, opts, parent, ref) do
+    Repo.checkout(fn ->
+      Process.put({Reservation, :runtime_authorization_barrier}, {parent, ref, {:claim, :before}})
+      Process.put({__MODULE__, :graph_ref}, ref)
+      handler = {__MODULE__, ref}
+      :ok = :telemetry.attach(handler, [:codex_pooler, :repo, :query], &__MODULE__.capture_graph_locks/4, {parent, ref})
+      [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+      send(parent, {:graph_actor, ref, self(), node(), backend})
+
+      try do
+        Accounting.claim_websocket_turn(auth, model, opts)
+      after
+        :telemetry.detach(handler)
+        Process.delete({Reservation, :runtime_authorization_barrier})
+        Process.delete({__MODULE__, :graph_ref})
+      end
+    end)
+  end
+
+  @spec capture_graph_locks([atom()], map(), map(), {pid(), reference()}) :: :ok
+  def capture_graph_locks(_event, _measurements, metadata, {parent, ref}) do
+    if Process.get({__MODULE__, :graph_ref}) == ref do
+      query = metadata.query
+
+      if String.contains?(query, "codex_sessions") and String.contains?(query, "FOR UPDATE") and String.contains?(query, "ORDER BY") do
+        send(parent, {:graph_session_lock, ref, node(), String.contains?(query, "ORDER BY c0.\"id\""), metadata.result})
+      end
+
+      if query == "SELECT clock_timestamp()" do
+        {:ok, %{rows: [[sample]]}} = metadata.result
+        send(parent, {:graph_clock, ref, sample})
+      end
+    end
+
+    :ok
+  end
+
+  @spec suppress_owned_periodic_renewal!(pid(), :http | :owner) :: :ok
+  def suppress_owned_periodic_renewal!(actor, kind) do
+    original = :sys.get_state(actor)
+    on_exit(fn -> restore_periodic_renewal(actor, kind, original) end)
+    state = :sys.replace_state(actor, &disable_periodic_renewal(&1, kind))
+    field = if kind == :http, do: :renewal_ref, else: :owner_renewal_ref
+    assert Map.fetch!(state, field) == nil
+    :ok
+  end
+
+  @spec disable_periodic_renewal(map(), :http | :owner) :: map()
+  def disable_periodic_renewal(state, :http) do
+    assert is_binary(state.session_id)
+    if is_reference(state.renewal_ref), do: Process.cancel_timer(state.renewal_ref)
+    drain_heartbeat_ticks()
+    %{state | renewal_ref: nil, renewal_token: nil}
+  end
+
+  def disable_periodic_renewal(state, :owner) do
+    assert is_binary(state.codex_session_id)
+    if is_reference(state.owner_renewal_ref), do: Process.cancel_timer(state.owner_renewal_ref)
+    drain_owner_ticks()
+    %{state | owner_renewal_ref: nil, owner_renewal_ms: 0}
+  end
+
+  defp drain_heartbeat_ticks do
+    receive do
+      {:session_lease_heartbeat_renew, _token} -> drain_heartbeat_ticks()
+    after
+      0 -> :ok
+    end
+  end
+
+  defp drain_owner_ticks do
+    receive do
+      :renew_owner_lease -> drain_owner_ticks()
+    after
+      0 -> :ok
+    end
+  end
+
+  defp restore_periodic_renewal(actor, kind, original) do
+    if (node(actor) == node() or node(actor) in Node.list()) and :erpc.call(node(actor), Process, :alive?, [actor]) do
+      restore_owned_timer(actor, kind, original)
+    end
+  end
+
+  defp restore_owned_timer(actor, :http, original) do
+    :sys.replace_state(actor, fn state -> %{state | renewal_token: original.renewal_token, renewal_ref: nil} end)
+    send(actor, {:session_lease_heartbeat_renew, original.renewal_token})
+  end
+
+  defp restore_owned_timer(actor, :owner, original) do
+    :sys.replace_state(actor, fn state -> %{state | owner_renewal_ms: original.owner_renewal_ms, owner_renewal_delay: original.owner_renewal_delay} end)
+    send(actor, :renew_owner_lease)
+  end
+
+  @spec observe_http_heartbeat!(pid()) :: term()
+  def observe_http_heartbeat!(test) do
+    handler = {__MODULE__, :heartbeat, make_ref()}
+    on_exit(fn -> :telemetry.detach(handler) end)
+    :ok = :telemetry.attach(handler, [:codex_pooler, :repo, :query], &__MODULE__.capture_http_heartbeat/4, %{test: test, claimed: :atomics.new(1, [])})
+    handler
+  end
+
+  @spec capture_http_heartbeat([atom()], map(), map(), map()) :: :ok
+  def capture_http_heartbeat(_event, _measurements, _metadata, config) do
+    if match?({CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat, :init, _}, Process.get(:"$initial_call")) and :atomics.add_get(config.claimed, 1, 1) == 1 do
+      send(config.test, {:owned_http_heartbeat, self()})
+    end
+
+    :ok
+  end
 
   @spec hold_before_session_lock!(pid()) :: reference()
   def hold_before_session_lock!(executor) do
