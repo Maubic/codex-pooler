@@ -10,6 +10,8 @@ defmodule CodexPooler.Accounting.APIKeyActiveRequestsTest do
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
   alias CodexPooler.Accounting.RequestLifecycle.LedgerEntries
   alias CodexPooler.Accounting.RequestLifecycle.Reservation
+  alias CodexPooler.Gateway.Payloads.{RequestOptions, WebsocketTurnIdentity}
+  alias CodexPooler.Gateway.Persistence.SessionContinuity
   alias CodexPooler.Repo
   alias Ecto.Adapters.SQL.Sandbox
 
@@ -451,11 +453,60 @@ defmodule CodexPooler.Accounting.APIKeyActiveRequestsTest do
           end)
 
         assert length(queries) == 16 * if(is_nil(cap), do: 10, else: 11)
+        CodexPooler.TestDiagnostics.puts(fn -> CodexPooler.JSON.encode!(%{scenario: "ordinary_admission_query_budget", cap: cap, admissions: 16, observed_queries: length(queries), statements: Enum.frequencies_by(queries, fn query -> query.query |> String.split(" ", parts: 2) |> hd() end)}) end)
         assert Enum.count(queries, &active_count_query?/1) == if(is_nil(cap), do: 0, else: 16)
         assert Accounting.LedgerReads.outstanding_reservation_count(fixture.api_key.id) == 16
       end)
     end
   end
+
+  for context_kind <- [:session, :native_claim, :semantic] do
+    @tag native_outer_transaction: true
+    test "#{context_kind} reservation context cannot bypass ordered admission in an uncoordinated caller transaction", context do
+      fixture = fixture(context, nil)
+
+      unboxed(fn ->
+        {:ok, session} = SessionContinuity.start_codex_session(fixture.auth, RequestOptions.for_websocket(%{session_header: "sample-native-#{Ecto.UUID.generate()}"}))
+        payload = %{"model" => fixture.model.exposed_model_id, "client_metadata" => %{"x-codex-turn-metadata" => CodexPooler.JSON.encode!(%{"turn_id" => "sample-turn", "request_kind" => "turn"})}}
+        {:ok, identity} = WebsocketTurnIdentity.resolve(payload, session.id)
+        opts = native_transaction_opts(unquote(context_kind), session, identity)
+
+        assert {:error, %{code: :duplicate_request, mailbox_check: :session}} =
+                 Repo.transaction(fn ->
+                   set_cap(fixture, 3)
+                   Accounting.reserve(fixture.auth, fixture.model, payload, opts)
+                 end)
+
+        assert Repo.get!(CodexPooler.Access.APIKey, fixture.api_key.id).max_active_requests == nil
+        assert counts(fixture) == %{requests: 0, reservations: 0, attempts: 0}
+      end)
+    end
+  end
+
+  @tag native_outer_transaction: true
+  test "a coordinated caller owns full rollback around a session-bound reservation", context do
+    fixture = fixture(context, nil)
+
+    unboxed(fn ->
+      {:ok, session} = SessionContinuity.start_codex_session(fixture.auth, RequestOptions.for_websocket(%{session_header: "sample-coordinated-#{Ecto.UUID.generate()}"}))
+
+      assert {:error, :cancelled} =
+               SessionContinuity.mailbox_admission_transaction(
+                 fn -> [session.id] end,
+                 fn ->
+                   assert {:ok, _} = Accounting.reserve(fixture.auth, fixture.model, %{"model" => fixture.model.exposed_model_id}, %{codex_session: session, correlation_id: Ecto.UUID.generate()})
+                   Repo.rollback(:cancelled)
+                 end,
+                 :unexpected_exhaustion
+               )
+
+      assert counts(fixture) == %{requests: 0, reservations: 0, attempts: 0}
+    end)
+  end
+
+  defp native_transaction_opts(:session, session, _identity), do: %{codex_session: session, correlation_id: Ecto.UUID.generate()}
+  defp native_transaction_opts(:native_claim, _session, identity), do: %{correlation_id: identity.turn_claim_key}
+  defp native_transaction_opts(:semantic, _session, identity), do: %{semantic_turn_digest: identity.semantic_turn_key, correlation_id: Ecto.UUID.generate()}
 
   test "active count excludes retained terminals regardless of amount status", context do
     fixture = fixture(context, 2)

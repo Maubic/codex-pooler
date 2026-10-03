@@ -1131,10 +1131,11 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
        ) do
     caller_owned_transaction? = Repo.in_transaction?()
 
-    SessionContinuity.mailbox_admission_transaction(
-      fn -> mailbox_admission_session_ids(auth, model, opts) end,
+    reservation_transaction(
+      auth,
+      model,
+      opts,
       fn ->
-        revalidate_mailbox_admission_sessions!(auth, model, opts)
         :ok = lock_resend_session(resend_session)
         api_key = authorize_runtime_turn!(api_key, captured_epoch)
         auth = Map.put(auth, :api_key, api_key)
@@ -1208,11 +1209,36 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
           estimate: estimate
         }
         |> DeadExecutionResendRecovery.put_markers(client_resend)
-      end,
-      mailbox_admission_exhausted_error()
+      end
     )
     |> unwrap_transaction()
     |> DeadExecutionResendRecovery.emit_after_commit(caller_owned_transaction?)
+  end
+
+  # A plain reservation has no session graph to discover or coordinate. Keep
+  # its caller-owned transaction semantics and query budget; every supplied
+  # native/session/retry context still requires the ordered admission boundary.
+  defp reservation_transaction(auth, model, opts, operation) do
+    if coordinated_reservation_context?(opts) do
+      SessionContinuity.mailbox_admission_transaction(
+        fn -> mailbox_admission_session_ids(auth, model, opts) end,
+        fn ->
+          revalidate_mailbox_admission_sessions!(auth, model, opts)
+          operation.()
+        end,
+        mailbox_admission_exhausted_error()
+      )
+    else
+      Repo.transaction(operation)
+    end
+  end
+
+  defp coordinated_reservation_context?(opts) do
+    context = [:codex_session, :turn_claim, :semantic_turn_digest, :native_client_retry_witness, :replay_claim_digest, :execution_recovery_request_id, :client_retry_predecessor_request_id, :original_request_claim, :native_http_steered_claim]
+
+    Enum.any?(context, &(not is_nil(attr(opts, &1)))) or
+      List.wrap(attr(opts, :websocket_compaction_claims)) != [] or
+      native_turn_claim?(attr(opts, :correlation_id))
   end
 
   @spec record_denied_request(CodexPooler.Access.auth_context(), term(), map()) ::

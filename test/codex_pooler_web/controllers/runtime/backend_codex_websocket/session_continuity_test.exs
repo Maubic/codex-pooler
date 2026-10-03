@@ -22,12 +22,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SessionContinuityTest do
     RoutingCircuitState
   }
 
+  alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.Gateway.Persistence.SessionContinuity
+
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Websocket, as: Gateway
   alias CodexPooler.Pools
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Assignments.PoolAssignments
   alias CodexPoolerWeb.CodexResponsesSocket
+  alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
 
   # Detection budget for a server-side connection teardown the test only
   # observes, never a scenario timeout.
@@ -1370,6 +1374,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SessionContinuityTest do
     refute metadata_text =~ "upstream-token"
   end
 
+  @tag slow: "observes a real one-second matching Session and Lease PostgreSQL deadline crossing"
   test "stable websocket session key is reused before timeout and replaced after timeout" do
     setup = gateway_setup(start_upstream(FakeUpstream.json_response(%{"data" => []})))
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
@@ -1393,11 +1398,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SessionContinuityTest do
 
     assert reused.id == session.id
 
-    expired_at = DateTime.add(DateTime.utc_now(), -30, :second) |> DateTime.truncate(:microsecond)
-
-    reused
-    |> Ecto.Changeset.change(%{status: "interrupted", owner_lease_expires_at: expired_at})
-    |> Repo.update!()
+    expire_matching_owner_lease!(reused)
 
     {:ok, replacement} =
       Gateway.start_codex_session(auth, %{
@@ -1431,6 +1432,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SessionContinuityTest do
   # rejoining the same session is pinned by the ephemeral fork test in
   # `handshake_test.exs`.
   @tag :websocket_window_session_key
+  @tag slow: "observes real matching Session and Lease expiry after the exact released-client socket cleanup"
   test "released-client websocket reconnect on one window recreates the window session after lease expiry" do
     upstream =
       start_upstream(
@@ -1462,11 +1464,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SessionContinuityTest do
 
     # The downstream is gone; let the owner lease lapse as if the idle window
     # had elapsed.
-    expired_at = DateTime.add(DateTime.utc_now(), -30, :second) |> DateTime.truncate(:microsecond)
-
-    first_session
-    |> Ecto.Changeset.change(%{owner_lease_expires_at: expired_at})
-    |> Repo.update!()
+    WebsocketCleanupFence.await_session_cleanups!()
+    expire_matching_owner_lease!(Repo.get!(CodexSession, first_session.id))
 
     recreated = released_client_websocket_turn!(port, setup, thread, window)
     recreated_session = await_session_assignment!(recreated.request_metadata["codex_session_id"])
@@ -1478,6 +1477,45 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SessionContinuityTest do
     # as its soft preference, which must survive the turn's session lock.
     assert recreated.request_metadata["routing"]["session_preference_kind"] == "recreated"
     assert recreated.request_metadata["routing"]["session_preference_status"] == "applied"
+  end
+
+  defp expire_matching_owner_lease!(session) do
+    options = RequestOptions.for_websocket(%{bridge_owner_lease_ttl_seconds: 1})
+    assert {:ok, renewed} = SessionContinuity.renew_owner_token(session, session.owner_lease_token, options)
+    before = matching_lease_snapshot!(session.id)
+    assert before.deadline == renewed.owner_lease_expires_at
+    assert DateTime.compare(before.clock, before.deadline) == :lt
+    after_expiry = await_matching_lease_expiry!(session.id, before.deadline, System.monotonic_time(:millisecond) + @connection_shutdown_timeout_ms)
+    assert DateTime.compare(after_expiry.clock, before.deadline) in [:eq, :gt]
+  end
+
+  defp matching_lease_snapshot!(session_id) do
+    %{rows: [[session_deadline, lease_deadline, clock]]} = Repo.query!("SELECT s.owner_lease_expires_at, l.expires_at, clock_timestamp() FROM codex_sessions s JOIN bridge_owner_leases l ON l.codex_session_id = s.id AND l.lease_token = s.owner_lease_token AND l.status = 'active' WHERE s.id = $1", [Ecto.UUID.dump!(session_id)])
+    deadline = utc_deadline(session_deadline)
+    assert deadline == utc_deadline(lease_deadline)
+    %{deadline: deadline, clock: utc_deadline(clock)}
+  end
+
+  defp utc_deadline(%NaiveDateTime{} = value), do: DateTime.from_naive!(value, "Etc/UTC")
+  defp utc_deadline(%DateTime{} = value), do: value
+
+  defp await_matching_lease_expiry!(session_id, expected, deadline) do
+    observation = matching_lease_snapshot!(session_id)
+    assert observation.deadline == expected
+
+    cond do
+      DateTime.compare(observation.clock, expected) != :lt ->
+        observation
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("matching owned Session and Lease did not reach PostgreSQL expiry")
+
+      true ->
+        receive do
+        after
+          10 -> await_matching_lease_expiry!(session_id, expected, deadline)
+        end
+    end
   end
 
   @tag :websocket_window_session_key

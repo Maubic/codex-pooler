@@ -239,16 +239,22 @@ defmodule CodexPooler.Accounting.ClientRetryPostgresTest do
     parent = self()
     release = make_ref()
     deadlocks_before = Sandbox.unboxed_run(Repo, &deadlock_count/0)
-
-    holder = Task.async(fn -> hold_session_lock(fixture, parent, release) end)
+    supervisor = start_supervised!(Task.Supervisor)
+    holder = Task.Supervisor.async_nolink(supervisor, fn -> hold_session_lock(fixture, parent, release) end)
 
     assert_receive {:session_holder_ready, ^release, holder_backend}, @detection_budget
 
     claimant =
-      Task.async(fn ->
+      Task.Supervisor.async_nolink(supervisor, fn ->
         Sandbox.unboxed_run(Repo, fn ->
           [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
           send(parent, {:blocked_claimant_ready, release, backend})
+
+          receive do
+            {:begin_claim, ^release} -> :ok
+          after
+            @detection_budget -> flunk("claimant start barrier was not released")
+          end
 
           Accounting.claim_client_retry_successor(
             fixture.auth,
@@ -263,14 +269,19 @@ defmodule CodexPooler.Accounting.ClientRetryPostgresTest do
 
     snapshot =
       Sandbox.unboxed_run(Repo, fn ->
-        snapshot =
-          await_blocked_snapshot(
-            claimant_backend,
-            holder_backend,
-            System.monotonic_time(:millisecond) + @detection_budget
-          )
+        {:ok, snapshot} =
+          Repo.transaction(fn ->
+            # Cache the backend's idle statement before letting it reach the
+            # actual session lock. Live blockers can then coexist with this old
+            # activity snapshot unless the observer explicitly refreshes it.
+            [[initial_state]] = Repo.query!("SELECT state FROM pg_stat_activity WHERE pid = $1", [claimant_backend]).rows
+            assert initial_state in ["idle", "idle in transaction"]
+            send(claimant.pid, {:begin_claim, release})
+            snapshot = await_blocked_snapshot(claimant_backend, holder_backend, System.monotonic_time(:millisecond) + @detection_budget)
+            mutate_after_lock_wait!(fixture, mutation)
+            snapshot
+          end)
 
-        mutate_after_lock_wait!(fixture, mutation)
         snapshot
       end)
 
@@ -396,10 +407,13 @@ defmodule CodexPooler.Accounting.ClientRetryPostgresTest do
   end
 
   defp await_blocked_snapshot(waiter, holder, deadline) do
-    [[state, wait_event_type, wait_event, blockers, ungranted_lock_count]] =
+    Repo.query!("SELECT pg_stat_clear_snapshot()")
+
+    [[state, query, wait_event_type, wait_event, blockers, ungranted_lock_count]] =
       Repo.query!(
         """
         SELECT activity.state,
+               activity.query,
                activity.wait_event_type,
                activity.wait_event,
                pg_blocking_pids($1),
@@ -407,14 +421,15 @@ defmodule CodexPooler.Accounting.ClientRetryPostgresTest do
         FROM pg_stat_activity AS activity
         LEFT JOIN pg_locks AS locks ON locks.pid = activity.pid
         WHERE activity.pid = $1
-        GROUP BY activity.state, activity.wait_event_type, activity.wait_event
+        GROUP BY activity.state, activity.query, activity.wait_event_type, activity.wait_event
         """,
         [waiter]
       ).rows
 
-    if holder in blockers and wait_event_type == "Lock" do
+    if state == "active" and String.contains?(query, "codex_sessions") and String.ends_with?(query, "FOR UPDATE") and holder in blockers and wait_event_type == "Lock" and ungranted_lock_count > 0 do
       %{
         state: state,
+        query: query,
         wait_event_type: wait_event_type,
         wait_event: wait_event,
         blockers: blockers,

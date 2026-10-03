@@ -20,6 +20,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexOwnerAnchoredDrainTest do
   @budget 15_000
   @moduletag capture_log: true
 
+  @tag slow: "executes real anchored websocket generation, coordinated owner drain, physical close and retry settlement"
   test "visible anchored continuation drains before its retry without orphaning lifecycle rows" do
     {setup, upstream, state, release_ref} = fixture()
     metadata = metadata()

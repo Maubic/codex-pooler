@@ -19,7 +19,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.MailboxAdmissionLock
   def transaction(discover, operation, exhausted_reason)
       when is_function(discover, 0) and is_function(operation, 0) do
     if Repo.in_transaction?() do
-      nested_transaction(operation)
+      nested_transaction(operation, exhausted_reason)
     else
       transact(discover, operation, exhausted_reason, 0)
     end
@@ -47,9 +47,12 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.MailboxAdmissionLock
   @spec coordinated?() :: boolean()
   def coordinated?, do: Repo.in_transaction?() and match?(%MapSet{}, Process.get(@held_sessions))
 
-  defp nested_transaction(operation) do
+  defp nested_transaction(operation, exhausted_reason) do
     # A parent without the coordinator cannot safely discover after its locks.
-    if is_nil(Process.get(@held_sessions)), do: Repo.rollback(@rediscover)
+    # No retry can release locks acquired by an arbitrary caller-owned outer
+    # transaction. Abort that whole transaction with the public caller error;
+    # private rediscovery is reserved for an enclosing coordinator to consume.
+    if is_nil(Process.get(@held_sessions)), do: Repo.rollback(exhausted_reason)
 
     case Repo.transaction(operation) do
       {:error, @rediscover} -> Repo.rollback(@rediscover)

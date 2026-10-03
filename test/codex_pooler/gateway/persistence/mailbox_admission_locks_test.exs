@@ -165,7 +165,7 @@ defmodule CodexPooler.Gateway.Persistence.MailboxAdmissionLocksTest do
     original = hd(fixture.sessions)
 
     Sandbox.unboxed_run(Repo, fn ->
-      assert {:error, :rediscover_mailbox_sessions} =
+      assert {:error, @exhausted} =
                Repo.transaction(fn ->
                  Repo.update_all(from(s in CodexSession, where: s.id == ^original.id), set: [session_key: "must-rollback"])
                  MailboxAdmissionLocks.transaction(fn -> flunk("late discovery") end, fn -> :admitted end, @exhausted)
@@ -203,7 +203,7 @@ defmodule CodexPooler.Gateway.Persistence.MailboxAdmissionLocksTest do
 
       assert {:ok, :ok} = MailboxAdmissionLocks.transaction(discover, fn -> :ok end, @exhausted)
 
-      assert {:error, :rediscover_mailbox_sessions} =
+      assert {:error, @exhausted} =
                Repo.transaction(fn ->
                  MailboxAdmissionLocks.transaction(fn -> flunk("context leaked") end, fn -> :admitted end, @exhausted)
                end)
