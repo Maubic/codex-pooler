@@ -9,6 +9,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   import Ecto.Query
 
   alias CodexPooler.Accounting.NativeContentFilterRetry
+  alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup
   alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
 
   alias CodexPooler.Accounting.{
@@ -572,6 +573,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   def execution_recovery_authority(%Attempt{}), do: nil
 
   defp recover_execution(request, candidate, timestamp, authority, opts) do
+    with {:ok, candidate} <- ExpiredOwnerGenerationCleanup.observe_pending(candidate) do
+      recover_observed_execution(request, candidate, timestamp, authority, opts)
+    end
+  end
+
+  defp recover_observed_execution(request, candidate, timestamp, authority, opts) do
     Repo.transaction(
       fn ->
         if Keyword.get(opts, :skip_locked, false), do: Repo.query!("SET LOCAL lock_timeout = '1ms'", [])
@@ -655,9 +662,22 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   end
 
   defp finalize_dead_execution(request, attempt, timestamp, authority) do
-    code =
-      if authority == :absent, do: "absent_instance_recovered", else: "dead_execution_recovered"
+    case ExpiredOwnerGenerationCleanup.read(attempt) do
+      {:ok, %{"phase" => "ended"} = witness} ->
+        if ExpiredOwnerGenerationCleanup.matches_request?(witness, request),
+          do: finalize_dead_execution_with_code(request, attempt, timestamp, "owner_unavailable"),
+          else: :noop
 
+      :none ->
+        code = if authority == :absent, do: "absent_instance_recovered", else: "dead_execution_recovered"
+        finalize_dead_execution_with_code(request, attempt, timestamp, code)
+
+      _unconfirmed ->
+        :noop
+    end
+  end
+
+  defp finalize_dead_execution_with_code(request, attempt, timestamp, code) do
     case finalize_request(request, attempt, %{
            request_status: "failed",
            attempt_status: "failed",
@@ -718,7 +738,9 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
           do: replay_db_now(),
           else: ClientRetry.completion_timestamp(request, now(attrs))
 
-      finalization = %{finalization | timestamp: timestamp}
+      finalization =
+        %{finalization | timestamp: timestamp}
+        |> ExpiredOwnerGenerationCleanup.finalization(request, attempt)
 
       replay_entitlement =
         replay_finalization_authority(attempt, replay_entitlement, attrs)
@@ -1126,6 +1148,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
             attrs
             |> Map.get(:attempt_metadata, %{})
             |> Metadata.sanitize_metadata()
+            |> ExpiredOwnerGenerationCleanup.preserve(attempt)
             |> keep_downstream_delivery_receipt(attempt.id)
         }
       end

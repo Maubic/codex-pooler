@@ -8,6 +8,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Recovery do
   alias CodexPooler.Accounting.RequestLifecycle
   alias CodexPooler.Accounting.RequestLifecycle.TurnClaimRelease
   alias CodexPooler.Gateway.Persistence.RuntimeCleanup
+  alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup
   alias CodexPooler.Repo
 
   @stale_after_seconds 6 * 60 * 60
@@ -260,16 +261,18 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Recovery do
   end
 
   defp settle_dispatched_request(%Request{} = request, %Attempt{} = attempt, now) do
-    RequestLifecycle.finalize_request(request, attempt, %{
-      request_status: "failed",
-      attempt_status: "failed",
-      response_status_code: 499,
-      last_error_code: @recovery_code,
-      error_message: "stale reservation recovered after request lifecycle was abandoned",
-      usage: %{status: "usage_unknown", source: @recovery_source},
-      now: now,
-      before_commit: recover_stale_turn(request, attempt, now)
-    })
+    ExpiredOwnerGenerationCleanup.with_stale_backstop_authority(request, attempt, fn ->
+      RequestLifecycle.finalize_request(request, attempt, %{
+        request_status: "failed",
+        attempt_status: "failed",
+        response_status_code: 499,
+        last_error_code: @recovery_code,
+        error_message: "stale reservation recovered after request lifecycle was abandoned",
+        usage: %{status: "usage_unknown", source: @recovery_source},
+        now: now,
+        before_commit: recover_stale_turn(request, attempt, now)
+      })
+    end)
   end
 
   # The request's turn is interrupted inside the settlement's own transaction

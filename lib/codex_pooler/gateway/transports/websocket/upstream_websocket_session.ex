@@ -44,6 +44,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV6
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks
+  alias CodexPooler.Platform.ExecutionIdentity
   alias CodexPooler.RouteClass
 
   @default_keepalive_interval_ms 25_000
@@ -219,6 +220,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   def live_connection(_pid), do: {:error, :invalid_input}
 
+  @spec producer_identity(pid()) :: map() | :unknown
+  def producer_identity(pid) when is_pid(pid) do
+    GenServer.call(pid, :producer_identity, 1_000)
+  catch
+    :exit, _reason -> :unknown
+  end
+
   @spec compaction_reservation_snapshot(pid()) ::
           {:ok, %{lifecycle_id: Ecto.UUID.t(), generation: pos_integer(), serving_mode: :full | :lite}}
           | {:error, atom()}
@@ -388,6 +396,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   def init({:new, subscriber, admission_topology}) do
     sensitivity = NativeCompactionTrace.configure_process_sensitivity(:upstream_session)
+    _producer_identity = ExecutionIdentity.producer()
 
     state =
       new_connection_lifecycle_state()
@@ -469,6 +478,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   def handle_call(:live_connection, _from, state), do: {:reply, {:ok, live_connection_state(state)}, state}
+
+  def handle_call(:producer_identity, _from, state), do: {:reply, ExecutionIdentity.producer(), state}
 
   # An armed compaction has no bound, and a final or a collection past its
   # own has ended (findings#270 rows 270-317 and 270-289). A snapshot of one

@@ -8,6 +8,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
   alias CodexPooler.Gateway.Payloads.{CompactionTrigger, NativeCodexTurnMetadata, RequestOptions}
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
   alias CodexPooler.Gateway.Runtime.Finalization
+  alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup
   alias CodexPooler.Gateway.Runtime.Routing.DispatchLifecycle
   alias CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector
 
@@ -1196,6 +1197,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
              :stale_downstream,
              :owner_busy
            ] do
+    finalization = ExpiredOwnerGenerationCleanup.strip(finalization)
     %{body: body, headers: headers, started: started} = finalization
     %{reserved: reserved, attempt: attempt, request_options: request_options} = context
     {:ok, owner_payload} = WebsocketOwnerContract.safe_error_payload(reason, nil)

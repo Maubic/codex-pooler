@@ -8,6 +8,7 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
   require Logger
 
   alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
 
   alias CodexPooler.Gateway.Persistence.{
     BridgeOwnerLease,
@@ -20,6 +21,7 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.OwnerLease, as: OwnerLeaseStatus
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.Session, as: SessionStatus
+  alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
   alias CodexPooler.Platform.ForwardedGenerationEnds
   alias CodexPooler.Platform.InstancePresence
@@ -40,12 +42,17 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
   @type expired_owner_candidate :: %{
           required(:session_id) => Ecto.UUID.t(),
           required(:owner_instance_id) => String.t(),
+          required(:owner_instance_boot_id) => String.t() | nil,
           required(:owner_lease_token) => Ecto.UUID.t(),
           required(:owner_lease_expires_at) => DateTime.t()
         }
 
   @spec cleanup_expired_runtime_state(DateTime.t()) :: {:ok, map()} | {:error, term()}
   def cleanup_expired_runtime_state(now \\ now()) do
+    if Repo.in_transaction?(), do: {:error, :caller_transaction}, else: cleanup_expired_outside_transaction(now)
+  end
+
+  defp cleanup_expired_outside_transaction(now) do
     with {:ok, recovered_summary} <- recover_expired_owner_runtime_state(now),
          {:ok, cleanup_summary} <- cleanup_expired(now) do
       {:ok, Map.merge(cleanup_summary, recovered_summary)}
@@ -353,9 +360,62 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
   # gate, no log and no test — the shape findings#195 row 195-05's third site
   # had. There is now one `{:ok, _}` shape and it always carries the markers.
   defp recover_expired_owner_session(candidate, {:ok, recovered_count}) do
-    candidate
-    |> then(&Repo.transaction(fn -> recover_expired_owner_session_locked(&1) end))
-    |> complete_expired_owner_recovery(recovered_count)
+    result =
+      cond do
+        not expired_websocket_owner?(candidate.session_id) -> recover_expired_persistence(candidate)
+        expired_owner_proven_gone?(candidate) -> recover_proven_gone_owner(candidate)
+        true -> recover_expired_generation(candidate)
+      end
+
+    complete_expired_owner_recovery(result, recovered_count)
+  end
+
+  defp recover_expired_persistence(candidate), do: Repo.transaction(fn -> recover_expired_owner_session_locked(candidate) end)
+
+  defp recover_proven_gone_owner(candidate) do
+    attempt = Repo.one(from t in CodexTurn, join: a in CodexPooler.Accounting.Attempt, on: a.request_id == t.request_id, where: t.codex_session_id == ^candidate.session_id and t.status == "in_progress", order_by: [desc: t.turn_sequence, desc: a.attempt_number], limit: 1, select: a)
+
+    with {:ok, observed} <- ExpiredOwnerGenerationCleanup.observe_pending(attempt) do
+      recover_proven_gone_attempt(candidate, observed)
+    end
+  end
+
+  defp recover_proven_gone_attempt(candidate, attempt) do
+    case ExpiredOwnerGenerationCleanup.read(attempt) do
+      {:ok, %{"phase" => "ended"} = witness} ->
+        case Interruption.recover_stopped_owner_request(witness, RequestOptions.for_websocket(%{})) do
+          {:ok, result} -> {:ok, {1, result}}
+          {:error, _reason} = error -> error
+        end
+
+      :none ->
+        recover_expired_persistence(candidate)
+
+      _unconfirmed ->
+        {:error, :owner_unavailable}
+    end
+  end
+
+  defp recover_expired_generation(candidate) do
+    case WebsocketOwnerSession.recover_expired_generation(candidate) do
+      {:ok, :stale_owner} -> {:ok, {0, %{interrupted_outcomes: []}}}
+      {:ok, recovery} -> {:ok, {1, recovery}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp expired_owner_proven_gone?(candidate) do
+    owner = InstancePresence.Identity.owner(candidate.owner_instance_id, candidate.owner_instance_boot_id)
+
+    case InstancePresence.status(owner) do
+      :dead -> true
+      :alive -> false
+      :unknown -> InstancePresence.superseded?(owner)
+    end
+  end
+
+  defp expired_websocket_owner?(session_id) do
+    Repo.one(from t in CodexTurn, join: a in CodexPooler.Accounting.Attempt, on: a.request_id == t.request_id, where: t.codex_session_id == ^session_id and t.status == "in_progress", order_by: [desc: t.turn_sequence, desc: a.attempt_number], limit: 1, select: a.transport) == "websocket"
   end
 
   @doc false
@@ -426,6 +486,7 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
         select: %{
           session_id: session.id,
           owner_instance_id: session.owner_instance_id,
+          owner_instance_boot_id: session.owner_instance_boot_id,
           owner_lease_token: session.owner_lease_token,
           owner_lease_expires_at: session.owner_lease_expires_at
         }

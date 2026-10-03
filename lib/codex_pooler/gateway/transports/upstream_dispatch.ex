@@ -7,6 +7,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
 
   alias CodexPooler.Accounting.ClientRetry
   alias CodexPooler.Gateway.OperationalSettings
+  alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup
 
   alias CodexPooler.Gateway.Payloads.{
     CompactionTrigger,
@@ -1358,10 +1359,15 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   defp owner_request_result(
          {:error, %{body: _body, reason: _reason} = response},
          _identity,
-         _request,
-         _attempt,
+         request,
+         attempt,
          _request_options
        ) do
+    response =
+      if ExpiredOwnerGenerationCleanup.stopped_caller?(response, request, attempt),
+        do: response,
+        else: ExpiredOwnerGenerationCleanup.strip(response)
+
     {:error, Map.put_new(response, :headers, [])}
   end
 

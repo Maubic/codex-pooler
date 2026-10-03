@@ -8,8 +8,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   alias CodexPooler.Accounting.RequestReplayEntitlement
   alias CodexPooler.Gateway.{OperationalSettings, OperationalStatus, OwnerRenewalSchedule}
   alias CodexPooler.Gateway.Payloads.NativeTurnContinuation
+  alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
   alias CodexPooler.Gateway.Persistence.SessionContinuity
+  alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
   alias CodexPooler.Gateway.Runtime.Finalization.SettlementRetry
   alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
@@ -46,6 +48,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   alias CodexPooler.Platform.ForwardedGenerationEnds
   alias CodexPooler.Platform.InstancePresence
   alias CodexPooler.Platform.TransientDatabaseError
+  alias CodexPooler.Repo
 
   defmodule ForwardedSendWitnessState do
     @moduledoc false
@@ -86,6 +89,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     :process_generation,
     :next_turn_descriptor,
     :upstream_pid,
+    :producer_identity,
+    :expired_slot_receipt,
     :callbacks,
     :active_turn,
     :termination_cleanup_witness,
@@ -281,6 +286,40 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
   @spec owner_status(GenServer.server()) :: {:ok, owner_status()}
   def owner_status(owner), do: GenServer.call(owner, :owner_status, owner_call_timeout())
+
+  @spec recover_expired_generation(map()) :: {:ok, term()} | {:error, term()}
+  def recover_expired_generation(candidate) do
+    if Repo.in_transaction?() do
+      {:error, :caller_transaction}
+    else
+      case Enum.find([node() | Node.list()], &(Atom.to_string(&1) == candidate.owner_instance_id)) do
+        nil -> {:error, :owner_unavailable}
+        target when target == node() -> local_recover_expired_generation(candidate)
+        target -> :erpc.call(target, __MODULE__, :local_recover_expired_generation, [candidate], owner_call_timeout())
+      end
+    end
+  catch
+    _, _reason -> {:error, :owner_unavailable}
+  end
+
+  @doc false
+  @spec local_recover_expired_generation(map()) :: {:ok, term()} | {:error, term()}
+  def local_recover_expired_generation(candidate) do
+    if Repo.in_transaction?() do
+      {:error, :caller_transaction}
+    else
+      case Registry.lookup(@registry, candidate.session_id) do
+        [{owner, _value}] ->
+          deadline = System.monotonic_time(:millisecond) + owner_call_timeout() - 1_000
+          GenServer.call(owner, {:recover_expired_generation, candidate, deadline}, owner_call_timeout())
+
+        [] ->
+          {:error, :owner_unavailable}
+      end
+    end
+  catch
+    _, _reason -> {:error, :owner_unavailable}
+  end
 
   @spec reserve_compaction_retry_submit(GenServer.server(), binary(), downstream(), pid()) ::
           {:ok, CompactionRetrySubmitHold.t()} | {:error, atom()}
@@ -1384,6 +1423,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
          owner_instance_id: owner_instance_id,
          owner_registry: owner_registry(opts),
          upstream_pid: upstream_pid,
+         producer_identity: Map.get(upstream, :producer_identity, fn _pid -> :unknown end).(upstream_pid),
          callbacks: %Callbacks{
            upstream_sender: upstream.send,
            upstream_closer: upstream.close,
@@ -1556,6 +1596,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
           state
         ),
         do: {:reply, {:error, :full_trace_unavailable}, state}
+  end
+
+  def handle_call({:recover_expired_generation, candidate, deadline}, _from, state) do
+    case ExpiredOwnerGenerationCleanup.within_deadline(deadline, fn -> recover_expired_slot(state, candidate) end) do
+      {result, %__MODULE__{} = next_state} -> {:reply, result, next_state}
+      {:error, _reason} = error -> {:reply, error, state}
+    end
   end
 
   def handle_call(:owner_identity, _from, state) do
@@ -6184,7 +6231,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
           send_owner_upstream(upstream_pid, upstream_payload, writer)
         end,
         close: &UpstreamWebsocketSession.close/1,
-        live_connection: &UpstreamWebsocketSession.live_connection/1
+        live_connection: &UpstreamWebsocketSession.live_connection/1,
+        producer_identity: &UpstreamWebsocketSession.producer_identity/1
       }
     end)
   end
@@ -6276,6 +6324,161 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   end
 
   defp exact_keys?(_map, _keys), do: false
+
+  defp recover_expired_slot(%{expired_slot_receipt: receipt} = state, candidate) when is_map(receipt) do
+    cleanup = ExpiredOwnerGenerationCleanup
+
+    cond do
+      cleanup.receipt_completed?(receipt) ->
+        recover_expired_slot(%{state | expired_slot_receipt: nil}, candidate)
+
+      receipt["session_id"] == candidate.session_id and receipt["lease_identity_digest"] == cleanup.digest(candidate.owner_lease_token) and receipt["session_deadline"] == DateTime.to_iso8601(candidate.owner_lease_expires_at) ->
+        {recover_retained_expired_receipt(candidate, receipt), state}
+
+      true ->
+        {{:error, :owner_unavailable}, state}
+    end
+  rescue
+    _exception -> {{:error, :owner_unavailable}, state}
+  end
+
+  defp recover_expired_slot(state, candidate) do
+    cleanup = ExpiredOwnerGenerationCleanup
+
+    case cleanup.authorize(state, candidate) do
+      {:ok, witness} -> recover_authorized_expired_slot(state, candidate, witness)
+      {:error, _reason} = error -> {error, state}
+    end
+  rescue
+    _exception -> {{:error, :owner_unavailable}, state}
+  end
+
+  defp recover_retained_expired_receipt(candidate, receipt) do
+    with {:ok, ended} <- ExpiredOwnerGenerationCleanup.record_end(receipt, "serialized_connection_closed") do
+      ExpiredOwnerGenerationCleanup.sql_phase(fn -> Interruption.recover_stopped_owner_request(ended, expired_slot_options(candidate, receipt)) end) |> unwrap_expired_sql_result()
+    end
+  end
+
+  defp recover_authorized_expired_slot(state, candidate, witness) do
+    cleanup = ExpiredOwnerGenerationCleanup
+    task = state.active_turn.task_pid
+    monitor = Process.monitor(task)
+    signal_key = {__MODULE__, :expired_slot_signal}
+    proof_key = {__MODULE__, :expired_slot_proof}
+    Process.put(signal_key, false)
+    Process.put(proof_key, nil)
+
+    try do
+      signal = fn ->
+        if not Process.alive?(task), do: Repo.rollback({:stale_owner, :task_before_signal})
+        :ok = DownstreamState.cancel_active_turn_task(state.active_turn)
+        cleanup.signal_issued()
+      end
+
+      result =
+        with :ok <- cleanup.checkpoint(:authorized, witness),
+             {:ok, :ok} <- cleanup.signal_authorized(state, candidate, witness, signal),
+             :ok <- await_expired_slot_end(monitor, task, state.active_turn.task_ref, state.upstream_pid),
+             {:ok, ended} <- record_expired_slot_end(witness, proof_key) do
+          :ok = cleanup.checkpoint(:ended, ended)
+          opts = expired_slot_options(candidate, witness)
+
+          case cleanup.sql_phase(fn -> Interruption.recover_expired_owner_lifecycle(candidate, opts) end) do
+            {:ok, {:ok, :stale_owner}} -> cleanup.sql_phase(fn -> Interruption.recover_stopped_owner_request(ended, opts) end) |> unwrap_expired_sql_result()
+            {:ok, result} -> result
+            result -> result
+          end
+        end
+
+      case result do
+        {:preserved_terminal, terminal} ->
+          Process.demonitor(state.active_turn.task_ref, [:flush])
+          send(self(), {state.active_turn.task_ref, terminal})
+          {{:ok, :stale_owner}, state}
+
+        result ->
+          result = clear_failed_unsignalled_authorization(result, state, witness, Process.get(signal_key))
+          {result, expired_slot_reply_state(state, witness, Process.get(signal_key))}
+      end
+    rescue
+      _exception -> {{:error, :owner_unavailable}, expired_slot_reply_state(state, witness, Process.get(signal_key))}
+    after
+      Process.delete(signal_key)
+      Process.delete(proof_key)
+      Process.demonitor(monitor, [:flush])
+    end
+  end
+
+  defp clear_failed_unsignalled_authorization({:error, _reason} = error, state, witness, false) do
+    case ExpiredOwnerGenerationCleanup.clear_unsignalled_authorization(state, witness) do
+      {:ok, :cleared} -> error
+      {:error, _unresolved} = failure -> failure
+    end
+  end
+
+  defp clear_failed_unsignalled_authorization(result, _state, _witness, _signal_issued), do: result
+
+  defp record_expired_slot_end(witness, proof_key) do
+    Process.put(proof_key, witness)
+    :ok = ExpiredOwnerGenerationCleanup.checkpoint(:physical_end, witness)
+    ExpiredOwnerGenerationCleanup.record_end(witness, "serialized_connection_closed")
+  end
+
+  defp expired_slot_options(candidate, witness) do
+    %{}
+    |> RequestOptions.for_websocket()
+    |> RequestOptions.put_transport(websocket_owner_lease_token: candidate.owner_lease_token)
+    |> RequestOptions.put_runtime_context(reason_held_request_id: witness["request_id"])
+  end
+
+  defp await_expired_slot_end(monitor, task, task_ref, upstream) do
+    case exact_queued_success(task_ref) do
+      {:ok, _response} = terminal -> {:preserved_terminal, terminal}
+      :none -> await_expired_task_down(monitor, task, task_ref, upstream)
+    end
+  end
+
+  defp await_expired_task_down(monitor, task, task_ref, upstream) do
+    cleanup = ExpiredOwnerGenerationCleanup
+
+    receive do
+      {:DOWN, ^monitor, :process, ^task, _reason} ->
+        case exact_queued_success(task_ref) do
+          {:ok, _response} = terminal ->
+            {:preserved_terminal, terminal}
+
+          :none ->
+            case if(cleanup.remaining_ms() >= 1_000, do: UpstreamWebsocketSession.live_connection(upstream), else: {:error, :unavailable}) do
+              {:ok, %{generation: nil}} -> :ok
+              _unproved -> {:error, :owner_unavailable}
+            end
+        end
+    after
+      max(cleanup.remaining_ms() - 1_250, 0) ->
+        case exact_queued_success(task_ref) do
+          {:ok, _response} = terminal -> {:preserved_terminal, terminal}
+          :none -> {:error, :owner_unavailable}
+        end
+    end
+  end
+
+  defp exact_queued_success(task_ref) do
+    receive do
+      {^task_ref, {:ok, %{terminal: terminal}} = result} when terminal in ["response.completed", "response.done"] -> result
+    after
+      0 -> :none
+    end
+  end
+
+  defp unwrap_expired_sql_result({:ok, result}), do: result
+  defp unwrap_expired_sql_result(error), do: error
+
+  defp expired_slot_reply_state(state, witness, true) do
+    error = %{body: "", reason: :owner_unavailable, headers: [], started: false, expired_owner_stop_disposition: ExpiredOwnerGenerationCleanup.disposition(witness)}
+    %{state | active_turn: Map.put(state.active_turn, :canceled_result, {:error, error}), expired_slot_receipt: Process.get({__MODULE__, :expired_slot_proof})}
+  end
+
+  defp expired_slot_reply_state(state, _witness, _not_signalled), do: state
 
   defp owner_call_timeout, do: WebsocketOwnerContract.default_owner_call_timeout_ms()
 

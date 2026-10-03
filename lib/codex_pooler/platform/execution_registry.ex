@@ -17,6 +17,9 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
   @spec register(String.t(), GenServer.server()) :: :ok | :unknown
   def register(id, server \\ __MODULE__), do: call(server, {:register, id})
 
+  @spec register_producer(String.t(), GenServer.server()) :: :ok | :unknown
+  def register_producer(id, server \\ __MODULE__), do: call(server, {:register_producer, id})
+
   @spec complete(String.t(), GenServer.server()) :: :ok | :unknown
   def complete(id, server \\ __MODULE__), do: call(server, {:complete, id})
 
@@ -66,6 +69,7 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
          entries: %{},
          monitors: %{},
          owners: %{},
+         purposes: %{},
          process_executions: %{},
          interruptions: %{},
          pending: %{},
@@ -76,30 +80,11 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
 
   @impl true
   def handle_call({:register, id}, {pid, _}, state) do
-    case Map.get(state.entries, id) do
-      nil when is_binary(id) ->
-        if match?({:ok, ^id}, Ecto.UUID.cast(id)) do
-          ref = Process.monitor(pid)
+    register_identity(id, pid, :accounting, state)
+  end
 
-          state = %{
-            state
-            | entries: Map.put(state.entries, id, {pid, ref}),
-              owners: Map.put(state.owners, id, Identity.local()),
-              process_executions: Map.update(state.process_executions, pid, [id], &[id | &1]),
-              monitors: Map.put(state.monitors, ref, id)
-          }
-
-          {:reply, :ok, state}
-        else
-          {:reply, :unknown, state}
-        end
-
-      {^pid, ref} when is_reference(ref) ->
-        {:reply, :ok, state}
-
-      _ ->
-        {:reply, :unknown, state}
-    end
+  def handle_call({:register_producer, id}, {pid, _}, state) do
+    register_identity(id, pid, :producer_provenance, state)
   end
 
   def handle_call({:mark_interruption, pid, code}, _from, state)
@@ -117,8 +102,8 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
   def handle_call({:mark_interruption, _pid, _code}, _from, state), do: {:reply, :unknown, state}
 
   def handle_call({:complete, id}, {pid, _}, state) do
-    case Map.get(state.entries, id) do
-      {^pid, ref} when is_reference(ref) ->
+    case {Map.get(state.entries, id), Map.get(state.purposes, id)} do
+      {{^pid, ref}, :accounting} when is_reference(ref) ->
         {:reply, :ok, retire(state, id, pid, ref, "completed")}
 
       _ ->
@@ -198,11 +183,43 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
        state
        | entries: Map.delete(state.entries, id),
          owners: Map.delete(state.owners, id),
+         purposes: Map.delete(state.purposes, id),
          pending: Map.delete(state.pending, id),
          interruptions: Map.delete(state.interruptions, id),
          expired_warning: state.expired_warning or expired
      }}
   end
+
+  defp register_identity(id, pid, purpose, state) do
+    case Map.get(state.entries, id) do
+      nil when is_binary(id) ->
+        if match?({:ok, ^id}, Ecto.UUID.cast(id)) do
+          ref = Process.monitor(pid)
+
+          state = %{
+            state
+            | entries: Map.put(state.entries, id, {pid, ref}),
+              owners: Map.put(state.owners, id, Identity.local()),
+              purposes: Map.put(state.purposes, id, purpose),
+              process_executions: register_accounting_process(state.process_executions, purpose, pid, id),
+              monitors: Map.put(state.monitors, ref, id)
+          }
+
+          {:reply, :ok, state}
+        else
+          {:reply, :unknown, state}
+        end
+
+      {^pid, ref} when is_reference(ref) ->
+        {:reply, if(Map.get(state.purposes, id) == purpose, do: :ok, else: :unknown), state}
+
+      _ ->
+        {:reply, :unknown, state}
+    end
+  end
+
+  defp register_accounting_process(executions, :accounting, pid, id), do: Map.update(executions, pid, [id], &[id | &1])
+  defp register_accounting_process(executions, :producer_provenance, _pid, _id), do: executions
 
   defp retire(state, id, pid, ref, end_kind, interruption_code \\ nil) do
     Process.demonitor(ref, [:flush])
@@ -217,6 +234,14 @@ defmodule CodexPooler.Platform.ExecutionRegistry do
         process_executions: drop_process_execution(state.process_executions, pid, id)
     }
 
+    if Map.get(state.purposes, id) == :producer_provenance do
+      state
+    else
+      publish_retired_identity(state, id, pid, end_kind, interruption_code)
+    end
+  end
+
+  defp publish_retired_identity(state, id, pid, end_kind, interruption_code) do
     owner = Map.fetch!(state.owners, id)
 
     proof = %{

@@ -5,6 +5,27 @@ defmodule CodexPooler.Platform.ExecutionIdentity do
   alias CodexPooler.Platform.InstancePresence.Identity
 
   @key {__MODULE__, :execution_id}
+  @producer_key {__MODULE__, :producer_id}
+
+  @spec producer() :: map() | :unknown
+  def producer do
+    case Process.get(@producer_key) do
+      nil -> register_producer()
+      identity -> if status(identity) == :alive, do: identity, else: :unknown
+    end
+  end
+
+  defp register_producer do
+    id = Ecto.UUID.generate()
+
+    if ExecutionRegistry.register_producer(id) == :ok do
+      identity = %{owner_instance_id: Atom.to_string(node()), owner_instance_boot_id: Identity.boot_id(), owner_process_id: List.to_string(:erlang.pid_to_list(self())), owner_execution_id: id}
+      Process.put(@producer_key, identity)
+      identity
+    else
+      :unknown
+    end
+  end
 
   @spec local() :: %{owner_process_id: String.t(), owner_execution_id: Ecto.UUID.t()}
   def local do

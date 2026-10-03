@@ -16,6 +16,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.OwnerLease, as: OwnerLeaseStatus
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.Session, as: SessionStatus
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.Turn, as: TurnStatus
+  alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup
   alias CodexPooler.Gateway.Runtime.Finalization.InterruptionOutcome
   alias CodexPooler.Gateway.Runtime.Finalization.Metadata
   alias CodexPooler.Gateway.Runtime.Finalization.Streaming
@@ -682,11 +683,44 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
     Repo.transaction(fn -> recover_expired_owner_locked(candidate, opts) end)
   end
 
+  @doc false
+  @spec recover_stopped_owner_request(map(), RequestOptions.t()) :: {:ok, map()} | {:error, term()}
+  def recover_stopped_owner_request(witness, %RequestOptions{} = opts) do
+    Repo.transaction(fn ->
+      cleanup = ExpiredOwnerGenerationCleanup
+      {request, attempt} = cleanup.lock_witness_tuple!(witness)
+
+      with {:ok, %{"phase" => "ended"} = stored} <- cleanup.read(attempt),
+           true <- cleanup.scope(stored) == cleanup.scope(witness),
+           true <- cleanup.matches_request?(stored, request) do
+        recover_exact_stopped_request(request, attempt, stored, opts)
+      else
+        _stale -> Repo.rollback(:stale_owner)
+      end
+    end)
+  end
+
+  defp recover_exact_stopped_request(request, attempt, witness, opts) do
+    if request.status in ["accepted", "in_progress"] and attempt.status in ["queued", "in_progress"] do
+      marker = finalize_interrupted_request!(request, attempt, opts, "owner_unavailable", true)
+      timestamp = now()
+
+      Repo.get!(CodexTurn, witness["turn_id"])
+      |> Ecto.Changeset.change(status: @turn_interrupted, error_code: "owner_unavailable", final_attempt_id: attempt.id, completed_at: timestamp, updated_at: timestamp)
+      |> Repo.update!()
+
+      interruption_result(1, List.wrap(marker))
+    else
+      interruption_result(0, [])
+    end
+  end
+
   defp recover_expired_owner_locked(candidate, opts) do
     session = codex_session_for_update(candidate.session_id)
 
     if (session && session.owner_instance_id == candidate.owner_instance_id) and
          session.owner_lease_token == candidate.owner_lease_token and
+         session.owner_instance_boot_id == Map.get(candidate, :owner_instance_boot_id, session.owner_instance_boot_id) and
          session.owner_lease_expires_at == candidate.owner_lease_expires_at and
          DateTime.compare(candidate.owner_lease_expires_at, now()) != :gt do
       # Keep the session lock before entering the shared finalization lock order.
@@ -745,7 +779,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
           limit: 1
       )
 
-    if attempt do
+    if not is_nil(attempt) and not ExpiredOwnerGenerationCleanup.marked?(attempt) do
       case Accounting.RequestLifecycle.recover_dead_execution(request, attempt, now()) do
         {:ok, :recovered} ->
           interruption_marker("interrupted", opts, bounded_transport(attempt.transport))

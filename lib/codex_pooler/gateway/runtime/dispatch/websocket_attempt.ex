@@ -18,6 +18,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Gateway.Runtime.Finalization
   alias CodexPooler.Gateway.Runtime.Finalization.{AttemptSettlement, Metadata, ProviderUsageLimit}
+  alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup
   alias CodexPooler.Gateway.Runtime.Finalization.SideEffects
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl
   alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
@@ -867,7 +868,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
   defp dispatch_websocket_request_with_owner_recovery(prepared_context, dispatch_request) do
     case UpstreamDispatch.websocket_request(dispatch_request) do
       {:error, %{reason: :owner_unavailable} = error} ->
-        if pre_visible_transport_websocket_failure?(error) do
+        if pre_visible_transport_websocket_failure?(error) and
+             not ExpiredOwnerGenerationCleanup.retry_blocked?(error, dispatch_request.accounting_request, dispatch_request.accounting_attempt) do
           retry_owner_websocket_request(prepared_context, dispatch_request, error)
         else
           {:error, error}
