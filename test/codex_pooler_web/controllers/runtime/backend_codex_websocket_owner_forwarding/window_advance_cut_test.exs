@@ -758,8 +758,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
     assert {:ok, {:ok, :ok}} = Task.yield(task, @detection_timeout_ms)
   end
 
-  # Records every backend `pg_blocking_pids` shows waiting on the holder, and
-  # releases the holder when it finds one so the waiter can finish.
+  # Activity fields are sampled independently. Record every blocker sample,
+  # but keep the holder until a returned sample also shows the lock wait
+  # that the overlap caller asserts.
   defp watch_alias_row_waiters!(holder) do
     connection = start_supervised!(Supervisor.child_spec({Postgrex, raw_connection_options()}, id: :alias_row_watcher))
     Task.async(fn -> watch_alias_row_waiters(connection, holder, []) end)
@@ -775,7 +776,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
             watch_alias_row_waiters(connection, holder, waited)
 
           rows ->
-            send(holder_pid, :release_alias_row)
+            if Enum.any?(rows, &match?([_pid, "Lock"], &1)), do: send(holder_pid, :release_alias_row)
             watch_alias_row_waiters(connection, holder, Enum.reverse(rows) ++ waited)
         end
     end
