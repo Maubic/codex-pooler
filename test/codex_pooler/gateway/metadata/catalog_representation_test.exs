@@ -11,7 +11,7 @@ defmodule CodexPooler.Gateway.Metadata.CatalogRepresentationTest do
 
   describe "version table" do
     test "clients whose every build prefers the instructions template get the template-only entry" do
-      for version <- ["0.148.0", "0.153.4", "0.158.1", "0.159.0", "0.200.0", "1.0.0", "0.148.0-alpha.1"] do
+      for version <- ["0.148.0", "0.153.4", "0.158.1", "0.159.0", "0.160.0", "0.160.0-alpha.1", "0.159.2", "0.159.2-alpha.1", "0.200.0", "1.0.0", "0.148.0-alpha.1"] do
         assert CatalogRepresentation.for_user_agent(codex(version)) == :instructions_template, version
       end
     end

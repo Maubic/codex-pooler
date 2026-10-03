@@ -101,7 +101,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpCompactionTerminalTest do
           [
             {"response.failed", terminal},
             {"response.output_text.delta", %{"type" => "response.output_text.delta", "delta" => "synthetic"}}
-          ], barrier_after: 1, notify: self(), release_ref: release, done: false)
+          ],
+          barrier_after: 1,
+          notify: self(),
+          release_ref: release,
+          done: false
+        )
       )
 
     setup = gateway_setup(upstream, compact?: true)

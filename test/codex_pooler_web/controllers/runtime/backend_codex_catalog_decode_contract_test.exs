@@ -43,7 +43,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
       refute log =~ "Synthetic #{@broken_slug}", path
     end
 
-    for version <- ["0.158.1", "0.159.0", "0.153.4", "0.146.1", ""] do
+    for version <- ["0.158.1", "0.159.0", "0.160.0", "0.160.0-alpha.1", "0.159.2-alpha.1", "0.153.4", "0.146.1", ""] do
       response = conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent(version)) |> get("/backend-api/codex/models", %{"client_version" => version})
       assert response |> json_response(200) |> Map.fetch!("models") |> Enum.map(& &1["slug"]) |> Enum.sort() == Enum.sort([good_slug, @broken_slug]), version
     end
@@ -99,6 +99,30 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
       assert turn.status == 200
       assert get_resp_header(turn, "x-models-etag") == [catalog_etag]
     end)
+  end
+
+  test "current stable and alpha catalogs preserve optional guidance and use their Responses representation ETag", %{conn: conn} do
+    upstream = start_upstream(FakeUpstream.sse_stream([{"response.completed", %{"type" => "response.completed", "response" => %{"id" => "resp_catalog_guidance", "usage" => %{"input_tokens" => 4, "output_tokens" => 3, "total_tokens" => 7}}}}]))
+    setup = catalog_setup(upstream)
+    source = CodexCatalogShapes.synced_source(setup.model.exposed_model_id) |> put_in(["model_messages", "content_filter_guidance"], "Synthetic guidance")
+    setup.model |> Ecto.Changeset.change(metadata: %{"source_assignment_ids" => [setup.assignment.id], "source_assignment_models" => %{setup.assignment.id => source}}) |> Repo.update!()
+
+    for version <- ["0.160.0", "0.160.0-alpha.1"] do
+      for path <- ["/backend-api/codex/models", "/backend-api/codex/v1/models"] do
+        catalog = conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent(version)) |> get(path, %{"client_version" => version})
+        body = json_response(catalog, 200)
+        entry = Enum.find(body["models"], &(&1["slug"] == setup.model.exposed_model_id))
+        assert entry["model_messages"]["content_filter_guidance"] == "Synthetic guidance"
+        refute Map.has_key?(entry, "base_instructions")
+        assert @broken_slug in Enum.map(body["models"], & &1["slug"])
+        assert [etag] = get_resp_header(catalog, "etag")
+        assert etag == CodexCatalog.etag(body)
+
+        turn = conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent(version)) |> post("/backend-api/codex/responses", %{"model" => setup.model.exposed_model_id, "input" => native_text_input("synthetic guidance representation"), "stream" => true})
+        assert turn.status == 200
+        assert get_resp_header(turn, "x-models-etag") == [etag]
+      end
+    end
   end
 
   # findings#206 row 206-444: the model every `gateway_setup/2` test routes to

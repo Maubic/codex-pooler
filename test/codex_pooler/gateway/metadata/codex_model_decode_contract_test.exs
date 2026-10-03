@@ -46,6 +46,16 @@ defmodule CodexPooler.Gateway.Metadata.CodexModelDecodeContractTest do
   end
 
   describe "violations/1" do
+    test "the common decoder ignores current-only guidance while preserving its value" do
+      for guidance <- [nil, "Synthetic guidance", 7, false, %{}] do
+        entry = "sample-guidance-model" |> CodexCatalogShapes.synced_source() |> put_in(["model_messages", "content_filter_guidance"], guidance)
+        assert CodexModelDecodeContract.violations(entry) == []
+        assert {:ok, catalog} = build([{model("sample-guidance-model"), entry}], :decode_checked)
+        assert [served] = catalog.body["models"]
+        assert served["model_messages"]["content_filter_guidance"] == guidance
+      end
+    end
+
     test "diagnostics distinguish unknown enum variants from malformed values without retaining content" do
       base = CodexCatalogShapes.synced_source("sample-diagnostic-model")
       assert CodexModelDecodeContract.violation_classes(Map.put(base, "shell_type", "new_provider_variant")) == ["new_enum_variant"]
@@ -113,7 +123,7 @@ defmodule CodexPooler.Gateway.Metadata.CodexModelDecodeContractTest do
       refute checked.etag == template.etag
     end
 
-    test "serves an empty catalog, which the client merges with its bundled one, when no entry decodes" do
+    test "serves an empty catalog when no entry decodes" do
       sources = [{model("gpt-undecodable"), Map.delete(CodexCatalogShapes.synced_source("gpt-undecodable"), "truncation_policy")}]
 
       assert {:ok, checked} = build(sources, :decode_checked)
