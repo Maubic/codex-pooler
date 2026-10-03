@@ -684,6 +684,38 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
   end
 
   @doc false
+  @spec physical_expiry_stop_required?(Ecto.UUID.t()) :: boolean()
+  def physical_expiry_stop_required?(session_id) do
+    active_expiry_requests(session_id)
+    |> Enum.any?(&request_needs_physical_expiry_stop?/1)
+  end
+
+  defp active_expiry_requests(session_id) do
+    Repo.all(from r in Request, join: t in CodexTurn, on: t.request_id == r.id, where: t.codex_session_id == ^session_id and t.status == ^@turn_in_progress, order_by: [asc: r.id], select: r)
+  end
+
+  defp request_needs_physical_expiry_stop?(request) do
+    attempt = Repo.one(from a in Attempt, where: a.request_id == ^request.id, order_by: [desc: a.attempt_number], limit: 1)
+    marked_attempt? = Repo.all(from a in Attempt, where: a.request_id == ^request.id, select: a.response_metadata) |> Enum.any?(&Map.has_key?(&1 || %{}, "expired_owner_stop"))
+
+    marked_attempt? or (not is_nil(attempt) and attempt.transport == "websocket" and Map.has_key?(request.request_metadata || %{}, "websocket_owner_forwarding"))
+  end
+
+  defp validate_sql_only_expiry!(session, %{sql_only_expiry: true}) do
+    Access.lock_api_key_for_read(session.api_key_id)
+
+    active_expiry_requests(session.id)
+    |> Enum.each(fn request ->
+      request = Repo.one!(from r in Request, where: r.id == ^request.id, lock: "FOR UPDATE")
+      Repo.all(from t in CodexTurn, where: t.request_id == ^request.id and t.codex_session_id == ^session.id, order_by: [asc: t.id], lock: "FOR UPDATE")
+      Repo.all(from a in Attempt, where: a.request_id == ^request.id, order_by: [asc: a.attempt_number], lock: "FOR UPDATE")
+      if request_needs_physical_expiry_stop?(request), do: Repo.rollback(:owner_unavailable)
+    end)
+  end
+
+  defp validate_sql_only_expiry!(_session, _candidate), do: :ok
+
+  @doc false
   @spec recover_stopped_owner_request(map(), RequestOptions.t()) :: {:ok, map()} | {:error, term()}
   def recover_stopped_owner_request(witness, %RequestOptions{} = opts) do
     Repo.transaction(fn ->
@@ -723,6 +755,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
          session.owner_instance_boot_id == Map.get(candidate, :owner_instance_boot_id, session.owner_instance_boot_id) and
          session.owner_lease_expires_at == candidate.owner_lease_expires_at and
          DateTime.compare(candidate.owner_lease_expires_at, now()) != :gt do
+      validate_sql_only_expiry!(session, candidate)
       # Keep the session lock before entering the shared finalization lock order.
       # Replay entitlement must still exist when execution recovery tests it.
       recovered_outcomes = recover_dead_session_executions(session.id, opts)

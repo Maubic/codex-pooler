@@ -276,11 +276,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
   end
 
   for carrier <- [:owner_local, :owner_remote] do
-    @tag mode: "full", carrier: carrier, boundary: :healthy, mailbox_expired_ambient_guard: true
+    @tag mode: "full", carrier: carrier, boundary: :healthy, lease_ttl: 1, mailbox_expired_ambient_guard: true
     @tag slow: "real local/remote live owner and genuine completed frame with arity-only transaction trace"
     test "#{carrier} ambient transaction makes zero owner RPC and retains genuine active work", context do
       with_info_log(fn ->
         fixture = open_scenario!(context)
+        MailboxPrefixRaceSupport.suppress_owned_periodic_renewal!(fixture.actor, :owner)
+        assert %{genuine_expiry: true, unchanged_deadlines: true} = MailboxLeaseLifecycleSupport.renew_and_observe_expiry!(Repo.get!(CodexSession, fixture.old_session.id))
         candidate = expired_candidate!(fixture.old_session.id)
 
         calls =

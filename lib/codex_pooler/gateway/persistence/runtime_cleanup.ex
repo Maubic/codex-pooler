@@ -49,7 +49,7 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
 
   @spec cleanup_expired_runtime_state(DateTime.t()) :: {:ok, map()} | {:error, term()}
   def cleanup_expired_runtime_state(now \\ now()) do
-    if Repo.in_transaction?(), do: {:error, :caller_transaction}, else: cleanup_expired_outside_transaction(now)
+    cleanup_expired_outside_transaction(now)
   end
 
   defp cleanup_expired_outside_transaction(now) do
@@ -362,7 +362,8 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
   defp recover_expired_owner_session(candidate, {:ok, recovered_count}) do
     result =
       cond do
-        not expired_websocket_owner?(candidate.session_id) -> recover_expired_persistence(candidate)
+        not Interruption.physical_expiry_stop_required?(candidate.session_id) -> recover_expired_persistence(Map.put(candidate, :sql_only_expiry, true))
+        Repo.in_transaction?() -> {:error, :caller_transaction}
         expired_owner_proven_gone?(candidate) -> recover_proven_gone_owner(candidate)
         true -> recover_expired_generation(candidate)
       end
@@ -412,10 +413,6 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
       :alive -> false
       :unknown -> InstancePresence.superseded?(owner)
     end
-  end
-
-  defp expired_websocket_owner?(session_id) do
-    Repo.one(from t in CodexTurn, join: a in CodexPooler.Accounting.Attempt, on: a.request_id == t.request_id, where: t.codex_session_id == ^session_id and t.status == "in_progress", order_by: [desc: t.turn_sequence, desc: a.attempt_number], limit: 1, select: a.transport) == "websocket"
   end
 
   @doc false

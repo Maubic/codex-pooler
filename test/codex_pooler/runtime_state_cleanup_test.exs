@@ -13,6 +13,7 @@ defmodule CodexPooler.RuntimeStateCleanupTest do
   alias CodexPooler.Files.FileRecord
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.RuntimeCleanup
+  alias CodexPooler.Gateway.Runtime.Finalization.Interruption
   alias CodexPooler.Gateway.Transports.Websocket.ActivityRegistry
   alias CodexPooler.Gateway.Websocket.ResponseTask
   alias CodexPooler.Platform.ExecutionIdentity
@@ -169,6 +170,42 @@ defmodule CodexPooler.RuntimeStateCleanupTest do
              "reservation",
              "settlement"
            ]
+  end
+
+  for binding <- [:malformed_forwarding, :historical_marker, :older_active_request] do
+    test "SQL-only expiry revalidates #{binding} after discovery before interruption" do
+      now = DateTime.utc_now()
+      %{pool: pool, api_key: api_key} = active_api_key_fixture()
+      %{assignment: assignment} = upstream_assignment_fixture(pool)
+      session = session_fixture(pool, api_key, assignment, DateTime.add(now, -60, :second))
+      request = request_fixture(%{pool: pool, api_key: api_key}, %{transport: "websocket", status: "in_progress", completed_at: nil, request_metadata: %{"codex_session_id" => session.id}})
+      attempt = attempt_fixture(request, assignment, %{status: "in_progress", completed_at: nil, response_metadata: %{}})
+      turn = turn_fixture(session, request, attempt, now)
+      candidate = %{session_id: session.id, owner_instance_id: session.owner_instance_id, owner_lease_token: session.owner_lease_token, owner_lease_expires_at: session.owner_lease_expires_at, sql_only_expiry: true}
+      refute Interruption.physical_expiry_stop_required?(session.id)
+
+      case unquote(binding) do
+        :historical_marker ->
+          attempt |> Ecto.Changeset.change(response_metadata: %{"expired_owner_stop" => %{"version" => 99}}) |> Repo.update!()
+          attempt_fixture(request, assignment, %{attempt_number: 2, transport: "http_sse", status: "in_progress", completed_at: nil, response_metadata: %{}})
+
+        :older_active_request ->
+          later = request_fixture(%{pool: pool, api_key: api_key}, %{transport: "http_sse", status: "in_progress", completed_at: nil, request_metadata: %{"codex_session_id" => session.id}})
+          later_attempt = attempt_fixture(later, assignment, %{status: "in_progress", completed_at: nil})
+          turn_fixture(session, later, later_attempt, now, 2)
+          request |> Ecto.Changeset.change(request_metadata: %{"codex_session_id" => session.id, "websocket_owner_forwarding" => nil}) |> Repo.update!()
+
+        :malformed_forwarding ->
+          request |> Ecto.Changeset.change(request_metadata: %{"codex_session_id" => session.id, "websocket_owner_forwarding" => nil}) |> Repo.update!()
+      end
+
+      assert Interruption.physical_expiry_stop_required?(session.id)
+      assert {:error, :owner_unavailable} = Interruption.recover_expired_owner_lifecycle(candidate, RequestOptions.for_websocket(%{}))
+      assert Repo.reload!(request).status == "in_progress"
+      assert Repo.reload!(turn).status == "in_progress"
+      assert Repo.reload!(session) == session
+      assert ledger_entries_for_request(request.id) == []
+    end
   end
 
   for execution_state <- [:dead, :scanner_first, :entitled, :alive, :unknown] do
@@ -1129,13 +1166,13 @@ defmodule CodexPooler.RuntimeStateCleanupTest do
     assert Repo.reload!(lease).status == "active"
   end
 
-  defp turn_fixture(session, request, attempt, now) do
+  defp turn_fixture(session, request, attempt, now, sequence \\ 1) do
     timestamp = now |> DateTime.add(-30, :second) |> usec()
 
     %CodexTurn{
       codex_session_id: session.id,
       request_id: request.id,
-      turn_sequence: 1,
+      turn_sequence: sequence,
       transport_kind: request.transport,
       final_attempt_id: attempt.id,
       status: "in_progress",
