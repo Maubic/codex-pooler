@@ -43,8 +43,16 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   @usage_pending "usage_pending"
   @usage_not_applicable "not_applicable"
 
+  @type mailbox_admission_auth :: %{
+          required(:pool) => CodexPooler.Pools.Pool.t(),
+          required(:api_key) => CodexPooler.Access.APIKey.t(),
+          optional(:pool_id) => Ecto.UUID.t(),
+          optional(:api_key_id) => Ecto.UUID.t(),
+          optional(:key_prefix) => String.t()
+        }
+
   @doc false
-  @spec mailbox_admission_session_ids(CodexPooler.Access.auth_context(), Model.t(), map()) :: [Ecto.UUID.t()]
+  @spec mailbox_admission_session_ids(mailbox_admission_auth(), Model.t(), map()) :: [Ecto.UUID.t()]
   def mailbox_admission_session_ids(%{pool: pool, api_key: api_key}, %Model{} = model, opts) do
     session = attr(opts, :codex_session)
     claims = [attr(opts, :correlation_id), attr(opts, :original_request_claim), attr(opts, :native_http_steered_claim) | List.wrap(attr(opts, :websocket_compaction_claims))] |> Enum.filter(&is_binary/1) |> Enum.uniq()
@@ -71,7 +79,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
     do: duplicate_request_error(%{disposition: :chain_exhausted, mailbox_check: :session})
 
   @doc false
-  @spec revalidate_mailbox_admission_sessions!(CodexPooler.Access.auth_context(), Model.t(), map()) :: :ok
+  @spec revalidate_mailbox_admission_sessions!(mailbox_admission_auth(), Model.t(), map()) :: :ok
   def revalidate_mailbox_admission_sessions!(auth, model, opts) do
     Enum.each(mailbox_admission_session_ids(auth, model, opts), &SessionContinuity.require_mailbox_session!/1)
     :ok

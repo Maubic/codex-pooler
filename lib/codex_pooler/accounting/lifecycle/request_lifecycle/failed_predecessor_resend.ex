@@ -64,6 +64,18 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           optional(:anchor_present?) => boolean()
         }
 
+  @type admission_scope :: %{
+          required(:pool_id) => Ecto.UUID.t(),
+          required(:api_key_id) => Ecto.UUID.t(),
+          required(:model_id) => Ecto.UUID.t(),
+          required(:endpoint) => String.t(),
+          required(:codex_session_id) => Ecto.UUID.t() | nil,
+          required(:claims) => [String.t()],
+          required(:semantic_turn_digest) => <<_::256>> | nil,
+          required(:replay_claim_digest) => <<_::256>> | nil,
+          required(:execution_recovery_request_id) => Ecto.UUID.t() | nil
+        }
+
   @type disposition ::
           :unsupported_claim
           | :missing_predecessor
@@ -107,7 +119,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   @type refusal :: disposition() | %{disposition: disposition(), mailbox_check: ClientRetry.mailbox_stage()}
 
   @doc false
-  @spec admission_session_ids(String.t() | nil, scope()) :: [Ecto.UUID.t()]
+  @spec admission_session_ids(String.t() | nil, admission_scope()) :: [Ecto.UUID.t()]
   def admission_session_ids(claim, scope), do: discover_sessions(claim, scope, 0)
 
   defp discover_sessions(_claim, _scope, depth) when depth > @max_chain_depth, do: []

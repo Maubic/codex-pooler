@@ -19,6 +19,13 @@ defmodule CodexPooler.Accounting.RequestLifecycle.LedgerEntries do
   @source_event_conflict_target {:unsafe_fragment, "(source_event_id) WHERE source_event_id IS NOT NULL"}
 
   @type cost :: Decimal.t() | nil
+  @type reservation_auth :: %{
+          required(:pool) => CodexPooler.Pools.Pool.t(),
+          required(:api_key) => APIKey.t(),
+          optional(:pool_id) => Ecto.UUID.t(),
+          optional(:api_key_id) => Ecto.UUID.t(),
+          optional(:key_prefix) => String.t()
+        }
   @type estimate :: %{
           required(:input_tokens) => non_neg_integer() | nil,
           required(:cached_input_tokens) => non_neg_integer() | nil,
@@ -140,7 +147,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.LedgerEntries do
 
   @spec reservation_attrs(
           Request.t(),
-          CodexPooler.Access.auth_context(),
+          reservation_auth(),
           APIKey.t(),
           pricing(),
           estimate(),
