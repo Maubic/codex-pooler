@@ -5,6 +5,7 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
 
   alias CodexPooler.Gateway.Payloads.RequestOptions.ResetProbe
   alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
+  alias CodexPooler.ProviderCreditsDispatchSupport
   alias CodexPooler.ProviderCreditsFixtures
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
@@ -62,6 +63,8 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
   end
 
   defp admitted_confirmation!(assignment, identity, probe) do
+    accounting = ProviderCreditsDispatchSupport.context!(identity, model: probe.effective_model, upstream_model: "gpt-6-sol", transport: :http_json, route_class: probe.route_class, request_id: Ecto.UUID.generate(), attempt_id: Ecto.UUID.generate())
+
     assert {:ok, context} =
              ProviderCreditsAdmission.new_context(%{
                version: 1,
@@ -74,8 +77,8 @@ defmodule CodexPooler.Upstreams.SavedResets.ProbeLeaseTest do
                serving_mode: :full,
                transport: :http_json,
                route_class: probe.route_class,
-               request_id: Ecto.UUID.generate(),
-               attempt_id: Ecto.UUID.generate(),
+               request_id: accounting.request_id,
+               attempt_id: accounting.attempt_id,
                reset_probe: probe,
                redemption_generation: @generation,
                redemption_attempt_id: @attempt

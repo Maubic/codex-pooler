@@ -4,6 +4,8 @@ defmodule CodexPooler.ProviderCreditsDispatchSupport do
   import Ecto.Query
 
   alias CodexPooler.Access
+  alias CodexPooler.Accounting.{Attempt, Request}
+  alias CodexPooler.Catalog.Model
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.RequestOptions.ResetProbe
   alias CodexPooler.Gateway.Runtime.Service
@@ -11,6 +13,7 @@ defmodule CodexPooler.ProviderCreditsDispatchSupport do
   alias CodexPooler.Gateway.Transports.UpstreamDispatch
   alias CodexPooler.Gateway.Transports.Websocket.{UpstreamWebsocketSession, WebsocketOwnerRequestV8, WebsocketOwnerSession}
   alias CodexPooler.PoolerFixtures
+  alias CodexPooler.Pools.Pool
   alias CodexPooler.ProviderCreditsFixtures
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
@@ -50,7 +53,32 @@ defmodule CodexPooler.ProviderCreditsDispatchSupport do
       redemption_generation: nil,
       redemption_attempt_id: nil
     }
+    |> persist_accounting_scope!()
   end
+
+  defp persist_accounting_scope!(%{request_id: nil} = context), do: context
+
+  defp persist_accounting_scope!(context) do
+    request = Repo.get(Request, context.request_id) || insert_accounting_request!(context)
+
+    if context.attempt_id && is_nil(Repo.get(Attempt, context.attempt_id)) do
+      Repo.insert!(%Attempt{id: context.attempt_id, request_id: request.id, attempt_number: next_attempt_number(request.id), pool_upstream_assignment_id: context.pool_upstream_assignment_id, upstream_identity_id: context.upstream_identity_id, model_id: request.model_id, upstream_model_id: context.upstream_model, transport: accounting_transport(context.transport), status: "in_progress", started_at: DateTime.utc_now(), retryable: false, usage_status: "usage_pending", response_metadata: %{}})
+    end
+
+    context
+  end
+
+  defp insert_accounting_request!(context) do
+    pool = Repo.get!(Pool, context.pool_id)
+    %{api_key: key} = PoolerFixtures.active_api_key_fixture(pool)
+    model = Repo.get_by(Model, pool_id: pool.id, exposed_model_id: context.model) || PoolerFixtures.model_fixture(pool, %{exposed_model_id: context.model, upstream_model_id: context.upstream_model, metadata: %{"source_assignment_ids" => [context.pool_upstream_assignment_id]}})
+
+    Repo.insert!(%Request{id: context.request_id, pool_id: pool.id, api_key_id: key.id, model_id: model.id, requested_model: context.model, endpoint: "/backend-api/codex/responses", transport: accounting_transport(context.transport), status: "in_progress", usage_status: "usage_pending", correlation_id: "synthetic-dispatch-#{context.request_id}", request_metadata: %{}, admitted_at: DateTime.utc_now(), retry_count: 0})
+  end
+
+  defp next_attempt_number(request_id), do: (Repo.aggregate(from(attempt in Attempt, where: attempt.request_id == ^request_id), :max, :attempt_number) || 0) + 1
+  defp accounting_transport(transport) when transport in [:native_websocket, :bridged_websocket], do: "websocket"
+  defp accounting_transport(transport), do: Atom.to_string(transport)
 
   @doc "Binds a physical wire fixture to real persisted scope and its current accounting identities."
   @spec wire_request!(UpstreamWebsocketSession.Request.t(), keyword()) :: UpstreamWebsocketSession.Request.t()
