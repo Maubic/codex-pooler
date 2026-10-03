@@ -1268,7 +1268,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
       _no_recorded_refusal ->
         log_duplicate_turn(request_options, :reservation_duplicate,
           stage: "websocket_turn_claim",
-          extra: [resend_disposition: Map.get(reason, :resend_disposition)]
+          extra: [resend_disposition: Map.get(reason, :resend_disposition), mailbox_check: Map.get(reason, :mailbox_check)]
         )
 
         {:error, duplicate_turn_error()}
@@ -2225,7 +2225,6 @@ defmodule CodexPooler.Gateway.Runtime.Service do
         with :none <- native_http_final_refusal(request_options, native_http_claim) do
           auth
           |> Accounting.reserve(model, payload, attrs)
-          |> normalize_native_http_turn_duplicate(endpoint, request_options)
         end
     end
   end
@@ -2259,7 +2258,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
       log_duplicate_turn(request_options, :reservation_duplicate,
         stage: "native_http_turn_claim",
         endpoint: endpoint,
-        extra: [resend_disposition: Map.get(reason, :resend_disposition)]
+        extra: [resend_disposition: Map.get(reason, :resend_disposition), mailbox_check: Map.get(reason, :mailbox_check)]
       )
 
       {:error, duplicate_turn_error()}
@@ -2527,6 +2526,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
         authorized_correlation_id
       )
     end
+    |> normalize_native_http_turn_duplicate(endpoint, request_options)
     |> case do
       {:ok, reserved} ->
         case request_options.runtime.compaction_retry_submit_hold do

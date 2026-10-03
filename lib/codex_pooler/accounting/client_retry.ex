@@ -118,7 +118,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defmodule OriginalWitness do
     @moduledoc false
     @enforce_keys [:version, :digest, :auth_epoch]
-    defstruct [:version, :digest, :auth_epoch, :content_filter_original, alternates: [], grown: [], mailbox: [], content_filter: []]
+    defstruct [:version, :digest, :auth_epoch, :content_filter_original, alternates: [], grown: [], mailbox: [], mailbox_intent?: false, content_filter: []]
 
     # CF retains a separate full-payload seal when the legacy HTTP resume
     # witness binds only input. Only that opaque seal persists; candidates do not.
@@ -144,6 +144,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
             alternates: [<<_::256>>],
             grown: [grown_candidate()],
             mailbox: [mailbox_candidate()],
+            mailbox_intent?: boolean(),
             content_filter: [map()],
             content_filter_original: <<_::256>> | nil
           }

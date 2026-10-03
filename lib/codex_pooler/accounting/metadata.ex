@@ -73,7 +73,9 @@ defmodule CodexPooler.Accounting.Metadata do
           required(:code) => atom(),
           required(:message) => String.t(),
           optional(:limit_scope) => :window | :request,
-          optional(:retry_after_seconds) => pos_integer()
+          optional(:retry_after_seconds) => pos_integer(),
+          optional(:resend_disposition) => atom(),
+          optional(:mailbox_check) => CodexPooler.Accounting.ClientRetry.mailbox_stage()
         }
   @type request_result_row :: %{required(:request) => Request.t(), optional(atom()) => term()}
   @type request_result :: {:ok, request_result_row()} | {:error, accounting_error()}

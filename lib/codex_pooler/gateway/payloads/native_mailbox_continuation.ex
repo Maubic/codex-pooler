@@ -16,8 +16,14 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
   # accounting chain to verify against its actual predecessor and successor.
   @spec attach(OriginalWitness.t(), <<_::256>>, map(), RequestOptions.t()) :: OriginalWitness.t()
   def attach(%OriginalWitness{} = witness, semantic_key, payload, options) do
-    %{witness | mailbox: candidates(semantic_key, payload, options)}
+    %{witness | mailbox: candidates(semantic_key, payload, options), mailbox_intent?: mailbox_intent?(payload)}
   end
+
+  # Intent is diagnostic only: an invalid mailbox shape still has no proof.
+  defp mailbox_intent?(%{"input" => input}) when is_list(input) and is_integer(length(input)),
+    do: Enum.any?(input, &match?(%{"type" => "agent_message"}, &1))
+
+  defp mailbox_intent?(_payload), do: false
 
   defp candidates(semantic_key, %{"input" => input} = payload, options) when is_list(input) do
     with nil <- Map.get(payload, "previous_response_id"),

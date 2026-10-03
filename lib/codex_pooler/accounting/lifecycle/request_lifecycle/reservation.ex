@@ -720,6 +720,9 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   defp duplicate_request_error(disposition) when is_atom(disposition),
     do: Map.put(duplicate_request_error(nil), :resend_disposition, disposition)
 
+  defp duplicate_request_error(%{disposition: disposition, mailbox_check: stage}),
+    do: Map.put(duplicate_request_error(disposition), :mailbox_check, stage)
+
   @spec claim_client_retry_successor(CodexPooler.Access.auth_context(), Model.t(), map(), map()) ::
           {:ok, ClientRetry.SuccessorClaim.t()} | {:error, atom() | map()}
   def claim_client_retry_successor(auth, model, payload, opts),

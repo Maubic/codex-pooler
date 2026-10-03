@@ -60,6 +60,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           optional(:native_http_transport) => String.t() | nil,
           optional(:payload) => map() | nil,
           optional(:mailbox_successor) => Request.t(),
+          optional(:mailbox_check) => ClientRetry.mailbox_result(),
           optional(:anchor_present?) => boolean()
         }
 
@@ -103,9 +104,13 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           optional(:execution_recovery?) => boolean()
         }
 
+  @type refusal :: disposition() | %{disposition: disposition(), mailbox_check: ClientRetry.mailbox_stage()}
+
   @doc false
-  @spec resolve(term(), scope()) :: {:ok, resolution()} | {:error, disposition()}
+  @spec resolve(term(), scope()) :: {:ok, resolution()} | {:error, refusal()}
   def resolve(claim, scope) when is_binary(claim) and is_map(scope) do
+    scope = Map.delete(scope, :mailbox_check)
+
     cond do
       not (WebsocketTurnIdentity.native_claim?(claim) or
                ClientRetry.failed_predecessor_claim?(claim)) ->
@@ -161,10 +166,11 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   def recoverable_predecessor(_scope), do: nil
 
   @doc false
-  @spec resolve_execution(String.t(), map(), Ecto.UUID.t()) :: {:ok, resolution()} | {:error, disposition()}
+  @spec resolve_execution(String.t(), map(), Ecto.UUID.t()) :: {:ok, resolution()} | {:error, refusal()}
   def resolve_execution(claim, scope, request_id) do
     turn = lock_turn(request_id)
     request = Repo.one(from request in Request, where: request.id == ^request_id, lock: "FOR UPDATE")
+    scope = put_mailbox_check(Map.delete(scope, :mailbox_check), request)
 
     with false <- Map.get(scope, :anchor_present?) == true,
          %Request{} <- request,
@@ -183,8 +189,8 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
          {:ok, resolved_claim} <- execution_successor_claim(claim, request) do
       {:ok, %{claim: resolved_claim, predecessor: request, predecessor_shape: shape, recovery_markers: if(marker, do: [marker], else: []), execution_recovery?: true}}
     else
-      {:error, _reason} = error -> error
-      _invalid -> {:error, :terminal_predecessor}
+      {:error, reason} -> {:error, mailbox_refusal(reason, scope)}
+      _invalid -> {:error, mailbox_refusal(:terminal_predecessor, scope)}
     end
   end
 
@@ -230,9 +236,9 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   defp resume_claim?("codex-resume:" <> _digest), do: true
   defp resume_claim?(_claim), do: false
 
-  defp resolve_chain(_claim, _predecessor, _shape, _scope, _now, _markers, depth)
+  defp resolve_chain(_claim, _predecessor, _shape, scope, _now, _markers, depth)
        when depth > @max_chain_depth,
-       do: {:error, :chain_exhausted}
+       do: {:error, mailbox_refusal(:chain_exhausted, scope)}
 
   defp resolve_chain(claim, predecessor, shape, scope, now, markers, depth) do
     case lock_request_by_claim(claim) do
@@ -241,7 +247,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
 
       nil ->
         if passed_compaction?(predecessor) do
-          {:error, :terminal_predecessor}
+          {:error, mailbox_refusal(:terminal_predecessor, scope)}
         else
           {:ok,
            %{
@@ -285,13 +291,55 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
          {:ok, request, marker} <-
            DeadExecutionResendRecovery.recover(request, scoped?(request, scope), now),
          effective_now <- if(marker, do: db_now(), else: now),
-         {:ok, request_shape} <-
-           validate_predecessor(request, scoped_validation, effective_now),
-         :ok <- validate_semantic_retry(request, request_shape, scoped_validation, {previous, successor}) do
+         scoped_validation <- put_mailbox_check(scoped_validation, request),
+         {:ok, request_shape} <- validate_chain_node(request, scoped_validation, {previous, successor}, effective_now) do
       markers = if marker, do: [marker | markers], else: markers
-      resolve_chain(derived, request, request_shape, scope, now, markers, depth + 1)
+      diagnostic_scope = Map.merge(scope, Map.take(scoped_validation, [:mailbox_check]))
+      resolve_chain(derived, request, request_shape, diagnostic_scope, now, markers, depth + 1)
     end
   end
+
+  defp validate_chain_node(request, scope, edges, now) do
+    with {:ok, shape} <- validate_predecessor(request, scope, now),
+         :ok <- validate_semantic_retry(request, shape, scope, edges) do
+      {:ok, shape}
+    else
+      {:error, disposition} -> {:error, mailbox_refusal(disposition, scope)}
+    end
+  end
+
+  defp put_mailbox_check(scope, request) do
+    # A proved historical edge reached its actual live successor. The live-row
+    # guard vetoes admission before this tail can be a new mailbox proof edge.
+    if live_mailbox_successor_guard?(scope, request) do
+      scope
+    else
+      case Map.get(scope, :native_client_retry_witness) do
+        %ClientRetry.OriginalWitness{mailbox: [_first | _rest]} -> compute_mailbox_check(scope, request)
+        %ClientRetry.OriginalWitness{mailbox_intent?: true} -> compute_mailbox_check(scope, request)
+        _ordinary -> Map.delete(scope, :mailbox_check)
+      end
+    end
+  end
+
+  defp live_mailbox_successor_guard?(%{mailbox_check: %{stage: :verified}} = scope, %Request{} = request),
+    do: authorization_scoped?(request, scope) and (request.status in @live_request_statuses or is_nil(request.completed_at))
+
+  defp live_mailbox_successor_guard?(_scope, _request), do: false
+
+  defp compute_mailbox_check(%{native_client_retry_witness: %ClientRetry.OriginalWitness{mailbox: []} = witness} = scope, request),
+    do: Map.put(scope, :mailbox_check, ClientRetry.mailbox_check(nil, request, nil, witness, Map.get(scope, :mailbox_successor), :rejected))
+
+  defp compute_mailbox_check(scope, request) do
+    turn = if is_struct(request, Request), do: lock_turn(request.id)
+    attempt = if is_struct(request, Request), do: lock_final_attempt(turn, request.id)
+    verdict = if match?(%CodexTurn{codex_session_id: id} when id == scope.codex_session_id, turn), do: :same_session, else: :rejected
+    result = ClientRetry.mailbox_check(turn, request, attempt, Map.get(scope, :native_client_retry_witness), Map.get(scope, :mailbox_successor), verdict)
+    Map.put(scope, :mailbox_check, result)
+  end
+
+  defp mailbox_refusal(disposition, %{mailbox_check: %{stage: stage}}), do: %{disposition: disposition, mailbox_check: stage}
+  defp mailbox_refusal(disposition, _scope), do: disposition
 
   defp scope_for_predecessor(scope, %Request{} = successor) do
     scope = scope |> Map.put(:successor_admitted?, true) |> Map.put(:mailbox_successor, successor)
@@ -716,14 +764,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     end
   end
 
-  defp mailbox_continuation?(request, %{native_client_retry_witness: %ClientRetry.OriginalWitness{mailbox: [_first | _rest]}} = scope) do
-    turn = lock_turn(request.id)
-    attempt = lock_final_attempt(turn, request.id)
-
-    match?(%CodexTurn{codex_session_id: session_id} when session_id == scope.codex_session_id, turn) and
-      ClientRetry.verified_mailbox_continuation?(turn, request, attempt, Map.get(scope, :native_client_retry_witness), Map.get(scope, :mailbox_successor))
-  end
-
+  defp mailbox_continuation?(_request, %{mailbox_check: %{stage: :verified}}), do: true
   defp mailbox_continuation?(_request, _scope), do: false
 
   defp admit_mailbox_predecessor(request, scope, now) do

@@ -135,6 +135,24 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuationTest do
     assert witness(append(payload(), too_many_runs)).mailbox == []
   end
 
+  test "mailbox intent is transient and does not change the sealed request or acceptance" do
+    ordinary = witness(payload())
+    refute ordinary.mailbox_intent?
+    marked = %{ordinary | mailbox_intent?: true}
+    assert ClientRetry.request_attrs(marked) == ClientRetry.request_attrs(ordinary)
+    assert marked.digest == ordinary.digest
+    assert marked.mailbox == ordinary.mailbox
+
+    hostile = witness(append(payload(), [reasoning("first"), Map.put(mailbox("first"), "recipient", "/root/other")]))
+    assert hostile.mailbox_intent?
+    assert hostile.mailbox == []
+    refute Map.has_key?(ClientRetry.request_attrs(hostile), :mailbox_intent?)
+
+    for input <- [nil, "invalid", %{}, []] do
+      refute witness(Map.put(payload(), "input", input)).mailbox_intent?
+    end
+  end
+
   test "mail before a later user message cannot be an edge of that request" do
     original = payload()
     old_mail = append(original, [reasoning("old"), mailbox("old"), %{"type" => "message", "role" => "user", "content" => "synthetic later input"}])
