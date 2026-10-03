@@ -2446,23 +2446,75 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   @doc "Verifies a settled native request followed by a retained completed-output prefix and new addressed mailbox input. Candidates are transient, never persisted."
   @spec verified_mailbox_continuation?(term(), term(), term(), term(), term()) :: boolean()
-  def verified_mailbox_continuation?(
-        %CodexTurn{transport_kind: transport, final_attempt_id: attempt_id, completed_at: %DateTime{}} = turn,
-        %Request{transport: transport, endpoint: "/backend-api/codex/responses", completed_at: %DateTime{}} = request,
-        %Attempt{id: attempt_id, transport: transport, replay_generation: 0, completed_at: %DateTime{}} = attempt,
-        %OriginalWitness{version: 1, auth_epoch: epoch, mailbox: candidates},
-        successor
-      )
-      when is_binary(attempt_id) and transport in ["websocket", "http_sse"] and is_list(candidates) do
-    mailbox_settlement?(turn, request, attempt) and original_witness_eligible?(request) and request.native_client_retry_auth_epoch == epoch and
-      Enum.any?(candidates, fn candidate ->
-        mailbox_witness_matches?(request, candidate.prefix) and
-          mailbox_ending_matches?(successor, candidate) and
-          mailbox_output_matches?(turn, request, attempt, candidate)
-      end)
+  def verified_mailbox_continuation?(turn, request, attempt, witness, successor),
+    do: mailbox_check(turn, request, attempt, witness, successor, :same_session).stage == :verified
+
+  @type mailbox_stage :: :no_candidate | :settlement | :authorization | :session | :witness | :ending | :output_prefix | :verified
+  @type mailbox_result :: %{required(:stage) => mailbox_stage(), optional(:candidate_index) => pos_integer()}
+  @type mailbox_session_verdict :: :same_session | :expired_replacement | :rejected
+
+  # Checking length in a guard rejects improper tails without raising during
+  # candidate enumeration. This checks list shape, not an empty-list policy.
+  defguardp is_proper_list(value) when is_list(value) and is_integer(length(value))
+
+  @doc "Returns the furthest proof stage reached by one transient mailbox candidate. Session authority must be supplied by the caller; this proof does not establish it."
+  @spec mailbox_check(term(), term(), term(), term(), term(), mailbox_session_verdict()) :: mailbox_result()
+  def mailbox_check(turn, request, attempt, %OriginalWitness{mailbox: [_first | _rest] = candidates} = witness, successor, session_verdict) when is_proper_list(candidates) do
+    cond do
+      not mailbox_settled_rows?(turn, request, attempt) -> %{stage: :settlement}
+      not mailbox_authorized?(request, witness) -> %{stage: :authorization}
+      session_verdict not in [:same_session, :expired_replacement] -> %{stage: :session}
+      true -> mailbox_candidates_check(turn, request, attempt, candidates, successor)
+    end
   end
 
-  def verified_mailbox_continuation?(_turn, _request, _attempt, _witness, _successor), do: false
+  def mailbox_check(_turn, _request, _attempt, _witness, _successor, _session_verdict), do: %{stage: :no_candidate}
+
+  defp mailbox_settled_rows?(
+         %CodexTurn{transport_kind: transport, final_attempt_id: attempt_id, completed_at: %DateTime{}} = turn,
+         %Request{transport: transport, endpoint: "/backend-api/codex/responses", completed_at: %DateTime{}} = request,
+         %Attempt{id: attempt_id, transport: transport, replay_generation: 0, completed_at: %DateTime{}} = attempt
+       )
+       when is_binary(attempt_id) and transport in ["websocket", "http_sse"],
+       do: mailbox_settlement?(turn, request, attempt)
+
+  defp mailbox_settled_rows?(_turn, _request, _attempt), do: false
+
+  defp mailbox_authorized?(request, %OriginalWitness{version: 1, auth_epoch: epoch}),
+    do: original_witness_eligible?(request) and request.native_client_retry_auth_epoch == epoch
+
+  defp mailbox_authorized?(_request, _witness), do: false
+
+  defp mailbox_candidates_check(turn, request, attempt, candidates, successor) do
+    candidates
+    |> Enum.with_index(1)
+    |> Enum.reduce_while(%{stage: :witness}, fn {candidate, index}, furthest ->
+      stage = mailbox_candidate_stage(turn, request, attempt, candidate, successor)
+      result = %{stage: stage, candidate_index: index}
+
+      cond do
+        stage == :verified -> {:halt, result}
+        mailbox_stage_rank(stage) > mailbox_stage_rank(furthest.stage) -> {:cont, result}
+        not Map.has_key?(furthest, :candidate_index) -> {:cont, result}
+        true -> {:cont, furthest}
+      end
+    end)
+  end
+
+  defp mailbox_candidate_stage(turn, request, attempt, %{prefix: prefix} = candidate, successor) do
+    cond do
+      not mailbox_witness_matches?(request, prefix) -> :witness
+      not mailbox_ending_matches?(successor, candidate) -> :ending
+      not mailbox_output_matches?(turn, request, attempt, candidate) -> :output_prefix
+      true -> :verified
+    end
+  end
+
+  defp mailbox_candidate_stage(_turn, _request, _attempt, _candidate, _successor), do: :witness
+
+  defp mailbox_stage_rank(:witness), do: 0
+  defp mailbox_stage_rank(:ending), do: 1
+  defp mailbox_stage_rank(:output_prefix), do: 2
 
   defp mailbox_settlement?(%CodexTurn{status: "succeeded"}, %Request{status: "succeeded"}, %Attempt{status: "succeeded"}), do: true
 
@@ -2475,30 +2527,32 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   defp mailbox_settlement?(_turn, _request, _attempt), do: false
 
-  defp mailbox_witness_matches?(%Request{transport: "websocket", native_client_retry_digest: digest}, %{websocket: candidates}),
+  defp mailbox_witness_matches?(%Request{transport: "websocket", native_client_retry_digest: digest}, %{websocket: candidates}) when is_proper_list(candidates),
     do: Enum.any?(candidates, &secure_compare(digest, &1))
 
   defp mailbox_witness_matches?(%Request{transport: "http_sse", native_client_retry_digest: digest, request_metadata: %{"native_http_claim_arm" => "post_compaction_resume"}}, %{http: expected}),
     do: secure_compare(digest, expected)
 
   defp mailbox_witness_matches?(%Request{transport: "http_sse", native_client_retry_digest: digest, request_metadata: %{"native_http_claim_arm" => arm}}, %{websocket: candidates})
-       when arm in ["opening", "steered_continuation", "tool_continuation"],
+       when arm in ["opening", "steered_continuation", "tool_continuation"] and is_proper_list(candidates),
        do: Enum.any?(candidates, &secure_compare(digest, &1))
 
   defp mailbox_witness_matches?(_request, _witnesses), do: false
 
-  defp mailbox_ending_matches?(nil, %{current?: current?}), do: current?
+  defp mailbox_ending_matches?(nil, %{current?: current?}), do: current? == true
 
   defp mailbox_ending_matches?(%Request{} = successor, %{ending: ending}),
     do: original_witness_eligible?(successor) and mailbox_witness_matches?(successor, ending)
 
+  defp mailbox_ending_matches?(_successor, _candidate), do: false
+
   # Server writes do not acknowledge client consumption. Match a nonempty
   # ordered prefix of the complete receipt, under the same proof used for a
   # grown resend; candidates themselves exclude tool calls and outputs.
-  defp mailbox_output_matches?(turn, %Request{transport: "websocket"} = request, attempt, candidate),
+  defp mailbox_output_matches?(turn, %Request{transport: "websocket"} = request, attempt, %{items: items} = candidate) when is_proper_list(items),
     do: verified_completed_item_resend?(turn, request, attempt, [candidate])
 
-  defp mailbox_output_matches?(%CodexTurn{transport_kind: "http_sse"}, %Request{transport: "http_sse"}, %Attempt{transport: "http_sse", response_metadata: metadata}, %{http_progress: candidates, items: items}) do
+  defp mailbox_output_matches?(%CodexTurn{transport_kind: "http_sse"}, %Request{transport: "http_sse"}, %Attempt{transport: "http_sse", response_metadata: metadata}, %{http_progress: candidates, items: items}) when is_map(metadata) and is_proper_list(candidates) do
     Enum.any?(candidates, &exact_http_mailbox_progress?(metadata["native_http_resume_progress"], &1)) or
       http_mailbox_prefix?(metadata["native_http_mailbox_prefix"], items)
   end
