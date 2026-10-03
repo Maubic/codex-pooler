@@ -23,6 +23,7 @@ defmodule CodexPooler.Gateway.Persistence.CodexSession do
     field :last_heartbeat_at, :utc_datetime_usec
     field :disconnected_at, :utc_datetime_usec
     field :closed_at, :utc_datetime_usec
+    field :close_reason, :string
     field :created_at, :utc_datetime_usec
     field :updated_at, :utc_datetime_usec
 

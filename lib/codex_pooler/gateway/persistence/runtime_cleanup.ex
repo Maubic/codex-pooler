@@ -305,7 +305,7 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
 
     CodexSession
     |> where([session], session.id in ^candidates)
-    |> Repo.update_all([set: [status: SessionStatus.closed_status(), closed_at: now, updated_at: now]], timeout: 15_000)
+    |> Repo.update_all([set: [status: SessionStatus.closed_status(), closed_at: now, close_reason: nil, updated_at: now]], timeout: 15_000)
   end
 
   defp recover_expired_owner_runtime_state(%DateTime{} = now) do

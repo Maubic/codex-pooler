@@ -566,6 +566,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
       last_heartbeat_at: now,
       disconnected_at: nil,
       closed_at: nil,
+      close_reason: nil,
       updated_at: now
     })
     |> Repo.update!()
@@ -577,6 +578,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
       api_key_id: auth.api_key.id,
       session_key: session_key,
       status: @session_active,
+      close_reason: nil,
       owner_instance_id: owner.node_name,
       owner_instance_boot_id: owner.boot_id,
       owner_lease_token: Ecto.UUID.generate(),

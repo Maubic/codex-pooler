@@ -963,6 +963,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
         status: next_status,
         disconnected_at: now,
         closed_at: if(next_status == @session_closed, do: now, else: nil),
+        close_reason: nil,
         owner_lease_expires_at: lease_expires_at,
         last_heartbeat_at: now,
         updated_at: now
@@ -1089,6 +1090,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
           status: next_status,
           disconnected_at: now,
           closed_at: if(next_status == @session_closed, do: now, else: nil),
+          close_reason: nil,
           owner_lease_expires_at: lease_expires_at,
           last_heartbeat_at: now,
           updated_at: now

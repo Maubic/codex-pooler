@@ -74,11 +74,16 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.ExpiredSessions do
   def close_for_key_and_aliases!(pool_id, api_key_id, session_key, session_header_values, %DateTime{} = now)
       when is_list(session_header_values) do
     alias_hashes = Enum.map(session_header_values, &:crypto.hash(:sha256, &1))
-    expiring_sessions = lock_expired_sessions(pool_id, api_key_id, session_key, alias_hashes, now)
-    session_ids = Enum.map(expiring_sessions, & &1.id)
+    candidates = lock_expired_sessions(pool_id, api_key_id, session_key, alias_hashes, now)
+    candidate_ids = Enum.map(candidates, & &1.id)
 
-    lock_active_leases!(session_ids)
-    lock_active_aliases!(session_ids)
+    leases = lock_active_leases!(candidate_ids)
+    lock_active_aliases!(candidate_ids)
+
+    %{rows: [[now]]} = Repo.query!("SELECT clock_timestamp()", [])
+
+    expiring_sessions = Enum.filter(candidates, &expired_owner?(&1, leases, now))
+    session_ids = Enum.map(expiring_sessions, & &1.id)
 
     expire_leases!(session_ids, now)
     expire_aliases!(session_ids, now)
@@ -163,6 +168,8 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.ExpiredSessions do
         order_by: [asc: session.id],
         select: %{
           id: session.id,
+          owner_lease_token: session.owner_lease_token,
+          owner_lease_expires_at: session.owner_lease_expires_at,
           api_key_id: session.api_key_id,
           pool_upstream_assignment_id: session.pool_upstream_assignment_id,
           last_heartbeat_at: session.last_heartbeat_at,
@@ -199,9 +206,16 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.ExpiredSessions do
       from lease in BridgeOwnerLease,
         where: lease.codex_session_id in ^session_ids and lease.status == ^@lease_active,
         order_by: [asc: lease.id],
-        select: lease.id,
+        select: lease,
         lock: "FOR UPDATE"
     )
+  end
+
+  defp expired_owner?(session, leases, now) do
+    DateTime.compare(session.owner_lease_expires_at, now) != :gt and
+      Enum.all?(Enum.filter(leases, &(&1.codex_session_id == session.id)), fn lease ->
+        lease.lease_token == session.owner_lease_token and DateTime.compare(lease.expires_at, now) != :gt
+      end)
   end
 
   defp lock_active_aliases!([]), do: []
@@ -246,6 +260,6 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.ExpiredSessions do
   defp close_sessions!(session_ids, now) do
     CodexSession
     |> where([session], session.id in ^session_ids)
-    |> Repo.update_all(set: [status: @session_closed, closed_at: now, updated_at: now])
+    |> Repo.update_all(set: [status: @session_closed, closed_at: now, close_reason: "owner_lease_expired", updated_at: now])
   end
 end
