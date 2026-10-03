@@ -22,6 +22,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
   }
 
   alias CodexPooler.Gateway.Persistence.SessionContinuity.MailboxAdmissionLocks
+  alias CodexPooler.Gateway.Persistence.SessionContinuity.MailboxSessionAuthority
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.OwnerLease, as: OwnerLeaseStatus
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.Session, as: SessionStatus
   alias CodexPooler.Repo
@@ -49,6 +50,14 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
   @doc false
   @spec require_mailbox_session!(Ecto.UUID.t() | nil) :: :ok
   defdelegate require_mailbox_session!(session_id), to: MailboxAdmissionLocks, as: :require_session!
+
+  @doc false
+  @spec mailbox_session_verdict(Ecto.UUID.t() | nil, Ecto.UUID.t() | nil, MailboxSessionAuthority.scope()) :: MailboxSessionAuthority.verdict()
+  defdelegate mailbox_session_verdict(previous_id, current_id, scope), to: MailboxSessionAuthority, as: :verdict
+
+  @doc false
+  @spec mailbox_session_edge_verdict(Ecto.UUID.t() | nil, Ecto.UUID.t() | nil, Ecto.UUID.t() | nil, MailboxSessionAuthority.scope()) :: MailboxSessionAuthority.verdict()
+  defdelegate mailbox_session_edge_verdict(previous_id, successor_id, current_id, scope), to: MailboxSessionAuthority, as: :edge_verdict
 
   @session_start_conflict_error %{
     status: 409,
@@ -587,7 +596,9 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
     |> Repo.update!()
   end
 
-  defp insert_new_session!(auth, opts, session_key, owner, now, preference) do
+  defp insert_new_session!(auth, opts, session_key, owner, _now, preference) do
+    now = db_now()
+
     attrs = %{
       pool_id: auth.pool.id,
       api_key_id: auth.api_key.id,

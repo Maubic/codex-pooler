@@ -60,6 +60,19 @@ defmodule CodexPooler.Gateway.Persistence.SessionCloseReasonTest do
 
   def capture_expiry_phase(_event, _measurements, _metadata, _parent), do: :ok
 
+  test "a replacement creation clock follows the expiry close and precedes its acquired lease", %{session: session, auth: auth, opts: opts} do
+    expire(session)
+    assert {:ok, replacement} = SessionContinuity.start_codex_session(auth, opts)
+    closed = Repo.get!(CodexSession, session.id)
+    assert closed.close_reason == "owner_lease_expired"
+    assert replacement.id != closed.id
+    assert DateTime.compare(replacement.created_at, closed.closed_at) != :lt
+    lease = Repo.get_by!(BridgeOwnerLease, codex_session_id: replacement.id, status: "active")
+    assert DateTime.compare(lease.renewed_at, replacement.created_at) != :lt
+    assert replacement.owner_lease_expires_at == lease.expires_at
+    assert DateTime.compare(replacement.last_heartbeat_at, lease.renewed_at) != :lt
+  end
+
   test "legacy session without an active lease retains actual expiry qualification", %{session: session} do
     expire(session)
     Repo.delete_all(from lease in BridgeOwnerLease, where: lease.codex_session_id == ^session.id)

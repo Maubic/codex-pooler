@@ -16,7 +16,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
   }
 
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
-  alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn}
+  alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn, SessionContinuity}
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes
   alias CodexPooler.InstanceSettings.AppSecretCrypto
   alias CodexPooler.Platform.ExecutionTerminalProofs
@@ -2620,6 +2620,30 @@ defmodule CodexPooler.Accounting.ClientRetry do
   @type mailbox_stage :: :no_candidate | :settlement | :authorization | :session | :witness | :ending | :output_prefix | :verified
   @type mailbox_result :: %{required(:stage) => mailbox_stage(), optional(:candidate_index) => pos_integer()}
   @type mailbox_session_verdict :: :same_session | :expired_replacement | :rejected
+
+  @doc false
+  @spec mailbox_check_for_session(term(), term(), term(), term(), term(), Ecto.UUID.t() | nil, map()) :: mailbox_result()
+  def mailbox_check_for_session(%CodexTurn{} = turn, request, attempt, witness, successor, current_session_id, scope) do
+    verdict = mailbox_edge_session_verdict(turn, successor, current_session_id, scope)
+    mailbox_check(turn, request, attempt, witness, successor, verdict)
+  end
+
+  def mailbox_check_for_session(turn, request, attempt, witness, successor, _current_session_id, _scope),
+    do: mailbox_check(turn, request, attempt, witness, successor, :rejected)
+
+  defp mailbox_edge_session_verdict(%CodexTurn{codex_session_id: id}, _successor, id, _scope), do: :same_session
+  defp mailbox_edge_session_verdict(turn, nil, current_id, scope), do: SessionContinuity.mailbox_session_verdict(turn.codex_session_id, current_id, scope)
+
+  defp mailbox_edge_session_verdict(turn, %Request{} = successor, current_id, scope) do
+    require_admission_request_sessions!(successor, scope)
+
+    case Repo.one(from next in CodexTurn, where: next.request_id == ^successor.id, lock: "FOR UPDATE") do
+      %CodexTurn{codex_session_id: successor_id} -> SessionContinuity.mailbox_session_edge_verdict(turn.codex_session_id, successor_id, current_id, scope)
+      nil -> :rejected
+    end
+  end
+
+  defp mailbox_edge_session_verdict(_turn, _successor, _current_id, _scope), do: :rejected
 
   # Checking length in a guard rejects improper tails without raising during
   # candidate enumeration. This checks list shape, not an empty-list policy.

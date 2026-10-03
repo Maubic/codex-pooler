@@ -361,8 +361,14 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   defp compute_mailbox_check(scope, request) do
     turn = if is_struct(request, Request), do: lock_turn(request.id)
     attempt = if is_struct(request, Request), do: lock_final_attempt(turn, request.id)
-    verdict = if match?(%CodexTurn{codex_session_id: id} when id == scope.codex_session_id, turn), do: :same_session, else: :rejected
-    result = ClientRetry.mailbox_check(turn, request, attempt, Map.get(scope, :native_client_retry_witness), Map.get(scope, :mailbox_successor), verdict)
+
+    result =
+      if (is_struct(request, Request) and authorization_scoped?(request, scope)) or match?(%CodexTurn{codex_session_id: id} when id == scope.codex_session_id, turn) do
+        ClientRetry.mailbox_check_for_session(turn, request, attempt, Map.get(scope, :native_client_retry_witness), Map.get(scope, :mailbox_successor), Map.get(scope, :codex_session_id), scope)
+      else
+        ClientRetry.mailbox_check(turn, request, attempt, Map.get(scope, :native_client_retry_witness), Map.get(scope, :mailbox_successor), :rejected)
+      end
+
     Map.put(scope, :mailbox_check, result)
   end
 

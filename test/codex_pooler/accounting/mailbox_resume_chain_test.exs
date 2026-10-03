@@ -6,7 +6,7 @@ defmodule CodexPooler.Accounting.MailboxResumeChainTest do
   alias CodexPooler.Accounting
   alias CodexPooler.Accounting.{Attempt, ClientRetry, LedgerEntry, Request, RequestClientRetryLink}
   alias CodexPooler.Gateway.Payloads.{NativeMailboxContinuation, NativeTurnContinuation, RequestOptions, WebsocketTurnIdentity}
-  alias CodexPooler.Gateway.Persistence.{CodexSession, CodexTurn}
+  alias CodexPooler.Gateway.Persistence.{CodexSession, CodexTurn, SessionContinuity}
   alias CodexPooler.Repo
 
   @endpoint "/backend-api/codex/responses"
@@ -44,6 +44,78 @@ defmodule CodexPooler.Accounting.MailboxResumeChainTest do
       assert Repo.get!(Request, original.id).request_metadata == original.request_metadata
       refute Map.has_key?(original.request_metadata, "mailbox")
       assert Repo.get!(Request, first.id).native_client_retry_digest == witness(fixture, first_payload, unquote(successor_transport)).digest
+    end
+  end
+
+  for transport <- ["websocket", "http_sse"] do
+    @tag slow: "observes two actual one-second lease deadlines through the renewal API"
+    test "#{transport} mailbox chain proves every expiry-replaced historical session", %{fixture: fixture} do
+      transport = unquote(transport)
+      original = admit!(fixture, fixture.payload, transport)
+      first_output = reasoning("replacement-first")
+      cut!(fixture, original, first_output)
+      replacement = replace_expired_fixture!(fixture)
+      first_payload = append(fixture.payload, [first_output, mailbox(1)])
+      first = admit!(replacement, first_payload, transport)
+      assert_edge!(original, first)
+      second_output = reasoning("replacement-second")
+      cut!(replacement, first, second_output)
+      newest = replace_expired_fixture!(replacement)
+      candidate = append(first_payload, [second_output, mailbox(2)])
+
+      # The latest edge alone is insufficient: invalidate the oldest genuine
+      # expiry reason while retaining the newer edge's certificate.
+      Repo.update_all(from(s in CodexSession, where: s.id == ^fixture.session.id), set: [close_reason: nil])
+      assert_refused_opts!(newest, options(newest, candidate, transport), :terminal_predecessor)
+      assert counts(newest) == %{requests: 2, attempts: 2, turns: 2, links: 1, settlements: 2}
+    end
+  end
+
+  for transport <- ["websocket", "http_sse"] do
+    @tag slow: "observes two actual one-second lease deadlines through the renewal API"
+    test "#{transport} mailbox chain crosses two certified expiry replacements", %{fixture: fixture} do
+      transport = unquote(transport)
+      original = admit!(fixture, fixture.payload, transport)
+      first_output = reasoning("replacement-first")
+      cut!(fixture, original, first_output)
+      replacement = replace_expired_fixture!(fixture)
+      first_payload = append(fixture.payload, [first_output, mailbox(1)])
+      first = admit!(replacement, first_payload, transport)
+      second_output = reasoning("replacement-second")
+      cut!(replacement, first, second_output)
+      newest = replace_expired_fixture!(replacement)
+      second = admit!(newest, append(first_payload, [second_output, mailbox(2)]), transport)
+      assert_edge!(original, first)
+      assert_edge!(first, second)
+      assert counts(newest) == %{requests: 3, attempts: 2, turns: 2, links: 2, settlements: 2}
+      assert original.correlation_id == fixture.claim
+    end
+  end
+
+  for transport <- ["websocket", "http_sse"] do
+    @tag mailbox_historical_target: true
+    @tag slow: "observes two actual lease deadlines and invalidates only the intermediate creation order"
+    test "#{transport} historical authority binds the stored intermediate successor", %{fixture: fixture} do
+      transport = unquote(transport)
+      original = admit!(fixture, fixture.payload, transport)
+      output = reasoning("historical-target-first")
+      cut!(fixture, original, output)
+      intermediate = replace_expired_fixture!(fixture)
+      first_payload = append(fixture.payload, [output, mailbox(1)])
+      first = admit!(intermediate, first_payload, transport)
+      later_output = reasoning("historical-target-second")
+      cut!(intermediate, first, later_output)
+      newest = replace_expired_fixture!(intermediate)
+      old = Repo.get!(CodexSession, fixture.session.id)
+      middle = Repo.get!(CodexSession, intermediate.session.id)
+      current = Repo.get!(CodexSession, newest.session.id)
+      Repo.update_all(from(s in CodexSession, where: s.id == ^middle.id), set: [created_at: DateTime.add(old.closed_at, -1, :microsecond)])
+      assert Repo.get!(CodexSession, middle.id).close_reason == "owner_lease_expired"
+      assert Repo.get!(CodexSession, old.id) == old
+      assert Repo.get!(CodexSession, current.id) == current
+      candidate = append(first_payload, [later_output, mailbox(2)])
+      if transport == "http_sse", do: assert_http_refused!(newest, candidate, :terminal_predecessor), else: assert_refused_opts!(newest, options(newest, candidate, transport), :terminal_predecessor)
+      assert_edge!(original, first)
     end
   end
 
@@ -335,7 +407,7 @@ defmodule CodexPooler.Accounting.MailboxResumeChainTest do
     %{
       requests: Repo.aggregate(requests, :count),
       attempts: Repo.aggregate(from(a in Attempt, where: a.request_id in subquery(requests)), :count),
-      turns: Repo.aggregate(from(t in CodexTurn, where: t.codex_session_id == ^fixture.session.id), :count),
+      turns: Repo.aggregate(from(t in CodexTurn, where: t.request_id in subquery(requests)), :count),
       links: Repo.aggregate(from(l in RequestClientRetryLink, where: l.predecessor_request_id in subquery(requests)), :count),
       settlements: Repo.aggregate(from(l in LedgerEntry, where: l.request_id in subquery(requests) and l.entry_kind == "settlement"), :count)
     }
@@ -350,6 +422,28 @@ defmodule CodexPooler.Accounting.MailboxResumeChainTest do
     Repo.update_all(from(r in Request, where: r.id == ^request.id), set: [completed_at: expired])
     Repo.update_all(from(a in Attempt, where: a.request_id == ^request.id), set: [completed_at: expired])
     Repo.update_all(from(t in CodexTurn, where: t.request_id == ^request.id), set: [completed_at: expired])
+  end
+
+  defp replace_expired_fixture!(fixture) do
+    opts = RequestOptions.for_websocket(%{session_key: fixture.session.session_key})
+    assert {:ok, owned} = SessionContinuity.start_codex_session(fixture.setup.auth, opts)
+    assert owned.id == fixture.session.id
+    assert {:ok, renewed} = SessionContinuity.renew_owner_token(owned, owned.owner_lease_token, RequestOptions.for_websocket(%{bridge_owner_lease_ttl_seconds: 1}))
+    await_fixture_expiry!(renewed.owner_lease_expires_at, System.monotonic_time(:millisecond) + 15_000)
+    assert {:ok, replacement} = SessionContinuity.start_codex_session(fixture.setup.auth, opts)
+    assert replacement.id != owned.id
+    closed = Repo.get!(CodexSession, owned.id)
+    assert closed.close_reason == "owner_lease_expired"
+    assert DateTime.compare(replacement.created_at, closed.closed_at) != :lt
+    %{fixture | session: replacement}
+  end
+
+  defp await_fixture_expiry!(expires_at, deadline) do
+    if DateTime.compare(db_now(), expires_at) == :lt do
+      assert System.monotonic_time(:millisecond) < deadline, "owned fixture lease did not expire"
+      Process.sleep(20)
+      await_fixture_expiry!(expires_at, deadline)
+    end
   end
 
   defp insert_session!(setup) do
