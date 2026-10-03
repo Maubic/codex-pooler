@@ -4989,7 +4989,13 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         put_termination_receipt_pending(state, pid)
 
       :unknown ->
-        state
+        :ok = record_downstream_delivery_receipt(state, pid, termination_receipt_outcome(state, pid, :aborted))
+
+        # No token can be acknowledged yet. Remember only the bound receipt:
+        # a later local-owner handoff still receives its ACK from the drain.
+        if is_binary(get_in(state, [:direct_cleanup_receipts, pid, :attempt_id])),
+          do: Map.update(state, :terminate_acknowledged_tasks, MapSet.new([pid]), &MapSet.put(&1, pid)),
+          else: state
     end
   end
 

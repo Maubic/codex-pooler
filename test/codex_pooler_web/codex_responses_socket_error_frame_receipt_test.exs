@@ -14,9 +14,11 @@ defmodule CodexPoolerWeb.CodexResponsesSocketErrorFrameReceiptTest do
   import CodexPooler.PoolerFixtures,
     only: [active_api_key_fixture: 0, active_upstream_assignment_fixture: 1, request_fixture: 2, attempt_fixture: 3]
 
-  alias CodexPooler.Accounting.Attempt
+  alias CodexPooler.Accounting.{Attempt, Request}
   alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.Gateway.Websocket.DirectCleanup
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.WebsocketDownstreamWriteWatch
 
@@ -68,6 +70,94 @@ defmodule CodexPoolerWeb.CodexResponsesSocketErrorFrameReceiptTest do
     assert :ok = CodexResponsesSocket.terminate(:normal, state)
 
     assert %{"outcome" => "aborted", "terminal_class" => "none", "frames_after_visible" => 1, "write_failure" => "closed"} = receipt(attempt)
+  end
+
+  test "unknown termination writes no unrelated Attempt when the binding is missing or the task is removed", %{task_pid: task_pid, attempt: attempt, state: state} do
+    stop_fixture_task!(task_pid)
+
+    for scenario <- [:missing_binding, :removed_task] do
+      original = Repo.get!(Attempt, attempt.id).response_metadata
+
+      changed =
+        case scenario do
+          :missing_binding -> Map.put(state, :direct_cleanup_receipts, %{})
+          :removed_task -> Map.put(state, :tasks, MapSet.new())
+        end
+
+      assert :ok = CodexResponsesSocket.terminate(:normal, changed)
+      assert Repo.get!(Attempt, attempt.id).response_metadata == original
+    end
+
+    refute Process.alive?(task_pid)
+  end
+
+  test "foreign cleanup ref and session cannot replace the accepted Attempt binding", %{task_pid: task_pid, attempt: attempt, state: state} do
+    valid = state.direct_cleanup_receipts[task_pid]
+    {foreign_request, foreign_attempt, foreign_session} = receipt_fixture()
+    ref = make_ref()
+    context = %DirectCleanup{registry: CodexPooler.Gateway.Transports.Websocket.ActivityRegistry, task: task_pid, ref: ref, parent: self(), session_id: valid.session_id}
+    state = Map.put(state, :direct_cleanup_contexts, %{task_pid => context})
+    foreign = %{valid | session_id: foreign_session, request_id: foreign_request.id, attempt_id: foreign_attempt.id}
+    assert {:ok, rejected} = CodexResponsesSocket.handle_info({:direct_request_cleanup, task_pid, ref, foreign}, state)
+    assert rejected.direct_cleanup_receipts == state.direct_cleanup_receipts
+    assert {:ok, rejected} = CodexResponsesSocket.handle_info({:direct_request_cleanup, task_pid, make_ref(), %{foreign | session_id: valid.session_id}}, rejected)
+    assert rejected.direct_cleanup_receipts == state.direct_cleanup_receipts
+    # The accepted real UUID stays the only target, while the foreign row is unchanged.
+    assert Repo.get!(Attempt, foreign_attempt.id).response_metadata == %{}
+    assert Repo.get!(Attempt, attempt.id).response_metadata == %{}
+  end
+
+  test "unknown termination preserves only the first completed item when the second write fails", %{task_pid: task_pid, attempt: attempt, state: state} do
+    first = completed_item_frame(1)
+    second = completed_item_frame(2)
+    {:push, {:text, ^first}, state} = CodexResponsesSocket.handle_info({:codex_response_chunk, task_pid, first}, state)
+    # The next callback confirms the first physical write before staging the second.
+    {:push, {:text, ^second}, state} = CodexResponsesSocket.handle_info({:codex_response_chunk, task_pid, second}, state)
+    send_error(:timeout)
+    stop_fixture_task!(task_pid)
+    assert :ok = CodexResponsesSocket.terminate(:normal, state)
+    stored = receipt(attempt)
+    assert stored["outcome"] == "aborted"
+    assert stored["terminal_class"] == "none"
+    assert stored["write_failure"] == "timeout"
+    assert stored["highest_frame_class"] == "item_done"
+    assert stored["completed_items"] == 1
+    assert length(stored["completed_item_digests"]) == 1
+  end
+
+  test "an old bound receipt cannot modify a newer Attempt generation", %{task_pid: task_pid, attempt: attempt, state: state} do
+    request = Repo.get!(Request, attempt.request_id)
+    assignment = Repo.get!(PoolUpstreamAssignment, attempt.pool_upstream_assignment_id)
+    marker = %{"generation_marker" => "newer_attempt"}
+    newer = attempt_fixture(request, assignment, %{attempt_number: 2, transport: "websocket", response_metadata: marker})
+    newer = Repo.update!(Ecto.Changeset.change(newer, replay_generation: 1))
+    frame = completed_item_frame(1)
+    {:push, {:text, ^frame}, state} = CodexResponsesSocket.handle_info({:codex_response_chunk, task_pid, frame}, state)
+    stop_fixture_task!(task_pid)
+    assert :ok = CodexResponsesSocket.terminate(:normal, state)
+    assert receipt(attempt)["completed_items"] == 1
+    current = Repo.get!(Attempt, newer.id)
+    assert current.replay_generation == 1
+    assert current.response_metadata == marker
+  end
+
+  test "unknown termination without completed items keeps an unusable output proof", %{task_pid: task_pid, attempt: attempt, state: state} do
+    stop_fixture_task!(task_pid)
+    assert :ok = CodexResponsesSocket.terminate(:normal, state)
+    stored = receipt(attempt)
+    assert stored["outcome"] == "aborted"
+    refute Map.has_key?(stored, "completed_item_digests")
+    refute Map.has_key?(stored, "completed_items")
+  end
+
+  defp stop_fixture_task!(task) do
+    monitor = Process.monitor(task)
+    send(task, :stop)
+    assert_receive {:DOWN, ^monitor, :process, ^task, :normal}, 15_000
+  end
+
+  defp completed_item_frame(ordinal) do
+    CodexPooler.JSON.encode!(%{"type" => "response.output_item.done", "item" => %{"type" => "reasoning", "id" => "rs_written_#{ordinal}", "summary" => [], "encrypted_content" => "synthetic_written_#{ordinal}"}})
   end
 
   # The chunk is pushed by one callback and written by Bandit before the next.
