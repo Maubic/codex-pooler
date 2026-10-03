@@ -599,6 +599,142 @@ defmodule CodexPooler.Accounting.ClientRetry do
     end
   end
 
+  @doc false
+  @spec admission_session_ids(map()) :: [Ecto.UUID.t()]
+  def admission_session_ids(scope) do
+    roots =
+      Repo.all(from request in admission_requests(scope), where: request.correlation_id in ^Map.get(scope, :claims, []))
+
+    digest = Map.get(scope, :semantic_turn_digest)
+
+    semantic_roots =
+      if is_binary(digest) and byte_size(digest) == @digest_bytes do
+        pattern = @successor_prefix <> "%"
+
+        query = from request in admission_requests(scope), join: turn in CodexTurn, on: turn.request_id == request.id, where: turn.semantic_turn_digest == ^digest, select: request
+        global_roots = Repo.all(from [request, turn] in query, where: not like(request.correlation_id, ^pattern), order_by: [desc: request.admitted_at, desc: turn.turn_sequence], limit: 1)
+
+        current_roots = current_admission_roots(query, Map.get(scope, :codex_session_id), pattern)
+        global_roots ++ current_roots
+      else
+        []
+      end
+
+    recovery_roots =
+      case Map.get(scope, :execution_recovery_request_id) do
+        id when is_binary(id) -> Repo.all(from request in admission_requests(scope), where: request.id == ^id)
+        _none -> []
+      end
+
+    (roots ++ semantic_roots ++ recovery_roots)
+    |> Enum.uniq_by(& &1.id)
+    |> Enum.flat_map(&admission_linked_session_ids(&1, scope))
+    |> Enum.uniq()
+  end
+
+  defp current_admission_roots(query, session_id, pattern) when is_binary(session_id) do
+    current = from [_request, turn] in query, where: turn.codex_session_id == ^session_id, order_by: [desc: turn.turn_sequence], limit: 1
+
+    case Repo.all(from [request, _turn] in current, where: not like(request.correlation_id, ^pattern)) do
+      [] -> Repo.all(current)
+      roots -> roots
+    end
+  end
+
+  defp current_admission_roots(_query, _session_id, _pattern), do: []
+
+  @doc false
+  @spec admission_linked_session_ids(Request.t(), map()) :: [Ecto.UUID.t()]
+  def admission_linked_session_ids(%Request{} = request, scope) do
+    ancestry = discover_admission_ancestry(request, scope, 0)
+    original = hd(ancestry)
+    Enum.flat_map(tl(ancestry), &admission_request_session_ids(&1.id)) ++ discover_linked_sessions(original, original, scope, 0)
+  end
+
+  defp discover_admission_ancestry(request, _scope, depth) when depth >= @max_chain_depth, do: [request]
+
+  defp discover_admission_ancestry(request, scope, depth) do
+    predecessor = Repo.one(from candidate in admission_requests(scope), join: link in RequestClientRetryLink, on: link.predecessor_request_id == candidate.id, where: link.successor_request_id == ^request.id, select: candidate)
+
+    case predecessor do
+      %Request{} ->
+        ancestry = discover_admission_ancestry(predecessor, scope, depth + 1)
+        if admission_link_claim?(hd(ancestry), predecessor, request, scope), do: ancestry ++ [request], else: [request]
+
+      nil ->
+        [request]
+    end
+  end
+
+  defp discover_linked_sessions(_original, _request, _scope, depth) when depth > @max_chain_depth, do: []
+
+  defp discover_linked_sessions(original, request, scope, depth) do
+    sessions = admission_request_session_ids(request.id)
+
+    successor =
+      Repo.one(
+        from candidate in admission_requests(scope),
+          join: link in RequestClientRetryLink,
+          on: link.successor_request_id == candidate.id,
+          where: link.predecessor_request_id == ^request.id,
+          select: candidate
+      )
+
+    case successor do
+      %Request{} ->
+        if admission_client_retry_claim?(original, request, successor, scope),
+          do: sessions ++ discover_linked_sessions(original, successor, scope, depth + 1),
+          else: sessions
+
+      nil ->
+        sessions
+    end
+  end
+
+  defp admission_link_claim?(original, previous, successor, scope) do
+    admission_client_retry_claim?(original, previous, successor, scope) or
+      deterministic_failed_predecessor_claim(previous.correlation_id, previous.id) == {:ok, successor.correlation_id}
+  end
+
+  defp admission_client_retry_claim?(original, previous, successor, scope) do
+    claims = [deterministic_successor_claim(original, previous.id)]
+
+    claims =
+      case Repo.one(from turn in CodexTurn, where: turn.request_id == ^previous.id) do
+        %CodexTurn{} = turn -> [deterministic_compaction_successor_claim(previous, turn, Map.get(scope, :replay_claim_digest)) | claims]
+        nil -> claims
+      end
+
+    Enum.any?(claims, fn
+      {:ok, claim} -> claim == successor.correlation_id
+      _invalid -> false
+    end)
+  end
+
+  defp admission_requests(scope) do
+    from request in Request,
+      where: request.pool_id == ^scope.pool_id and request.api_key_id == ^scope.api_key_id and request.model_id == ^scope.model_id and request.endpoint == ^scope.endpoint
+  end
+
+  @doc false
+  @spec admission_request_session_ids(Ecto.UUID.t()) :: [Ecto.UUID.t()]
+  def admission_request_session_ids(request_id),
+    do: Repo.all(from turn in CodexTurn, where: turn.request_id == ^request_id, select: turn.codex_session_id)
+
+  @doc false
+  @spec require_admission_request_sessions!(Request.t(), map()) :: :ok
+  def require_admission_request_sessions!(%Request{} = request, scope) do
+    alias CodexPooler.Gateway.Persistence.SessionContinuity.MailboxAdmissionLocks
+
+    if MailboxAdmissionLocks.coordinated?() and
+         request.pool_id == scope.pool_id and request.api_key_id == scope.api_key_id and
+         request.model_id == scope.model_id and request.endpoint == scope.endpoint do
+      MailboxAdmissionLocks.require_sessions!(admission_request_session_ids(request.id))
+    end
+
+    :ok
+  end
+
   @spec preflight_snapshot(CodexSession.t(), APIKey.t(), CodexPooler.Catalog.Model.t(), map()) ::
           :none | {:ok, map()} | {:error, atom()}
   def preflight_snapshot(session, api_key, model, input) do
@@ -708,7 +844,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
       )
       when is_map(input) do
     with :ok <- reject_anchor(input),
-         {:ok, turn, request} <- lock_predecessor(session, api_key, input),
+         {:ok, turn, request} <- lock_predecessor(session, api_key, model, input),
          attempt <- lock_attempt(if(turn, do: turn.final_attempt_id), request.id),
          owner_lease <- lock_owner_lease(session),
          lineage <- lock_lineage(request.id, input),
@@ -772,34 +908,38 @@ defmodule CodexPooler.Accounting.ClientRetry do
   rows it reads (findings#206 row 206-538).
   """
   @spec forwarded_chain_state(Request.t()) :: :none | :live | :settled | {:armed, Ecto.UUID.t()}
-  def forwarded_chain_state(%Request{id: id}), do: forwarded_chain_state(id, 0)
+  def forwarded_chain_state(%Request{} = request), do: forwarded_chain_state(request.id, request, 0)
 
-  defp forwarded_chain_state(_request_id, depth) when depth > @max_chain_depth, do: :live
+  defp forwarded_chain_state(_request_id, _original, depth) when depth > @max_chain_depth, do: :live
 
-  defp forwarded_chain_state(request_id, depth) do
+  defp forwarded_chain_state(request_id, original, depth) do
     successor_pattern = @successor_prefix <> "%"
 
-    successor =
-      Repo.one(
-        from request in Request,
-          join: link in RequestClientRetryLink,
-          on: link.successor_request_id == request.id,
-          where: link.predecessor_request_id == ^request_id and like(request.correlation_id, ^successor_pattern),
-          lock: "FOR UPDATE OF r0"
-      )
+    query =
+      from request in Request,
+        join: link in RequestClientRetryLink,
+        on: link.successor_request_id == request.id,
+        where: link.predecessor_request_id == ^request_id and like(request.correlation_id, ^successor_pattern)
+
+    scope = Map.take(original, [:pool_id, :api_key_id, :model_id, :endpoint])
+    previous = Repo.get!(Request, request_id)
+    candidate = Repo.one(query)
+    if candidate && admission_link_claim?(original, previous, candidate, scope), do: require_admission_request_sessions!(candidate, scope)
+    successor = Repo.one(from request in query, lock: "FOR UPDATE OF r0")
+    if successor && admission_link_claim?(original, previous, successor, scope), do: require_admission_request_sessions!(successor, scope)
 
     case successor do
       nil when depth == 0 -> :none
       nil -> :settled
-      %Request{} -> forwarded_tail_state(successor, depth)
+      %Request{} -> forwarded_tail_state(successor, original, depth)
     end
   end
 
-  defp forwarded_tail_state(%Request{id: id} = successor, depth) do
+  defp forwarded_tail_state(%Request{id: id} = successor, original, depth) do
     next? = Repo.exists?(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^id))
 
     cond do
-      next? -> forwarded_chain_state(id, depth + 1)
+      next? -> forwarded_chain_state(id, original, depth + 1)
       match?(%RequestReplayEntitlement{status: "armed"}, lock_entitlement(id)) -> {:armed, id}
       successor.status in ["accepted", "in_progress"] or is_nil(successor.completed_at) -> :live
       true -> :settled
@@ -833,7 +973,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
     do: {:error, :retry_exhausted}
 
   defp walk_chain(session, original, previous, successor_id, input, db_now, depth) do
-    request = lock_request!(successor_id)
+    request = lock_admission_chain_request!(successor_id, original, previous, input)
     turn = Repo.one(from(turn in CodexTurn, where: turn.request_id == ^request.id, lock: "FOR UPDATE"))
     attempt = lock_attempt(if(turn, do: turn.final_attempt_id), request.id)
 
@@ -854,7 +994,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
          true <- chain_node_scoped?(request, original, turn, session, input),
          nil <- lock_entitlement(request.id),
          :ok <- validate_retry_lifecycle(turn, request, attempt),
-         :ok <- validate_chain_tail_window(next_id, request, attempt, db_now) do
+         :ok <- validate_chain_tail_window(next_id, request, attempt, db_now()) do
       if next_id,
         do: walk_chain(session, original, request, next_id, input, db_now, depth + 1),
         else: {:ok, %{request: request, turn: turn, attempt: attempt}}
@@ -878,14 +1018,22 @@ defmodule CodexPooler.Accounting.ClientRetry do
 
   defp chain_node_scoped?(_request, _original, _turn, _session, _input), do: false
 
-  defp lock_predecessor(session, api_key, input) do
+  defp lock_predecessor(session, api_key, model, input) do
+    scope = %{pool_id: session.pool_id, api_key_id: api_key.id, model_id: model.id, endpoint: Map.get(input, :endpoint)}
+
     case claimed_original(session, api_key, input) do
       %Request{} = request ->
-        {:ok, nil, lock_request!(request.id)}
+        :ok = require_admission_request_sessions!(request, scope)
+        request = lock_request!(request.id)
+        :ok = require_admission_request_sessions!(request, scope)
+        {:ok, nil, request}
 
       nil ->
         with {:ok, turn} <- lock_predecessor_turn(session.id, input) do
-          {:ok, turn, lock_request!(turn.request_id)}
+          :ok = require_admission_request_sessions!(Repo.get!(Request, turn.request_id), scope)
+          request = lock_request!(turn.request_id)
+          :ok = require_admission_request_sessions!(request, scope)
+          {:ok, turn, request}
         end
     end
   end
@@ -1391,6 +1539,25 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defp lock_request!(request_id) do
     Repo.one!(from request in Request, where: request.id == ^request_id, lock: "FOR UPDATE")
   end
+
+  defp lock_admission_chain_request!(request_id, original, previous, input) do
+    scope = Map.take(original, [:pool_id, :api_key_id, :model_id, :endpoint])
+    candidate = Repo.get!(Request, request_id)
+    if expected_admission_chain_claim?(original, previous, candidate, input), do: require_admission_request_sessions!(candidate, scope)
+    request = lock_request!(request_id)
+    if expected_admission_chain_claim?(original, previous, request, input), do: require_admission_request_sessions!(request, scope)
+    request
+  end
+
+  defp expected_admission_chain_claim?(_original, previous, request, %{retry_policy: :native_compaction} = input) do
+    case Repo.one(from turn in CodexTurn, where: turn.request_id == ^previous.id) do
+      %CodexTurn{} = turn -> deterministic_compaction_successor_claim(previous, turn, Map.get(input, :replay_claim_digest)) == {:ok, request.correlation_id}
+      nil -> false
+    end
+  end
+
+  defp expected_admission_chain_claim?(original, previous, request, _input),
+    do: deterministic_successor_claim(original, previous.id) == {:ok, request.correlation_id}
 
   defp reject_anchor(input) do
     if Map.get(input, :anchor_present?) == true, do: {:error, :anchor_unavailable}, else: :ok
@@ -2790,15 +2957,19 @@ defmodule CodexPooler.Accounting.ClientRetry do
   # own edge, which `validate_predecessor_claim/4` checks (findings#270 row
   # 270-237 (a)); it used to decide instead, refusing every chained
   # predecessor `retry_exhausted`.
-  defp lock_lineage(request_id, %{retry_policy: :native_compaction}) do
+  defp lock_lineage(request_id, %{retry_policy: :native_compaction} = input) do
     # Dispatch locks the successor request before its link. Preserve that order
     # when reclaiming; the caller already holds the session and predecessor.
     case Repo.one(
            from link in RequestClientRetryLink,
              where: link.predecessor_request_id == ^request_id
          ) do
-      %RequestClientRetryLink{} = link -> lock_request!(link.successor_request_id)
-      nil -> :ok
+      %RequestClientRetryLink{} = link ->
+        original = Repo.get!(Request, request_id)
+        lock_admission_chain_request!(link.successor_request_id, original, original, input)
+
+      nil ->
+        :ok
     end
 
     Repo.one(
@@ -2837,7 +3008,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defp lock_compaction_successor(nil, _request, _turn, _input), do: {:ok, nil}
 
   defp lock_compaction_successor(link, request, turn, %{retry_policy: :native_compaction} = input) do
-    successor = lock_request!(link.successor_request_id)
+    successor = lock_admission_chain_request!(link.successor_request_id, request, request, input)
 
     successor_turn =
       Repo.one(

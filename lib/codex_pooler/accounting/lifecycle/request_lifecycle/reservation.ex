@@ -43,6 +43,40 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   @usage_pending "usage_pending"
   @usage_not_applicable "not_applicable"
 
+  @doc false
+  @spec mailbox_admission_session_ids(CodexPooler.Access.auth_context(), Model.t(), map()) :: [Ecto.UUID.t()]
+  def mailbox_admission_session_ids(%{pool: pool, api_key: api_key}, %Model{} = model, opts) do
+    session = attr(opts, :codex_session)
+    claims = [attr(opts, :correlation_id), attr(opts, :original_request_claim), attr(opts, :native_http_steered_claim) | List.wrap(attr(opts, :websocket_compaction_claims))] |> Enum.filter(&is_binary/1) |> Enum.uniq()
+
+    scope = %{
+      pool_id: pool.id,
+      api_key_id: api_key.id,
+      model_id: model.id,
+      endpoint: attr(opts, :endpoint) || "/backend-api/codex/responses",
+      codex_session_id: if(match?(%CodexSession{}, session), do: session.id),
+      claims: claims,
+      semantic_turn_digest: attr(opts, :semantic_turn_digest),
+      replay_claim_digest: attr(opts, :replay_claim_digest),
+      execution_recovery_request_id: attr(opts, :execution_recovery_request_id)
+    }
+
+    current = if match?(%CodexSession{}, session), do: [session.id], else: []
+    current ++ ClientRetry.admission_session_ids(scope) ++ Enum.flat_map(claims, &FailedPredecessorResend.admission_session_ids(&1, scope))
+  end
+
+  @doc false
+  @spec mailbox_admission_exhausted_error() :: map()
+  def mailbox_admission_exhausted_error,
+    do: duplicate_request_error(%{disposition: :chain_exhausted, mailbox_check: :session})
+
+  @doc false
+  @spec revalidate_mailbox_admission_sessions!(CodexPooler.Access.auth_context(), Model.t(), map()) :: :ok
+  def revalidate_mailbox_admission_sessions!(auth, model, opts) do
+    Enum.each(mailbox_admission_session_ids(auth, model, opts), &SessionContinuity.require_mailbox_session!/1)
+    :ok
+  end
+
   @spec claim_websocket_turn(
           CodexPooler.Access.auth_context(),
           Model.t(),
@@ -63,6 +97,9 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
 
       true ->
         case do_claim_websocket_turn(pool, api_key, model, opts, nil) do
+          {:error, %{code: :duplicate_request, mailbox_check: :session, resend_disposition: :chain_exhausted}} = exhausted ->
+            exhausted
+
           {:error, %{code: :duplicate_request}} ->
             pool
             |> claim_failed_predecessor_resend(api_key, model, opts)
@@ -254,46 +291,51 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
     caller_owned_transaction? = Repo.in_transaction?()
     maybe_test_runtime_authorization_barrier(:claim, :before)
 
-    Repo.transaction(fn ->
-      lock_execution_recovery_sessions(resend_session, attr(opts, :execution_recovery_request_id))
-      :ok = lock_resend_session(resend_session)
-      api_key = authorize_runtime_turn_for_read!(api_key, captured_epoch)
-      maybe_test_runtime_authorization_barrier(:claim, :after)
-      {correlation_id, client_resend} = resend_claim!(resend_session, pool, api_key, model, opts)
+    SessionContinuity.mailbox_admission_transaction(
+      fn -> mailbox_admission_session_ids(%{pool: pool, api_key: api_key}, model, opts) end,
+      fn ->
+        revalidate_mailbox_admission_sessions!(%{pool: pool, api_key: api_key}, model, opts)
+        lock_execution_recovery_sessions(resend_session, attr(opts, :execution_recovery_request_id), %{pool_id: pool.id, api_key_id: api_key.id, model_id: model.id, endpoint: attr(opts, :endpoint) || "/backend-api/codex/responses"})
+        :ok = lock_resend_session(resend_session)
+        api_key = authorize_runtime_turn_for_read!(api_key, captured_epoch)
+        maybe_test_runtime_authorization_barrier(:claim, :after)
+        {correlation_id, client_resend} = resend_claim!(resend_session, pool, api_key, model, opts)
 
-      request =
-        %Request{
-          pool_id: pool.id,
-          api_key_id: api_key.id,
-          model_id: model.id,
-          requested_model: attr(opts, :requested_model) || model.exposed_model_id,
-          endpoint: attr(opts, :endpoint),
-          transport: "websocket",
-          status: "accepted",
-          usage_status: @usage_pending,
-          correlation_id: correlation_id,
-          client_ip: blank_to_nil(attr(opts, :client_ip)),
-          user_agent: blank_to_nil(attr(opts, :user_agent)),
-          request_metadata: claim_request_metadata(opts, client_resend),
-          admitted_at: timestamp,
-          retry_count: 0
-        }
-        |> Ecto.Changeset.change(ClientRetry.request_attrs(attr(opts, :native_client_retry_witness)))
-        |> Repo.insert!()
+        request =
+          %Request{
+            pool_id: pool.id,
+            api_key_id: api_key.id,
+            model_id: model.id,
+            requested_model: attr(opts, :requested_model) || model.exposed_model_id,
+            endpoint: attr(opts, :endpoint),
+            transport: "websocket",
+            status: "accepted",
+            usage_status: @usage_pending,
+            correlation_id: correlation_id,
+            client_ip: blank_to_nil(attr(opts, :client_ip)),
+            user_agent: blank_to_nil(attr(opts, :user_agent)),
+            request_metadata: claim_request_metadata(opts, client_resend),
+            admitted_at: timestamp,
+            retry_count: 0
+          }
+          |> Ecto.Changeset.change(ClientRetry.request_attrs(attr(opts, :native_client_retry_witness)))
+          |> Repo.insert!()
 
-      RequestLogFacts.record_request_created!(request)
-      :ok = bind_direct_cleanup(opts, request)
-      link_semantic_execution_retry!(opts, client_resend, request, timestamp)
+        RequestLogFacts.record_request_created!(request)
+        :ok = bind_direct_cleanup(opts, request)
+        link_semantic_execution_retry!(opts, client_resend, request, timestamp)
 
-      case client_resend do
-        nil ->
-          %{request: request}
+        case client_resend do
+          nil ->
+            %{request: request}
 
-        %{} ->
-          %{request: request, client_resend: Map.delete(client_resend, :recovery_markers)}
-          |> DeadExecutionResendRecovery.put_markers(client_resend)
-      end
-    end)
+          %{} ->
+            %{request: request, client_resend: Map.delete(client_resend, :recovery_markers)}
+            |> DeadExecutionResendRecovery.put_markers(client_resend)
+        end
+      end,
+      mailbox_admission_exhausted_error()
+    )
     |> unwrap_transaction()
     |> DeadExecutionResendRecovery.emit_after_commit(caller_owned_transaction?)
   rescue
@@ -367,24 +409,19 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   defp lock_resend_session(nil), do: :ok
 
   defp lock_resend_session(%CodexSession{id: session_id}) do
-    _locked_or_missing =
-      Repo.one(from session in CodexSession, where: session.id == ^session_id, lock: "FOR UPDATE")
-
-    :ok
+    SessionContinuity.require_mailbox_session!(session_id)
   end
 
-  defp lock_execution_recovery_sessions(%CodexSession{id: session_id}, request_id) when is_binary(request_id) do
-    original_session_id = Repo.one(from turn in CodexTurn, where: turn.request_id == ^request_id, select: turn.codex_session_id)
-    session_ids = Enum.uniq([session_id, original_session_id])
+  defp lock_execution_recovery_sessions(%CodexSession{id: session_id}, request_id, scope) when is_binary(request_id) do
+    :ok = SessionContinuity.require_mailbox_session!(session_id)
 
-    # Acquire every session before the key, turn, request and attempt prefix.
-    # The original finalizer owns the old session; a rotated reconnect must
-    # never hold its request while waiting for that session to be released.
-    Repo.all(from session in CodexSession, where: session.id in ^session_ids, order_by: session.id, lock: "FOR UPDATE")
-    :ok
+    case Repo.get(Request, request_id) do
+      %Request{} = request -> ClientRetry.require_admission_request_sessions!(request, scope)
+      nil -> :ok
+    end
   end
 
-  defp lock_execution_recovery_sessions(_session, _request_id), do: :ok
+  defp lock_execution_recovery_sessions(_session, _request_id, _scope), do: :ok
 
   defp resend_claim!(nil, _pool, _api_key, _model, opts), do: {attr(opts, :correlation_id), nil}
 
@@ -749,124 +786,129 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
        ) do
     captured_epoch = runtime_revocation_epoch(api_key, opts)
 
-    Repo.transaction(fn ->
-      session = SessionContinuity.lock_codex_session_for_turn(session)
-      api_key = authorize_runtime_turn!(api_key, captured_epoch)
-      authorize_client_retry_model!(api_key, model)
+    SessionContinuity.mailbox_admission_transaction(
+      fn -> mailbox_admission_session_ids(auth, model, opts) end,
+      fn ->
+        revalidate_mailbox_admission_sessions!(auth, model, opts)
+        session = SessionContinuity.lock_codex_session_for_turn(session)
+        api_key = authorize_runtime_turn!(api_key, captured_epoch)
+        authorize_client_retry_model!(api_key, model)
 
-      input = %{
-        retry_policy: retry_policy,
-        full_history?: attr(opts, :full_history?),
-        compaction_trigger_bridge?: attr(opts, :compaction_trigger_bridge?),
-        endpoint: attr(opts, :endpoint) || "/backend-api/codex/responses",
-        requested_model: attr(opts, :requested_model) || model.exposed_model_id,
-        runtime_revocation_epoch: captured_epoch,
-        semantic_turn_digest: attr(opts, :semantic_turn_digest),
-        original_request_claim: attr(opts, :original_request_claim),
-        replay_claim_digest: attr(opts, :replay_claim_digest),
-        replay_claim_alternates: witness_alternates(attr(opts, :native_client_retry_witness)),
-        grown_resend_candidates: witness_grown(attr(opts, :native_client_retry_witness)),
-        anchor_present?: retry_anchor(opts, retry_policy),
-        after_locks: attr(opts, :after_locks),
-        owner_idle_validated?: attr(opts, :owner_idle_validated?) == true,
-        owner_lease_token: attr(opts, :owner_lease_token),
-        owner_instance_id: attr(opts, :owner_instance_id)
-      }
+        input = %{
+          retry_policy: retry_policy,
+          full_history?: attr(opts, :full_history?),
+          compaction_trigger_bridge?: attr(opts, :compaction_trigger_bridge?),
+          endpoint: attr(opts, :endpoint) || "/backend-api/codex/responses",
+          requested_model: attr(opts, :requested_model) || model.exposed_model_id,
+          runtime_revocation_epoch: captured_epoch,
+          semantic_turn_digest: attr(opts, :semantic_turn_digest),
+          original_request_claim: attr(opts, :original_request_claim),
+          replay_claim_digest: attr(opts, :replay_claim_digest),
+          replay_claim_alternates: witness_alternates(attr(opts, :native_client_retry_witness)),
+          grown_resend_candidates: witness_grown(attr(opts, :native_client_retry_witness)),
+          anchor_present?: retry_anchor(opts, retry_policy),
+          after_locks: attr(opts, :after_locks),
+          owner_idle_validated?: attr(opts, :owner_idle_validated?) == true,
+          owner_lease_token: attr(opts, :owner_lease_token),
+          owner_instance_id: attr(opts, :owner_instance_id)
+        }
 
-      with {:ok, predecessor} <-
-             ClientRetry.lock_eligible_predecessor!(session, api_key, model, input),
-           {:ok, correlation_id} <- successor_correlation(predecessor, retry_policy, input) do
-        if predecessor.successor do
-          reclaim_compaction_successor!(predecessor, opts)
-        else
-          auth = %{auth | api_key: api_key}
-          timestamp = predecessor.db_now
-          requested_model = input.requested_model
-          pricing = PricingResolution.lookup(model, requested_model, payload, opts, timestamp)
-          effective_model = ReservationPolicy.effective_model(model, requested_model, opts)
+        with {:ok, predecessor} <-
+               ClientRetry.lock_eligible_predecessor!(session, api_key, model, input),
+             {:ok, correlation_id} <- successor_correlation(predecessor, retry_policy, input) do
+          if predecessor.successor do
+            reclaim_compaction_successor!(predecessor, opts)
+          else
+            auth = %{auth | api_key: api_key}
+            timestamp = predecessor.db_now
+            requested_model = input.requested_model
+            pricing = PricingResolution.lookup(model, requested_model, payload, opts, timestamp)
+            effective_model = ReservationPolicy.effective_model(model, requested_model, opts)
 
-          policy =
-            ReservationPolicy.policy_for_update(
-              api_key,
-              effective_model,
-              nil
-            )
+            policy =
+              ReservationPolicy.policy_for_update(
+                api_key,
+                effective_model,
+                nil
+              )
 
-          {:ok, estimate} =
-            PricingResolution.reservation_estimate(
-              payload,
-              pricing.snapshot,
-              policy,
-              attr(opts, :reservation_estimate)
-            )
+            {:ok, estimate} =
+              PricingResolution.reservation_estimate(
+                payload,
+                pricing.snapshot,
+                policy,
+                attr(opts, :reservation_estimate)
+              )
 
-          case ReservationPolicy.enforce_reservation_limits(api_key, policy, estimate) do
-            :ok ->
-              :ok
+            case ReservationPolicy.enforce_reservation_limits(api_key, policy, estimate) do
+              :ok ->
+                :ok
 
-            {:error, reason} ->
-              Repo.rollback(reason)
+              {:error, reason} ->
+                Repo.rollback(reason)
+            end
+
+            context = %{
+              pool: pool,
+              api_key: api_key,
+              model: model,
+              payload: payload,
+              requested_model: requested_model,
+              endpoint: input.endpoint,
+              transport: "websocket",
+              correlation_id: correlation_id,
+              auth: auth,
+              pricing: pricing,
+              estimate: estimate,
+              # Original witnesses belong to generation zero; a successor must
+              # dispatch through its link authority instead.
+              opts:
+                opts
+                |> Map.put(:turn_claim, nil)
+                |> Map.delete(:native_client_retry_witness),
+              timestamp: timestamp
+            }
+
+            request = insert_reserved_request!(context)
+            RequestLogFacts.record_request_created!(request)
+
+            reservation =
+              request
+              |> LedgerEntries.reservation_attrs(auth, api_key, pricing, estimate, timestamp)
+              |> LedgerEntries.create_or_get!()
+
+            turn =
+              ClientRetry.insert_successor_turn!(
+                session,
+                request,
+                input.semantic_turn_digest,
+                timestamp
+              )
+
+            maybe_test_client_retry_storage_failure!(opts)
+            link = ClientRetry.insert_link!(predecessor.request, request, timestamp)
+            dispatch_authority = ClientRetry.dispatch_authority(predecessor.request, request, link)
+
+            %ClientRetry.SuccessorClaim{
+              predecessor_request_id: predecessor.request.id,
+              request: request,
+              codex_turn: turn,
+              reservation: reservation,
+              pricing_snapshot: pricing.snapshot,
+              pricing_status: pricing.status,
+              pricing_service_tier: pricing.service_tier,
+              estimate: estimate,
+              link: link,
+              correlation_id: correlation_id,
+              dispatch_authority: dispatch_authority
+            }
           end
-
-          context = %{
-            pool: pool,
-            api_key: api_key,
-            model: model,
-            payload: payload,
-            requested_model: requested_model,
-            endpoint: input.endpoint,
-            transport: "websocket",
-            correlation_id: correlation_id,
-            auth: auth,
-            pricing: pricing,
-            estimate: estimate,
-            # Original witnesses belong to generation zero; a successor must
-            # dispatch through its link authority instead.
-            opts:
-              opts
-              |> Map.put(:turn_claim, nil)
-              |> Map.delete(:native_client_retry_witness),
-            timestamp: timestamp
-          }
-
-          request = insert_reserved_request!(context)
-          RequestLogFacts.record_request_created!(request)
-
-          reservation =
-            request
-            |> LedgerEntries.reservation_attrs(auth, api_key, pricing, estimate, timestamp)
-            |> LedgerEntries.create_or_get!()
-
-          turn =
-            ClientRetry.insert_successor_turn!(
-              session,
-              request,
-              input.semantic_turn_digest,
-              timestamp
-            )
-
-          maybe_test_client_retry_storage_failure!(opts)
-          link = ClientRetry.insert_link!(predecessor.request, request, timestamp)
-          dispatch_authority = ClientRetry.dispatch_authority(predecessor.request, request, link)
-
-          %ClientRetry.SuccessorClaim{
-            predecessor_request_id: predecessor.request.id,
-            request: request,
-            codex_turn: turn,
-            reservation: reservation,
-            pricing_snapshot: pricing.snapshot,
-            pricing_status: pricing.status,
-            pricing_service_tier: pricing.service_tier,
-            estimate: estimate,
-            link: link,
-            correlation_id: correlation_id,
-            dispatch_authority: dispatch_authority
-          }
+        else
+          {:error, reason} -> Repo.rollback(reason)
         end
-      else
-        {:error, reason} -> Repo.rollback(reason)
-      end
-    end)
+      end,
+      mailbox_admission_exhausted_error()
+    )
     |> case do
       {:ok, claim} -> {:ok, claim}
       {:error, reason} -> {:error, normalize_retry_claim_error(reason)}
@@ -952,6 +994,8 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   defp changed_cleanup_owner?(_old_owner, _new_owner, _opts), do: false
 
   defp normalize_retry_claim_error(%Ecto.Changeset{}), do: :successor_claimed
+
+  defp normalize_retry_claim_error(%{code: :duplicate_request, mailbox_check: :session} = reason), do: reason
 
   # A key policy refusal is the successor's own refusal, answered and recorded
   # as the ordinary reservation answers it, never a lost claim (findings#206
@@ -1087,81 +1131,86 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
        ) do
     caller_owned_transaction? = Repo.in_transaction?()
 
-    Repo.transaction(fn ->
-      :ok = lock_resend_session(resend_session)
-      api_key = authorize_runtime_turn!(api_key, captured_epoch)
-      auth = Map.put(auth, :api_key, api_key)
-      maybe_test_runtime_authorization_barrier(:reserve, :after)
+    SessionContinuity.mailbox_admission_transaction(
+      fn -> mailbox_admission_session_ids(auth, model, opts) end,
+      fn ->
+        revalidate_mailbox_admission_sessions!(auth, model, opts)
+        :ok = lock_resend_session(resend_session)
+        api_key = authorize_runtime_turn!(api_key, captured_epoch)
+        auth = Map.put(auth, :api_key, api_key)
+        maybe_test_runtime_authorization_barrier(:reserve, :after)
 
-      {correlation_id, client_resend, claim_arm} =
-        native_turn_resend_claim!(resend_session, %{
-          correlation_id: correlation_id,
+        {correlation_id, client_resend, claim_arm} =
+          native_turn_resend_claim!(resend_session, %{
+            correlation_id: correlation_id,
+            pool: pool,
+            api_key: api_key,
+            model: model,
+            endpoint: endpoint,
+            opts: opts,
+            payload: payload
+          })
+
+        policy =
+          ReservationPolicy.policy_for_update(
+            api_key,
+            effective_model
+          )
+
+        {:ok, estimate} =
+          PricingResolution.reservation_estimate(
+            payload,
+            pricing.snapshot,
+            policy,
+            attr(opts, :reservation_estimate)
+          )
+
+        case ReservationPolicy.enforce_reservation_limits(api_key, policy, estimate) do
+          :ok -> :ok
+          {:error, error} -> Repo.rollback(error)
+        end
+
+        request_context = %{
           pool: pool,
           api_key: api_key,
           model: model,
+          payload: payload,
+          requested_model: requested_model,
           endpoint: endpoint,
+          transport: transport,
+          correlation_id: correlation_id,
+          client_resend: client_resend,
+          native_http_claim_arm: claim_arm,
+          auth: auth,
+          pricing: pricing,
+          estimate: estimate,
           opts: opts,
-          payload: payload
-        })
+          timestamp: timestamp
+        }
 
-      policy =
-        ReservationPolicy.policy_for_update(
-          api_key,
-          effective_model
-        )
+        request = insert_reserved_request!(request_context)
+        RequestLogFacts.record_request_created!(request)
+        # An HTTPS resend admitted under the turn's semantic claim is linked to its
+        # predecessor like the websocket claim's (findings#232 row 232-231).
+        link_semantic_execution_retry!(opts, client_resend, request, timestamp)
 
-      {:ok, estimate} =
-        PricingResolution.reservation_estimate(
-          payload,
-          pricing.snapshot,
-          policy,
-          attr(opts, :reservation_estimate)
-        )
+        reservation =
+          request
+          |> LedgerEntries.reservation_attrs(auth, api_key, pricing, estimate, timestamp)
+          |> LedgerEntries.create_or_get!()
 
-      case ReservationPolicy.enforce_reservation_limits(api_key, policy, estimate) do
-        :ok -> :ok
-        {:error, error} -> Repo.rollback(error)
-      end
-
-      request_context = %{
-        pool: pool,
-        api_key: api_key,
-        model: model,
-        payload: payload,
-        requested_model: requested_model,
-        endpoint: endpoint,
-        transport: transport,
-        correlation_id: correlation_id,
-        client_resend: client_resend,
-        native_http_claim_arm: claim_arm,
-        auth: auth,
-        pricing: pricing,
-        estimate: estimate,
-        opts: opts,
-        timestamp: timestamp
-      }
-
-      request = insert_reserved_request!(request_context)
-      RequestLogFacts.record_request_created!(request)
-      # An HTTPS resend admitted under the turn's semantic claim is linked to its
-      # predecessor like the websocket claim's (findings#232 row 232-231).
-      link_semantic_execution_retry!(opts, client_resend, request, timestamp)
-
-      reservation =
-        request
-        |> LedgerEntries.reservation_attrs(auth, api_key, pricing, estimate, timestamp)
-        |> LedgerEntries.create_or_get!()
-
-      %{
-        request: request,
-        pricing_snapshot: pricing.snapshot,
-        pricing_status: pricing.status,
-        pricing_service_tier: pricing.service_tier,
-        reservation: reservation,
-        estimate: estimate
-      }
-      |> DeadExecutionResendRecovery.put_markers(client_resend)
-    end)
+        %{
+          request: request,
+          pricing_snapshot: pricing.snapshot,
+          pricing_status: pricing.status,
+          pricing_service_tier: pricing.service_tier,
+          reservation: reservation,
+          estimate: estimate
+        }
+        |> DeadExecutionResendRecovery.put_markers(client_resend)
+      end,
+      mailbox_admission_exhausted_error()
+    )
     |> unwrap_transaction()
     |> DeadExecutionResendRecovery.emit_after_commit(caller_owned_transaction?)
   end

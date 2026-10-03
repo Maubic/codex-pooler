@@ -10,7 +10,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxDiagnosticsTest do
   alias CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Payloads.{NativeMailboxContinuation, RequestOptions}
-  alias CodexPooler.Gateway.Persistence.{CodexSession, CodexTurn}
+  alias CodexPooler.Gateway.Persistence.{BridgeSessionAlias, CodexSession, CodexTurn}
+  alias CodexPooler.Gateway.Runtime.Service
   alias CodexPooler.Repo
   alias Ecto.Adapters.SQL.Sandbox
 
@@ -191,6 +192,129 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxDiagnosticsTest do
     end
   end
 
+  for inserted_edges <- [1, 2, 3] do
+    @tag committed: true
+    @tag mailbox_admission_lock_order: true
+    @tag mailbox_lock_rediscovery: true
+    test "nested HTTP admission fully exits after #{inserted_edges} historical graph insertions" do
+      n = unquote(inserted_edges)
+      fixture = fixture!(true)
+      payload = Map.update!(fixture.payload, "input", &(&1 ++ [fixture.output, mailbox()]))
+      current = Repo.get!(CodexSession, fixture.turn.codex_session_id)
+      {:ok, current_binary} = Ecto.UUID.dump(current.id)
+      current_integer = :binary.decode_unsigned(current_binary)
+
+      sessions = [
+        current
+        | Enum.map(1..3, fn offset ->
+            {:ok, id} = Ecto.UUID.load(<<current_integer + offset::128>>)
+            now = db_clock!()
+            Repo.insert!(%CodexSession{id: id, pool_id: fixture.setup.pool.id, api_key_id: fixture.setup.api_key.id, session_key: "nested-mailbox-lock-#{System.unique_integer([:positive, :monotonic])}", status: "active", created_at: now, updated_at: now})
+          end)
+      ]
+
+      before = counts(fixture)
+      alias_query = from a in BridgeSessionAlias, where: a.pool_id == ^fixture.setup.pool.id
+      aliases_before = Repo.aggregate(alias_query, :count)
+      parent = self()
+      ref = make_ref()
+      telemetry = "nested-mailbox-lock-#{System.unique_integer([:positive, :monotonic])}"
+      on_exit(fn -> :telemetry.detach(telemetry) end)
+
+      :ok =
+        :telemetry.attach(
+          telemetry,
+          [:codex_pooler, :gateway, :duplicate_turn, :refused],
+          fn _event, _measurements, _metadata, _config ->
+            in_transaction? = Repo.in_transaction?()
+            # A real query at publication proves the connection is usable after
+            # rollback; an aborted enclosing transaction cannot execute it.
+            query_succeeded? =
+              try do
+                Repo.query!("SELECT 1").rows == [[1]]
+              rescue
+                _error -> false
+              end
+
+            send(parent, {:refusal_transaction, ref, in_transaction?, query_succeeded?})
+          end,
+          nil
+        )
+
+      {{result, admission_backend, blocker_backends}, logs} =
+        with_info_log(fn ->
+          admission =
+            Task.async(fn ->
+              Sandbox.unboxed_run(Repo, fn ->
+                Process.put({Service, :runtime_authorization_barrier}, {parent, ref, {:reservation_lock, :before}})
+                send(parent, {:admission_backend, ref, backend_pid!()})
+                send_continuation(fixture, payload, :http)
+              end)
+            end)
+
+          stop_lock_actor_on_exit(admission)
+          assert_receive {:admission_backend, ^ref, admission_backend}, 15_000
+          assert_receive {:runtime_authorization_barrier, ^ref, :reservation_lock, :before, admission_pid}, 15_000
+
+          blockers =
+            Enum.map(Enum.take(sessions, n), fn session ->
+              task =
+                Task.async(fn ->
+                  Sandbox.unboxed_run(Repo, fn ->
+                    Repo.transaction(fn ->
+                      Repo.one!(from s in CodexSession, where: s.id == ^session.id, lock: "FOR NO KEY UPDATE")
+                      send(parent, {:nested_held, ref, session.id, backend_pid!()})
+
+                      receive do
+                        {:append_nested, ^ref, predecessor, next_session} -> insert_nested_chain_edge!(fixture, payload, predecessor, next_session)
+                      end
+                    end)
+                  end)
+                end)
+
+              stop_lock_actor_on_exit(task)
+              assert_receive {:nested_held, ^ref, id, backend}, 15_000
+              assert id == session.id
+              refute backend == admission_backend
+              %{task: task, backend: backend}
+            end)
+
+          send(admission_pid, {:runtime_authorization_release, ref})
+
+          Enum.reduce(Enum.with_index(blockers), fixture.request, fn {blocker, index}, predecessor ->
+            query = await_nested_session_wait!(admission_backend, blocker.backend)
+            assert query =~ "codex_sessions"
+
+            assert {:ok, :prior_locks_released} =
+                     Sandbox.unboxed_run(Repo, fn ->
+                       Repo.transaction(fn ->
+                         Repo.one!(from r in Request, where: r.id == ^fixture.request.id, lock: "FOR UPDATE NOWAIT")
+                         Repo.one!(from k in CodexPooler.Access.APIKey, where: k.id == ^fixture.setup.api_key.id, lock: "FOR UPDATE NOWAIT")
+                         :prior_locks_released
+                       end)
+                     end)
+
+            send(blocker.task.pid, {:append_nested, ref, predecessor, Enum.at(sessions, index + 1)})
+            assert {:ok, successor} = Task.await(blocker.task, 15_000)
+            successor
+          end)
+
+          result = Task.await(admission, 15_000)
+          {result, admission_backend, Enum.map(blockers, & &1.backend)}
+        end)
+
+      assert_refusal(result, :http)
+      assert_receive {:refusal_transaction, ^ref, false, true}, 15_000
+      refute_receive {:refusal_transaction, ^ref, _, _}, 50
+      assert logs =~ "mailbox_check=session"
+      assert logs =~ "stage=native_http_turn_claim"
+      assert counts(fixture) == %{before | requests: before.requests + n, attempts: before.attempts + n, turns: before.turns + n, links: before.links + n}
+      assert Repo.aggregate(alias_query, :count) == aliases_before
+      assert FakeUpstream.count(fixture.upstream) == 1
+      if System.get_env("CODEX_POOLER_LOCK_TEST_DIAGNOSTICS") == "true", do: IO.puts(Jason.encode!(%{scenario: "nested_http_chain_insertion", inserted_edges: n, admission_backend: admission_backend, blocker_backends: blocker_backends, refusal_after_outer_transaction: true, public_status: 409, new_aliases: 0, new_reservations: 0, provider_dispatch_count: 1, mailbox_check: "session"}))
+    end
+  end
+
   defp fixture!(committed? \\ false) do
     output = reasoning("first")
     completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_diagnostic", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
@@ -312,6 +436,37 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxDiagnosticsTest do
     assert frame["error"] == %{"code" => "duplicate_turn", "message" => "duplicate Codex turn was already recorded for this session", "param" => "request_id", "type" => "invalid_request_error"}
     refute Map.has_key?(frame, "mailbox_check")
   end
+
+  defp insert_nested_chain_edge!(fixture, payload, predecessor, session) do
+    now = db_clock!()
+    [candidate] = mailbox_witness(fixture, payload).mailbox
+    {:ok, claim} = ClientRetry.deterministic_failed_predecessor_claim(predecessor.correlation_id, predecessor.id)
+    request = Repo.insert!(%Request{pool_id: fixture.setup.pool.id, api_key_id: fixture.setup.api_key.id, model_id: fixture.setup.model.id, requested_model: fixture.setup.model.exposed_model_id, endpoint: @path, transport: "http_sse", status: "failed", completed_at: now, last_error_code: "client_disconnected", usage_status: "usage_unknown", correlation_id: claim, admitted_at: now, native_client_retry_version: 1, native_client_retry_digest: hd(candidate.ending.websocket), native_client_retry_auth_epoch: fixture.request.native_client_retry_auth_epoch, request_metadata: %{"native_http_claim_arm" => "opening", "client_resend" => %{"predecessor_request_id" => predecessor.id}}})
+    %Attempt{} = original_attempt = fixture.attempt
+    attempt = Repo.insert!(%Attempt{original_attempt | id: nil, request_id: request.id, status: "failed", completed_at: now, network_error_code: "client_disconnected"})
+    Repo.insert!(%CodexTurn{codex_session_id: session.id, request_id: request.id, turn_sequence: 1, transport_kind: "http_sse", semantic_turn_digest: fixture.turn.semantic_turn_digest, status: "interrupted", error_code: "client_disconnected", final_attempt_id: attempt.id, started_at: now, completed_at: now, created_at: now, updated_at: now})
+    ClientRetry.insert_link!(predecessor, request, now)
+    request
+  end
+
+  defp await_nested_session_wait!(waiter, blocker), do: await_nested_session_wait!(waiter, blocker, System.monotonic_time(:millisecond) + 15_000)
+
+  defp await_nested_session_wait!(waiter, blocker, deadline) do
+    rows = Sandbox.unboxed_run(Repo, fn -> Repo.query!("SELECT query FROM pg_stat_activity WHERE pid=$1 AND $2=ANY(pg_blocking_pids(pid))", [waiter, blocker]).rows end)
+
+    case rows do
+      [[query]] ->
+        query
+
+      [] ->
+        assert System.monotonic_time(:millisecond) < deadline, "nested admission never reached sorted session locks"
+        Process.sleep(20)
+        await_nested_session_wait!(waiter, blocker, deadline)
+    end
+  end
+
+  defp db_clock!, do: Repo.query!("SELECT clock_timestamp()").rows |> hd() |> hd()
+  defp stop_lock_actor_on_exit(task), do: on_exit(fn -> if Process.alive?(task.pid), do: Process.exit(task.pid, :kill) end)
 
   defp counts(fixture) do
     requests = from r in Request, where: r.pool_id == ^fixture.setup.pool.id, select: r.id

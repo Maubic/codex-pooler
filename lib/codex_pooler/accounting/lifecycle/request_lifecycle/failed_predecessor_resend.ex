@@ -107,6 +107,29 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   @type refusal :: disposition() | %{disposition: disposition(), mailbox_check: ClientRetry.mailbox_stage()}
 
   @doc false
+  @spec admission_session_ids(String.t() | nil, scope()) :: [Ecto.UUID.t()]
+  def admission_session_ids(claim, scope), do: discover_sessions(claim, scope, 0)
+
+  defp discover_sessions(_claim, _scope, depth) when depth > @max_chain_depth, do: []
+
+  defp discover_sessions(claim, scope, depth) when is_binary(claim) do
+    request = Repo.one(from request in Request, where: request.correlation_id == ^claim)
+
+    if match?(%Request{}, request) and authorization_scoped?(request, scope) do
+      sessions = ClientRetry.admission_linked_session_ids(request, scope)
+
+      case ClientRetry.deterministic_failed_predecessor_claim(claim, request.id) do
+        {:ok, derived} -> sessions ++ discover_sessions(derived, scope, depth + 1)
+        _unsupported -> sessions
+      end
+    else
+      []
+    end
+  end
+
+  defp discover_sessions(_claim, _scope, _depth), do: []
+
+  @doc false
   @spec resolve(term(), scope()) :: {:ok, resolution()} | {:error, refusal()}
   def resolve(claim, scope) when is_binary(claim) and is_map(scope) do
     scope = Map.delete(scope, :mailbox_check)
@@ -168,8 +191,10 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   @doc false
   @spec resolve_execution(String.t(), map(), Ecto.UUID.t()) :: {:ok, resolution()} | {:error, refusal()}
   def resolve_execution(claim, scope, request_id) do
+    require_request_sessions(request_id, scope)
     turn = lock_turn(request_id)
     request = Repo.one(from request in Request, where: request.id == ^request_id, lock: "FOR UPDATE")
+    if request, do: ClientRetry.require_admission_request_sessions!(request, scope)
     scope = put_mailbox_check(Map.delete(scope, :mailbox_check), request)
 
     with false <- Map.get(scope, :anchor_present?) == true,
@@ -211,9 +236,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
         {:ok, nil}
 
       {%Request{} = predecessor, digest} when digest == turn.semantic_turn_digest ->
-        if scoped?(predecessor, scope) and request.request_metadata["client_resend"]["predecessor_request_id"] == predecessor.id,
-          do: {:ok, predecessor},
-          else: {:error, :terminal_predecessor}
+        if scoped?(predecessor, scope) and request.request_metadata["client_resend"]["predecessor_request_id"] == predecessor.id do
+          :ok = ClientRetry.require_admission_request_sessions!(predecessor, scope)
+          {:ok, predecessor}
+        else
+          {:error, :terminal_predecessor}
+        end
 
       _invalid ->
         {:error, :terminal_predecessor}
@@ -241,7 +269,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
        do: {:error, mailbox_refusal(:chain_exhausted, scope)}
 
   defp resolve_chain(claim, predecessor, shape, scope, now, markers, depth) do
-    case lock_request_by_claim(claim) do
+    case lock_request_by_claim(claim, scope) do
       nil when is_nil(predecessor) ->
         {:error, :missing_predecessor}
 
@@ -286,7 +314,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   defp continue_chain(request, previous, claim, scope, now, markers, depth) do
     with {:ok, derived} <-
            ClientRetry.deterministic_failed_predecessor_claim(claim, request.id),
-         successor <- lock_request_by_claim(derived),
+         successor <- lock_request_by_claim(derived, scope),
          scoped_validation <- scope_for_predecessor(scope, successor),
          {:ok, request, marker} <-
            DeadExecutionResendRecovery.recover(request, scoped?(request, scope), now),
@@ -448,12 +476,28 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     end)
   end
 
-  defp lock_request_by_claim(claim) do
-    Repo.one(
-      from request in Request,
-        where: request.correlation_id == ^claim,
-        lock: "FOR UPDATE"
-    )
+  defp lock_request_by_claim(claim, scope) do
+    case Repo.one(from request in Request, where: request.correlation_id == ^claim) do
+      %Request{} = request -> ClientRetry.require_admission_request_sessions!(request, scope)
+      nil -> :ok
+    end
+
+    request =
+      Repo.one(
+        from request in Request,
+          where: request.correlation_id == ^claim,
+          lock: "FOR UPDATE"
+      )
+
+    if request, do: ClientRetry.require_admission_request_sessions!(request, scope)
+    request
+  end
+
+  defp require_request_sessions(request_id, scope) do
+    case Repo.get(Request, request_id) do
+      %Request{} = request -> ClientRetry.require_admission_request_sessions!(request, scope)
+      nil -> :ok
+    end
   end
 
   # The explicit conjunction keeps every terminal requirement visible.
@@ -983,8 +1027,10 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   # From the predecessor's completion, or from the failed downstream write its
   # final attempt's receipt names (`ClientRetry.retry_window_start/3`,
   # findings#232 row 232-261).
-  defp validate_retry_window(%Request{} = request, attempt, %DateTime{} = now, _scope, window_seconds),
-    do: validate_window_age(ClientRetry.retry_window_start(request, attempt, now), now, window_seconds)
+  defp validate_retry_window(%Request{} = request, attempt, %DateTime{}, _scope, window_seconds) do
+    now = db_now()
+    validate_window_age(ClientRetry.retry_window_start(request, attempt, now), now, window_seconds)
+  end
 
   defp validate_window_age(%DateTime{} = started_at, %DateTime{} = now, window_seconds) do
     age = DateTime.diff(now, started_at, :millisecond)

@@ -369,13 +369,20 @@ defmodule CodexPooler.Accounting.ClientRetryPostgresTest do
 
     # Each claim samples the database clock under the key lock before reading
     # the combined token-window snapshot. Nil active caps add no count query.
-    # Each claim also checks that its predecessor's turn claim has no successor
-    # (findings#206 row 206-538, one indexed existence read): 16 claims * 23
-    # statements = 368, including one enforcement clock per claim.
+    # Bounded graph discovery, current-session roots, locked revalidation and node membership add 26 reads
+    # to each claim's original 23-statement schedule. The resulting 49 statements
+    # include one enforcement clock per claim at every concurrency level.
     assert Enum.map(schedules, & &1.enforcement_clock_queries) == [16, 16, 16]
-    assert Enum.map(schedules, & &1.total) == [368, 368, 368]
-    assert Enum.map(schedules, & &1.per_operation) == [23, 23, 23]
+    assert Enum.map(schedules, & &1.total) == [784, 784, 784]
+    assert Enum.map(schedules, & &1.per_operation) == [49, 49, 49]
     assert Enum.map(schedules, & &1.operation_sources) |> Enum.uniq() |> length() == 1
+
+    if System.get_env("CODEX_POOLER_LOCK_TEST_DIAGNOSTICS") == "true" do
+      Enum.each(schedules, fn schedule ->
+        sources = Enum.map(schedule.operation_sources, fn {{operation, source}, count} -> %{operation: operation, source: source, count: count} end)
+        IO.puts(Jason.encode!(Map.put(Map.drop(schedule, [:operation_sources]), :operation_sources, sources)))
+      end)
+    end
   end
 
   defp await_blocked(waiter, holder, deadline) do

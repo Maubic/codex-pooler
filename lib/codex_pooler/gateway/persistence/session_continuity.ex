@@ -21,6 +21,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
     SessionContinuity.TurnLifecycle
   }
 
+  alias CodexPooler.Gateway.Persistence.SessionContinuity.MailboxAdmissionLocks
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.OwnerLease, as: OwnerLeaseStatus
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.Session, as: SessionStatus
   alias CodexPooler.Repo
@@ -40,6 +41,14 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
   @type request_ref :: Request.t() | Ecto.UUID.t()
   @type owner_token_result :: :ok | {:error, :stale_owner | :owner_unavailable}
   @type session_ref :: CodexSession.t() | Ecto.UUID.t() | String.t()
+
+  @doc false
+  @spec mailbox_admission_transaction(MailboxAdmissionLocks.discovery(), MailboxAdmissionLocks.operation(), term()) :: {:ok, term()} | {:error, term()}
+  defdelegate mailbox_admission_transaction(discover, operation, exhausted_reason), to: MailboxAdmissionLocks, as: :transaction
+
+  @doc false
+  @spec require_mailbox_session!(Ecto.UUID.t() | nil) :: :ok
+  defdelegate require_mailbox_session!(session_id), to: MailboxAdmissionLocks, as: :require_session!
 
   @session_start_conflict_error %{
     status: 409,
@@ -74,6 +83,8 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
           session_owner_witness: %OwnerWitness{session_id: session_id, lease_token: lease_token}
         }
       }) do
+    if MailboxAdmissionLocks.coordinated?(), do: MailboxAdmissionLocks.require_session!(session_id)
+
     case codex_session_for_update(session_id) do
       %CodexSession{} = session ->
         _lease_and_now = lock_and_validate_owner!(session, lease_token)
@@ -391,7 +402,11 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
   @spec start_codex_turn(CodexSession.t(), Request.t(), opts()) :: turn_result()
   defdelegate start_codex_turn(session, request, opts), to: TurnLifecycle
   @spec lock_codex_session_for_turn(CodexSession.t()) :: CodexSession.t()
-  defdelegate lock_codex_session_for_turn(session), to: TurnLifecycle
+  def lock_codex_session_for_turn(%CodexSession{id: session_id} = session) do
+    if MailboxAdmissionLocks.coordinated?(), do: MailboxAdmissionLocks.require_session!(session_id)
+    TurnLifecycle.lock_codex_session_for_turn(session)
+  end
+
   @spec complete_codex_turn(complete_turn_result(), String.t(), term()) :: term()
   defdelegate complete_codex_turn(result, status, error_code), to: TurnLifecycle
 

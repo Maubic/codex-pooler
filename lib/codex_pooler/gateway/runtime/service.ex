@@ -6,6 +6,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   alias CodexPooler.Access
   alias CodexPooler.Accounting
   alias CodexPooler.Accounting.ClientRetry
+  alias CodexPooler.Accounting.RequestLifecycle.Reservation, as: RequestReservation
   alias CodexPooler.Catalog
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Gateway.Contracts
@@ -964,31 +965,58 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   defp witness_grown(_witness), do: []
 
   defp prepare_replay_intent_transaction(context) do
-    Repo.transaction(fn ->
-      locked_session = PersistenceSessionContinuity.lock_codex_session_for_turn(context.session)
+    PersistenceSessionContinuity.mailbox_admission_transaction(
+      fn -> replay_admission_session_ids(context) end,
+      fn ->
+        Enum.each(replay_admission_session_ids(context), &PersistenceSessionContinuity.require_mailbox_session!/1)
+        locked_session = PersistenceSessionContinuity.lock_codex_session_for_turn(context.session)
 
-      with :ok <- validate_replay_session_binding(locked_session, context.auth),
-           {:ok, authorization} <-
-             Access.authorize_api_key_runtime_turn_for_read(
-               context.auth.api_key.id,
-               context.api_key_runtime_epoch
-             ),
-           :ok <- validate_replay_api_key_pool(authorization.api_key, locked_session),
-           {:ok, pool} <- load_active_replay_pool(locked_session.pool_id, authorization),
-           {:ok, model} <- authorize_replay_model(authorization.api_key, pool, context) do
-        classify_replay_intent(locked_session, authorization, model, context)
-      else
-        {:error, {:pre_classification_refusal, reason, public_error}} ->
-          refuse_replay_before_classification(context, reason, public_error)
+        with :ok <- validate_replay_session_binding(locked_session, context.auth),
+             {:ok, authorization} <-
+               Access.authorize_api_key_runtime_turn_for_read(
+                 context.auth.api_key.id,
+                 context.api_key_runtime_epoch
+               ),
+             :ok <- validate_replay_api_key_pool(authorization.api_key, locked_session),
+             {:ok, pool} <- load_active_replay_pool(locked_session.pool_id, authorization),
+             {:ok, model} <- authorize_replay_model(authorization.api_key, pool, context) do
+          classify_replay_intent(locked_session, authorization, model, context)
+        else
+          {:error, {:pre_classification_refusal, reason, public_error}} ->
+            refuse_replay_before_classification(context, reason, public_error)
 
-        {:error, reason} ->
-          Repo.rollback(reason)
-      end
-    end)
+          {:error, reason} ->
+            Repo.rollback(reason)
+        end
+      end,
+      :mailbox_session_rediscovery_exhausted
+    )
     |> case do
-      {:ok, result} -> {:ok, result}
-      {:error, {:replay_model_denial, denial}} -> refuse_replay_model(context, denial)
-      {:error, reason} -> {:error, reason}
+      {:ok, result} ->
+        {:ok, result}
+
+      {:error, :mailbox_session_rediscovery_exhausted} ->
+        log_duplicate_turn(context.request_options, :chain_exhausted, stage: "runtime_replay_preflight", endpoint: context.endpoint, extra: [mailbox_check: :session])
+        {:error, duplicate_turn_error()}
+
+      {:error, {:replay_model_denial, denial}} ->
+        refuse_replay_model(context, denial)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp replay_admission_session_ids(context) do
+    # Advisory reads are refreshed on each complete outer restart. Key, Pool
+    # and model authorization still runs under the sorted session locks.
+    with %CodexPooler.Access.APIKey{} = api_key <- Repo.get(CodexPooler.Access.APIKey, context.auth.api_key.id),
+         {:ok, model} <- authorize_replay_model(api_key, context.auth.pool, context) do
+      auth = %{context.auth | api_key: api_key}
+      opts = %{endpoint: context.endpoint, codex_session: context.session, correlation_id: context.request_options.continuity.request_claim_key, original_request_claim: context.request_options.continuity.request_claim_key, semantic_turn_digest: context.semantic_turn_digest, replay_claim_digest: context.replay_claim_digest, websocket_compaction_claims: [context.semantic_turn_claim_key]}
+      RequestReservation.mailbox_admission_session_ids(auth, model, opts)
+    else
+      _denied -> [context.session.id]
     end
   end
 
@@ -2269,6 +2297,20 @@ defmodule CodexPooler.Gateway.Runtime.Service do
 
   defp normalize_native_http_turn_duplicate(result, _endpoint, %RequestOptions{}), do: result
 
+  defp normalize_mailbox_admission_exhaustion({:error, %{code: :duplicate_request, mailbox_check: :session, resend_disposition: :chain_exhausted}}, endpoint, %RequestOptions{transport: %{transport: "websocket"}} = options) do
+    stage =
+      case options.runtime.replay_lifecycle_binding do
+        %{client_retry_predecessor_request_id: _id} -> if endpoint == "/backend-api/codex/responses/compact", do: "compaction_retry_claim", else: "client_retry_claim"
+        %{compaction_successor_pending?: true} -> "compaction_retry_claim"
+        _ordinary -> "websocket_turn_claim"
+      end
+
+    log_duplicate_turn(options, :chain_exhausted, stage: stage, endpoint: endpoint, extra: [mailbox_check: :session])
+    {:error, duplicate_turn_error()}
+  end
+
+  defp normalize_mailbox_admission_exhaustion(result, _endpoint, _options), do: result
+
   # The HTTPS resend of a native websocket turn whose provider refusal went out
   # as the final wrapped 400 is answered with that refusal, like its websocket
   # resend (findings#254 rows 254-100 and 254-130), before anything is
@@ -2526,6 +2568,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
         authorized_correlation_id
       )
     end
+    |> normalize_mailbox_admission_exhaustion(endpoint, request_options)
     |> normalize_native_http_turn_duplicate(endpoint, request_options)
     |> case do
       {:ok, reserved} ->
@@ -2617,33 +2660,44 @@ defmodule CodexPooler.Gateway.Runtime.Service do
          turn_claim,
          authorized_correlation_id
        ) do
-    Repo.transaction(fn ->
-      request_options = lock_codex_session_before_reservation(request_options)
+    PersistenceSessionContinuity.mailbox_admission_transaction(
+      fn ->
+        attrs = AccountingReservation.attrs(auth, payload, endpoint, request_options, route_state, authorized_correlation_id)
+        attrs = attrs |> Map.put(:original_request_claim, request_options.continuity.request_claim_key) |> Map.put(:turn_claim, turn_claim) |> Map.put(:replay_claim_digest, request_options.continuity.replay_claim_digest)
+        RequestReservation.mailbox_admission_session_ids(auth, model, attrs)
+      end,
+      fn ->
+        attrs = AccountingReservation.attrs(auth, payload, endpoint, request_options, route_state, authorized_correlation_id)
+        attrs = attrs |> Map.put(:original_request_claim, request_options.continuity.request_claim_key) |> Map.put(:turn_claim, turn_claim) |> Map.put(:replay_claim_digest, request_options.continuity.replay_claim_digest)
+        :ok = RequestReservation.revalidate_mailbox_admission_sessions!(auth, model, attrs)
+        request_options = lock_codex_session_before_reservation(request_options)
 
-      with {:ok, reserved} <-
-             reserve(
-               auth,
-               model,
-               payload,
-               endpoint,
-               request_options,
-               route_state,
-               turn_claim,
-               authorized_correlation_id
-             ),
-           {:ok, reserved} <- maybe_start_reserved_turn(reserved, request_options),
-           :ok <-
-             register_final_window_alias(
-               auth,
-               payload,
-               request_options,
-               authorized_correlation_id
-             ) do
-        reserved
-      else
-        {:error, reason} -> Repo.rollback(reason)
-      end
-    end)
+        with {:ok, reserved} <-
+               reserve(
+                 auth,
+                 model,
+                 payload,
+                 endpoint,
+                 request_options,
+                 route_state,
+                 turn_claim,
+                 authorized_correlation_id
+               ),
+             {:ok, reserved} <- maybe_start_reserved_turn(reserved, request_options),
+             :ok <-
+               register_final_window_alias(
+                 auth,
+                 payload,
+                 request_options,
+                 authorized_correlation_id
+               ) do
+          reserved
+        else
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end,
+      RequestReservation.mailbox_admission_exhausted_error()
+    )
   end
 
   defp cancel_compaction_retry_hold(%RequestOptions{
