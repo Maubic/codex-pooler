@@ -587,7 +587,10 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
   `status`, a content part's `annotations` and `logprobs`, and null fields.
   Reasoning items use the client's fields, with summary/content parts projected
   to `type` and `text`; content survives only if it contains `reasoning_text`
-  (Codex 0.158.0). The identity binds those fields under a keyed digest, the
+  (Codex 0.158.0). Assistant commentary with a binary id and nonempty valid
+  `output_text` content keeps only `type`, `id`, `role`, `phase`, and ordered
+  `type`/`text` parts, matching observed Codex 0.160.0 serialization. Other
+  message/content shapes retain the generic identity. The identity binds those fields under a keyed digest, the
   house 12-character shape, so a receipt can carry it without carrying content.
   `:error` for anything that is not an item map.
   """
@@ -704,7 +707,23 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
     |> without_nulls()
   end
 
-  defp completed_item_identity(item) do
+  defp completed_item_identity(%{"type" => "message", "role" => "assistant", "phase" => "commentary", "id" => id, "content" => [_part | _parts] = parts} = item) when is_binary(id) do
+    if Enum.all?(parts, &commentary_output_text?/1) do
+      item
+      |> Map.take(["type", "id", "role", "phase", "content"])
+      |> Map.put("content", Enum.map(parts, &Map.take(&1, ["type", "text"])))
+      |> without_nulls()
+    else
+      generic_completed_item_identity(item)
+    end
+  end
+
+  defp completed_item_identity(item), do: generic_completed_item_identity(item)
+
+  defp commentary_output_text?(%{"type" => "output_text", "text" => text}) when is_binary(text), do: true
+  defp commentary_output_text?(_part), do: false
+
+  defp generic_completed_item_identity(item) do
     item
     |> Map.drop(["status", "internal_chat_message_metadata_passthrough"])
     |> Map.new(fn
