@@ -158,7 +158,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
       assert terminal["type"] == "response.incomplete"
       Mint.HTTP.close(conn)
       first = await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget)
-      await_delivery(first.id, System.monotonic_time(:millisecond) + @budget)
+      await_delivery(first, System.monotonic_time(:millisecond) + @budget, %{type: terminal["type"], reason: get_in(terminal, ["response", "incomplete_details", "reason"])})
       {conn, websocket, ref} = public_websocket_connect!(port, setup, thread)
       successor = Map.put(original, "input", input ++ output ++ [guidance()])
       {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(successor))
@@ -333,7 +333,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
     end
   end
 
-  defp await_delivery(request_id, deadline) do
+  defp await_delivery(%Request{id: request_id} = selected_request, deadline, observed_terminal) do
     attempt = Repo.get_by!(Attempt, request_id: request_id)
 
     cond do
@@ -341,11 +341,17 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
         :ok
 
       System.monotonic_time(:millisecond) > deadline ->
-        flunk("delivery receipt absent")
+        request = Repo.get!(Request, request_id)
+        metadata = attempt.response_metadata || %{}
+        receipt = metadata["downstream_delivery"] || %{}
+        source = metadata["native_content_filter_source"] || %{}
+        latest_attempt = Repo.one(from a in Attempt, where: a.request_id == ^request_id, order_by: [desc: a.attempt_number], limit: 1)
+        pool_request_count = Repo.aggregate(from(r in Request, where: r.pool_id == ^selected_request.pool_id), :count)
+        flunk("delivery receipt not delivered: " <> CodexPooler.JSON.encode!(%{observed_terminal: observed_terminal, selected_request_completed_at: selected_request.completed_at, pool_request_count: pool_request_count, attempt_request_match: attempt.request_id == request_id, attempt_number: attempt.attempt_number, latest_attempt_match: latest_attempt && latest_attempt.id == attempt.id, request_id: request_id, request_status: request.status, request_error: request.last_error_code, attempt_id: attempt.id, attempt_status: attempt.status, replay_generation: attempt.replay_generation, receipt_present: Map.has_key?(metadata, "downstream_delivery"), outcome: receipt["outcome"], terminal_class: receipt["terminal_class"], highest_frame_class: receipt["highest_frame_class"], incomplete_reason: receipt["incomplete_reason"], completed_items: receipt["completed_items"], digest_count: length(receipt["completed_item_digests"] || []), write_failure: receipt["write_failure"], source_attempt_match: source["attempt_id"] == attempt.id, marker_reason: get_in(metadata, ["native_content_filter_terminal", "reason"])}))
 
       true ->
         Process.sleep(10)
-        await_delivery(request_id, deadline)
+        await_delivery(selected_request, deadline, observed_terminal)
     end
   end
 
