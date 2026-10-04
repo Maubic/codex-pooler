@@ -19,7 +19,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn, SessionContinuity}
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes
   alias CodexPooler.InstanceSettings.AppSecretCrypto
-  alias CodexPooler.Platform.ExecutionTerminalProofs
+  alias CodexPooler.Platform.{ExecutionTerminalProof, ExecutionTerminalProofs}
   alias CodexPooler.Repo
 
   @version 1
@@ -2720,6 +2720,23 @@ defmodule CodexPooler.Accounting.ClientRetry do
          %Attempt{status: "failed", network_error_code: "client_disconnected"}
        ),
        do: true
+
+  defp mailbox_settlement?(
+         %CodexTurn{status: "failed", error_code: "upstream_stream_error", first_visible_output_at: %DateTime{}},
+         %Request{status: "failed", last_error_code: "upstream_stream_error", transport: "http_sse"},
+         %Attempt{status: "failed", network_error_code: "upstream_stream_error", transport: "http_sse"} = attempt
+       ) do
+    ExecutionTerminalProofs.terminal?(attempt, include_interrupted: false) and
+      Repo.exists?(
+        from proof in ExecutionTerminalProof,
+          where:
+            proof.execution_id == ^attempt.owner_execution_id and
+              proof.owner_instance_id == ^attempt.owner_instance_id and
+              proof.owner_instance_boot_id == ^attempt.owner_instance_boot_id and
+              proof.owner_process_id == ^attempt.owner_process_id and
+              proof.end_kind == "completed" and is_nil(proof.interruption_code)
+      )
+  end
 
   defp mailbox_settlement?(_turn, _request, _attempt), do: false
 
