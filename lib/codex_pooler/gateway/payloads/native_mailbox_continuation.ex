@@ -46,17 +46,57 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
   end
 
   defp candidate_ranges(input, {start, finish}) do
-    input
-    |> Enum.take(start)
-    |> Enum.reverse()
-    |> Enum.take(@max_completed_items)
-    |> Enum.take_while(&preemptible_output?/1)
-    |> Enum.with_index(1)
-    |> Enum.map(fn {_item, count} -> {start - count, count, finish} end)
+    preceding = input |> Enum.take(start) |> Enum.reverse()
+    output = preceding |> Enum.take(@max_completed_items) |> Enum.take_while(&preemptible_output?/1)
+
+    if output == [] do
+      fulfilled_call_ranges(preceding, start, finish)
+    else
+      output |> Enum.with_index(1) |> Enum.map(fn {_item, count} -> {start - count, Enum.slice(input, start - count, count), finish} end)
+    end
   end
 
-  defp build_candidate(semantic_key, payload, input, {prefix_count, count, finish}, {candidates, cache}) do
-    output = Enum.slice(input, prefix_count, count)
+  # Codex drains in-flight tools after a mailbox preemption and before recording
+  # the mail. Results are client input; only the matching provider calls and
+  # preemptible output participate in the original ordered server-write proof.
+  defp fulfilled_call_ranges(preceding, start, finish) do
+    {results, remaining} = preceding |> Enum.take(@max_completed_items * 2) |> Enum.split_while(&(tool_result_pair(&1) != nil))
+
+    if results != [] and length(results) <= @max_completed_items and preemptible_output?(List.first(remaining)) do
+      ordered_results = Enum.reverse(results)
+
+      remaining
+      |> Enum.take(@max_completed_items)
+      |> Enum.take_while(&(preemptible_output?(&1) or provider_call_pair(&1) != nil))
+      |> Enum.with_index(1)
+      |> Enum.flat_map(fn {_item, count} -> fulfilled_call_range(remaining, ordered_results, start, count, finish) end)
+    else
+      []
+    end
+  end
+
+  defp fulfilled_call_range(remaining, results, start, count, finish) do
+    output = remaining |> Enum.take(count) |> Enum.reverse()
+    calls = Enum.filter(output, &(provider_call_pair(&1) != nil))
+    if fulfilled_calls?(calls, results), do: [{start - length(results) - count, output, finish}], else: []
+  end
+
+  defp fulfilled_calls?(calls, results) do
+    pairs = Enum.map(calls, &provider_call_pair/1)
+    ids = Enum.map(pairs, &elem(&1, 1))
+
+    pairs != [] and length(ids) == length(Enum.uniq(ids)) and pairs == Enum.map(results, &tool_result_pair/1) and
+      Enum.zip(calls, results) |> Enum.all?(fn {call, result} -> Enum.all?(["name", "namespace"], fn key -> not Map.has_key?(result, key) or Map.get(result, key) == Map.get(call, key) end) end)
+  end
+
+  defp provider_call_pair(%{"type" => "function_call", "call_id" => id, "name" => name, "arguments" => arguments}) when is_binary(id) and byte_size(id) > 0 and is_binary(name) and byte_size(name) > 0 and is_binary(arguments), do: {"function_call_output", id}
+  defp provider_call_pair(%{"type" => "custom_tool_call", "call_id" => id, "name" => name, "input" => input}) when is_binary(id) and byte_size(id) > 0 and is_binary(name) and byte_size(name) > 0 and is_binary(input), do: {"custom_tool_call_output", id}
+  defp provider_call_pair(_item), do: nil
+
+  defp tool_result_pair(%{"type" => type, "call_id" => id, "output" => output}) when type in ["function_call_output", "custom_tool_call_output"] and is_binary(id) and byte_size(id) > 0 and (is_binary(output) or (is_list(output) and is_integer(length(output)))), do: {type, id}
+  defp tool_result_pair(_item), do: nil
+
+  defp build_candidate(semantic_key, payload, input, {prefix_count, output, finish}, {candidates, cache}) do
     {prefix, cache} = witnesses_at(semantic_key, payload, prefix_count, cache)
     {ending, cache} = witnesses_at(semantic_key, payload, finish, cache)
 

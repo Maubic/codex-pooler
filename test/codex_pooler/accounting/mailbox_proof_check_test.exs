@@ -2,7 +2,7 @@ defmodule CodexPooler.Accounting.MailboxProofCheckTest do
   use ExUnit.Case, async: true
 
   alias CodexPooler.Accounting.{Attempt, ClientRetry, Request}
-  alias CodexPooler.Gateway.Payloads.{NativeMailboxContinuation, RequestOptions}
+  alias CodexPooler.Gateway.Payloads.{NativeMailboxContinuation, RequestOptions, WebsocketTurnIdentity}
   alias CodexPooler.Gateway.Persistence.CodexTurn
 
   @semantic :crypto.hash(:sha256, "synthetic proof turn")
@@ -198,6 +198,94 @@ defmodule CodexPooler.Accounting.MailboxProofCheckTest do
     # The evaluator does not silently discard a producer's later valid proof.
     invalid = %{proof.candidate | prefix: %{websocket: []}}
     assert_stage(with_candidates(proof, List.duplicate(invalid, 63) ++ [proof.candidate]), :verified, 64)
+  end
+
+  for {call_type, result_type} <- [{"function_call", "function_call_output"}, {"custom_tool_call", "custom_tool_call_output"}], output_kind <- ["reasoning", "commentary"] do
+    @tag mailbox_tool_drain_regression: true
+    test "#{call_type}/#{output_kind}: codec-bound completed calls and preemptible output allow their matched native drain before mail" do
+      proof = drained_proof(unquote(call_type), unquote(result_type), unquote(output_kind))
+      assert ClientRetry.mailbox_check(proof.turn, proof.request, proof.attempt, proof.witness, nil, :same_session).stage == :verified
+      assert ClientRetry.verified_mailbox_continuation?(proof.turn, proof.request, proof.attempt, proof.witness, nil)
+    end
+
+    @tag mailbox_tool_drain_regression: true
+    test "#{call_type}/#{output_kind}: fulfilled-call recovery cannot discard prefix, output, epoch or session proof" do
+      proof = drained_proof(unquote(call_type), unquote(result_type), unquote(output_kind))
+
+      for changed <- [
+            %{proof | request: %{proof.request | native_client_retry_digest: :crypto.hash(:sha256, "foreign original prefix")}},
+            %{proof | witness: %{proof.witness | auth_epoch: 2}},
+            %{proof | request: %{proof.request | native_client_retry_auth_epoch: 2}},
+            %{proof | attempt: %{proof.attempt | replay_generation: 1}},
+            %{proof | attempt: %{proof.attempt | id: "foreign-final-attempt"}},
+            %{proof | attempt: %{proof.attempt | response_metadata: %{}}}
+          ] do
+        refute ClientRetry.verified_mailbox_continuation?(changed.turn, changed.request, changed.attempt, changed.witness, nil)
+      end
+
+      assert check(proof, :rejected).stage != :verified
+
+      for field <- ["model", "instructions"] do
+        changed = Map.put(proof.continuation, field, "synthetic changed option")
+        refute ClientRetry.verified_mailbox_continuation?(proof.turn, proof.request, proof.attempt, witness(changed), nil)
+      end
+
+      anchored = Map.put(proof.continuation, "previous_response_id", "resp_synthetic_foreign_socket")
+      assert witness(anchored).mailbox == []
+    end
+  end
+
+  @tag mailbox_tool_drain_regression: true
+  test "fulfilled calls retain real downstream proof stages after candidate recognition" do
+    proof = drained_proof("function_call", "function_call_output", "reasoning")
+    assert check(proof).stage == :verified
+    assert [%{items: [_call_digest, _reasoning_digest]}] = proof.witness.mailbox
+    assert check(%{proof | request: %{proof.request | native_client_retry_digest: :crypto.hash(:sha256, "foreign prefix")}}).stage == :witness
+    assert check(%{proof | witness: %{proof.witness | auth_epoch: 2}}).stage == :authorization
+    assert check(%{proof | attempt: %{proof.attempt | replay_generation: 1}}).stage == :settlement
+    assert check(proof, :rejected).stage == :session
+    receipt = proof.attempt.response_metadata["downstream_delivery"]
+    reversed = put_in(proof.attempt.response_metadata["downstream_delivery"]["completed_item_digests"], Enum.reverse(receipt["completed_item_digests"]))
+    assert check(reversed).stage == :output_prefix
+
+    for field <- ["arguments", "name", "call_id"] do
+      changed = update_in(proof.continuation, ["input"], fn [head, call | tail] -> [head, Map.put(call, field, "synthetic changed") | tail] end)
+      stage = if field == "call_id", do: :no_candidate, else: :output_prefix
+      assert check(%{proof | witness: witness(changed)}).stage == stage
+    end
+
+    for field <- ["model", "instructions"] do
+      assert check(%{proof | witness: witness(Map.put(proof.continuation, field, "synthetic changed"))}).stage == :witness
+    end
+
+    # A client tool result belongs to the ending witness, not the server receipt.
+    historical = witness(append(proof.continuation, [%{"type" => "function_call_output", "call_id" => "sample-later-call", "output" => "synthetic later input"}]))
+    historical_proof = %{proof | witness: historical}
+    assert check(historical_proof).stage == :ending
+    successor = %{proof.request | native_client_retry_digest: hd(hd(proof.witness.mailbox).ending.websocket)}
+    assert check(historical_proof, :same_session, successor).stage == :verified
+    assert check(historical_proof, :same_session, proof.request).stage == :ending
+  end
+
+  defp drained_proof(call_type, result_type, output_kind) do
+    original = payload()
+    call = if call_type == "function_call", do: %{"type" => call_type, "id" => "fc_sample_inflight", "call_id" => "sample-inflight-call", "name" => "sample_tool", "arguments" => "{}"}, else: %{"type" => call_type, "id" => "ct_sample_inflight", "call_id" => "sample-inflight-call", "name" => "sample_tool", "input" => "synthetic input"}
+    output = if output_kind == "reasoning", do: reasoning("preemptible"), else: %{"type" => "message", "id" => "msg_sample_preemptible", "role" => "assistant", "phase" => "commentary", "content" => [%{"type" => "output_text", "text" => "synthetic commentary"}]}
+    outputs = [call, output]
+    result = %{"type" => result_type, "call_id" => "sample-inflight-call", "output" => "synthetic tool completion"}
+    continuation = append(original, outputs ++ [result, mailbox()])
+    {:ok, digest} = WebsocketTurnIdentity.replay_claim_digest(@semantic, original)
+
+    written =
+      Enum.map(outputs, fn item ->
+        {:ok, value} = WebsocketTurnIdentity.completed_item_digest(item)
+        value
+      end)
+
+    attempt = %Attempt{id: @attempt_id, status: "failed", network_error_code: "client_disconnected", transport: "websocket", replay_generation: 0, completed_at: @now, response_metadata: %{"downstream_delivery" => %{"outcome" => "aborted", "terminal_class" => "none", "highest_frame_class" => "item_done", "completed_items" => 2, "completed_item_digests" => written}}}
+    request = %Request{status: "failed", last_error_code: "client_disconnected", endpoint: "/backend-api/codex/responses", transport: "websocket", completed_at: @now, native_client_retry_version: 1, native_client_retry_digest: digest, native_client_retry_auth_epoch: 1}
+    turn = %CodexTurn{status: "interrupted", error_code: "client_disconnected", transport_kind: "websocket", final_attempt_id: @attempt_id, completed_at: @now}
+    %{turn: turn, request: request, attempt: attempt, witness: witness(continuation), continuation: continuation}
   end
 
   defp assert_stage(proof, stage, index \\ nil) do

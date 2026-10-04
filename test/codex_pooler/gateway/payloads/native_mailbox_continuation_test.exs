@@ -190,6 +190,93 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuationTest do
     assert length(witness(append(ordinary, Enum.map(1..5, &reasoning(Integer.to_string(&1))) ++ [mailbox("incoming")])).mailbox) == 4
   end
 
+  for {call_type, result_type} <- [{"function_call", "function_call_output"}, {"custom_tool_call", "custom_tool_call_output"}], output_kind <- ["reasoning", "commentary"] do
+    @tag mailbox_tool_drain_regression: true
+    test "#{call_type}/#{output_kind}: a fulfilled native in-flight call before incoming mail retains its ordered server output proof" do
+      original = payload()
+      call = drained_call(unquote(call_type))
+      output = drained_output(unquote(output_kind))
+      result = drained_result(unquote(result_type))
+      continuation = append(original, [call, output, result, mailbox("after-drain")])
+      sealed = witness(continuation)
+      {:ok, prefix} = WebsocketTurnIdentity.replay_claim_digest(@semantic, original)
+      {:ok, ending} = WebsocketTurnIdentity.replay_claim_digest(@semantic, continuation)
+
+      written =
+        Enum.map([call, output], fn item ->
+          {:ok, digest} = WebsocketTurnIdentity.completed_item_digest(item)
+          digest
+        end)
+
+      assert sealed.mailbox_intent?
+      assert Enum.any?(sealed.mailbox, fn candidate -> prefix in candidate.prefix.websocket and ending in candidate.ending.websocket and candidate.current? and candidate.items == written end)
+    end
+
+    @tag mailbox_tool_drain_regression: true
+    test "#{call_type}/#{output_kind}: unmatched client bookkeeping and wrong-address mail remain ineligible" do
+      call = drained_call(unquote(call_type))
+      result = drained_result(unquote(result_type))
+      output = drained_output(unquote(output_kind))
+
+      for changed <- [Map.delete(result, "call_id"), Map.put(result, "call_id", "sample-foreign-call"), Map.put(result, "type", "output_text")] do
+        assert witness(append(payload(), [call, output, changed, mailbox("after-drain")])).mailbox == []
+      end
+
+      assert witness(append(payload(), [output, result, mailbox("orphan-result")])).mailbox == []
+      assert witness(append(payload(), [call, output, result, Map.put(mailbox("foreign"), "recipient", "/root/other")])).mailbox == []
+      assert witness(append(payload(), [call, output, result, mailbox("anchored")]) |> Map.put("previous_response_id", "resp_synthetic_anchor")).mailbox == []
+    end
+  end
+
+  @tag mailbox_tool_drain_regression: true
+  test "fulfilled call bookkeeping remains unique, ordered, typed and bounded by four provider items" do
+    first = drained_call("function_call")
+    second = drained_call("custom_tool_call") |> Map.put("call_id", "sample-second-call")
+    first_result = drained_result("function_call_output")
+    second_result = drained_result("custom_tool_call_output") |> Map.put("call_id", "sample-second-call")
+    output = reasoning("preemptible")
+    valid = append(payload(), [first, second, output, first_result, second_result, mailbox("ordered")])
+    assert [_candidate] = witness(valid).mailbox
+
+    for invalid <- [
+          [first, second, output, second_result, first_result, mailbox("reordered")],
+          [first, output, first_result, first_result, mailbox("duplicate-result")],
+          [first, first, output, first_result, first_result, mailbox("duplicate-call")],
+          [first, output, first_result, second_result, mailbox("extra-result")],
+          [first, output, Map.put(first_result, "type", "custom_tool_call_output"), mailbox("wrong-type")],
+          [first, output, Map.put(first_result, "name", "foreign_tool"), mailbox("wrong-name")],
+          [first, output, Map.put(first_result, "namespace", "foreign"), mailbox("wrong-namespace")],
+          [first, output, Map.delete(first_result, "output"), mailbox("missing-result")],
+          [first, output, Map.put(first_result, "output", %{}), mailbox("malformed-result")],
+          [first, output, %{"type" => "message", "role" => "assistant", "phase" => "final_answer"}, first_result, mailbox("arbitrary-gap")],
+          [first, output, first_result, %{"type" => "message", "role" => "user", "content" => "synthetic new boundary"}, mailbox("new-user")],
+          [first, output, first_result, %{"type" => "compaction", "encrypted_content" => "synthetic boundary"}, mailbox("compacted")],
+          [first | Enum.map(1..4, &reasoning(Integer.to_string(&1)))] ++ [first_result, mailbox("five-provider-items")]
+        ] do
+      assert witness(append(payload(), invalid)).mailbox == []
+    end
+
+    four = append(payload(), [first | Enum.map(1..3, &reasoning(Integer.to_string(&1)))] ++ [first_result, mailbox("four-provider-items")])
+    assert [candidate] = witness(four).mailbox
+    assert length(candidate.items) == 4
+
+    runs =
+      Enum.flat_map(1..16, fn n ->
+        call = Map.put(first, "call_id", "sample-call-#{n}")
+        result = Map.put(first_result, "call_id", "sample-call-#{n}")
+        [call, output, result, mailbox("run-#{n}")]
+      end)
+
+    assert length(witness(append(payload(), runs)).mailbox) == 16
+    assert witness(append(payload(), runs ++ [first, output, first_result, mailbox("run-17")])).mailbox == []
+  end
+
+  defp drained_output("reasoning"), do: reasoning("preemptible")
+  defp drained_output("commentary"), do: %{"type" => "message", "id" => "msg_sample_preemptible", "role" => "assistant", "phase" => "commentary", "content" => [%{"type" => "output_text", "text" => "synthetic commentary"}]}
+  defp drained_call("function_call"), do: %{"type" => "function_call", "id" => "fc_sample_inflight", "call_id" => "sample-inflight-call", "name" => "sample_tool", "arguments" => "{}"}
+  defp drained_call("custom_tool_call"), do: %{"type" => "custom_tool_call", "id" => "ct_sample_inflight", "call_id" => "sample-inflight-call", "name" => "sample_tool", "input" => "synthetic input"}
+  defp drained_result(type), do: %{"type" => type, "call_id" => "sample-inflight-call", "output" => "synthetic tool completion"}
+
   defp witness(payload, options \\ options()) do
     ClientRetry.original_witness!(:crypto.hash(:sha256, "current request"), 1)
     |> NativeMailboxContinuation.attach(@semantic, payload, options)
