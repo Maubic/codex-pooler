@@ -510,3 +510,180 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputMarkTransientDatabaseTest do
      }}
   end
 end
+
+defmodule CodexPoolerWeb.Runtime.VisibleOutputLifecycleContentionTest do
+  use CodexPoolerWeb.ConnCase, async: false
+  import Ecto.Query
+  import CodexPoolerWeb.Runtime.BackendCodexTestSupport, only: [gateway_setup: 1, native_text_input: 1, start_upstream: 1]
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport
+  alias CodexPooler.Accounting.{LedgerEntry, Request}
+  alias CodexPooler.{FakeUpstream, Repo}
+  alias CodexPooler.Gateway.Persistence.CodexTurn
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder.ERPCNodeClient
+  alias Ecto.Adapters.SQL.Sandbox
+  @detection_timeout_ms 15_000
+
+  setup_all do
+    %{peer: start_shared_bridge_peer!()}
+  end
+
+  setup do
+    Sandbox.mode(Repo, :auto)
+    on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
+    CodexPooler.AccountsFixtures.committed_bootstrap_owner_fixture!()
+    :ok
+  end
+
+  @tag slow: "holds actual PostgreSQL lifecycle authorization through the original five-second boundary"
+  @tag lifecycle_barrier_lock_regression: true
+  test "remote lifecycle contention withholds output while its owner and upstream remain alive", %{peer: peer} do
+    fixture = lifecycle_fixture!(peer)
+    holder = start_supervised!({Postgrex, connection_options()}, id: :lifecycle_holder)
+    observer = start_supervised!({Postgrex, connection_options()}, id: :lifecycle_observer)
+    Postgrex.query!(holder, "BEGIN", [])
+
+    try do
+      %{rows: [[holder_backend]]} = Postgrex.query!(holder, "SELECT pg_backend_pid()", [])
+      Postgrex.query!(holder, "SELECT id FROM requests WHERE id=$1 FOR UPDATE", [Ecto.UUID.dump!(fixture.authority.request_id)])
+      send(fixture.server, {:fake_upstream_release_websocket, fixture.release})
+      waiter = await_writer_wait!(observer, holder_backend, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+      refute waiter == holder_backend
+      assert :ok = GenServer.call(fixture.owner, {:writer_lifecycle_barrier, fixture.active_ref}, 1_000)
+      assert %CodexTurn{first_visible_output_at: nil} = Repo.get_by!(CodexTurn, request_id: fixture.authority.request_id)
+      refute_receive {:websocket_owner_frame, _, _, _, {:data, _}}, 0
+      forged = CodexPooler.JSON.encode!(%{"type" => "response.created", "response" => %{"id" => "resp_synthetic_forged", "status" => "in_progress"}})
+      send(fixture.owner, {:websocket_owner_authorized_frame, fixture.active_ref, make_ref(), Map.take(fixture.authority, [:request_id, :attempt_id, :replay_generation]), forged, %CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator{}, :not_committed})
+      assert :ok = GenServer.call(fixture.owner, {:writer_lifecycle_barrier, fixture.active_ref}, 1_000)
+      refute_receive {:websocket_owner_frame, _, _, _, {:data, ^forged}}, 0
+      %{active_turn: %{writer_capability: capability}} = :erpc.call(peer, :sys, :get_state, [fixture.owner, 1_000])
+      stale_authority = fixture.authority |> Map.take([:request_id, :attempt_id, :replay_generation]) |> Map.update!(:replay_generation, &(&1 + 1))
+      send(fixture.owner, {:websocket_owner_authorized_frame, fixture.active_ref, capability, stale_authority, forged, %CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator{}, :not_committed})
+      assert :ok = GenServer.call(fixture.owner, {:writer_lifecycle_barrier, fixture.active_ref}, 1_000)
+      refute_receive {:websocket_owner_frame, _, _, _, {:data, ^forged}}, 0
+      boundary = make_ref()
+      Process.send_after(self(), {:original_lifecycle_boundary, boundary}, 5_000)
+      assert_receive {:original_lifecycle_boundary, ^boundary}, @detection_timeout_ms
+      assert :erpc.call(peer, Process, :alive?, [fixture.upstream])
+      assert :erpc.call(peer, Process, :alive?, [fixture.owner])
+      assert :ok = GenServer.call(fixture.owner, {:writer_lifecycle_barrier, fixture.active_ref}, 1_000)
+      refute_receive {:websocket_owner_frame, _, _, _, {:data, _}}, 0
+      CodexPooler.TestDiagnostics.puts("lifecycle_pg_wait holder_backend=#{holder_backend} waiter_backend=#{waiter} owner_responsive=true original_5000ms_preserved=true")
+    after
+      Postgrex.query!(holder, "COMMIT", [])
+    end
+
+    {socket, types} = drain_frames!(fixture.socket, [])
+    assert Enum.count(types, &(&1 == "response.created")) == 1
+    assert Enum.count(types, &(&1 == "response.output_text.delta")) == 1
+    assert Enum.count(types, &(&1 == "response.completed")) == 1
+    assert {:ok, _} = receive_owner_socket_complete(socket)
+    request = await_settled!(fixture.authority.request_id, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+    assert {request.status, request.usage_status} == {"succeeded", "usage_known"}
+    assert Repo.all(from e in LedgerEntry, where: e.request_id == ^request.id and e.entry_kind == "settlement", select: {e.usage_status, e.total_tokens}) == [{"usage_known", 5}]
+    assert %CodexTurn{final_attempt_id: attempt, first_visible_output_at: %DateTime{}} = Repo.get_by!(CodexTurn, request_id: request.id)
+    assert attempt == fixture.authority.attempt_id
+    assert FakeUpstream.count(fixture.provider) == 1
+    assert :erpc.call(peer, Process, :alive?, [fixture.upstream])
+    assert :erpc.call(peer, Process, :alive?, [fixture.owner])
+  end
+
+  @tag lifecycle_barrier_lock_regression: true
+  test "cancelled lifecycle authorization never forwards an unapproved frame", %{peer: peer} do
+    fixture = lifecycle_fixture!(peer)
+    holder = start_supervised!({Postgrex, connection_options()}, id: :cancel_holder)
+    observer = start_supervised!({Postgrex, connection_options()}, id: :cancel_observer)
+    Postgrex.query!(holder, "BEGIN", [])
+
+    try do
+      %{rows: [[backend]]} = Postgrex.query!(holder, "SELECT pg_backend_pid()", [])
+      Postgrex.query!(holder, "SELECT id FROM requests WHERE id=$1 FOR UPDATE", [Ecto.UUID.dump!(fixture.authority.request_id)])
+      send(fixture.server, {:fake_upstream_release_websocket, fixture.release})
+      writer = await_writer_wait!(observer, backend, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+      assert :ok = GenServer.call(fixture.owner, {:writer_lifecycle_barrier, fixture.active_ref}, 1_000)
+      assert %{rows: [[true]]} = Postgrex.query!(observer, "SELECT pg_cancel_backend($1)", [writer])
+      CodexPooler.TestDiagnostics.puts("lifecycle_cancel actual_writer_backend=#{writer} cancellation_confirmed=true")
+    after
+      Postgrex.query!(holder, "COMMIT", [])
+    end
+
+    assert {:ok, _socket} = receive_owner_socket_complete(fixture.socket)
+    request = await_settled!(fixture.authority.request_id, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+    assert request.status == "failed"
+    assert %CodexTurn{first_visible_output_at: nil} = Repo.get_by!(CodexTurn, request_id: request.id)
+    assert Repo.aggregate(from(e in LedgerEntry, where: e.request_id == ^request.id and e.entry_kind == "settlement"), :count) == 1
+    assert FakeUpstream.count(fixture.provider) == 1
+    refute_receive {:websocket_owner_frame, _, _, _, {:data, _}}, 0
+  end
+
+  defp lifecycle_fixture!(peer) do
+    release = make_ref()
+    id = "resp_synthetic_lifecycle_contention"
+    events = [%{"type" => "response.created", "response" => %{"id" => id, "status" => "in_progress"}}, %{"type" => "response.output_text.delta", "response_id" => id, "output_index" => 0, "content_index" => 0, "delta" => "synthetic lifecycle output"}, %{"type" => "response.completed", "response" => %{"id" => id, "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 2, "output_tokens" => 3, "total_tokens" => 5}}}]
+    frames = Enum.map(events, &CodexPooler.JSON.encode!/1)
+    provider = start_upstream(FakeUpstream.websocket_init_barrier(FakeUpstream.websocket_text_frames(frames), notify: self(), release_ref: release))
+    setup = gateway_setup(provider)
+    {:ok, auth} = CodexPooler.Access.authenticate_authorization_header(setup.authorization)
+    thread = Ecto.UUID.generate()
+    %{owner_pid: owner, session: _session} = start_shared_peer_session_owner!(setup, %{session_header: thread, session_header_source: "x-session-id"}, peer)
+    {:ok, socket} = owner_socket(auth, "synthetic-lifecycle-contention", Ecto.UUID.generate(), session_header: thread, session_header_source: "x-session-id", websocket_owner_forwarder_opts: [node_client: ERPCNodeClient, app_node_names: [Atom.to_string(peer)]])
+    payload = websocket_input_payload(setup, native_text_input("synthetic lifecycle contention"), %{"client_metadata" => %{"x-codex-turn-metadata" => CodexPooler.JSON.encode!(%{"session_id" => thread, "thread_id" => thread, "turn_id" => Ecto.UUID.generate(), "request_kind" => "turn"})}})
+    assert {:ok, socket} = CodexPoolerWeb.CodexResponsesSocket.handle_in({payload, [opcode: :text]}, socket)
+    assert_receive {:fake_upstream_websocket_barrier, :before_init, server, ^release}, @detection_timeout_ms
+    FakeUpstream.set_mode(provider, FakeUpstream.websocket_text_frames(frames))
+    assert %{upstream_pid: upstream, active_turn: %{ref: active_ref, descriptor: %{request_id: request, attempt_id: _} = authority}} = :erpc.call(peer, :sys, :get_state, [owner, 1_000])
+    assert is_binary(request)
+
+    on_exit(fn ->
+      send(server, {:fake_upstream_release_websocket, release})
+      if peer in Node.list(:connected) and :erpc.call(peer, Process, :alive?, [owner]), do: :erpc.call(peer, GenServer, :stop, [owner, :normal, 5_000])
+      refute :erpc.call(peer, Process, :alive?, [owner])
+      refute :erpc.call(peer, Process, :alive?, [upstream])
+      CodexPooler.TestDiagnostics.puts("lifecycle_cleanup known_owner_alive=false known_upstream_alive=false")
+    end)
+
+    %{provider: provider, setup: setup, socket: socket, server: server, release: release, owner: owner, upstream: upstream, authority: authority, active_ref: active_ref}
+  end
+
+  defp connection_options, do: Repo.config() |> Keyword.take([:hostname, :port, :username, :password, :database, :socket_dir])
+
+  defp await_writer_wait!(observer, holder, deadline) do
+    case Postgrex.query!(observer, "SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND wait_event_type='Lock'", [holder]).rows do
+      [[pid] | _] ->
+        assert %{rows: [[true, true]]} = Postgrex.query!(observer, "SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid=l.relation WHERE l.pid=$1 AND c.relname='requests' AND l.granted), EXISTS (SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid=l.relation WHERE l.pid=$2 AND c.relname='requests' AND l.granted)", [holder, pid])
+        pid
+
+      [] ->
+        assert System.monotonic_time(:millisecond) < deadline
+
+        receive do
+        after
+          0 -> await_writer_wait!(observer, holder, deadline)
+        end
+    end
+  end
+
+  defp drain_frames!(socket, types) do
+    case receive_owner_socket_raw_push(socket) do
+      {:push, {:text, text}, next} ->
+        type = CodexPooler.JSON.decode!(text)["type"]
+        if type == "response.completed", do: {next, Enum.reverse([type | types])}, else: drain_frames!(next, [type | types])
+    end
+  end
+
+  defp await_settled!(id, deadline) do
+    case Repo.get!(Request, id) do
+      %Request{status: status} = request when status not in ["accepted", "in_progress"] ->
+        request
+
+      _ ->
+        assert System.monotonic_time(:millisecond) < deadline
+
+        receive do
+        after
+          0 -> await_settled!(id, deadline)
+        end
+    end
+  end
+end

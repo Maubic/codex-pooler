@@ -1255,8 +1255,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
     end
   end
 
-  for {mode, control} <- [{"full", :valid}, {"lite", :valid}] ++ Enum.map([:missing_proof, :wrong_boot, :wrong_generation, :wrong_epoch, :wrong_witness, :visible_output, :hard_anchor], &{"full", &1}) do
+  for {mode, control} <- [{"full", :valid}, {"lite", :valid}, {"full", :remote_502}] ++ Enum.map([:missing_proof, :wrong_boot, :wrong_generation, :wrong_epoch, :wrong_witness, :visible_output, :hard_anchor], &{"full", &1}) do
     @tag :proven_continuation_owner_crash
+    if control == :remote_502, do: @tag(:remote_proven_owner_crash)
     @tag slow: "public websocket owner crash, executor proof publication and reconnect"
     test "a proven owner crash on a codex-request continuation recovers after visible history in #{mode} with #{control}" do
       start_supervised!({ExecutionProofPublisher, enabled: true, name: :continuation_owner_death_publisher, interval_ms: 60_000})
@@ -1275,8 +1276,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
           ])
         )
 
+      if unquote(control) == :remote_502, do: enter_peer_owner_topology!()
       setup = gateway_setup(upstream)
       set_model_serving_mode!(model_serving_scope(), setup, unquote(mode))
+      peer = if unquote(control) == :remote_502, do: start_peer_session_owner!(setup, %{accepted_turn_state: "proven-continuation-owner-crash"})
       {_server, port} = start_public_endpoint_with_server!()
       frame = released_client_frame(setup, Ecto.UUID.generate())
       turn_id = Ecto.UUID.generate()
@@ -1302,10 +1305,43 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
           {conn, websocket}
         end
 
+      {conn, websocket} =
+        if unquote(control) == :remote_502 do
+          :ok = FakeUpstream.release_frame(upstream, release_ref)
+          assert_receive {:fake_upstream_frame_barrier, 1, _handler, ^release_ref}, @detection_timeout_ms
+          {conn, websocket, created_frame} = public_websocket_receive_text!(conn, websocket, ref)
+          assert %{"type" => "response.created"} = CodexPooler.JSON.decode!(created_frame)
+          {conn, websocket}
+        else
+          {conn, websocket}
+        end
+
       owner = socket_connection_state!(socket).websocket_owner_pid
+      if peer, do: assert(node(owner) == peer.node and node(owner) != node())
       owner_ref = Process.monitor(owner)
-      Process.exit(:sys.get_state(owner).upstream_pid, :kill)
-      assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}, @detection_timeout_ms
+
+      if unquote(control) == :remote_502 do
+        execution_ids = Repo.all(from a in Attempt, join: r in Request, on: r.id == a.request_id, where: r.pool_id == ^setup.pool.id, select: a.owner_execution_id)
+        on_exit(fn -> Repo.delete_all(from p in ExecutionTerminalProof, where: p.execution_id in ^execution_ids) end)
+        :ok = :sys.suspend(socket)
+
+        on_exit(fn ->
+          try do
+            :sys.resume(socket)
+          catch
+            :exit, _gone -> :ok
+          end
+        end)
+
+        Process.exit(owner, :kill)
+        assert_receive {:DOWN, ^owner_ref, :process, ^owner, :killed}, @detection_timeout_ms
+        await_proven_owner_502!(setup.pool.id)
+        :ok = :sys.resume(socket)
+      else
+        Process.exit(:sys.get_state(owner).upstream_pid, :kill)
+        assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}, @detection_timeout_ms
+      end
+
       {conn, _websocket, frames} = receive_frames_until_close!(conn, websocket, ref)
       assert List.last(frames) == {:close, 1011, "websocket owner crashed"}
       Mint.HTTP.close(conn)
@@ -1315,7 +1351,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
       assert prior.status == "succeeded"
       assert Repo.get_by!(CodexTurn, request_id: prior.id).first_visible_output_at != nil
       assert String.starts_with?(predecessor.correlation_id, "codex-request:")
-      assert {predecessor.status, predecessor.last_error_code, predecessor.response_status_code} == {"failed", "owner_crashed", 499}
+      expected_status = if unquote(control) == :remote_502, do: 502, else: 499
+      assert {predecessor.status, predecessor.last_error_code, predecessor.response_status_code} == {"failed", "owner_crashed", expected_status}
       attempt = Repo.get_by!(Attempt, request_id: predecessor.id)
       :ok = await_execution_proof!(attempt, System.monotonic_time(:millisecond) + 2_000)
       assert ExecutionTerminalProofs.terminal?(attempt)
@@ -1367,7 +1404,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
       entries = Repo.all(from l in LedgerEntry, where: l.request_id in ^Enum.map(rows, & &1.id))
       IO.puts("PROVEN-CONTINUATION-METADATA " <> CodexPooler.JSON.encode!(%{control: Atom.to_string(unquote(control)), serving_mode: predecessor.request_metadata["routing"]["model_serving_mode"], claim_class: String.split(predecessor.correlation_id, ":") |> hd(), prior_visible: Repo.get_by!(CodexTurn, request_id: prior.id).first_visible_output_at != nil, same_semantic_turn: Repo.get_by!(CodexTurn, request_id: prior.id).semantic_turn_digest == Repo.get_by!(CodexTurn, request_id: predecessor.id).semantic_turn_digest, latest_generation: attempt.replay_generation, first_visible: Repo.get_by!(CodexTurn, request_id: predecessor.id).first_visible_output_at != nil, proof_kind: proof.end_kind, exact_terminal_proof: ExecutionTerminalProofs.terminal?(attempt), proof_interruption: proof.interruption_code, request_status: predecessor.status, request_error: predecessor.last_error_code, response_status: predecessor.response_status_code, usage_status: predecessor.usage_status, unchanged_retry_frame: retry_frame == continuation, refusal_stages: stages, retry_wire_code: get_in(terminal, ["error", "code"]), upstream_dispatch_count: FakeUpstream.count(upstream), request_count: length(rows), ledger_counts: Enum.frequencies_by(entries, & &1.entry_kind)}))
 
-      if unquote(control) == :valid do
+      if unquote(control) in [:valid, :remote_502] do
         assert %{"type" => "response.completed", "response" => %{"id" => "resp_continuation_recovered"}} = terminal
         assert %RequestClientRetryLink{successor_request_id: successor_id} = Repo.get_by!(RequestClientRetryLink, predecessor_request_id: predecessor.id)
         assert Repo.get!(Request, successor_id).status == "succeeded"
@@ -1398,6 +1435,27 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
           assert Enum.frequencies_by(entries, & &1.entry_kind) == %{"reservation" => 2, "settlement" => 2, "release" => 2}
         end
       end
+    end
+  end
+
+  defp await_proven_owner_502!(pool_id) do
+    await_proven_owner_502!(pool_id, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+  end
+
+  defp await_proven_owner_502!(pool_id, deadline) do
+    case Repo.one(from r in Request, where: r.pool_id == ^pool_id and r.last_error_code == "owner_crashed") do
+      %Request{status: "failed", response_status_code: response_status} ->
+        IO.puts("REMOTE-OWNER-TERMINAL-METADATA " <> CodexPooler.JSON.encode!(%{response_status: response_status, error: "owner_crashed"}))
+        assert response_status == 502
+        :ok
+
+      _pending ->
+        assert System.monotonic_time(:millisecond) < deadline
+
+        receive do
+        after
+          5 -> await_proven_owner_502!(pool_id, deadline)
+        end
     end
   end
 

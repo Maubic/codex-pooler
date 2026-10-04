@@ -3322,6 +3322,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
         {:ok, :delivered} -> :ok
         {:ok, visibility} -> deliver.(visibility)
         {:error, :stale_generation} -> :ok
+        {:error, :visible_output_unavailable} -> raise DBConnection.ConnectionError, message: "lifecycle delivery authorization unavailable"
         {:error, :settlement_retry_exhausted} -> raise DBConnection.ConnectionError, message: "visible output authorization unavailable"
       end
     end
@@ -3346,8 +3347,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     attempt = %CodexPooler.Accounting.Attempt{id: attempt_id, request_id: request_id, replay_generation: Map.get(authority, :replay_generation, 0)}
 
     if StreamProtocol.lifecycle_only_event?(frame) do
-      deliver.(:not_committed)
-      {:ok, :delivered}
+      authorize_writer_lifecycle_frame(request, attempt, deliver)
     else
       SettlementRetry.run(:visible_output, request, attempt, fn -> SessionContinuity.authorize_codex_turn_visibility(request_id, attempt) end, subject: "visible output mark", fallback: "withheld_output", exhaustion: :return)
     end
@@ -3355,9 +3355,25 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
   defp authorize_writer_frame(_authority, _frame, _deliver), do: {:ok, :not_committed}
 
-  defp send_authorized_writer_frame(owner, ref, _capability, authority, frame, discriminator, :not_committed) do
-    send(owner, {:websocket_owner_upstream_frame, ref, frame, discriminator})
-    if tracked_lifecycle_frame?(authority, frame), do: await_lifecycle_authorization(owner, ref), else: :ok
+  defp authorize_writer_lifecycle_frame(request, attempt, deliver) do
+    CodexPooler.Accounting.with_current_replay_generation(request, attempt, fn ->
+      deliver.(:not_committed)
+      :delivered
+    end)
+  rescue
+    Ecto.NoResultsError ->
+      {:error, :stale_generation}
+
+    error in [DBConnection.ConnectionError, Postgrex.Error] ->
+      if TransientDatabaseError.transient?(error), do: {:error, :visible_output_unavailable}, else: reraise(error, __STACKTRACE__)
+  end
+
+  defp send_authorized_writer_frame(owner, ref, capability, authority, frame, discriminator, :not_committed) do
+    if tracked_lifecycle_frame?(authority, frame) do
+      send(owner, {:websocket_owner_authorized_frame, ref, capability, authority, frame, discriminator, :not_committed})
+    else
+      send(owner, {:websocket_owner_upstream_frame, ref, frame, discriminator})
+    end
   end
 
   defp send_authorized_writer_frame(owner, ref, capability, authority, frame, discriminator, visibility) do
@@ -3368,14 +3384,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
        when is_binary(request_id) and is_binary(attempt_id), do: StreamProtocol.lifecycle_only_event?(frame)
 
   defp tracked_lifecycle_frame?(_authority, _frame), do: false
-
-  defp await_lifecycle_authorization(owner, ref) do
-    case GenServer.call(owner, {:writer_lifecycle_barrier, ref}, 5_000) do
-      :ok -> :ok
-      {:error, :stale_generation} -> :ok
-      {:error, :visible_output_unavailable} -> raise DBConnection.ConnectionError, message: "lifecycle delivery authorization unavailable"
-    end
-  end
 
   defp send_downstream(_state, nil, _payload), do: {:error, :owner_unavailable}
 
