@@ -39,6 +39,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes
+  alias CodexPooler.Platform.{ExecutionTerminalProof, ExecutionTerminalProofs}
   alias CodexPooler.Repo
 
   @max_chain_depth 16
@@ -556,7 +557,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
         undelivered_completion(request, scope, now)
 
       native_http_tool_scope?(request, scope) ->
-        admit_native_http_partial_tool(request, scope, now)
+        admit_native_http_stream_cut(request, scope, now)
 
       not transport_scoped?(request, scope) ->
         {:error, :authorization_changed}
@@ -654,6 +655,56 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     do: arm in ["opening", "tool_continuation"]
 
   defp native_http_tool_scope?(_request, _scope), do: false
+
+  defp admit_native_http_stream_cut(request, scope, now) do
+    turn = lock_turn(request.id)
+    attempt = lock_final_attempt(turn, request.id)
+
+    if zero_done_http_observation?(attempt),
+      do: admit_native_http_zero_done(request, turn, attempt, scope, now),
+      else: admit_native_http_partial_tool(request, scope, now)
+  end
+
+  defp zero_done_http_observation?(%Attempt{response_metadata: metadata}) when is_map(metadata),
+    do: metadata["native_http_partial_tool"] == %{"version" => 1, "parser_complete" => true, "poisoned" => false, "partial_tool" => nil, "input_done" => false}
+
+  defp zero_done_http_observation?(_attempt), do: false
+
+  # A complete observation of only unfinished reasoning is distinct from a
+  # missing tool proof. Admit only the exact original HTTP request after its
+  # generation completed; neither an appended mailbox nor an output prefix is
+  # authorized by zero completed items.
+  defp admit_native_http_zero_done(request, turn, attempt, scope, now) do
+    with %Request{id: request_id, status: "failed", transport: "http_sse", endpoint: "/backend-api/codex/responses", response_status_code: 200, last_error_code: @stream_error_code, completed_at: %DateTime{}} <- request,
+         %CodexTurn{request_id: ^request_id, status: "failed", error_code: @stream_error_code, transport_kind: "http_sse", final_attempt_id: attempt_id, completed_at: %DateTime{}, codex_session_id: session_id} <- turn,
+         true <- session_id == Map.get(scope, :codex_session_id),
+         %Attempt{id: ^attempt_id, request_id: ^request_id, status: "failed", transport: "http_sse", network_error_code: @stream_error_code, upstream_status_code: 200, replay_generation: 0, completed_at: %DateTime{}, response_metadata: metadata} <- attempt,
+         false <- Map.get(scope, :anchor_present?, false),
+         true <- ClientRetry.native_http_progress_matches?(metadata["native_http_resume_progress"], []),
+         %{} = prefix when map_size(prefix) == 0 <- metadata["native_http_mailbox_prefix"],
+         %{"outcome" => "completed", "terminal_class" => "none", "frames_after_visible" => frames} when is_integer(frames) and frames in 0..65_535 <- metadata["downstream_delivery"],
+         true <- completed_http_execution?(attempt),
+         %ClientRetry.OriginalWitness{version: 1, digest: digest, auth_epoch: epoch} <- Map.get(scope, :native_client_retry_witness),
+         true <- ClientRetry.original_witness_eligible?(request),
+         true <- secure_compare(request.native_client_retry_digest, digest),
+         true <- request.native_client_retry_auth_epoch == epoch,
+         false <- Repo.exists?(from link in RequestClientRetryLink, where: link.successor_request_id == ^request_id),
+         false <- live_turn?(request_id) or live_attempt?(request_id) or entitlement?(request_id),
+         :ok <- validate_retry_window(request, attempt, now, scope) do
+      {:ok, :identical_resend}
+    else
+      {:error, :retry_expired} = error -> error
+      _unsafe -> {:error, :terminal_predecessor}
+    end
+  end
+
+  defp completed_http_execution?(attempt) do
+    ExecutionTerminalProofs.valid_identity?(attempt) and
+      Repo.exists?(
+        from proof in ExecutionTerminalProof,
+          where: proof.execution_id == ^attempt.owner_execution_id and proof.owner_instance_id == ^attempt.owner_instance_id and proof.owner_instance_boot_id == ^attempt.owner_instance_boot_id and proof.owner_process_id == ^attempt.owner_process_id and proof.end_kind == "completed" and is_nil(proof.interruption_code)
+      )
+  end
 
   defp admit_native_http_partial_tool(request, scope, now) do
     turn = lock_turn(request.id)
