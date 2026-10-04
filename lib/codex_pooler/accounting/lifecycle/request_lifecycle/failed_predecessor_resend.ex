@@ -561,6 +561,9 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
       not transport_scoped?(request, scope) ->
         {:error, :authorization_changed}
 
+      request.last_error_code == "owner_crashed" ->
+        admit_proven_owner_crash(request, scope, now)
+
       request.status != "failed" or (is_nil(family) and not websocket_compaction?(request)) ->
         {:error, :terminal_predecessor}
 
@@ -575,6 +578,24 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
 
       true ->
         admit_predecessor(request, family, scope, now)
+    end
+  end
+
+  defp admit_proven_owner_crash(request, scope, now) do
+    turn = lock_turn(request.id)
+    attempt = lock_final_attempt(turn, request.id)
+
+    with %CodexTurn{first_visible_output_at: nil} <- turn,
+         true <- ClientRetry.verified_owner_crash?(turn, request, attempt),
+         %ClientRetry.OriginalWitness{version: 1, digest: digest, auth_epoch: epoch} = witness <- Map.get(scope, :native_client_retry_witness),
+         true <- ClientRetry.original_witness_eligible?(request),
+         true <- request.native_client_retry_auth_epoch == epoch,
+         true <- ClientRetry.witness_matches?(request.native_client_retry_digest, digest, witness.alternates),
+         false <- live_turn?(request.id) or live_attempt?(request.id) or entitlement?(request.id),
+         :ok <- validate_retry_window(request, attempt, now, scope) do
+      {:ok, :identical_resend}
+    else
+      _unproved -> {:error, :terminal_predecessor}
     end
   end
 

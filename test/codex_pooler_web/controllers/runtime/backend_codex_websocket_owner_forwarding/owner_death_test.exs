@@ -13,6 +13,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
   alias CodexPooler.Access
   alias CodexPooler.Access.APIKey
   alias CodexPooler.Accounting.Attempt
+  alias CodexPooler.Accounting.ClientRetry
   alias CodexPooler.Accounting.LedgerEntry
   alias CodexPooler.Accounting.Request
   alias CodexPooler.Accounting.RequestClientRetryLink
@@ -1251,6 +1252,161 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
       assert %Request{status: "succeeded"} = Repo.get!(Request, successor_id)
       assert %CodexTurn{status: "interrupted", error_code: "owner_crashed"} = Repo.get_by!(CodexTurn, request_id: predecessor.id)
       assert FakeUpstream.count(upstream) == 2
+    end
+  end
+
+  for {mode, control} <- [{"full", :valid}, {"lite", :valid}] ++ Enum.map([:missing_proof, :wrong_boot, :wrong_generation, :wrong_epoch, :wrong_witness, :visible_output, :hard_anchor], &{"full", &1}) do
+    @tag :proven_continuation_owner_crash
+    @tag slow: "public websocket owner crash, executor proof publication and reconnect"
+    test "a proven owner crash on a codex-request continuation recovers after visible history in #{mode} with #{control}" do
+      start_supervised!({ExecutionProofPublisher, enabled: true, name: :continuation_owner_death_publisher, interval_ms: 60_000})
+      release_ref = make_ref()
+      reasoning = %{"type" => "reasoning", "id" => "rs_prior_step", "encrypted_content" => "synthetic-encrypted", "summary" => []}
+      call = %{"type" => "function_call", "id" => "fc_prior_step", "call_id" => "call_prior_step", "name" => "sample_tool", "arguments" => "{}"}
+      created = CodexPooler.JSON.encode!(%{"type" => "response.created", "response" => %{"id" => "resp_continuation_held", "status" => "in_progress"}})
+      held_frames = if unquote(control) == :visible_output, do: [created, CodexPooler.JSON.encode!(%{"type" => "response.output_item.done", "item" => reasoning})], else: [created]
+
+      upstream =
+        start_upstream(
+          FakeUpstream.strict_sequence([
+            completed_response_frames("resp_prior_step", [reasoning, call], 3, 2),
+            FakeUpstream.barrier_websocket_frames(held_frames, notify: self(), release_ref: release_ref),
+            completed_response_frames("resp_continuation_recovered", [], 3, 2)
+          ])
+        )
+
+      setup = gateway_setup(upstream)
+      set_model_serving_mode!(model_serving_scope(), setup, unquote(mode))
+      {_server, port} = start_public_endpoint_with_server!()
+      frame = released_client_frame(setup, Ecto.UUID.generate())
+      turn_id = Ecto.UUID.generate()
+      opening_input = native_text_input("synthetic tool request")
+      opening = frame.(opening_input, turn_id, %{})
+      continuation = frame.(opening_input ++ [reasoning, call, %{"type" => "function_call_output", "call_id" => "call_prior_step", "output" => "synthetic result"}], turn_id, %{})
+      before = WebsocketCleanupFence.listener_sockets()
+      {conn, websocket, ref} = public_websocket_connect!(port, setup, "proven-continuation-owner-crash")
+      socket = WebsocketCleanupFence.await_new_listener_socket!(before)
+      {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, opening)
+      {conn, websocket, terminal} = receive_native_terminal!(conn, websocket, ref)
+      assert terminal["type"] == "response.completed"
+      [_opening_request] = await_succeeded_pool_requests!(setup.pool.id, 1)
+      {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, continuation)
+      assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^release_ref}, @detection_timeout_ms
+
+      {conn, websocket} =
+        if unquote(control) == :visible_output do
+          :ok = FakeUpstream.release_remaining_frames(upstream, release_ref)
+          assert_receive {:fake_upstream_frame_barrier, 2, _handler, ^release_ref}, @detection_timeout_ms
+          await_proven_visible_output!(conn, websocket, ref)
+        else
+          {conn, websocket}
+        end
+
+      owner = socket_connection_state!(socket).websocket_owner_pid
+      owner_ref = Process.monitor(owner)
+      Process.exit(:sys.get_state(owner).upstream_pid, :kill)
+      assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}, @detection_timeout_ms
+      {conn, _websocket, frames} = receive_frames_until_close!(conn, websocket, ref)
+      assert List.last(frames) == {:close, 1011, "websocket owner crashed"}
+      Mint.HTTP.close(conn)
+      :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(socket)
+
+      [prior, predecessor] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id, order_by: [asc: r.admitted_at])
+      assert prior.status == "succeeded"
+      assert Repo.get_by!(CodexTurn, request_id: prior.id).first_visible_output_at != nil
+      assert String.starts_with?(predecessor.correlation_id, "codex-request:")
+      assert {predecessor.status, predecessor.last_error_code, predecessor.response_status_code} == {"failed", "owner_crashed", 499}
+      attempt = Repo.get_by!(Attempt, request_id: predecessor.id)
+      :ok = await_execution_proof!(attempt, System.monotonic_time(:millisecond) + 2_000)
+      assert ExecutionTerminalProofs.terminal?(attempt)
+      assert attempt.replay_generation == 0
+      refute ClientRetry.verified_owner_crash?(Repo.get_by!(CodexTurn, request_id: prior.id), prior, Repo.get_by!(Attempt, request_id: prior.id))
+      assert Repo.get_by!(CodexTurn, request_id: predecessor.id).first_visible_output_at != nil == (unquote(control) == :visible_output)
+      proof = Repo.get!(ExecutionTerminalProof, attempt.owner_execution_id)
+
+      case unquote(control) do
+        :missing_proof -> Repo.delete!(proof)
+        :wrong_boot -> attempt |> Ecto.Changeset.change(owner_instance_boot_id: "different-owned-test-boot") |> Repo.update!()
+        :wrong_generation -> attempt |> Ecto.Changeset.change(replay_generation: 1) |> Repo.update!()
+        :wrong_epoch -> predecessor |> Ecto.Changeset.change(native_client_retry_auth_epoch: predecessor.native_client_retry_auth_epoch + 1) |> Repo.update!()
+        :wrong_witness -> predecessor |> Ecto.Changeset.change(native_client_retry_digest: :crypto.hash(:sha256, "different-owned-test-witness")) |> Repo.update!()
+        _other -> :ok
+      end
+
+      attempt = Repo.reload!(attempt)
+      predecessor = Repo.reload!(predecessor)
+
+      retry_frame = if unquote(control) == :hard_anchor, do: continuation |> CodexPooler.JSON.decode!() |> Map.put("previous_response_id", "resp_prior_step") |> CodexPooler.JSON.encode!(), else: continuation
+      telemetry_ref = make_ref()
+      telemetry_id = {__MODULE__, :proven_continuation_refusal, telemetry_ref}
+      test_pid = self()
+      :ok = :telemetry.attach(telemetry_id, [:codex_pooler, :gateway, :duplicate_turn, :refused], fn _event, _measurements, metadata, _config -> send(test_pid, {telemetry_ref, metadata}) end, nil)
+      on_exit(fn -> :telemetry.detach(telemetry_id) end)
+      before = WebsocketCleanupFence.listener_sockets()
+      {conn, websocket, ref} = public_websocket_connect!(port, setup, "proven-continuation-owner-crash")
+      socket = WebsocketCleanupFence.await_new_listener_socket!(before)
+      {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, retry_frame)
+      {conn, _websocket, terminal} = receive_native_terminal!(conn, websocket, ref)
+      Mint.HTTP.close(conn)
+      :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(socket)
+
+      stages =
+        cond do
+          unquote(control) == :hard_anchor ->
+            nil
+
+          get_in(terminal, ["error", "code"]) == "duplicate_turn" ->
+            assert_receive {^telemetry_ref, %{stage: stage, transport: "websocket"}}, @detection_timeout_ms
+            [stage]
+
+          true ->
+            []
+        end
+
+      rows = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id)
+      entries = Repo.all(from l in LedgerEntry, where: l.request_id in ^Enum.map(rows, & &1.id))
+      IO.puts("PROVEN-CONTINUATION-METADATA " <> CodexPooler.JSON.encode!(%{control: Atom.to_string(unquote(control)), serving_mode: predecessor.request_metadata["routing"]["model_serving_mode"], claim_class: String.split(predecessor.correlation_id, ":") |> hd(), prior_visible: Repo.get_by!(CodexTurn, request_id: prior.id).first_visible_output_at != nil, same_semantic_turn: Repo.get_by!(CodexTurn, request_id: prior.id).semantic_turn_digest == Repo.get_by!(CodexTurn, request_id: predecessor.id).semantic_turn_digest, latest_generation: attempt.replay_generation, first_visible: Repo.get_by!(CodexTurn, request_id: predecessor.id).first_visible_output_at != nil, proof_kind: proof.end_kind, exact_terminal_proof: ExecutionTerminalProofs.terminal?(attempt), proof_interruption: proof.interruption_code, request_status: predecessor.status, request_error: predecessor.last_error_code, response_status: predecessor.response_status_code, usage_status: predecessor.usage_status, unchanged_retry_frame: retry_frame == continuation, refusal_stages: stages, retry_wire_code: get_in(terminal, ["error", "code"]), upstream_dispatch_count: FakeUpstream.count(upstream), request_count: length(rows), ledger_counts: Enum.frequencies_by(entries, & &1.entry_kind)}))
+
+      if unquote(control) == :valid do
+        assert %{"type" => "response.completed", "response" => %{"id" => "resp_continuation_recovered"}} = terminal
+        assert %RequestClientRetryLink{successor_request_id: successor_id} = Repo.get_by!(RequestClientRetryLink, predecessor_request_id: predecessor.id)
+        assert Repo.get!(Request, successor_id).status == "succeeded"
+        assert FakeUpstream.count(upstream) == 3
+        assert length(rows) == 3
+        assert Enum.frequencies_by(entries, & &1.entry_kind) == %{"reservation" => 3, "settlement" => 3, "release" => 3}
+      else
+        if unquote(control) == :hard_anchor do
+          assert %{"type" => "error", "error" => %{"code" => code}} = terminal
+          assert code in ["duplicate_turn", "previous_response_not_found"]
+        else
+          assert %{"type" => "error", "status" => 409, "error" => %{"code" => "duplicate_turn"}} = terminal
+        end
+
+        refute Repo.exists?(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^predecessor.id)
+        assert FakeUpstream.count(upstream) == 2
+
+        if unquote(control) == :hard_anchor do
+          assert length(rows) == 3
+          denied = Enum.find(rows, &(&1.id not in [prior.id, predecessor.id]))
+          assert denied.status == "failed"
+          assert denied.last_error_code == "stream_incomplete"
+          denied_settlement = Enum.find(entries, &(&1.request_id == denied.id and &1.entry_kind == "settlement"))
+          IO.puts("ANCHOR-DENIAL-METADATA " <> CodexPooler.JSON.encode!(%{status: denied.status, error: denied.last_error_code, usage_status: denied.usage_status, total_tokens: denied_settlement.total_tokens, amount_status: denied_settlement.amount_status, settled_cost_zero: if(is_nil(denied_settlement.settled_cost_micros), do: nil, else: Decimal.equal?(denied_settlement.settled_cost_micros, 0)), no_upstream_dispatch: FakeUpstream.count(upstream) == 2}))
+          assert Enum.frequencies_by(entries, & &1.entry_kind) == %{"reservation" => 3, "settlement" => 3, "release" => 3}
+        else
+          assert length(rows) == 2
+          assert Enum.frequencies_by(entries, & &1.entry_kind) == %{"reservation" => 2, "settlement" => 2, "release" => 2}
+        end
+      end
+    end
+  end
+
+  defp await_proven_visible_output!(conn, websocket, ref) do
+    {conn, websocket, frame} = public_websocket_receive_text!(conn, websocket, ref)
+
+    case CodexPooler.JSON.decode!(frame) do
+      %{"type" => "response.output_item.done", "item" => %{"type" => "reasoning"}} -> {conn, websocket}
+      _progress -> await_proven_visible_output!(conn, websocket, ref)
     end
   end
 

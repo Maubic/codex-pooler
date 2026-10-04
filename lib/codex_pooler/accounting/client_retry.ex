@@ -1977,8 +1977,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
       [
         &verified_task_exception?/3,
         &verified_dead_execution?/3,
-        &verified_proven_owner_crash?/3,
-        &verified_proven_owner_crash_failure?/3,
+        &verified_owner_crash?/3,
         &verified_proven_owner_unavailable_failure?/3,
         &verified_provider_terminal_failure?/3,
         &verified_latest_quota_rejection?/3,
@@ -2143,6 +2142,11 @@ defmodule CodexPooler.Accounting.ClientRetry do
        do: ExecutionTerminalProofs.terminal?(attempt)
 
   defp verified_proven_owner_crash_failure?(_turn, _request, _attempt), do: false
+
+  @doc false
+  @spec verified_owner_crash?(term(), term(), term()) :: boolean()
+  def verified_owner_crash?(turn, request, attempt),
+    do: verified_proven_owner_crash?(turn, request, attempt) or verified_proven_owner_crash_failure?(turn, request, attempt)
 
   # The owner's node cut off by a partition: the socket's response task, whose
   # forward to the cut owner failed, settles the turn with that answer, 503
