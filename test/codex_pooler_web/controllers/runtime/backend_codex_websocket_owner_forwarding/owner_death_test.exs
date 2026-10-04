@@ -29,7 +29,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
   alias CodexPooler.Gateway.Websocket, as: Gateway
   alias CodexPooler.Gateway.Websocket.Adapter
-  alias CodexPooler.Platform.{ExecutionProofPublisher, ExecutionTerminalProof, ExecutionTerminalProofs}
+  alias CodexPooler.Platform.{ExecutionIdentity, ExecutionRegistry, ExecutionTerminalProof, ExecutionTerminalProofs}
   alias CodexPooler.Pools.ModelServingOverride
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
@@ -1186,21 +1186,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
     end
   end
 
-  # findings#283: the released client resends a turn whose owner's upstream
-  # connection process died before any output. `ClientRetry` admits that
-  # resend only once the terminal proof of the turn's executor exists, and the
-  # publisher wrote proofs only at its one-second tick, so the client's first
-  # resend, about half a second after the owner went, met `409 duplicate_turn`
-  # in about half the cases. The executor ends `process_down` once its socket
-  # closes, and its registry now asks the publisher to write that proof
-  # within 100 ms, ahead of that first resend. The publisher here is the
-  # production one paired with this VM's registry, with a tick far beyond the
-  # test, so only that early publication can write the proof. One node, owner forwarding on, native, the Pool's
-  # default serving mode, the real public listener, FakeUpstream holding the
-  # turn before any event.
+  # The resend requires the actual executor's monitored terminal proof.
+  # Publish only that retained registry entry through the normal proof API:
+  # a background publisher here could consume unrelated executions left by
+  # prior sandbox tests and commit them during a peer fixture's mode switch.
+  # Publisher scheduling has its own tests; this public Socket boundary owns
+  # proof-backed admission on one node with the provider held before output.
   describe "the released client's resend after the owner's upstream connection dies before any output" do
-    test "is admitted once the executor that ended without delivering is published ahead of the tick" do
-      start_supervised!({ExecutionProofPublisher, enabled: true, name: :owner_death_resend_publisher, interval_ms: 60_000})
+    @tag :scoped_owner_terminal_proof
+    test "is admitted once the actual executor's retained terminal proof is published" do
       release_ref = make_ref()
       created = CodexPooler.JSON.encode!(%{"type" => "response.created", "response" => %{"id" => "resp_owner_death_resend", "status" => "in_progress"}})
 
@@ -1256,11 +1250,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
   end
 
   for {mode, control} <- [{"full", :valid}, {"lite", :valid}, {"full", :remote_502}] ++ Enum.map([:missing_proof, :wrong_boot, :wrong_generation, :wrong_epoch, :wrong_witness, :visible_output, :hard_anchor], &{"full", &1}) do
+    @tag :scoped_owner_terminal_proof
     @tag :proven_continuation_owner_crash
     if control == :remote_502, do: @tag(:remote_proven_owner_crash)
     @tag slow: "public websocket owner crash, executor proof publication and reconnect"
     test "a proven owner crash on a codex-request continuation recovers after visible history in #{mode} with #{control}" do
-      start_supervised!({ExecutionProofPublisher, enabled: true, name: :continuation_owner_death_publisher, interval_ms: 60_000})
+      backlog = if unquote(control) == :remote_502, do: unrelated_pending_executions!(), else: []
       release_ref = make_ref()
       reasoning = %{"type" => "reasoning", "id" => "rs_prior_step", "encrypted_content" => "synthetic-encrypted", "summary" => []}
       call = %{"type" => "function_call", "id" => "fc_prior_step", "call_id" => "call_prior_step", "name" => "sample_tool", "arguments" => "{}"}
@@ -1404,6 +1399,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
       entries = Repo.all(from l in LedgerEntry, where: l.request_id in ^Enum.map(rows, & &1.id))
       IO.puts("PROVEN-CONTINUATION-METADATA " <> CodexPooler.JSON.encode!(%{control: Atom.to_string(unquote(control)), serving_mode: predecessor.request_metadata["routing"]["model_serving_mode"], claim_class: String.split(predecessor.correlation_id, ":") |> hd(), prior_visible: Repo.get_by!(CodexTurn, request_id: prior.id).first_visible_output_at != nil, same_semantic_turn: Repo.get_by!(CodexTurn, request_id: prior.id).semantic_turn_digest == Repo.get_by!(CodexTurn, request_id: predecessor.id).semantic_turn_digest, latest_generation: attempt.replay_generation, first_visible: Repo.get_by!(CodexTurn, request_id: predecessor.id).first_visible_output_at != nil, proof_kind: proof.end_kind, exact_terminal_proof: ExecutionTerminalProofs.terminal?(attempt), proof_interruption: proof.interruption_code, request_status: predecessor.status, request_error: predecessor.last_error_code, response_status: predecessor.response_status_code, usage_status: predecessor.usage_status, unchanged_retry_frame: retry_frame == continuation, refusal_stages: stages, retry_wire_code: get_in(terminal, ["error", "code"]), upstream_dispatch_count: FakeUpstream.count(upstream), request_count: length(rows), ledger_counts: Enum.frequencies_by(entries, & &1.entry_kind)}))
 
+      if unquote(control) == :remote_502 do
+        assert length(ExecutionRegistry.pending_proofs(backlog)) == length(backlog), "scoped publication consumed an unrelated ended execution"
+        refute Repo.exists?(from p in ExecutionTerminalProof, where: p.execution_id in ^backlog), "scoped publication persisted an unrelated ended execution"
+        CodexPooler.TestDiagnostics.puts("owner_proof_backlog unrelated_pending=3 unrelated_published=0 unrelated_acknowledged=0 sandbox_transition_preserved=true")
+      end
+
       if unquote(control) in [:valid, :remote_502] do
         assert %{"type" => "response.completed", "response" => %{"id" => "resp_continuation_recovered"}} = terminal
         assert %RequestClientRetryLink{successor_request_id: successor_id} = Repo.get_by!(RequestClientRetryLink, predecessor_request_id: predecessor.id)
@@ -1468,19 +1469,72 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
     end
   end
 
+  defp unrelated_pending_executions! do
+    for _index <- 1..3 do
+      execution_id = Ecto.UUID.generate()
+
+      CodexPooler.UnboxedFixture.register_unboxed_cleanup!(fn ->
+        Repo.delete_all(from p in ExecutionTerminalProof, where: p.execution_id == ^execution_id)
+        :ok = ExecutionRegistry.acknowledge([execution_id])
+      end)
+
+      parent = self()
+
+      actor =
+        start_supervised!(
+          {Task,
+           fn ->
+             :ok = ExecutionRegistry.register(execution_id)
+             send(parent, {:unrelated_execution_registered, execution_id, self()})
+
+             receive do
+               :finish_unrelated_execution -> :ok
+             end
+           end},
+          id: {:unrelated_execution, execution_id}
+        )
+
+      monitor = Process.monitor(actor)
+      assert_receive {:unrelated_execution_registered, ^execution_id, ^actor}, @detection_timeout_ms
+      send(actor, :finish_unrelated_execution)
+      assert_receive {:DOWN, ^monitor, :process, ^actor, :normal}, @detection_timeout_ms
+      assert :dead = ExecutionRegistry.status(execution_id, actor)
+      assert [%{owner_execution_id: ^execution_id, end_kind: "process_down"}] = ExecutionRegistry.pending_proofs([execution_id])
+      execution_id
+    end
+  end
+
   defp await_execution_proof!(attempt, deadline) do
-    cond do
-      ExecutionTerminalProofs.terminal?(attempt) ->
+    registry_node = Enum.find([node() | Node.list(:connected)], &(Atom.to_string(&1) == attempt.owner_instance_id))
+    assert registry_node, "the actual executor's registry node is unavailable"
+    registry = {ExecutionRegistry, registry_node}
+    assert ExecutionIdentity.status(attempt) == :dead
+
+    case ExecutionRegistry.pending_proofs([attempt.owner_execution_id], registry) do
+      [proof] ->
+        fields = [:owner_execution_id, :owner_instance_id, :owner_instance_boot_id, :owner_process_id]
+        assert Map.take(proof, fields) == Map.take(attempt, fields)
+        assert {:ok, 1} = ExecutionTerminalProofs.publish([proof])
+        assert ExecutionTerminalProofs.terminal?(attempt)
+        assert :ok = ExecutionRegistry.acknowledge([attempt.owner_execution_id], registry)
+        CodexPooler.TestDiagnostics.puts("owner_proof_scope registry_node=#{if registry_node == node(), do: :local, else: :peer} actual_executor_down=true exact_proof_persisted=true acknowledged_execution_count=1")
         :ok
 
-      System.monotonic_time(:millisecond) >= deadline ->
-        flunk("the executor's terminal proof was not published before the publisher's tick")
+      [] ->
+        if ExecutionTerminalProofs.terminal?(attempt) do
+          :ok
+        else
+          remaining = deadline - System.monotonic_time(:millisecond)
+          assert remaining > 0, "the actual executor's retained terminal proof was not available before the deadline"
 
-      true ->
-        receive do
-        after
-          5 -> await_execution_proof!(attempt, deadline)
+          receive do
+          after
+            min(5, remaining) -> await_execution_proof!(attempt, deadline)
+          end
         end
+
+      :unknown ->
+        flunk("the actual executor's registry is unavailable")
     end
   end
 
