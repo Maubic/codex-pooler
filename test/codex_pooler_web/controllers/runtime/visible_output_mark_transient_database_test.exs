@@ -637,13 +637,30 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputLifecycleContentionTest do
 
     on_exit(fn ->
       send(server, {:fake_upstream_release_websocket, release})
-      if peer in Node.list(:connected) and :erpc.call(peer, Process, :alive?, [owner]), do: :erpc.call(peer, GenServer, :stop, [owner, :normal, 5_000])
+      if peer in Node.list(:connected), do: stop_owner!(peer, owner)
       refute :erpc.call(peer, Process, :alive?, [owner])
       refute :erpc.call(peer, Process, :alive?, [upstream])
       CodexPooler.TestDiagnostics.puts("lifecycle_cleanup known_owner_alive=false known_upstream_alive=false")
     end)
 
     %{provider: provider, setup: setup, socket: socket, server: server, release: release, owner: owner, upstream: upstream, authority: authority, active_ref: active_ref}
+  end
+
+  # A cancelled lifecycle authorization ends the upstream session, and the owner then retires itself (`owner_crashed`) once it has
+  # settled the turn; its `terminate/2` still runs database transactions after the test body has seen the turn settle. Whether the owner
+  # is idle, retiring or gone when this cleanup runs is scheduling, so finding it alive does not promise a stop will find it alive:
+  # the retirement can win, and `GenServer.stop/3` then exits with the owner's own reason (findings#303 row 303-10, Drone 1814).
+  # The monitor's DOWN, whatever its reason, is what proves the owner is gone.
+  defp stop_owner!(peer, owner) do
+    monitor = Process.monitor(owner)
+
+    try do
+      :erpc.call(peer, GenServer, :stop, [owner, :normal, 5_000])
+    catch
+      :exit, _already_gone_or_retiring -> :ok
+    end
+
+    assert_receive {:DOWN, ^monitor, :process, ^owner, _reason}, @detection_timeout_ms
   end
 
   defp connection_options, do: Repo.config() |> Keyword.take([:hostname, :port, :username, :password, :database, :socket_dir])
@@ -659,7 +676,7 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputLifecycleContentionTest do
 
         receive do
         after
-          0 -> await_writer_wait!(observer, holder, deadline)
+          10 -> await_writer_wait!(observer, holder, deadline)
         end
     end
   end
@@ -682,7 +699,7 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputLifecycleContentionTest do
 
         receive do
         after
-          0 -> await_settled!(id, deadline)
+          10 -> await_settled!(id, deadline)
         end
     end
   end
