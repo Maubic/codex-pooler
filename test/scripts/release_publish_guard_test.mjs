@@ -18,6 +18,7 @@ const success = {
 	],
 };
 const absentAliases = {
+	versionTag: { state: "missing" },
 	latest: { state: "missing" },
 	minor: { state: "missing" },
 };
@@ -148,6 +149,7 @@ test("CLI writes reviewed tags and refuses failed evidence without modifying its
 
 test("registry aliases cannot regress when a newer release is removed from the inventory", () => {
 	const registry = {
+		versionTag: { state: "missing" },
 		latest: { state: "present", version: "1.4.9" },
 		minor: { state: "present", version: "1.4.8" },
 	};
@@ -160,12 +162,13 @@ test("registry aliases cannot regress when a newer release is removed from the i
 
 test("unknown or malformed registry evidence withholds aliases but keeps the verified version", () => {
 	for (const registry of [
-		{},
 		{
+			versionTag: { state: "missing" },
 			latest: { state: "unavailable", reason: "registry_read_failed" },
 			minor: { state: "unavailable" },
 		},
 		{
+			versionTag: { state: "missing" },
 			latest: { state: "present", version: "invalid" },
 			minor: { state: "present", version: "2.0.0" },
 		},
@@ -187,6 +190,93 @@ const manifestType = "application/vnd.oci.image.manifest.v1+json";
 const indexType = "application/vnd.oci.image.index.v1+json";
 const digest = (char) => `sha256:${char.repeat(64)}`;
 
+test("an existing matching version is reused while missing aliases remain recoverable", () => {
+	const result = releasePublication(
+		"v1.2.3",
+		sha,
+		success,
+		[release("v1.2.3")],
+		{
+			...absentAliases,
+			versionTag: {
+				state: "present",
+				version: "1.2.3",
+				revision: sha,
+				digest: digest("9"),
+			},
+		},
+	);
+	assert.equal(result.imageAction, "reuse");
+	assert.equal(result.imageDigest, digest("9"));
+	assert.deepEqual(result.tags, ["1.2", "latest"]);
+});
+
+test("duplicate delivery reuses the image even when no stable alias is eligible", () => {
+	const result = releasePublication(
+		"v1.2.3",
+		sha,
+		success,
+		[release("v1.2.3"), release("v1.2.4")],
+		{
+			...absentAliases,
+			versionTag: {
+				state: "present",
+				version: "1.2.3",
+				revision: sha,
+				digest: digest("9"),
+			},
+		},
+	);
+	assert.equal(result.imageAction, "reuse");
+	assert.deepEqual(result.tags, []);
+	assert.deepEqual(result.imageTags, ["1.2.3"]);
+});
+
+test("an existing prerelease is reused without assigning any stable alias", () => {
+	const version = "1.2.3-rc.1";
+	const result = releasePublication(
+		`v${version}`,
+		sha,
+		success,
+		[release(`v${version}`, { prerelease: true })],
+		{
+			versionTag: {
+				state: "present",
+				version,
+				revision: sha,
+				digest: digest("9"),
+			},
+		},
+	);
+	assert.equal(result.imageAction, "reuse");
+	assert.deepEqual(result.tags, []);
+	assert.deepEqual(result.imageTags, [version]);
+});
+
+test("conflicting, unknown or malformed immutable image evidence never authorizes a build", () => {
+	for (const versionTag of [
+		undefined,
+		{ state: "unavailable" },
+		{ state: "present", version: "1.2.4", revision: sha, digest: digest("9") },
+		{
+			state: "present",
+			version: "1.2.3",
+			revision: "b".repeat(40),
+			digest: digest("9"),
+		},
+		{ state: "present", version: "1.2.3", revision: sha, digest: "invalid" },
+	]) {
+		assert.throws(
+			() =>
+				releasePublication("v1.2.3", sha, success, [release("v1.2.3")], {
+					...absentAliases,
+					versionTag,
+				}),
+			/immutable/,
+		);
+	}
+});
+
 async function registryFixture(t, mode) {
 	const calls = [];
 	const server = createServer((request, response) => {
@@ -196,7 +286,10 @@ async function registryFixture(t, mode) {
 		});
 		const leaf = request.url.split("/").at(-1);
 		const send = (code, body) => {
-			response.writeHead(code, { "content-type": "application/json" });
+			response.writeHead(code, {
+				"content-type": "application/json",
+				"docker-content-digest": digest("9"),
+			});
 			response.end(JSON.stringify(body));
 		};
 		if (mode.startsWith("token-")) {
@@ -209,6 +302,17 @@ async function registryFixture(t, mode) {
 				return send(401, {});
 		}
 		if (mode === "read-timeout") return;
+		if (leaf === "1.2.3") {
+			if (mode === "version-present" || mode === "version-conflict")
+				return send(200, {
+					mediaType: indexType,
+					manifests: ["a", "b"].map((char) => ({
+						mediaType: manifestType,
+						digest: digest(char),
+					})),
+				});
+			return send(404, { errors: [{ code: "MANIFEST_UNKNOWN" }] });
+		}
 		if (mode === "connection-reset") return request.socket.destroy();
 		if (mode === "read-failed")
 			return send(503, { errors: [{ code: "UNAVAILABLE" }] });
@@ -253,12 +357,15 @@ async function registryFixture(t, mode) {
 			return send(200, {
 				config: {
 					Labels: {
-						"org.opencontainers.image.version":
-							mode === "disagree" && leaf === digest("d")
+						"org.opencontainers.image.version": mode.startsWith("version-")
+							? "1.2.3"
+							: mode === "disagree" && leaf === digest("d")
 								? "1.2.8"
 								: mode === "malformed"
 									? "not-a-version"
 									: "1.2.9",
+						"org.opencontainers.image.revision":
+							mode === "version-conflict" ? "b".repeat(40) : sha,
 					},
 				},
 			});
@@ -278,6 +385,39 @@ async function registryFixture(t, mode) {
 		timeoutMs: mode === "read-timeout" ? 20 : 1000,
 		calls,
 	};
+}
+
+for (const mode of ["version-present", "version-conflict"]) {
+	test(`immutable image identity crosses the real registry HTTP boundary: ${mode}`, async (t) => {
+		const evidence = await registryEvidence(
+			"v1.2.3",
+			await registryFixture(t, mode),
+		);
+		assert.equal(evidence.versionTag.digest, digest("9"));
+		if (mode === "version-present")
+			assert.equal(
+				releasePublication(
+					"v1.2.3",
+					sha,
+					success,
+					[release("v1.2.3")],
+					evidence,
+				).imageAction,
+				"reuse",
+			);
+		else
+			assert.throws(
+				() =>
+					releasePublication(
+						"v1.2.3",
+						sha,
+						success,
+						[release("v1.2.3")],
+						evidence,
+					),
+				/immutable/,
+			);
+	});
 }
 
 for (const mode of [
@@ -300,6 +440,21 @@ for (const mode of [
 	test(`real registry HTTP boundary classifies ${mode}`, async (t) => {
 		const options = await registryFixture(t, mode);
 		const evidence = await registryEvidence("v1.2.3", options);
+		if (mode === "read-timeout") {
+			assert.equal(evidence.versionTag.state, "unavailable");
+			assert.throws(
+				() =>
+					releasePublication(
+						"v1.2.3",
+						sha,
+						success,
+						[release("v1.2.3")],
+						evidence,
+					),
+				/immutable/,
+			);
+			return;
+		}
 		const result = releasePublication(
 			"v1.2.3",
 			sha,
@@ -425,6 +580,7 @@ for (const mode of [
 		);
 		if (mode === "token-failed" || mode === "token-missing") {
 			assert.deepEqual(evidence, {
+				versionTag: { state: "unavailable", reason: "registry_auth_failed" },
 				latest: { state: "unavailable", reason: "registry_auth_failed" },
 				minor: { state: "unavailable", reason: "registry_auth_failed" },
 			});
@@ -463,7 +619,7 @@ test("release flags must match version stability", () => {
 	}
 });
 
-test("CLI with unreadable or malformed registry evidence publishes only the verified version with a warning", (t) => {
+test("CLI refuses unreadable or malformed immutable registry evidence", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "registry-cli-unavailable-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	writeFileSync(join(root, "status"), JSON.stringify(success));
@@ -486,11 +642,7 @@ test("CLI with unreadable or malformed registry evidence publishes only the veri
 			],
 			{ encoding: "utf8" },
 		);
-		assert.equal(cli.status, 0);
-		assert.deepEqual(JSON.parse(cli.stdout).tags, ["1.2.3"]);
-		assert.match(
-			cli.stderr,
-			/release alias withheld: latest registry_evidence_unavailable/,
-		);
+		assert.notEqual(cli.status, 0);
+		assert.match(cli.stderr, /immutable/);
 	}
 });
