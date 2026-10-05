@@ -94,6 +94,9 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
 
   defp pending_source_error?(_decoded, _tracker), do: false
 
+  defp guard_success(data, %{"type" => type} = decoded, _tracker) when type in ["response.failed", "response.incomplete", "error"],
+    do: {data, decoded, false}
+
   defp guard_success(data, decoded, tracker) do
     with {:ok, %{kind: :completed}} <- StreamProtocol.terminal_outcome(nil, decoded),
          {:error, _reason} <- PublicResponsesToolCompletion.completion_verdict(tracker) do

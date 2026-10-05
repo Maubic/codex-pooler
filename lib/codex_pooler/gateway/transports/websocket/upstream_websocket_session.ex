@@ -2209,8 +2209,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     handle_text_frame(
       state,
       receive_state,
-      raw_text,
-      raw_decoded,
+      if(receive_state.public_tool_completion_reason, do: raw_text, else: source_text),
+      if(receive_state.public_tool_completion_reason, do: raw_decoded, else: source_decoded),
       mapped_text,
       mapped_decoded
     )
@@ -2259,11 +2259,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp guard_public_tool_completion(text, decoded, %ReceiveState{public_tool_completion: nil} = receive_state),
     do: {text, decoded, receive_state}
 
+  defp guard_public_tool_completion(text, %{"type" => type, "response" => response} = decoded, receive_state)
+       when type in ["response.failed", "response.incomplete", "error"] and not is_map(response) and not is_nil(response) do
+    tracker = PublicResponsesToolCompletion.observe(receive_state.public_tool_completion, decoded)
+    repaired_text = StreamProtocol.normalize_public_openai_responses_json_message(text)
+    {repaired_text, CodexPooler.JSON.decode!(repaired_text), %{receive_state | public_tool_completion: tracker}}
+  end
+
   defp guard_public_tool_completion(text, decoded, receive_state) do
     tracker = PublicResponsesToolCompletion.observe(receive_state.public_tool_completion, decoded)
     receive_state = %{receive_state | public_tool_completion: tracker}
 
     with %{} <- decoded,
+         false <- decoded["type"] in ["response.failed", "response.incomplete", "error"],
          {:ok, %{kind: :completed}} <- StreamProtocol.terminal_outcome(nil, decoded),
          {:error, reason} <- PublicResponsesToolCompletion.completion_verdict(tracker) do
       event = Adapter.websocket_error(%{status: 500, code: :server_error, message: StreamProtocol.synthetic_public_openai_responses_failure_message(), param: nil})

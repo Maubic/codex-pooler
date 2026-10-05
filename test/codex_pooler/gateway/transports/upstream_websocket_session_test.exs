@@ -6084,6 +6084,28 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
              UpstreamWebsocketSession.request_once(websocket_request(FakeUpstream.url(upstream)))
   end
 
+  test "public owner repairs malformed failed envelopes before terminal classification" do
+    for response <- [:absent, nil, "scalar", ["list"]] do
+      terminal = %{"type" => "response.failed"}
+      terminal = if response == :absent, do: terminal, else: Map.put(terminal, "response", response)
+      upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(terminal)])]))
+      {:ok, session} = UpstreamWebsocketSession.start_link([])
+      on_exit(fn -> UpstreamWebsocketSession.close(session) end)
+      parent = self()
+      label = make_ref()
+      request = %{websocket_request(FakeUpstream.url(upstream)) | message_mapper: &StreamProtocol.normalize_public_openai_responses_json_message/1, writer: fn frame -> send(parent, {:malformed_failed_frame, label, frame}) end}
+      assert {:ok, %{terminal: "response.failed"}} = UpstreamWebsocketSession.request(session, request)
+      assert_receive {:malformed_failed_frame, ^label, frame}, @message_detection_timeout_ms
+      assert %{"type" => "response.failed", "response" => %{"status" => "failed", "error" => %{"code" => "upstream_error", "type" => "server_error"}}} = CodexPooler.JSON.decode!(frame)
+      refute_received {:malformed_failed_frame, ^label, _extra}
+      assert Process.alive?(session)
+      assert length(FakeUpstream.requests(upstream)) == 1
+      assert :ok = FakeUpstream.verify!(upstream)
+      IO.puts("MALFORMED_OWNER source_shape=#{if response == :absent, do: "absent", else: if(is_nil(response), do: "nil", else: if(is_binary(response), do: "scalar", else: "list"))} terminal=response.failed provider_requests=1 owner_alive=true")
+      assert :ok = UpstreamWebsocketSession.close(session)
+    end
+  end
+
   defp assert_public_guard_terminal(session, request, label, connection_use) do
     parent = self()
     request = %{request | writer: fn frame -> send(parent, {:guard_frame, label, frame}) end}
