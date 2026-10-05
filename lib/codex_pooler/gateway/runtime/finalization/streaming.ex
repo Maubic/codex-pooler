@@ -306,9 +306,10 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
         %ResponseContext{context: context, response: response} = response_context,
         stream_state \\ nil
       ) do
-    code = error_code(reason)
-    terminal_failure = terminal_failure_reason(reason)
     websocket_attempt_metadata = upstream_websocket_attempt_metadata(response_context)
+    terminal_failure = Map.get(websocket_attempt_metadata, :tool_completion_failure) || terminal_failure_reason(reason)
+    reason = if Map.get(websocket_attempt_metadata, :tool_completion_failure), do: {:terminal_stream_failure, terminal_failure}, else: reason
+    code = error_code(reason)
     transports = resolved_transports(response_context, websocket_attempt_metadata)
 
     attempt_metadata =
@@ -330,7 +331,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
       AttemptSettlement.finalize_partial_stream_failure(
         context.reserved.request,
         context.attempt,
-        stream_usage(body, stream_state) |> merge_model_observation(websocket_attempt_metadata),
+        (Map.get(websocket_attempt_metadata, :response_usage) || stream_usage(body, stream_state)) |> merge_model_observation(websocket_attempt_metadata),
         SettlementAttrs.partial_stream_failure(
           context,
           failure_response_status(reason, response.status),

@@ -84,6 +84,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
   @type part :: {:data, binary()} | :done | {:bridge_error, term()}
   @type attempt_metadata :: %{
           optional(:model_usage) => map(),
+          optional(:response_usage) => map(),
+          optional(:tool_completion_failure) => StreamProtocol.terminal_failure(),
           optional(:provider_credits_admission) => CodexPooler.Gateway.Transports.ProviderCreditsAdmission.Receipt.t() | nil,
           upstream_websocket_connection: map() | nil,
           transport_failure: map() | nil
@@ -162,6 +164,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
           pending_bytes: 0,
           upstream_websocket_connection: nil,
           model_usage: nil,
+          response_usage: nil,
+          tool_completion_failure: nil,
           transport_failure: nil,
           provider_credits_admission: nil,
           policy_denial: nil,
@@ -873,6 +877,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
         state
         | upstream_websocket_connection: connection || state.upstream_websocket_connection,
           model_usage: model_usage(result),
+          response_usage: Map.get(result, :response_usage),
+          tool_completion_failure: tool_completion_failure(result),
           transport_failure: nonempty_map(transport_failure) || state.transport_failure,
           provider_credits_admission: Map.get(result, :provider_credits_admission),
           policy_denial: if(Map.get(result, :reason) == :provider_credits_policy_denied, do: result)
@@ -882,6 +888,13 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
   end
 
   defp put_submit_result_connection(state, _result), do: state
+
+  defp tool_completion_failure(%{public_tool_completion_reason: reason, upstream_error_code: "upstream_stream_error"})
+       when reason in [:incomplete_tool_item, :invalid_tool_correlation, :tool_tracking_overflow] do
+    %{code: "upstream_stream_error", upstream_code: nil, upstream_error_param: nil, event_type: "error", data_type: "error", tool_completion_reason: reason}
+  end
+
+  defp tool_completion_failure(_result), do: nil
 
   defp model_usage(%{response_usage: %{model_observation: %{"version" => 1}} = usage}), do: Map.take(usage, [:served_model, :model_observation])
   defp model_usage(%{response_usage: %{} = usage}), do: Map.take(usage, [:served_model])
@@ -1038,6 +1051,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketBridgeStream do
       provider_credits_admission: state.provider_credits_admission
     }
     |> then(fn metadata -> if state.model_usage, do: Map.put(metadata, :model_usage, state.model_usage), else: metadata end)
+    |> then(fn metadata -> if state.response_usage, do: Map.put(metadata, :response_usage, state.response_usage), else: metadata end)
+    |> then(fn metadata -> if state.tool_completion_failure, do: Map.put(metadata, :tool_completion_failure, state.tool_completion_failure), else: metadata end)
   end
 
   defp empty_attempt_metadata do

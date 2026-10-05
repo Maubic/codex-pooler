@@ -7,6 +7,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesSequence
+  alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesToolCompletion
 
   @type summary_state :: %{
           required(:schema_version) => pos_integer(),
@@ -39,6 +40,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
           required(:terminal_failure) => StreamProtocol.terminal_failure() | nil,
           required(:custom_tool_namespaces) => map(),
           required(:sequence) => PublicResponsesSequence.state(),
+          required(:tool_completion) => PublicResponsesToolCompletion.state(),
           required(:summary) => summary_state(),
           required(:passthrough?) => boolean(),
           required(:passthrough_terminal) => nil,
@@ -62,6 +64,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
       terminal_failure: nil,
       custom_tool_namespaces: custom_tool_namespaces,
       sequence: PublicResponsesSequence.new_state(),
+      tool_completion: PublicResponsesToolCompletion.new_state(),
       summary: new_summary(),
       passthrough?: false,
       passthrough_terminal: nil,
@@ -399,19 +402,24 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
     {IO.iodata_to_binary(iodata), state}
   end
 
-  defp normalize_block("data: [DONE]", state) do
-    state =
-      state
-      |> Map.update!(:sequence, &%{&1 | terminal_latched?: true})
-      |> Map.put(:terminal_kind, :completed)
-      |> Map.put(:terminal_failure, nil)
-      |> put_summary_terminal(:completed, "completed")
+  defp normalize_block(_block, %{sequence: %{terminal_latched?: true}} = state), do: {[], state, false}
 
-    {[], state, true}
+  defp normalize_block("data: [DONE]", state) do
+    case PublicResponsesToolCompletion.completion_verdict(state.tool_completion) do
+      :ok -> normalize_done_marker(state)
+      {:error, reason} -> reject_tool_completion(state, reason)
+    end
   end
 
   defp normalize_block(block, state) do
     {event_type, decoded} = stream_block_event(block)
+
+    state =
+      if effective_source_public_type(event_type, decoded) do
+        %{state | tool_completion: PublicResponsesToolCompletion.observe(state.tool_completion, Map.put_new(decoded, "type", event_type))}
+      else
+        state
+      end
 
     decoded =
       decoded
@@ -441,6 +449,17 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
       :drop ->
         {[], state, false}
     end
+  end
+
+  defp normalize_done_marker(state) do
+    state =
+      state
+      |> Map.update!(:sequence, &%{&1 | terminal_latched?: true})
+      |> Map.put(:terminal_kind, :completed)
+      |> Map.put(:terminal_failure, nil)
+      |> put_summary_terminal(:completed, "completed")
+
+    {[], state, true}
   end
 
   defp effective_source_public_type(event_type, %{} = decoded) do
@@ -495,6 +514,33 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
   defp normalize_public_block(_type, _decoded, state), do: {[], state}
 
   defp normalize_public_terminal_block(type, decoded, source_terminal_outcome, state) do
+    case {type, PublicResponsesToolCompletion.completion_verdict(state.tool_completion)} do
+      {"response.completed", {:error, reason}} ->
+        {terminal, state, true} = reject_tool_completion(state, reason)
+        {terminal, state}
+
+      _valid_or_failed ->
+        emit_public_terminal_block(type, decoded, source_terminal_outcome, state)
+    end
+  end
+
+  defp reject_tool_completion(state, reason) do
+    {sequence_number, state} = track_synthetic_terminal_failure(state)
+
+    failure = %{
+      code: "upstream_stream_error",
+      upstream_code: nil,
+      upstream_error_param: nil,
+      event_type: "error",
+      data_type: "error",
+      tool_completion_reason: reason
+    }
+
+    terminal = StreamProtocol.synthetic_public_openai_responses_error_sse(reason, sequence_number)
+    {terminal, %{state | terminal_failure: failure}, true}
+  end
+
+  defp emit_public_terminal_block(type, decoded, source_terminal_outcome, state) do
     {prefix, state} = terminal_prefix(type, decoded, state)
     {terminal, state, emitted?} = emit_public_sse(type, decoded, state)
 

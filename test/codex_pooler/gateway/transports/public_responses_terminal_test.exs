@@ -14,6 +14,94 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesTerminalTest do
     {"null", nil}
   ]
 
+  test "SSE raw tool obligations reject completed done and DONE across chunk and newline boundaries" do
+    added = %{"type" => "response.output_item.added", "output_index" => 0, "item" => %{"id" => "tool_integrity", "type" => "function_call", "call_id" => "call_integrity", "name" => "lookup", "arguments" => ""}}
+
+    for terminal <- [sse_event("response.completed", completed("resp_integrity")), sse_event("response.done", done("resp_integrity")), "data: [DONE]\n\n"],
+        separator <- ["\n", "\r\n", "\r"] do
+      source = IO.iodata_to_binary([sse_event("response.output_item.added", added), terminal, sse_event("response.completed", completed("resp_late"))]) |> String.replace("\n", separator)
+
+      {wire, state} =
+        source
+        |> :binary.bin_to_list()
+        |> Enum.reduce({"", StreamProtocol.public_openai_responses_stream_state()}, fn byte, {wire, state} ->
+          {chunk, state} = StreamProtocol.normalize_public_openai_responses_sse_data(<<byte>>, state)
+          {wire <> chunk, state}
+        end)
+
+      events = public_events(wire)
+      assert Enum.map(events, & &1.event) == ["response.output_item.added", "error"]
+      assert state.terminal_kind == :failed
+      assert state.terminal_failure.code == "upstream_stream_error"
+      assert state.terminal_failure.tool_completion_reason == :incomplete_tool_item
+      assert state.sequence.terminal_latched?
+      assert List.last(events).data["error"]["code"] == "server_error"
+      refute wire =~ "incomplete_tool_item"
+    end
+  end
+
+  test "SSE observes raw IDs and indices before fallback normalization and resets per request" do
+    item = %{"id" => "tool_raw", "type" => "custom_tool_call", "call_id" => "call_raw", "name" => "lookup", "input" => ""}
+    added = %{"type" => "response.output_item.added", "output_index" => 0, "item" => item}
+
+    for changed <- [
+          Map.delete(added, "output_index"),
+          Map.put(added, "output_index", "0"),
+          Map.put(added, "item_id", "different"),
+          Map.put(added, "item", Map.drop(item, ["id", "call_id"]))
+        ] do
+      {wire, state} = normalize_sse([sse_event("response.output_item.added", changed), sse_event("response.completed", completed("resp_raw"))])
+      assert List.last(public_events(wire)).event == "error"
+      assert state.terminal_failure.tool_completion_reason == :invalid_tool_correlation
+    end
+
+    {wire, state} = normalize_sse(sse_event("response.completed", completed("resp_fresh")))
+    assert List.last(public_events(wire)).event == "response.completed"
+    assert state.terminal_kind == :completed
+  end
+
+  test "SSE preserves provider non-success with pending tools" do
+    added = %{"type" => "response.output_item.added", "output_index" => 0, "item" => %{"id" => "tool_pending", "type" => "function_call", "call_id" => "call_pending", "name" => "lookup", "arguments" => ""}}
+
+    for type <- ["response.failed", "response.incomplete"] do
+      terminal = %{"type" => type, "response" => %{"id" => "resp_non_success", "status" => String.replace_prefix(type, "response.", "")}}
+      terminal = if type == "response.failed", do: put_in(terminal, ["response", "error"], %{"code" => "upstream_stream_error", "message" => "synthetic failure"}), else: put_in(terminal, ["response", "incomplete_details"], %{"reason" => "max_output_tokens"})
+      {wire, state} = normalize_sse([sse_event("response.output_item.added", added), sse_event(type, terminal)])
+      assert List.last(public_events(wire)).event == type
+      refute Map.has_key?(state.terminal_failure || %{}, :tool_completion_reason)
+    end
+  end
+
+  test "SSE healthy done chunks retain tools unknown events and terminal-only snapshots" do
+    item = %{"id" => "tool_healthy", "type" => "custom_tool_call", "call_id" => "call_healthy", "name" => "lookup", "input" => ""}
+    added = %{"type" => "response.output_item.added", "output_index" => 0, "item" => item}
+    done_item = %{"type" => "response.output_item.done", "output_index" => 0, "item" => item}
+    unknown = %{"type" => "response.future_tool_metadata", "output_index" => 0}
+
+    for separator <- ["\n", "\r\n", "\r"] do
+      source = [sse_event("response.output_item.added", added), sse_event("response.future_tool_metadata", unknown), sse_event("response.output_item.done", done_item), sse_event("response.done", done("resp_valid_chunks"))] |> IO.iodata_to_binary() |> String.replace("\n", separator)
+
+      {wire, state} =
+        source
+        |> :binary.bin_to_list()
+        |> Enum.reduce({"", StreamProtocol.public_openai_responses_stream_state()}, fn byte, {wire, state} ->
+          {chunk, state} = StreamProtocol.normalize_public_openai_responses_sse_data(<<byte>>, state)
+          {wire <> chunk, state}
+        end)
+
+      assert Enum.map(public_events(wire), & &1.event) == ["response.output_item.added", "response.future_tool_metadata", "response.output_item.done", "response.created", "response.completed"]
+      assert state.terminal_kind == :completed
+    end
+
+    {wire, state} = normalize_sse("data: [DONE]\n\n")
+    assert wire == ""
+    assert state.terminal_kind == :completed
+    terminal = put_in(completed("resp_snapshot"), ["response", "output"], [%{"type" => "function_call", "name" => "lookup", "arguments" => "{}"}])
+    {wire, state} = normalize_sse(sse_event("response.completed", terminal))
+    assert List.last(public_events(wire)).event == "response.completed"
+    assert state.terminal_kind == :completed
+  end
+
   @tag :public_terminal_pin
   test "SSE terminal labels supply a missing JSON type and latch the complete response" do
     for type <- ["response.completed", "response.incomplete", "response.failed"], separator <- ["", "\n\n"] do
