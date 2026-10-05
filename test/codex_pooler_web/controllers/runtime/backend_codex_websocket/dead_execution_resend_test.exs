@@ -21,10 +21,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DeadExecutionResendTest d
   alias CodexPooler.Accounting.{Attempt, Request}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.CodexTurn
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
+  alias CodexPooler.Gateway.Transports.Websocket.{ActivityRegistry, WebsocketOwnerSession}
   alias CodexPooler.Platform.{ExecutionIdentity, ExecutionProofPublisher, ExecutionTerminalProofs}
   alias CodexPooler.Platform.InstancePresence.Identity
   alias CodexPooler.Repo
+  alias CodexPoolerWeb.Runtime.SettlementTransactionHold
 
   @moduletag capture_log: true
   @detection_timeout_ms 15_000
@@ -219,12 +220,39 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DeadExecutionResendTest d
                } = CodexPooler.JSON.decode!(other_frame)
       end
 
+      # A native terminal can reach the client while its response task still
+      # holds the shared sandbox connection during settlement. Closing then
+      # cancels that task and destroys the sandbox transaction. Hold that exact
+      # boundary, then finish settlement before closing the direct socket.
+      settlement_hold = if not forwarding, do: SettlementTransactionHold.inside_transaction!()
       assert :ok = FakeUpstream.release_remaining_frames(upstream, retry_barrier)
+
+      {settler, settler_monitor} =
+        if settlement_hold do
+          {settler, _facts} = SettlementTransactionHold.await_held!(settlement_hold)
+          {settler, Process.monitor(settler)}
+        else
+          {nil, nil}
+        end
 
       {retry_conn, _retry_ws, frame} =
         public_websocket_receive_text!(retry_conn, retry_ws, retry_ref)
 
-      Mint.HTTP.close(retry_conn)
+      if settler do
+        %{direct_parent: retry_socket} =
+          ActivityRegistry.activities()
+          |> Enum.find(&(&1.pid == settler))
+
+        socket_monitor = Process.monitor(retry_socket)
+        cleanup = subscribe_socket_cleanup!(retry_socket)
+        SettlementTransactionHold.release(settlement_hold, settler)
+        assert_receive {:DOWN, ^settler_monitor, :process, ^settler, :normal}, @detection_timeout_ms
+        Mint.HTTP.close(retry_conn)
+        assert_receive {^cleanup, :cleanup_finished}, @detection_timeout_ms
+        assert_receive {:DOWN, ^socket_monitor, :process, ^retry_socket, _reason}, @detection_timeout_ms
+      else
+        Mint.HTTP.close(retry_conn)
+      end
 
       assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(frame)
 
@@ -290,4 +318,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DeadExecutionResendTest d
     {conn, websocket} = mint_websocket_new!(conn, ref, status, response_headers)
     {conn, websocket, ref}
   end
+
+  defp subscribe_socket_cleanup!(socket) do
+    ref = make_ref()
+    handler_id = {__MODULE__, ref}
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    :ok = :telemetry.attach(handler_id, [:codex_pooler, :gateway, :websocket_control, :cleanup_finished], &__MODULE__.socket_cleanup_finished/4, {self(), socket, ref})
+    ref
+  end
+
+  @doc false
+  def socket_cleanup_finished(_event, _measurements, %{caller: socket}, {test, socket, ref}) do
+    send(test, {ref, :cleanup_finished})
+  end
+
+  def socket_cleanup_finished(_event, _measurements, _metadata, _config), do: :ok
 end
