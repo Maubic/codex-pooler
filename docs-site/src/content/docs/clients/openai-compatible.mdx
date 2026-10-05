@@ -501,7 +501,15 @@ A successful upstream transcription response must contain a string `text` field.
 
 Relayed validation errors name a client input index only when its original position remains known. If coercion removed or expanded items, the public parameter uses `input[]` rather than an incorrect index. Tool-output image `detail` is validated for both list outputs and object outputs containing a `content` list.
 
+### Responses stream behavior
+
 Streaming `/v1/responses` clients must also handle a terminal `type: "error"` SSE event whose flat fields and nested `error` object both carry the sanitized `server_error` code.
+
+On public Responses SSE and narrow Responses websockets, an announced function or custom-tool call needs a real `response.output_item.done` with matching source identity and output index before the response can succeed. Argument or input completion alone isn't enough, and a final response snapshot can't complete an already announced tool. Missing completion or invalid correlation produces one sanitized `server_error` terminal instead of success. Already delivered deltas remain delivered; Pooler doesn't invent a tool completion or replay the request after visible output.
+
+A valid terminal-only response that never announced a tool retains its existing snapshot normalization, including accepted omitted item IDs or statuses. Provider failed and ordinary incomplete outcomes remain non-success outcomes. Accounting settles observed provider usage once even when an attempted success is rejected, and the rejected response creates no successful continuation alias.
+
+An anchored continuation must still reach the upstream websocket connection that produced its response. A prior successful alias can remain stored after that connection generation is retired, but it can't authorize a fresh connection: Pooler refuses the continuation before acquiring that connection or sending upstream. A new unanchored turn can recover on the same downstream websocket with fresh upstream state.
 
 Streaming `/v1/chat/completions` clients must separately handle a terminal `data: {"error":{...}}` chunk with nested `server_error` fields and no top-level `type`; no `[DONE]` chunk follows that terminal.
 
