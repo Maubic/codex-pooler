@@ -2,7 +2,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
   # findings#258 row 258-34: the released Codex client decodes the whole
   # `/models` body as one `ModelsResponse`, so one entry it cannot decode makes
   # it discard every entry and fall back to its bundled catalog. A client
-  # inside the verified decode window (0.154.0 through 0.158.0) is served the
+  # inside the verified decode window (0.154.0 through 0.160.1) is served the
   # catalog without that entry, the omission is logged with the model slug and
   # field names only, and its turns name the ETag of that same body. Clients
   # outside the window and `/v1/models` keep the unchecked catalog.
@@ -27,7 +27,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
     good_slug = setup.model.exposed_model_id
 
     for path <- ["/backend-api/codex/models", "/backend-api/codex/v1/models"],
-        version <- ["0.156.1", "0.157.0", "0.157.0-alpha.11.1", "0.157.1", "0.158.0", "0.158.0-alpha.15.4"] do
+        version <- ["0.156.1", "0.157.0", "0.157.0-alpha.11.1", "0.157.1", "0.158.0", "0.158.0-alpha.15.4", "0.159.0", "0.159.3", "0.160.0", "0.160.0-alpha.4", "0.160.1"] do
       log =
         capture_log(fn ->
           response = conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent(version)) |> get(path, %{"client_version" => version})
@@ -43,7 +43,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
       refute log =~ "Synthetic #{@broken_slug}", path
     end
 
-    for version <- ["0.158.1", "0.159.0", "0.160.0", "0.160.0-alpha.1", "0.159.2-alpha.1", "0.153.4", "0.146.1", ""] do
+    for version <- ["0.160.2", "0.161.0", "0.161.0-alpha.1", "0.153.4", "0.146.1", ""] do
       response = conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent(version)) |> get("/backend-api/codex/models", %{"client_version" => version})
       assert response |> json_response(200) |> Map.fetch!("models") |> Enum.map(& &1["slug"]) |> Enum.sort() == Enum.sort([good_slug, @broken_slug]), version
     end
@@ -81,7 +81,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
       assert [catalog_etag] = get_resp_header(models, "etag")
 
       unchecked =
-        conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent("0.158.1")) |> get("/backend-api/codex/models", %{"client_version" => "0.158.1"}) |> get_resp_header("etag")
+        conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent("0.160.2")) |> get("/backend-api/codex/models", %{"client_version" => "0.160.2"}) |> get_resp_header("etag")
 
       refute unchecked == [catalog_etag]
 
@@ -101,20 +101,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
     end)
   end
 
-  test "current stable and alpha catalogs preserve optional guidance and use their Responses representation ETag", %{conn: conn} do
+  test "current stable and alpha clients get the decode-checked catalog with its optional guidance and ETag", %{conn: conn} do
     upstream = start_upstream(FakeUpstream.sse_stream([{"response.completed", %{"type" => "response.completed", "response" => %{"id" => "resp_catalog_guidance", "usage" => %{"input_tokens" => 4, "output_tokens" => 3, "total_tokens" => 7}}}}]))
     setup = catalog_setup(upstream)
     source = CodexCatalogShapes.synced_source(setup.model.exposed_model_id) |> put_in(["model_messages", "content_filter_guidance"], "Synthetic guidance")
     setup.model |> Ecto.Changeset.change(metadata: %{"source_assignment_ids" => [setup.assignment.id], "source_assignment_models" => %{setup.assignment.id => source}}) |> Repo.update!()
 
-    for version <- ["0.160.0", "0.160.0-alpha.1"] do
+    for version <- ["0.160.1", "0.160.0-alpha.4"] do
       for path <- ["/backend-api/codex/models", "/backend-api/codex/v1/models"] do
         catalog = conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent(version)) |> get(path, %{"client_version" => version})
         body = json_response(catalog, 200)
         entry = Enum.find(body["models"], &(&1["slug"] == setup.model.exposed_model_id))
         assert entry["model_messages"]["content_filter_guidance"] == "Synthetic guidance"
         refute Map.has_key?(entry, "base_instructions")
-        assert @broken_slug in Enum.map(body["models"], & &1["slug"])
+        refute @broken_slug in Enum.map(body["models"], & &1["slug"])
         assert [etag] = get_resp_header(catalog, "etag")
         assert etag == CodexCatalog.etag(body)
 
@@ -134,7 +134,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
 
     log =
       capture_log(fn ->
-        for version <- ["0.156.1", "0.154.0", "0.157.0", "0.157.1", "0.158.0", "0.146.1"] do
+        for version <- ["0.156.1", "0.154.0", "0.157.0", "0.157.1", "0.158.0", "0.159.3", "0.160.1", "0.146.1"] do
           body = conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent(version)) |> get("/backend-api/codex/models", %{"client_version" => version}) |> json_response(200)
 
           assert [entry] = body["models"], version
