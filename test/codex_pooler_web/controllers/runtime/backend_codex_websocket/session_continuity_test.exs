@@ -1454,16 +1454,24 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SessionContinuityTest do
     window = thread <> ":0"
     window_key = "x-codex-window-id:" <> Base.encode16(:crypto.hash(:sha256, window), case: :lower)
 
+    sockets_before = WebsocketCleanupFence.listener_sockets()
     first = released_client_websocket_turn!(port, setup, thread, window)
-    # The assignment is bound in the same transaction that renews the owner
-    # lease for this turn, so once it is visible nothing of this turn renews
-    # the lease again.
+    first_socket = WebsocketCleanupFence.await_new_listener_socket!(sockets_before)
+    # The assignment is bound in the settlement transaction, so it is visible
+    # (like the finalized request) before the turn's response task has
+    # registered the session's continuity, which renews the owner lease once
+    # more in a transaction of its own (`SideEffects.record_success/5`).
+    # Neither orders that renewal.
     first_session = await_session_assignment!(first.request_metadata["codex_session_id"])
     assert first_session.session_key == window_key
     assert first_session.pool_upstream_assignment_id == setup.assignment.id
 
     # The downstream is gone; let the owner lease lapse as if the idle window
-    # had elapsed.
+    # had elapsed. The socket's termination drains its response task, so once
+    # the socket is down nothing of the first turn can renew the lease again
+    # (findings#303 row 303-6: a response task a few milliseconds late renewed
+    # it for 45 s inside the forced one-second expiry).
+    await_released_client_socket_down!(first_socket)
     WebsocketCleanupFence.await_session_cleanups!()
     expire_matching_owner_lease!(Repo.get!(CodexSession, first_session.id))
 
@@ -1477,6 +1485,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SessionContinuityTest do
     # as its soft preference, which must survive the turn's session lock.
     assert recreated.request_metadata["routing"]["session_preference_kind"] == "recreated"
     assert recreated.request_metadata["routing"]["session_preference_status"] == "applied"
+  end
+
+  # `terminate/2` of the released client's socket drains the turn's response
+  # task (it waits for it, then cancels it past its drain budget) before the
+  # socket exits, so the exit is the signal that no task of that connection is
+  # left to write the session's lease. The helper closed the client already; a
+  # socket that is down by now answers `:noproc` at once.
+  defp await_released_client_socket_down!(socket) do
+    monitor = Process.monitor(socket)
+    assert_receive {:DOWN, ^monitor, :process, ^socket, _reason}, @connection_shutdown_timeout_ms
   end
 
   defp expire_matching_owner_lease!(session) do
@@ -1501,7 +1519,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SessionContinuityTest do
 
   defp await_matching_lease_expiry!(session_id, expected, deadline) do
     observation = matching_lease_snapshot!(session_id)
-    assert observation.deadline == expected
+
+    assert observation.deadline == expected,
+           "the lease deadline moved while the forced expiry was pending: something renewed the lease after it was written"
 
     cond do
       DateTime.compare(observation.clock, expected) != :lt ->
