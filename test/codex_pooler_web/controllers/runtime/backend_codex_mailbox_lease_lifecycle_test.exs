@@ -137,9 +137,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
     with_info_log(fn ->
       fixture = open_scenario!(context)
       expired_packet_deadline = System.monotonic_time(:millisecond) + 4000
-      holder = hold_session_row!(fixture.old_session.id)
       fixture = observe_boundary!(fixture)
       {cleanup, ref} = fixture.cleanup
+      # Held only once `observe_boundary!/1` has switched the owner's renewal timer off: a tick that fires while the
+      # test holds the row blocks the owner on it, and the suppression's `:sys.get_state` then times out (findings#303
+      # row 303-9). The cleanup stays parked at its barrier until the release below, so the row is still held when its
+      # second guard asks for it.
+      holder = hold_session_row!(fixture.old_session.id)
       started = System.monotonic_time(:millisecond)
       send(cleanup.pid, {:release_runtime_cleanup_owner_candidates, ref})
       waiter = await_session_waiter!(holder.backend, System.monotonic_time(:millisecond) + @budget)
@@ -773,9 +777,28 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
     end
   end
 
-  defp assert_backend_transaction_released!(backend) do
-    [[transactions]] = Repo.query!("SELECT count(*) FROM pg_stat_activity WHERE pid=$1 AND xact_start IS NOT NULL", [backend]).rows
-    assert transactions == 0
+  # The deadline's cut returns before the backend reacts: Postgrex cancels and closes the connection on its own
+  # process while the caller moves on, so the waiter is still in its row-lock wait for a moment and only then aborts
+  # its transaction (findings#303 row 303-9). The holder keeps the row throughout, so what is polled, from fresh
+  # snapshots, is the backend ending its own transaction, never a release by the holder.
+  defp assert_backend_transaction_released!(backend), do: await_backend_transaction_released!(backend, System.monotonic_time(:millisecond) + @budget)
+
+  defp await_backend_transaction_released!(backend, deadline) do
+    Repo.query!("SELECT pg_stat_clear_snapshot()")
+    rows = Repo.query!("SELECT state, wait_event_type, wait_event FROM pg_stat_activity WHERE pid=$1 AND xact_start IS NOT NULL", [backend]).rows
+
+    case rows do
+      [] ->
+        :ok
+
+      [[state, wait_event_type, wait_event]] ->
+        assert System.monotonic_time(:millisecond) < deadline, "backend #{backend} still holds its transaction: state=#{state} wait_event=#{wait_event_type}/#{wait_event}"
+
+        receive do
+        after
+          10 -> await_backend_transaction_released!(backend, deadline)
+        end
+    end
   end
 
   defp active_owner_task!(owner) do
