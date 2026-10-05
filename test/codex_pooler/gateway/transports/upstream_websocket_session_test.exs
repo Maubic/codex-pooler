@@ -4681,18 +4681,24 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
       refute_received {:upstream_websocket_connection_closed, _session, _signal}
     end
 
-    test "a refused fresh anchor opens no connection and signals no close" do
+    test "a connection that carried no request signals nothing when it closes" do
       peer = start_raw_websocket_peer()
       session = start_subscribed_session!()
       request = raw_websocket_request(peer.url, self())
 
-      # An anchored request cannot acquire a connection it did not produce.
+      # An anchored request meeting a fresh connection is refused before
+      # anything is sent, so the connection it opened carries no request.
       assert {:ok, %{terminal: "error", upstream_error_code: "previous_response_not_found"}} =
                UpstreamWebsocketSession.request(session, %{request | connection_bound_continuation?: true})
 
-      assert {:ok, %{generation: nil}} = UpstreamWebsocketSession.live_connection(session)
-      assert :ok = UpstreamWebsocketSession.close(session)
+      log =
+        close_idle_connection_from_peer!(peer, session, fn server_socket ->
+          :ok = :gen_tcp.send(server_socket, raw_websocket_server_close_frame(1000))
+        end)
+
       refute_received {:raw_upstream_websocket_request, 1, _request_count}
+      assert log =~ "reason_code=peer_close_frame closed_by=peer close_code=1000 "
+      assert log =~ " connection_requests=0 "
       refute_received {:upstream_websocket_connection_closed, _session, _signal}
     end
 
@@ -5797,7 +5803,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
   end
 
   @tag :continuation_generation_boundary
-  test "marked continuation on a replacement key refuses before acquisition and leaves the producing connection intact" do
+  test "public marked continuation on a replacement key refuses before acquisition and leaves the producing connection intact" do
     # Strict finite scenario: the guarded continuation sends nothing, and the
     # later full request must open the replacement connection.
     upstream =
@@ -5812,12 +5818,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     {:ok, session} = UpstreamWebsocketSession.start_link([])
     on_exit(fn -> UpstreamWebsocketSession.close(session) end)
 
-    warmup_request = websocket_request(FakeUpstream.url(upstream))
+    warmup_request = %{websocket_request(FakeUpstream.url(upstream)) | message_mapper: &StreamProtocol.normalize_public_openai_responses_json_message/1}
     replacement_request = %{warmup_request | url: warmup_request.url <> "?scope=replacement"}
 
     assert {:ok, _warmup} = UpstreamWebsocketSession.request(session, warmup_request)
 
-    assert_guard_terminal(
+    assert_public_guard_terminal(
       session,
       %{replacement_request | connection_bound_continuation?: true},
       :replacement_guard,
@@ -5838,7 +5844,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
   end
 
   @tag :continuation_generation_boundary
-  test "repeated marked continuations after invalidation refuse before acquisition until an unanchored request" do
+  test "repeated public marked continuations after invalidation refuse before acquisition until an unanchored request" do
     # Strict finite scenario: the guarded continuation sends nothing after
     # invalidation, and the later request must open the reconnect connection.
     upstream =
@@ -5853,11 +5859,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     {:ok, session} = UpstreamWebsocketSession.start_link([])
     on_exit(fn -> UpstreamWebsocketSession.close(session) end)
 
-    request = websocket_request(FakeUpstream.url(upstream))
+    request = %{websocket_request(FakeUpstream.url(upstream)) | message_mapper: &StreamProtocol.normalize_public_openai_responses_json_message/1}
     assert {:ok, _warmup} = UpstreamWebsocketSession.request(session, request)
     assert :ok = UpstreamWebsocketSession.invalidate_connection(session)
 
-    assert_guard_terminal(
+    assert_public_guard_terminal(
       session,
       %{request | connection_bound_continuation?: true},
       :invalidation_guard,
@@ -5865,12 +5871,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     )
 
     assert [_warmup] = FakeUpstream.requests(upstream)
-    assert_guard_terminal(
+
+    assert_public_guard_terminal(
       session,
       %{request | connection_bound_continuation?: true},
       :second_invalidation_guard,
       :reconnected
     )
+
     assert [_warmup] = FakeUpstream.requests(upstream)
     assert FakeUpstream.websocket_connection_count(upstream) == 1
     assert {:ok, %{generation: nil}} = UpstreamWebsocketSession.live_connection(session)
@@ -5928,17 +5936,58 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
   end
 
   @tag :continuation_generation_boundary
-  test "request_once writes one retry terminal without sending marked continuation bytes" do
+  test "native fresh continuation acquires a replacement without sending and reuses it for explicit full retry" do
+    upstream =
+      start_upstream(
+        # provenance: synthetic_adversarial
+        FakeUpstream.strict_sequence([
+          strict_websocket_turn(websocket_success_without_id(), websocket_connection_ordinal: 1)
+        ])
+      )
+
+    {:ok, session} = UpstreamWebsocketSession.start_link([])
+    on_exit(fn -> UpstreamWebsocketSession.close(session) end)
+    parent = self()
+
+    request = %{
+      websocket_request(FakeUpstream.url(upstream))
+      | native_codex_response_control: %TurnSnapshot{models_etag: "native-guard-etag"},
+        writer: fn frame -> send(parent, {:native_guard_frame, frame}) end
+    }
+
+    assert {:ok, result} = UpstreamWebsocketSession.request(session, %{request | connection_bound_continuation?: true})
+    assert result.upstream_error_code == "previous_response_not_found"
+    assert result.transport_failure == expected_guard_metadata(:fresh)
+    assert_receive {:native_guard_frame, metadata}, @message_detection_timeout_ms
+    assert %{"type" => "codex.response.metadata"} = CodexPooler.JSON.decode!(metadata)
+    terminal = native_retry_terminal()
+    assert_receive {:native_guard_frame, ^terminal}, @message_detection_timeout_ms
+    refute_received {:native_guard_frame, _extra_frame}
+    assert FakeUpstream.requests(upstream) == []
+    assert FakeUpstream.websocket_connection_count(upstream) == 1
+    assert {:ok, %{generation: generation}} = UpstreamWebsocketSession.live_connection(session)
+    assert is_integer(generation)
+
+    assert {:ok, result} = UpstreamWebsocketSession.request(session, request)
+    assert result.upstream_websocket_connection.reused
+    assert [_full_retry] = FakeUpstream.requests(upstream)
+    assert FakeUpstream.websocket_connection_count(upstream) == 1
+    assert :ok = FakeUpstream.verify!(upstream)
+  end
+
+  @tag :continuation_generation_boundary
+  test "public request_once writes one refusal terminal without sending marked continuation bytes" do
     upstream = start_upstream(websocket_success_without_id())
     parent = self()
 
     request =
       FakeUpstream.url(upstream)
       |> websocket_request()
+      |> Map.put(:message_mapper, &StreamProtocol.normalize_public_openai_responses_json_message/1)
       |> Map.put(:connection_bound_continuation?, true)
       |> Map.put(:writer, fn frame -> send(parent, {:guard_frame, :request_once_guard, frame}) end)
 
-    assert_guard_result(
+    assert_public_guard_result(
       UpstreamWebsocketSession.request_once(request),
       :request_once_guard,
       :fresh
@@ -6035,38 +6084,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
              UpstreamWebsocketSession.request_once(websocket_request(FakeUpstream.url(upstream)))
   end
 
-  defp assert_guard_terminal(session, request, label, connection_use) do
+  defp assert_public_guard_terminal(session, request, label, connection_use) do
     parent = self()
     request = %{request | writer: fn frame -> send(parent, {:guard_frame, label, frame}) end}
-
-    assert_guard_result(UpstreamWebsocketSession.request(session, request), label, connection_use)
+    assert_public_guard_result(UpstreamWebsocketSession.request(session, request), label, connection_use)
   end
 
-  defp assert_guard_result(result, label, connection_use) do
-    terminal = native_retry_terminal()
-
-    assert {:ok,
-            %{
-              body: "data: " <> ^terminal <> "\n\n",
-              terminal: "error",
-              status: 200,
-              headers: headers,
-              upstream_error_code: "previous_response_not_found",
-              upstream_error_param: "previous_response_id",
-              websocket_frame_headers: %{},
-              transport_failure: transport_failure,
-              upstream_websocket_connection: connection
-            }} = result
-
-    assert transport_failure ==
-             expected_guard_metadata(connection_use)
-
-    assert connection.reused == false
+  defp assert_public_guard_result(result, label, connection_use) do
+    assert {:ok, %{terminal: "error", upstream_error_code: "previous_response_not_found", transport_failure: transport_failure, upstream_websocket_connection: connection}} = result
+    assert transport_failure == expected_guard_metadata(connection_use)
+    refute connection.reused
     assert connection.reconnected == (connection_use == :reconnected)
-
-    assert headers == [] or Enum.any?(headers, fn {name, value} -> name == "sec-websocket-accept" and byte_size(value) > 0 end)
-
-    assert_receive {:guard_frame, ^label, ^terminal}, @message_detection_timeout_ms
+    assert_receive {:guard_frame, ^label, terminal}, @message_detection_timeout_ms
+    assert %{"type" => "error", "status" => 400, "error" => %{"type" => "invalid_request_error", "message" => "Invalid `previous_response_id`."} = error} = CodexPooler.JSON.decode!(terminal)
+    refute Map.has_key?(error, "code")
     refute_received {:guard_frame, ^label, _extra_terminal}
   end
 

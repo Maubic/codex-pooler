@@ -527,7 +527,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.UpstreamCloseDownstreamTe
     upstream =
       start_upstream(
         # provenance: synthetic_adversarial (close 1000 right after the terminal)
-        FakeUpstream.strict_sequence([anchorless_request(1, closing_turn("resp_ws_public_upstream_close", 1000))])
+        FakeUpstream.strict_sequence([
+          anchorless_request(
+            1,
+            FakeUpstream.websocket_sse_then_close(
+              [{"response.completed", %{"type" => "response.completed", "response" => %{"id" => "resp_ws_public_upstream_close", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 2, "output_tokens" => 1, "total_tokens" => 3}}}}],
+              code: 1000,
+              reason: "synthetic upstream close"
+            )
+          )
+        ])
       )
 
     setup = upstream_close_setup(upstream, nil)

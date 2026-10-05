@@ -125,6 +125,39 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesToolCompletionTest do
     end
   end
 
+  for {kind, output_kind} <- [{"function_call", "function_call_output"}, {"custom_tool_call", "custom_tool_call_output"}] do
+    test "#{output_kind} with distinct item and index preserves its completed call" do
+      kind = unquote(kind)
+      output_kind = unquote(output_kind)
+      complete = observe([item("added", kind, 1, "item-a", "call-a"), item("done", kind, 1, "item-a", "call-a")])
+      output = item("added", output_kind, 2, "output-a", "call-a") |> put_in(["item", "output"], "synthetic-private-output")
+      state = observe([output, %{output | "type" => "response.output_item.done"}, %{"type" => "response.completed"}], complete)
+      assert Completion.completion_verdict(state) == :ok
+      assert state.tools == complete.tools
+      assert state.aliases == complete.aliases
+      refute :erlang.term_to_binary(state) =~ "synthetic-private-output"
+    end
+
+    test "#{output_kind} cannot discharge pending calls or hide collisions" do
+      kind = unquote(kind)
+      output_kind = unquote(output_kind)
+      added = item("added", kind, 1, "item-a", "call-a")
+      output = item("done", output_kind, 2, "output-a", "call-a")
+      assert Completion.completion_verdict(observe([added, output])) == {:error, :incomplete_tool_item}
+
+      for phase <- ["added", "done"],
+          {index, id} <- [{1, "output-a"}, {2, "item-a"}] do
+        assert_invalid([added, item("done", kind, 1, "item-a", "call-a"), item(phase, output_kind, index, id, "call-a")])
+      end
+
+      assert_invalid([added, put_in(output, ["item", "call_id"], "call-b") |> Map.put("call_id", "call-a")])
+      assert_invalid([added, item("done", "message", 2, "output-a", "call-a")])
+      assert_invalid([added, item("done", output_kind, -1, "output-a", "call-a")])
+      assert_invalid([added, item("done", output_kind, 2, "", "call-a")])
+      assert Completion.completion_verdict(observe([added, item("done", output_kind, 2, String.duplicate("x", 1025), "call-a")])) == {:error, :tool_tracking_overflow}
+    end
+  end
+
   test "duplicate add, duplicate done and orphan tool events poison" do
     added = item("added", "function_call", 0, "item-a")
     done = item("done", "function_call", 0, "item-a")

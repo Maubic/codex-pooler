@@ -52,9 +52,29 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
     kind = if is_map(item), do: Map.get(item, "type")
     phase = if type == "response.output_item.added", do: :add, else: :done
 
-    if kind in @tool_types or tracked_reference?(state, event),
-      do: observe_tool(state, event, kind, phase),
-      else: state
+    cond do
+      kind in @tool_types ->
+        observe_tool(state, event, kind, phase)
+
+      tracked_reference?(state, event) ->
+        if kind in ["function_call_output", "custom_tool_call_output"],
+          do: observe_output(state, event),
+          else: observe_tool(state, event, kind, phase)
+
+      true ->
+        state
+    end
+  end
+
+  defp observe_output(state, event) do
+    with {:ok, item_id, _call_id} <- source_identity(event),
+         index when is_integer(index) and index >= 0 and index <= @max_index <- Map.get(event, "output_index"),
+         false <- Map.has_key?(state.tools, index) or alias_bound?(state, item_id, nil) do
+      state
+    else
+      {:error, reason} -> %{state | reason: reason}
+      _invalid -> %{state | reason: :invalid_tool_correlation}
+    end
   end
 
   @spec completion_verdict(state()) :: :ok | {:error, reason()}

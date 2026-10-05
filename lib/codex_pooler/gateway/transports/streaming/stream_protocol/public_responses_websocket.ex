@@ -62,10 +62,12 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
     tracker = PublicResponsesToolCompletion.observe(state.tool_completion, source_decoded)
     state = %{state | tool_completion: tracker}
     {data, source_decoded, rejected?} = guard_success(data, source_decoded, tracker)
+
     {_data, decoded} =
       if rejected? or pending_source_error?(source_decoded, tracker),
         do: {data, source_decoded},
         else: PublicResponses.normalize_json_message(data, source_decoded)
+
     decoded = PublicResponses.drop_provider_event_headers(decoded)
     event_type = string_value(decoded, "type")
 

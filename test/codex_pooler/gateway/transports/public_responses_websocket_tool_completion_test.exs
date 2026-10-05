@@ -10,6 +10,7 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesWebsocketToolCompletionT
       item = %{"type" => kind, "id" => "item_fixture", "call_id" => "call_fixture", "name" => "fixture"}
       added = %{"type" => "response.output_item.added", "output_index" => 0, "item" => item}
       done = %{"type" => "response.output_item.done", "output_index" => 0, "item" => item}
+
       events =
         case defect do
           :missing_done -> [added]
@@ -19,10 +20,13 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesWebsocketToolCompletionT
           :string_index -> [Map.put(added, "output_index", "0"), done]
           :one_pending -> [added, done, %{added | "output_index" => 1, "item" => %{item | "id" => "other_fixture", "call_id" => "other_call"}}]
         end
-      state = Enum.reduce(events, PublicResponsesWebsocket.new_state("fixture_stream"), fn event, state ->
-        assert {:push, _wire, state} = normalize(event, state)
-        state
-      end)
+
+      state =
+        Enum.reduce(events, PublicResponsesWebsocket.new_state("fixture_stream"), fn event, state ->
+          assert {:push, _wire, state} = normalize(event, state)
+          state
+        end)
+
       assert {:push, wire, state} = normalize(terminal("response.completed"), state)
       event = CodexPooler.JSON.decode!(wire)
       assert event["type"] == "error"
@@ -59,11 +63,13 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesWebsocketToolCompletionT
   end
 
   defp terminal(type) do
-    status = case type do
-      "response.completed" -> "completed"
-      "response.failed" -> "failed"
-      "response.incomplete" -> "incomplete"
-    end
+    status =
+      case type do
+        "response.completed" -> "completed"
+        "response.failed" -> "failed"
+        "response.incomplete" -> "incomplete"
+      end
+
     %{"type" => type, "response" => %{"id" => "resp_fixture", "status" => status, "output" => [], "usage" => %{"input_tokens" => 5457, "input_tokens_details" => %{"cache_write_tokens" => 5454}, "output_tokens" => 2, "total_tokens" => 5459}}}
   end
 

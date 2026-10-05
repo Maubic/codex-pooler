@@ -1413,7 +1413,7 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizerTest do
         |> RequestOptions.for_websocket(payload)
 
       assert {true, true} = capture_continuation_state(payload, native_options)
-      assert {true, false} = capture_continuation_state(payload, public_options)
+      assert {true, true} = capture_continuation_state(payload, public_options)
     end
 
     test "retained semantic native HTTP state is not connection-bound at dispatch" do

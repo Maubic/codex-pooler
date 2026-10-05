@@ -971,7 +971,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
          receive_state,
          connection_usage
        ) do
-    if (request.connection_bound_continuation? and not reusable_connection?(state, key)) or
+    if (public_openai_responses_mapper?(request.message_mapper) and Map.get(request, :connection_bound_continuation?, false) and not reusable_connection?(state, key)) or
          (collect_compaction?(request) and
             not collect_connection_eligible?(state, key, request, connection_usage)) do
       reason = if connection_use(connection_usage) == :reused and Map.get(state, :last_successful_effective_serving_mode) != request.effective_serving_mode, do: :previous_response_serving_mode_mismatch, else: :previous_response_generation_mismatch

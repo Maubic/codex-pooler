@@ -1014,7 +1014,13 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
   @tag :v1_websocket
   test "GET /v1/responses websocket coerces public opencode replay frames before dispatch" do
     upstream =
-      start_upstream(public_websocket_completed_response("resp_v1_websocket_opencode_replay"))
+      start_upstream(
+        # provenance: synthetic_adversarial; healthy producing turn followed by anchored replay.
+        FakeUpstream.strict_sequence([
+          public_websocket_completed_response("resp_v1_ws_opencode_previous"),
+          public_websocket_completed_response("resp_v1_websocket_opencode_replay")
+        ])
+      )
 
     setup = gateway_setup(upstream, model_metadata: %{"input_modalities" => ["text", "image"]})
     assert :ok = Events.subscribe_pool(setup.pool)
@@ -1028,11 +1034,18 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       ])
 
     try do
+      opener = CodexPooler.JSON.encode!(%{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => "synthetic opener"})
+      {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, opener)
+      {conn, websocket, opener_frame} = public_websocket_receive_text!(conn, websocket, ref)
+      assert %{"type" => "response.completed", "response" => %{"id" => previous_response_id}} = CodexPooler.JSON.decode!(opener_frame)
+      assert previous_response_id == "resp_v1_ws_opencode_previous"
+      assert_receive_finalized_request!()
+
       payload =
         CodexPooler.JSON.encode!(%{
           "type" => "response.create",
           "model" => setup.model.exposed_model_id,
-          "previous_response_id" => "resp_v1_ws_opencode_previous",
+          "previous_response_id" => previous_response_id,
           "store" => false,
           "moderation" => %{"model" => "omni-moderation-latest"},
           "input" => [
@@ -1075,13 +1088,15 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
                "response" => %{"id" => "resp_v1_websocket_opencode_replay"}
              } = CodexPooler.JSON.decode!(frame)
 
-      assert [captured] = FakeUpstream.requests(upstream)
+      assert [producing, captured] = FakeUpstream.requests(upstream)
+      assert producing.websocket_connection_id == captured.websocket_connection_id
+      refute Map.has_key?(producing.json, "previous_response_id")
       assert captured.path == "/backend-api/codex/responses"
       assert captured.json["type"] == "response.create"
       assert captured.json["generate"] == true
       assert captured.json["stream"] == true
       assert captured.json["store"] == false
-      assert captured.json["previous_response_id"] == "resp_v1_ws_opencode_previous"
+      assert captured.json["previous_response_id"] == previous_response_id
       assert captured.json["moderation"] == %{"model" => "omni-moderation-latest"}
 
       assert Enum.map(captured.json["input"], & &1["type"]) == [
@@ -1103,7 +1118,8 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
 
       assert_receive_finalized_request!()
 
-      assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
+      assert [opener_request, request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id, order_by: [asc: r.admitted_at]))
+      assert opener_request.status == "succeeded"
       assert request.endpoint == "/v1/responses"
       assert request.transport == "websocket"
       assert request.status == "succeeded"
@@ -1116,6 +1132,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       refute persistence_text =~ "fc_v1_ws_opencode_call"
       refute persistence_text =~ setup.authorization
       refute persistence_text =~ setup.raw_key
+      assert :ok = FakeUpstream.verify!(upstream)
 
       conn
     after
@@ -1127,7 +1144,13 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
   @tag :v1_websocket
   test "GET /v1/responses websocket forwards namespaced custom tool replay before dispatch" do
     upstream =
-      start_upstream(public_websocket_completed_response("resp_v1_websocket_custom_tool_replay"))
+      start_upstream(
+        # provenance: synthetic_adversarial; healthy producing turn followed by namespaced replay.
+        FakeUpstream.strict_sequence([
+          public_websocket_completed_response("resp_v1_custom_tool_previous"),
+          public_websocket_completed_response("resp_v1_websocket_custom_tool_replay")
+        ])
+      )
 
     setup = gateway_setup(upstream)
     assert :ok = Events.subscribe_pool(setup.pool)
@@ -1140,11 +1163,18 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       ])
 
     try do
+      opener = CodexPooler.JSON.encode!(%{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => "synthetic opener"})
+      {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, opener)
+      {conn, websocket, opener_frame} = public_websocket_receive_text!(conn, websocket, ref)
+      assert %{"type" => "response.completed", "response" => %{"id" => previous_response_id}} = CodexPooler.JSON.decode!(opener_frame)
+      assert previous_response_id == "resp_v1_custom_tool_previous"
+      assert_receive_finalized_request!()
+
       payload =
         CodexPooler.JSON.encode!(%{
           "type" => "response.create",
           "model" => setup.model.exposed_model_id,
-          "previous_response_id" => "resp_v1_custom_tool_previous",
+          "previous_response_id" => previous_response_id,
           "store" => false,
           "generate" => true,
           "input" => [
@@ -1185,11 +1215,13 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
 
       assert_receive_finalized_request!()
 
-      assert [captured] = FakeUpstream.requests(upstream)
+      assert [producing, captured] = FakeUpstream.requests(upstream)
+      assert producing.websocket_connection_id == captured.websocket_connection_id
+      refute Map.has_key?(producing.json, "previous_response_id")
       assert captured.path == "/backend-api/codex/responses"
       assert captured.json["type"] == "response.create"
       assert captured.json["generate"] == true
-      assert captured.json["previous_response_id"] == "resp_v1_custom_tool_previous"
+      assert captured.json["previous_response_id"] == previous_response_id
 
       assert [custom_call, custom_output] = captured.json["input"]
       assert custom_call["type"] == "custom_tool_call"
@@ -1203,7 +1235,8 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       assert custom_output["name"] == "lookup"
       assert custom_output["output"] == "synthetic custom output"
 
-      assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
+      assert [opener_request, request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id, order_by: [asc: r.admitted_at]))
+      assert opener_request.status == "succeeded"
       assert request.endpoint == "/v1/responses"
       assert request.transport == "websocket"
       assert request.status == "succeeded"
@@ -1217,6 +1250,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       refute persistence_text =~ "turn_v1_custom_output"
       refute persistence_text =~ setup.authorization
       refute persistence_text =~ setup.raw_key
+      assert :ok = FakeUpstream.verify!(upstream)
 
       conn
     after
@@ -1268,14 +1302,21 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
   @tag :v1_websocket
   @tag :tool_result_previous_response
   test "GET /v1/responses websocket forwards the same safe continuation shape and rejects malformed item references" do
+    previous_response_id = "resp_v1_ws_safe_previous_#{System.unique_integer([:positive])}"
+
     upstream =
-      start_upstream(public_websocket_completed_response("resp_v1_websocket_safe_continuation"))
+      start_upstream(
+        # provenance: synthetic_adversarial; healthy producing turn followed by safe continuation.
+        FakeUpstream.strict_sequence([
+          public_websocket_completed_response(previous_response_id),
+          public_websocket_completed_response("resp_v1_websocket_safe_continuation")
+        ])
+      )
 
     setup = gateway_setup(upstream)
     assert :ok = Events.subscribe_pool(setup.pool)
     port = start_public_endpoint!()
     turn_state = "v1-safe-continuation-ws-#{System.unique_integer([:positive])}"
-    previous_response_id = "resp_v1_ws_safe_previous_#{System.unique_integer([:positive])}"
     tool_call_id = "call_v1_ws_safe_#{System.unique_integer([:positive])}"
 
     {safe_conn, safe_websocket, safe_ref, _response_headers} =
@@ -1284,6 +1325,12 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       ])
 
     try do
+      opener = CodexPooler.JSON.encode!(%{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => "synthetic opener"})
+      {safe_conn, safe_websocket} = public_websocket_send_text!(safe_conn, safe_websocket, safe_ref, opener)
+      {safe_conn, safe_websocket, opener_frame} = public_websocket_receive_text!(safe_conn, safe_websocket, safe_ref)
+      assert %{"type" => "response.completed", "response" => %{"id" => ^previous_response_id}} = CodexPooler.JSON.decode!(opener_frame)
+      assert_receive_finalized_request!()
+
       payload =
         CodexPooler.JSON.encode!(%{
           "type" => "response.create",
@@ -1320,7 +1367,9 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
 
       assert_receive_finalized_request!()
 
-      assert [captured] = FakeUpstream.requests(upstream)
+      assert [producing, captured] = FakeUpstream.requests(upstream)
+      assert producing.websocket_connection_id == captured.websocket_connection_id
+      refute Map.has_key?(producing.json, "previous_response_id")
       assert captured.path == "/backend-api/codex/responses"
       assert captured.json["type"] == "response.create"
       assert captured.json["generate"] == true
@@ -1340,7 +1389,8 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       assert Enum.at(captured.json["input"], 1)["namespace"] == "browser.search"
       assert Enum.at(captured.json["input"], 2)["role"] == "user"
 
-      assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
+      assert [opener_request, request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id, order_by: [asc: r.admitted_at]))
+      assert opener_request.status == "succeeded"
       assert request.endpoint == "/v1/responses"
       assert request.transport == "websocket"
       assert request.status == "succeeded"
@@ -1400,9 +1450,10 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
         Mint.HTTP.close(invalid_conn)
       end
 
-      assert FakeUpstream.count(upstream) == 1
-      assert Repo.aggregate(Request, :count) == 1
-      assert Repo.aggregate(Attempt, :count) == 1
+      assert FakeUpstream.count(upstream) == 2
+      assert Repo.aggregate(Request, :count) == 2
+      assert Repo.aggregate(Attempt, :count) == 2
+      assert :ok = FakeUpstream.verify!(upstream)
 
       safe_conn
     after

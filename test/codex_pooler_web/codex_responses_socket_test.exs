@@ -13,6 +13,8 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTest do
   alias CodexPooler.Gateway.Transports.Admission
   alias CodexPooler.Gateway.Transports.Streaming.PreparedWebsocketFrame
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesSequence
+  alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesToolCompletion
+  alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesWebsocket
   alias CodexPooler.Gateway.Transports.Websocket.{ActivityRegistry, RolloutDrain}
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
   alias CodexPooler.Gateway.Transports.WebsocketRolloutDrainSupport
@@ -1344,12 +1346,12 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTest do
       assert MapSet.member?(turn_two_state.tasks, second_task_pid)
       assert :queue.len(turn_two_state.queued_response_payloads) == 0
 
-      assert turn_two_state.public_responses_websocket_state == %{
-               custom_tool_namespaces: %{},
-               max_seen: nil,
-               terminal_latched?: false,
-               overflow_latched?: false
-             }
+      public_state = turn_two_state.public_responses_websocket_state
+      assert public_state.custom_tool_namespaces == %{}
+      assert public_state.max_seen == nil
+      refute public_state.terminal_latched?
+      refute public_state.overflow_latched?
+      assert public_state.tool_completion == PublicResponsesToolCompletion.new_state()
 
       frame =
         CodexPooler.JSON.encode!(%{"type" => "response.output_text.delta", "delta" => "current"})
@@ -1499,16 +1501,14 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTest do
   test "public websocket sequence overflow emits one error envelope and then latches drops" do
     task_pid = self()
 
-    tracker = %{
-      max_seen: PublicResponsesSequence.max_safe_integer() - 1,
-      terminal_latched?: false,
-      overflow_latched?: false
-    }
+    tracker =
+      PublicResponsesWebsocket.new_state("lane-overflow")
+      |> Map.put(:max_seen, PublicResponsesSequence.max_safe_integer() - 1)
 
     state =
       public_turn_state(task_pid, %{
         public_response_stream_id: "lane-overflow",
-        public_responses_websocket_state: Map.put(tracker, :stream_id, "lane-overflow")
+        public_responses_websocket_state: tracker
       })
 
     frame =
@@ -1580,11 +1580,9 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTest do
 
     overflow_state =
       public_turn_state(task_pid, %{
-        public_responses_websocket_state: %{
-          max_seen: PublicResponsesSequence.max_safe_integer() - 1,
-          terminal_latched?: false,
-          overflow_latched?: false
-        }
+        public_responses_websocket_state:
+          PublicResponsesWebsocket.new_state()
+          |> Map.put(:max_seen, PublicResponsesSequence.max_safe_integer() - 1)
       })
 
     assert {:push, {:text, _payload}, error_state} =
