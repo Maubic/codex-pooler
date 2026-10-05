@@ -22,7 +22,7 @@ permissions:
 jobs:
   build:
     if: github.event_name != 'status' || (github.event.context == 'continuous-integration/drone/push' && github.event.state == 'success')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: release-image-publication
       queue: max
