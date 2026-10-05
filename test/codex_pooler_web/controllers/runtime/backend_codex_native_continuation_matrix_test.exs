@@ -693,11 +693,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexNativeContinuationMatrixTest do
     window = CodexPooler.JSON.decode!(body["client_metadata"]["x-codex-turn-metadata"])["window_number"]
     headers = [{"x-codex-window-id", "#{thread}:#{window}"}]
     headers = if setup.serving_mode == "lite", do: [{"x-openai-internal-codex-responses-lite", "true"} | headers], else: headers
+    sockets_before = WebsocketCleanupFence.listener_sockets()
     {conn, ws, ref, _headers} = public_websocket_connect_with_request_headers!(port, setup, thread, @path, headers)
+    socket = WebsocketCleanupFence.await_new_listener_socket!(sockets_before)
     {conn, ws} = public_websocket_send_text!(conn, ws, ref, CodexPooler.JSON.encode!(Map.put(body, "type", "response.create")))
     {_conn, _ws, terminal} = receive_native_terminal!(conn, ws, ref)
     assert terminal["type"] == "response.completed"
+    monitor = Process.monitor(socket)
     Mint.HTTP.close(conn)
+    # Neither the settled request nor the delivery receipt orders the turn's response task, which registers the
+    # session's continuity, and so renews its owner lease, after the settlement: a socket closing while that task is
+    # slower than its 250 ms terminate drain records the receipt without it when the owner is local, and a lease
+    # forced to lapse next was renewed again for 45 s (findings#303 row 303-6). The socket's exit ends the task.
+    assert_receive {:DOWN, ^monitor, :process, ^socket, _reason}, @budget
     WebsocketCleanupFence.await_session_cleanups!()
     latest!(setup)
   end
