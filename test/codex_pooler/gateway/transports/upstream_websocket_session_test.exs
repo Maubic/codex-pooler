@@ -6023,6 +6023,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
         end
       end)
 
+    # The owner is not linked to the test, so a failure before the stop below would leave the fake running.
+    on_exit(fn ->
+      if Process.alive?(owner), do: send(owner, :stop_fake_upstream_owner)
+    end)
+
     assert_receive {:fake_upstream_started, ^owner, upstream}, @message_detection_timeout_ms
     supervisor_monitor = Process.monitor(upstream.supervisor)
 
@@ -6050,7 +6055,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     # whole shutdown: one read returned the upgrade response together with the close frame, which the upgrade does not
     # decode, and the end of the connection then came before its send (the send found it closed) or after it (the
     # receive saw it). A node shared with other suites produced the send-phase one (findings#303 row 303-7, Drone 1809).
-    case Task.await(request_task, @detection_timeout_ms) do
+    case Task.await(request_task, @message_detection_timeout_ms) do
       {:ok, %{terminal: "response.completed", status: 200}} -> :ok
       {:error, %{reason: :upstream_websocket_closed_before_terminal}} -> :ok
       {:error, %{reason: %Mint.TransportError{reason: reason}, transport_failure: %{"phase" => "send_payload", "termination_source" => "payload_send_error", "terminal_seen" => false, "text_frame_count" => 0}}} when reason in @peer_ended_connection_reasons -> :ok

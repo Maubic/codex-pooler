@@ -1440,7 +1440,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
   end
 
   test "idle owner retires when its current upstream exits", context do
-    context = %{context | codex_session_id: Ecto.UUID.generate()}
+    context = uuid_owner_context(context)
     {upstream, upstream_pid} = exit_controlled_upstream(self(), :idle)
     persistence = owner_exit_persistence_spy(self(), context)
 
@@ -1452,18 +1452,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
     Process.exit(upstream_pid, :shutdown)
 
-    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}
-    assert_receive {:owner_exit_release, session_id, lease_token, "owner_crashed", nil}
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}, @detection_timeout_ms
+    assert_receive {:owner_exit_release, session_id, lease_token, "owner_crashed", nil}, @detection_timeout_ms
     assert session_id == context.codex_session_id
     assert lease_token == context.owner_lease_token
     refute_received {:owner_exit_interrupt, _, _}
-    assert_receive {:exit_controlled_upstream_closed, :idle, ^upstream_pid}
+    assert_receive {:exit_controlled_upstream_closed, :idle, ^upstream_pid}, @detection_timeout_ms
     assert await_owner_unavailable(context.codex_session_id) == {:error, :owner_unavailable}
   end
 
   test "pre-visible active owner settles once and retires when its current upstream exits",
        context do
-    context = %{context | codex_session_id: Ecto.UUID.generate()}
+    context = uuid_owner_context(context)
     {upstream, upstream_pid} = exit_controlled_upstream(self(), :pre_visible)
     persistence = owner_exit_persistence_spy(self(), context)
 
@@ -1484,16 +1484,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
     Process.exit(upstream_pid, :shutdown)
 
-    assert_receive {:websocket_owner_frame, "upstream-exit-pre", 1, {:error, :owner_crashed, safe_payload}}
+    assert_receive {:websocket_owner_frame, "upstream-exit-pre", 1, {:error, :owner_crashed, safe_payload}}, @detection_timeout_ms
 
     assert safe_payload.code == "owner_crashed"
-    assert_receive {:websocket_owner_frame, "upstream-exit-pre", 1, :complete}
+    assert_receive {:websocket_owner_frame, "upstream-exit-pre", 1, :complete}, @detection_timeout_ms
 
-    assert_receive {:owner_exit_submitter_outcome, :pre_visible, {:return, {:error, :owner_crashed}}}
+    assert_receive {:owner_exit_submitter_outcome, :pre_visible, {:return, {:error, :owner_crashed}}}, @detection_timeout_ms
 
-    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}, @detection_timeout_ms
     assert_owner_exit_persisted_once(context)
-    assert_receive {:exit_controlled_upstream_closed, :pre_visible, ^upstream_pid}
+    assert_receive {:exit_controlled_upstream_closed, :pre_visible, ^upstream_pid}, @detection_timeout_ms
     assert await_owner_unavailable(context.codex_session_id) == {:error, :owner_unavailable}
     refute_received {:exit_controlled_upstream_send, :pre_visible, _upstream_pid, 2}
     refute_received {:websocket_owner_frame, "upstream-exit-pre", 1, _duplicate}
@@ -1501,7 +1501,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
   end
 
   test "post-visible active owner preserves the commit barrier before retiring", context do
-    context = %{context | codex_session_id: Ecto.UUID.generate()}
+    context = uuid_owner_context(context)
     {upstream, upstream_pid} = exit_controlled_upstream(self(), :post_visible)
     persistence = owner_exit_persistence_spy(self(), context)
 
@@ -1525,7 +1525,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
     Process.exit(upstream_pid, :shutdown)
 
-    assert_receive {:websocket_owner_output_commit_probe, "upstream-exit-post", 1, ^submitter, active_turn_ref, ^owner, probe_ref}
+    assert_receive {:websocket_owner_output_commit_probe, "upstream-exit-post", 1, ^submitter, active_turn_ref, ^owner, probe_ref}, @detection_timeout_ms
 
     refute_received {:websocket_owner_frame, "upstream-exit-post", 1, ^submitter, :complete}
     refute_received {:owner_exit_release, _session_id, _lease_token, _reason, _cause}
@@ -1535,16 +1535,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
       {:websocket_owner_output_commit_ack, "upstream-exit-post", 1, submitter, active_turn_ref, probe_ref, true}
     )
 
-    assert_receive {:websocket_owner_frame, "upstream-exit-post", 1, ^submitter, {:error, :upstream_stream_error, safe_payload}}
+    assert_receive {:websocket_owner_frame, "upstream-exit-post", 1, ^submitter, {:error, :upstream_stream_error, safe_payload}}, @detection_timeout_ms
 
     assert safe_payload.code == "server_error"
-    assert_receive {:websocket_owner_frame, "upstream-exit-post", 1, ^submitter, :complete}
+    assert_receive {:websocket_owner_frame, "upstream-exit-post", 1, ^submitter, :complete}, @detection_timeout_ms
 
-    assert_receive {:owner_exit_submitter_outcome, :post_visible, {:return, {:error, %{reason: :owner_crashed}}}}
+    assert_receive {:owner_exit_submitter_outcome, :post_visible, {:return, {:error, %{reason: :owner_crashed}}}}, @detection_timeout_ms
 
-    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}, @detection_timeout_ms
     assert_owner_exit_persisted_once(context)
-    assert_receive {:exit_controlled_upstream_closed, :post_visible, ^upstream_pid}
+    assert_receive {:exit_controlled_upstream_closed, :post_visible, ^upstream_pid}, @detection_timeout_ms
     assert await_owner_unavailable(context.codex_session_id) == {:error, :owner_unavailable}
     refute_received {:exit_controlled_upstream_send, :post_visible, _upstream_pid, 2}
     refute_received {:websocket_owner_frame, "upstream-exit-post", 1, ^submitter, _duplicate}
@@ -1553,7 +1553,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
   @tag :owner_exit_settlement_fix
   test "post-visible owner retires when downstream detaches during the commit probe", context do
-    context = %{context | codex_session_id: Ecto.UUID.generate()}
+    context = uuid_owner_context(context)
     {upstream, upstream_pid} = exit_controlled_upstream(self(), :post_visible)
     persistence = owner_exit_persistence_spy(self(), context)
 
@@ -1578,16 +1578,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
     Process.exit(upstream_pid, :shutdown)
 
-    assert_receive {:websocket_owner_output_commit_probe, "upstream-exit-probe-detach", 1, ^submitter, _active_turn_ref, ^owner, _probe_ref}
+    assert_receive {:websocket_owner_output_commit_probe, "upstream-exit-probe-detach", 1, ^submitter, _active_turn_ref, ^owner, _probe_ref}, @detection_timeout_ms
 
     refute_received {:owner_exit_release, _session_id, _lease_token, _reason, _cause}
     assert :ok = WebsocketOwnerSession.detach_downstream(owner, stable_downstream)
 
-    assert_receive {:owner_exit_submitter_outcome, :probe_detach, {:return, {:error, :client_disconnected}}}
+    assert_receive {:owner_exit_submitter_outcome, :probe_detach, {:return, {:error, :client_disconnected}}}, @detection_timeout_ms
 
-    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}, @detection_timeout_ms
     assert_owner_exit_persisted_once(context)
-    assert_receive {:exit_controlled_upstream_closed, :post_visible, ^upstream_pid}
+    assert_receive {:exit_controlled_upstream_closed, :post_visible, ^upstream_pid}, @detection_timeout_ms
     assert WebsocketOwnerSession.lookup(context.codex_session_id) == {:error, :owner_unavailable}
 
     refute_received {:websocket_owner_frame, "upstream-exit-probe-detach", 1, ^submitter, :complete}
@@ -1595,7 +1595,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
   @tag :owner_exit_settlement_fix
   test "post-visible owner retires when its submitter dies during the commit probe", context do
-    context = %{context | codex_session_id: Ecto.UUID.generate()}
+    context = uuid_owner_context(context)
     {upstream, upstream_pid} = exit_controlled_upstream(self(), :post_visible)
     persistence = owner_exit_persistence_spy(self(), context)
 
@@ -1620,29 +1620,29 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
     Process.exit(upstream_pid, :shutdown)
 
-    assert_receive {:websocket_owner_output_commit_probe, "upstream-exit-submitter-death", 1, ^submitter, _active_turn_ref, ^owner, _probe_ref}
+    assert_receive {:websocket_owner_output_commit_probe, "upstream-exit-submitter-death", 1, ^submitter, _active_turn_ref, ^owner, _probe_ref}, @detection_timeout_ms
 
     refute_received {:owner_exit_release, _session_id, _lease_token, _reason, _cause}
     submitter_ref = Process.monitor(submitter)
     Process.exit(submitter, :shutdown)
-    assert_receive {:DOWN, ^submitter_ref, :process, ^submitter, :shutdown}
+    assert_receive {:DOWN, ^submitter_ref, :process, ^submitter, :shutdown}, @detection_timeout_ms
 
-    assert_receive {:websocket_owner_frame, "upstream-exit-submitter-death", 1, ^submitter, {:error, :client_disconnected, safe_payload}}
+    assert_receive {:websocket_owner_frame, "upstream-exit-submitter-death", 1, ^submitter, {:error, :client_disconnected, safe_payload}}, @detection_timeout_ms
 
     assert safe_payload.code == "client_disconnected"
 
-    assert_receive {:websocket_owner_frame, "upstream-exit-submitter-death", 1, ^submitter, :complete}
+    assert_receive {:websocket_owner_frame, "upstream-exit-submitter-death", 1, ^submitter, :complete}, @detection_timeout_ms
 
-    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}, @detection_timeout_ms
     assert_owner_exit_persisted_once(context)
-    assert_receive {:exit_controlled_upstream_closed, :post_visible, ^upstream_pid}
+    assert_receive {:exit_controlled_upstream_closed, :post_visible, ^upstream_pid}, @detection_timeout_ms
     assert WebsocketOwnerSession.lookup(context.codex_session_id) == {:error, :owner_unavailable}
     refute_received {:owner_exit_submitter_outcome, :submitter_death, _outcome}
   end
 
   @tag :owner_exit_settlement_fix
   test "post-visible owner retires when commit probe delivery fails", context do
-    context = %{context | codex_session_id: Ecto.UUID.generate()}
+    context = uuid_owner_context(context)
     {upstream, upstream_pid} = exit_controlled_upstream(self(), :post_visible)
     persistence = owner_exit_persistence_spy(self(), context)
     parent = self()
@@ -1682,13 +1682,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
     Process.exit(upstream_pid, :shutdown)
 
-    assert_receive :owner_exit_probe_delivery_failed
+    assert_receive :owner_exit_probe_delivery_failed, @detection_timeout_ms
 
-    assert_receive {:owner_exit_submitter_outcome, :probe_failure, {:return, {:error, %{reason: :owner_crashed}}}}
+    assert_receive {:owner_exit_submitter_outcome, :probe_failure, {:return, {:error, %{reason: :owner_crashed}}}}, @detection_timeout_ms
 
-    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :owner_crashed}, @detection_timeout_ms
     assert_owner_exit_persisted_once(context)
-    assert_receive {:exit_controlled_upstream_closed, :post_visible, ^upstream_pid}
+    assert_receive {:exit_controlled_upstream_closed, :post_visible, ^upstream_pid}, @detection_timeout_ms
     assert WebsocketOwnerSession.lookup(context.codex_session_id) == {:error, :owner_unavailable}
 
     refute_received {:websocket_owner_frame, "upstream-exit-probe-failure", 1, ^submitter, :complete}
@@ -7344,6 +7344,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     %{context | codex_session_id: codex_session_id}
   end
 
+  # The owner-exit tests start their owners under a UUID session id, which is what runs the persistence callbacks they
+  # spy on; the setup's cleanup covers only the original id, so this one registers its own before an owner starts.
+  defp uuid_owner_context(context) do
+    codex_session_id = Ecto.UUID.generate()
+    on_exit(fn -> cleanup_owner_session(codex_session_id) end)
+    %{context | codex_session_id: codex_session_id}
+  end
+
   defp start_owner(context, opts) do
     WebsocketOwnerSession.start_owner(
       Keyword.merge(opts,
@@ -8781,10 +8789,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
   end
 
   defp assert_owner_exit_persisted_once(context) do
-    assert_receive {:owner_exit_release, session_id, lease_token, "owner_crashed", nil}
+    assert_receive {:owner_exit_release, session_id, lease_token, "owner_crashed", nil}, @detection_timeout_ms
     assert session_id == context.codex_session_id
     assert lease_token == context.owner_lease_token
-    assert_receive {:owner_exit_interrupt, ^session_id, "owner_crashed"}
+    assert_receive {:owner_exit_interrupt, ^session_id, "owner_crashed"}, @detection_timeout_ms
     refute_received {:owner_exit_release, _session_id, _lease_token, _reason, _cause}
     refute_received {:owner_exit_interrupt, _session_id, _reason}
   end
