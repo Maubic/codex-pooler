@@ -20,6 +20,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   alias CodexPooler.Gateway.Transports.Streaming.WebsocketCodec
   alias CodexPooler.Gateway.Transports.Websocket.{ActivityRegistry, WebsocketOwnerContract}
   alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
+  alias CodexPooler.Gateway.Transports.Websocket.DownstreamProgress
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionTrace
   alias CodexPooler.Gateway.Transports.Websocket.RemoteReconnectControlV2
@@ -62,10 +63,45 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     :ok = WebsocketDownstreamWriteWatch.watch()
 
     case WebsocketControlPath.run(:init, fn -> initialize_socket(state) end) do
-      {:ok, result} -> mark_stopped(result)
+      {:ok, result} -> result |> start_downstream_keepalive() |> mark_stopped()
       {:error, _reason} -> mark_stopped({:stop, :normal, {1011, "websocket initialization unavailable"}, state})
     end
   end
+
+  # The downstream idle bound is Bandit's read timeout, set at upgrade from
+  # `websocket_idle_timeout_ms`. ThousandIsland re-arms it only on bytes from
+  # the client, never on a frame this socket pushes, and the released client
+  # sends nothing while it reads a response, so a turn streaming longer than the
+  # bound was closed in the middle (findings#302). Every third of the bound the
+  # socket pings the client when a turn delivered client-visible frames since
+  # the previous tick: the client's pong re-arms the read timer. A turn that
+  # showed nothing gets no ping, so a stalled turn is still closed by the bound.
+  # The same tick tells each owner-forwarded task that progressed
+  # (`DownstreamProgress`): a remote owner's submission waits on those notices.
+  # The tick carries the counts it saw instead of keeping them in the state
+  # (socket tests compare whole states). The interval reads the settings the
+  # upgrade read a moment earlier.
+  defp start_downstream_keepalive({:ok, _state} = result) do
+    interval_ms = max(div(OperationalSettings.current().websocket_idle_timeout_ms, 3), 1)
+    :ok = schedule_downstream_keepalive(interval_ms, %{})
+    result
+  end
+
+  defp start_downstream_keepalive(result), do: result
+
+  defp schedule_downstream_keepalive(interval_ms, delivered_frames) do
+    _timer = Process.send_after(self(), {__MODULE__, :downstream_keepalive, interval_ms, delivered_frames}, interval_ms)
+    :ok
+  end
+
+  defp delivered_frames_by_task(state) do
+    state
+    |> Map.get(:downstream_delivery_evidence, %{})
+    |> Map.new(fn {task, evidence} -> {task, Map.get(evidence, :frames, 0)} end)
+  end
+
+  defp progressed_tasks(delivered_frames, previous_frames),
+    do: for({task, frames} <- delivered_frames, frames > Map.get(previous_frames, task, 0), do: task)
 
   defp initialize_socket(state) do
     started_at = System.monotonic_time(:millisecond)
@@ -245,6 +281,20 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # This callback runs after Bandit wrote the preceding push. The public
   # handle_info entry confirms it only after the driver queue is empty.
   defp handle_socket_info(:confirm_content_filter_terminal_write, state), do: {:ok, state}
+
+  defp handle_socket_info({__MODULE__, :downstream_keepalive, interval_ms, previous_frames}, state) do
+    delivered_frames = delivered_frames_by_task(state)
+    :ok = schedule_downstream_keepalive(interval_ms, delivered_frames)
+
+    case progressed_tasks(delivered_frames, previous_frames) do
+      [] ->
+        {:ok, state}
+
+      tasks ->
+        if owner_forwarded_socket?(state), do: Enum.each(tasks, &DownstreamProgress.notify/1)
+        {:push, {:ping, ""}, state}
+    end
+  end
 
   defp handle_socket_info(
          {InstanceSettingsCache, {:applied, applied_version}},
@@ -626,6 +676,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp terminate_socket(reason, state) do
     :ok = record_written_error_frame_receipts(state)
     :ok = confirm_written_delivery_evidence(state)
+    :ok = log_downstream_idle_timeout(reason, state)
 
     _trace =
       NativeCompactionTrace.emit(:cleanup_finished, %{pid_role: :socket, outcome: :finished})
@@ -681,6 +732,27 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
     :ok
   end
+
+  # Bandit calls `terminate(:timeout, _)` only when its read timeout closed the
+  # connection (1002). A turn still tracked then settles `client_disconnected`
+  # like any lost client, so this line is the one witness that the server's idle
+  # bound cut it: a client that never answered the keepalive pings, or a turn
+  # that delivered nothing for the whole bound (findings#302).
+  defp log_downstream_idle_timeout(:timeout, state) do
+    case MapSet.size(Map.get(state, :tasks, MapSet.new())) do
+      0 ->
+        :ok
+
+      tracked_tasks ->
+        WebsocketConnectionLogger.log_downstream_idle_timeout(%{
+          tracked_tasks: tracked_tasks,
+          idle_timeout_ms: OperationalSettings.current().websocket_idle_timeout_ms,
+          codex_session_id: codex_session_id(state)
+        })
+    end
+  end
+
+  defp log_downstream_idle_timeout(_reason, _state), do: :ok
 
   # A client that loses the socket before any output resends the same request
   # on a new socket; Codex 0.156.0 does so after about 200 ms. The owner must

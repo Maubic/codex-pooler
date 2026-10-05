@@ -1981,8 +1981,27 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
 
     opts
     |> node_client()
-    |> safe_remote_call(node, __MODULE__, function, args, timeout)
+    |> safe_remote_turn_call(node, __MODULE__, function, args, timeout)
     |> normalize_submitted_request_result()
+  end
+
+  # A turn submission is answered when the turn ends, so its budget counts from
+  # the turn's latest delivered frames, not from the submission
+  # (`NodeClient.call_owner_turn/5`, findings#302). A node client without that
+  # callback keeps the total bound of `call_owner/5`.
+  defp safe_remote_turn_call(node_client, node, module, function, args, timeout) do
+    if Code.ensure_loaded?(node_client) and function_exported?(node_client, :call_owner_turn, 5) do
+      node_client.call_owner_turn(node, module, function, args, timeout)
+      |> normalize_returned_remote_failure(module, function, args)
+    else
+      safe_remote_call(node_client, node, module, function, args, timeout)
+    end
+  catch
+    :exit, reason ->
+      {:error, normalize_remote_failure(:exit, reason, module, function, args)}
+
+    kind, reason when kind in [:error, :throw] ->
+      {:error, normalize_remote_failure(kind, reason, module, function, args)}
   end
 
   defp call_remote_control(node, control, opts) do
@@ -2441,12 +2460,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
     @callback connected_app_nodes() :: [node()]
     @callback app_node?(node()) :: boolean()
     @callback call_owner(node(), module(), atom(), [term()], pos_integer()) :: term()
+    @doc """
+    Calls the owner with a turn submission whose budget is an idle bound: the
+    caller's `DownstreamProgress` notices each restart it.
+    """
+    @callback call_owner_turn(node(), module(), atom(), [term()], pos_integer()) :: term()
+    @optional_callbacks call_owner_turn: 5
   end
 
   defmodule ERPCNodeClient do
     @moduledoc false
 
     @behaviour NodeClient
+    alias CodexPooler.Gateway.Transports.Websocket.DownstreamProgress
     alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
     alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
 
@@ -2482,6 +2508,49 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
       kind, reason when kind in [:error, :throw] ->
         {:error, normalize_erpc_failure(kind, reason, module, function, args)}
     end
+
+    # The owner relays the turn's frames to this node's socket, which notifies
+    # the waiting task (`DownstreamProgress`) at every keepalive tick that
+    # delivered some; each notice restarts the budget. A turn that delivers
+    # nothing for the whole budget is abandoned as `call_owner/5` abandons it at
+    # its deadline: `erpc:receive_response/2` drops the late reply and raises
+    # `{erpc, timeout}`. With no notice at all the two calls time out alike.
+    @impl NodeClient
+    def call_owner_turn(node, module, function, args, idle_timeout)
+        when is_atom(node) and is_atom(module) and is_atom(function) and is_list(args) and
+               is_integer(idle_timeout) and idle_timeout > 0 do
+      request = :erpc.send_request(node, module, function, args)
+      await_owner_turn(request, idle_timeout, turn_deadline(idle_timeout))
+    catch
+      :exit, reason ->
+        {:error, normalize_erpc_failure(:exit, reason, module, function, args)}
+
+      kind, reason when kind in [:error, :throw] ->
+        {:error, normalize_erpc_failure(kind, reason, module, function, args)}
+    end
+
+    defp await_owner_turn(request, idle_timeout, deadline) do
+      remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+
+      case :erpc.wait_response(request, min(remaining_ms, progress_poll_ms(idle_timeout))) do
+        {:response, result} ->
+          result
+
+        :no_response ->
+          cond do
+            DownstreamProgress.drain() -> await_owner_turn(request, idle_timeout, turn_deadline(idle_timeout))
+            System.monotonic_time(:millisecond) >= deadline -> :erpc.receive_response(request, 0)
+            true -> await_owner_turn(request, idle_timeout, deadline)
+          end
+      end
+    end
+
+    defp turn_deadline(idle_timeout), do: System.monotonic_time(:millisecond) + idle_timeout
+
+    # A notice waits at most a quarter of the budget before it moves the
+    # deadline; the socket ticks every third of the downstream idle timeout,
+    # which the budget exceeds by at least its one-second margin.
+    defp progress_poll_ms(idle_timeout), do: max(div(idle_timeout, 4), 1)
 
     defp normalize_erpc_failure(kind, reason, module, function, args),
       do:

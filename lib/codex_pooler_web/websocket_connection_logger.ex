@@ -49,6 +49,12 @@ defmodule CodexPoolerWeb.WebsocketConnectionLogger do
   # With owner forwarding on the owner logs the same kept-open line, with its
   # own skip reasons, for a close it does not pass on; `stale_downstream` is an
   # owner's word that reached a socket bound to the owner anew since.
+  # Bandit's read timeout (the upgrade `timeout`, `websocket_idle_timeout_ms`)
+  # closed a connection that still tracked a turn: no byte, not even a pong to
+  # the keepalive ping, came from the client for the whole bound (findings#302).
+  # The turn settles `client_disconnected`; this line says the server cut it.
+  @downstream_idle_timeout_message "websocket downstream closed by idle timeout"
+  @downstream_idle_timeout_metadata_keys [:tracked_tasks, :idle_timeout_ms, :codex_session_id]
   @downstream_closed_after_upstream_close_message "websocket downstream closed after upstream connection close"
   @downstream_kept_open_after_upstream_close_message "websocket downstream kept open after upstream connection close"
   @upstream_close_metadata_keys [:reason_code, :skip_reason, :lifecycle_id, :generation, :forwarding, :codex_session_id, :queued_request]
@@ -88,6 +94,17 @@ defmodule CodexPoolerWeb.WebsocketConnectionLogger do
 
   @spec replay_rejection_message() :: String.t()
   def replay_rejection_message, do: @replay_rejection_message
+
+  @spec downstream_idle_timeout_message() :: String.t()
+  def downstream_idle_timeout_message, do: @downstream_idle_timeout_message
+
+  @doc """
+  Logs a connection Bandit's read timeout closed while it still tracked a turn.
+  The metadata names `tracked_tasks`, `idle_timeout_ms` and `codex_session_id`.
+  """
+  @spec log_downstream_idle_timeout(event_metadata()) :: :ok
+  def log_downstream_idle_timeout(metadata),
+    do: log_event(:warning, @downstream_idle_timeout_message, metadata, nil, @downstream_idle_timeout_metadata_keys)
 
   @spec downstream_closed_after_upstream_close_message() :: String.t()
   def downstream_closed_after_upstream_close_message, do: @downstream_closed_after_upstream_close_message
