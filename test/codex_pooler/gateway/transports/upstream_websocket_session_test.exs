@@ -5998,6 +5998,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     assert FakeUpstream.websocket_connection_count(upstream) == 0
   end
 
+  # What a request reports when the peer ends the connection under it: an orderly close, a reset or a broken pipe.
+  @peer_ended_connection_reasons [:closed, :econnreset, :epipe]
+
   @tag :fake_upstream_lifecycle_regression
   test "owner shutdown keeps FakeUpstream state alive through websocket initialization" do
     parent = self()
@@ -6040,11 +6043,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     send(websocket_pid, {:fake_upstream_release_websocket, release_ref})
 
     assert_receive {:fake_upstream_websocket_initialized, ^websocket_pid, ^release_ref}, @message_detection_timeout_ms
-    assert_receive {:DOWN, ^supervisor_monitor, :process, _, :shutdown}, 5_000
+    assert_receive {:DOWN, ^supervisor_monitor, :process, _, :shutdown}, @message_detection_timeout_ms
 
+    # Nothing orders the request task against the fake's shutdown, so its outcome depends on how far it got: it was
+    # answered before the connection closed, or it sent its frame and decoded the close, or its reads lagged behind the
+    # whole shutdown: one read returned the upgrade response together with the close frame, which the upgrade does not
+    # decode, and the end of the connection then came before its send (the send found it closed) or after it (the
+    # receive saw it). A node shared with other suites produced the send-phase one (findings#303 row 303-7, Drone 1809).
     case Task.await(request_task, @detection_timeout_ms) do
       {:ok, %{terminal: "response.completed", status: 200}} -> :ok
       {:error, %{reason: :upstream_websocket_closed_before_terminal}} -> :ok
+      {:error, %{reason: %Mint.TransportError{reason: reason}, transport_failure: %{"phase" => "send_payload", "termination_source" => "payload_send_error", "terminal_seen" => false, "text_frame_count" => 0}}} when reason in @peer_ended_connection_reasons -> :ok
+      {:error, %{reason: %Mint.TransportError{reason: reason}, transport_failure: %{"phase" => "receive", "termination_source" => "mint_transport_error", "terminal_seen" => false, "text_frame_count" => 0}}} when reason in @peer_ended_connection_reasons -> :ok
     end
   end
 

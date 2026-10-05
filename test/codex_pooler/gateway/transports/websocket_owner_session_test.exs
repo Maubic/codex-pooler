@@ -1448,7 +1448,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
              start_owner(context, upstream: upstream, persistence: persistence)
 
     assert_receive {:exit_controlled_upstream_started, :idle, ^upstream_pid}
-    owner_ref = Process.monitor(owner)
+    owner_ref = monitor_owner(owner)
 
     Process.exit(upstream_pid, :shutdown)
 
@@ -1480,7 +1480,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
 
     submitter = owner_exit_submitter(self(), owner, downstream, :pre_visible)
     assert_receive {:exit_controlled_upstream_send, :pre_visible, ^upstream_pid, 1}
-    owner_ref = Process.monitor(owner)
+    owner_ref = monitor_owner(owner)
 
     Process.exit(upstream_pid, :shutdown)
 
@@ -1521,7 +1521,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     assert_receive {:websocket_owner_frame, "upstream-exit-post", 1, ^submitter, {:data, "visible-before-upstream-exit"}}
 
     assert_receive {:exit_controlled_upstream_send, :post_visible, ^upstream_pid, 1}
-    owner_ref = Process.monitor(owner)
+    owner_ref = monitor_owner(owner)
 
     Process.exit(upstream_pid, :shutdown)
 
@@ -1574,7 +1574,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     assert_receive {:websocket_owner_frame, "upstream-exit-probe-detach", 1, ^submitter, {:data, "visible-before-upstream-exit"}}
 
     assert_receive {:exit_controlled_upstream_send, :post_visible, ^upstream_pid, 1}
-    owner_ref = Process.monitor(owner)
+    owner_ref = monitor_owner(owner)
 
     Process.exit(upstream_pid, :shutdown)
 
@@ -1616,7 +1616,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     assert_receive {:websocket_owner_frame, "upstream-exit-submitter-death", 1, ^submitter, {:data, "visible-before-upstream-exit"}}
 
     assert_receive {:exit_controlled_upstream_send, :post_visible, ^upstream_pid, 1}
-    owner_ref = Process.monitor(owner)
+    owner_ref = monitor_owner(owner)
 
     Process.exit(upstream_pid, :shutdown)
 
@@ -1678,7 +1678,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     assert_receive {:websocket_owner_frame, "upstream-exit-probe-failure", 1, ^submitter, {:data, "visible-before-upstream-exit"}}
 
     assert_receive {:exit_controlled_upstream_send, :post_visible, ^upstream_pid, 1}
-    owner_ref = Process.monitor(owner)
+    owner_ref = monitor_owner(owner)
 
     Process.exit(upstream_pid, :shutdown)
 
@@ -8678,6 +8678,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
        reason: :upstream_stream_error,
        transport_failure: %{"reason" => "upstream_stream_error"}
      }}
+  end
+
+  # Monitors the owner and returns once the owner has taken the monitor request. `Process.monitor/1` only queues the
+  # request: the VM parks it until the caller next signals the same process, asks for another monitor or is scheduled
+  # out (erl_proc_sig_queue.c `proc_queue_signal`, erl_process.c `erts_schedule`), so the signal that ends the owner's
+  # upstream, which goes to another process, can overtake it. An owner that is already gone then answers `noproc`
+  # instead of its exit reason, which a test process stalled on a shared CI node saw (findings#303 row 303-8, Drone
+  # 1809). A call sent after the monitor is ordered behind it, and its answer shows the owner and its upstream alive
+  # before the test ends the upstream.
+  defp monitor_owner(owner) do
+    owner_ref = Process.monitor(owner)
+    assert {:ok, %{upstream_alive?: true}} = WebsocketOwnerSession.owner_status(owner)
+    owner_ref
   end
 
   defp exit_controlled_upstream(parent, scenario) do
