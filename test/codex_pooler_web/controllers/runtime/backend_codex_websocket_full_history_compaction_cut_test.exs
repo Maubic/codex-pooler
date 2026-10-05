@@ -5,7 +5,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
 
   import Ecto.Query
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
-  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [hold_settled_websocket_turn!: 0, model_serving_scope: 0, release_settled_websocket_turn: 2, set_model_serving_mode!: 3]
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [capture_stream_outcome_telemetry: 1, hold_settled_websocket_turn!: 0, model_serving_scope: 0, release_settled_websocket_turn: 2, set_model_serving_mode!: 3]
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [enter_peer_owner_topology!: 0, start_peer_window_owner!: 2]
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink, RequestReplayEntitlement}
@@ -205,10 +205,22 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
     ctx = Map.put(ctx, :setup, setup)
     port = start_public_endpoint!()
 
-    first = connect!(port, setup)
-    first = ordinary_turn!(first, turn_frame(ctx))
-    Mint.HTTP.close(first.conn)
-    await!(fn -> match?([%Request{status: "succeeded"}], pool_requests(setup.pool.id)) end, "the first turn never settled")
+    # The first turn's task emits its stream outcome after its settlement
+    # committed, so the row says nothing about the task being done with it. The
+    # hold of `lose_compaction_reply!/3` claims the first websocket outcome from
+    # its attachment on: attached while the first turn's task still had its
+    # outcome to emit, it parked that task instead of the compaction's, the
+    # client then left a compaction still in progress, and the close cut it
+    # (`failed`, `client_disconnected`) with owner forwarding on, so it never
+    # settled `succeeded` (Drone 1809, both forwarded arms; findings#303 row
+    # 303-5). Wait for the outcome itself before the first hold.
+    capture_stream_outcome_telemetry(fn ->
+      first = connect!(port, setup)
+      first = ordinary_turn!(first, turn_frame(ctx))
+      Mint.HTTP.close(first.conn)
+      await!(fn -> match?([%Request{status: "succeeded"}], pool_requests(setup.pool.id)) end, "the first turn never settled")
+      assert_receive {:stream_outcome, %{outcome: "succeeded", downstream_transport: "websocket"}}, @settle_timeout_ms, "the first turn's task never emitted its stream outcome"
+    end)
 
     deliveries = [lose_compaction_reply!(ctx, port, 1), lose_compaction_reply!(ctx, port, 2), full_history_resend!(ctx, port)]
     rows = await_no_live_requests(setup.pool.id)
