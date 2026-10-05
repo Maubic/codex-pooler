@@ -376,6 +376,8 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeatTest do
 
     assert {:ok, heartbeat} = SessionLeaseHeartbeat.start(request_options, caller: caller)
     monitor = Process.monitor(heartbeat)
+    # A call after the monitor delivers it before the trigger below (see CodexPooler.TestProcess).
+    :sys.get_state(heartbeat)
 
     Process.exit(caller, :kill)
 

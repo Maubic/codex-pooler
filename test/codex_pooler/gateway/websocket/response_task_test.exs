@@ -4,6 +4,7 @@ defmodule CodexPooler.Gateway.Websocket.ResponseTaskTest do
   alias CodexPooler.Gateway.Transports.Websocket.ActivityRegistry
   alias CodexPooler.Gateway.Websocket.ResponseTask
   alias CodexPooler.Platform.{ExecutionIdentity, ExecutionRegistry}
+  alias CodexPooler.TestProcess
 
   # Failure-detection budget for a response task or watcher that must exit on
   # a socket-death signal; never a scenario timer.
@@ -294,17 +295,18 @@ defmodule CodexPooler.Gateway.Websocket.ResponseTaskTest do
     # The coordinator is parked inside `before_completion_handoff` until the
     # release below, so nothing has yet sent the watcher its stop message, and
     # its other three receive clauses are fenced on this turn's own token and
-    # on its own monitor of a coordinator that is still alive. The watcher must
-    # therefore be alive here. Asserted rather than assumed because a run under
-    # `make test-fast` once monitored a watcher that was already gone and only
-    # showed it five assertions later as a `:noproc` DOWN (findings#221 row
-    # 221-75, unreproduced in 901 in-VM repeats of this file and in every
-    # isolated run since); if it happens again this names the moment rather
-    # than the symptom five assertions later.
+    # on its own monitor of a coordinator that is still alive. The watcher is
+    # therefore alive here, and the release below is what lets the coordinator
+    # stop it. `Process.monitor/1` only queues its request until this process
+    # is scheduled out, and the release goes to another process: a run that
+    # stalled right after the monitor saw the watcher's DOWN as `:noproc` five
+    # assertions later, although the watcher had been alive when it was
+    # monitored (findings#221 row 221-75, explained by findings#303 row
+    # 303-8). `monitor_flushed/1` sends the request before the release.
     assert Process.alive?(watcher),
            "the cancellation watcher died before the completion handoff was released"
 
-    watcher_monitor = Process.monitor(watcher)
+    watcher_monitor = TestProcess.monitor_flushed(watcher)
     send(pid, {:release_natural_winner_completion, completion_ref})
     assert_receive {:websocket_response_activity, ^pid, ^token}
     assert_receive {:codex_response_done, ^pid, :ok}
@@ -425,7 +427,7 @@ defmodule CodexPooler.Gateway.Websocket.ResponseTaskTest do
     assert_receive {:socket_received, {:websocket_response_activity_cancelled, ^pid, ^token, watcher, :owner_drained}}
 
     on_exit(fn -> if Process.alive?(watcher), do: Process.exit(watcher, :kill) end)
-    watcher_monitor = Process.monitor(watcher)
+    watcher_monitor = TestProcess.monitor_flushed(watcher)
 
     Process.exit(socket, :kill)
 

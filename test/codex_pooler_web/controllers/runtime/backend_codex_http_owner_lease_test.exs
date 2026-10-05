@@ -723,6 +723,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHTTPOwnerLeaseTest do
 
     assert_receive {:session_lease_heartbeat, :started, heartbeat}, @detection_budget
     heartbeat_ref = Process.monitor(heartbeat)
+    # A call after the monitor delivers it before the trigger below (see CodexPooler.TestProcess).
+    :sys.get_state(heartbeat)
     Process.exit(caller, :kill)
     assert_receive {:DOWN, ^caller_ref, :process, ^caller, :killed}, @detection_budget
     assert_receive {:session_lease_heartbeat, :stopped, ^heartbeat}, @detection_budget
@@ -980,6 +982,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHTTPOwnerLeaseTest do
 
     assert_receive {:session_lease_heartbeat, :started, heartbeat}, @detection_budget
     heartbeat_ref = Process.monitor(heartbeat)
+    # A call after the monitor delivers it before the trigger below (see CodexPooler.TestProcess).
+    :sys.get_state(heartbeat)
     send(upstream_pid, {:fake_upstream_release_gate, release_ref})
     assert_receive {:downstream_stream_started, caller}, @detection_budget
     assert caller == task.pid

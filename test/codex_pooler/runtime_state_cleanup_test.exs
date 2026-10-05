@@ -18,6 +18,7 @@ defmodule CodexPooler.RuntimeStateCleanupTest do
   alias CodexPooler.Gateway.Websocket.ResponseTask
   alias CodexPooler.Platform.ExecutionIdentity
   alias CodexPooler.TestDiagnostics
+  alias CodexPooler.TestProcess
   alias CodexPooler.UnboxedFixture
 
   alias CodexPooler.Gateway.Persistence.{
@@ -282,7 +283,7 @@ defmodule CodexPooler.RuntimeStateCleanupTest do
       |> Repo.update!()
 
       if unquote(execution_state) in [:dead, :scanner_first, :entitled] do
-        monitor = Process.monitor(pid)
+        monitor = TestProcess.monitor_flushed(pid)
         send(starter, :finish)
         assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 15_000
         CodexPooler.ExecutionProofSupport.publish_terminal!(attempt)

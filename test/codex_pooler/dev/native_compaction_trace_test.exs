@@ -18,6 +18,7 @@ defmodule CodexPooler.Dev.NativeCompactionTraceTest do
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Request
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Websocket.ResponseTask
+  alias CodexPooler.TestProcess
 
   setup do
     original = Application.get_env(:codex_pooler, TraceEvent)
@@ -724,7 +725,7 @@ defmodule CodexPooler.Dev.NativeCompactionTraceTest do
     assert_receive {:collector_blocked_task, ^task_pid}, 15_000
     collector = Process.whereis(NativeCompactionTrace)
     collector_monitor = Process.monitor(collector)
-    task_monitor = Process.monitor(task_pid)
+    task_monitor = TestProcess.monitor_flushed(task_pid)
     Process.exit(collector, :kill)
     assert_receive {:DOWN, ^collector_monitor, :process, ^collector, :killed}, 15_000
     assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, :killed}, 15_000

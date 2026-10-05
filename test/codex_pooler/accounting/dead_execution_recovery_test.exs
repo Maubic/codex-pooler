@@ -10,6 +10,7 @@ defmodule CodexPooler.Accounting.DeadExecutionRecoveryTest do
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
   alias CodexPooler.Gateway.Websocket.ResponseTask
   alias CodexPooler.Platform.{ExecutionIdentity, InstancePresence}
+  alias CodexPooler.TestProcess
   alias CodexPooler.UnboxedFixture
   alias Ecto.Adapters.SQL
   alias Ecto.Adapters.SQL.Sandbox
@@ -80,7 +81,7 @@ defmodule CodexPooler.Accounting.DeadExecutionRecoveryTest do
                DeadExecutionRecovery.recover(DateTime.add(DateTime.utc_now(), 121))
 
       assert Repo.reload!(request).status == "in_progress"
-      monitor = Process.monitor(pid)
+      monitor = TestProcess.monitor_flushed(pid)
       send(starter, :stop)
       assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 15_000
       assert ExecutionIdentity.status(attempt) == :dead

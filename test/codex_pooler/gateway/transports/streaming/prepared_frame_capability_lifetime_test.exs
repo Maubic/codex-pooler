@@ -86,6 +86,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.PreparedFrameCapabilityLifeti
 
     assert_receive {:sealed, capability, token}, @detection_timeout_ms
     monitor = Process.monitor(capability.server)
+    # A call after the monitor delivers it before the trigger below (see CodexPooler.TestProcess).
+    :sys.get_state(capability.server)
 
     send(sealer, :stop)
 

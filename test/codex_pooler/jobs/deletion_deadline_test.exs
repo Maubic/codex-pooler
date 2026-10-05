@@ -13,6 +13,7 @@ defmodule CodexPooler.Jobs.DeletionDeadlineTest do
   alias CodexPooler.Pools
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
+  alias CodexPooler.TestProcess
   alias Ecto.Adapters.SQL.Sandbox
 
   @detection_timeout_ms 15_000
@@ -164,7 +165,7 @@ defmodule CodexPooler.Jobs.DeletionDeadlineTest do
     runner_monitor = Process.monitor(runner.pid)
     on_exit(fn -> if Process.alive?(runner.pid), do: Process.exit(runner.pid, :kill) end)
     assert_receive {:executor_started, executor}
-    executor_monitor = Process.monitor(executor)
+    executor_monitor = TestProcess.monitor_flushed(executor)
     Process.unlink(runner.pid)
     Process.exit(runner.pid, :kill)
     assert_receive {:DOWN, ^runner_monitor, :process, _, :killed}
