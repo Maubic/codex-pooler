@@ -2263,7 +2263,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     tracker = PublicResponsesToolCompletion.observe(receive_state.public_tool_completion, decoded)
     receive_state = %{receive_state | public_tool_completion: tracker}
 
-    with %{"type" => type} when type in ["response.completed", "response.done"] <- decoded,
+    with %{} <- decoded,
          {:ok, %{kind: :completed}} <- StreamProtocol.terminal_outcome(nil, decoded),
          {:error, reason} <- PublicResponsesToolCompletion.completion_verdict(tracker) do
       event = Adapter.websocket_error(%{status: 500, code: :server_error, message: StreamProtocol.synthetic_public_openai_responses_failure_message(), param: nil})

@@ -6,6 +6,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
     only: [
       await_public_websocket_upgrade: 2,
+      auth: 2,
       gateway_setup: 1,
       mint_websocket_new!: 4,
       public_websocket_receive_text!: 3,
@@ -25,12 +26,13 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
 
   @timeout 15_000
 
-  for topology <- [:direct, :local_owner, :remote_owner], kind <- ["function_call", "custom_tool_call"], defect <- [:missing_done, :missing_index, :string_index, :wrong_index, :wrong_id, :one_pending] do
+  for topology <- [:direct, :local_owner, :remote_owner], kind <- ["function_call", "custom_tool_call"], defect <- [:missing_done, :missing_index, :string_index, :wrong_index, :wrong_id, :one_pending], terminal_shape <- [:typed, :legacy] do
     if topology == :remote_owner, do: @tag(slow: "actual remote owner on a distinct BEAM node")
     @tag topology: topology
     @tag kind: kind
     @tag defect: defect
-    test "#{topology} rejects #{defect} #{kind} and serves a fresh same-socket turn", %{topology: topology, kind: kind, defect: defect} do
+    @tag terminal_shape: terminal_shape
+    test "#{topology} rejects #{defect} #{kind} #{terminal_shape} and serves a fresh same-socket turn", %{topology: topology, kind: kind, defect: defect, terminal_shape: terminal_shape} do
       CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
       Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology != :direct)
       if topology == :remote_owner, do: enter_peer_owner_topology!()
@@ -39,8 +41,8 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
         start_upstream(
           FakeUpstream.strict_sequence([
             FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(put_in(healthy_terminal(), ["response", "id"], "resp_prior_tool_fixture"))]),
-            FakeUpstream.websocket_text_frames(Enum.map(source_events(kind, defect), &CodexPooler.JSON.encode!/1)),
-            FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(healthy_terminal())])
+            FakeUpstream.websocket_text_frames(Enum.map(source_events(kind, defect, terminal_shape), &CodexPooler.JSON.encode!/1)),
+            FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(terminal_shape(healthy_terminal(), terminal_shape))])
           ])
         )
 
@@ -69,13 +71,17 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
         assert %{"lifecycle_id" => prior_lifecycle, "generation" => prior_generation} = prior_attempt.response_metadata["upstream_websocket_connection"]
         {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(payload))
         {conn, websocket, types, terminal} = receive_terminal!(conn, websocket, ref, [])
+        assert_receive {Events, %{reason: "request_finalized", payload: %{"status" => status}}}, @timeout
+        observed = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id and r.id != ^prior_attempt.request_id)
+        observed_settlement = Repo.one!(from l in LedgerEntry, where: l.request_id == ^observed.id and l.entry_kind == "settlement")
+        IO.puts("F4_LEGACY topology=#{topology} kind=#{kind} defect=#{defect} shape=#{terminal_shape} terminal=#{List.last(types)} status=#{status} request_id=#{observed.id} input=#{observed_settlement.input_tokens} output=#{observed_settlement.output_tokens} cache_write=#{observed_settlement.cache_write_tokens} provider_requests=#{length(FakeUpstream.requests(upstream))} invalid_alias=#{Repo.exists?(response_alias_query(setup, "resp_invalid_tool_fixture"))}")
+        assert status == "failed"
         assert List.last(types) == "error"
         assert terminal["error"]["code"] == "server_error"
         refute "response.completed" in types
         if defect == :missing_done, do: refute("response.output_item.done" in types)
         assert "response.output_item.added" in types
         assert Enum.any?(types, &String.ends_with?(&1, ".delta"))
-        assert_receive {Events, %{reason: "request_finalized", payload: %{"status" => "failed"}}}, @timeout
         assert [request] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id and r.status == "failed")
         assert request.status == "failed"
         assert request.last_error_code == "upstream_stream_error"
@@ -86,6 +92,8 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
         assert settlement.input_tokens == 5457
         assert settlement.output_tokens == 2
         assert settlement.cache_write_tokens == 5454
+        assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "reservation"), :count) == 1
+        assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "release"), :count) == 1
         assert request.usage_status == "usage_known"
         assert [%{status: "failed"}] = Repo.all(from t in CodexTurn, where: t.request_id == ^request.id)
         refute Repo.exists?(response_alias_query(setup, "resp_invalid_tool_fixture"))
@@ -124,13 +132,60 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
           assert node(peer.owner_pid) != node()
           assert %{upstream_pid: pid} = :sys.get_state(peer.owner_pid)
           assert node(pid) == peer.node
-          IO.puts("TASK3_REMOTE socket_node=#{node()} owner_node=#{peer.node} upstream_node=#{node(pid)} usage_input=5457 usage_output=2 cache_write=5454 provider_requests=3")
+          IO.puts("TASK3_REMOTE shape=#{terminal_shape} kind=#{kind} defect=#{defect} request_id=#{request.id} socket_node=#{node()} owner_node=#{peer.node} upstream_node=#{node(pid)} usage_input=5457 usage_output=2 cache_write=5454 provider_requests=3")
         end
 
         conn
       after
         Mint.HTTP.close(conn)
       end
+    end
+  end
+
+  for kind <- ["function_call", "custom_tool_call"], defect <- [:missing_done, :wrong_id] do
+    test "bridged SSE rejects #{kind} #{defect} legacy completion and preserves healthy legacy", %{conn: conn} do
+      CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
+      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
+
+      upstream =
+        start_upstream(
+          FakeUpstream.strict_sequence([
+            FakeUpstream.websocket_text_frames(Enum.map(source_events(unquote(kind), unquote(defect), :legacy), &CodexPooler.JSON.encode!/1)),
+            FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(terminal_shape(healthy_terminal(), :legacy))])
+          ])
+        )
+
+      setup = gateway_setup(upstream)
+      assert :ok = Events.subscribe_pool(setup.pool)
+      session = "legacy-bridge-#{System.unique_integer([:positive])}"
+      handler = {__MODULE__, make_ref()}
+      on_exit(fn -> :telemetry.detach(handler) end)
+      :ok = :telemetry.attach(handler, [:codex_pooler, :gateway, :stream, :outcome], fn _event, _measurements, metadata, target -> if self() == target, do: send(target, {:bridge_settled, metadata.outcome}) end, self())
+      payload = %{"model" => setup.model.exposed_model_id, "input" => "synthetic legacy bridge", "stream" => true}
+      response = conn |> auth(setup) |> put_req_header("x-session-id", session) |> post("/v1/responses", payload)
+      types = response.resp_body |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, "event: ")) |> Enum.map(&String.replace_prefix(&1, "event: ", ""))
+      assert types == Enum.map(source_events(unquote(kind), unquote(defect), :legacy) |> Enum.drop(-1), & &1["type"]) ++ ["response.created", "error"]
+      assert response.resp_body =~ ~s("server_error")
+      refute response.resp_body =~ "incomplete_tool_item"
+      assert_received {:bridge_settled, "failed"}
+      request = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id)
+      assert request.status == "failed"
+      assert request.transport == "http_sse"
+      attempt = Repo.one!(from a in Attempt, where: a.request_id == ^request.id)
+      assert attempt.status == "failed"
+      assert attempt.transport == "websocket"
+      assert attempt.network_error_code == "upstream_stream_error"
+      settlement = Repo.one!(from l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "settlement")
+      assert {settlement.input_tokens, settlement.output_tokens, settlement.cache_write_tokens} == {5457, 2, 5454}
+      assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "release"), :count) == 1
+      refute Repo.exists?(response_alias_query(setup, "resp_invalid_tool_fixture"))
+      healthy = build_conn() |> auth(setup) |> put_req_header("x-session-id", session) |> post("/v1/responses", payload)
+      assert healthy.resp_body =~ "event: response.completed"
+      assert_received {:bridge_settled, "succeeded"}
+      assert length(FakeUpstream.requests(upstream)) == 2
+      assert Enum.all?(FakeUpstream.requests(upstream), &(&1.method == "WEBSOCKET"))
+      assert :ok = FakeUpstream.verify!(upstream)
+      IO.puts("F4_BRIDGE request_id=#{request.id} terminal=error settlement=failed input=5457 output=2 cache_write=5454 release=1 provider_requests=2 healthy_legacy=completed")
     end
   end
 
@@ -160,7 +215,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
     assert_receive {:DOWN, ^monitor, :process, ^executor, :normal}, @timeout
   end
 
-  defp source_events(kind, defect) do
+  defp source_events(kind, defect, terminal_shape) do
     item = %{"type" => kind, "id" => "tool_fixture", "call_id" => "call_fixture", "name" => "fixture", "status" => "in_progress"}
     added = %{"type" => "response.output_item.added", "output_index" => 0, "item" => item}
     delta_type = if kind == "function_call", do: "response.function_call_arguments.delta", else: "response.custom_tool_call_input.delta"
@@ -177,8 +232,11 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
         :one_pending -> [added, delta, done, %{added | "output_index" => 1, "item" => %{item | "id" => "second_fixture", "call_id" => "second_call"}}]
       end
 
-    events ++ [%{"type" => "response.completed", "response" => %{"id" => "resp_invalid_tool_fixture", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 5457, "input_tokens_details" => %{"cached_tokens" => 0, "cache_write_tokens" => 5454}, "output_tokens" => 2, "total_tokens" => 5459}}}]
+    events ++ [terminal_shape(%{"type" => "response.completed", "response" => %{"id" => "resp_invalid_tool_fixture", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 5457, "input_tokens_details" => %{"cached_tokens" => 0, "cache_write_tokens" => 5454}, "output_tokens" => 2, "total_tokens" => 5459}}}, terminal_shape)]
   end
+
+  defp terminal_shape(%{"response" => response}, :legacy), do: Map.drop(response, ["status", "output"])
+  defp terminal_shape(event, :typed), do: event
 
   defp healthy_terminal, do: %{"type" => "response.completed", "response" => %{"id" => "resp_healthy_tool_fixture", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 6, "output_tokens" => 2, "total_tokens" => 8}}}
 

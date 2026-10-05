@@ -95,8 +95,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
   defp pending_source_error?(_decoded, _tracker), do: false
 
   defp guard_success(data, decoded, tracker) do
-    with %{"type" => type} when type in ["response.completed", "response.done"] <- decoded,
-         {:ok, %{kind: :completed}} <- StreamProtocol.terminal_outcome(nil, decoded),
+    with {:ok, %{kind: :completed}} <- StreamProtocol.terminal_outcome(nil, decoded),
          {:error, _reason} <- PublicResponsesToolCompletion.completion_verdict(tracker) do
       event = Adapter.websocket_error(%{status: 500, code: :server_error, message: StreamProtocol.synthetic_public_openai_responses_failure_message(), param: nil})
       {CodexPooler.JSON.encode!(event), event, true}

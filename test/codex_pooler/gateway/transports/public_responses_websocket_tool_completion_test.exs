@@ -3,10 +3,11 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesWebsocketToolCompletionT
 
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesWebsocket
 
-  for kind <- ["function_call", "custom_tool_call"], defect <- [:missing_done, :wrong_index, :wrong_id, :missing_index, :string_index, :one_pending] do
+  for kind <- ["function_call", "custom_tool_call"], defect <- [:missing_done, :wrong_index, :wrong_id, :missing_index, :string_index, :one_pending], terminal_shape <- [:typed, :legacy] do
     @tag kind: kind
     @tag defect: defect
-    test "#{kind} #{defect} fails defensively before a success terminal", %{kind: kind, defect: defect} do
+    @tag terminal_shape: terminal_shape
+    test "#{kind} #{defect} #{terminal_shape} fails defensively before a success terminal", %{kind: kind, defect: defect, terminal_shape: terminal_shape} do
       item = %{"type" => kind, "id" => "item_fixture", "call_id" => "call_fixture", "name" => "fixture"}
       added = %{"type" => "response.output_item.added", "output_index" => 0, "item" => item}
       done = %{"type" => "response.output_item.done", "output_index" => 0, "item" => item}
@@ -27,7 +28,9 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesWebsocketToolCompletionT
           state
         end)
 
-      assert {:push, wire, state} = normalize(terminal("response.completed"), state)
+      completed = terminal("response.completed")
+      completed = if terminal_shape == :legacy, do: Map.drop(completed["response"], ["status", "output"]), else: completed
+      assert {:push, wire, state} = normalize(completed, state)
       event = CodexPooler.JSON.decode!(wire)
       assert event["type"] == "error"
       assert event["error"]["code"] == "server_error"
@@ -36,6 +39,19 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesWebsocketToolCompletionT
       assert {:drop, ^state} = normalize(terminal("response.completed"), state)
       assert {:push, next_wire, _state} = normalize(terminal("response.completed"), PublicResponsesWebsocket.new_state())
       assert CodexPooler.JSON.decode!(next_wire)["type"] == "response.completed"
+    end
+  end
+
+  for kind <- ["function_call", "custom_tool_call"] do
+    test "healthy legacy #{kind} terminal-only snapshot retains accepted completion" do
+      legacy = terminal("response.completed")["response"] |> Map.delete("status") |> Map.put("output", [%{"type" => unquote(kind), "call_id" => "call_fixture", "name" => "fixture"}])
+      assert {:push, wire, state} = normalize(legacy, PublicResponsesWebsocket.new_state())
+      event = CodexPooler.JSON.decode!(wire)
+      assert event["type"] == "response.completed"
+      assert event["response"]["usage"]["input_tokens_details"]["cache_write_tokens"] == 5454
+      assert length(event["response"]["output"]) == 1
+      assert state.terminal_latched?
+      assert {:drop, ^state} = normalize(legacy, state)
     end
   end
 
