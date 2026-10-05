@@ -597,6 +597,14 @@ Codex backend uses for an exhausted account, on every route and transport:
 The Codex client ends the turn and names the reset time; the OpenAI SDKs do not
 retry it.
 
+On the Codex backend routes, those accounts include the ones Codex Pooler keeps
+out of a request because they advertise the model with a different catalog
+shape. Before refusing, Codex Pooler checks them once with the same quota rules,
+reading any quota older than the freshness window again first, and moves the
+request to one of them that has quota. When none has, the earliest reset covers
+them too. A compaction that has to stay on the WebSocket connection it runs on
+is the exception.
+
 Codex Desktop is the exception on the Codex backend Responses routes
 (`/backend-api/codex/responses` over HTTP and websocket,
 `/backend-api/codex/responses/compact`, and their `/backend-api/codex/v1/`

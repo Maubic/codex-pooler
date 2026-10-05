@@ -207,12 +207,15 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
              request_options,
              model
            ) do
+      {partition_fallback, held_back_skip_reason} = partition_fallback(canonical_filter_input_candidates, candidates, visible_model_context, endpoint, request_options, model)
+      request_options = put_held_back_skip_reason(request_options, held_back_skip_reason)
+
       route_state =
         route_state
         |> RouteState.put_usage_limit_capacity(usage_limit_capacity(canonical_filter_input_candidates, visible_model_context.valid_canonical_assignment_ids, endpoint, request_options))
         |> RouteState.put_saved_reset_auto_capacity(request_compatible_capacity)
         |> RouteState.put_candidates(candidates)
-        |> RouteState.put_partition_fallback(partition_fallback(canonical_filter_input_candidates, candidates, visible_model_context, endpoint, request_options, model))
+        |> RouteState.put_partition_fallback(partition_fallback)
         |> RouteState.preload_routing_snapshots(auth, model, request_options)
         |> RouteState.put_reservation_snapshot_inputs(
           AccountingReservation.reservation_snapshot_inputs(
@@ -397,7 +400,16 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
       "filtered_count" => max(valid_count - selected_count, 0),
       "routable_selection" => partition.routable_selection?
     }
+    |> put_routable_counts(partition.routable_counts)
   end
+
+  # Bounded integers from the selection's own quota classification, so a
+  # refusal that names only the selected seats also says whether selection
+  # read any held-back seat as routable.
+  defp put_routable_counts(summary, %{selected: selected, held_back: held_back}),
+    do: Map.merge(summary, %{"selected_routable_count" => selected, "held_back_routable_count" => held_back})
+
+  defp put_routable_counts(summary, _counts), do: summary
 
   # Only the surfaces that are actually capped to one partition carry the
   # evidence. The translated Responses surface starts from every valid canonical
@@ -500,27 +512,52 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatch do
   # The runtime-compatible candidates with a valid canonical source that the
   # selected partition held back, passed through the same file-affinity,
   # compact and session-pin filters as the kept ones, so a hard pin or a file
-  # affinity leaves none (findings#206 row 206-586). Translated surfaces
-  # already route over every valid source and keep none.
+  # affinity leaves none (findings#206 row 206-586), with the reason when
+  # valid held-back seats exist and none can ever take a fallback for this
+  # request. A connection-bound compaction runs only on the upstream
+  # connection that holds it and never moves; its held-back candidates stay
+  # recorded because a relayed usage limit's Pool advice still counts them
+  # (row 206-545). Translated surfaces already route over every valid source
+  # and keep none.
   defp partition_fallback(input_candidates, kept_candidates, visible_model_context, endpoint, request_options, model) do
     kept_ids = MapSet.new(kept_candidates, fn {assignment, _identity} -> assignment.id end)
-    valid_ids = MapSet.new(visible_model_context.valid_canonical_assignment_ids)
+    outside_ids = visible_model_context.valid_canonical_assignment_ids |> MapSet.new() |> MapSet.difference(kept_ids)
+    held_back = Enum.filter(input_candidates, fn {assignment, _identity} -> MapSet.member?(outside_ids, assignment.id) end)
 
-    held_back =
-      Enum.filter(input_candidates, fn {assignment, _identity} ->
-        MapSet.member?(valid_ids, assignment.id) and not MapSet.member?(kept_ids, assignment.id)
-      end)
+    cond do
+      MapSet.size(outside_ids) == 0 or OpenAICompatibility.translated_responses_surface?(request_options.openai_compatibility) ->
+        {[], nil}
 
-    with [_ | _] <- held_back,
-         false <- OpenAICompatibility.translated_responses_surface?(request_options.openai_compatibility),
-         {:ok, [_ | _] = held_back} <- SessionContinuity.filter_file_affinity(held_back, request_options),
-         {:ok, [_ | _] = held_back} <- CandidateEligibility.maybe_filter_compact(endpoint, held_back),
-         {:ok, [_ | _] = held_back} <- SessionContinuity.apply_codex_session_assignment(held_back, request_options, model) do
-      held_back
-    else
-      _none -> []
+      held_back == [] ->
+        {[], :runtime_incompatible}
+
+      RequestOptions.connection_bound_compaction?(request_options) ->
+        {held_back |> continuity_held_back(endpoint, request_options, model) |> elem(0), :connection_bound_compaction}
+
+      true ->
+        continuity_held_back(held_back, endpoint, request_options, model)
     end
   end
+
+  defp continuity_held_back(held_back, endpoint, request_options, model) do
+    with {:file_affinity, {:ok, [_ | _] = held_back}} <- {:file_affinity, SessionContinuity.filter_file_affinity(held_back, request_options)},
+         {:compact_unsupported, {:ok, [_ | _] = held_back}} <- {:compact_unsupported, CandidateEligibility.maybe_filter_compact(endpoint, held_back)},
+         {:hard_pin, {:ok, [_ | _] = held_back}} <- {:hard_pin, SessionContinuity.apply_codex_session_assignment(held_back, request_options, model)} do
+      {held_back, nil}
+    else
+      {reason, _none} -> {[], reason}
+    end
+  end
+
+  # Bounded fixed vocabulary on the summary of a capped surface, so a request
+  # row says why its held-back seats could not take the selected partition's
+  # place: `runtime_incompatible`, `connection_bound_compaction`,
+  # `file_affinity`, `compact_unsupported` or `hard_pin`
+  # (`PartitionFallback.before_dispatch/3` adds `non_quota_refusal`).
+  defp put_held_back_skip_reason(%RequestOptions{routing: %{canonical_partition: %{} = summary}} = request_options, reason) when is_atom(reason) and not is_nil(reason),
+    do: RequestOptions.put_routing(request_options, canonical_partition: Map.put(summary, "held_back_skip_reason", Atom.to_string(reason)))
+
+  defp put_held_back_skip_reason(%RequestOptions{} = request_options, _reason), do: request_options
 
   defp finish_canonical_filtering(
          candidates,

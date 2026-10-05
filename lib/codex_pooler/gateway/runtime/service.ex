@@ -29,6 +29,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   alias CodexPooler.Gateway.Runtime.Dispatch.CandidateDispatch
   alias CodexPooler.Gateway.Runtime.Dispatch.Context
   alias CodexPooler.Gateway.Runtime.Dispatch.FileDispatch
+  alias CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback
   alias CodexPooler.Gateway.Runtime.Dispatch.PreDispatch
   alias CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
@@ -112,7 +113,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
           optional(:authorized_correlation_id) => String.t() | nil
         }
   @typep session_routable_result ::
-           {:ok, map(), list(), opts(), RouteState.t()} | {:error, term()}
+           {:ok, map(), list(), opts(), RouteState.t()} | {:error, term()} | {:error, term(), opts()}
   @typedoc false
   @type reserve_and_start_turn_fun ::
           (auth(),
@@ -597,7 +598,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
                request_options,
                candidates
              )
-             |> RouteFiltering.filter_candidates_with_route_state(route_state),
+             |> filter_route_with_held_back_partition(route_state),
            :ok <-
              AccountingReservation.validate_reset_probe_scope(
                candidates,
@@ -632,6 +633,12 @@ defmodule CodexPooler.Gateway.Runtime.Service do
 
   @spec handle_session_routable_result(session_routable_result(), session_routable_context()) ::
           {:ok, gateway_result()} | {:error, gateway_error()}
+  # A route-filtering refusal carries the request options whose canonical
+  # partition summary records the held-back partition's part in it
+  # (`PartitionFallback.before_dispatch/3`); the refusal is recorded with them.
+  defp handle_session_routable_result({:error, reason, %RequestOptions{} = request_options}, context),
+    do: handle_session_routable_result({:error, reason}, %{context | request_options: request_options})
+
   defp handle_session_routable_result(
          result,
          %{
@@ -745,6 +752,18 @@ defmodule CodexPooler.Gateway.Runtime.Service do
       "native compaction reservation cleanup failed " <>
         "reason_code=#{DiagnosticTaxonomy.reason_code(reason) || "unknown"}"
     )
+  end
+
+  # The selected canonical partition's quota refusal is the Pool's answer only
+  # once the held-back partition refused too (`PartitionFallback.before_dispatch/3`):
+  # selection read the held-back seats on the snapshot alone, without the
+  # stale-evidence refresh route filtering gives the seats it classifies. A
+  # refusal comes back with the request options it is recorded with.
+  defp filter_route_with_held_back_partition(filter_input, route_state) do
+    case RouteFiltering.filter_candidates_with_route_state(filter_input, route_state) do
+      {:error, refusal} -> PartitionFallback.before_dispatch(filter_input, route_state, refusal)
+      admitted -> admitted
+    end
   end
 
   defp route_filter_input(auth, model, endpoint, payload, request_options, candidates) do

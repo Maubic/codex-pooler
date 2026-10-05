@@ -35,6 +35,7 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalog do
           required(:model) => Model.t(),
           required(:partition_count) => pos_integer(),
           required(:routable_selection?) => boolean(),
+          required(:routable_counts) => %{selected: non_neg_integer(), held_back: non_neg_integer()} | nil,
           required(:source) => map()
         }
   @type routable_assignment_ids_by_model_id :: %{
@@ -327,7 +328,24 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalog do
       model: model,
       partition_count: length(capability_families),
       routable_selection?: members != baseline_members,
+      routable_counts: routable_counts(pairs, members, routable_assignment_ids),
       source: tier_presentation_source(presentation_anchor, reasoning_union_source(anchor, members, routable_assignment_ids))
+    }
+  end
+
+  # How many quota-routable seats selection counted inside and outside the
+  # selected family: a held-back count of zero says the held-back seats were
+  # read as unroutable, not that they were never read. Absent when selection
+  # did not need quota routability (one family, one reasoning projection).
+  defp routable_counts(_pairs, _members, nil), do: nil
+
+  defp routable_counts(pairs, members, %MapSet{} = routable_assignment_ids) do
+    selected_ids = MapSet.new(members, & &1.assignment_id)
+    {selected, held_back} = Enum.split_with(pairs, &MapSet.member?(selected_ids, &1.assignment_id))
+
+    %{
+      selected: partition_routable_count(selected, routable_assignment_ids),
+      held_back: partition_routable_count(held_back, routable_assignment_ids)
     }
   end
 

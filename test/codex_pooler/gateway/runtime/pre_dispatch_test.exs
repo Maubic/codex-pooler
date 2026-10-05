@@ -1938,18 +1938,25 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatchTest do
 
     exclusions = request.request_metadata["candidate_exclusions"]
 
-    # Nothing is routable anywhere, so the largest partition is kept and the
-    # denial still names only its seats.
+    # Nothing is routable anywhere, so the largest partition is kept; its
+    # refusal re-filters the held-back partition once, and the Pool's denial
+    # names every seat, the held-back ones marked.
     assert Enum.sort(Enum.map(exclusions, & &1["pool_upstream_assignment_id"])) ==
-             Enum.sort(starved.healthy_assignment_ids)
+             Enum.sort(starved.healthy_assignment_ids ++ starved.exhausted_assignment_ids)
 
-    # The request log now says the other two seats existed and were held back
-    # by partition filtering, which is what makes this self-diagnosable.
+    assert exclusions |> Enum.filter(&(&1["partition"] == "held_back")) |> Enum.map(& &1["pool_upstream_assignment_id"]) |> Enum.sort() ==
+             Enum.sort(starved.exhausted_assignment_ids)
+
+    # The request log says the other two seats existed, were held back by
+    # partition filtering and read as unroutable, which is what makes this
+    # self-diagnosable.
     assert %{
              "partition_count" => 2,
              "selected_count" => 6,
              "filtered_count" => 2,
              "routable_selection" => false,
+             "selected_routable_count" => 0,
+             "held_back_routable_count" => 0,
              "digest_prefix" => digest_prefix
            } = request.request_metadata["canonical_partition"]
 

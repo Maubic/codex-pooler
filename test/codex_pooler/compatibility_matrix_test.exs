@@ -704,6 +704,22 @@ defmodule CodexPooler.CompatibilityMatrixTest do
                malformed_or_retired_source: "unavailable"
              }
 
+      assert feature.canonical_partition.selected_partition_quota_refusal == %{
+               held_back_partition: "route_filtered_once_before_reservation",
+               connection_bound_compaction: "selected_partition_refusal",
+               non_quota_refusal: "selected_partition_refusal",
+               pool_refusal_exclusions: "both_partitions_held_back_marked",
+               summary_counts: ["selected_routable_count", "held_back_routable_count"],
+               summary_markers: %{
+                 held_back_fallback: ["pre_dispatch", "after_refusal"],
+                 held_back_fallback_outcome: ["admitted", "pool_refusal"],
+                 held_back_skip_reason: ["runtime_incompatible", "connection_bound_compaction", "file_affinity", "compact_unsupported", "hard_pin", "non_quota_refusal"]
+               }
+             }
+
+      assert feature.contract =~
+               "first runs its held-back families once through the same quota filtering"
+
       assert feature.contract =~
                "same policy-visible native catalog body and deterministic weak ETag"
 
