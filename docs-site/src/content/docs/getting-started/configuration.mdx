@@ -234,7 +234,7 @@ the request.
 
 Gateway websocket upgrades use two separate admin-managed idle settings:
 
-- `websocket_idle_timeout_ms` controls downstream idle close behavior for new backend Codex websocket upgrades and the narrow public `/v1/responses` websocket route. It also bounds owner-forwarded full-turn submit waits for new websocket requests. It is separate from upstream receive timeouts.
+- `websocket_idle_timeout_ms` controls downstream idle close behavior for new backend Codex websocket upgrades and the narrow public `/v1/responses` websocket route. A response that is still streaming does not count as idle: while a turn delivers frames, Codex Pooler pings the client every third of the window and the client's pong keeps the connection open, so a turn may run longer than the window. A turn that delivers nothing for the whole window is still closed. The larger of this window and the upstream receive timeout, plus one second, also bounds how long an owner-forwarded turn may go without delivering a frame before the forwarding node gives up on it. It is separate from upstream receive timeouts.
 - `websocket_owner_idle_timeout_ms` controls how long an owner and its upstream websocket may remain available after the final downstream detaches and no turn is active. Reattaching before expiry cancels that owner's retention timer.
 
 Both settings default to `1_800_000` ms and accept `60_000..3_600_000` ms. Each new or recovered owner captures `websocket_owner_idle_timeout_ms` from the node where it starts. An existing owner retains its captured value when the setting changes; later owners capture the new value.

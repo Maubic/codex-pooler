@@ -250,6 +250,8 @@ Safe close metadata can include route family, endpoint, transport, route class, 
 
 For downstream idle closes on backend Codex websockets and narrow public `/v1/responses` websockets, check the admin-managed `websocket_idle_timeout_ms` setting. Its default is `1_800_000` ms and the accepted range is `60_000..3_600_000` ms. This setting does not change upstream receive timeout classification.
 
+A turn the idle window closed while it was still running is recorded as `client_disconnected`, and the application log has a `websocket downstream closed by idle timeout` warning with `tracked_tasks` and `idle_timeout_ms`. Either the client did not answer the pings Codex Pooler sends while a response streams, or the turn delivered nothing for the whole window.
+
 ## Usage metadata
 
 Usage lines summarize request accounting, including request count context, token totals, cached input tokens, and estimated cost when pricing is available. Treat these as operational attribution and capacity evidence. They are not a replacement for provider billing records or the key-local Observatory projection.
