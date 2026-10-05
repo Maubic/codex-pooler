@@ -13,8 +13,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDownstreamKeepalivePeerTes
   #
   # Topology: the real public listener, FakeUpstream, the Pool's default mode
   # (Full), owner forwarding on, the session's owner on the peer VM. On this
-  # node the downstream idle bound is 0.5 s; the long turn's arm also takes the
-  # upstream receive timeout to 0.4 s, so its remote turn budget is 1.5 s.
+  # node the downstream idle bound is 1.5 s; the long turn's arm also takes the
+  # upstream receive timeout to 1 s, so its remote turn budget is 2.5 s. The
+  # bound also covers the turn's setup before its first frame (the forward to
+  # the peer, the owner's upstream connect), which the client's request frame
+  # starts: on an idle machine the first frame comes 0.1-0.2 s after it, and up
+  # to 0.5 s on the module's first turn, which still warms the peer's fresh
+  # connections. A half-second bound closed the stalled arm before its first
+  # frame when three suites shared the CI node (Drone 1809), and the long arm
+  # before its end (Drone 1809, 1811).
   use CodexPoolerWeb.ConnCase, async: false
 
   import ExUnit.CaptureLog
@@ -30,9 +37,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDownstreamKeepalivePeerTes
 
   @moduletag capture_log: true
 
-  @idle_timeout_ms 500
-  @receive_timeout_ms 400
-  @remote_turn_budget_ms 1_500
+  @idle_timeout_ms 1_500
+  @receive_timeout_ms 1_000
+  @remote_turn_budget_ms 2_500
   @frame_interval_ms 100
 
   setup_all do
@@ -47,17 +54,17 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDownstreamKeepalivePeerTes
   @tag settings: [websocket_idle_timeout_ms: @idle_timeout_ms, upstream_receive_timeout_ms: @receive_timeout_ms]
   @tag slow: "the remote turn budget is a real timer: the turn must stream past it to show its delivered frames renew it"
   test "owner on another VM: a turn streaming past the remote turn budget completes", %{peer_node: peer_node} do
-    # Twenty-two frames 100 ms apart: about 2.2 s against the 1.5 s budget.
-    deltas = 18
+    # Thirty-two frames 100 ms apart: about 3.2 s against the 2.5 s budget.
+    deltas = 28
     upstream = start_upstream(FakeUpstream.delayed_sse_stream(stream_events("resp_keepalive_remote_long", deltas), interval_ms: @frame_interval_ms))
     setup = gateway_setup(upstream)
 
     {turn, log} = with_log(fn -> setup |> start_turn!(peer_node: peer_node) |> read_turn!(answer_pings?: true) end)
 
     assert node(turn.client.owner) == peer_node
-    assert turn.end == {:terminal, "response.completed"}
+    assert turn.end == {:terminal, "response.completed"}, "the turn " <> describe_turn(turn)
     assert Enum.count(turn.events, &(&1["type"] == "response.output_text.delta")) == deltas
-    assert turn.elapsed_ms > @remote_turn_budget_ms
+    assert turn.elapsed_ms > @remote_turn_budget_ms, "the turn " <> describe_turn(turn)
     request = assert_request_settled!(setup, "succeeded", nil)
     assert %{"owner_instance_id" => owner_instance, "proxy_instance_id" => proxy_instance} = request.request_metadata["websocket_owner_forwarding"]
     assert owner_instance != proxy_instance
@@ -92,9 +99,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDownstreamKeepalivePeerTes
       end)
 
     assert node(turn.client.owner) == peer_node
-    assert turn.end in [{:close, 1002}, :socket_closed]
+    assert turn.end in [{:close, 1002}, :socket_closed], "the turn " <> describe_turn(turn)
     assert Enum.map(turn.events, & &1["type"]) -- ["codex.response.metadata"] == ["response.created", "response.output_item.added"]
-    assert turn.pings <= 2
+    assert turn.pings <= 2, "the turn " <> describe_turn(turn)
     assert_request_settled!(setup, "failed", "client_disconnected")
     assert log =~ "#{WebsocketConnectionLogger.downstream_idle_timeout_message()} tracked_tasks=1"
     :ok = FakeUpstream.release_remaining_frames(upstream, hold)

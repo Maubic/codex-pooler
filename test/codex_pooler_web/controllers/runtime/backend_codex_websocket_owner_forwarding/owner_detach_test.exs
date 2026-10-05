@@ -22,7 +22,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDetac
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
-  alias CodexPooler.Platform.ExecutionProofPublisher
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport.ReplayRemoteNodeClient
@@ -685,7 +684,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDetac
   end
 
   defp start_proof_publisher! do
-    start_supervised!({ExecutionProofPublisher, enabled: true, name: :owner_detach_proof_publisher, interval_ms: 60_000})
+    CodexPooler.ExecutionProofSupport.start_publisher!(name: :owner_detach_proof_publisher, interval_ms: 60_000)
   end
 
   defp owner_lifecycle_request_options(request_id, turn_state, extra_opts \\ []) do

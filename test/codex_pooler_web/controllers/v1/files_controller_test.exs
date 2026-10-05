@@ -520,8 +520,7 @@ defmodule CodexPoolerWeb.V1.FilesControllerTest do
     response_body = Keyword.get(opts, :response_body, "")
     stub_name = {__MODULE__, :upload_put, file_id}
     test_pid = self()
-    {:ok, statuses} = Agent.start_link(fn -> Keyword.get(opts, :statuses, [response_status]) end)
-    on_exit(fn -> if Process.alive?(statuses), do: Agent.stop(statuses) end)
+    statuses = start_supervised!(Supervisor.child_spec({Agent, fn -> Keyword.get(opts, :statuses, [response_status]) end}, id: make_ref()))
 
     Req.Test.stub(stub_name, fn conn ->
       send(test_pid, {

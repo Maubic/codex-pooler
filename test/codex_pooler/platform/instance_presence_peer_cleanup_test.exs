@@ -24,8 +24,7 @@ defmodule CodexPooler.InstancePresencePeerCleanupTest do
   end
 
   test "peer state purge proves the peer's backends ended before deleting its rows" do
-    {:ok, calls} = Agent.start_link(fn -> [] end)
-    on_exit(fn -> if Process.alive?(calls), do: Agent.stop(calls) end)
+    calls = start_supervised!({Agent, fn -> [] end})
     record = fn step -> Agent.update(calls, &(&1 ++ [step])) end
 
     assert :ok =
@@ -47,8 +46,7 @@ defmodule CodexPooler.InstancePresencePeerCleanupTest do
   end
 
   test "peer state purge never deletes rows when the backends cannot be ended" do
-    {:ok, calls} = Agent.start_link(fn -> [] end)
-    on_exit(fn -> if Process.alive?(calls), do: Agent.stop(calls) end)
+    calls = start_supervised!({Agent, fn -> [] end})
 
     assert_raise MatchError, fn ->
       InstancePresencePeer.purge_peer_state!(
@@ -62,8 +60,7 @@ defmodule CodexPooler.InstancePresencePeerCleanupTest do
   end
 
   test "peer state purge never deletes rows while backend absence is unproven" do
-    {:ok, calls} = Agent.start_link(fn -> [] end)
-    on_exit(fn -> if Process.alive?(calls), do: Agent.stop(calls) end)
+    calls = start_supervised!({Agent, fn -> [] end})
 
     assert_raise MatchError, fn ->
       InstancePresencePeer.purge_peer_state!(
@@ -82,10 +79,7 @@ defmodule CodexPooler.InstancePresencePeerCleanupTest do
   end
 
   test "OS absence waits past peer termination until the kernel PID disappears" do
-    {:ok, samples} =
-      Agent.start_link(fn -> [{"", 0}, {"", 0}, {"kill: 123: No such process\n", 1}] end)
-
-    on_exit(fn -> if Process.alive?(samples), do: Agent.stop(samples) end)
+    samples = start_supervised!({Agent, fn -> [{"", 0}, {"", 0}, {"kill: 123: No such process\n", 1}] end})
 
     probe = fn "owned-pid" ->
       Agent.get_and_update(samples, fn [next | rest] -> {next, rest} end)

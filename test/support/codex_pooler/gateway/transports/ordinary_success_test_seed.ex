@@ -16,7 +16,9 @@ defmodule CodexPooler.Gateway.Transports.OrdinarySuccessTestSeed do
         ])
       )
 
-    {:ok, store} = Agent.start_link(fn -> %{} end)
+    # Not linked: the exit of the test process would stop it while the `on_exit`
+    # below stops it too, and an owner's teardown still reads it before then.
+    {:ok, store} = Agent.start(fn -> %{} end)
 
     boundary = %{
       start: fn ->

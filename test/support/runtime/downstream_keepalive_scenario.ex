@@ -82,7 +82,7 @@ defmodule CodexPoolerWeb.Runtime.DownstreamKeepaliveScenario do
   # `answer_pings?: false` is a client that does not. Ends on a terminal event,
   # a Close or the connection's end.
   def read_turn!(client, answer_pings?: answer_pings?),
-    do: read_turn!(client, answer_pings?, %{events: [], pings: 0})
+    do: read_turn!(client, answer_pings?, %{events: [], pings: 0, first_event_ms: nil})
 
   defp read_turn!(client, answer_pings?, acc) do
     case receive_mint_socket_message!(client.conn, @detection_timeout_ms, "timed out waiting for the turn") do
@@ -124,7 +124,7 @@ defmodule CodexPoolerWeb.Runtime.DownstreamKeepaliveScenario do
 
   defp apply_frames([{:text, text} | frames], client, acc, answer_pings?) do
     event = CodexPooler.JSON.decode!(text)
-    acc = %{acc | events: acc.events ++ [event]}
+    acc = %{acc | events: acc.events ++ [event], first_event_ms: acc.first_event_ms || System.monotonic_time(:millisecond) - client.sent_at}
 
     if event["type"] in @terminal_types,
       do: {:halt, client, acc, {:terminal, event["type"]}},
@@ -134,8 +134,16 @@ defmodule CodexPoolerWeb.Runtime.DownstreamKeepaliveScenario do
   defp apply_frames([{:close, code, _reason} | _frames], client, acc, _answer_pings?), do: {:halt, client, acc, {:close, code}}
   defp apply_frames([_frame | frames], client, acc, answer_pings?), do: apply_frames(frames, client, acc, answer_pings?)
 
-  defp finish_turn(client, acc, ending),
-    do: Map.merge(acc, %{client: client, end: ending, elapsed_ms: System.monotonic_time(:millisecond) - client.sent_at})
+  defp finish_turn(client, acc, ending) do
+    turn = Map.merge(acc, %{client: client, end: ending, elapsed_ms: System.monotonic_time(:millisecond) - client.sent_at})
+    CodexPooler.TestDiagnostics.puts(fn -> "downstream keepalive turn " <> describe_turn(turn) end)
+    turn
+  end
+
+  # How a read turn went, for assertion messages: a close before the first
+  # event is a bound shorter than the turn's setup, one after it a gap.
+  def describe_turn(turn),
+    do: "ended #{inspect(turn.end)} after #{turn.elapsed_ms} ms with #{length(turn.events)} events (first after #{inspect(turn.first_event_ms)} ms) and #{turn.pings} pings"
 
   defp send_frame!(client, frame) do
     {:ok, websocket, data} = Mint.WebSocket.encode(client.websocket, frame)

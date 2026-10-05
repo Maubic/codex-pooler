@@ -31,7 +31,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexTurn}
   alias CodexPooler.Gateway.Transports.Websocket.{OwnerDefaults, WebsocketOwnerSession}
-  alias CodexPooler.Platform.{ExecutionProofPublisher, ExecutionTerminalProofs}
+  alias CodexPooler.Platform.ExecutionTerminalProofs
   alias CodexPooler.Pools.ModelServingOverride
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Runtime.OwnerLossScenario, as: Scenario
@@ -55,7 +55,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
   # takeover always comes before its crash cleanup, as it does unheld.
   @tag slow: "kills an owner blocked inside a callback past two one-second budgets while it runs a turn that showed output"
   test "a turn in flight on an owner killed by a new socket's reuse check closes, and the client's resend is served once" do
-    _publisher = start_supervised!({ExecutionProofPublisher, enabled: true})
+    _publisher = CodexPooler.ExecutionProofSupport.start_publisher!()
     {live, release_ref} = turn_in_flight!()
     :ok = age_last_renewal!(live)
     owner_monitor = Process.monitor(live.owner)
@@ -93,7 +93,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
   # settles the turn first, as it does in about four plain crashes out of nine.
   @tag slow: "crashes an owner while it runs a turn that showed output, with the socket held so its task settles the turn"
   test "a turn in flight on an owner that crashed, settled by its socket's response task, is resent and served once" do
-    _publisher = start_supervised!({ExecutionProofPublisher, enabled: true})
+    _publisher = CodexPooler.ExecutionProofSupport.start_publisher!()
     {live, release_ref} = turn_in_flight!()
     crashed = crash_with_socket_held!(live)
     assert :ok = await_executor_proof!(crashed)

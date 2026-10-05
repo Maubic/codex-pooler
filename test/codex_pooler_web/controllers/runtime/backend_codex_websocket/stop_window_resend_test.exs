@@ -37,7 +37,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StopWindowResendTest do
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink}
   alias CodexPooler.ExecutionProofSupport
   alias CodexPooler.FakeUpstream
-  alias CodexPooler.Platform.{ExecutionProofPublisher, ExecutionTerminalProof, ExecutionTerminalProofs}
+  alias CodexPooler.Platform.{ExecutionTerminalProof, ExecutionTerminalProofs}
   alias CodexPooler.Repo
   alias CodexPooler.UnboxedFixture
   alias CodexPoolerWeb.Runtime.CleanupProofRace
@@ -195,7 +195,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.StopWindowResendTest do
   defp prove!(attempt) do
     proofs_before = Repo.all(from(proof in ExecutionTerminalProof, select: proof.execution_id))
     UnboxedFixture.register_unboxed_cleanup!(fn -> Repo.delete_all(from(proof in ExecutionTerminalProof, where: proof.execution_id not in ^proofs_before)) end)
-    publisher = start_supervised!({ExecutionProofPublisher, enabled: true, name: :stop_window_resend_publisher, interval_ms: 60_000})
+    publisher = ExecutionProofSupport.start_publisher!(name: :stop_window_resend_publisher, interval_ms: 60_000)
     ExecutionProofSupport.await_terminal!(attempt, publisher)
   end
 

@@ -22,7 +22,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DeadExecutionResendTest d
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Gateway.Transports.Websocket.{ActivityRegistry, WebsocketOwnerSession}
-  alias CodexPooler.Platform.{ExecutionIdentity, ExecutionProofPublisher, ExecutionTerminalProofs}
+  alias CodexPooler.Platform.{ExecutionIdentity, ExecutionTerminalProofs}
   alias CodexPooler.Platform.InstancePresence.Identity
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Runtime.SettlementTransactionHold
@@ -121,8 +121,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DeadExecutionResendTest d
         # The production publisher reads the registry tombstone and publishes
         # the terminal proof this test then waits for; the publisher is started
         # here only because the test environment leaves it disabled.
-        publisher =
-          start_supervised!({ExecutionProofPublisher, enabled: true, name: :"dead_execution_resend_publisher_#{unquote(forwarding)}"})
+        publisher = CodexPooler.ExecutionProofSupport.start_publisher!(name: :"dead_execution_resend_publisher_#{unquote(forwarding)}")
 
         :ok = CodexPooler.ExecutionProofSupport.await_terminal!(attempt, publisher)
         assert ExecutionTerminalProofs.terminal?(attempt)

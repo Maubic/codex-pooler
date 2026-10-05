@@ -1,10 +1,44 @@
 defmodule CodexPooler.ExecutionProofSupport do
   @moduledoc false
   import ExUnit.Assertions
-  alias CodexPooler.Platform.{ExecutionIdentity, ExecutionRegistry, ExecutionTerminalProofs}
+  alias CodexPooler.Platform.{ExecutionIdentity, ExecutionProofPublisher, ExecutionRegistry, ExecutionTerminalProofs}
 
   @identity_fields [:owner_execution_id, :owner_instance_id, :owner_instance_boot_id, :owner_process_id]
   @terminal_readiness_timeout_ms 15_000
+  # Detection budget for the publisher's stop: it waits for a publication in
+  # flight, whose own database deadline is far shorter.
+  @publisher_stop_timeout_ms 15_000
+
+  @doc """
+  Starts the production `ExecutionProofPublisher` for one test (`config/test.exs`
+  disables the application's own) and stops it from an `on_exit` registered now,
+  so the stop runs before the cleanups the test registered earlier: its Pool's
+  owner stops, the websocket cleanup fence and the sandbox owner's stop.
+
+  Never start it with `start_supervised!/1`. ExUnit stops supervised children
+  with an exit signal before any `on_exit` runs, and the publisher does not trap
+  exits: about 100 ms after an execution ends it publishes the proof inside a
+  transaction on the shared sandbox connection, and a publisher stopped there
+  took that connection down, so the next cleanup that read the database failed
+  `DBConnection.OwnershipError ... mode :manual` (Drone 1807,
+  `dead_execution_resend_test.exs`). `GenServer.stop/3` is handled between
+  callbacks, after a publication in flight committed. The publisher is not
+  linked to the test process, whose `:shutdown` exit would stop it the same way.
+  Takes the publisher's own options (`:name`, defaulting to the module as
+  `start_link/1` does, `:registry`, `:interval_ms`).
+  """
+  @spec start_publisher!(keyword()) :: pid()
+  def start_publisher!(opts \\ []) do
+    {:ok, publisher} = GenServer.start(ExecutionProofPublisher, opts, name: Keyword.get(opts, :name, ExecutionProofPublisher))
+    ExUnit.Callbacks.on_exit(fn -> stop_publisher(publisher) end)
+    publisher
+  end
+
+  defp stop_publisher(publisher) do
+    GenServer.stop(publisher, :normal, @publisher_stop_timeout_ms)
+  catch
+    :exit, {:noproc, _call} -> :ok
+  end
 
   @spec publish_committed_terminal!(map()) :: :ok
   def publish_committed_terminal!(identity) do

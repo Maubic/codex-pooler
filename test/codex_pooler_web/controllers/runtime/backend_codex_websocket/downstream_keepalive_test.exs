@@ -10,8 +10,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DownstreamKeepaliveTest d
   # Topology: the real public listener and a Mint client, FakeUpstream pacing
   # the provider's frames on the upstream websocket, the Pool's default mode
   # (Full), owner forwarding off and on (the owner on this node). The bound is
-  # half a second through the test-only settings override; the behaviour is a
-  # timer's, so each arm spends up to about two seconds of real time.
+  # one second through the test-only settings override; the behaviour is a
+  # timer's, so each arm spends up to about two and a half seconds of real
+  # time. The bound also covers the turn's setup before its first frame, which
+  # the client's request frame starts; the peer module's half-second bound was
+  # shorter than that setup on a shared CI node (Drone 1809).
   use CodexPoolerWeb.ConnCase, async: false
 
   import ExUnit.CaptureLog
@@ -23,7 +26,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DownstreamKeepaliveTest d
 
   @moduletag capture_log: true
 
-  @idle_timeout_ms 500
+  @idle_timeout_ms 1_000
   @frame_interval_ms 100
 
   setup %{forwarding: forwarding?} do
@@ -34,20 +37,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DownstreamKeepaliveTest d
     topology = if forwarding?, do: "owner forwarding on", else: "owner forwarding off"
 
     @tag forwarding: forwarding?
-    @tag slow: "the idle bound is a real timer: the turn must stream for three bounds to show the pings keep it open"
-    test "#{topology}: a turn streaming three idle bounds long completes for a client that answers pings" do
-      # Sixteen frames 100 ms apart: the turn streams for about 1.6 s against a
-      # 0.5 s bound.
-      deltas = 12
+    @tag slow: "the idle bound is a real timer: the turn must stream for two bounds to show the pings keep it open"
+    test "#{topology}: a turn streaming two idle bounds long completes for a client that answers pings" do
+      # Twenty-two frames 100 ms apart: the turn streams for about 2.2 s
+      # against a 1 s bound.
+      deltas = 18
       upstream = start_upstream(FakeUpstream.delayed_sse_stream(stream_events("resp_keepalive_long", deltas), interval_ms: @frame_interval_ms))
       setup = gateway_setup(upstream)
 
       {turn, log} = with_log(fn -> setup |> start_turn!() |> read_turn!(answer_pings?: true) end)
 
-      assert turn.end == {:terminal, "response.completed"}
+      assert turn.end == {:terminal, "response.completed"}, "the turn " <> describe_turn(turn)
       assert Enum.count(turn.events, &(&1["type"] == "response.output_text.delta")) == deltas
-      assert turn.pings >= 1
-      assert turn.elapsed_ms >= 2 * @idle_timeout_ms
+      assert turn.pings >= 1, "the turn " <> describe_turn(turn)
+      assert turn.elapsed_ms >= 2 * @idle_timeout_ms, "the turn " <> describe_turn(turn)
       assert_request_settled!(setup, "succeeded", nil)
       refute log =~ WebsocketConnectionLogger.downstream_idle_timeout_message()
       assert [%{method: "WEBSOCKET", path: "/backend-api/codex/responses"}] = FakeUpstream.requests(upstream)
@@ -57,14 +60,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DownstreamKeepaliveTest d
     @tag forwarding: forwarding?
     @tag slow: "the idle bound is a real timer: the cut lands one bound after the request frame"
     test "#{topology}: a client that never answers pings is still cut at the idle bound" do
-      upstream = start_upstream(FakeUpstream.delayed_sse_stream(stream_events("resp_keepalive_silent_client", 12), interval_ms: @frame_interval_ms))
+      # Twenty-two frames 100 ms apart: the stream outlasts the 1 s bound.
+      upstream = start_upstream(FakeUpstream.delayed_sse_stream(stream_events("resp_keepalive_silent_client", 18), interval_ms: @frame_interval_ms))
       setup = gateway_setup(upstream)
 
       {turn, log} = with_log(fn -> setup |> start_turn!() |> read_turn!(answer_pings?: false) end)
 
-      assert turn.end in [{:close, 1002}, :socket_closed]
+      assert turn.end in [{:close, 1002}, :socket_closed], "the turn " <> describe_turn(turn)
       refute Enum.any?(turn.events, &(&1["type"] in terminal_types()))
-      assert turn.pings >= 1
+      assert turn.pings >= 1, "the turn " <> describe_turn(turn)
       assert_request_settled!(setup, "failed", "client_disconnected")
       assert log =~ "#{WebsocketConnectionLogger.downstream_idle_timeout_message()} tracked_tasks=1 idle_timeout_ms=#{@idle_timeout_ms}"
       :ok = close_client!(turn.client)
@@ -95,9 +99,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DownstreamKeepaliveTest d
       # The client answered every ping, so the close proves the pings stopped
       # with the frames: only the ticks that saw the two frames pinged (one,
       # or two when a tick fell between them).
-      assert turn.end in [{:close, 1002}, :socket_closed]
+      assert turn.end in [{:close, 1002}, :socket_closed], "the turn " <> describe_turn(turn)
       assert Enum.map(turn.events, & &1["type"]) -- ["codex.response.metadata"] == ["response.created", "response.output_item.added"]
-      assert turn.pings <= 2
+      assert turn.pings <= 2, "the turn " <> describe_turn(turn)
       assert_request_settled!(setup, "failed", "client_disconnected")
       assert log =~ "#{WebsocketConnectionLogger.downstream_idle_timeout_message()} tracked_tasks=1"
       :ok = FakeUpstream.release_remaining_frames(upstream, hold)

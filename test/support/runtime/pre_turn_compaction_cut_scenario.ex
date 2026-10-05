@@ -13,7 +13,7 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
 
   import Ecto.Query
   import ExUnit.Assertions
-  import ExUnit.Callbacks, only: [on_exit: 1, start_supervised!: 1]
+  import ExUnit.Callbacks, only: [on_exit: 1]
   import Phoenix.ConnTest, only: [build_conn: 0, post: 3]
   import Plug.Conn, only: [put_req_header: 3]
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
@@ -25,7 +25,7 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
   alias CodexPooler.Gateway.Persistence.{CodexSession, CodexTurn}
   alias CodexPooler.Gateway.Transports.Websocket.{ActivityDrain, ActivityRegistry, NativeCompactionAdmission, WebsocketOwnerSession}
-  alias CodexPooler.Platform.{ExecutionProofPublisher, ExecutionTerminalProof}
+  alias CodexPooler.Platform.ExecutionTerminalProof
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
 
@@ -439,7 +439,7 @@ defmodule CodexPoolerWeb.Runtime.PreTurnCompactionCutScenario do
   defp start_proof_publisher! do
     proofs_before = Repo.all(from(proof in ExecutionTerminalProof, select: proof.execution_id))
     UnboxedFixture.register_unboxed_cleanup!(fn -> Repo.delete_all(from(proof in ExecutionTerminalProof, where: proof.execution_id not in ^proofs_before)) end)
-    start_supervised!({ExecutionProofPublisher, enabled: true, name: :compaction_drain_cut_proof_publisher, interval_ms: 60_000})
+    CodexPooler.ExecutionProofSupport.start_publisher!(name: :compaction_drain_cut_proof_publisher, interval_ms: 60_000)
   end
 
   defp await_cut_execution_proof!(ctx, publisher) do

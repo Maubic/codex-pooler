@@ -95,8 +95,7 @@ defmodule CodexPooler.Gateway.Transports.WebsocketResponseInterruptTest do
   end
 
   test "an upstream session with no turn in flight drops the interrupt with its line" do
-    {:ok, session} = UpstreamWebsocketSession.start_link()
-    on_exit(fn -> if Process.alive?(session), do: GenServer.stop(session) end)
+    session = start_supervised!({UpstreamWebsocketSession, []})
 
     {_state, log} =
       with_info_log(fn ->

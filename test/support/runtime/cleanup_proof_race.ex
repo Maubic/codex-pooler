@@ -24,7 +24,6 @@ defmodule CodexPoolerWeb.Runtime.CleanupProofRace do
   alias CodexPooler.Accounting.Attempt
   alias CodexPooler.ExecutionProofSupport
   alias CodexPooler.Gateway.Transports.Websocket.ActivityRegistry
-  alias CodexPooler.Platform.ExecutionProofPublisher
   alias CodexPooler.Repo
 
   @detection_timeout_ms 15_000
@@ -51,7 +50,7 @@ defmodule CodexPoolerWeb.Runtime.CleanupProofRace do
   @doc "Arms the hold for the cut of `request_id`, from the test process, before the cut."
   @spec arm!(Ecto.UUID.t()) :: t()
   def arm!(request_id) do
-    publisher = ExUnit.Callbacks.start_supervised!({ExecutionProofPublisher, enabled: true, name: :cleanup_proof_race_publisher, interval_ms: 60_000})
+    publisher = CodexPooler.ExecutionProofSupport.start_publisher!(name: :cleanup_proof_race_publisher, interval_ms: 60_000)
     test = self()
     ref = make_ref()
     prover = spawn_link(fn -> prove(ref, request_id, publisher, test) end)
@@ -78,7 +77,7 @@ defmodule CodexPoolerWeb.Runtime.CleanupProofRace do
   """
   @spec hold_owner_interrupt!(pid(), Ecto.UUID.t()) :: reference()
   def hold_owner_interrupt!(owner, request_id) do
-    publisher = ExUnit.Callbacks.start_supervised!({ExecutionProofPublisher, enabled: true, name: :cleanup_proof_race_owner_publisher, interval_ms: 60_000})
+    publisher = CodexPooler.ExecutionProofSupport.start_publisher!(name: :cleanup_proof_race_owner_publisher, interval_ms: 60_000)
     test = self()
     ref = make_ref()
 

@@ -10,7 +10,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DeadExecutionPreflightTes
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
-  alias CodexPooler.Platform.{ExecutionIdentity, ExecutionProofPublisher, ExecutionTerminalProofs}
+  alias CodexPooler.Platform.{ExecutionIdentity, ExecutionTerminalProofs}
   alias CodexPooler.Repo
 
   @moduletag capture_log: true
@@ -107,7 +107,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.DeadExecutionPreflightTes
       try do
         Process.exit(task, :kill)
         assert_receive {:DOWN, ^task_monitor, :process, ^task, :killed}, @timeout_ms
-        publisher = start_supervised!({ExecutionProofPublisher, enabled: true, name: :"preflight_proof_#{unquote(forwarding)}_#{unquote(mode)}"})
+        publisher = CodexPooler.ExecutionProofSupport.start_publisher!(name: :"preflight_proof_#{unquote(forwarding)}_#{unquote(mode)}")
         :ok = CodexPooler.ExecutionProofSupport.await_terminal!(attempt, publisher)
         assert ExecutionTerminalProofs.terminal?(attempt)
         assert Repo.reload!(request).status == "in_progress"

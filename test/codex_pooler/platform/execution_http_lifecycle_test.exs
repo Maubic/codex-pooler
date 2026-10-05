@@ -4,7 +4,7 @@ defmodule CodexPooler.Platform.ExecutionHTTPLifecycleTest do
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
   alias CodexPooler.Accounting.{Attempt, Request}
   alias CodexPooler.FakeUpstream
-  alias CodexPooler.Platform.{ExecutionIdentity, ExecutionProofPublisher}
+  alias CodexPooler.Platform.ExecutionIdentity
   alias CodexPooler.Platform.InstancePresence.Identity
 
   @detection_timeout_ms 15_000
@@ -41,8 +41,7 @@ defmodule CodexPooler.Platform.ExecutionHTTPLifecycleTest do
     proof =
       Enum.find(ExecutionRegistry.pending(2_000, registry), &(&1.owner_execution_id == last_id))
 
-    publisher =
-      start_supervised!({ExecutionProofPublisher, enabled: true, name: nil, registry: registry})
+    publisher = CodexPooler.ExecutionProofSupport.start_publisher!(name: nil, registry: registry)
 
     assert :ok = CodexPooler.ExecutionProofSupport.await_terminal!(proof, publisher)
     assert [] = ExecutionRegistry.pending(2_000, registry)
@@ -69,15 +68,12 @@ defmodule CodexPooler.Platform.ExecutionHTTPLifecycleTest do
     setup = gateway_setup(upstream, compact?: true)
     port = start_public_endpoint!()
 
-    publisher =
-      start_supervised!(
-        # One fixed name: the file is synchronous, so no two tests hold it at once
-        # and long sessions do not mint an atom per run. The publisher drains the
-        # global ExecutionRegistry, so a proof another sandboxed test left pending
-        # could be acknowledged here while its write rolls back; both files that
-        # start the real publisher are `async: false` for that reason.
-        {ExecutionProofPublisher, enabled: true, name: :execution_http_lifecycle_publisher}
-      )
+    # One fixed name: the file is synchronous, so no two tests hold it at once
+    # and long sessions do not mint an atom per run. The publisher drains the
+    # global ExecutionRegistry, so a proof another sandboxed test left pending
+    # could be acknowledged here while its write rolls back; both files that
+    # start the real publisher are `async: false` for that reason.
+    publisher = CodexPooler.ExecutionProofSupport.start_publisher!(name: :execution_http_lifecycle_publisher)
 
     {:ok, conn} = Mint.HTTP.connect(:http, "127.0.0.1", port, protocols: [:http1])
     on_exit(fn -> Mint.HTTP.close(conn) end)

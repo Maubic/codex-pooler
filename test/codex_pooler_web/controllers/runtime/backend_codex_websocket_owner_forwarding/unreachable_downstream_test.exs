@@ -47,7 +47,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn}
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
-  alias CodexPooler.Platform.{ExecutionProofPublisher, ExecutionTerminalProof, ExecutionTerminalProofs, ForwardedGenerationEnd, InstanceHeartbeat, InstancePresence}
+  alias CodexPooler.Platform.{ExecutionTerminalProof, ExecutionTerminalProofs, ForwardedGenerationEnd, InstanceHeartbeat, InstancePresence}
   alias CodexPooler.Repo
   alias CodexPooler.UnboxedFixture
   alias CodexPoolerWeb.Runtime.OwnerLossScenario, as: Scenario
@@ -99,7 +99,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
       test "#{order}: the owner cancels a turn that showed output at once, and the client's resend of the settled turn is served once", ctx do
         proofs_before = Repo.all(from(proof in ExecutionTerminalProof, select: proof.execution_id))
         :ok = register_proof_cleanup!(proofs_before)
-        _publisher = start_supervised!({ExecutionProofPublisher, enabled: true})
+        _publisher = CodexPooler.ExecutionProofSupport.start_publisher!()
         turn = start_turn!(ctx, :partition, successor: true)
         %{tasks: tasks} = socket_connection_state!(turn.client.socket)
         [task] = MapSet.to_list(tasks)
