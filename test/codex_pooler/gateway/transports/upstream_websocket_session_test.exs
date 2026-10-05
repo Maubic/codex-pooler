@@ -4681,24 +4681,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
       refute_received {:upstream_websocket_connection_closed, _session, _signal}
     end
 
-    test "a connection that carried no request signals nothing when it closes" do
+    test "a refused fresh anchor opens no connection and signals no close" do
       peer = start_raw_websocket_peer()
       session = start_subscribed_session!()
       request = raw_websocket_request(peer.url, self())
 
-      # An anchored request meeting a fresh connection is refused before
-      # anything is sent, so the connection it opened carries no request.
+      # An anchored request cannot acquire a connection it did not produce.
       assert {:ok, %{terminal: "error", upstream_error_code: "previous_response_not_found"}} =
                UpstreamWebsocketSession.request(session, %{request | connection_bound_continuation?: true})
 
-      log =
-        close_idle_connection_from_peer!(peer, session, fn server_socket ->
-          :ok = :gen_tcp.send(server_socket, raw_websocket_server_close_frame(1000))
-        end)
-
+      assert {:ok, %{generation: nil}} = UpstreamWebsocketSession.live_connection(session)
+      assert :ok = UpstreamWebsocketSession.close(session)
       refute_received {:raw_upstream_websocket_request, 1, _request_count}
-      assert log =~ "reason_code=peer_close_frame closed_by=peer close_code=1000 "
-      assert log =~ " connection_requests=0 "
       refute_received {:upstream_websocket_connection_closed, _session, _signal}
     end
 
@@ -5803,7 +5797,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
   end
 
   @tag :continuation_generation_boundary
-  test "marked continuation on a replacement connection writes one retry terminal and keeps it reusable" do
+  test "marked continuation on a replacement key refuses before acquisition and leaves the producing connection intact" do
     # Strict finite scenario: the guarded continuation sends nothing, and the
     # later full request must open the replacement connection.
     upstream =
@@ -5831,11 +5825,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     )
 
     assert [_warmup] = FakeUpstream.requests(upstream)
+    assert FakeUpstream.websocket_connection_count(upstream) == 1
 
     assert {:ok, later_result} =
              UpstreamWebsocketSession.request(session, replacement_request)
 
-    assert later_result.upstream_websocket_connection.reused
+    refute later_result.upstream_websocket_connection.reused
     assert [warmup, later_full_request] = FakeUpstream.requests(upstream)
     assert warmup.websocket_connection_id != later_full_request.websocket_connection_id
     assert FakeUpstream.websocket_connection_count(upstream) == 2
@@ -5843,7 +5838,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
   end
 
   @tag :continuation_generation_boundary
-  test "marked continuation after invalidation writes one retry terminal and keeps reconnect reusable" do
+  test "repeated marked continuations after invalidation refuse before acquisition until an unanchored request" do
     # Strict finite scenario: the guarded continuation sends nothing after
     # invalidation, and the later request must open the reconnect connection.
     upstream =
@@ -5870,9 +5865,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     )
 
     assert [_warmup] = FakeUpstream.requests(upstream)
+    assert_guard_terminal(
+      session,
+      %{request | connection_bound_continuation?: true},
+      :second_invalidation_guard,
+      :reconnected
+    )
+    assert [_warmup] = FakeUpstream.requests(upstream)
+    assert FakeUpstream.websocket_connection_count(upstream) == 1
+    assert {:ok, %{generation: nil}} = UpstreamWebsocketSession.live_connection(session)
 
     assert {:ok, later_result} = UpstreamWebsocketSession.request(session, request)
-    assert later_result.upstream_websocket_connection.reused
+    refute later_result.upstream_websocket_connection.reused
+    assert later_result.upstream_websocket_connection.reconnected
     assert length(FakeUpstream.requests(upstream)) == 2
     assert FakeUpstream.websocket_connection_count(upstream) == 2
     assert :ok = FakeUpstream.verify!(upstream)
@@ -5939,12 +5944,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
       :fresh
     )
 
-    # The guard aborts before any bytes are sent, so this is the one connection
-    # assertion in this file with no recorded request to serve as its barrier —
-    # every other one reads `requests/1` first, and a recorded request is proof
-    # the handler's `init/1` has already run.
+    # Synchronous admission refuses before acquisition, not merely before send.
     assert FakeUpstream.requests(upstream) == []
-    assert FakeUpstream.await_websocket_connection_count(upstream, 1) == 1
+    assert FakeUpstream.websocket_connection_count(upstream) == 0
   end
 
   @tag :fake_upstream_lifecycle_regression
@@ -5974,10 +5976,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
 
     request_task =
       Task.async(fn ->
-        request = %{
-          websocket_request(FakeUpstream.url(upstream))
-          | connection_bound_continuation?: true
-        }
+        request = websocket_request(FakeUpstream.url(upstream))
 
         UpstreamWebsocketSession.request_once(request)
       end)
@@ -5988,21 +5987,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     send(owner, :stop_fake_upstream_owner)
     assert_receive {:DOWN, ^owner_monitor, :process, ^owner, :shutdown}, @message_detection_timeout_ms
     assert Process.alive?(upstream.pid)
+    FakeUpstream.set_mode(upstream, websocket_success_without_id())
     send(websocket_pid, {:fake_upstream_release_websocket, release_ref})
 
     assert_receive {:fake_upstream_websocket_initialized, ^websocket_pid, ^release_ref}, @message_detection_timeout_ms
     assert_receive {:DOWN, ^supervisor_monitor, :process, _, :shutdown}, 5_000
 
-    terminal = native_retry_terminal()
-
-    assert {:ok,
-            %{
-              body: "data: " <> ^terminal <> "\n\n",
-              terminal: "error",
-              status: 200,
-              upstream_error_code: "previous_response_not_found",
-              upstream_error_param: "previous_response_id"
-            }} = Task.await(request_task, @detection_timeout_ms)
+    case Task.await(request_task, @detection_timeout_ms) do
+      {:ok, %{terminal: "response.completed", status: 200}} -> :ok
+      {:error, %{reason: :upstream_websocket_closed_before_terminal}} -> :ok
+    end
   end
 
   @tag :fake_upstream_lifecycle_regression
@@ -6070,9 +6064,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     assert connection.reused == false
     assert connection.reconnected == (connection_use == :reconnected)
 
-    assert Enum.any?(headers, fn {name, value} ->
-             name == "sec-websocket-accept" and byte_size(value) > 0
-           end)
+    assert headers == [] or Enum.any?(headers, fn {name, value} -> name == "sec-websocket-accept" and byte_size(value) > 0 end)
 
     assert_receive {:guard_frame, ^label, ^terminal}, @message_detection_timeout_ms
     refute_received {:guard_frame, ^label, _extra_terminal}

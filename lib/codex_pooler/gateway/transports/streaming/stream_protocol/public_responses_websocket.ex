@@ -6,14 +6,17 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
   alias CodexPooler.Gateway.OpenAICompatibility.Responses
   alias CodexPooler.Gateway.Runtime.Finalization.Metadata
   alias CodexPooler.Gateway.Runtime.Finalization.ProviderUsageLimit
+  alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponses
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesSequence
+  alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesToolCompletion
   alias CodexPooler.Gateway.Websocket.Adapter
 
   @type state :: %{
           required(:max_seen) => integer() | nil,
           required(:terminal_latched?) => boolean(),
           required(:overflow_latched?) => boolean(),
+          required(:tool_completion) => PublicResponsesToolCompletion.state(),
           optional(:stream_id) => String.t(),
           optional(:custom_tool_namespaces) => map()
         }
@@ -26,10 +29,10 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
   @spec new_state(String.t() | nil) :: state()
   def new_state(stream_id \\ nil)
 
-  def new_state(nil), do: PublicResponsesSequence.new_state()
+  def new_state(nil), do: Map.put(PublicResponsesSequence.new_state(), :tool_completion, PublicResponsesToolCompletion.new_state())
 
   def new_state(stream_id) when is_binary(stream_id) do
-    PublicResponsesSequence.new_state()
+    new_state(nil)
     |> Map.put(:stream_id, stream_id)
   end
 
@@ -51,8 +54,18 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
     end
   end
 
+  defp normalize_decoded(_data, _source_decoded, %{terminal_latched?: true} = state, _stream_id),
+    do: {:drop, state}
+
   defp normalize_decoded(data, source_decoded, state, stream_id) do
-    {_data, decoded} = PublicResponses.normalize_json_message(data, source_decoded)
+    previous_state = state
+    tracker = PublicResponsesToolCompletion.observe(state.tool_completion, source_decoded)
+    state = %{state | tool_completion: tracker}
+    {data, source_decoded, rejected?} = guard_success(data, source_decoded, tracker)
+    {_data, decoded} =
+      if rejected? or pending_source_error?(source_decoded, tracker),
+        do: {data, source_decoded},
+        else: PublicResponses.normalize_json_message(data, source_decoded)
     decoded = PublicResponses.drop_provider_event_headers(decoded)
     event_type = string_value(decoded, "type")
 
@@ -66,11 +79,27 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
 
         {:push, CodexPooler.JSON.encode!(normalized), state}
 
-      {:drop, state} ->
-        {:drop, state}
+      {:drop, _state} ->
+        {:drop, previous_state}
 
       {:overflow, _failed, state} ->
         {:error, sequence_exhausted(), state}
+    end
+  end
+
+  defp pending_source_error?(%{"type" => "error"}, tracker),
+    do: match?({:error, _}, PublicResponsesToolCompletion.completion_verdict(tracker))
+
+  defp pending_source_error?(_decoded, _tracker), do: false
+
+  defp guard_success(data, decoded, tracker) do
+    with %{"type" => type} when type in ["response.completed", "response.done"] <- decoded,
+         {:ok, %{kind: :completed}} <- StreamProtocol.terminal_outcome(nil, decoded),
+         {:error, _reason} <- PublicResponsesToolCompletion.completion_verdict(tracker) do
+      event = Adapter.websocket_error(%{status: 500, code: :server_error, message: StreamProtocol.synthetic_public_openai_responses_failure_message(), param: nil})
+      {CodexPooler.JSON.encode!(event), event, true}
+    else
+      _outcome -> {data, decoded, false}
     end
   end
 

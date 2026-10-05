@@ -17,6 +17,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   alias CodexPooler.Gateway.Transports.Streaming.RuntimeAdmissionProof
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes
+  alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesToolCompletion
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.UpstreamErrorParam
   alias CodexPooler.Gateway.Transports.TransportFailureReason
@@ -44,6 +45,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV6
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks
+  alias CodexPooler.Gateway.Websocket.Adapter
   alias CodexPooler.Platform.ExecutionIdentity
   alias CodexPooler.RouteClass
 
@@ -918,6 +920,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       writer: request.writer,
       timeouts: request.timeouts,
       message_mapper: request.message_mapper,
+      public_tool_completion: new_public_tool_completion(request),
       frame_observer: request.frame_observer,
       native_codex_response_control: Map.get(request, :native_codex_response_control),
       delivery: %Delivery{
@@ -968,8 +971,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
          receive_state,
          connection_usage
        ) do
-    if collect_compaction?(request) and
-         not collect_connection_eligible?(state, key, request, connection_usage) do
+    if (request.connection_bound_continuation? and not reusable_connection?(state, key)) or
+         (collect_compaction?(request) and
+            not collect_connection_eligible?(state, key, request, connection_usage)) do
       reason = if connection_use(connection_usage) == :reused and Map.get(state, :last_successful_effective_serving_mode) != request.effective_serving_mode, do: :previous_response_serving_mode_mismatch, else: :previous_response_generation_mismatch
       guard_connection_bound_continuation(state, receive_state, connection_usage, reason)
     else
@@ -1962,11 +1966,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
         headers: Map.get(state, :headers, []),
         upstream_error_code: receive_state.terminal_upstream_error_code,
         upstream_error_param: receive_state.terminal_upstream_error_param,
+        public_tool_completion_reason: receive_state.public_tool_completion_reason,
         websocket_frame_headers: receive_state.websocket_frame_headers
       }
       |> maybe_put_success_response_id(terminal, receive_state.response_id)
 
     state = drain_trailing_frames(state, trailing_frames, :terminal)
+    state = if receive_state.public_tool_completion_reason, do: close_and_signal(state, :invalidated, &invalidate_state/1), else: state
 
     {{:ok, result}, maybe_retire_exhausted_connection(state, receive_state)}
   end
@@ -2192,8 +2198,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     receive_state = renew_receive_deadline(receive_state)
     raw_decoded = decode_text_frame(raw_text)
 
+    {source_text, source_decoded, receive_state} =
+      guard_public_tool_completion(raw_text, raw_decoded, receive_state)
+
     {mapped_text, mapped_decoded} =
-      map_message(raw_text, raw_decoded, receive_state.message_mapper)
+      if receive_state.public_tool_completion_reason,
+        do: {source_text, source_decoded},
+        else: map_message(source_text, source_decoded, receive_state.message_mapper)
 
     handle_text_frame(
       state,
@@ -2236,6 +2247,31 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp handle_frame({:binary, _data}, {:continue, state, receive_state}) do
     receive_state = %{receive_state | termination_source: :unexpected_binary_frame}
     {:halt, {:failure, state, receive_state, :unexpected_upstream_websocket_binary}}
+  end
+
+  defp new_public_tool_completion(%Request{message_mapper: mapper, websocket_delivery_mode: :relay}) do
+    if mapper == (&StreamProtocol.normalize_public_openai_responses_json_message/1),
+      do: PublicResponsesToolCompletion.new_state()
+  end
+
+  defp new_public_tool_completion(%Request{}), do: nil
+
+  defp guard_public_tool_completion(text, decoded, %ReceiveState{public_tool_completion: nil} = receive_state),
+    do: {text, decoded, receive_state}
+
+  defp guard_public_tool_completion(text, decoded, receive_state) do
+    tracker = PublicResponsesToolCompletion.observe(receive_state.public_tool_completion, decoded)
+    receive_state = %{receive_state | public_tool_completion: tracker}
+
+    with %{"type" => type} when type in ["response.completed", "response.done"] <- decoded,
+         {:ok, %{kind: :completed}} <- StreamProtocol.terminal_outcome(nil, decoded),
+         {:error, reason} <- PublicResponsesToolCompletion.completion_verdict(tracker) do
+      event = Adapter.websocket_error(%{status: 500, code: :server_error, message: StreamProtocol.synthetic_public_openai_responses_failure_message(), param: nil})
+      receive_state = %{receive_state | public_tool_completion_reason: reason, terminal_upstream_error_code: "upstream_stream_error"}
+      {CodexPooler.JSON.encode!(event), event, receive_state}
+    else
+      _outcome -> {text, decoded, receive_state}
+    end
   end
 
   defp append_receive_body(

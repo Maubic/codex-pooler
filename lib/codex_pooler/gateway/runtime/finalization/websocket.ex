@@ -846,7 +846,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
         true -> StreamProtocol.terminal_error_code(body, terminal)
       end
 
-    code = StreamProtocol.client_visible_error_code(upstream_code)
+    code = if Map.get(finalization, :public_tool_completion_reason), do: "upstream_stream_error", else: StreamProtocol.client_visible_error_code(upstream_code)
     websocket_frame_headers = Map.get(finalization, :websocket_frame_headers, %{})
     metadata_headers = headers ++ Map.to_list(websocket_frame_headers)
     continuation_guard = continuation_guard_metadata(upstream_code, Map.get(finalization, :transport_failure))

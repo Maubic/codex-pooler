@@ -810,6 +810,13 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   # a fresh one (findings#232 row 232-277, live probe 2026-09-23).
   defp connection_bound_continuation?(%RequestOptions{
          continuity: %{upstream_previous_response_id?: true},
+          transport: %{transport: "websocket"},
+          openai_compatibility: %{public_openai_responses_stream: true}
+        }),
+        do: true
+
+  defp connection_bound_continuation?(%RequestOptions{
+          continuity: %{upstream_previous_response_id?: true},
          transport: %{upstream_websocket_bridge?: true},
          openai_compatibility: %{public_openai_responses_stream: true}
        }),

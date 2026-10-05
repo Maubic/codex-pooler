@@ -554,6 +554,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketProgrammaticTest do
       assert Enum.map(frames, & &1["type"]) == [
                "response.output_item.added",
                "response.output_item.added",
+               "response.output_item.done",
                "response.completed"
              ]
 
@@ -4133,6 +4134,12 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketProgrammaticTest do
        }}
     end)
     |> Kernel.++([
+      {"response.output_item.done",
+       %{
+         "type" => "response.output_item.done",
+         "output_index" => 1,
+         "item" => programmatic_input_items() |> Enum.at(1) |> Map.put("status", "completed")
+       }},
       {"response.completed",
        %{
          "type" => "response.completed",
