@@ -31,19 +31,40 @@ defmodule CodexPoolerWeb.WebsocketDownstreamWriteWatch do
   # 232-261): a client that stops reading without closing is noticed only
   # when a write times out, 30 s later by default, so its resend always came
   # after a window measured from the provider's completion.
+  #
+  # The queue can only be read while the port is open, and the port exits with
+  # the peer's close: the released Codex client closes right after reading a
+  # content-filter terminal (findings#303 row 303-4), so the callback that
+  # confirms the terminal, and `terminate/2` itself, can run after the port is
+  # gone, where `:erlang.port_info/2` answers `:undefined` and nothing would ever
+  # be confirmed again. So the queue is also read right after every successful
+  # write (`[:thousand_island, :connection, :send]`, in the same process) and
+  # remembered: a closed port answers with that last observation, which is
+  # exactly whether the latest frame was in the kernel when the client could
+  # first have read it. A queue never observed counts as not empty, and so does
+  # the queue of a write whose port was already gone when it was read: an
+  # earlier write's observation says nothing about the latest frame.
 
   @event [:thousand_island, :connection, :send_error]
+  @sent_event [:thousand_island, :connection, :send]
   @handler_id {__MODULE__, :send_error}
+  @sent_handler_id {__MODULE__, :send}
   @watch_key {__MODULE__, :watch}
   @failure_key {__MODULE__, :failure}
   @failed_at_key {__MODULE__, :failed_at}
   @confirmed_key {__MODULE__, :confirmed}
   @port_key {__MODULE__, :port}
+  @queue_empty_key {__MODULE__, :queue_empty}
   @failures ~w(timeout closed other)
 
   @spec attach() :: :ok
   def attach do
-    case :telemetry.attach(@handler_id, @event, &__MODULE__.handle_event/4, :ok) do
+    :ok = attach_handler(@handler_id, @event)
+    attach_handler(@sent_handler_id, @sent_event)
+  end
+
+  defp attach_handler(handler_id, event) do
+    case :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, :ok) do
       :ok -> :ok
       {:error, :already_exists} -> :ok
     end
@@ -75,6 +96,11 @@ defmodule CodexPoolerWeb.WebsocketDownstreamWriteWatch do
     :ok
   end
 
+  def handle_event(@sent_event, _measurements, _metadata, _config) do
+    if Process.get(@watch_key) == true, do: observe_written_queue(Process.get(@port_key))
+    :ok
+  end
+
   def handle_event(_event, _measurements, _metadata, _config), do: :ok
 
   @doc "The class of the first failed write of this connection, or `nil`."
@@ -92,7 +118,7 @@ defmodule CodexPoolerWeb.WebsocketDownstreamWriteWatch do
   """
   @spec confirm(term()) :: :ok
   def confirm(evidence) do
-    if is_nil(failure()) and driver_queue_empty?(Process.get(@port_key)), do: Process.put(@confirmed_key, evidence)
+    if is_nil(failure()) and queue_empty?(), do: Process.put(@confirmed_key, evidence)
     :ok
   end
 
@@ -109,8 +135,27 @@ defmodule CodexPoolerWeb.WebsocketDownstreamWriteWatch do
 
   defp tcp_port?(link), do: is_port(link) and Port.info(link, :name) == {:name, ~c"tcp_inet"}
 
-  defp driver_queue_empty?(nil), do: true
-  defp driver_queue_empty?(port), do: :erlang.port_info(port, :queue_size) == {:queue_size, 0}
+  defp queue_empty? do
+    case Process.get(@port_key) do
+      nil -> true
+      port -> port |> :erlang.port_info(:queue_size) |> remember_queue()
+    end
+  end
+
+  defp remember_queue({:queue_size, size}) do
+    _previous = Process.put(@queue_empty_key, size == 0)
+    size == 0
+  end
+
+  defp remember_queue(:undefined), do: Process.get(@queue_empty_key, false)
+
+  # Right after a successful write: whether everything written so far is in the kernel. A port already gone cannot tell, so the latest frame then counts as not written, whatever an earlier read found.
+  defp observe_written_queue(nil), do: :ok
+
+  defp observe_written_queue(port) do
+    _previous = Process.put(@queue_empty_key, :erlang.port_info(port, :queue_size) == {:queue_size, 0})
+    :ok
+  end
 
   defp failure_class(%{error: :timeout}), do: "timeout"
   defp failure_class(%{error: :closed}), do: "closed"

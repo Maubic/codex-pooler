@@ -279,7 +279,10 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp mark_stopped(result), do: result
 
   # This callback runs after Bandit wrote the preceding push. The public
-  # handle_info entry confirms it only after the driver queue is empty.
+  # handle_info entry confirms it only after the driver queue is empty or,
+  # when the client already closed the connection, with the queue read right
+  # after the terminal's write (`WebsocketDownstreamWriteWatch`, findings#303
+  # row 303-4).
   defp handle_socket_info(:confirm_content_filter_terminal_write, state), do: {:ok, state}
 
   defp handle_socket_info({__MODULE__, :downstream_keepalive, interval_ms, previous_frames}, state) do
