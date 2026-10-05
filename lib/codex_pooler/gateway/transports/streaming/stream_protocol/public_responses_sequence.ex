@@ -8,7 +8,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
   @type state :: %{
           required(:max_seen) => integer() | nil,
           required(:terminal_latched?) => boolean(),
-          required(:overflow_latched?) => boolean()
+          required(:overflow_latched?) => boolean(),
+          optional(atom()) => term()
         }
 
   @type normalized ::
