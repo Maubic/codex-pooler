@@ -21,9 +21,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.AuthTest d
   alias CodexPooler.Gateway.Websocket, as: Gateway
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
+  alias CodexPooler.Upstreams.Lifecycle.IdentityLifecycle
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport.ReplayRemoteNodeClient
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport.TurnBudgetNodeClient
+
+  # Failure-detection budget for an expected message: a green run returns as
+  # soon as the message arrives, so only a missing one spends it.
+  @detection_timeout_ms 15_000
 
   setup do
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
@@ -327,6 +332,98 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.AuthTest d
       )
     after
       CodexResponsesSocket.terminate(:closed, state)
+    end
+  end
+
+  # The owner-forwarded handshake 401 whose refresh cannot retry, with another
+  # eligible candidate (findings#325): the owner's attempt fails over without
+  # recording the first attempt twice, and the same owner session answers the
+  # turn from the next candidate. `noop` is the refresh outcome of the stranded
+  # turn the ticket traced.
+  for mode <- ["full", "lite"], refresh_status <- ["noop", "reauth_required"] do
+    @mode mode
+    @refresh_status refresh_status
+    @tag :feature_websocket_terminal_auth_refresh
+    test "#{mode}: owner-forwarded websocket handshake 401 whose refresh returns #{refresh_status} fails over through the same owner" do
+      refresh_status = @refresh_status
+      release_ref = make_ref()
+
+      provider_refresh =
+        if refresh_status == "reauth_required",
+          do: [FakeUpstream.expect_request(method: "POST", path: "/oauth/token", respond: FakeUpstream.json_response(%{"error" => "invalid_grant"}, 400))],
+          else: []
+
+      # Strict: the preferred candidate's held 401 handshake, then its provider
+      # refresh when one is made; a redispatch to this candidate fails the
+      # fixture as an unexpected extra request.
+      first_upstream =
+        start_upstream(
+          # provenance: synthetic_adversarial
+          FakeUpstream.strict_sequence([held_websocket_handshake_401(self(), release_ref) | provider_refresh])
+        )
+
+      # Strict: the next candidate serves the turn on its first connection.
+      second_upstream =
+        start_upstream(
+          # provenance: synthetic_adversarial
+          FakeUpstream.strict_sequence([
+            FakeUpstream.expect_request(
+              method: "WEBSOCKET",
+              websocket_connection_ordinal: 1,
+              json: [valid: true, equals: %{"type" => "response.create"}],
+              respond:
+                FakeUpstream.websocket_text_frames([
+                  CodexPooler.JSON.encode!(%{
+                    "id" => "resp_owner_auth_failover_#{refresh_status}",
+                    "object" => "response",
+                    "usage" => %{"input_tokens" => 4, "output_tokens" => 3, "total_tokens" => 7}
+                  })
+                ])
+            )
+          ])
+        )
+
+      {setup, second} = websocket_failover_candidates!(first_upstream, second_upstream, @mode)
+
+      assert {:ok, _secret} =
+               Upstreams.store_encrypted_secret(setup.identity, %{
+                 secret_kind: "refresh_token",
+                 plaintext: "refresh-token-owner-ws-failover-do-not-leak"
+               })
+
+      {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
+      {:ok, state} = owner_socket(auth, "ws-owner-auth-failover-#{@mode}-#{refresh_status}", "owner-auth-failover-#{@mode}-#{refresh_status}")
+
+      try do
+        assert {:ok, owner_pid} = WebsocketOwnerSession.lookup(state.codex_session.id)
+        assert {:ok, state} = CodexResponsesSocket.handle_in({websocket_payload(setup, "owner auth failover"), [opcode: :text]}, state)
+
+        assert_receive {:fake_upstream_timeout_barrier, :before_headers, upstream_pid, ^release_ref}, @detection_timeout_ms
+        if refresh_status == "noop", do: assert({:ok, _identity} = IdentityLifecycle.update_upstream_identity(setup.identity, %{status: "paused"}))
+        send(upstream_pid, {:fake_upstream_release_timeout, release_ref})
+
+        assert {:push, {:text, frame}, state} = receive_owner_socket_push(state)
+        assert CodexPooler.JSON.decode!(frame)["id"] == "resp_owner_auth_failover_#{refresh_status}"
+        assert {:ok, _state} = receive_socket_done(state)
+        assert {:ok, ^owner_pid} = WebsocketOwnerSession.lookup(state.codex_session.id)
+
+        assert [request] = request_logs(setup.pool.id)
+        assert {request.status, request.last_error_code} == {"succeeded", nil}
+        assert request.request_metadata["routing"]["model_serving_mode"] == @mode
+        assert request.request_metadata["auth_refresh"]["status"] == refresh_status
+        assert request.request_metadata["websocket_owner_forwarding"]["owner_instance_id"] == Atom.to_string(node())
+
+        assert [first_attempt, second_attempt] = pool_attempts(setup.pool.id)
+        assert {first_attempt.pool_upstream_assignment_id, first_attempt.status, first_attempt.network_error_code} == {setup.assignment.id, "retryable_failed", "upstream_unauthorized"}
+        assert {second_attempt.pool_upstream_assignment_id, second_attempt.status} == {second.assignment.id, "succeeded"}
+        assert route_circuit_failures(setup.assignment.id) == [{"upstream_unauthorized", 1}]
+
+        assert :ok = FakeUpstream.verify!(first_upstream)
+        assert :ok = FakeUpstream.verify!(second_upstream)
+        refute inspect({request.request_metadata, first_attempt.response_metadata}) =~ "refresh-token-owner-ws-failover-do-not-leak"
+      after
+        CodexResponsesSocket.terminate(:closed, state)
+      end
     end
   end
 

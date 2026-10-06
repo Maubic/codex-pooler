@@ -21,6 +21,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
   alias CodexPooler.Gateway.Runtime.Finalization.{AttemptSettlement, Metadata, ProviderUsageLimit}
   alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup
   alias CodexPooler.Gateway.Runtime.Finalization.SideEffects
+  alias CodexPooler.Gateway.Runtime.Routing.DispatchLifecycle
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl
   alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
@@ -38,7 +39,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
              [
                finalize_not_retryable_auth_refresh: 6,
                retry_after_websocket_auth_refresh: 5,
-               record_auth_refresh_first_attempt_failure: 4
+               record_auth_refresh_first_attempt_failure: 4,
+               auth_refresh_failover?: 1,
+               failover_after_recorded_auth_failure: 2
              ]}
 
   @type callbacks :: %{
@@ -566,13 +569,42 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
              refresh_metadata,
              @websocket_refresh_metadata_operation
            ) do
-      finalize_exhausted_auth_refresh(
-        refreshed_context,
-        dispatch_request,
-        response,
-        failure,
-        started
-      )
+      if pre_visible_transport_websocket_failure?(response) and auth_refresh_failover?(refreshed_context) do
+        failover_after_recorded_auth_failure(refreshed_context, refresh_metadata)
+      else
+        finalize_exhausted_auth_refresh(
+          refreshed_context,
+          dispatch_request,
+          response,
+          failure,
+          started
+        )
+      end
+    end
+  end
+
+  # The attempt was recorded retryable before the refresh ran, and only a
+  # settlement may replace that record. The failed-websocket finalization
+  # records a pre-visible failure as retryable once more before failing over,
+  # which raised `attempt_already_finalized` here and left the request open,
+  # its reservation held, until the six-hour stale-reservation sweep
+  # (findings#325). With another candidate the turn fails over as the HTTP
+  # refresh does (`HttpAuthRefresh`): the failed route records the auth
+  # failure, or completes neutrally while another caller's refresh runs.
+  # Without one, the exhausted path settles the attempt.
+  defp auth_refresh_failover?(%{allow_retry?: true, request_options: request_options}),
+    do: not RequestOptions.connection_bound_compaction?(request_options)
+
+  defp auth_refresh_failover?(_context), do: false
+
+  defp failover_after_recorded_auth_failure(context, %{"status" => "refresh_in_progress"}) do
+    with :ok <- DispatchLifecycle.neutral_completion(context), do: {:retry, "upstream_unauthorized"}
+  end
+
+  defp failover_after_recorded_auth_failure(context, _refresh_metadata) do
+    case DispatchLifecycle.failure(context, "upstream_unauthorized") do
+      {:ok, _demotion_reason} -> {:retry, "upstream_unauthorized"}
+      {:error, _gateway_error} = error -> error
     end
   end
 

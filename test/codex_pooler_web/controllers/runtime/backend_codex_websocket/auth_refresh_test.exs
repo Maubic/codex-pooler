@@ -603,6 +603,166 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.AuthRefreshTest do
     end
   end
 
+  # A handshake 401 whose refresh cannot retry, with another eligible
+  # candidate. The first attempt is recorded retryable before the refresh
+  # runs, so the exhausted path fails over without recording it again; the
+  # second record raised `attempt_already_finalized` and left the request open,
+  # its reservation held, until the six-hour stale-reservation sweep
+  # (findings#325). The failed assignment's route health records the auth
+  # failure, except under a refresh another caller is running, which completes
+  # neutrally as it does on HTTP.
+  for mode <- ["full", "lite"],
+      {refresh_status, refresh} <- [
+        {"reauth_required", {:provider, 400, %{"error" => "invalid_grant"}}},
+        {"refresh_failed", {:provider, 503, %{"error" => "temporary"}}},
+        {"noop", :identity_paused},
+        {"refresh_in_progress", :identity_refreshing}
+      ] do
+    @mode mode
+    @refresh_status refresh_status
+    @refresh refresh
+    @tag :feature_websocket_terminal_auth_refresh_failures
+    test "#{mode}: websocket handshake 401 whose refresh returns #{refresh_status} fails over to the next candidate" do
+      refresh_status = @refresh_status
+      release_ref = make_ref()
+
+      # Strict: the preferred candidate's 401 handshake, held so the identity
+      # can change after routing, then its provider refresh when the refresh
+      # reaches the provider. No retry entry: a redispatch to this candidate
+      # fails the fixture as an unexpected extra request.
+      first_upstream =
+        start_upstream(
+          # provenance: synthetic_adversarial
+          FakeUpstream.strict_sequence([held_websocket_handshake_401(self(), release_ref) | provider_refresh(@refresh)])
+        )
+
+      # Strict: the next candidate serves the turn on its first connection.
+      second_upstream =
+        start_upstream(
+          # provenance: synthetic_adversarial
+          FakeUpstream.strict_sequence([
+            strict_native_response_payload(websocket_auth_retry_success_payload("failover_#{refresh_status}"), 1)
+          ])
+        )
+
+      {setup, second} = websocket_failover_candidates!(first_upstream, second_upstream, @mode)
+
+      assert {:ok, _secret} =
+               Upstreams.store_encrypted_secret(setup.identity, %{
+                 secret_kind: "refresh_token",
+                 plaintext: "refresh-token-ws-failover-do-not-leak"
+               })
+
+      {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
+      request_id = seed_preferring_assignment([setup.assignment.id, second.assignment.id], setup.assignment.id)
+      parent = self()
+
+      client =
+        Task.async(fn ->
+          Sandbox.allow(Repo, parent, self())
+
+          execute_websocket_response(
+            auth,
+            websocket_auth_refresh_payload(setup, "failover-#{refresh_status}"),
+            %{request_id: request_id},
+            fn frame -> send(parent, {:websocket_frame, frame}) end
+          )
+        end)
+
+      assert_receive {:fake_upstream_timeout_barrier, :before_headers, upstream_pid, ^release_ref}, @detection_timeout_ms
+      :ok = put_refresh_state!(setup.identity, @refresh)
+      send(upstream_pid, {:fake_upstream_release_timeout, release_ref})
+
+      assert :ok = Task.await(client, @detection_timeout_ms)
+      assert_received {:websocket_frame, frame}
+      assert CodexPooler.JSON.decode!(frame)["id"] == "resp_ws_auth_retry_failover_#{refresh_status}"
+      refute_received {:websocket_frame, _frame}
+
+      assert [first_attempt, second_attempt] = Repo.all(from(a in Attempt, order_by: [asc: a.attempt_number]))
+      assert {first_attempt.pool_upstream_assignment_id, first_attempt.status, first_attempt.network_error_code} == {setup.assignment.id, "retryable_failed", "upstream_unauthorized"}
+      assert {second_attempt.pool_upstream_assignment_id, second_attempt.status} == {second.assignment.id, "succeeded"}
+
+      assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
+      assert {request.status, request.last_error_code} == {"succeeded", nil}
+      assert request.request_metadata["routing"]["model_serving_mode"] == @mode
+      assert request.request_metadata["auth_refresh"]["status"] == refresh_status
+      assert request.request_metadata["auth_refresh"]["trigger_kind"] == "websocket_terminal_auth_failure"
+      assert route_circuit_failures(setup.assignment.id) == expected_route_failures(refresh_status)
+
+      assert :ok = FakeUpstream.verify!(first_upstream)
+      assert :ok = FakeUpstream.verify!(second_upstream)
+      refute inspect({request.request_metadata, first_attempt.response_metadata}) =~ "refresh-token-ws-failover-do-not-leak"
+    end
+  end
+
+  # The same handshake 401 on the last candidate has nowhere to fail over: the
+  # settlement replaces the attempt's retryable record and releases the
+  # reservation, so nothing is left for the stale-reservation sweep
+  # (findings#325).
+  for mode <- ["full", "lite"],
+      {refresh_status, refresh} <- [
+        {"reauth_required", {:provider, 400, %{"error" => "invalid_grant"}}},
+        {"noop", :identity_paused}
+      ] do
+    @mode mode
+    @refresh_status refresh_status
+    @refresh refresh
+    @tag :feature_websocket_terminal_auth_refresh_failures
+    test "#{mode}: websocket handshake 401 whose refresh returns #{refresh_status} on the last candidate settles the request" do
+      refresh_status = @refresh_status
+      release_ref = make_ref()
+
+      # Strict: the only candidate's held 401 handshake, then its provider
+      # refresh when one is made, and nothing after it.
+      upstream =
+        start_upstream(
+          # provenance: synthetic_adversarial
+          FakeUpstream.strict_sequence([held_websocket_handshake_401(self(), release_ref) | provider_refresh(@refresh)])
+        )
+
+      setup = gateway_setup(upstream)
+      _revision = set_model_serving_mode!(model_serving_scope(), setup, @mode)
+
+      assert {:ok, _secret} =
+               Upstreams.store_encrypted_secret(setup.identity, %{
+                 secret_kind: "refresh_token",
+                 plaintext: "refresh-token-ws-last-candidate-do-not-leak"
+               })
+
+      {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
+      parent = self()
+
+      client =
+        Task.async(fn ->
+          Sandbox.allow(Repo, parent, self())
+
+          execute_websocket_response(
+            auth,
+            websocket_auth_refresh_payload(setup, "last-candidate-#{refresh_status}"),
+            %{request_id: "ws-auth-last-candidate-#{@mode}-#{refresh_status}"},
+            fn frame -> send(parent, {:websocket_frame, frame}) end
+          )
+        end)
+
+      assert_receive {:fake_upstream_timeout_barrier, :before_headers, upstream_pid, ^release_ref}, @detection_timeout_ms
+      :ok = put_refresh_state!(setup.identity, @refresh)
+      send(upstream_pid, {:fake_upstream_release_timeout, release_ref})
+
+      assert {:error, %{status: 502, code: "upstream_request_failed"}} = Task.await(client, @detection_timeout_ms)
+
+      assert [attempt] = Repo.all(from(a in Attempt))
+      assert {attempt.status, attempt.network_error_code} == {"failed", "upstream_unauthorized"}
+
+      assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
+      assert {request.status, request.last_error_code} == {"failed", "upstream_unauthorized"}
+      assert request.completed_at
+      assert request.request_metadata["routing"]["model_serving_mode"] == @mode
+      assert request.request_metadata["auth_refresh"]["status"] == refresh_status
+      assert route_circuit_failures(setup.assignment.id) == [{"upstream_unauthorized", 1}]
+      assert :ok = FakeUpstream.verify!(upstream)
+    end
+  end
+
   @tag :feature_websocket_terminal_auth_refresh_failures
   test "websocket disconnect during terminal auth refresh drains the response task without DB noise" do
     release_ref = make_ref()
@@ -971,6 +1131,27 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.AuthRefreshTest do
   defp strict_oauth_refresh(respond) do
     FakeUpstream.expect_request(method: "POST", path: "/oauth/token", respond: respond)
   end
+
+  defp provider_refresh({:provider, status, body}), do: [strict_oauth_refresh(FakeUpstream.json_response(body, status))]
+  defp provider_refresh(_identity_state), do: []
+
+  # The refresh reads the identity as it is when the 401 lands: paused, it is
+  # a no-op; marked refreshing by another caller, this request is a follower.
+  defp put_refresh_state!(_identity, {:provider, _status, _body}), do: :ok
+
+  defp put_refresh_state!(identity, :identity_paused) do
+    assert {:ok, _identity} = IdentityLifecycle.update_upstream_identity(identity, %{status: "paused"})
+    :ok
+  end
+
+  defp put_refresh_state!(identity, :identity_refreshing) do
+    metadata = Map.put(identity.metadata || %{}, "token_refresh", active_token_refresh_metadata())
+    assert {:ok, _identity} = IdentityLifecycle.update_upstream_identity(identity, %{status: "refreshing", metadata: metadata})
+    :ok
+  end
+
+  defp expected_route_failures("refresh_in_progress"), do: []
+  defp expected_route_failures(_refresh_status), do: [{"upstream_unauthorized", 1}]
 
   defp active_token_refresh_metadata(opts \\ []) do
     %{

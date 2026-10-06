@@ -15,7 +15,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway, as: RuntimeGateway
   alias CodexPooler.Gateway.Payloads.RequestOptions
-  alias CodexPooler.Gateway.Persistence.{CodexSession, CodexTurn}
+  alias CodexPooler.Gateway.Persistence.{BridgeDemotion, CodexSession, CodexTurn, RoutingCircuitState}
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Websocket.Adapter
@@ -92,6 +92,63 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
       "stream" => true,
       "generate" => true
     })
+  end
+
+  # A websocket handshake the provider answers 401 with its authorization
+  # error header, held before the headers until the test sends
+  # `{:fake_upstream_release_timeout, release_ref}`, so the identity can change
+  # after routing and before the refresh reads it (findings#325).
+  def held_websocket_handshake_401(notify, release_ref) do
+    FakeUpstream.expect_request(
+      method: "GET",
+      respond:
+        FakeUpstream.websocket_upgrade_error(
+          %{"error" => %{"code" => "invalid_api_key"}},
+          status: 401,
+          headers: [{"x-openai-authorization-error", "invalid_api_key"}],
+          notify: notify,
+          release_ref: release_ref
+        )
+    )
+  end
+
+  # The setup's model served by two candidates in the given serving mode. The
+  # second carries an ordering demotion, so the first stays preferred while the
+  # second remains eligible for failover (findings#325).
+  def websocket_failover_candidates!(first_upstream, second_upstream, mode) do
+    setup = gateway_setup(first_upstream)
+    second = gateway_upstream(setup.pool, second_upstream, "upstream-token-ws-failover-second", [])
+    prime_routing_quota!(second.identity)
+    setup = %{setup | model: put_model_source_assignments!(setup.model, [setup.assignment, second.assignment])}
+    _revision = set_model_serving_mode!(model_serving_scope(), setup, mode)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    Repo.insert!(%BridgeDemotion{
+      pool_id: setup.pool.id,
+      api_key_id: setup.api_key.id,
+      model_identifier: setup.model.exposed_model_id,
+      pool_upstream_assignment_id: second.assignment.id,
+      upstream_identity_id: second.identity.id,
+      reason_code: "upstream_5xx",
+      status: "active",
+      demoted_until: DateTime.add(now, 600, :second),
+      attempt_count: 1,
+      metadata: %{},
+      created_at: now,
+      updated_at: now
+    })
+
+    {setup, second}
+  end
+
+  # The assignment's recorded route-circuit failures, `{reason_code, failure_count}`.
+  def route_circuit_failures(assignment_id) do
+    Repo.all(
+      from(c in RoutingCircuitState,
+        where: c.pool_upstream_assignment_id == ^assignment_id and c.failure_count > 0,
+        select: {c.reason_code, c.failure_count}
+      )
+    )
   end
 
   def synthetic_access_token(residency) do
