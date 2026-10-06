@@ -32,8 +32,6 @@ export const savedResetConnectParams = (root = document) => {
 export const SavedResetConnection = {
 	mounted() {
 		this.ready = true;
-		this.el =
-			this.el.closest?.("[data-saved-reset-connection-root]") || this.el;
 		this.guard = (event) => {
 			if (event.type === "keydown" && !["Enter", " "].includes(event.key))
 				return;

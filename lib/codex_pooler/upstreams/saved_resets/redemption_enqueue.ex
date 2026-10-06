@@ -3,8 +3,6 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionEnqueue do
   Scoped admin enqueue API for manual saved reset redemption.
   """
 
-  import Ecto.Query
-
   alias CodexPooler.Accounts.Scope
   alias CodexPooler.Events
   alias CodexPooler.Jobs
@@ -14,9 +12,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionEnqueue do
   alias CodexPooler.Upstreams.SavedResetRedemption
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
   alias CodexPooler.Upstreams.Secrets
-  alias CodexPooler.Upstreams.StatusVocabulary.Assignment, as: AssignmentStatus
 
-  @assignment_deleted AssignmentStatus.deleted_status()
   @type lifecycle_error :: %{required(:code) => atom(), required(:message) => String.t()}
 
   @spec enqueue_for_scope(
@@ -29,8 +25,10 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionEnqueue do
   def enqueue_for_scope(scope, identity_or_id, pool_id, opts \\ [])
 
   def enqueue_for_scope(%Scope{} = scope, identity_or_id, pool_id, opts) do
-    with {:ok, identity} <- AccountLifecycle.authorize(scope, identity_or_id),
-         {:ok, assignment} <- find_assignment(identity, pool_id),
+    # The Pool id comes from the page. The target is picked from the assignments the authorization read,
+    # so an assignment created after that read can never be targeted.
+    with {:ok, identity, assignments} <- AccountLifecycle.authorize_assignments(scope, identity_or_id),
+         {:ok, assignment} <- target_assignment(assignments, pool_id),
          {:ok, _assignment, _identity} <- ensure_available(assignment),
          {:ok, job} <-
            Jobs.enqueue_saved_reset_redemption(assignment, trigger_kind: "admin_manual") do
@@ -46,25 +44,15 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionEnqueue do
   def enqueue_for_scope(_scope, _identity_or_id, _pool_id, _opts),
     do: {:error, lifecycle_error(:invalid_request, "user scope is required")}
 
-  defp find_assignment(%UpstreamIdentity{} = identity, pool_id) when is_binary(pool_id) do
-    case Repo.one(
-           from assignment in PoolUpstreamAssignment,
-             where:
-               assignment.upstream_identity_id == ^identity.id and assignment.pool_id == ^pool_id and
-                 assignment.status != ^@assignment_deleted,
-             order_by: [asc: assignment.created_at, asc: assignment.id],
-             limit: 1
-         ) do
-      %PoolUpstreamAssignment{} = assignment ->
-        {:ok, assignment}
-
-      nil ->
-        {:error, lifecycle_error(:pool_assignment_not_found, "pool assignment was not found")}
+  # The authorized live assignments, oldest first: the first one in the requested Pool.
+  defp target_assignment(assignments, pool_id) do
+    with {:ok, pool_id} <- Ecto.UUID.cast(pool_id),
+         %PoolUpstreamAssignment{} = assignment <- Enum.find(assignments, &(&1.pool_id == pool_id)) do
+      {:ok, assignment}
+    else
+      _missing -> {:error, lifecycle_error(:pool_assignment_not_found, "pool assignment was not found")}
     end
   end
-
-  defp find_assignment(_identity, _pool_id),
-    do: {:error, lifecycle_error(:pool_assignment_not_found, "pool assignment was not found")}
 
   defp ensure_available(%PoolUpstreamAssignment{} = assignment) do
     case SavedResetRedemption.ensure_manual_available(assignment) do

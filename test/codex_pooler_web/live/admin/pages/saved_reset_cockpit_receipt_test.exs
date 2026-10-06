@@ -6,11 +6,6 @@ defmodule CodexPoolerWeb.Admin.SavedResetCockpitReceiptTest do
 
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Repo
-  alias CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts
-  alias CodexPoolerWeb.Admin.UpstreamCockpitLive.SavedResetWorkflow
-  alias CodexPoolerWeb.Admin.UpstreamCockpitReadModel
-  alias CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.SavedResetMeter
-  alias CodexPoolerWeb.DateTimeDisplay
 
   setup :register_and_log_in_user
 
@@ -85,19 +80,6 @@ defmodule CodexPoolerWeb.Admin.SavedResetCockpitReceiptTest do
     end
   end
 
-  test "legacy-only quota component retains its bounded confirmation and inventory", context do
-    %{identity: identity, now: now, scope: scope} = context
-    identity |> Ecto.Changeset.change(metadata: Map.put(identity.metadata, "saved_reset_redemption", redemption(:applied_pending, now))) |> Repo.update!()
-    assert {:ok, cockpit} = UpstreamCockpitReadModel.load_visible_without_request_metrics(scope, identity.id)
-    html = render_component(&Charts.quota_section/1, %{cockpit: Map.delete(cockpit, :saved_reset_operation), saved_reset_policy_form: SavedResetWorkflow.policy_form(cockpit.saved_reset_policy), datetime_preferences: DateTimeDisplay.preferences_for_user(nil)})
-    document = LazyHTML.from_fragment(html)
-    capture_html!(:legacy_component, html)
-    assert Enum.count(LazyHTML.query(document, "#upstream-quota-saved-reset-meter-confirmation[data-confirmation-state='awaiting_confirmation']")) == 1
-    assert Enum.count(LazyHTML.query(document, "#upstream-quota-saved-reset-meter-bar[aria-valuenow='2']")) == 1
-    assert Enum.count(LazyHTML.query(document, "#cockpit-saved-reset-expiration-row-0")) == 1
-    record_evidence!(:legacy_component, context.fake)
-  end
-
   for state <- [:consuming, :ambiguous] do
     @state state
 
@@ -127,27 +109,6 @@ defmodule CodexPoolerWeb.Admin.SavedResetCockpitReceiptTest do
       capture_html!("list_#{@state}_bank", render(view))
       record_evidence!("list_#{@state}", context.fake)
     end
-  end
-
-  test "meter show_confirmation=false omits all legacy copy while true retains it", context do
-    %{identity: identity, now: now, scope: scope} = context
-    identity |> Ecto.Changeset.change(metadata: Map.put(identity.metadata, "saved_reset_redemption", redemption(:applied_pending, now))) |> Repo.update!()
-    assert {:ok, account} = UpstreamCockpitReadModel.load_visible_without_request_metrics(scope, identity.id)
-    attrs = %{id: "sample-reset-meter", saved_resets: account.saved_resets, saved_reset_policy: account.saved_reset_policy, saved_reset_confirmation: account.saved_reset_confirmation}
-    hidden = render_component(&SavedResetMeter.saved_reset_meter/1, Map.put(attrs, :show_confirmation, false))
-    visible = render_component(&SavedResetMeter.saved_reset_meter/1, Map.put(attrs, :show_confirmation, true))
-    capture_html!(:meter_confirmation_hidden, hidden)
-    capture_html!(:meter_confirmation_visible, visible)
-    hidden_document = LazyHTML.from_fragment(hidden)
-    visible_document = LazyHTML.from_fragment(visible)
-
-    assert Enum.count(LazyHTML.query(hidden_document, "#sample-reset-meter-bar[aria-label='2 saved resets'][aria-valuenow='2']")) == 1
-    assert Enum.empty?(LazyHTML.query(hidden_document, "#sample-reset-meter-confirmation, [data-role='upstream-saved-reset-consumed-at']"))
-    refute hidden =~ "Reset consumed"
-    refute hidden =~ "Awaiting confirmation"
-    assert Enum.count(LazyHTML.query(visible_document, "#sample-reset-meter-confirmation[data-confirmation-state='awaiting_confirmation']")) == 1
-    assert Enum.count(LazyHTML.query(visible_document, "#sample-reset-meter-bar[aria-label*='Awaiting confirmation'][aria-valuenow='2']")) == 1
-    record_evidence!(:meter_confirmation_switch, context.fake)
   end
 
   defp redemption(:consuming, now), do: %{"status" => "redeeming", "phase" => "consuming", "started_at" => DateTime.to_iso8601(now)}

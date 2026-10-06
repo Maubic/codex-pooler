@@ -9,7 +9,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetConfirmationP
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProjection
   alias CodexPoolerWeb.DateTimeDisplay
 
-  test "monthly quota is the challenged window and five-hour exhaustion remains additional" do
+  test "monthly quota is the challenged window, never the five-hour window" do
     now = ~U[2026-07-14 03:30:00.000000Z]
 
     monthly = %AccountQuotaWindow{
@@ -28,7 +28,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetConfirmationP
       metadata: %{}
     }
 
-    primary = %{monthly | window_minutes: 300}
+    # A usable five-hour window beside the exhausted monthly one would read `:usable` if it were challenged.
+    primary = %{monthly | window_minutes: 300, used_percent: Decimal.new("10")}
 
     result =
       SavedResetConfirmationProjection.project(
@@ -39,7 +40,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetConfirmationP
       )
 
     assert result.challenged_evidence_state == :exhausted
-    assert result.additional_account_blocker_state == :exhausted
   end
 
   @now ~U[2026-10-05 12:00:00Z]
@@ -52,7 +52,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetConfirmationP
       readiness = QuotaProjection.readiness([retained], @now)
 
       assert confirmation.challenged_evidence_state == :candidate_progressing
-      assert confirmation.observed_at == DateTime.add(@now, -2, :minute)
       refute readiness.routing_ready_now?
 
       operation =

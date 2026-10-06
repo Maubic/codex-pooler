@@ -28,6 +28,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetSecondaryExclusionRecoveryTest d
     assert {:ok, [{assignment, identity}], options, _state} = result
     assert Map.fetch!(calls, :validate_locked_gateway_auto) >= 1
     assert Map.fetch!(calls, :validate_reserved_gateway_auto) >= 1
+    assert Map.fetch!(calls, :target_windows_resettable?) >= 1
     assert assignment.id == target.assignment.id
     assert identity.id == target.identity.id
     assert ResetProbe.bound?(options.routing.reset_probe)
@@ -45,6 +46,19 @@ defmodule CodexPooler.Gateway.Routing.SavedResetSecondaryExclusionRecoveryTest d
       receipt(Atom.to_string(veto), fake)
       assert consume_count(fake) == 0
       assert priority_generation_count(fake) == 0
+      assert Repo.reload!(target.identity).metadata["saved_resets"]["available_count"] == 2
+    end
+  end
+
+  # The window read runs only for a candidate the policy and bank already accept: the scan
+  # evaluates the two predicates once per candidate, in that order, and stops at the first refusal.
+  for veto <- [:disabled, :keep_credits] do
+    test "a #{veto} candidate is refused before its windows are read" do
+      %{upstream: fake, target: target, input: input} = arrangement(unquote(veto))
+      {result, calls} = traced_route(input)
+      assert {:error, _} = result
+      assert Map.get(calls, :target_windows_resettable?, 0) == 0
+      assert consume_count(fake) == 0
       assert Repo.reload!(target.identity).metadata["saved_resets"]["available_count"] == 2
     end
   end
@@ -79,8 +93,8 @@ defmodule CodexPooler.Gateway.Routing.SavedResetSecondaryExclusionRecoveryTest d
   defp traced_route(input) do
     collector = start_supervised!({Task, fn -> collect_calls(%{}) end})
     monitor = Process.monitor(collector)
-    functions = [:validate_locked_gateway_auto, :validate_reserved_gateway_auto]
-    for function <- functions, do: :erlang.trace_pattern({AutoEligibility, function, 4}, true, [:local])
+    functions = [validate_locked_gateway_auto: 4, validate_reserved_gateway_auto: 4, target_windows_resettable?: 3]
+    for {function, arity} <- functions, do: :erlang.trace_pattern({AutoEligibility, function, arity}, true, [:local])
     :erlang.trace(self(), true, [:call, {:tracer, collector}])
 
     try do
@@ -93,7 +107,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetSecondaryExclusionRecoveryTest d
       {result, counts}
     after
       :erlang.trace(self(), false, [:call])
-      for function <- functions, do: :erlang.trace_pattern({AutoEligibility, function, 4}, false, [:local])
+      for {function, arity} <- functions, do: :erlang.trace_pattern({AutoEligibility, function, arity}, false, [:local])
       send(collector, :stop)
       assert_receive {:DOWN, ^monitor, :process, ^collector, :normal}
     end

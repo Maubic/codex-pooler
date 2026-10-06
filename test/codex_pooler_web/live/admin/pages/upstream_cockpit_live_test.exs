@@ -42,7 +42,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
   alias CodexPoolerWeb.Admin.UpstreamCockpitComponents.Summary
   alias CodexPoolerWeb.Admin.UpstreamCockpitLive.AuthJsonImportWorkflow
   alias CodexPoolerWeb.Admin.UpstreamCockpitReadModel
-  alias CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.SavedResetMeter
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.ReconciliationStatus
   alias CodexPoolerWeb.DateTimeDisplay
   alias Ecto.Adapters.SQL
@@ -62,49 +61,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
   setup do
     Repo.delete_all(Oban.Job)
     :ok
-  end
-
-  @tag :saved_reset_confirmation
-  test "saved reset confirmation remains separate from unavailable usage" do
-    html =
-      render_component(&SavedResetMeter.saved_reset_meter/1,
-        id: "saved-reset-usage-separation-meter",
-        saved_resets: %{
-          available_count: 0,
-          label: "0 saved resets",
-          next_expires_title: nil,
-          reset_lifecycle: %{
-            phase: "consume_not_applied",
-            label: "Reset was not applied",
-            consumed_at: nil,
-            deadline_at: nil
-          }
-        },
-        saved_reset_policy: %{enabled?: false},
-        saved_reset_confirmation: %{
-          confirmation_state: :not_applied,
-          challenged_evidence_state: :absent,
-          additional_account_blocker_state: :unknown_unusable,
-          observed_at: nil
-        }
-      )
-
-    document = LazyHTML.from_fragment(html)
-
-    assert LazyHTML.query(
-             document,
-             "[data-role='upstream-saved-reset-confirmation-state'][data-confirmation-state='not_applied']"
-           )
-           |> LazyHTML.text()
-           |> String.trim() == "Not applied"
-
-    assert LazyHTML.query(
-             document,
-             "[data-role='upstream-saved-reset-additional-blocker'][data-blocker-state='unknown_unusable']"
-           )
-           |> LazyHTML.text() =~ "Unknown or unusable"
-
-    refute html =~ "Usage unavailable"
   end
 
   @tag :cockpit_consistency

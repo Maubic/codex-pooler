@@ -1,7 +1,7 @@
 defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjectionTest do
   use ExUnit.Case, async: true
 
-  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjection
+  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.{SavedResetOperationProjection, SavedResetProjection}
   alias CodexPoolerWeb.DateTimeDisplay
 
   @prefs DateTimeDisplay.preferences_for_user(nil)
@@ -24,9 +24,42 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjectionTes
       assert projected.saved_resets == account.saved_resets
     end
 
-    for state <- [:none, :stopped, :unavailable] do
+    for state <- [:none, :completed, :discarded, :cancelled, :stopped] do
       projected = Map.put(account, :saved_reset_operation, %{request: %{state: state}})
       assert SavedResetProjection.redemption_action(projected).available?
+    end
+
+    unreadable = Map.put(account, :saved_reset_operation, %{request: %{state: :unavailable}})
+    assert SavedResetProjection.redemption_action(unreadable) == %{available?: false, reason: "saved reset request status is unavailable"}
+  end
+
+  # One rule for the bank, the cockpit and both workflows: the recorded status holds the action back with its
+  # reason, so a disabled Redeem always says why.
+  test "the recorded status holds back another redemption with its reason" do
+    now = ~U[2026-07-14 03:30:00.000000Z]
+
+    account = fn record ->
+      operation = SavedResetOperationProjection.project(%{snapshot_at: now, datetime_preferences: @prefs, redemption: record})
+      saved_resets = SavedResetProjection.snapshot(%{"saved_reset_redemption" => record, "saved_resets" => %{"status" => "reported", "available_count" => 1}}, @prefs)
+      %{identity: %{status: "active"}, reauth_required?: false, refresh_status: "imported", secret_status: :present, assignments: [%{id: "trusted-assignment"}], saved_resets: saved_resets, saved_reset_operation: operation}
+    end
+
+    unresolved = "the last saved reset is unresolved; another redemption waits until it resolves"
+    malformed_replay = %{"phase" => "consume_not_applied", "result" => %{"code" => "consume_not_applied", "applied" => false}, "provider_replay" => %{"version" => 1, "provider_dispatches" => 1}}
+
+    for {record, reason} <- [
+          {%{"phase" => "confirmed_by_quota"}, unresolved},
+          {malformed_replay, unresolved},
+          {metadata("confirmed_by_upstream", %{"status" => "succeeded"})["saved_reset_redemption"], "the last saved reset is still in progress"}
+        ] do
+      assert SavedResetProjection.redemption_action(account.(record)) == %{available?: false, reason: reason}, inspect(record["phase"])
+      assert SavedResetProjection.status_hold(account.(record).saved_reset_operation) == reason
+    end
+
+    # A record without a lifecycle phase never resolves and the claim ignores it, so it keeps the action.
+    for record <- [%{"status" => "failed", "result" => %{"code" => "transport_error", "applied" => false}}, %{"status" => "completed"}] do
+      assert SavedResetProjection.redemption_action(account.(record)) == %{available?: true, reason: nil}
+      assert SavedResetProjection.status_hold(account.(record).saved_reset_operation) == nil
     end
   end
 
@@ -80,25 +113,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjectionTes
     %{"saved_reset_redemption" => redemption}
   end
 
-  test "surfaces a human-readable lifecycle for each phase" do
-    labels = %{
-      "consuming" => "Redeeming",
-      "consumed_pending_probe" => "Reset consumed — confirming",
-      "confirmed_by_upstream" => "Reset confirmed by probe",
-      "confirmed_by_quota" => "Reset confirmed by quota",
-      "reblocked" => "Reset consumed — awaiting usable quota",
-      "expired" => "Reset confirmation expired",
-      "consume_not_applied" => "Reset was not applied"
-    }
-
-    for {phase, label} <- labels do
-      snapshot = SavedResetProjection.snapshot(metadata(phase), @prefs)
-
-      assert snapshot.reset_lifecycle.phase == phase
-      assert snapshot.reset_lifecycle.label == label
-      assert is_binary(snapshot.reset_lifecycle.consumed_at)
-      assert is_binary(snapshot.reset_lifecycle.deadline_at)
+  # The receipt owns every operator-facing lifecycle fact; the snapshot keeps only the phase the action reads.
+  test "keeps only the recognized lifecycle phase" do
+    for phase <- ["consuming", "consumed_pending_probe", "confirmed_by_upstream", "confirmed_by_quota", "reblocked", "expired", "consume_not_applied"] do
+      assert SavedResetProjection.snapshot(metadata(phase), @prefs).reset_lifecycle == %{phase: phase}
     end
+
+    assert SavedResetProjection.snapshot(metadata("phase-from-a-newer-release"), @prefs).reset_lifecycle == nil
   end
 
   test "renders an applied reblock recovered by quota as confirmed" do
@@ -111,9 +132,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjectionTes
         @prefs
       )
 
-    assert snapshot.reset_lifecycle.phase == "confirmed_by_quota"
-    assert snapshot.reset_lifecycle.label == "Reset confirmed by quota"
-    refute snapshot.reset_lifecycle.label == "Still blocked after reset"
+    assert snapshot.reset_lifecycle == %{phase: "confirmed_by_quota"}
   end
 
   @tag :saved_reset_redemption_cause

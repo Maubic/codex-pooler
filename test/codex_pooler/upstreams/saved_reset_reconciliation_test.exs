@@ -158,8 +158,7 @@ defmodule CodexPooler.Upstreams.SavedResetReconciliationTest do
         DateTimeDisplay.preferences_for_user(nil)
       )
 
-    assert snapshot.reset_lifecycle.phase == "confirmed_by_quota"
-    assert snapshot.reset_lifecycle.label == "Reset confirmed by quota"
+    assert snapshot.reset_lifecycle == %{phase: "confirmed_by_quota"}
   end
 
   @tag :scheduler_boundary

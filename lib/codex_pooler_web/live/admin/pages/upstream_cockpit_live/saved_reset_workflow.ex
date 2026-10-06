@@ -5,6 +5,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive.SavedResetWorkflow do
   import Phoenix.LiveView, only: [put_flash: 3, clear_flash: 2]
 
   alias CodexPooler.Upstreams
+  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjection
 
   @reason "admin_upstream_cockpit_live"
 
@@ -139,10 +140,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive.SavedResetWorkflow do
     end
   end
 
-  defp status_only?(%{saved_reset_operation: operation}) do
-    operation.request.state in [:queued, :processing, :unavailable] or
-      operation.provider_outcome == :unknown or operation.active?
-  end
+  defp status_only?(%{saved_reset_operation: operation}), do: SavedResetProjection.status_hold(operation) != nil
 
   defp resume_status(socket) do
     socket

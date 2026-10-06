@@ -25,7 +25,7 @@ defmodule CodexPooler.Dev.SavedResetConfirmationFixtures do
   @database "codex_pooler_dev"
   @lock_namespace "codex-pooler:saved-reset-confirmation-fixtures"
   @journal_root Path.join(["tmp", "saved-reset-confirmation-fixtures"])
-  @scenarios ~w(absent exhausted candidate_progression blocker_sibling blocker_circuit confirmed not_applied expired circuit_recovery usage_unavailable queued processing unknown applied_pending provisional no_credit nothing_to_reset reblocked poll_paused)
+  @scenarios ~w(absent exhausted candidate_progression blocker_sibling blocker_circuit confirmed not_applied expired circuit_recovery usage_unavailable queued processing request_completed request_ended unknown applied_pending provisional no_credit nothing_to_reset reblocked poll_paused)
   @controls ~w(visibility_loss visibility_restore source_removed source_restore)
   @journal_keys ~w(actor_membership_ids actor_operator_pool_assignment_ids actor_user_ids assignment_ids browser_auth_path identity_ids pool_ids run_fingerprint scenario status)
 
@@ -605,19 +605,20 @@ defmodule CodexPooler.Dev.SavedResetConfirmationFixtures do
 
     %{
       "status" => if(unavailable?, do: "unavailable", else: "reported"),
-      "available_count" => if(scenario in ["not_applied", "no_credit", "expired"], do: 0, else: 1),
+      "available_count" => if(scenario in ["not_applied", "no_credit", "request_ended", "expired"], do: 0, else: 1),
       "source" => "synthetic_fixture",
       "observed_at" => DateTime.to_iso8601(now),
       "reason" => if(unavailable?, do: "usage_unavailable", else: nil)
     }
   end
 
-  defp put_scenario_lifecycle(base, scenario, now) when scenario in ["candidate_progression", "applied_pending", "poll_paused"], do: put_lifecycle(base, "redeeming", "consumed_pending_probe", DateTime.add(now, -120, :second))
+  defp put_scenario_lifecycle(base, scenario, now) when scenario in ["candidate_progression", "applied_pending", "poll_paused", "request_completed"], do: put_lifecycle(base, "redeeming", "consumed_pending_probe", DateTime.add(now, -120, :second))
   defp put_scenario_lifecycle(base, "confirmed", now), do: put_lifecycle(base, "succeeded", "confirmed_by_quota", DateTime.add(now, -120, :second))
   defp put_scenario_lifecycle(base, "processing", now), do: put_lifecycle(base, "redeeming", "consuming", now)
   defp put_scenario_lifecycle(base, "unknown", now), do: put_lifecycle(base, "redeeming", "consuming", DateTime.add(now, -600, :second)) |> put_in(["saved_reset_redemption", "provider_replay"], %{"version" => 1, "provider_dispatches" => 1, "state" => "ambiguous"})
   defp put_scenario_lifecycle(base, "provisional", now), do: put_lifecycle(base, "succeeded", "confirmed_by_upstream", DateTime.add(now, -120, :second))
   defp put_scenario_lifecycle(base, scenario, now) when scenario in ["no_credit", "nothing_to_reset"], do: put_noop(base, scenario, now)
+  defp put_scenario_lifecycle(base, "request_ended", now), do: put_noop(base, "no_credit", now)
   defp put_scenario_lifecycle(base, scenario, now) when scenario in ["reblocked", "blocker_sibling", "blocker_circuit"], do: put_lifecycle(base, "failed", "reblocked", now)
   defp put_scenario_lifecycle(base, "not_applied", now), do: put_noop(base, "consume_not_applied", now)
   defp put_scenario_lifecycle(base, "expired", now), do: put_lifecycle(base, "failed", "expired", DateTime.add(now, -1200, :second))
@@ -731,11 +732,20 @@ defmodule CodexPooler.Dev.SavedResetConfirmationFixtures do
     base |> put_lifecycle("failed", "consume_not_applied", now) |> put_in(["saved_reset_redemption", "result"], %{"applied" => false, "code" => code}) |> update_in(["saved_reset_redemption"], &Map.drop(&1, ["consumed_at", "deadline_at"]))
   end
 
-  defp insert_scenario_request(scenario, identity_id, assignment_id) when scenario in ["queued", "processing"] do
+  defp insert_scenario_request(scenario, identity_id, assignment_id) when scenario in ["queued", "processing", "request_completed", "request_ended"] do
     assignment = Repo.get!(PoolUpstreamAssignment, assignment_id)
     unless assignment.upstream_identity_id == identity_id, do: raise("fixture request target mismatch")
     job = SavedResetRedemptionWorker.new(%{"pool_upstream_assignment_id" => assignment.id, "manual_request_target" => %{"upstream_identity_id" => assignment.upstream_identity_id, "pool_id" => assignment.pool_id}, "trigger_kind" => "admin_manual"}) |> Repo.insert!()
-    if scenario == "processing", do: job |> Ecto.Changeset.change(state: "executing", attempted_at: DateTime.utc_now()) |> Repo.update!()
+    now = DateTime.utc_now()
+
+    # Finished requests carry the worker's own end states: `completed` after an applied reset, `discarded` after a no-op.
+    case scenario do
+      "queued" -> job
+      "processing" -> job |> Ecto.Changeset.change(state: "executing", attempted_at: now) |> Repo.update!()
+      "request_completed" -> job |> Ecto.Changeset.change(state: "completed", attempt: 1, attempted_at: now, completed_at: now) |> Repo.update!()
+      "request_ended" -> job |> Ecto.Changeset.change(state: "discarded", attempt: 1, attempted_at: now, discarded_at: now) |> Repo.update!()
+    end
+
     :ok
   end
 

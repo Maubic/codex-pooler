@@ -4,7 +4,6 @@ defmodule CodexPooler.Jobs.ReadModel.SavedResetRequests do
   import Ecto.Query
 
   alias CodexPooler.Accounts.Scope
-  alias CodexPooler.Jobs.ReadModel.Query
   alias CodexPooler.Jobs.SavedResetRedemptionWorker
   alias CodexPooler.Pools
   alias CodexPooler.Repo
@@ -13,9 +12,13 @@ defmodule CodexPooler.Jobs.ReadModel.SavedResetRequests do
   alias CodexPooler.Upstreams.StatusVocabulary.Assignment, as: AssignmentStatus
 
   @assignment_deleted AssignmentStatus.deleted_status()
+  # The worker's uniqueness counts these states as an incomplete request (Oban's `:incomplete`), so a held
+  # `suspended` job still reads as an open request and a new submission would join it.
+  @open_states ~w(suspended available scheduled executing retryable)
 
+  @type request_state :: :queued | :processing | :completed | :discarded | :cancelled | :stopped
   @type request :: %{
-          required(:state) => :queued | :processing | :stopped,
+          required(:state) => request_state(),
           required(:requested_at) => DateTime.t(),
           required(:scheduled_at) => DateTime.t() | nil
         }
@@ -28,9 +31,11 @@ defmodule CodexPooler.Jobs.ReadModel.SavedResetRequests do
 
   Only requests with both persisted nested target bindings are included; legacy unbound
   rows cannot prove their original target after an assignment changes.
-  Each identity has at most one open and one terminal request. A terminal job
-  establishes only stopped request context, never provider application, spend,
-  actor attribution or correlation with the identity's latest reset lifecycle.
+  Each identity has at most one open and one terminal request. A terminal
+  request carries how its job ended (`:completed`, `:discarded`, `:cancelled`,
+  or `:stopped` for any other state). That is job context only, never provider
+  application, spend, actor attribution or correlation with the identity's
+  latest reset lifecycle.
   """
   @spec summaries(Scope.t(), [Ecto.UUID.t()], options()) :: summaries()
   def summaries(scope, identity_ids, opts \\ [])
@@ -58,7 +63,7 @@ defmodule CodexPooler.Jobs.ReadModel.SavedResetRequests do
   end
 
   defp put_request_summary(row, summaries) do
-    key = if row.state in Query.open_job_states(), do: :open, else: :latest_terminal
+    key = if row.state in @open_states, do: :open, else: :latest_terminal
     request = %{state: request_state(row.state), requested_at: row.requested_at, scheduled_at: row.scheduled_at}
     Map.update!(summaries, row.identity_id, &Map.put(&1, key, request))
   end
@@ -98,7 +103,7 @@ defmodule CodexPooler.Jobs.ReadModel.SavedResetRequests do
         where: fragment("?->'manual_request_target'->>'pool_id'", job.args) == type(assignment.pool_id, :string),
         windows: [
           identity_request: [
-            partition_by: [assignment.upstream_identity_id, job.state in ^Query.open_job_states()],
+            partition_by: [assignment.upstream_identity_id, job.state in ^@open_states],
             order_by: [desc: job.inserted_at, desc: job.id]
           ]
         ],
@@ -128,9 +133,13 @@ defmodule CodexPooler.Jobs.ReadModel.SavedResetRequests do
   defp normalize_ids(_improper_tail, _acc), do: []
 
   defp request_state("executing"), do: :processing
-  defp request_state(state), do: if(state in Query.open_job_states(), do: :queued, else: :stopped)
+  defp request_state(state) when state in @open_states, do: :queued
+  defp request_state("completed"), do: :completed
+  defp request_state("discarded"), do: :discarded
+  defp request_state("cancelled"), do: :cancelled
+  defp request_state(_state), do: :stopped
 
-  # Computed at runtime: a module attribute built from these modules would make this read model a compile-time dependent
-  # of the worker and of `Query` (`mix quality.xref` permits none).
+  # Computed at runtime: a module attribute built from the worker module would make this read model a compile-time
+  # dependent of the worker (`mix quality.xref` permits none).
   defp worker_name, do: SavedResetRedemptionWorker |> Atom.to_string() |> String.replace_prefix("Elixir.", "")
 end

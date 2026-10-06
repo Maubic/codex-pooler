@@ -1016,6 +1016,21 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
     refute projection =~ hidden_sentinel
   end
 
+  test "a malformed saved reset redemption value reads as an unknown outcome instead of failing the page", %{conn: conn, scope: scope} do
+    pool = pool_fixture(%{created_by_user_id: scope.user.id})
+    %{identity: identity} = upstream_assignment_fixture(pool, %{identity_metadata: %{"saved_reset_redemption" => "malformed-redemption-value"}})
+    prefs = DateTimeDisplay.preferences_for_user(scope.user)
+
+    assert [account] = UpstreamAccountsReadModel.list_visible_accounts(scope, [pool], %{identity_ids: [identity.id]}, prefs)
+    assert account.saved_reset_refresh_cursor.lifecycle_generation == nil
+    assert account.saved_reset_operation.provider_outcome == :unknown
+    refute account.saved_reset_operation.show_latest_receipt?
+    refute inspect(account.saved_reset_operation) =~ "malformed-redemption-value"
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    assert has_element?(view, "#upstream-account-#{identity.id}")
+  end
+
   test "identity filter narrows the account snapshot after fleet model inventory", %{scope: scope} do
     target_pool = pool_fixture(%{name: "Target identity Pool"})
     sibling_pool = pool_fixture(%{name: "Sibling identity Pool"})

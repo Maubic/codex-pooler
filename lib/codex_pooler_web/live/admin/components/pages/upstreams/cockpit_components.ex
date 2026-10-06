@@ -55,7 +55,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents do
           class="grid gap-4"
           aria-busy={to_string(@request_metrics_loading? || @request_metrics_running?)}
         >
-          <AdminComponents.saved_reset_connection_notice id="saved-reset-connection-cockpit" />
+          <AdminComponents.saved_reset_connection_notice id="saved-reset-connection-cockpit" in_flight={match?(%{saved_reset_operation: %{open?: true}}, @cockpit)} />
           <AdminComponents.page_header
             id="upstream-cockpit-page-header"
             title="Upstream health"

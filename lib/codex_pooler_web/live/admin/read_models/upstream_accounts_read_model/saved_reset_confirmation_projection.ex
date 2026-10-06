@@ -13,18 +13,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetConfirmationP
     codex_rate_limit_error
   )
   @known_precisions ~w(authoritative observed inferred)
-  @blocker_precedence ~w(reset_missing expired not_fresh exhausted unknown_unusable)
 
   @type confirmation_state ::
           :awaiting_confirmation | :confirmed | :not_applied | :confirmation_expired
   @type challenged_evidence_state :: :absent | :exhausted | :candidate_progressing | :usable
-  @type additional_account_blocker_state ::
-          :none | :reset_missing | :expired | :not_fresh | :exhausted | :unknown_unusable
   @type t :: %{
           required(:confirmation_state) => confirmation_state(),
-          required(:challenged_evidence_state) => challenged_evidence_state(),
-          required(:additional_account_blocker_state) => additional_account_blocker_state(),
-          required(:observed_at) => DateTime.t() | nil
+          required(:challenged_evidence_state) => challenged_evidence_state()
         }
 
   @spec project(map(), [AccountQuotaWindow.t()], [AccountQuotaWindow.t()], DateTime.t()) ::
@@ -57,17 +52,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetConfirmationP
        ) do
     consumed_at = nonfuture_datetime(redemption["consumed_at"], snapshot_at)
 
-    {challenged_key, candidate_observed_at} =
+    {candidate_key, candidate_observed_at} =
       challenged_candidate(raw_windows, consumed_at, snapshot_at)
 
-    {challenged_key, accepted_observed_at} =
-      preserve_challenge(
-        challenged_key,
-        accepted_challenge(effective_windows, consumed_at, snapshot_at)
-      )
-
-    {challenged_key, fallback_observed_at} =
-      preserve_challenge(challenged_key, fallback_challenge(effective_windows, snapshot_at))
+    # A post-consume candidate names the challenged window first, then an accepted confirmation, then the
+    # newest reset-bearing account window.
+    challenged_key =
+      candidate_key || challenge_key(accepted_challenge(effective_windows, consumed_at, snapshot_at)) ||
+        challenge_key(fallback_challenge(effective_windows, snapshot_at))
 
     %{
       confirmation_state: confirmation_state,
@@ -77,9 +69,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetConfirmationP
           candidate_observed_at,
           effective_windows,
           snapshot_at
-        ),
-      additional_account_blocker_state: additional_account_blocker_state(challenged_key, effective_windows, snapshot_at),
-      observed_at: candidate_observed_at || accepted_observed_at || fallback_observed_at
+        )
     }
   end
 
@@ -185,36 +175,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetConfirmationP
     end
   end
 
-  defp additional_account_blocker_state(challenged_key, effective_windows, snapshot_at) do
-    effective_windows
-    |> Enum.filter(&account_window?/1)
-    |> Enum.reject(&(logical_key(&1) == challenged_key))
-    |> Enum.flat_map(&blocker_reasons(&1, snapshot_at))
-    |> Enum.map(&bounded_blocker_reason/1)
-    |> Enum.min_by(&blocker_rank/1, fn -> nil end)
-    |> case do
-      nil -> :none
-      "reset_missing" -> :reset_missing
-      "expired" -> :expired
-      "not_fresh" -> :not_fresh
-      "exhausted" -> :exhausted
-      "unknown_unusable" -> :unknown_unusable
-    end
-  end
-
-  defp blocker_reasons(%AccountQuotaWindow{} = window, snapshot_at) do
-    cond do
-      not bounded_account_window?(window) -> ["unknown_unusable"]
-      Windows.usable_window?(window, snapshot_at) -> []
-      true -> Windows.routing_window_reason_codes(window, snapshot_at)
-    end
-  end
-
-  defp blocker_rank(reason), do: Enum.find_index(@blocker_precedence, &(&1 == reason)) || 99
-
-  defp bounded_blocker_reason(reason) when reason in @blocker_precedence, do: reason
-  defp bounded_blocker_reason(_reason), do: "unknown_unusable"
-
   defp bounded_account_window?(%AccountQuotaWindow{} = window) do
     account_window?(window) and window.source in @known_sources and
       window.source_precision in @known_precisions
@@ -264,8 +224,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetConfirmationP
   defp challenge_pair(nil), do: {nil, nil}
   defp challenge_pair({key, observed_at}), do: {key, observed_at}
 
-  defp preserve_challenge(nil, fallback), do: fallback || {nil, nil}
-  defp preserve_challenge(challenged_key, _fallback), do: {challenged_key, nil}
+  defp challenge_key({key, _observed_at}), do: key
+  defp challenge_key(nil), do: nil
 
   defp window_sort_key(%AccountQuotaWindow{} = window) do
     {timestamp_rank(window.observed_at), inspect(WindowSelector.logical_key(window))}

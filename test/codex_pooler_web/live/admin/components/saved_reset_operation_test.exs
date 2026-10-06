@@ -92,7 +92,7 @@ defmodule CodexPoolerWeb.Admin.SavedResetOperationTest do
 
   @tag :receipt_state_rendering
   test "queued and processing manual requests carry no provider success claim" do
-    for {state, summary} <- [queued: "Queued. Nothing has been sent to the provider yet.", processing: "Being processed. The provider has not answered yet."] do
+    for {state, summary} <- [queued: "Queued. Nothing has been sent to the provider yet.", processing: "Being processed."] do
       operation = project(%{request_summary: %{open: %{state: state, requested_at: @now, scheduled_at: DateTime.add(@now, 30)}, latest_terminal: nil}})
       html = receipt(operation)
       document = LazyHTML.from_fragment(html)
@@ -103,6 +103,50 @@ defmodule CodexPoolerWeb.Admin.SavedResetOperationTest do
       refute html =~ ~r/Reset applied|applied the reset/
       record_html("#{state}", html)
     end
+  end
+
+  @tag :receipt_state_rendering
+  test "a completed request beside the latest receipt leaves only the receipt" do
+    completed = %{open: nil, latest_terminal: %{state: :completed, requested_at: DateTime.add(@now, -60), scheduled_at: DateTime.add(@now, -60)}}
+    html = %{redemption: applied("consumed_pending_probe"), request_summary: completed} |> project() |> receipt()
+    record_html("completed-request-applied", html)
+    document = LazyHTML.from_fragment(html)
+    assert Enum.empty?(LazyHTML.query(document, "[data-role='saved-reset-request']"))
+    refute LazyHTML.text(document) =~ "Request completed"
+    refute LazyHTML.text(document) =~ "Latest reset"
+    assert LazyHTML.query(document, "summary#saved-reset-operation-heading-bank-#{@identity}") |> LazyHTML.text() =~ "Reset applied — verifying quota"
+    assert LazyHTML.query(document, "[data-role='saved-reset-latest']") |> LazyHTML.text() =~ "Waiting for a usage report to confirm the new quota."
+    assert LazyHTML.query(document, "#saved-reset-operation-bank-#{@identity}-announcement") |> LazyHTML.text() |> String.trim() == "Reset applied — verifying quota"
+  end
+
+  @tag :receipt_state_rendering
+  test "a request that ended without completing keeps its own line beside the latest receipt" do
+    for {state, headline} <- [discarded: "Request did not complete", cancelled: "Request cancelled"] do
+      ended = %{open: nil, latest_terminal: %{state: state, requested_at: DateTime.add(@now, -60), scheduled_at: DateTime.add(@now, -60)}}
+      noop = %{"phase" => "consume_not_applied", "result" => %{"applied" => false, "code" => "no_credit"}}
+      html = %{redemption: noop, request_summary: ended} |> project() |> receipt()
+      record_html("ended-request-#{state}", html)
+      document = LazyHTML.from_fragment(html)
+      request = LazyHTML.query(document, "[data-role='saved-reset-request']") |> LazyHTML.text()
+      assert request =~ "Request"
+      assert request =~ headline
+      assert request =~ "Check the latest reset before acting."
+      refute request =~ "without a recorded result"
+      assert Enum.count(LazyHTML.query(document, "[data-role='saved-reset-request'] [data-role='saved-reset-requested-at']")) == 1
+      assert Enum.empty?(LazyHTML.query(document, "[data-role='saved-reset-request'] [data-role='saved-reset-scheduled-at']"))
+      latest = LazyHTML.query(document, "[data-role='saved-reset-latest']") |> LazyHTML.text()
+      assert latest =~ "Latest reset"
+      assert latest =~ "No saved reset was available"
+    end
+  end
+
+  @tag :compact_list_presentation
+  test "the list row names a passed deadline like the detail does" do
+    passed = Map.put(applied("consumed_pending_probe"), "deadline_at", DateTime.to_iso8601(DateTime.add(@now, -1)))
+    list = %{redemption: passed} |> project() |> receipt(:list) |> LazyHTML.from_fragment()
+    assert LazyHTML.query(list, "[data-role='saved-reset-headline']") |> LazyHTML.text() =~ "Deadline passed — checking quota"
+    bank = %{redemption: passed} |> project() |> receipt(:bank) |> LazyHTML.from_fragment()
+    assert LazyHTML.query(bank, "summary#saved-reset-operation-heading-bank-#{@identity}") |> LazyHTML.text() =~ "Deadline passed — checking quota"
   end
 
   @tag :receipt_ambiguity_and_no_fake_success
@@ -164,10 +208,18 @@ defmodule CodexPoolerWeb.Admin.SavedResetOperationTest do
   end
 
   @tag :receipt_state_rendering
-  test "the hidden connection notice repeats the disconnected receipt copy" do
+  test "the hidden connection notice repeats the disconnected receipt copy and names a continuing reset only while one is open" do
     disconnected = project(%{redemption: applied("consumed_pending_probe"), view_connected?: false})
-    notice = render_component(&Components.saved_reset_connection_notice/1, %{id: "saved-reset-connection-sample"}) |> LazyHTML.from_fragment()
-    assert LazyHTML.query(notice, "#saved-reset-connection-sample[data-saved-reset-connection-notice][hidden]") |> LazyHTML.text() |> String.trim() == "#{disconnected.headline}. #{disconnected.summary}"
+    assert disconnected.open?
+    in_flight = render_component(&Components.saved_reset_connection_notice/1, %{id: "saved-reset-connection-sample", in_flight: true}) |> LazyHTML.from_fragment()
+    assert LazyHTML.query(in_flight, "#saved-reset-connection-sample[data-saved-reset-connection-notice][hidden]") |> LazyHTML.text() |> String.trim() == "#{disconnected.headline}. #{disconnected.summary}"
+
+    # With nothing open the notice drops the continuing-reset sentence and keeps the rest of the receipt copy.
+    refute project(%{redemption: applied("confirmed_by_quota")}).open?
+    idle = render_component(&Components.saved_reset_connection_notice/1, %{id: "saved-reset-connection-sample"}) |> LazyHTML.from_fragment()
+    idle_text = LazyHTML.query(idle, "#saved-reset-connection-sample[data-saved-reset-connection-notice][hidden]") |> LazyHTML.text() |> String.trim()
+    assert idle_text == "#{disconnected.headline}. #{String.replace(disconnected.summary, "The reset continues. ", "")}"
+    refute idle_text =~ "The reset continues"
   end
 
   @tag :receipt_ambiguity_and_no_fake_success

@@ -11,6 +11,7 @@ defmodule CodexPoolerWeb.Admin.Components do
   def admin_shell(assigns), do: Shell.admin_shell(assigns)
 
   attr :id, :string, required: true
+  attr :in_flight, :boolean, default: false
 
   @spec saved_reset_connection_notice(map()) :: Phoenix.LiveView.Rendered.t()
   def saved_reset_connection_notice(assigns), do: SavedResetOperation.saved_reset_connection_notice(assigns)
@@ -18,7 +19,6 @@ defmodule CodexPoolerWeb.Admin.Components do
   attr :identity_id, :string, required: true
   attr :surface, :atom, required: true, values: [:list, :bank, :cockpit]
   attr :operation, :map, required: true
-  attr :refresh_event, :string, default: "refresh_saved_reset_status"
   attr :refreshing, :boolean, default: false
   attr :status_view_disabled, :boolean, default: false
 

@@ -1107,7 +1107,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
           not MapSet.member?(targets, id) -> [current]
           current.saved_reset_refresh_cursor != running.cursors[id] -> [current]
           not Map.has_key?(fresh, id) -> []
-          valid_saved_reset_cursor?(current.saved_reset_refresh_cursor, fresh[id].saved_reset_refresh_cursor) -> [fresh[id]]
+          UpstreamAccountsReadModel.newer_saved_reset_refresh_cursor?(fresh[id].saved_reset_refresh_cursor, current.saved_reset_refresh_cursor) -> [fresh[id]]
           true -> [current]
         end
       end)
@@ -1122,12 +1122,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
 
     {socket, _closed?} = close_lost_account_dialogs(socket)
     socket
-  end
-
-  defp valid_saved_reset_cursor?(current, fresh) do
-    current.identity_id == fresh.identity_id and current.credential_epoch == fresh.credential_epoch and
-      (is_nil(current.lifecycle_generation) or
-         (is_integer(fresh.lifecycle_generation) and fresh.lifecycle_generation >= current.lifecycle_generation))
   end
 
   defp sync_saved_reset_status_timer(socket) do

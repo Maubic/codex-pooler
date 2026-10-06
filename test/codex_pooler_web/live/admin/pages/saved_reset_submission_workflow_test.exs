@@ -151,6 +151,28 @@ defmodule CodexPoolerWeb.Admin.SavedResetSubmissionWorkflowTest do
       finish_scenario(context.fake, @surface, "unknown", %{jobs: 0, provider_outcome: :unknown, private_result_absent?: true})
     end
 
+    test "#{surface} a status that holds Redeem back names the reason on the control", context do
+      %{identity: identity, assignment: assignment} = context
+      now = DateTime.utc_now()
+
+      # The provisional recovery is still in progress; the malformed replay leaves the outcome unresolved.
+      # The claim itself would accept both, so only the recorded status holds the action back.
+      for {record, reason} <- [
+            {%{"status" => "succeeded", "phase" => "confirmed_by_upstream", "generation" => 1, "started_at" => DateTime.to_iso8601(DateTime.add(now, -3, :minute)), "consumed_at" => DateTime.to_iso8601(DateTime.add(now, -2, :minute)), "deadline_at" => DateTime.to_iso8601(DateTime.add(now, 13, :minute)), "result" => %{"applied" => true, "code" => "reset"}}, "the last saved reset is still in progress"},
+            {%{"status" => "failed", "phase" => "consume_not_applied", "generation" => 1, "result" => %{"applied" => false, "code" => "consume_not_applied"}, "provider_replay" => %{"version" => 1, "provider_dispatches" => 1}}, "the last saved reset is unresolved; another redemption waits until it resolves"}
+          ] do
+        current = Repo.get!(UpstreamIdentity, identity.id)
+        current |> Ecto.Changeset.change(metadata: Map.put(current.metadata, "saved_reset_redemption", record)) |> Repo.update!()
+        view = mount_surface(context.conn, identity.id, @surface)
+        assert has_element?(view, redeem_control(@surface, identity.id) <> "[disabled][data-server-disabled='true']")
+        assert has_element?(view, redeem_control(@surface, identity.id) <> "[title='#{reason}']")
+        refute has_element?(view, "#saved-reset-redemption-unavailable-reason")
+        assert jobs(assignment.id) == []
+      end
+
+      finish_scenario(context.fake, @surface, "held-reason", %{jobs: 0})
+    end
+
     for {code, headline} <- [{"no_credit", "No saved reset was available"}, {"nothing_to_reset", "Nothing needed resetting"}] do
       @noop_code code
       @noop_headline headline
@@ -173,6 +195,20 @@ defmodule CodexPoolerWeb.Admin.SavedResetSubmissionWorkflowTest do
     end
   end
 
+  # The cockpit sends the Pool id from the page; the scoped enqueue accepts it only when the account holds a live
+  # assignment there and the viewer may operate every Pool the account is assigned to.
+  test "cockpit refuses a Pool id the account has no live assignment in", context do
+    %{conn: conn, identity: identity, assignment: assignment, scope: scope} = context
+    other_pool = pool_fixture(%{created_by_user_id: scope.user.id})
+    view = mount_surface(conn, identity.id, :cockpit)
+    render_click(view, "open_saved_reset_redemption_confirmation", %{"id" => identity.id, "pool-id" => other_pool.id})
+    view |> element(confirm(:cockpit)) |> render_click()
+    assert jobs(assignment.id) == []
+    assert Repo.aggregate(from(job in Oban.Job, where: job.worker == ^@worker), :count) == 0
+    assert Phoenix.Flash.get(:sys.get_state(view.pid).socket.assigns.flash, :error) =~ "Saved reset request was not accepted"
+    finish_scenario(context.fake, :cockpit, "forged-pool", %{jobs: 0})
+  end
+
   defp mount_surface(conn, identity_id, :bank) do
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
     render_click(view, "open_saved_reset_policy", %{"id" => identity_id})
@@ -187,6 +223,9 @@ defmodule CodexPoolerWeb.Admin.SavedResetSubmissionWorkflowTest do
   defp jobs(assignment_id) do
     Repo.all(from job in Oban.Job, where: job.worker == ^@worker and fragment("?->>'pool_upstream_assignment_id'", job.args) == ^assignment_id)
   end
+
+  defp redeem_control(:bank, _identity_id), do: "#saved-reset-redemption-action"
+  defp redeem_control(:cockpit, identity_id), do: "#cockpit-redeem-saved-reset-upstream-account-#{identity_id}"
 
   defp confirmation(:bank), do: "#saved-reset-redemption-confirmation"
   defp confirmation(:cockpit), do: "#cockpit-saved-reset-redemption-confirmation"

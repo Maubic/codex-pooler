@@ -10,7 +10,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionEnqueueTest do
   alias CodexPooler.Jobs.SavedResetRedemptionWorker
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
-  alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
+  alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
   alias CodexPooler.Upstreams.Secrets
 
   setup do
@@ -198,6 +198,33 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionEnqueueTest do
              }
     end
 
+    # The Pool id comes from the page. An assignment of the same account that appears in a Pool the operator
+    # cannot operate, right after the enqueue read the account's assignments, must not become the target.
+    test "a forged Pool id cannot reach an assignment created after the authorization read" do
+      owner = owner_scope()
+      visible = pool_fixture()
+      hidden = pool_fixture()
+      %{user: operator} = operator_fixture(owner)
+      operator_pool_assignment_fixture(operator, visible)
+      scope = Scope.for_user(operator)
+      %{identity: identity} = assignment_with_saved_resets(visible, 1)
+
+      late = fn ->
+        now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+        Repo.insert!(%PoolUpstreamAssignment{pool_id: hidden.id, upstream_identity_id: identity.id, assignment_label: "Late assignment", status: "active", health_status: "active", eligibility_status: "eligible", created_at: now, updated_at: now, metadata: %{}})
+      end
+
+      {result, late_assignment} = after_first_assignment_read(late, fn -> Upstreams.enqueue_saved_reset_redemption_for_scope(scope, identity.id, hidden.id) end)
+
+      assert late_assignment.pool_id == hidden.id
+      assert {:error, %{code: :pool_assignment_not_found}} = result
+      assert saved_reset_job_count() == 0
+
+      # Control: with the assignment already there when the read happens, the operator may not operate its Pool.
+      assert {:error, %{code: :capability_denied}} = Upstreams.enqueue_saved_reset_redemption_for_scope(scope, identity.id, hidden.id)
+      assert saved_reset_job_count() == 0
+    end
+
     test "duplicate enqueue keeps job args account-assignment scoped only" do
       scope = owner_scope()
       pool = pool_fixture()
@@ -311,6 +338,36 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionEnqueueTest do
               }} = scheduled_event
 
       assert assignment_id == assignment.id
+    end
+  end
+
+  # Runs `fun` and calls `late` once, right after the first assignment read that `fun` makes in this process.
+  # Ecto reports a query after the connection is checked back in, so `late` runs between that read and the next.
+  defp after_first_assignment_read(late, fun) do
+    test_pid = self()
+    handler_id = {__MODULE__, :late_assignment, System.unique_integer([:positive])}
+    fired = :atomics.new(1, [])
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:codex_pooler, :repo, :query],
+        fn _event, _measurements, metadata, _config ->
+          if self() == test_pid and metadata[:source] == "pool_upstream_assignments" and is_binary(metadata[:query]) and
+               String.starts_with?(metadata.query, "SELECT") and :atomics.compare_exchange(fired, 1, 0, 1) == :ok do
+            send(test_pid, {handler_id, late.()})
+          end
+        end,
+        nil
+      )
+
+    try do
+      result = fun.()
+      assert_received {^handler_id, late_row}
+      {result, late_row}
+    after
+      :telemetry.detach(handler_id)
     end
   end
 

@@ -6,6 +6,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   alias CodexPoolerWeb.Admin.Components, as: AdminComponents
   alias CodexPoolerWeb.Admin.PoolFilterComponents
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.Formatting, as: ResetFormatting
+  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjection
   alias CodexPoolerWeb.Admin.UpstreamFilterForm
   alias CodexPoolerWeb.Admin.UpstreamOAuthDialogComponents
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard
@@ -55,7 +56,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   def upstreams_page(assigns) do
     ~H"""
     <section id="admin-upstreams-live" phx-hook="SavedResetConnection" class="grid min-w-0 gap-6">
-      <AdminComponents.saved_reset_connection_notice id="saved-reset-connection-list" />
+      <AdminComponents.saved_reset_connection_notice id="saved-reset-connection-list" in_flight={Enum.any?(@upstream_accounts, &saved_reset_open?/1)} />
       <AdminComponents.page_header
         id="upstream-account-page-header"
         title="Upstreams"
@@ -699,7 +700,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
           </p>
         </div>
 
-        <AdminComponents.saved_reset_connection_notice id="saved-reset-connection-bank" />
+        <AdminComponents.saved_reset_connection_notice id="saved-reset-connection-bank" in_flight={saved_reset_open?(@account)} />
         <.form
           id="saved-reset-policy-form"
           data-saved-reset-form
@@ -777,12 +778,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
                   id="saved-reset-redemption-action"
                   data-role="saved-reset-redemption-action"
                   data-saved-reset-action="open-redemption"
-                  data-server-disabled={to_string(!@account.saved_reset_redemption_action.available? || status_only?(@account.saved_reset_operation))}
+                  data-server-disabled={to_string(!@account.saved_reset_redemption_action.available?)}
                   type="button"
                   class="btn btn-secondary btn-sm gap-2"
                   phx-click="open_saved_reset_redemption_confirmation"
                   phx-value-id={@account.identity.id}
-                  disabled={!@account.saved_reset_redemption_action.available? || status_only?(@account.saved_reset_operation)}
+                  disabled={!@account.saved_reset_redemption_action.available?}
                   title={saved_reset_redemption_title(@account.saved_reset_redemption_action)}
                 >
                   <.icon name="hero-bolt" class="size-4" />
@@ -802,7 +803,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
               surface={:bank}
               confirm_id="saved-reset-redemption-confirm"
               cancel_id="saved-reset-redemption-cancel"
-              disabled={!@account.saved_reset_redemption_action.available? || status_only?(@account.saved_reset_operation)}
+              disabled={!@account.saved_reset_redemption_action.available?}
             />
             <AdminComponents.saved_reset_operation
               identity_id={@account.identity.id}
@@ -810,11 +811,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
               operation={@account.saved_reset_operation}
               refreshing={Map.get(@account, :saved_reset_status_refreshing?, false)}
             />
+            <%!-- A status hold is already explained by the receipt above; the
+            line names the account or bank reason the receipt cannot. --%>
             <p
               :if={
                 !@account.saved_reset_redemption_action.available? &&
                   @account.saved_reset_redemption_action.reason &&
-                  !@account.saved_reset_operation.active?
+                  is_nil(SavedResetProjection.status_hold(@account.saved_reset_operation))
               }
               id="saved-reset-redemption-unavailable-reason"
               class="text-xs leading-5 text-base-content/55"
@@ -936,10 +939,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   defp confirming_saved_reset_redemption?(%{identity_id: identity_id}, identity_id), do: true
   defp confirming_saved_reset_redemption?(_confirmation, _identity_id), do: false
 
-  defp status_only?(operation) do
-    operation.request.state in [:queued, :processing, :unavailable] or
-      operation.provider_outcome == :unknown or operation.active?
-  end
+  defp saved_reset_open?(account), do: match?(%{saved_reset_operation: %{open?: true}}, account)
 
   defp saved_reset_redemption_title(%{available?: true}), do: "Queue manual redemption"
 

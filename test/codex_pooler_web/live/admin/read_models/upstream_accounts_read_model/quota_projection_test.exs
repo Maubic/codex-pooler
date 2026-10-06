@@ -87,60 +87,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
              @snapshot_at
            ) == %{
              confirmation_state: :awaiting_confirmation,
-             challenged_evidence_state: :candidate_progressing,
-             additional_account_blocker_state: :none,
-             observed_at: DateTime.add(@snapshot_at, -60, :second)
+             challenged_evidence_state: :candidate_progressing
            }
-  end
-
-  @tag :quota_projection
-  test "uses fixed additional-account blocker precedence independent of input order" do
-    consumed_at = DateTime.add(@snapshot_at, -5, :minute)
-
-    challenged =
-      account_window(
-        window_kind: "secondary",
-        window_minutes: 10_080,
-        used_percent: Decimal.new("100"),
-        reset_at: DateTime.add(@snapshot_at, 6, :day),
-        observed_at: @snapshot_at,
-        metadata: candidate_metadata(@snapshot_at)
-      )
-
-    reset_missing =
-      account_window(
-        window_kind: "primary",
-        window_minutes: 300,
-        used_percent: Decimal.new("10"),
-        reset_at: nil,
-        observed_at: @snapshot_at
-      )
-
-    expired =
-      account_window(
-        window_kind: "primary",
-        window_minutes: 43_200,
-        used_percent: Decimal.new("10"),
-        reset_at: DateTime.add(@snapshot_at, -1, :second),
-        observed_at: @snapshot_at
-      )
-
-    for effective_windows <- [
-          [challenged, expired, reset_missing],
-          [reset_missing, challenged, expired],
-          [expired, reset_missing, challenged]
-        ] do
-      projection =
-        QuotaProjection.saved_reset_confirmation(
-          redemption("consumed_pending_probe", consumed_at),
-          [challenged],
-          effective_windows,
-          @snapshot_at
-        )
-
-      assert projection.challenged_evidence_state == :candidate_progressing
-      assert projection.additional_account_blocker_state == :reset_missing
-    end
   end
 
   @tag :quota_projection
@@ -186,13 +134,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
         )
 
       assert projection.challenged_evidence_state == :exhausted
-      assert projection.additional_account_blocker_state == :unknown_unusable
       refute inspect(projection) =~ raw_sentinel
     end
   end
 
   @tag :quota_projection
-  test "keeps model-scoped exhaustion outside both account evidence dimensions" do
+  test "keeps model-scoped exhaustion outside the challenged account evidence" do
     consumed_at = DateTime.add(@snapshot_at, -5, :minute)
 
     challenged =
@@ -223,7 +170,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
       )
 
     assert projection.challenged_evidence_state == :candidate_progressing
-    assert projection.additional_account_blocker_state == :none
   end
 
   @tag :quota_projection
@@ -249,7 +195,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
 
       assert projection.confirmation_state == confirmation_state
       assert projection.challenged_evidence_state == :absent
-      assert projection.additional_account_blocker_state == :none
     end
 
     assert QuotaProjection.saved_reset_confirmation(

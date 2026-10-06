@@ -242,8 +242,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Sections do
           icon="hero-bolt"
           label="Redeem saved reset"
           data-saved-reset-action="open-redemption"
-          data-server-disabled={to_string(!saved_reset_action(@cockpit).available?)}
-          action={saved_reset_action(@cockpit)}
+          data-server-disabled={to_string(!@cockpit.actions.redeem_saved_reset.available?)}
+          action={@cockpit.actions.redeem_saved_reset}
           phx-click="open_saved_reset_redemption_confirmation"
           phx-value-id={@cockpit.identity.id}
           phx-value-pool-id={default_pool_id(@cockpit)}
@@ -256,7 +256,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Sections do
           confirm_id="cockpit-saved-reset-redemption-confirm"
           cancel_id="cockpit-saved-reset-redemption-cancel"
           confirm_event={Phoenix.LiveView.JS.push("redeem_saved_reset", value: %{"id" => @cockpit.identity.id, "pool-id" => @confirming_saved_reset_redemption.pool_id})}
-          disabled={!saved_reset_action(@cockpit).available?}
+          disabled={!@cockpit.actions.redeem_saved_reset.available?}
         />
         <div :if={@cockpit.saved_reset_operation.refreshable? || @cockpit.saved_reset_operation.show_latest_receipt?} class="px-4 py-3">
           <AdminComponents.saved_reset_operation
@@ -706,17 +706,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Sections do
     do: identity_id == cockpit.identity.id
 
   defp confirming_saved_reset_redemption?(_confirmation, _cockpit), do: false
-
-  defp saved_reset_action(cockpit) do
-    operation = cockpit.saved_reset_operation
-    action = cockpit.actions.redeem_saved_reset
-
-    if operation.request.state in [:queued, :processing, :unavailable] or operation.provider_outcome == :unknown or operation.active? do
-      %{action | available?: false, reason: "Review the recorded saved reset status before taking another action"}
-    else
-      action
-    end
-  end
 
   defp default_pool_id(%{assignments: %{items: [%{pool_id: pool_id} | _items]}}), do: pool_id
   defp default_pool_id(_cockpit), do: nil

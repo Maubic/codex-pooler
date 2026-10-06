@@ -6,6 +6,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SavedResetWorkflow do
 
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
+  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjection
   alias CodexPoolerWeb.Admin.UpstreamsLive.WorkflowError
 
   @spec assign_form(Phoenix.LiveView.Socket.t(), Ecto.Changeset.t()) ::
@@ -146,10 +147,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SavedResetWorkflow do
     end
   end
 
-  defp status_only?(%{saved_reset_operation: operation}) do
-    operation.request.state in [:queued, :processing, :unavailable] or
-      operation.provider_outcome == :unknown or operation.active?
-  end
+  defp status_only?(%{saved_reset_operation: operation}), do: SavedResetProjection.status_hold(operation) != nil
 
   defp resume_status(socket, account, refresh_editing_fun) do
     socket

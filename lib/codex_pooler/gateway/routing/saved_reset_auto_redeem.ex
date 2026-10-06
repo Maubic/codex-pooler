@@ -163,9 +163,9 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
     candidates
     |> Enum.with_index()
     |> Enum.filter(fn {candidate, _index} ->
-      redeemable? = redeemable_candidate?(candidate, timestamp)
-      resettable? = resettable_candidate?(candidate, refresh_plan, timestamp)
-      redeemable? and resettable?
+      # Short-circuit: the window read runs only for a candidate the policy and bank accept,
+      # and only an `UpstreamIdentity` candidate can pass `redeemable_candidate?/2`.
+      redeemable_candidate?(candidate, timestamp) and resettable_candidate?(candidate, refresh_plan, timestamp)
     end)
     |> ExpiryPriority.order(timestamp)
     |> List.first()

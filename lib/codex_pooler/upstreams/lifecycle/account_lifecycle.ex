@@ -278,10 +278,21 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountLifecycle do
   @spec authorize(Scope.t(), identity_ref()) ::
           {:ok, UpstreamIdentity.t()} | {:error, lifecycle_error()}
   def authorize(%Scope{} = scope, identity_or_id) do
+    with {:ok, identity, _assignments} <- authorize_assignments(scope, identity_or_id), do: {:ok, identity}
+  end
+
+  @doc """
+  Authorizes like `authorize/2` and also returns the live assignments the decision was made on,
+  oldest first. A caller that acts on one assignment picks it from this list, so the target and the
+  Pool authorization come from the same read: an assignment created after it cannot be targeted.
+  """
+  @spec authorize_assignments(Scope.t(), identity_ref()) ::
+          {:ok, UpstreamIdentity.t(), [PoolUpstreamAssignment.t()]} | {:error, lifecycle_error()}
+  def authorize_assignments(%Scope{} = scope, identity_or_id) do
     with %UpstreamIdentity{} = identity <- normalize_identity(identity_or_id),
-         {:ok, pool_ids} <- lifecycle_pool_ids(identity),
-         :ok <- require_lifecycle_pool_access(scope, pool_ids) do
-      {:ok, identity}
+         {:ok, assignments} <- lifecycle_assignments(identity),
+         :ok <- require_lifecycle_pool_access(scope, assignments |> Enum.map(& &1.pool_id) |> Enum.uniq()) do
+      {:ok, identity, assignments}
     else
       nil ->
         {:error, lifecycle_error(:upstream_identity_not_found, "upstream identity was not found")}
@@ -319,17 +330,10 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountLifecycle do
     Map.put(metadata, "last_lifecycle_transition", lifecycle)
   end
 
-  defp lifecycle_pool_ids(%UpstreamIdentity{} = identity) do
-    pool_ids =
-      identity.id
-      |> assignments_for_identity()
-      |> Enum.reject(&(&1.status == @deleted))
-      |> Enum.map(& &1.pool_id)
-      |> Enum.uniq()
-
-    case pool_ids do
+  defp lifecycle_assignments(%UpstreamIdentity{} = identity) do
+    case identity.id |> assignments_for_identity() |> Enum.reject(&(&1.status == @deleted)) do
       [] -> {:error, lifecycle_error(:pool_assignment_not_found, "pool assignment was not found")}
-      pool_ids -> {:ok, pool_ids}
+      assignments -> {:ok, assignments}
     end
   end
 

@@ -131,7 +131,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive do
         socket =
           socket
           |> assign_cockpit(preserve_request_metrics(socket, cockpit))
-          |> assign(:quota_observations_dirty?, false)
           |> request_cockpit_metrics()
 
         {:noreply, if(closed?, do: put_flash(socket, :info, "Your Pool access changed"), else: socket)}
@@ -163,11 +162,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive do
   def handle_event("open_quota_observations", _params, socket),
     do: {:noreply, socket |> assign(:quota_observations_open?, true) |> schedule_saved_reset_status()}
 
-  def handle_event("close_quota_observations", _params, socket) do
-    dirty? = socket.assigns[:quota_observations_dirty?] == true
-    socket = assign(socket, quota_observations_open?: false, quota_observations_dirty?: false)
-    {:noreply, if(dirty?, do: request_saved_reset_status(socket), else: socket) |> schedule_saved_reset_status()}
-  end
+  def handle_event("close_quota_observations", _params, socket),
+    do: {:noreply, socket |> assign(:quota_observations_open?, false) |> schedule_saved_reset_status()}
 
   def handle_event("refresh_saved_reset_status", %{"id" => identity_id}, socket) do
     if socket.assigns.cockpit && identity_id == socket.assigns.cockpit.identity.id do
@@ -596,7 +592,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive do
   defp scope_signature(scope), do: {scope.user.id, scope.roles, scope.assigned_pool_ids}
 
   defp apply_saved_reset_status(socket, {:ok, cockpit}, token) do
-    if newer_cursor?(cockpit.saved_reset_refresh_cursor, token.cursor) do
+    if UpstreamAccountsReadModel.newer_saved_reset_refresh_cursor?(cockpit.saved_reset_refresh_cursor, token.cursor) do
       assign_cockpit(socket, preserve_request_metrics(socket, cockpit))
     else
       socket
@@ -609,16 +605,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive do
     |> put_flash(:info, "Your Pool access changed")
     |> push_navigate(to: ~p"/admin/upstreams")
   end
-
-  defp newer_cursor?(%{identity_id: identity_id} = incoming, %{identity_id: identity_id} = current) do
-    Enum.all?([:credential_epoch, :lifecycle_generation], fn field ->
-      old = Map.get(current, field)
-      new = Map.get(incoming, field)
-      is_nil(old) or (is_integer(new) and new >= old)
-    end)
-  end
-
-  defp newer_cursor?(_incoming, _current), do: false
 
   defp finish_saved_reset_status(socket) do
     socket = if socket.assigns.saved_reset_status_rerun?, do: request_saved_reset_status(socket, socket.assigns.saved_reset_status_force?), else: socket

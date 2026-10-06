@@ -46,7 +46,7 @@ defmodule CodexPooler.Jobs.SavedResetRequestSummariesTest do
     for identity <- identities do
       assert batch[identity.id] == %{
                open: %{state: :queued, requested_at: DateTime.add(@time, 5, :second), scheduled_at: @time},
-               latest_terminal: %{state: :stopped, requested_at: DateTime.add(@time, 5, :second), scheduled_at: @time}
+               latest_terminal: %{state: :completed, requested_at: DateTime.add(@time, 5, :second), scheduled_at: @time}
              }
     end
   end
@@ -142,7 +142,7 @@ defmodule CodexPooler.Jobs.SavedResetRequestSummariesTest do
 
     summary = Jobs.saved_reset_request_summaries(scope, [identity.id])[identity.id]
     assert summary.open == %{state: :queued, requested_at: @time, scheduled_at: @time}
-    assert summary.latest_terminal == %{state: :stopped, requested_at: old_time, scheduled_at: @time}
+    assert summary.latest_terminal == %{state: :completed, requested_at: old_time, scheduled_at: @time}
     assert Jobs.saved_reset_request_summaries(scope, [identity.id], pool_ids: [pool.id])[identity.id].open == nil
   end
 
@@ -203,12 +203,13 @@ defmodule CodexPooler.Jobs.SavedResetRequestSummariesTest do
   test "terminal and pruned jobs are safe request context without provider or actor claims", %{scope: scope} do
     %{identity: identity, assignment: assignment} = upstream_assignment_fixture()
 
-    for state <- ["completed", "cancelled", "discarded", "suspended"] do
+    # The terminal kind is how the job ended; it never states the provider outcome.
+    for {state, kind} <- [{"completed", :completed}, {"cancelled", :cancelled}, {"discarded", :discarded}] do
       job = insert_request(assignment, state: state, args: Map.put(request_args(assignment), "synthetic_private_field", "private-job-context"))
       from(row in Oban.Job, where: row.id == ^job.id) |> Repo.update_all(set: [errors: [%{"error" => "synthetic-private-error"}]])
       result = Jobs.saved_reset_request_summaries(scope, [identity.id])[identity.id]
       assert result.open == nil
-      assert result.latest_terminal == %{state: :stopped, requested_at: @time, scheduled_at: @time}
+      assert result.latest_terminal == %{state: kind, requested_at: @time, scheduled_at: @time}
       assert Map.keys(result.latest_terminal) |> Enum.sort() == [:requested_at, :scheduled_at, :state]
       refute inspect(result) =~ "private-job-context"
       refute inspect(result) =~ "synthetic-private-error"
@@ -218,6 +219,18 @@ defmodule CodexPooler.Jobs.SavedResetRequestSummariesTest do
       Repo.delete!(job)
       assert Jobs.saved_reset_request_summaries(scope, [identity.id])[identity.id] == %{open: nil, latest_terminal: nil}
     end
+  end
+
+  test "a suspended job is held before it runs and stays an open request", %{scope: scope} do
+    %{identity: identity, assignment: assignment} = upstream_assignment_fixture()
+    insert_request(assignment, state: "completed", inserted_at: DateTime.add(@time, -60, :second))
+    insert_request(assignment, state: "suspended", inserted_at: @time)
+
+    # The worker's uniqueness treats a suspended job as incomplete, so a new submission would join it rather than start.
+    assert Jobs.saved_reset_request_summaries(scope, [identity.id])[identity.id] == %{
+             open: %{state: :queued, requested_at: @time, scheduled_at: @time},
+             latest_terminal: %{state: :completed, requested_at: DateTime.add(@time, -60, :second), scheduled_at: @time}
+           }
   end
 
   test "real manual enqueue is visible only through its trusted persisted target", %{scope: scope} do

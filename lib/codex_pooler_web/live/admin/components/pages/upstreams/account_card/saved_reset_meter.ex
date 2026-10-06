@@ -48,15 +48,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.SavedResetMete
   attr :identity_id, :string, default: nil
   attr :saved_resets, :map, required: true
   attr :saved_reset_policy, :map, required: true
-  attr :saved_reset_confirmation, :map, default: nil
-  attr :show_confirmation, :boolean, default: true
   attr :class, :any, default: nil
   attr :now, :any, default: nil
 
+  # The latest reset receipt lives in the bank dialog and the cockpit (`SavedResetOperation`); the meter
+  # shows inventory and policy only.
   def saved_reset_meter(assigns) do
-    confirmation =
-      if assigns.show_confirmation, do: saved_reset_confirmation(assigns.saved_reset_confirmation, assigns.saved_resets), else: nil
-
     now = assigns.now || DateTime.utc_now()
 
     assigns =
@@ -64,14 +61,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.SavedResetMete
       |> assign(:segments, saved_reset_meter_segments(assigns.saved_resets))
       |> assign(:meter_max, saved_reset_meter_max(assigns.saved_resets))
       |> assign(:meter_value, saved_reset_meter_value(assigns.saved_resets))
-      |> assign(
-        :meter_label,
-        saved_reset_meter_label(assigns.saved_resets, confirmation)
-      )
+      |> assign(:meter_label, saved_reset_meter_label(assigns.saved_resets))
       |> assign(:meter_count_label, saved_reset_meter_count_label(assigns.saved_resets))
       |> assign(:meter_reset_label, saved_reset_meter_reset_label(assigns.saved_resets, now))
       |> assign(:meter_policy_active, saved_reset_policy_active?(assigns.saved_reset_policy))
-      |> assign(:confirmation, confirmation)
 
     ~H"""
     <div id={@id} data-role="upstream-saved-reset-meter" class={["relative grid gap-1.5", @class]}>
@@ -142,76 +135,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.SavedResetMete
           <span class="truncate">{@meter_reset_label}</span>
         </span>
       </div>
-      <div
-        :if={@show_confirmation and @confirmation}
-        id={"#{@id}-confirmation"}
-        data-role="upstream-saved-reset-confirmation"
-        data-confirmation-state={@confirmation.state}
-        role="status"
-        aria-label={@confirmation.title}
-        title={@confirmation.title}
-        class="relative z-20 grid gap-2 rounded-box border border-base-300 bg-base-200/45 px-3 py-2 text-[11px] text-base-content/70"
-      >
-        <div class="flex min-w-0 items-center justify-between gap-3">
-          <span
-            data-role="upstream-saved-reset-confirmation-state"
-            data-confirmation-state={@confirmation.state}
-            class={[
-              "min-w-0 truncate font-semibold",
-              saved_reset_confirmation_state_class(@confirmation)
-            ]}
-          >
-            {@confirmation.state_label}
-          </span>
-          <span
-            data-role="upstream-saved-reset-routing-pause"
-            data-routing-paused={to_string(@confirmation.routing_paused?)}
-            class="shrink-0 font-medium"
-          >
-            {@confirmation.routing_label}
-          </span>
-        </div>
-        <p data-role="upstream-saved-reset-confirmation-summary" class="leading-4">
-          {@confirmation.summary}
-        </p>
-        <dl class="grid grid-cols-2 gap-x-3 gap-y-1">
-          <div class="min-w-0">
-            <dt class="font-medium text-base-content/50">Consumed</dt>
-            <dd data-role="upstream-saved-reset-consumed-at" class="truncate">
-              {@confirmation.consumed_at}
-            </dd>
-          </div>
-          <div class="min-w-0">
-            <dt class="font-medium text-base-content/50">Deadline</dt>
-            <dd data-role="upstream-saved-reset-deadline" class="truncate">
-              {@confirmation.deadline_at}
-            </dd>
-          </div>
-          <div class="min-w-0">
-            <dt class="font-medium text-base-content/50">Challenged evidence</dt>
-            <dd
-              data-role="upstream-saved-reset-challenged-evidence"
-              data-evidence-state={@confirmation.evidence_state}
-              class="truncate"
-            >
-              {@confirmation.evidence_label}
-            </dd>
-          </div>
-          <div class="min-w-0">
-            <dt class="font-medium text-base-content/50">Additional blocker</dt>
-            <dd
-              data-role="upstream-saved-reset-additional-blocker"
-              data-blocker-state={@confirmation.blocker_state}
-              class="truncate"
-            >
-              {@confirmation.blocker_label}
-            </dd>
-          </div>
-        </dl>
-        <p data-role="upstream-saved-reset-single-consume" class="leading-4 text-base-content/60">
-          This confirmation never consumes a second saved reset.
-        </p>
-      </div>
     </div>
     """
   end
@@ -262,165 +185,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.SavedResetMete
 
   defp saved_reset_meter_max(saved_resets), do: max(saved_reset_meter_value(saved_resets), 5)
 
-  defp saved_reset_meter_label(saved_resets, %{title: confirmation_title}),
-    do: "#{saved_reset_meter_label(saved_resets)} · #{confirmation_title}"
-
-  defp saved_reset_meter_label(saved_resets, nil),
-    do: saved_reset_meter_label(saved_resets)
-
   defp saved_reset_meter_label(%{label: label}) when is_binary(label) and label != "",
     do: label
 
   defp saved_reset_meter_label(saved_resets),
     do: "#{saved_reset_meter_value(saved_resets)} saved resets"
-
-  defp saved_reset_confirmation(
-         %{confirmation_state: :confirmed},
-         _saved_resets
-       ),
-       do: nil
-
-  defp saved_reset_confirmation(
-         %{
-           confirmation_state: confirmation_state,
-           challenged_evidence_state: evidence_state,
-           additional_account_blocker_state: blocker_state
-         },
-         saved_resets
-       )
-       when confirmation_state in [
-              :awaiting_confirmation,
-              :not_applied,
-              :confirmation_expired
-            ] and
-              evidence_state in [:absent, :exhausted, :candidate_progressing, :usable] and
-              blocker_state in [
-                :none,
-                :reset_missing,
-                :expired,
-                :not_fresh,
-                :exhausted,
-                :unknown_unusable
-              ] do
-    lifecycle = bounded_lifecycle(saved_resets)
-    state_label = confirmation_state_label(confirmation_state)
-    evidence_label = confirmation_evidence_label(evidence_state)
-    blocker_label = confirmation_blocker_label(blocker_state)
-    routing_paused? = confirmation_state == :awaiting_confirmation
-    routing_label = if routing_paused?, do: "Routing paused", else: "Routing pause released"
-    consumed_at = lifecycle_value(lifecycle, :consumed_at)
-    deadline_at = lifecycle_value(lifecycle, :deadline_at)
-
-    %{
-      state: confirmation_state,
-      state_label: state_label,
-      summary: confirmation_state_summary(confirmation_state),
-      evidence_state: evidence_state,
-      evidence_label: evidence_label,
-      blocker_state: blocker_state,
-      blocker_label: blocker_label,
-      routing_paused?: routing_paused?,
-      routing_label: routing_label,
-      consumed_at: consumed_at,
-      deadline_at: deadline_at,
-      title:
-        confirmation_title(
-          state_label,
-          consumed_at,
-          deadline_at,
-          evidence_label,
-          blocker_label,
-          routing_label
-        )
-    }
-  end
-
-  defp saved_reset_confirmation(nil, _saved_resets), do: nil
-
-  defp saved_reset_confirmation(_confirmation, _saved_resets) do
-    %{
-      state: :unavailable,
-      state_label: "Confirmation details unavailable",
-      summary: "The confirmation snapshot could not be safely displayed.",
-      evidence_state: :unavailable,
-      evidence_label: "Unavailable",
-      blocker_state: :unavailable,
-      blocker_label: "Unavailable",
-      routing_paused?: true,
-      routing_label: "Routing paused",
-      consumed_at: "Not reported",
-      deadline_at: "Not reported",
-      title: "Confirmation details unavailable. Routing paused. This confirmation never consumes a second saved reset."
-    }
-  end
-
-  defp bounded_lifecycle(%{reset_lifecycle: %{phase: phase} = lifecycle})
-       when phase in [
-              "consuming",
-              "consumed_pending_probe",
-              "confirmed_by_upstream",
-              "confirmed_by_quota",
-              "reblocked",
-              "expired",
-              "consume_not_applied"
-            ],
-       do: lifecycle
-
-  defp bounded_lifecycle(_saved_resets), do: %{}
-
-  defp lifecycle_value(lifecycle, key) do
-    case Map.get(lifecycle, key) do
-      value when is_binary(value) and value != "" -> value
-      _value -> "Not reported"
-    end
-  end
-
-  defp confirmation_state_label(:awaiting_confirmation), do: "Awaiting confirmation"
-  defp confirmation_state_label(:not_applied), do: "Not applied"
-  defp confirmation_state_label(:confirmation_expired), do: "Confirmation expired"
-
-  defp confirmation_state_summary(:awaiting_confirmation),
-    do: "Reset consumed; confirmation is still pending."
-
-  defp confirmation_state_summary(:not_applied), do: "The saved reset was not applied."
-
-  defp confirmation_state_summary(:confirmation_expired),
-    do: "The confirmation window ended without proof of a usable reset."
-
-  defp confirmation_evidence_label(:absent), do: "Absent"
-  defp confirmation_evidence_label(:exhausted), do: "Exhausted"
-  defp confirmation_evidence_label(:candidate_progressing), do: "Candidate progressing"
-  defp confirmation_evidence_label(:usable), do: "Usable"
-
-  defp confirmation_blocker_label(:none), do: "None"
-  defp confirmation_blocker_label(:reset_missing), do: "Reset missing"
-  defp confirmation_blocker_label(:expired), do: "Expired"
-  defp confirmation_blocker_label(:not_fresh), do: "Not fresh"
-  defp confirmation_blocker_label(:exhausted), do: "Exhausted"
-  defp confirmation_blocker_label(:unknown_unusable), do: "Unknown or unusable"
-
-  defp confirmation_title(
-         state_label,
-         consumed_at,
-         deadline_at,
-         evidence_label,
-         blocker_label,
-         routing_label
-       ) do
-    "#{state_label}. Consumed #{consumed_at}. Deadline #{deadline_at}. " <>
-      "Challenged evidence #{evidence_label}. Additional blocker #{blocker_label}. " <>
-      "#{routing_label}. This confirmation never consumes a second saved reset."
-  end
-
-  defp saved_reset_confirmation_state_class(%{state: :not_applied}), do: "text-error"
-
-  defp saved_reset_confirmation_state_class(%{state: :confirmation_expired}),
-    do: "text-warning"
-
-  defp saved_reset_confirmation_state_class(%{state: :awaiting_confirmation}),
-    do: "text-(--color-reset-bank)"
-
-  defp saved_reset_confirmation_state_class(_confirmation), do: "text-base-content/60"
 
   defp saved_reset_meter_count_label(%{available_count: count})
        when is_integer(count) and count >= 0,

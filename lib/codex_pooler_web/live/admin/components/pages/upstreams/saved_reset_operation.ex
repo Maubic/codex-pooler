@@ -9,13 +9,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation do
   @surfaces [:list, :bank, :cockpit]
   @outcomes [:applied, :not_applied, :unknown, :not_recorded]
   @verifications [:not_started, :pending, :candidate, :quota_confirmed, :request_verified, :reblocked, :expired, :unknown]
+  @idle_notice "Live updates disconnected. Reconnect to see the latest status before acting."
+  @in_flight_notice "Live updates disconnected. The reset continues. Reconnect to see the latest status before acting."
   @confirmation_copy "Redeem one saved reset for this account? The provider may apply it before quota checks finish. Verification can take a few minutes. You can leave this view and return to check the status."
   @timestamps [started_at: "Started", consumed_at: "Consumed", finished_at: "Finished", deadline_at: "Deadline", last_checked_at: "Checked", pause_until: "Checks paused until"]
 
   attr :identity_id, :string, required: true
   attr :surface, :atom, required: true, values: @surfaces
   attr :operation, :map, required: true
-  attr :refresh_event, :string, default: "refresh_saved_reset_status"
   attr :refreshing, :boolean, default: false
   attr :status_view_disabled, :boolean, default: false
 
@@ -32,13 +33,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation do
       |> assign(:refresh_id, "saved-reset-status-refresh-#{assigns.surface}-#{assigns.identity_id}")
       |> assign(:visible?, if(assigns.surface == :list, do: list_visible?(operation), else: operation.refreshable? || operation.show_latest_receipt?))
       |> assign(:detail_open?, list_visible?(operation))
-      |> assign(:compact_headline, compact_headline(operation))
+      |> assign(:compact_headline, operation.compact_headline)
       |> assign(:provider_outcome, bounded_state(operation.provider_outcome, @outcomes, :unknown))
       |> assign(:verification, bounded_state(operation.verification, @verifications, :unknown))
       |> assign(:timestamps, timestamp_facts(operation, @timestamps))
       |> assign(:request_times, timestamp_facts(operation.request, requested_at: "Requested", scheduled_at: "Scheduled"))
       |> assign(:announcement, announcement(operation))
-      |> assign(:two_facts?, operation.request.state != :none and operation.show_latest_receipt?)
+      |> assign(:two_facts?, operation.show_request? and operation.show_latest_receipt?)
 
     ~H"""
     <section
@@ -84,7 +85,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation do
         <span id={"#{@id}-announcement"} role="status" aria-live="polite" aria-atomic="true" class="sr-only">{@announcement}</span>
         <div class="flex min-w-0 items-start justify-between gap-2">
           <div class="grid min-w-0 gap-2">
-            <div :if={@operation.request.state != :none} data-role="saved-reset-request" class="grid min-w-0 gap-0.5">
+            <div :if={@operation.show_request?} data-role="saved-reset-request" class="grid min-w-0 gap-0.5">
               <p :if={@two_facts?} class="font-semibold text-base-content">Request</p>
               <p :if={@two_facts?} class="font-medium">{@operation.request.headline}</p>
               <p :if={@operation.request.summary}>{@operation.request.summary}</p>
@@ -106,7 +107,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation do
             id={@refresh_id}
             type="button"
             class="btn btn-ghost btn-xs shrink-0 gap-1 text-base-content/60 hover:text-base-content"
-            phx-click={@refresh_event}
+            phx-click="refresh_saved_reset_status"
             phx-value-id={@identity_id}
             disabled={@refreshing}
             title="Reads the recorded status. It does not contact the provider or start another redemption."
@@ -141,31 +142,23 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation do
       operation.request.state in [:queued, :processing] -> true
       accepted? and ready? -> false
       operation.active? -> true
-      unresolved_outcome?(operation) -> true
+      operation.unresolved? and not accepted? -> true
       operation.verification in [:reblocked, :expired] -> not ready?
       true -> false
     end
   end
 
-  defp unresolved_outcome?(%{show_latest_receipt?: true, provider_outcome: :unknown, verification: verification}), do: verification not in [:quota_confirmed, :request_verified]
-  defp unresolved_outcome?(_operation), do: false
-
-  defp compact_headline(%{request: %{state: state}}) when state in [:queued, :processing], do: "Request accepted — #{if state == :queued, do: "queued", else: "processing"}"
-  defp compact_headline(%{headline: "Reset request in progress"}), do: "Reset request in progress"
-  defp compact_headline(%{show_latest_receipt?: true, provider_outcome: :unknown, verification: verification}) when verification not in [:quota_confirmed, :request_verified], do: "Reset outcome not confirmed"
-  defp compact_headline(%{verification: :quota_confirmed}), do: "Quota confirmed"
-  defp compact_headline(%{verification: :request_verified}), do: "Recovery verified by a request"
-  defp compact_headline(%{verification: :reblocked}), do: "Quota is still unavailable"
-  defp compact_headline(%{verification: :expired}), do: "Quota confirmation timed out"
-  defp compact_headline(%{provider_outcome: :applied, verification: verification}) when verification in [:pending, :candidate], do: "Reset applied — verifying quota"
-  defp compact_headline(operation), do: operation.headline
-
   attr :id, :string, required: true
+  attr :in_flight, :boolean, default: false
 
+  # Shown by the SavedResetConnection hook while the socket is down. It repeats the receipt's disconnected copy, and
+  # says the reset continues only when the page shows an operation that is still open (`open?`).
   @spec saved_reset_connection_notice(map()) :: Phoenix.LiveView.Rendered.t()
   def saved_reset_connection_notice(assigns) do
+    assigns = assign(assigns, :text, if(assigns.in_flight, do: @in_flight_notice, else: @idle_notice))
+
     ~H"""
-    <p id={@id} data-saved-reset-connection-notice hidden role="status" aria-live="polite" class="text-xs leading-5 text-base-content/70">Live updates disconnected. The reset continues. Reconnect to see the latest status before acting.</p>
+    <p id={@id} data-saved-reset-connection-notice hidden role="status" aria-live="polite" class="text-xs leading-5 text-base-content/70">{@text}</p>
     """
   end
 
@@ -224,7 +217,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation do
   end
 
   defp announcement(operation) do
-    [operation.request.headline, operation.headline]
+    [if(operation.show_request?, do: operation.request.headline), operation.headline]
     |> Enum.filter(&is_binary/1)
     |> Enum.uniq()
     |> Enum.join(". ")

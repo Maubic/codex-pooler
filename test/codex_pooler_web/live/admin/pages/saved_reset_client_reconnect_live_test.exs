@@ -53,6 +53,24 @@ defmodule CodexPoolerWeb.Admin.SavedResetClientReconnectLiveTest do
     refute has_element?(view, "#saved-reset-redemption-confirm")
   end
 
+  test "the disconnect notices say the reset continues only while the page shows one still open", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "reconnect-notice", name: "Reconnect notice"})
+    %{identity: identity} = upstream_assignment_fixture(pool)
+    continues = "The reset continues."
+
+    # Nothing open: every notice says only what holds on any page.
+    assert_notices(conn, identity, fn view, selector -> assert has_element?(view, selector, "Live updates disconnected. Reconnect to see the latest status before acting.") end)
+    assert_notices(conn, identity, fn view, selector -> refute has_element?(view, selector, continues) end)
+
+    # A reset under verification is still open, so every surface that shows it says it continues.
+    persist_receipt!(identity, "consumed_pending_probe")
+    assert_notices(conn, identity, fn view, selector -> assert has_element?(view, selector, continues) end)
+
+    # A finished receipt leaves nothing open.
+    persist_receipt!(identity, "confirmed_by_quota")
+    assert_notices(conn, identity, fn view, selector -> refute has_element?(view, selector, continues) end)
+  end
+
   test "malformed reconnect draft is ignored and both page roots expose native connection hook", %{conn: conn, scope: scope} do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "reconnect-malformed", name: "Reconnect malformed"})
     %{identity: identity} = upstream_assignment_fixture(pool)
@@ -64,5 +82,22 @@ defmodule CodexPoolerWeb.Admin.SavedResetClientReconnectLiveTest do
     assert has_element?(cockpit, "#upstream-cockpit[phx-hook='SavedResetConnection']")
     assert has_element?(cockpit, "[data-saved-reset-action='open-redemption'][data-server-disabled]")
     assert has_element?(cockpit, "#saved-reset-policy-form[data-saved-reset-form]")
+  end
+
+  # List, bank and cockpit each render their own hidden notice; the hook shows it while the socket is down.
+  defp assert_notices(conn, identity, check) do
+    {:ok, list, _html} = live(conn, ~p"/admin/upstreams")
+    check.(list, "#saved-reset-connection-list[data-saved-reset-connection-notice][hidden]")
+    render_click(list, "open_saved_reset_policy", %{"id" => identity.id})
+    check.(list, "#saved-reset-connection-bank[data-saved-reset-connection-notice][hidden]")
+    {:ok, cockpit, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+    check.(cockpit, "#saved-reset-connection-cockpit[data-saved-reset-connection-notice][hidden]")
+  end
+
+  defp persist_receipt!(identity, phase) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    record = %{"phase" => phase, "status" => "succeeded", "generation" => 2, "started_at" => DateTime.to_iso8601(DateTime.add(now, -30, :second)), "consumed_at" => DateTime.to_iso8601(DateTime.add(now, -20, :second)), "deadline_at" => DateTime.to_iso8601(DateTime.add(now, 180, :second)), "result" => %{"applied" => true, "code" => "reset"}}
+    current = Repo.get!(UpstreamIdentity, identity.id)
+    current |> Ecto.Changeset.change(metadata: Map.put(current.metadata, "saved_reset_redemption", record)) |> Repo.update!()
   end
 end

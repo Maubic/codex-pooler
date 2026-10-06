@@ -98,6 +98,14 @@ defmodule CodexPoolerWeb.Admin.SavedResetRedemptionWorkflowIntegrationTest do
     assert applied.metadata["saved_resets"]["available_count"] == 0
     refresh_views([list, cockpit], identity)
     assert_operation([{:bank, list}, {:cockpit, cockpit}], identity, "applied", "pending")
+
+    # The completed job adds nothing beside the latest receipt, so only the receipt reads.
+    for {surface, view} <- [{:bank, list}, {:cockpit, cockpit}] do
+      assert has_element?(view, heading(surface, identity), "Reset applied — verifying quota")
+      assert has_element?(view, receipt(surface, identity) <> " [data-role='saved-reset-latest']", "Waiting for a usage report to confirm the new quota.")
+      refute has_element?(view, receipt(surface, identity) <> " [data-role='saved-reset-request']")
+    end
+
     assert :sys.get_state(list.pid).socket.assigns.quota_observations_open?
     assert :sys.get_state(list.pid).socket.assigns.saved_reset_policy_form === form
     assert has_element?(list, "#saved-reset-policy-dialog[open]")
@@ -123,7 +131,7 @@ defmodule CodexPoolerWeb.Admin.SavedResetRedemptionWorkflowIntegrationTest do
     assert window.observed_at == canonical_at
     assert DateTime.compare(candidate.observed_at, window.observed_at) == :gt
     current = :sys.get_state(list.pid).socket.assigns.editing_saved_reset_policy
-    assert current.saved_reset_confirmation.observed_at == candidate_at
+    assert current.saved_reset_confirmation.challenged_evidence_state == :candidate_progressing
     assert current.saved_reset_operation.last_checked_at != nil
     assert_operation([{:bank, list}, {:cockpit, cockpit}], identity, "applied", "candidate")
     assert render(list) =~ "Last verified quota"
@@ -229,6 +237,10 @@ defmodule CodexPoolerWeb.Admin.SavedResetRedemptionWorkflowIntegrationTest do
         assert has_element?(view, receipt(surface, fixture.identity) <> "[data-provider-outcome='#{unquote(outcome)}']", unquote(guidance))
         assert has_element?(view, heading(surface, fixture.identity), unquote(headline))
         refute has_element?(view, receipt(surface, fixture.identity) <> " [data-role='saved-reset-consumed-at']")
+        # The discarded job says it did not complete and points at the receipt instead of denying a result.
+        request = receipt(surface, fixture.identity) <> " [data-role='saved-reset-request']"
+        assert has_element?(view, request, "Request did not complete")
+        assert has_element?(view, request, "Check the latest reset before acting.")
       end
 
       counts = FakeUpstream.physical_counts(fake)

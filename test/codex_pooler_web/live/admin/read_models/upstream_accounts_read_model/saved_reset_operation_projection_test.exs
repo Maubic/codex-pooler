@@ -48,7 +48,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProj
 
   @tag :operation_truth_matrix
   test "candidate, quota confirmation and request verification remain distinct" do
-    candidate = %{confirmation_state: :awaiting_confirmation, challenged_evidence_state: :candidate_progressing, additional_account_blocker_state: :none, observed_at: @now}
+    candidate = %{confirmation_state: :awaiting_confirmation, challenged_evidence_state: :candidate_progressing}
     assert project(redemption("consumed_pending_probe"), %{confirmation: candidate}).verification == :candidate
 
     quota = project(redemption("confirmed_by_quota"))
@@ -315,5 +315,111 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProj
     refute inspect(result) =~ sentinel
     refute Map.has_key?(result, :redemption)
     assert result.provider_outcome == :unknown
+  end
+
+  @tag :operation_truth_matrix
+  test "a finished request says how its job ended without claiming the latest result" do
+    terminal = fn state -> %{open: nil, latest_terminal: %{state: state, requested_at: @started, scheduled_at: @started}} end
+
+    # A completed job adds nothing beside the latest receipt, which is the account's newest recorded result.
+    completed = project(redemption("consumed_pending_probe"), %{request_summary: terminal.(:completed)})
+    assert completed.request.state == :completed
+    refute completed.show_request?
+    assert completed.headline == "Reset applied — verifying quota"
+
+    for {state, headline} <- [completed: "Request completed", discarded: "Request did not complete", cancelled: "Request cancelled", stopped: "Request stopped"] do
+      alone = project(nil, %{request_summary: terminal.(state)})
+      assert alone.show_request?, "#{state}"
+      assert {alone.request.headline, alone.request.summary} == {headline, "No reset result is recorded."}
+      assert {alone.headline, alone.compact_headline} == {headline, headline}
+      refute alone.active?
+    end
+
+    noop = %{"status" => "noop", "result" => %{"code" => "no_credit", "applied" => false}}
+
+    for state <- [:discarded, :cancelled, :stopped] do
+      beside = project(noop, %{request_summary: terminal.(state)})
+      assert beside.show_request?, "#{state}"
+      assert beside.request.summary == "Check the latest reset before acting."
+      assert beside.headline == "No saved reset was available"
+    end
+  end
+
+  @tag :operation_truth_matrix
+  test "a processing request makes no claim about the provider's answer" do
+    processing = %{open: %{state: :processing, requested_at: @started, scheduled_at: @started}, latest_terminal: nil}
+    result = project(redemption("consumed_pending_probe"), %{request_summary: processing})
+    assert result.request.summary == "Being processed."
+    assert result.compact_headline == "Request accepted — processing"
+  end
+
+  @tag :operation_truth_matrix
+  test "the scheduled time is shown only when it differs from the request time" do
+    same = project(nil, %{request_summary: %{open: %{state: :queued, requested_at: @started, scheduled_at: @started}, latest_terminal: nil}})
+    assert is_binary(same.request.requested_at)
+    refute Map.has_key?(same.request, :scheduled_at)
+
+    later = project(nil, %{request_summary: %{open: %{state: :queued, requested_at: @started, scheduled_at: DateTime.add(@started, 5, :minute)}, latest_terminal: nil}})
+    assert is_binary(later.request.requested_at) and is_binary(later.request.scheduled_at)
+    refute later.request.requested_at == later.request.scheduled_at
+  end
+
+  @tag :operation_truth_matrix
+  test "a finished receipt keeps its own copy under every observation" do
+    pause = %{paused_until: DateTime.add(@now, 5, :minute)}
+
+    for record <- [redemption("confirmed_by_quota"), redemption("reblocked"), redemption("expired"), %{"status" => "noop", "result" => %{"code" => "no_credit", "applied" => false}}] do
+      settled = project(record)
+      refute settled.active?
+
+      for extra <- [%{view_paused?: true}, %{view_connected?: false}, %{usage_poll_pause: pause}, %{usage_poll_pause: :unavailable}] do
+        observed = project(record, extra)
+        assert {observed.headline, observed.summary, observed.detail} == {settled.headline, settled.summary, settled.detail}, "#{record["phase"]} #{inspect(Map.keys(extra))}"
+        refute observed.summary =~ "The reset continues"
+      end
+
+      assert Projection.observe(settled, paused?: true).headline == settled.headline
+      assert Projection.observe(settled, connected?: false).summary == settled.summary
+    end
+
+    # The polling pause stays a recorded fact on the finished receipt.
+    assert is_binary(project(redemption("confirmed_by_quota"), %{usage_poll_pause: pause}).pause_until)
+  end
+
+  @tag :operation_truth_matrix
+  test "the compact status line follows the recorded status, not the observation" do
+    passed = redemption("consumed_pending_probe") |> Map.put("deadline_at", DateTime.to_iso8601(DateTime.add(@now, -1, :second)))
+    assert project(passed, %{view_paused?: true}).compact_headline == "Deadline passed — checking quota"
+    assert project(passed, %{view_paused?: true}).headline == "Live updates paused"
+
+    unknown_reblock = project(%{"phase" => "reblocked"})
+    assert {unknown_reblock.compact_headline, unknown_reblock.headline} == {"Reset outcome not confirmed", "Quota is still unavailable"}
+    assert project(%{"phase" => "consuming", "started_at" => DateTime.to_iso8601(@started)}).compact_headline == "Reset request in progress"
+    assert project(%{"phase" => "confirmed_by_quota"}).compact_headline == "Quota confirmed"
+    assert project(%{"status" => "noop", "result" => %{"code" => "no_credit", "applied" => false}}, %{view_paused?: true}).compact_headline == "No saved reset was available"
+    queued = %{open: %{state: :queued, requested_at: @now}, latest_terminal: nil}
+    assert project(redemption("confirmed_by_quota"), %{request_summary: queued, view_connected?: false}).compact_headline == "Request accepted — queued"
+  end
+
+  @tag :unknown_and_contradictory_outcomes
+  test "a settled record without a lifecycle phase is history, not an unresolved warning" do
+    # The claim ignores such a record (no phase), so its unknown outcome never resolves and never holds a redemption back.
+    for record <- [%{"status" => "failed", "result" => %{"code" => "transport_error", "applied" => false}}, %{"status" => "failed", "result" => %{"code" => "stale_redemption_unknown", "applied" => false}}, %{"status" => "completed"}] do
+      result = project(record)
+      assert result.provider_outcome == :unknown
+      assert {result.headline, result.summary} == {"Reset outcome not recorded", "It does not block another redemption."}
+      assert result.outcome_caveat == nil and result.detail == nil
+      assert result.compact_headline == "Reset outcome not recorded"
+      refute result.unresolved?
+      refute result.active?
+      assert Projection.observe(result, paused?: true).headline == "Reset outcome not recorded"
+    end
+
+    # A phase-less record still marked redeeming may still be in flight, so it keeps the warning.
+    redeeming = project(%{"status" => "redeeming", "started_at" => DateTime.to_iso8601(@started)})
+    assert redeeming.active? and redeeming.unresolved?
+    assert redeeming.headline == "Reset outcome not confirmed"
+    assert project(%{"phase" => "consuming", "started_at" => DateTime.to_iso8601(DateTime.add(@now, -1, :hour))}).unresolved?
+    refute project(redemption("confirmed_by_quota")).unresolved?
   end
 end

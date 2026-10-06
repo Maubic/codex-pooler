@@ -190,8 +190,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
                 identity_id={@account.identity.id}
                 saved_resets={@saved_resets}
                 saved_reset_policy={@saved_reset_policy}
-                saved_reset_confirmation={@saved_reset_confirmation}
-                show_confirmation={not Map.has_key?(@account, :saved_reset_operation)}
                 class={saved_reset_meter_grid_class(@reported_quota_limits)}
               />
             </div>

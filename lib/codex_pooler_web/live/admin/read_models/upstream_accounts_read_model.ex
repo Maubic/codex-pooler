@@ -564,20 +564,41 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
   end
 
   # Private LiveView invalidation state; never pass this cursor to components or DOM.
-  @spec saved_reset_refresh_cursor(UpstreamIdentity.t(), map() | nil, SavedResetOperationProjection.request_summary() | nil) :: saved_reset_refresh_cursor()
+  @spec saved_reset_refresh_cursor(UpstreamIdentity.t(), term(), SavedResetOperationProjection.request_summary() | nil) :: saved_reset_refresh_cursor()
   defp saved_reset_refresh_cursor(identity, redemption, request_summary) do
     metadata = identity.metadata || %{}
 
     %{
       identity_id: identity.id,
       credential_epoch: cursor_counter(metadata["credential_epoch"]),
-      lifecycle_generation: cursor_counter(redemption["generation"]),
+      lifecycle_generation: cursor_counter(redemption_generation(redemption)),
       request_generation: :crypto.hash(:sha256, :erlang.term_to_binary(request_summary)) |> Base.encode16(case: :lower)
     }
   end
 
+  # The projection reads a malformed redemption value as an unknown outcome; the cursor reads it as no generation.
+  defp redemption_generation(%{"generation" => generation}), do: generation
+  defp redemption_generation(_redemption), do: nil
+
   defp cursor_counter(value) when is_integer(value) and value >= 0, do: value
   defp cursor_counter(_value), do: nil
+
+  @doc """
+  Whether a targeted saved-reset status read may replace the account a LiveView shows. `incoming` must
+  name the same account and hold every counter at or above `current`, the cursor the read started from:
+  a counter `current` does not know accepts any value, and a missing counter never replaces a known one.
+  Token refresh advances the credential epoch, so a later epoch is newer data, never a stale read.
+  """
+  @spec newer_saved_reset_refresh_cursor?(saved_reset_refresh_cursor() | term(), saved_reset_refresh_cursor() | term()) :: boolean()
+  def newer_saved_reset_refresh_cursor?(%{identity_id: identity_id} = incoming, %{identity_id: identity_id} = current) do
+    Enum.all?([:credential_epoch, :lifecycle_generation], fn field ->
+      known = Map.get(current, field)
+      read = Map.get(incoming, field)
+      is_nil(known) or (is_integer(read) and read >= known)
+    end)
+  end
+
+  def newer_saved_reset_refresh_cursor?(_incoming, _current), do: false
 
   defp identity_assignments(identity, assignments, quota_readiness, token_burn) do
     assignments

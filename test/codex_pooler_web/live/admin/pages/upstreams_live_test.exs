@@ -6539,6 +6539,39 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
   end
 
   @tag :saved_reset_live_status
+  test "an open bank applies a status read after a token refresh advanced the credential epoch", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "epoch-reset-status", name: "Epoch reset status"})
+    %{identity: identity} = upstream_assignment_fixture(pool, %{identity_metadata: %{"credential_epoch" => 1}})
+    persist_reset_receipt!(identity, "consumed_pending_probe")
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    render_click(view, "open_saved_reset_policy", %{"id" => identity.id})
+    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id}[data-verification-state='pending']")
+    # A token refresh advances the credential epoch while the lifecycle moves on; both are newer facts.
+    current = Repo.get!(UpstreamIdentity, identity.id)
+    current |> UpstreamIdentity.changeset(%{metadata: Map.put(current.metadata, "credential_epoch", 2)}) |> Repo.update!()
+    persist_reset_receipt!(identity, "confirmed_by_quota")
+    render_click(view, "refresh_saved_reset_status", %{"id" => identity.id})
+    settle_saved_reset_status(view)
+    assert :sys.get_state(view.pid).socket.assigns.editing_saved_reset_policy.saved_reset_refresh_cursor.credential_epoch == 2
+    assert_confirmed_receipt_reviewable(view, identity)
+  end
+
+  @tag :saved_reset_live_status
+  test "a finished receipt keeps its own status while live updates are paused", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "paused-finished-receipt", name: "Paused finished receipt"})
+    %{identity: identity} = upstream_assignment_fixture(pool)
+    persist_reset_receipt!(identity, "confirmed_by_quota")
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    render_hook(view, "set_live_updates", %{"paused" => true})
+    render_click(view, "open_saved_reset_policy", %{"id" => identity.id})
+    latest = "#saved-reset-operation-bank-#{identity.id} [data-role='saved-reset-latest']"
+    assert has_element?(view, latest, "The new quota cycle is confirmed.")
+    refute has_element?(view, latest, "The reset continues")
+    refute has_element?(view, latest, "Live updates paused")
+    assert has_element?(view, "#saved-reset-operation-heading-bank-#{identity.id}", "Quota confirmed")
+  end
+
+  @tag :saved_reset_live_status
   test "paused status refresh performs one scoped DB read without unpausing and resume rereads immediately", %{conn: conn, scope: scope} do
     {:ok, fake} = FakeUpstream.start_link(:success)
     on_exit(fn -> FakeUpstream.stop(fake) end)
@@ -6830,7 +6863,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     render_hook(view, "set_live_updates", %{"paused" => true})
     account = Enum.find(:sys.get_state(view.pid).socket.assigns.upstream_accounts, &(&1.identity.id == identity.id))
     assert account.saved_reset_operation.serving_readiness.routing_ready_now?
-    assert account.saved_reset_operation.request.state == :stopped
+    assert account.saved_reset_operation.request.state == :completed
     refute has_element?(view, "#saved-reset-operation-list-#{identity.id}")
     assert has_element?(view, "#upstream-account-#{identity.id}-quota-readiness-contract[data-routing-ready-now='true']")
 
@@ -6844,6 +6877,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     view |> element("#saved-reset-view-status-list-#{identity.id}") |> render_click()
     assert has_element?(view, "#saved-reset-policy-dialog[open]")
     assert has_element?(view, "#saved-reset-operation-bank-#{identity.id}[data-verification-state='pending']")
+    # The completed job adds nothing beside the latest receipt.
+    refute has_element?(view, "#saved-reset-operation-bank-#{identity.id} [data-role='saved-reset-request']")
     # While the reset is unconfirmed the account cannot route, and the bank prints why next to the routing label.
     blocked = :sys.get_state(view.pid).socket.assigns.editing_saved_reset_policy.saved_reset_operation.serving_readiness
     refute blocked.routing_ready_now?
@@ -6862,7 +6897,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     {:ok, remounted, _html} = live(conn, ~p"/admin/upstreams")
     assert_confirmed_receipt_reviewable(remounted, identity)
     assert FakeUpstream.requests(fake) == []
-    CodexPooler.TestDiagnostics.puts(Jason.encode!(%{scenario: "normal_paused_historical_compact_active_detail_remount", initial_routing_ready: true, terminal_request_state: "stopped", paused_normal_list_receipts: 0, active_compact_rows: 1, view_status_opened_safe_bank: true, confirmed_hidden_from_list: true, latest_bank_receipt_after_remount: true, provider_calls: 0}))
+    CodexPooler.TestDiagnostics.puts(Jason.encode!(%{scenario: "normal_paused_historical_compact_active_detail_remount", initial_routing_ready: true, terminal_request_state: "completed", paused_normal_list_receipts: 0, active_compact_rows: 1, view_status_opened_safe_bank: true, confirmed_hidden_from_list: true, latest_bank_receipt_after_remount: true, provider_calls: 0}))
     stop_saved_reset_fake!(fake)
   end
 
@@ -7725,201 +7760,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     html = render(view)
     refute html =~ secret_sentinel
-  end
-
-  @tag :relative_countdown_contract
-  @tag :saved_reset_confirmation
-  test "saved reset meter renders only the bounded post-consume confirmation contract" do
-    saved_resets = %{
-      available_count: 0,
-      label: "0 saved resets",
-      next_expires_title: nil,
-      reset_lifecycle: %{
-        phase: "reblocked",
-        label: "raw-lifecycle-label-must-not-render",
-        consumed_at: "August 8, 2026 at 10:14 AM",
-        deadline_at: "August 8, 2026 at 10:29 AM"
-      }
-    }
-
-    awaiting_html =
-      render_component(&SavedResetMeter.saved_reset_meter/1,
-        id: "saved-reset-awaiting-meter",
-        saved_resets: saved_resets,
-        saved_reset_policy: %{enabled?: true},
-        saved_reset_confirmation: %{
-          confirmation_state: :awaiting_confirmation,
-          challenged_evidence_state: :candidate_progressing,
-          additional_account_blocker_state: :exhausted,
-          observed_at: ~U[2026-08-08 10:18:00Z]
-        }
-      )
-
-    awaiting_document = LazyHTML.from_fragment(awaiting_html)
-
-    confirmation =
-      LazyHTML.query(
-        awaiting_document,
-        "#saved-reset-awaiting-meter-confirmation[data-role='upstream-saved-reset-confirmation']"
-      )
-
-    assert Enum.count(confirmation) == 1
-
-    assert [confirmation_title] = LazyHTML.attribute(confirmation, "title")
-
-    assert confirmation_title ==
-             "Awaiting confirmation. Consumed August 8, 2026 at 10:14 AM. Deadline August 8, 2026 at 10:29 AM. Challenged evidence Candidate progressing. Additional blocker Exhausted. Routing paused. This confirmation never consumes a second saved reset."
-
-    assert LazyHTML.query(
-             awaiting_document,
-             "#saved-reset-awaiting-meter-confirmation[aria-label='#{confirmation_title}']"
-           )
-           |> Enum.count() == 1
-
-    assert LazyHTML.query(
-             awaiting_document,
-             "[data-role='upstream-saved-reset-confirmation-state'][data-confirmation-state='awaiting_confirmation']"
-           )
-           |> LazyHTML.text()
-           |> String.trim() == "Awaiting confirmation"
-
-    assert LazyHTML.query(
-             awaiting_document,
-             "[data-role='upstream-saved-reset-challenged-evidence'][data-evidence-state='candidate_progressing']"
-           )
-           |> LazyHTML.text() =~ "Candidate progressing"
-
-    assert LazyHTML.query(
-             awaiting_document,
-             "[data-role='upstream-saved-reset-additional-blocker'][data-blocker-state='exhausted']"
-           )
-           |> LazyHTML.text() =~ "Exhausted"
-
-    assert LazyHTML.query(
-             awaiting_document,
-             "[data-role='upstream-saved-reset-routing-pause'][data-routing-paused='true']"
-           )
-           |> LazyHTML.text() =~ "Routing paused"
-
-    assert LazyHTML.query(awaiting_document, "[data-role='upstream-saved-reset-consumed-at']")
-           |> LazyHTML.text() =~ "August 8, 2026 at 10:14 AM"
-
-    assert LazyHTML.query(awaiting_document, "[data-role='upstream-saved-reset-deadline']")
-           |> LazyHTML.text() =~ "August 8, 2026 at 10:29 AM"
-
-    assert LazyHTML.query(awaiting_document, "[data-role='upstream-saved-reset-single-consume']")
-           |> LazyHTML.text() =~ "never consumes a second saved reset"
-
-    assert LazyHTML.query(
-             awaiting_document,
-             "#saved-reset-awaiting-meter-bar[aria-valuenow='0']"
-           )
-           |> Enum.count() == 1
-
-    for index <- 1..5 do
-      segment =
-        LazyHTML.query(
-          awaiting_document,
-          "#saved-reset-awaiting-meter-segment-#{index}"
-        )
-
-      assert LazyHTML.attribute(segment, "class") |> List.first() =~ "bg-base-300/70"
-      assert LazyHTML.attribute(segment, "data-confirmation-state") == []
-      assert LazyHTML.attribute(segment, "title") == []
-    end
-
-    refute awaiting_html =~ "still blocked"
-    refute awaiting_html =~ "raw-lifecycle-label-must-not-render"
-
-    confirmed_html =
-      render_component(&SavedResetMeter.saved_reset_meter/1,
-        id: "saved-reset-confirmed-meter",
-        saved_resets: saved_resets,
-        saved_reset_policy: %{enabled?: false},
-        saved_reset_confirmation: %{
-          confirmation_state: :confirmed,
-          challenged_evidence_state: :usable,
-          additional_account_blocker_state: :none,
-          observed_at: nil
-        }
-      )
-
-    confirmed_document = LazyHTML.from_fragment(confirmed_html)
-
-    assert LazyHTML.query(
-             confirmed_document,
-             "#saved-reset-confirmed-meter-bar[aria-valuenow='0']"
-           )
-           |> Enum.count() == 1
-
-    refute LazyHTML.query(
-             confirmed_document,
-             "[data-role='upstream-saved-reset-confirmation']"
-           )
-           |> Enum.any?()
-
-    refute confirmed_html =~ "Confirmed"
-
-    state_labels = [
-      {:not_applied, "Not applied"},
-      {:confirmation_expired, "Confirmation expired"}
-    ]
-
-    rendered_states =
-      for {state, label} <- state_labels, into: %{} do
-        html =
-          render_component(&SavedResetMeter.saved_reset_meter/1,
-            id: "saved-reset-#{state}-meter",
-            saved_resets: saved_resets,
-            saved_reset_policy: %{enabled?: false},
-            saved_reset_confirmation: %{
-              confirmation_state: state,
-              challenged_evidence_state: :usable,
-              additional_account_blocker_state: :none,
-              observed_at: nil
-            }
-          )
-
-        assert html =~ label
-        {state, html}
-      end
-
-    refute rendered_states.not_applied =~ "Confirmation expired"
-    refute rendered_states.confirmation_expired =~ "Not applied"
-  end
-
-  @tag :saved_reset_confirmation
-  test "saved reset confirmation fails closed for malformed projection input" do
-    sentinel = "saved-reset-raw-confirmation-sentinel"
-
-    html =
-      render_component(&SavedResetMeter.saved_reset_meter/1,
-        id: "saved-reset-malformed-meter",
-        saved_resets: %{
-          available_count: 1,
-          label: "1 saved reset",
-          next_expires_title: nil,
-          reset_lifecycle: nil
-        },
-        saved_reset_policy: %{enabled?: false},
-        saved_reset_confirmation: %{
-          confirmation_state: sentinel,
-          challenged_evidence_state: sentinel,
-          additional_account_blocker_state: sentinel,
-          observed_at: sentinel
-        }
-      )
-
-    document = LazyHTML.from_fragment(html)
-
-    assert LazyHTML.query(
-             document,
-             "#saved-reset-malformed-meter-confirmation[data-confirmation-state='unavailable']"
-           )
-           |> LazyHTML.text() =~ "Confirmation details unavailable"
-
-    refute html =~ sentinel
-    refute html =~ "Usage unavailable"
   end
 
   @tag :relative_countdown_contract
