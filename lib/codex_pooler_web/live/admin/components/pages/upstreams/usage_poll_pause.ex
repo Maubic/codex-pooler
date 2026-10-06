@@ -7,6 +7,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.UsagePollPause do
   attr :pause, :map, default: nil
 
   def usage_poll_pause(assigns) do
+    assigns = assign(assigns, :heading, assigns.pause && "Usage polling paused until #{assigns.pause.paused_until_label}")
+
     ~H"""
     <section
       :if={@pause}
@@ -18,8 +20,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.UsagePollPause do
     >
       <div class="flex min-w-0 items-center gap-2">
         <span class="size-2 shrink-0 rounded-full bg-warning ring-[3px] ring-warning/15" aria-hidden="true"></span>
-        <h3 id={"#{@id_prefix}-usage-poll-pause-title"} class="min-w-0 flex-1 truncate font-semibold text-base-content">
-          Usage polling paused until {@pause.paused_until_label}
+        <%!-- Below `sm` the heading wraps so the whole deadline shows; from `sm` it truncates as before, and the title carries the full text. --%>
+        <h3 id={"#{@id_prefix}-usage-poll-pause-title"} title={@heading} class="min-w-0 flex-1 font-semibold text-base-content sm:truncate">
+          {@heading}
         </h3>
         <span id={"#{@id_prefix}-usage-poll-pause-remaining"} phx-hook="RelativeCountdown" data-countdown-at={DateTime.to_iso8601(@pause.paused_until)} class="shrink-0 text-xs text-base-content/55">
           <span data-role="relative-countdown-value">{@pause.remaining_label}</span>
