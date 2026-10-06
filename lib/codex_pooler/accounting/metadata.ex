@@ -407,6 +407,9 @@ defmodule CodexPooler.Accounting.Metadata do
   defp sanitize_value(value, key) when key in [:native_content_filter_source, "native_content_filter_source", :native_content_filter_binding, "native_content_filter_binding"],
     do: NativeContentFilterRetry.sanitize_source(value)
 
+  defp sanitize_value(value, key) when key in [:native_content_filter_pin, "native_content_filter_pin"],
+    do: NativeContentFilterRetry.sanitize_pin(value)
+
   # Reason: metadata dispatch deliberately preserves separate safe projections.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp sanitize_value(value, key) when is_map(value) do

@@ -140,16 +140,64 @@ defmodule CodexPooler.Accounting.NativeContentFilterRetry do
   def bound_assignment(_request), do: nil
 
   @doc """
-  Gives up the claim and the client-retry link of a guided retry that was
-  refused before any attempt because its bound account was not eligible
-  (findings#318). Such a row sent nothing to the provider, but as a failed
-  node of the turn's chain it refused the client's next retry as a terminal
-  predecessor (`409 duplicate_turn`). Once released, that retry chains onto
-  the content-filtered predecessor again under the same checks, its retry
-  window included. The release is narrow: only a bound guided retry finalized
-  `503 no_eligible_backend`, with no attempt and no request chained onto it.
-  Its accounting rows stay; it keeps its history under a fresh correlation
-  id, and `request_metadata.released_turn_claim` names the claim it held (as
+  The assignment and upstream identity a reserved request is pinned to: a
+  verified guided retry's binding (`bound_assignment/1`), or the routing-only
+  pin a later request of the same turn inherited from a pinned request it was
+  linked to (`native_content_filter_pin`, findings#318 row 318-2); `nil` for
+  any other request.
+  """
+  @spec pinned_assignment(Request.t() | term()) :: {Ecto.UUID.t(), Ecto.UUID.t()} | nil
+  def pinned_assignment(%Request{request_metadata: %{} = metadata} = request),
+    do: bound_assignment(request) || pin_assignment(metadata["native_content_filter_pin"])
+
+  def pinned_assignment(_request), do: nil
+
+  defp pin_assignment(value) do
+    case sanitize_pin(value) do
+      %{"assignment_id" => assignment_id, "identity_id" => identity_id} -> {assignment_id, identity_id}
+      _invalid -> nil
+    end
+  end
+
+  @doc "The routing-only pin in its one valid shape, or an empty map."
+  @spec sanitize_pin(term()) :: map()
+  def sanitize_pin(%{"version" => 1, "assignment_id" => assignment_id, "identity_id" => identity_id} = value) when map_size(value) == 3 do
+    if Enum.all?([assignment_id, identity_id], &match?({:ok, _}, Ecto.UUID.cast(&1))), do: value, else: %{}
+  end
+
+  def sanitize_pin(_value), do: %{}
+
+  @doc """
+  Records on a successor the routing-only pin of the request it is linked to,
+  when that request is pinned: a guided retry that failed before any output on
+  its account (a first-event `server_error`) is retried by the client, and that
+  retry, admitted as the exact retry of a zero-output node, carried no binding
+  and followed the session's affinity to another account, which drops the
+  retained reasoning without an error (findings#318 row 318-2). Dispatch never
+  reads the pin: `dispatch_allowed?/2` still checks only the binding.
+  """
+  @spec put_successor_pin(map(), Ecto.UUID.t() | term()) :: map()
+  def put_successor_pin(metadata, predecessor_request_id) when is_map(metadata) and is_binary(predecessor_request_id) do
+    case pinned_assignment(Repo.get(Request, predecessor_request_id)) do
+      {assignment_id, identity_id} -> Map.put(metadata, "native_content_filter_pin", %{"version" => 1, "assignment_id" => assignment_id, "identity_id" => identity_id})
+      nil -> metadata
+    end
+  end
+
+  def put_successor_pin(metadata, _predecessor_request_id), do: metadata
+
+  @doc """
+  Gives up the claim and the client-retry link of a pinned request (a guided
+  retry, or a later request of its turn that inherited the pin) refused before
+  any attempt because its account was not eligible (findings#318). Such a row
+  sent nothing to the provider, but as a failed node of the turn's chain it
+  refused the client's next retry as a terminal predecessor (`409
+  duplicate_turn`). Once released, that retry chains onto the request before
+  it again under the same checks, its retry window included. The release is
+  narrow: only a pinned chain successor finalized `503 no_eligible_backend`,
+  with no attempt and no request chained onto it. Its accounting rows stay; it
+  keeps its history under a fresh correlation id, and
+  `request_metadata.released_turn_claim` names the claim it held (as
   `TurnClaimRelease` records it).
   """
   @spec release_refused_retry(Request.t()) :: :ok | {:error, term()}
@@ -172,8 +220,9 @@ defmodule CodexPooler.Accounting.NativeContentFilterRetry do
 
   defp release_locked_refused_retry(nil), do: :ok
 
-  defp releasable_refused_retry?(%Request{id: id, status: "failed", response_status_code: 503, last_error_code: "no_eligible_backend", request_metadata: %{"client_resend" => %{"predecessor_shape" => "content_filter_retry"}} = metadata} = request),
-    do: not is_nil(bound_assignment(request)) and is_binary(metadata["client_resend"]["predecessor_request_id"]) and not Repo.exists?(from a in Attempt, where: a.request_id == ^id) and not Repo.exists?(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^id)
+  defp releasable_refused_retry?(%Request{id: id, status: "failed", response_status_code: 503, last_error_code: "no_eligible_backend", request_metadata: %{"client_resend" => %{"predecessor_request_id" => predecessor_id}}} = request)
+       when is_binary(predecessor_id),
+       do: not is_nil(pinned_assignment(request)) and not Repo.exists?(from a in Attempt, where: a.request_id == ^id) and not Repo.exists?(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^id)
 
   defp releasable_refused_retry?(_request), do: false
 

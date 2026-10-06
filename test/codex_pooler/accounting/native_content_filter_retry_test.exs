@@ -93,11 +93,19 @@ defmodule CodexPooler.Accounting.NativeContentFilterRetryTest do
     assert {released.status, released.response_status_code, released.last_error_code, released.completed_at} == {successor.status, successor.response_status_code, successor.last_error_code, successor.completed_at}
     refute Repo.exists?(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^predecessor.id or l.successor_request_id == ^successor.id)
 
+    # A later request of the turn that inherited the pin (findings#318 row 318-2) is released the same way.
+    pin = %{"version" => 1, "assignment_id" => setup.assignment.id, "identity_id" => setup.identity.id}
+    {pinned_predecessor, pinned} = refused.(%{request_metadata: %{"client_resend" => %{"predecessor_request_id" => Ecto.UUID.generate(), "reason" => "failed_predecessor"}, "native_content_filter_binding" => %{}, "native_content_filter_pin" => pin}})
+    assert :ok = NativeContentFilterRetry.release_refused_retry(pinned)
+    assert Repo.get!(Request, pinned.id).request_metadata["released_turn_claim"] == pinned.correlation_id
+    refute Repo.exists?(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^pinned_predecessor.id)
+
     kept = [
       refused.(%{response_status_code: 409, last_error_code: "invalid_content_filter_retry_binding"}),
       refused.(%{status: "succeeded", response_status_code: 200, last_error_code: nil}),
       refused.(%{request_metadata: %{"native_content_filter_binding" => %{}}}),
-      refused.(%{request_metadata: %{"client_resend" => %{"predecessor_shape" => "identical_resend"}}})
+      refused.(%{request_metadata: %{"native_content_filter_binding" => %{}, "native_content_filter_pin" => Map.put(pin, "version", 2)}}),
+      refused.(%{request_metadata: %{"client_resend" => %{"predecessor_shape" => "content_filter_retry"}}})
     ]
 
     {attempted_predecessor, attempted} = refused.(%{})
@@ -110,6 +118,35 @@ defmodule CodexPooler.Accounting.NativeContentFilterRetryTest do
       assert Repo.get!(Request, successor.id).correlation_id == successor.correlation_id
       assert Repo.exists?(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^predecessor.id and l.successor_request_id == ^successor.id)
     end
+  end
+
+  # The routing-only pin a later request of a guided retry's turn inherits keeps one exact shape, routes like the binding and is never read by dispatch (findings#318 row 318-2).
+  test "the inherited pin keeps its exact shape and passes from a pinned request to its successor" do
+    setup = accounting_setup()
+    pin = %{"version" => 1, "assignment_id" => setup.assignment.id, "identity_id" => setup.identity.id}
+    assert CodexPooler.Accounting.sanitize_metadata(%{"native_content_filter_pin" => pin}) == %{"native_content_filter_pin" => pin}
+
+    for invalid <- [nil, "synthetic", [], %{}, Map.put(pin, "version", 2), Map.put(pin, "extra", true), Map.delete(pin, "identity_id"), Map.put(pin, "assignment_id", "synthetic")] do
+      assert CodexPooler.Accounting.sanitize_metadata(%{"native_content_filter_pin" => invalid}) == %{"native_content_filter_pin" => %{}}
+      assert NativeContentFilterRetry.pinned_assignment(%Request{request_metadata: %{"native_content_filter_pin" => invalid}}) == nil
+    end
+
+    source = %{"version" => 1, "attempt_id" => Ecto.UUID.generate(), "assignment_id" => setup.assignment.id, "identity_id" => setup.identity.id, "credential_epoch" => 1, "serving_mode" => "full", "requested_model" => setup.model.exposed_model_id, "effective_model" => setup.model.exposed_model_id, "upstream_model" => setup.model.upstream_model_id}
+    bound = request_fixture(setup, %{request_metadata: %{"native_content_filter_binding" => source}})
+    pinned = request_fixture(setup, %{request_metadata: %{"native_content_filter_pin" => pin}})
+    plain = request_fixture(setup, %{request_metadata: %{}})
+    expected = {setup.assignment.id, setup.identity.id}
+    assert NativeContentFilterRetry.pinned_assignment(bound) == expected
+    assert NativeContentFilterRetry.pinned_assignment(pinned) == expected
+    assert NativeContentFilterRetry.pinned_assignment(plain) == nil
+    assert NativeContentFilterRetry.put_successor_pin(%{"client_resend" => %{}}, bound.id) == %{"client_resend" => %{}, "native_content_filter_pin" => pin}
+    assert NativeContentFilterRetry.put_successor_pin(%{}, pinned.id) == %{"native_content_filter_pin" => pin}
+    assert NativeContentFilterRetry.put_successor_pin(%{}, plain.id) == %{}
+    assert NativeContentFilterRetry.put_successor_pin(%{}, nil) == %{}
+
+    # Dispatch reads only the binding: a request with nothing but the pin is not required to carry one.
+    scope = %{assignment_id: Ecto.UUID.generate(), identity_id: Ecto.UUID.generate(), credential_epoch: 1, serving_mode: "full", effective_model: setup.model.exposed_model_id, upstream_model: setup.model.upstream_model_id}
+    assert NativeContentFilterRetry.dispatch_allowed?(pinned, scope)
   end
 
   defp db_now do

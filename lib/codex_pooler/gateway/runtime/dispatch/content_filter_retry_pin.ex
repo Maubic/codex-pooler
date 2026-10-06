@@ -18,6 +18,12 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.ContentFilterRetryPin do
   # The guided retry carries the reasoning its predecessor completed before the
   # filter.
   #
+  # A later request of the same turn linked to a pinned request (the client's
+  # retry of a guided retry that failed on its account before any output)
+  # inherits the pin as routing-only metadata (`native_content_filter_pin`,
+  # findings#318 row 318-2): without it, that retry followed the session's
+  # affinity and lost the reasoning on another account.
+  #
   # The pin narrows the candidates route filtering admitted to the bound one and
   # never adds it back. A bound account route filtering excluded (an open
   # circuit, spent quota) refuses the retry with the retryable `503
@@ -38,19 +44,19 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.ContentFilterRetryPin do
 
   require Logger
 
-  @doc "True for a reserved request a valid content-filter retry binding pins to one account."
+  @doc "True for a reserved request a content-filter retry binding or an inherited pin holds to one account."
   @spec bound?(Request.t() | term()) :: boolean()
-  def bound?(request), do: not is_nil(NativeContentFilterRetry.bound_assignment(request))
+  def bound?(request), do: not is_nil(NativeContentFilterRetry.pinned_assignment(request))
 
   @doc """
-  The candidates a reserved request is routed over: the bound candidate alone
-  when the request carries a valid binding and route filtering admitted that
-  candidate, every candidate when it carries none, and `:unavailable` when the
-  bound candidate is not among them.
+  The candidates a reserved request is routed over: the pinned candidate alone
+  when the request carries a valid binding or inherited pin and route
+  filtering admitted that candidate, every candidate when it carries neither,
+  and `:unavailable` when the pinned candidate is not among them.
   """
   @spec candidates(Request.t() | term(), [BridgeRing.candidate()]) :: {:ok, [BridgeRing.candidate()]} | :unavailable
   def candidates(request, candidates) when is_list(candidates) do
-    case NativeContentFilterRetry.bound_assignment(request) do
+    case NativeContentFilterRetry.pinned_assignment(request) do
       nil ->
         {:ok, candidates}
 
@@ -74,7 +80,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.ContentFilterRetryPin do
     case AttemptSettlement.finalize_reservation_failure(request, attrs) do
       {:ok, _finalized} ->
         release_claim(request)
-        bound = NativeContentFilterRetry.bound_assignment(request)
+        bound = NativeContentFilterRetry.pinned_assignment(request)
         excluded = route_state |> RouteState.route_filter_candidates() |> Enum.filter(&bound_candidate?(&1, bound)) |> Enum.take(1)
 
         {:error, %{status: 503, code: "no_eligible_backend", message: "no healthy eligible backend is currently available", param: "model"}}

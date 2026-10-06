@@ -1,7 +1,7 @@
 defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
   use CodexPoolerWeb.ConnCase, async: false
   import Ecto.Query
-  import CodexPoolerWeb.Runtime.BackendCodexTestSupport, only: [gateway_setup: 2, gateway_upstream: 4, prime_routing_quota!: 1, register_unboxed_pool_cleanup!: 1, native_text_input: 1, start_public_endpoint!: 0, start_upstream: 1, public_websocket_connect!: 3, public_websocket_send_text!: 4, public_websocket_receive_text!: 3]
+  import CodexPoolerWeb.Runtime.BackendCodexTestSupport, only: [gateway_setup: 2, gateway_upstream: 4, prime_routing_quota!: 1, register_unboxed_pool_cleanup!: 1, native_text_input: 1, start_public_endpoint!: 0, start_upstream: 1, public_websocket_connect!: 3, public_websocket_send_text!: 4, public_websocket_receive_text!: 3, first_event_terminal_sse: 2, first_event_terminal_payload: 2]
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, NativeContentFilterRetry, Request, RequestClientRetryLink}
   alias CodexPooler.FakeUpstream
@@ -563,6 +563,123 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
     end
   end
 
+  # A guided retry can fail on its account before any output (a first-event `server_error`), and the client retries it. That retry is the exact retry of a zero-output node and carries no binding, so it followed the session's affinity to another account, which drops the retained reasoning without an error; with owner forwarding on, the content-filter preflight refused it and ended the turn. It inherits the guided retry's account as a routing-only pin (`native_content_filter_pin`) and is served there; dispatch validation still reads only the binding (findings#318 row 318-2).
+  for mode <- ["full", "lite"] do
+    @tag mode: mode
+    test "#{mode} HTTP retry of a guided retry that failed on its account stays on that account", context do
+      CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+      on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+      :ok = Sandbox.mode(Repo, :auto)
+      terminal = %{"type" => "response.incomplete", "response" => %{"id" => "resp_synthetic_cf", "status" => "incomplete", "incomplete_details" => %{"reason" => "content_filter"}, "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.raw_response(event(terminal), headers: [{"content-type", "text/event-stream"}]), first_event_terminal_sse("response.failed", "server_error"), FakeUpstream.raw_response(event(completed), headers: [{"content-type", "text/event-stream"}])]))
+      # The other account could serve the retry, so only routing keeps it off.
+      other_upstream = start_upstream(FakeUpstream.raw_response(event(completed), headers: [{"content-type", "text/event-stream"}]))
+      setup = gateway_setup(upstream, compact?: true)
+      register_unboxed_pool_cleanup!(setup)
+      set_model_serving_mode!(model_serving_scope(), setup, context.mode)
+      setup = Map.put(setup, :serving_mode, context.mode)
+      port = start_public_endpoint!()
+      thread = Ecto.UUID.generate()
+      input = native_text_input("synthetic")
+      original = payload(setup, thread, input, 0)
+      assert {200, _} = post(port, setup, original, thread)
+      first = await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget)
+      other = add_pool_account!(setup, other_upstream)
+      move_affinity!(first, other.assignment)
+      retry = Map.put(original, "input", input ++ [guidance()])
+      assert {200, body} = post(port, setup, retry, thread)
+      assert body =~ "server_error"
+      guided = await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget)
+      assert %Request{status: "failed", last_error_code: "server_error"} = guided
+      assert {200, _} = post(port, setup, retry, thread)
+      assert FakeUpstream.count(upstream) == 3
+      assert FakeUpstream.count(other_upstream) == 0
+      assert_pinned_retry_served!(setup, guided)
+    end
+  end
+
+  for mode <- ["full", "lite"], forwarding? <- [false, true] do
+    @tag mode: mode, forwarding?: forwarding?
+    test "#{mode} websocket owner #{forwarding?} retry of a guided retry that failed on its account stays on that account", context do
+      CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
+      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, context.forwarding?)
+      CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+      on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+      :ok = Sandbox.mode(Repo, :auto)
+      terminal = %{"type" => "response.incomplete", "response" => %{"id" => "resp_synthetic_cf", "status" => "incomplete", "incomplete_details" => %{"reason" => "content_filter"}, "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      {_type, failed} = first_event_terminal_payload("response.failed", "server_error")
+      # The provider drops the connection after each terminal, so every retry needs a new handshake and routing decides where it goes.
+      upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.websocket_text_frames_then_abrupt_close([CodexPooler.JSON.encode!(terminal)]), FakeUpstream.websocket_text_frames_then_abrupt_close([CodexPooler.JSON.encode!(failed)]), FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(completed)])]))
+      # The other account could serve the retry, so only routing keeps it off.
+      other_upstream = start_upstream(FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(completed)]))
+      setup = gateway_setup(upstream, compact?: true)
+      register_unboxed_pool_cleanup!(setup)
+      set_model_serving_mode!(model_serving_scope(), setup, context.mode)
+      port = start_public_endpoint!()
+      thread = Ecto.UUID.generate()
+      input = native_text_input("synthetic")
+      original = websocket_payload(setup, thread, input, context.mode)
+      {first, terminal} = websocket_turn!(port, setup, thread, original)
+      assert terminal["type"] == "response.incomplete"
+      await_delivery(first, System.monotonic_time(:millisecond) + @budget, %{type: terminal["type"], reason: get_in(terminal, ["response", "incomplete_details", "reason"])})
+      other = add_pool_account!(setup, other_upstream)
+      move_affinity!(first, other.assignment)
+      retry = Map.put(original, "input", input ++ [guidance()])
+      {guided, frame} = websocket_turn!(port, setup, thread, retry)
+      assert %{"type" => "response.failed"} = frame
+      assert %Request{status: "failed", last_error_code: "server_error"} = guided
+      {_served, frame} = websocket_turn!(port, setup, thread, retry)
+      assert %{"type" => "response.completed"} = frame
+      assert FakeUpstream.count(upstream) == 3
+      assert FakeUpstream.count(other_upstream) == 0
+      assert_pinned_retry_served!(setup, guided)
+    end
+  end
+
+  # A retry that inherited the pin is refused like a guided retry when its account is excluded: the retryable 503 before any attempt, and the refused row gives up its claim and link, so the client's next retry chains onto the failed guided retry again and is served on the account once it is eligible.
+  test "a pinned retry whose account is excluded is refused 503 and served there once it is eligible", context do
+    CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+    on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+    :ok = Sandbox.mode(Repo, :auto)
+    terminal = %{"type" => "response.incomplete", "response" => %{"id" => "resp_synthetic_cf", "status" => "incomplete", "incomplete_details" => %{"reason" => "content_filter"}, "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+    completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+    upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.raw_response(event(terminal), headers: [{"content-type", "text/event-stream"}]), first_event_terminal_sse("response.failed", "server_error"), FakeUpstream.raw_response(event(completed), headers: [{"content-type", "text/event-stream"}])]))
+    other_upstream = start_upstream(FakeUpstream.raw_response(event(completed), headers: [{"content-type", "text/event-stream"}]))
+    setup = gateway_setup(upstream, compact?: true)
+    register_unboxed_pool_cleanup!(setup)
+    set_model_serving_mode!(model_serving_scope(), setup, "full")
+    setup = Map.put(setup, :serving_mode, "full")
+    port = start_public_endpoint!()
+    thread = Ecto.UUID.generate()
+    input = native_text_input("synthetic")
+    original = payload(setup, thread, input, 0)
+    assert {200, _} = post(port, setup, original, thread)
+    first = await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget)
+    other = add_pool_account!(setup, other_upstream)
+    move_affinity!(first, other.assignment)
+    retry = Map.put(original, "input", input ++ [guidance()])
+    assert {200, _} = post(port, setup, retry, thread)
+    guided = await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget)
+    assert %Request{status: "failed", last_error_code: "server_error"} = guided
+    circuit = open_circuit!(setup, "proxy_stream")
+    refusal = req_post!(port, setup, retry, thread)
+    assert refusal.status == 503
+    assert %{"error" => %{"code" => "no_eligible_backend"}} = refusal.body
+    refused = await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget)
+    assert %Request{status: "failed", response_status_code: 503, last_error_code: "no_eligible_backend"} = refused
+    assert refused.request_metadata["native_content_filter_pin"]["assignment_id"] == setup.assignment.id
+    refute Repo.exists?(from a in Attempt, where: a.request_id == ^refused.id)
+    assert [{"release", nil, "routing_rejected"}, {"reservation", nil, nil}] = ledger_entries(refused)
+    assert_claim_released!(guided, refused)
+    Repo.delete!(circuit)
+    assert {200, _} = post(port, setup, retry, thread)
+    assert FakeUpstream.count(upstream) == 3
+    assert FakeUpstream.count(other_upstream) == 0
+    assert_pinned_retry_served!(setup, guided)
+  end
+
   # A guided retry whose first attempt met a provider 401 refreshes the account's token and retries on the same assignment, where its binding is checked again. While the refresh is held, the predecessor stops being the settled request its binding names, so only that retry is refused. It used to answer 500 `gateway_accounting_failed` and leave the request `in_progress` (findings#316); it is now finalized after the attempt the retry never replaced and answered 409.
   test "a guided retry refused by its binding at the auth-refresh retry is finalized and answered 409", context do
     CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
@@ -683,6 +800,24 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
         assert System.monotonic_time(:millisecond) < deadline, "guided retry never settled"
         Process.sleep(10)
         assert_served_on!(setup, first, assignment, deadline)
+    end
+  end
+
+  # The one request linked to the failed guided retry succeeded on the guided retry's account, with the inherited routing-only pin and no binding.
+  defp assert_pinned_retry_served!(setup, guided, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + @budget
+
+    case Repo.all(from r in Request, join: l in RequestClientRetryLink, on: l.successor_request_id == r.id, where: l.predecessor_request_id == ^guided.id, select: r) do
+      [%Request{status: "succeeded", completed_at: %DateTime{}} = served] ->
+        assert served.request_metadata["native_content_filter_pin"] == %{"version" => 1, "assignment_id" => setup.assignment.id, "identity_id" => setup.identity.id}
+        refute Map.has_key?(served.request_metadata, "native_content_filter_binding")
+        assert [%Attempt{status: "succeeded", pool_upstream_assignment_id: assignment_id}] = Repo.all(from a in Attempt, where: a.request_id == ^served.id)
+        assert assignment_id == setup.assignment.id
+
+      _pending ->
+        assert System.monotonic_time(:millisecond) < deadline, "pinned retry never settled"
+        Process.sleep(10)
+        assert_pinned_retry_served!(setup, guided, deadline)
     end
   end
 

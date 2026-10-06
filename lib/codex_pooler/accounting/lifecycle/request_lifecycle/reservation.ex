@@ -744,6 +744,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
       "predecessor_request_id" => predecessor_request_id,
       "reason" => "failed_predecessor"
     })
+    |> NativeContentFilterRetry.put_successor_pin(predecessor_request_id)
   end
 
   defp duplicate_request_error(nil),
@@ -1364,7 +1365,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
          %Request{request_metadata: %{"client_resend" => client_resend} = original}
        )
        when is_map(metadata) and is_map(client_resend),
-       do: %{attrs | request_metadata: metadata |> Map.put("client_resend", client_resend) |> Map.merge(Map.take(original, ["native_content_filter_binding"]))}
+       do: %{attrs | request_metadata: metadata |> Map.put("client_resend", client_resend) |> Map.merge(Map.take(original, ["native_content_filter_binding", "native_content_filter_pin"]))}
 
   defp preserve_client_resend_metadata(attrs, _request), do: attrs
 
@@ -1465,10 +1466,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   end
 
   defp put_client_resend_metadata(metadata, %{predecessor_request_id: predecessor_request_id}) do
-    Map.put(metadata, "client_resend", %{
+    metadata
+    |> Map.put("client_resend", %{
       "predecessor_request_id" => predecessor_request_id,
       "reason" => "failed_predecessor"
     })
+    |> NativeContentFilterRetry.put_successor_pin(predecessor_request_id)
   end
 
   defp bind_direct_cleanup(opts, request) do

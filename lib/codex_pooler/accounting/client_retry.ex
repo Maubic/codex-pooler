@@ -596,22 +596,37 @@ defmodule CodexPooler.Accounting.ClientRetry do
           select: t
       )
 
-    if is_nil(turn) do
+    request = if turn, do: Repo.get(Request, turn.request_id)
+
+    cond do
+      is_nil(turn) ->
+        :ok
+
+      # The newest request of the turn is a pinned request that failed (a guided
+      # retry that failed on its account before any output, or a later retry of
+      # it): the client's retry chains onto it, and the resend policy judges it
+      # under the reservation locks (findings#318 row 318-2). Refusing it here
+      # ended the turn with owner forwarding on.
+      match?(%Request{status: "failed"}, request) and not is_nil(NativeContentFilterRetry.pinned_assignment(request)) ->
+        :ok
+
+      true ->
+        verified_content_filter_predecessor(session, api_key, model, input, turn, request)
+    end
+  end
+
+  defp verified_content_filter_predecessor(session, api_key, model, input, turn, request) do
+    attempt = Repo.one(from a in Attempt, where: a.request_id == ^turn.request_id, order_by: [desc: a.attempt_number], limit: 1)
+
+    with %Request{} <- request,
+         :ok <- validate_authorization(session, api_key, model, request, input),
+         true <- NativeContentFilterRetry.verified?(turn, request, attempt, input.native_client_retry_witness, nil),
+         true <- NativeContentFilterRetry.current_source?(attempt),
+         false <- Repo.exists?(from e in RequestReplayEntitlement, where: e.request_id == ^request.id),
+         :ok <- validate_retry_window(request.completed_at, db_now(), @retry_window_seconds) do
       :ok
     else
-      request = Repo.get(Request, turn.request_id)
-      attempt = Repo.one(from a in Attempt, where: a.request_id == ^turn.request_id, order_by: [desc: a.attempt_number], limit: 1)
-
-      with %Request{} <- request,
-           :ok <- validate_authorization(session, api_key, model, request, input),
-           true <- NativeContentFilterRetry.verified?(turn, request, attempt, input.native_client_retry_witness, nil),
-           true <- NativeContentFilterRetry.current_source?(attempt),
-           false <- Repo.exists?(from e in RequestReplayEntitlement, where: e.request_id == ^request.id),
-           :ok <- validate_retry_window(request.completed_at, db_now(), @retry_window_seconds) do
-        :ok
-      else
-        _unsafe -> {:error, :terminal_predecessor}
-      end
+      _unsafe -> {:error, :terminal_predecessor}
     end
   end
 
