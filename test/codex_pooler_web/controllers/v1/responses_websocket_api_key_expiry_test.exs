@@ -210,7 +210,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketApiKeyExpiryTest do
             receive_frames_until_close(conn, websocket, ref, frames)
         end
     after
-      3_000 -> frames ++ [:timeout]
+      @frame_timeout_ms -> frames ++ [:timeout]
     end
   end
 
