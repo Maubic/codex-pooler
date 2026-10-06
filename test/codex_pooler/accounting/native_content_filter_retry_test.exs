@@ -1,10 +1,11 @@
 defmodule CodexPooler.Accounting.NativeContentFilterRetryTest do
   use CodexPooler.DataCase, async: false
+  import Ecto.Query
 
   import CodexPooler.AccountingTestSupport
   import CodexPooler.PoolerFixtures, only: [request_fixture: 2, attempt_fixture: 3]
 
-  alias CodexPooler.Accounting.{ClientRetry, NativeContentFilterRetry, Request}
+  alias CodexPooler.Accounting.{ClientRetry, NativeContentFilterRetry, Request, RequestClientRetryLink}
   alias CodexPooler.Gateway.Persistence.CodexSession
   alias CodexPooler.Repo
 
@@ -59,6 +60,56 @@ defmodule CodexPooler.Accounting.NativeContentFilterRetryTest do
     assert {:ok, accepted} = CodexPooler.Accounting.create_attempt(successor, setup.assignment, %{model: setup.model, response_metadata: %{"routing" => %{"model_serving_mode" => "full"}}})
     assert accepted.pool_upstream_assignment_id == setup.assignment.id
     assert accepted.upstream_model_id == setup.model.upstream_model_id
+  end
+
+  # A guided retry refused before any attempt because its bound account was not eligible gives up its claim and its client-retry link, so the client's next retry chains onto the content-filtered request again (findings#318). The release is narrow: a row with an attempt, a request chained onto it, another refusal, no valid binding or another resend shape keeps both, and no row loses its accounting.
+  test "only a bound guided retry refused 503 before any attempt gives up its claim and link" do
+    setup = accounting_setup()
+    now = db_now()
+    source = %{"version" => 1, "attempt_id" => Ecto.UUID.generate(), "assignment_id" => setup.assignment.id, "identity_id" => setup.identity.id, "credential_epoch" => 1, "serving_mode" => "full", "requested_model" => setup.model.exposed_model_id, "effective_model" => setup.model.exposed_model_id, "upstream_model" => setup.model.upstream_model_id}
+    assert NativeContentFilterRetry.bound_assignment(%Request{request_metadata: %{"native_content_filter_binding" => source}}) == {setup.assignment.id, setup.identity.id}
+
+    for invalid <- [nil, %{}, Map.put(source, "version", 2), Map.delete(source, "identity_id"), Map.put(source, "assignment_id", "synthetic")] do
+      assert NativeContentFilterRetry.bound_assignment(%Request{request_metadata: %{"native_content_filter_binding" => invalid}}) == nil
+    end
+
+    assert NativeContentFilterRetry.bound_assignment(%Request{request_metadata: %{}}) == nil
+
+    refused = fn changes ->
+      predecessor = request_fixture(setup, %{model_id: setup.model.id, requested_model: setup.model.exposed_model_id, transport: "websocket"})
+      metadata = %{"client_resend" => %{"predecessor_request_id" => predecessor.id, "reason" => "failed_predecessor", "predecessor_shape" => "content_filter_retry"}, "native_content_filter_binding" => source}
+      attrs = Map.merge(%{model_id: setup.model.id, requested_model: setup.model.exposed_model_id, transport: "websocket", status: "failed", response_status_code: 503, last_error_code: "no_eligible_backend", correlation_id: "codex-request-retry:synthetic-#{System.unique_integer([:positive])}", request_metadata: metadata}, Map.drop(changes, [:request_metadata]))
+      attrs = Map.update!(attrs, :request_metadata, &Map.merge(&1, Map.get(changes, :request_metadata, %{})))
+      successor = request_fixture(setup, attrs)
+      ClientRetry.insert_link!(predecessor, successor, now)
+      {predecessor, successor}
+    end
+
+    {predecessor, successor} = refused.(%{})
+    assert :ok = NativeContentFilterRetry.release_refused_retry(successor)
+    released = Repo.get!(Request, successor.id)
+    assert released.request_metadata["released_turn_claim"] == successor.correlation_id
+    assert released.correlation_id != successor.correlation_id
+    assert {released.status, released.response_status_code, released.last_error_code, released.completed_at} == {successor.status, successor.response_status_code, successor.last_error_code, successor.completed_at}
+    refute Repo.exists?(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^predecessor.id or l.successor_request_id == ^successor.id)
+
+    kept = [
+      refused.(%{response_status_code: 409, last_error_code: "invalid_content_filter_retry_binding"}),
+      refused.(%{status: "succeeded", response_status_code: 200, last_error_code: nil}),
+      refused.(%{request_metadata: %{"native_content_filter_binding" => %{}}}),
+      refused.(%{request_metadata: %{"client_resend" => %{"predecessor_shape" => "identical_resend"}}})
+    ]
+
+    {attempted_predecessor, attempted} = refused.(%{})
+    attempt_fixture(attempted, setup.assignment, %{upstream_model_id: setup.model.upstream_model_id})
+    {chained_predecessor, chained} = refused.(%{})
+    ClientRetry.insert_link!(chained, request_fixture(setup, %{model_id: setup.model.id, transport: "websocket"}), now)
+
+    for {predecessor, successor} <- kept ++ [{attempted_predecessor, attempted}, {chained_predecessor, chained}] do
+      assert :ok = NativeContentFilterRetry.release_refused_retry(successor)
+      assert Repo.get!(Request, successor.id).correlation_id == successor.correlation_id
+      assert Repo.exists?(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^predecessor.id and l.successor_request_id == ^successor.id)
+    end
   end
 
   defp db_now do

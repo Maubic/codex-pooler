@@ -125,6 +125,59 @@ defmodule CodexPooler.Accounting.NativeContentFilterRetry do
   end
 
   @doc """
+  The assignment and upstream identity a reserved guided retry is bound to: the
+  source of its predecessor's content-filter terminal, as reservation recorded
+  it, or `nil` for a request without a valid binding.
+  """
+  @spec bound_assignment(Request.t() | term()) :: {Ecto.UUID.t(), Ecto.UUID.t()} | nil
+  def bound_assignment(%Request{request_metadata: %{"native_content_filter_binding" => value}}) do
+    case sanitize_source(value) do
+      %{"assignment_id" => assignment_id, "identity_id" => identity_id} -> {assignment_id, identity_id}
+      _invalid -> nil
+    end
+  end
+
+  def bound_assignment(_request), do: nil
+
+  @doc """
+  Gives up the claim and the client-retry link of a guided retry that was
+  refused before any attempt because its bound account was not eligible
+  (findings#318). Such a row sent nothing to the provider, but as a failed
+  node of the turn's chain it refused the client's next retry as a terminal
+  predecessor (`409 duplicate_turn`). Once released, that retry chains onto
+  the content-filtered predecessor again under the same checks, its retry
+  window included. The release is narrow: only a bound guided retry finalized
+  `503 no_eligible_backend`, with no attempt and no request chained onto it.
+  Its accounting rows stay; it keeps its history under a fresh correlation
+  id, and `request_metadata.released_turn_claim` names the claim it held (as
+  `TurnClaimRelease` records it).
+  """
+  @spec release_refused_retry(Request.t()) :: :ok | {:error, term()}
+  def release_refused_retry(%Request{id: id}) do
+    Repo.transaction(fn -> release_locked_refused_retry(Repo.one(from r in Request, where: r.id == ^id, lock: "FOR UPDATE")) end)
+    |> case do
+      {:ok, :ok} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp release_locked_refused_retry(%Request{id: id} = request) do
+    if releasable_refused_retry?(request) do
+      {_links, _returned} = Repo.delete_all(from l in RequestClientRetryLink, where: l.successor_request_id == ^id)
+      request |> Ecto.Changeset.change(correlation_id: Ecto.UUID.generate(), request_metadata: Map.put(request.request_metadata, "released_turn_claim", request.correlation_id)) |> Repo.update!()
+    end
+
+    :ok
+  end
+
+  defp release_locked_refused_retry(nil), do: :ok
+
+  defp releasable_refused_retry?(%Request{id: id, status: "failed", response_status_code: 503, last_error_code: "no_eligible_backend", request_metadata: %{"client_resend" => %{"predecessor_shape" => "content_filter_retry"}} = metadata} = request),
+    do: not is_nil(bound_assignment(request)) and is_binary(metadata["client_resend"]["predecessor_request_id"]) and not Repo.exists?(from a in Attempt, where: a.request_id == ^id) and not Repo.exists?(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^id)
+
+  defp releasable_refused_retry?(_request), do: false
+
+  @doc """
   Whether the turn's final attempt recorded a content-filter terminal (given
   that attempt, or the predecessor request's id). Such a predecessor admits
   only its verified guided retry: dispatch requires that retry's binding for

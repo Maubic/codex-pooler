@@ -5,7 +5,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, NativeContentFilterRetry, Request, RequestClientRetryLink}
   alias CodexPooler.FakeUpstream
-  alias CodexPooler.Gateway.Persistence.CodexSession
+  alias CodexPooler.Gateway.Persistence.{CodexSession, RoutingCircuitState}
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
   alias Ecto.Adapters.SQL.Sandbox
@@ -312,15 +312,104 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
     end
   end
 
-  # A verified guided retry carries the binding of its predecessor's attempt, and dispatch refuses it on any other assignment. Moving the session's affinity to a second account between the terminal and the retry routes it there (findings#318: routing does not pin the retry to the bound account yet). That refusal used to answer 500 `gateway_accounting_failed` and leave the request `in_progress` (findings#316); it is now finalized before any attempt, its reservation released, and answered 409.
+  # A verified guided retry carries the binding of its predecessor's attempt, and dispatch refuses it on any other assignment: the provider reads retained reasoning only on the account that produced it (`ContentFilterRetryPin`). Moving the session's affinity to a second account between the terminal and the retry used to route the retry there, where dispatch refused it although the bound account could serve it (findings#318). Routing pins it to the bound account.
+  for mode <- ["full", "lite"] do
+    @tag mode: mode
+    test "#{mode} HTTP guided retry is served on its bound account after the session's affinity moved", context do
+      CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+      on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+      :ok = Sandbox.mode(Repo, :auto)
+      terminal = %{"type" => "response.incomplete", "response" => %{"id" => "resp_synthetic_cf", "status" => "incomplete", "incomplete_details" => %{"reason" => "content_filter"}, "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.raw_response(event(terminal), headers: [{"content-type", "text/event-stream"}]), FakeUpstream.raw_response(event(completed), headers: [{"content-type", "text/event-stream"}])]))
+      other_upstream = start_upstream(FakeUpstream.json_response(%{"id" => "must_not_run"}))
+      setup = gateway_setup(upstream, compact?: true)
+      register_unboxed_pool_cleanup!(setup)
+      set_model_serving_mode!(model_serving_scope(), setup, context.mode)
+      setup = Map.put(setup, :serving_mode, context.mode)
+      port = start_public_endpoint!()
+      thread = Ecto.UUID.generate()
+      input = native_text_input("synthetic")
+      original = payload(setup, thread, input, 0)
+      assert {200, _} = post(port, setup, original, thread)
+      first = await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget)
+      other = add_pool_account!(setup, other_upstream)
+      move_affinity!(first, other.assignment)
+      assert {200, _} = post(port, setup, Map.put(original, "input", input ++ [guidance()]), thread)
+      assert FakeUpstream.count(upstream) == 2
+      assert FakeUpstream.count(other_upstream) == 0
+      assert_served_on!(setup, first, setup.assignment)
+    end
+  end
+
+  for mode <- ["full", "lite"], forwarding? <- [false, true] do
+    @tag mode: mode, forwarding?: forwarding?
+    test "#{mode} websocket owner #{forwarding?} guided retry is served on its bound account after the session's affinity moved", context do
+      CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
+      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, context.forwarding?)
+      CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+      on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+      :ok = Sandbox.mode(Repo, :auto)
+      terminal = %{"type" => "response.incomplete", "response" => %{"id" => "resp_synthetic_cf", "status" => "incomplete", "incomplete_details" => %{"reason" => "content_filter"}, "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      # The provider drops the connection after the terminal, so the guided retry needs a new handshake with or without an owner session and routing decides where it goes.
+      upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.websocket_text_frames_then_abrupt_close([CodexPooler.JSON.encode!(terminal)]), FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(completed)])]))
+      other_upstream = start_upstream(FakeUpstream.json_response(%{"id" => "must_not_run"}))
+      setup = gateway_setup(upstream, compact?: true)
+      register_unboxed_pool_cleanup!(setup)
+      set_model_serving_mode!(model_serving_scope(), setup, context.mode)
+      port = start_public_endpoint!()
+      thread = Ecto.UUID.generate()
+      input = native_text_input("synthetic")
+      original = websocket_payload(setup, thread, input, context.mode)
+      {first, terminal} = websocket_turn!(port, setup, thread, original)
+      assert terminal["type"] == "response.incomplete"
+      await_delivery(first, System.monotonic_time(:millisecond) + @budget, %{type: terminal["type"], reason: get_in(terminal, ["response", "incomplete_details", "reason"])})
+      other = add_pool_account!(setup, other_upstream)
+      move_affinity!(first, other.assignment)
+      {_served, frame} = websocket_turn!(port, setup, thread, Map.put(original, "input", input ++ [guidance()]))
+      assert %{"type" => "response.completed"} = frame
+      assert FakeUpstream.count(upstream) == 2
+      assert FakeUpstream.count(other_upstream) == 0
+      assert_served_on!(setup, first, setup.assignment)
+    end
+  end
+
+  # The pin applies only to a request that carries a valid binding: an ordinary request of the same session still follows the session's affinity to another account (findings#318).
+  test "an ordinary request follows the session's affinity to another account", context do
+    CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+    on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+    :ok = Sandbox.mode(Repo, :auto)
+    completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+    upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.raw_response(event(completed), headers: [{"content-type", "text/event-stream"}])]))
+    other_upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.raw_response(event(completed), headers: [{"content-type", "text/event-stream"}])]))
+    setup = gateway_setup(upstream, compact?: true)
+    register_unboxed_pool_cleanup!(setup)
+    set_model_serving_mode!(model_serving_scope(), setup, "full")
+    setup = Map.put(setup, :serving_mode, "full")
+    port = start_public_endpoint!()
+    thread = Ecto.UUID.generate()
+    assert {200, _} = post(port, setup, payload(setup, thread, native_text_input("synthetic"), 0), thread)
+    first = await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget)
+    other = add_pool_account!(setup, other_upstream)
+    move_affinity!(first, other.assignment)
+    next = payload(setup, thread, native_text_input("synthetic next turn"), 0, "synthetic_next_turn")
+    assert {200, _} = post(port, setup, next, thread)
+    assert FakeUpstream.count(upstream) == 1
+    assert FakeUpstream.count(other_upstream) == 1
+    served = await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget)
+    assert served.id != first.id
+    assert [%Attempt{status: "succeeded", pool_upstream_assignment_id: assignment_id}] = Repo.all(from a in Attempt, where: a.request_id == ^served.id)
+    assert assignment_id == other.assignment.id
+  end
+
+  # Routing selects the bound account, and attempt creation checks the binding again, so the pin cannot prevent every binding refusal at dispatch. Here attempt creation waits for the bound assignment's row while the predecessor stops being the settled request the binding names. That refusal used to answer 500 `gateway_accounting_failed` and leave the request `in_progress` (findings#316); it is finalized before any attempt, its reservation released, and answered 409.
   test "a guided retry refused at dispatch by its binding is finalized and answered 409", context do
     CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
     on_exit(fn -> Sandbox.mode(Repo, :manual) end)
     :ok = Sandbox.mode(Repo, :auto)
     terminal = %{"type" => "response.incomplete", "response" => %{"id" => "resp_synthetic_cf", "status" => "incomplete", "incomplete_details" => %{"reason" => "content_filter"}, "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
-    completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
-    upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.raw_response(event(terminal), headers: [{"content-type", "text/event-stream"}]), FakeUpstream.raw_response(event(completed), headers: [{"content-type", "text/event-stream"}])]))
-    other_upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.raw_response(event(completed), headers: [{"content-type", "text/event-stream"}])]))
+    upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.raw_response(event(terminal), headers: [{"content-type", "text/event-stream"}])]))
     setup = gateway_setup(upstream, compact?: true)
     register_unboxed_pool_cleanup!(setup)
     set_model_serving_mode!(model_serving_scope(), setup, "full")
@@ -331,18 +420,147 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
     original = payload(setup, thread, input, 0)
     assert {200, _} = post(port, setup, original, thread)
     first = await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget)
-    other = add_pool_account!(setup, other_upstream)
-    session_id = first.request_metadata["codex_session_id"]
-    {1, _} = Repo.update_all(from(session in CodexSession, where: session.id == ^session_id), set: [pool_upstream_assignment_id: other.assignment.id])
-    assert {409, body} = post(port, setup, Map.put(original, "input", input ++ [guidance()]), thread)
-    assert %{"error" => %{"code" => "duplicate_turn"}} = CodexPooler.JSON.decode!(body)
+    parent = self()
+
+    # `FOR NO KEY UPDATE` waits out the `FOR SHARE` attempt creation takes on the assignment (`ReferenceLocks`), not the key-share locks of foreign-key checks.
+    holder =
+      Task.async(fn ->
+        Repo.transaction(fn ->
+          Repo.query!("SELECT id FROM pool_upstream_assignments WHERE id = $1 FOR NO KEY UPDATE", [Ecto.UUID.dump!(setup.assignment.id)])
+          %{rows: [[backend]]} = Repo.query!("SELECT pg_backend_pid()")
+          send(parent, {:assignment_locked, backend})
+
+          receive do
+            :release -> :ok
+          after
+            2 * @budget -> raise "assignment lock release missing"
+          end
+        end)
+      end)
+
+    assert_receive {:assignment_locked, holder_backend}, @budget
+    retry = Task.async(fn -> req_post!(port, setup, Map.put(original, "input", input ++ [guidance()]), thread) end)
+
+    try do
+      _attempt_creation = await_relation_waiter(holder_backend, "pool_upstream_assignments", System.monotonic_time(:millisecond) + @budget)
+      [successor] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id and r.id != ^first.id)
+      assert successor.request_metadata["native_content_filter_binding"]["assignment_id"] == setup.assignment.id
+      {1, _} = Repo.update_all(from(r in Request, where: r.id == ^first.id), set: [status: "failed"])
+      send(holder.pid, :release)
+      assert {:ok, :ok} = Task.await(holder, @budget)
+      response = Task.await(retry, @budget)
+      assert response.status == 409
+      assert %{"error" => %{"code" => "duplicate_turn"}} = response.body
+    after
+      send(holder.pid, :release)
+      Task.shutdown(holder, :brutal_kill)
+      Task.shutdown(retry, :brutal_kill)
+    end
+
     assert FakeUpstream.count(upstream) == 1
-    assert FakeUpstream.count(other_upstream) == 0
     [successor] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id and r.id != ^first.id)
-    assert %Request{status: "failed", response_status_code: 409, completed_at: %DateTime{}} = successor
+    assert %Request{status: "failed", response_status_code: 409, last_error_code: "invalid_content_filter_retry_binding", completed_at: %DateTime{}} = successor
     refute Repo.exists?(from a in Attempt, where: a.request_id == ^successor.id)
     assert Repo.exists?(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^first.id and l.successor_request_id == ^successor.id)
-    assert Enum.sort(Repo.all(from l in LedgerEntry, where: l.request_id == ^successor.id, select: l.entry_kind)) == ["release", "reservation"]
+    assert [{"release", nil, "routing_rejected"}, {"reservation", nil, nil}] = ledger_entries(successor)
+  end
+
+  # A guided retry stays on its bound account (findings#318). When route filtering excluded that account (an open circuit), the retry is refused with the retryable 503 before any attempt: its reservation is released and the refused row gives up its claim and client-retry link, so the client's next retry, which Codex rust-v0.160.1 sends after a 503 (`UnexpectedStatus` has a retry delay, `Retry-After` honoured), chains onto the content-filtered request again and is served there once the account is eligible. Two such retries admit one: the other meets the successor the first one claimed.
+  for mode <- ["full", "lite"] do
+    @tag mode: mode
+    test "#{mode} HTTP guided retry whose bound account is excluded is refused 503 and served there once it is eligible", context do
+      CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+      on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+      :ok = Sandbox.mode(Repo, :auto)
+      terminal = %{"type" => "response.incomplete", "response" => %{"id" => "resp_synthetic_cf", "status" => "incomplete", "incomplete_details" => %{"reason" => "content_filter"}, "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.raw_response(event(terminal), headers: [{"content-type", "text/event-stream"}]), FakeUpstream.raw_response(event(completed), headers: [{"content-type", "text/event-stream"}])]))
+      other_upstream = start_upstream(FakeUpstream.json_response(%{"id" => "must_not_run"}))
+      setup = gateway_setup(upstream, compact?: true)
+      register_unboxed_pool_cleanup!(setup)
+      set_model_serving_mode!(model_serving_scope(), setup, context.mode)
+      setup = Map.put(setup, :serving_mode, context.mode)
+      port = start_public_endpoint!()
+      thread = Ecto.UUID.generate()
+      input = native_text_input("synthetic")
+      original = payload(setup, thread, input, 0)
+      assert {200, _} = post(port, setup, original, thread)
+      first = await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget)
+      other = add_pool_account!(setup, other_upstream)
+      move_affinity!(first, other.assignment)
+      circuit = open_circuit!(setup, "proxy_stream")
+      retry = Map.put(original, "input", input ++ [guidance()])
+      refusal = req_post!(port, setup, retry, thread)
+      assert refusal.status == 503
+      assert %{"error" => %{"code" => "no_eligible_backend"}} = refusal.body
+      assert [seconds] = Req.Response.get_header(refusal, "retry-after")
+      assert String.to_integer(seconds) in 1..60
+      assert FakeUpstream.count(upstream) == 1
+      assert FakeUpstream.count(other_upstream) == 0
+      [refused] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id and r.id != ^first.id)
+      assert %Request{status: "failed", response_status_code: 503, last_error_code: "no_eligible_backend", completed_at: %DateTime{}} = refused
+      refute Repo.exists?(from a in Attempt, where: a.request_id == ^refused.id)
+      assert [{"release", nil, "routing_rejected"}, {"reservation", nil, nil}] = ledger_entries(refused)
+      assert_claim_released!(first, refused)
+      assert %RoutingCircuitState{status: "open", metadata: %{"probe_in_flight_count" => 0}} = Repo.reload!(circuit)
+      Repo.delete!(circuit)
+
+      if context.mode == "full" do
+        race_successor(port, setup, retry, thread, first.request_metadata["codex_session_id"])
+      else
+        assert {200, _} = post(port, setup, retry, thread)
+      end
+
+      assert FakeUpstream.count(upstream) == 2
+      assert FakeUpstream.count(other_upstream) == 0
+      assert_served_on!(setup, first, setup.assignment)
+    end
+  end
+
+  for mode <- ["full", "lite"], forwarding? <- [false, true] do
+    @tag mode: mode, forwarding?: forwarding?
+    test "#{mode} websocket owner #{forwarding?} guided retry whose bound account is excluded is refused 503 and served there once it is eligible", context do
+      CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
+      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, context.forwarding?)
+      CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+      on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+      :ok = Sandbox.mode(Repo, :auto)
+      terminal = %{"type" => "response.incomplete", "response" => %{"id" => "resp_synthetic_cf", "status" => "incomplete", "incomplete_details" => %{"reason" => "content_filter"}, "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.websocket_text_frames_then_abrupt_close([CodexPooler.JSON.encode!(terminal)]), FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(completed)])]))
+      other_upstream = start_upstream(FakeUpstream.json_response(%{"id" => "must_not_run"}))
+      setup = gateway_setup(upstream, compact?: true)
+      register_unboxed_pool_cleanup!(setup)
+      set_model_serving_mode!(model_serving_scope(), setup, context.mode)
+      port = start_public_endpoint!()
+      thread = Ecto.UUID.generate()
+      input = native_text_input("synthetic")
+      original = websocket_payload(setup, thread, input, context.mode)
+      {first, terminal} = websocket_turn!(port, setup, thread, original)
+      assert terminal["type"] == "response.incomplete"
+      await_delivery(first, System.monotonic_time(:millisecond) + @budget, %{type: terminal["type"], reason: get_in(terminal, ["response", "incomplete_details", "reason"])})
+      other = add_pool_account!(setup, other_upstream)
+      move_affinity!(first, other.assignment)
+      circuit = open_circuit!(setup, "proxy_websocket")
+      retry = Map.put(original, "input", input ++ [guidance()])
+      {refused, refusal} = websocket_turn!(port, setup, thread, retry)
+      assert %{"type" => "error", "status" => 503, "error" => %{"code" => "no_eligible_backend"}} = refusal
+      assert String.to_integer(refusal["headers"]["retry-after"]) in 1..60
+      assert FakeUpstream.count(upstream) == 1
+      assert FakeUpstream.count(other_upstream) == 0
+      assert refused.id != first.id
+      assert %Request{status: "failed", response_status_code: 503, last_error_code: "no_eligible_backend", completed_at: %DateTime{}} = refused
+      refute Repo.exists?(from a in Attempt, where: a.request_id == ^refused.id)
+      assert [{"release", nil, "routing_rejected"}, {"reservation", nil, nil}] = ledger_entries(refused)
+      assert_claim_released!(first, refused)
+      assert %RoutingCircuitState{status: "open", metadata: %{"probe_in_flight_count" => 0}} = Repo.reload!(circuit)
+      Repo.delete!(circuit)
+      {_served, frame} = websocket_turn!(port, setup, thread, retry)
+      assert %{"type" => "response.completed"} = frame
+      assert FakeUpstream.count(upstream) == 2
+      assert FakeUpstream.count(other_upstream) == 0
+      assert_served_on!(setup, first, setup.assignment)
+    end
   end
 
   # A guided retry whose first attempt met a provider 401 refreshes the account's token and retries on the same assignment, where its binding is checked again. While the refresh is held, the predecessor stops being the settled request its binding names, so only that retry is refused. It used to answer 500 `gateway_accounting_failed` and leave the request `in_progress` (findings#316); it is now finalized after the attempt the retry never replaced and answered 409.
@@ -434,6 +652,66 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
       assert [%Attempt{id: attempt_id, status: "retryable_failed"}] = Repo.all(from a in Attempt, where: a.request_id == ^successor.id)
       assert [{"release", ^attempt_id}, {"reservation", nil}] = Enum.sort(Repo.all(from l in LedgerEntry, where: l.request_id == ^successor.id, select: {l.entry_kind, l.attempt_id}))
     end
+  end
+
+  defp websocket_payload(setup, thread, input, mode) do
+    original = payload(setup, thread, input, 0) |> Map.put("type", "response.create")
+    if mode == "lite", do: put_in(original, ["client_metadata", "ws_request_header_x_openai_internal_codex_responses_lite"], "true"), else: original
+  end
+
+  # One request on a fresh downstream connection, closed once its terminal or error frame arrives: the settled request row and that frame.
+  defp websocket_turn!(port, setup, thread, payload) do
+    {conn, websocket, ref} = public_websocket_connect!(port, setup, thread)
+    on_exit(fn -> Mint.HTTP.close(conn) end)
+    {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(payload))
+    {conn, _websocket, frame} = receive_terminal(conn, websocket, ref)
+    Mint.HTTP.close(conn)
+    {await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget), frame}
+  end
+
+  # The one admitted guided retry that succeeded, linked to the content-filtered request and served on `assignment`.
+  defp assert_served_on!(setup, first, assignment, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + @budget
+
+    case Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id and r.id != ^first.id and r.status == "succeeded" and not is_nil(r.completed_at)) do
+      [served] ->
+        assert [%Attempt{status: "succeeded", pool_upstream_assignment_id: assignment_id}] = Repo.all(from a in Attempt, where: a.request_id == ^served.id)
+        assert assignment_id == assignment.id
+        assert [served.id] == Repo.all(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^first.id, select: l.successor_request_id)
+
+      [] ->
+        assert System.monotonic_time(:millisecond) < deadline, "guided retry never settled"
+        Process.sleep(10)
+        assert_served_on!(setup, first, assignment, deadline)
+    end
+  end
+
+  # The refused retry kept its accounting rows but gave up its claim and its link, so the content-filtered request names no successor.
+  defp assert_claim_released!(first, refused) do
+    refused = Repo.reload!(refused)
+    assert is_binary(refused.request_metadata["released_turn_claim"])
+    assert refused.correlation_id != refused.request_metadata["released_turn_claim"]
+    refute Repo.exists?(from l in RequestClientRetryLink, where: l.predecessor_request_id == ^first.id or l.successor_request_id == ^refused.id)
+  end
+
+  defp ledger_entries(request), do: Enum.sort(Repo.all(from l in LedgerEntry, where: l.request_id == ^request.id, select: {l.entry_kind, l.attempt_id, fragment("?->>'pre_attempt_phase'", l.details)}))
+
+  defp move_affinity!(%Request{request_metadata: %{"codex_session_id" => session_id}}, assignment) do
+    {1, _} = Repo.update_all(from(session in CodexSession, where: session.id == ^session_id), set: [pool_upstream_assignment_id: assignment.id])
+    :ok
+  end
+
+  defp open_circuit!(setup, route_class) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    Repo.insert!(%RoutingCircuitState{pool_id: setup.pool.id, pool_upstream_assignment_id: setup.assignment.id, upstream_identity_id: setup.identity.id, model_identifier: setup.model.exposed_model_id, route_class: route_class, status: "open", reason_code: "upstream_network_error", failure_count: 3, success_count: 0, opened_at: now, next_probe_at: DateTime.add(now, 30, :second), metadata: %{"probe_in_flight_count" => 0}, created_at: now, updated_at: now})
+  end
+
+  defp req_post!(port, setup, payload, thread) do
+    metadata = payload["client_metadata"]["x-codex-turn-metadata"]
+    window = CodexPooler.JSON.decode!(metadata)["window_number"]
+    headers = [{"authorization", setup.authorization}, {"content-type", "application/json"}, {"session-id", thread}, {"thread-id", thread}, {"x-codex-window-id", "#{thread}:#{window}"}, {"x-codex-turn-metadata", metadata}, {"originator", "codex_cli_rs"}]
+    headers = if setup.serving_mode == "lite", do: [{"x-openai-internal-codex-responses-lite", "true"} | headers], else: headers
+    Req.post!("http://127.0.0.1:#{port}#{@path}", headers: headers, json: payload, retry: false, receive_timeout: @budget)
   end
 
   defp assert_refused_before_linking!(setup, upstream, first) do
@@ -690,8 +968,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
     end
   end
 
-  defp payload(setup, thread, input, window) do
-    %{"model" => setup.model.exposed_model_id, "input" => input, "stream" => true, "store" => false, "client_metadata" => %{"x-codex-turn-metadata" => CodexPooler.JSON.encode!(%{"thread_id" => thread, "session_id" => thread, "turn_id" => "synthetic_turn", "request_kind" => "turn", "agent_name" => "/root", "window_id" => "#{thread}:#{window}", "window_number" => window})}}
+  defp payload(setup, thread, input, window, turn_id \\ "synthetic_turn") do
+    %{"model" => setup.model.exposed_model_id, "input" => input, "stream" => true, "store" => false, "client_metadata" => %{"x-codex-turn-metadata" => CodexPooler.JSON.encode!(%{"thread_id" => thread, "session_id" => thread, "turn_id" => turn_id, "request_kind" => "turn", "agent_name" => "/root", "window_id" => "#{thread}:#{window}", "window_number" => window})}}
   end
 
   defp event(data), do: "event: #{data["type"]}\ndata: " <> CodexPooler.JSON.encode!(data) <> "\n\n"

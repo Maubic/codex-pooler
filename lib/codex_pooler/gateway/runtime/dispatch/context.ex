@@ -6,7 +6,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.Context do
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Routing.{BridgeRing, RoutePlanInput}
-  alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
+  alias CodexPooler.Gateway.Runtime.Dispatch.{ContentFilterRetryPin, RouteState}
   alias CodexPooler.Gateway.Transports.Websocket.CompactionRetrySubmitHold
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
 
@@ -56,6 +56,19 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.Context do
       |> Map.fetch!(:request_options)
       |> RequestOptions.put_runtime_context(compaction_retry_submit_hold: Map.get(input.reserved, :compaction_retry_submit_hold))
 
+    # A verified guided content-filter retry is routed only to the account its
+    # binding names (findings#318).
+    case ContentFilterRetryPin.candidates(input.reserved.request, input.candidates) do
+      {:ok, candidates} ->
+        build(%{input | candidates: candidates}, request_options)
+
+      :unavailable ->
+        cancel_compaction_retry_hold(request_options)
+        ContentFilterRetryPin.refuse(%{input | request_options: request_options})
+    end
+  end
+
+  defp build(input, request_options) do
     route_state = RouteState.preload_routing_snapshots(input.route_state, input.auth, input.model, request_options)
 
     route_plan =

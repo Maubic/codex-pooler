@@ -16,6 +16,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch do
   alias CodexPooler.Gateway.Routing.CandidateEligibility.Quota
   alias CodexPooler.Gateway.Routing.ProviderCredits
   alias CodexPooler.Gateway.Runtime.Dispatch.ContentFilterBindingRefusal
+  alias CodexPooler.Gateway.Runtime.Dispatch.ContentFilterRetryPin
   alias CodexPooler.Gateway.Runtime.Dispatch.Context
   alias CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback
   alias CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation
@@ -85,11 +86,15 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch do
     retry_selected_result(result, context, assignment.id, allow_retry?, dispatch)
   end
 
+  # A guided content-filter retry never moves off its bound account
+  # (`ContentFilterRetryPin`): the route filter's deferred-recovery candidates
+  # join the remaining cohort outside the pinned plan.
   defp retry_remaining?(context, assignment_id),
     do:
       remaining_cohort(context, assignment_id) != [] and
         not bound_reset_probe?(context.request_options.routing.reset_probe) and
-        not RequestOptions.connection_bound_compaction?(context.request_options) and not client_retry_dispatch?(context)
+        not RequestOptions.connection_bound_compaction?(context.request_options) and not client_retry_dispatch?(context) and
+        not ContentFilterRetryPin.bound?(context.reserved.request)
 
   defp bound_reset_probe?(%ResetProbe{} = probe), do: ResetProbe.bound?(probe)
   defp bound_reset_probe?(nil), do: false

@@ -581,7 +581,20 @@ defmodule CodexPooler.Accounting.ClientRetry do
   @doc "Advisory content-filter check; the original claim is revalidated under reservation locks."
   @spec content_filter_preflight(CodexSession.t(), APIKey.t(), CodexPooler.Catalog.Model.t(), map()) :: :ok | {:error, atom()}
   def content_filter_preflight(session, api_key, model, input) do
-    turn = Repo.one(from t in CodexTurn, where: t.codex_session_id == ^session.id and t.semantic_turn_digest == ^input.semantic_turn_digest, order_by: [desc: t.turn_sequence], limit: 1)
+    # A guided retry refused before any attempt gave up its claim
+    # (`NativeContentFilterRetry.release_refused_retry/1`): its turn is no node
+    # of the turn's chain, and the client's next retry is judged against the
+    # content-filtered request again (findings#318).
+    turn =
+      Repo.one(
+        from t in CodexTurn,
+          join: r in Request,
+          on: r.id == t.request_id,
+          where: t.codex_session_id == ^session.id and t.semantic_turn_digest == ^input.semantic_turn_digest and is_nil(fragment("?->>'released_turn_claim'", r.request_metadata)),
+          order_by: [desc: t.turn_sequence],
+          limit: 1,
+          select: t
+      )
 
     if is_nil(turn) do
       :ok

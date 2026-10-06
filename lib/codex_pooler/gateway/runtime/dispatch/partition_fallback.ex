@@ -37,6 +37,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback do
   alias CodexPooler.Gateway.Routing.CandidateEligibility.PoolReturn
   alias CodexPooler.Gateway.Routing.CandidateEligibility.UsageLimit
   alias CodexPooler.Gateway.Routing.RouteFiltering
+  alias CodexPooler.Gateway.Runtime.Dispatch.ContentFilterRetryPin
   alias CodexPooler.Gateway.Runtime.Dispatch.Context
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
@@ -127,14 +128,16 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback do
   @doc """
   True when the selected candidate's refusal may take the hop: a held-back
   candidate can serve the model now, the fallback is not spent, and the turn
-  is neither a client-retry resend nor connection-bound compaction. The caller
-  decides that the refusal is a pre-output provider usage limit.
+  is neither a client-retry resend, a guided content-filter retry bound to its
+  account (`ContentFilterRetryPin`) nor connection-bound compaction. The
+  caller decides that the refusal is a pre-output provider usage limit.
   """
   @spec available?(SelectedCandidateContext.t()) :: boolean()
   def available?(%SelectedCandidateContext{} = context) do
     fallback = RouteState.partition_fallback(context.route_state)
 
     fallback != [] and is_nil(context.client_retry_dispatch_authority) and
+      not ContentFilterRetryPin.bound?(context.reserved.request) and
       not RequestOptions.connection_bound_compaction?(context.request_options) and
       PoolReturn.any_routable?(context.auth, context.model, fallback, context.request_options)
   end
