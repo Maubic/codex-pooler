@@ -83,10 +83,10 @@ defmodule CodexPoolerWeb.Runtime.NativeWebsocketRateLimitsTest do
   end
 
   # The frame crosses nodes on the owner path: the owner's upstream session
-  # runs on the peer, and the socket on this node still drops it. The harness
-  # peer runs the owner runtime and the Repo only, without the PubSub the quota
-  # evidence is published on, so its owner cannot record the evidence; the
-  # one-node arms assert it.
+  # runs on the peer, and the socket on this node still drops it. The owner on
+  # the peer records the evidence too: the harness peer runs the production
+  # PubSub the quota evidence is published on (without it the observer raised
+  # `ArgumentError` and nothing was recorded).
   @tag slow: "boots a second VM that owns the session and shares the committed database"
   test "a native socket whose session owner runs on another node keeps codex.rate_limits from the client" do
     put_owner_forwarding!(true)
@@ -105,6 +105,7 @@ defmodule CodexPoolerWeb.Runtime.NativeWebsocketRateLimitsTest do
 
     assert_relayed_without_rate_limits!(texts, provider_frames(reset_at))
     assert_served_turn!(upstream, "full")
+    assert_recorded_window!(setup, reset_at)
   end
 
   defp start_turn_upstream!(reset_at) do

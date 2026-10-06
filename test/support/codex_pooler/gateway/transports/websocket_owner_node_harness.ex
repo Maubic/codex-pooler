@@ -235,6 +235,18 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness do
     repo_pid
   end
 
+  # The production PubSub (`{Phoenix.PubSub, name: CodexPooler.PubSub}`) on a harness peer that runs real persistence. Accounting
+  # finalization and the quota evidence observer publish events, and the interrupt a retiring owner writes on exit runs the
+  # finalization inside its own transaction, so without the registry it raised `ArgumentError: unknown registry:
+  # CodexPooler.PubSub` and rolled back (`interrupt_accounting_failed`), a path production never takes. Started by the caller
+  # and kept alive past the erpc worker that starts it, like the Repo.
+  def start_pubsub do
+    {:ok, _applications} = Application.ensure_all_started(:phoenix_pubsub)
+    {:ok, pubsub} = Supervisor.start_link([{Phoenix.PubSub, name: CodexPooler.PubSub}], strategy: :one_for_one)
+    Process.unlink(pubsub)
+    {:ok, pubsub}
+  end
+
   def put_owner_idle_timeout(timeout) when is_integer(timeout) do
     settings = OperationalSettings.current()
 

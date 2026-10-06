@@ -175,55 +175,6 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputMarkTransientDatabaseTest do
     assert response.body["error"]["code"] == "gateway_accounting_failed"
   end
 
-  @tag slow: "boots a real peer and cancels owner lifecycle authorization"
-  test "remote lifecycle authorization failure ends once without retrying delivery or crashing its owner" do
-    ensure_test_distribution_started!()
-    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
-    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
-    release = make_ref()
-    frames = [created_event(), delta_event(), completed_event()] |> Enum.map(fn {_kind, event} -> CodexPooler.JSON.encode!(event) end)
-    upstream = start_upstream(FakeUpstream.websocket_init_barrier(FakeUpstream.websocket_text_frames(frames), notify: self(), release_ref: release))
-    setup = gateway_setup(upstream)
-    register_unboxed_pool_cleanup!(setup)
-    {:ok, auth} = CodexPooler.Access.authenticate_authorization_header(setup.authorization)
-    peer = start_bridge_peer!(:current, setup.identity, repo: :real)
-    thread = Ecto.UUID.generate()
-    {session, owner} = start_remote_bridge_owner!(auth, thread, peer, :real)
-    {:ok, socket} = owner_socket(auth, "synthetic-lifecycle-fault", Ecto.UUID.generate(), session_header: thread, session_header_source: "x-session-id", websocket_owner_forwarder_opts: [node_client: ERPCNodeClient, app_node_names: [Atom.to_string(peer)]])
-    payload = websocket_input_payload(setup, native_text_input("synthetic lifecycle fault"))
-    assert {:ok, socket} = CodexPoolerWeb.CodexResponsesSocket.handle_in({payload, [opcode: :text]}, socket)
-    assert_receive {:fake_upstream_websocket_barrier, :before_init, server, ^release}, 15_000
-    holder = start_supervised!({Postgrex, connection_options()}, id: :lifecycle_row_holder)
-    observer = observer!()
-    Postgrex.query!(holder, "BEGIN", [])
-    %{rows: [[holder_pid]]} = Postgrex.query!(holder, "SELECT pg_backend_pid()", [])
-    Postgrex.query!(holder, "SELECT id FROM codex_sessions WHERE id=$1 FOR UPDATE", [Ecto.UUID.dump!(session.id)])
-    send(server, {:fake_upstream_release_websocket, release})
-    backend = await_owner_query_wait!(observer, holder_pid, System.monotonic_time(:millisecond) + 15_000)
-    assert cancel_backend!(observer, backend)
-    Postgrex.query!(holder, "COMMIT", [])
-    assert {:push, {:text, frame}, socket} = receive_owner_socket_raw_push(socket)
-    assert %{"type" => "error"} = CodexPooler.JSON.decode!(frame)
-    assert {:ok, _socket} = receive_owner_socket_complete(socket)
-    assert :erpc.call(peer, Process, :alive?, [owner])
-    assert FakeUpstream.count(upstream) == 1
-    request = settled_request!(setup)
-    assert request.status == "failed"
-    assert %CodexTurn{first_visible_output_at: nil} = Repo.get_by!(CodexTurn, request_id: request.id)
-  end
-
-  defp await_owner_query_wait!(observer, holder, deadline) do
-    case Postgrex.query!(observer, "SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))", [holder]).rows do
-      [[backend] | _] ->
-        backend
-
-      [] ->
-        assert System.monotonic_time(:millisecond) < deadline
-        Process.sleep(5)
-        await_owner_query_wait!(observer, holder, deadline)
-    end
-  end
-
   @tag slow: "boots a real peer owner and cancels its first-visible COMMIT"
   test "remote native websocket: a cancelled visible mark retries outside the responsive owner and settles once" do
     ensure_test_distribution_started!()
@@ -602,16 +553,25 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputLifecycleContentionTest do
       send(fixture.server, {:fake_upstream_release_websocket, fixture.release})
       writer = await_writer_wait!(observer, backend, System.monotonic_time(:millisecond) + @detection_timeout_ms)
       assert :ok = GenServer.call(fixture.owner, {:writer_lifecycle_barrier, fixture.active_ref}, 1_000)
+      # The owner has handled everything sent before that call and the writer, the only frame producer, waits in the
+      # database: nothing may have been forwarded while its authorization waited.
+      refute_receive {:websocket_owner_frame, _, _, _, {:data, _}}, 0
       assert %{rows: [[true]]} = Postgrex.query!(observer, "SELECT pg_cancel_backend($1)", [writer])
       CodexPooler.TestDiagnostics.puts("lifecycle_cancel actual_writer_backend=#{writer} cancellation_confirmed=true")
     after
       Postgrex.query!(holder, "COMMIT", [])
     end
 
-    assert {:ok, _socket} = receive_owner_socket_complete(fixture.socket)
+    # What the stand-in client was sent, before and after the cancel: nothing. Every frame of this turn (metadata, created,
+    # delta, completed) is unapproved once its authorization failed, and the turn ends with `:complete` alone.
+    assert {{:ok, _socket}, frames} = receive_owner_socket_complete_frames(fixture.socket)
+    assert frames == []
     request = await_settled!(fixture.authority.request_id, System.monotonic_time(:millisecond) + @detection_timeout_ms)
-    assert request.status == "failed"
-    assert %CodexTurn{first_visible_output_at: nil} = Repo.get_by!(CodexTurn, request_id: request.id)
+    # The retiring owner settles the turn it holds as an owner crash before it answers it, so the record is its interruption
+    # (499, turn `interrupted`), never the socket's 502 fallback. That needs the PubSub finalization publishes to on the peer:
+    # a peer without it rolled the interruption back (`interrupt_accounting_failed`) and left the fallback to write the record.
+    assert {request.status, request.response_status_code, request.last_error_code} == {"failed", 499, "owner_crashed"}
+    assert %CodexTurn{status: "interrupted", first_visible_output_at: nil} = Repo.get_by!(CodexTurn, request_id: request.id)
     assert Repo.aggregate(from(e in LedgerEntry, where: e.request_id == ^request.id and e.entry_kind == "settlement"), :count) == 1
     assert FakeUpstream.count(fixture.provider) == 1
     refute_receive {:websocket_owner_frame, _, _, _, {:data, _}}, 0

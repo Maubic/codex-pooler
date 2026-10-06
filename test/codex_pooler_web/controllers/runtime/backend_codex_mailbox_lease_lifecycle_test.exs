@@ -429,7 +429,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
       assert generation_monitor == fixture.generation_monitor and handler == fixture.generation_actor
       await_peer_disconnected!(node(owner), System.monotonic_time(:millisecond) + @budget)
       worker = BackendCodexWebsocketOwnerForwardingSupport.start_bridge_peer!(:current, fixture.setup.identity, repo: :real)
-      assert {:ok, _pubsub} = :erpc.call(worker, MailboxPrefixRaceSupport, :start_peer_lifecycle_services, [])
       record_fixture_presence_node!(worker, slot)
       assert node(owner) not in :erpc.call(worker, Node, :list, [])
       producer = Map.new(witness["producer"], fn {key, value} -> {String.to_existing_atom(key), value} end)
@@ -1089,7 +1088,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
 
   defp start_serving_vm_owner!(setup, thread, peer) do
     assert {:ok, _registry} = :erpc.call(peer, GenServer, :start, [ExecutionRegistry, nil, [name: ExecutionRegistry]])
-    assert {:ok, _pubsub} = :erpc.call(peer, MailboxPrefixRaceSupport, :start_peer_lifecycle_services, [])
     assert {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
     assert {:ok, session} = :erpc.call(peer, Gateway, :start_codex_session, [auth, %{accepted_turn_state: thread}])
     lease = Repo.get_by!(CodexPooler.Gateway.Persistence.BridgeOwnerLease, codex_session_id: session.id, status: "active")

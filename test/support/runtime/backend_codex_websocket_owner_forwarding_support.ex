@@ -238,17 +238,28 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
       ])
 
     on_exit(fn ->
-      if remote_node in Node.list(:connected) and
-           :erpc.call(remote_node, Process, :alive?, [owner_pid]) do
-        owner_monitor = Process.monitor(owner_pid)
-        :erpc.call(remote_node, GenServer, :stop, [owner_pid, :normal, 5_000])
-
-        assert_receive {:DOWN, ^owner_monitor, :process, ^owner_pid, :normal},
-                       @handoff_detection_timeout_ms
-      end
+      if remote_node in Node.list(:connected), do: stop_remote_owner!(remote_node, owner_pid)
     end)
 
     {session, owner_pid}
+  end
+
+  # An owner can retire on its own at any time once its turn settled (its upstream session ended, a
+  # cancelled authorization, a lease takeover), so finding it alive does not promise that a stop will
+  # find it alive: the retirement can win, and `GenServer.stop/3` then exits with the owner's own reason
+  # (`owner_crashed`, findings#303 row 303-10, Drone 1814). Cleanup therefore monitors first, treats the
+  # stop as a request, and takes the monitor's DOWN, whatever its reason, as proof the owner is gone. A
+  # test whose claim is a clean owner stop asserts it in its own body.
+  defp stop_remote_owner!(remote_node, owner_pid) do
+    owner_monitor = Process.monitor(owner_pid)
+
+    try do
+      :erpc.call(remote_node, GenServer, :stop, [owner_pid, :normal, 5_000])
+    catch
+      :exit, _already_gone_or_retiring -> :ok
+    end
+
+    assert_receive {:DOWN, ^owner_monitor, :process, ^owner_pid, _reason}, @handoff_detection_timeout_ms
   end
 
   def start_bridge_peer!(release, identity, opts \\ [])
@@ -341,6 +352,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
         |> Keyword.merge(pool: DBConnection.ConnectionPool, pool_size: 2)
 
       assert is_pid(:erpc.call(peer_node, WebsocketOwnerNodeHarness, :start_repo, [repo_config]))
+      assert {:ok, _pubsub} = :erpc.call(peer_node, WebsocketOwnerNodeHarness, :start_pubsub, [])
 
       upstream_config = Application.get_env(:codex_pooler, Upstreams, [])
 
@@ -1000,30 +1012,43 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
   end
 
   def receive_owner_socket_complete(state) do
+    {result, _frames} = receive_owner_socket_complete_frames(state)
+    result
+  end
+
+  # `receive_owner_socket_complete/1` for a test that asserts what the stand-in client was sent: `{result, frames}`, where
+  # `result` is what that function returns and `frames` is every frame the socket pushed to its client while the turn
+  # completed, in order (`{:text, binary}` tuples, internal `codex.*` controls included). The owner's messages wait in this
+  # process's mailbox until read, so a frame sent before a database wait was cancelled is counted too. A `:stop` result
+  # carries the frames the socket closed with itself.
+  def receive_owner_socket_complete_frames(state), do: await_owner_socket_complete(state, [])
+
+  defp await_owner_socket_complete(state, frames) do
     receive do
       {:websocket_owner_frame, _correlation_id, _epoch, _owner_turn_id, _payload} = message ->
-        handle_owner_socket_complete_message(message, state)
+        handle_owner_socket_complete_message(message, state, frames)
 
       {:websocket_owner_frame, _correlation_id, _epoch, _payload} = message ->
-        handle_owner_socket_complete_message(message, state)
+        handle_owner_socket_complete_message(message, state, frames)
 
       {:websocket_owner_output_commit_probe, _, _, _, _, _, _} = message ->
-        handle_owner_socket_complete_control(message, state)
+        handle_owner_socket_complete_control(message, state, frames)
 
       {:websocket_response_activity, _, _} = message ->
-        handle_owner_socket_complete_control(message, state)
+        handle_owner_socket_complete_control(message, state, frames)
 
       {:codex_response_done, _, _} = message ->
-        handle_owner_socket_complete_control(message, state)
+        handle_owner_socket_complete_control(message, state, frames)
 
       {:websocket_response_delivery_complete, _, _} = message ->
-        handle_owner_socket_complete_control(message, state)
+        handle_owner_socket_complete_control(message, state, frames)
     after
       @handoff_detection_timeout_ms -> flunk("expected owner websocket completion frame")
     end
   end
 
-  defp handle_owner_socket_complete_message(message, state) do
+  # `frames` is kept newest first and reversed once, when the turn is done.
+  defp handle_owner_socket_complete_message(message, state, frames) do
     accepted_completion? =
       Adapter.accept_downstream_message(message, state) == {:ok, :complete}
 
@@ -1032,19 +1057,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
     case result do
       {:ok, next_state} ->
         if accepted_completion? or owner_completion_transition?(message, state, next_state) do
-          {:ok, next_state}
+          {{:ok, next_state}, Enum.reverse(frames)}
         else
-          receive_owner_socket_complete(next_state)
+          await_owner_socket_complete(next_state, frames)
         end
 
-      {:push, _frame, state} ->
-        receive_owner_socket_complete(state)
+      {:push, pushed, state} ->
+        await_owner_socket_complete(state, Enum.reverse(List.wrap(pushed), frames))
 
       {:stop, _reason, _detail, _state} = stop ->
-        stop
+        {stop, Enum.reverse(frames)}
 
       {:stop, _reason, _detail, _frames, _state} = stop ->
-        stop
+        {stop, Enum.reverse(frames)}
     end
   end
 
@@ -1075,12 +1100,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
          not Map.get(next_state, :websocket_owner_active_turn_reconnect?, false))
   end
 
-  defp handle_owner_socket_complete_control(message, state) do
+  defp handle_owner_socket_complete_control(message, state, frames) do
     case CodexResponsesSocket.handle_info(message, state) do
-      {:ok, state} -> receive_owner_socket_complete(state)
-      {:push, _frame, state} -> receive_owner_socket_complete(state)
-      {:stop, _reason, _detail, _state} = stop -> stop
-      {:stop, _reason, _detail, _frames, _state} = stop -> stop
+      {:ok, state} -> await_owner_socket_complete(state, frames)
+      {:push, pushed, state} -> await_owner_socket_complete(state, Enum.reverse(List.wrap(pushed), frames))
+      {:stop, _reason, _detail, _state} = stop -> {stop, Enum.reverse(frames)}
+      {:stop, _reason, _detail, _frames, _state} = stop -> {stop, Enum.reverse(frames)}
     end
   end
 

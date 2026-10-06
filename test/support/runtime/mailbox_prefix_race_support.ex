@@ -24,20 +24,6 @@ defmodule CodexPoolerWeb.Runtime.MailboxPrefixRaceSupport do
     end)
   end
 
-  @spec start_peer_lifecycle_services() :: {:ok, pid()} | {:error, term()}
-  def start_peer_lifecycle_services do
-    {:ok, _applications} = Application.ensure_all_started(:phoenix_pubsub)
-
-    case Supervisor.start_link([{Phoenix.PubSub, name: CodexPooler.PubSub}], strategy: :one_for_one) do
-      {:ok, supervisor} = result ->
-        Process.unlink(supervisor)
-        result
-
-      error ->
-        error
-    end
-  end
-
   @spec graph_claim(map(), struct(), map(), pid(), reference()) :: term()
   def graph_claim(auth, model, opts, parent, ref) do
     Repo.checkout(fn ->
