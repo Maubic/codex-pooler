@@ -140,6 +140,33 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
     end
   end
 
+  @doc """
+  Moves valid capacity facts and valid retained blockers recorded at
+  `from_epoch` to `to_epoch`, each on its own, and leaves every other value as
+  it is: a token refresh keeps the provider account they describe
+  (findings#334). Only the epoch tags change, the blockers' own and each
+  retained observation's; every other field, `observed_at` included, stays
+  byte for byte.
+  """
+  @spec carry_forward(map(), pos_integer(), pos_integer()) :: map()
+  def carry_forward(metadata, from_epoch, to_epoch) when is_map(metadata) and is_integer(to_epoch) and to_epoch > 0 do
+    metadata =
+      case load(metadata) do
+        {:ok, %CapacityFacts{credential_epoch: ^from_epoch}} -> put_in(metadata, [@key, "credential_epoch"], to_epoch)
+        _absent_invalid_or_other_epoch -> metadata
+      end
+
+    case load_blockers(metadata) do
+      {:ok, %{credential_epoch: ^from_epoch}} ->
+        Map.update!(metadata, @blocker_key, fn blockers ->
+          %{blockers | "credential_epoch" => to_epoch, "observations" => Enum.map(blockers["observations"], &Map.put(&1, "credential_epoch", to_epoch))}
+        end)
+
+      _absent_invalid_or_other_epoch ->
+        metadata
+    end
+  end
+
   defp write_observation(metadata, observation, epoch) do
     metadata
     |> Map.put(@key, encode!(observation, epoch))

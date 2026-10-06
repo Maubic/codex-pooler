@@ -7,6 +7,7 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Auth.TokenRefreshMetadata
   alias CodexPooler.Upstreams.Lifecycle.IdentitySlotLock
+  alias CodexPooler.Upstreams.Quota.{AccountAvailabilityStore, CapacityFactsStore, CreditBalanceStore}
   alias CodexPooler.Upstreams.Schemas.{EncryptedSecret, PoolUpstreamAssignment, UpstreamIdentity}
   alias CodexPooler.Upstreams.StatusVocabulary.Assignment, as: AssignmentStatus
   alias CodexPooler.Upstreams.StatusVocabulary.Identity, as: IdentityStatus
@@ -77,15 +78,32 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
   @doc """
   The metadata of a successful token refresh and its credential epoch: exactly
   what `prepare_replacement_metadata/1` writes, except that the credential's
-  lineage goes on. A refresh exchanges the refresh token the identity holds
-  for the access of the same provider account, so the credential in place
-  keeps the epoch it was put in place at, or, without a trusted lineage, the
-  epoch the refresh started at (findings#330).
+  lineage goes on and the account's quota evidence goes with it. A refresh
+  exchanges the refresh token the identity holds for the access of the same
+  provider account, so the credential in place keeps the epoch it was put in
+  place at, or, without a trusted lineage, the epoch the refresh started at
+  (findings#330). The provider's availability, the capacity facts and their
+  retained blockers, and the credit balance describe that account, so the
+  ones current at the epoch the refresh started at move to its new epoch in
+  this same write, with `observed_at` untouched (findings#334); their readers
+  stay strict, so a replacement, which carries nothing, still drops them.
   """
   @spec prepare_refresh_metadata(UpstreamIdentity.t()) ::
           {:ok, map(), pos_integer()} | {:error, %{code: atom(), message: String.t()}}
-  def prepare_refresh_metadata(%UpstreamIdentity{} = identity),
-    do: prepare_epoch_metadata(identity, fn _epoch -> credential_lineage_since(identity) end)
+  def prepare_refresh_metadata(%UpstreamIdentity{} = identity) do
+    with {:ok, metadata, epoch} <- prepare_epoch_metadata(identity, fn _epoch -> credential_lineage_since(identity) end) do
+      {:ok, carry_account_evidence(metadata, initialize_metadata(identity.metadata)[@credential_epoch_key], epoch), epoch}
+    end
+  end
+
+  defp carry_account_evidence(metadata, epoch, epoch), do: metadata
+
+  defp carry_account_evidence(metadata, from_epoch, to_epoch) do
+    metadata
+    |> AccountAvailabilityStore.carry_forward(from_epoch, to_epoch)
+    |> CapacityFactsStore.carry_forward(from_epoch, to_epoch)
+    |> CreditBalanceStore.carry_forward(from_epoch, to_epoch)
+  end
 
   defp prepare_epoch_metadata(%UpstreamIdentity{metadata: %{"permanent_deletion_requested_at" => _}}, _since) do
     {:error, %{code: :upstream_account_deleting, message: "upstream account is being deleted"}}
