@@ -44,6 +44,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
   @observe_only_interval_seconds 6 * 60 * 60
   @provider_staleness_floor_seconds 30 * 60
   @replay_delays_seconds %{1 => 60, 2 => 5 * 60, 3 => 15 * 60, 4 => 60 * 60, 5 => 3 * 60 * 60}
+  @max_windows_reset 16
 
   @type trigger_kind :: String.t()
 
@@ -60,7 +61,10 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
           optional(:available_count_before) => non_neg_integer(),
           optional(:available_count_after) => non_neg_integer(),
           optional(:http_status) => non_neg_integer(),
-          optional(:reason) => String.t()
+          optional(:reason) => String.t(),
+          optional(:windows_reset) => non_neg_integer(),
+          optional(:five_hour_before) => map(),
+          optional(:five_hour_after) => map()
         }
 
   @type scheduled_noop_result :: %{
@@ -1017,7 +1021,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
          |> store_cloudflare_cookies(recovery.consume_url) do
       {:ok, %{status: status, body: response_body}} ->
         code = response_code(response_body, status, endpoint_kind)
-        finalize_recovery_response(recovery, code, status, dispatch_response_now(recovery, now))
+        finalize_recovery_response(recovery, code, status, dispatch_response_now(recovery, now), consume_windows_reset(response_body))
 
       {:error, _reason} ->
         preserve_and_snooze_recovery(
@@ -1048,22 +1052,23 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
 
   defp maybe_put_recovery_credit_id(body, :codex, _credit_id), do: body
 
-  defp finalize_recovery_response(recovery, code, status, now)
+  defp finalize_recovery_response(recovery, code, status, now, windows_reset)
        when code in @known_applied_codes do
     result =
-      result_from_response(
-        code,
+      code
+      |> result_from_response(
         status,
         SavedResets.snapshot(recovery.identity).available_count,
         recovery.identity,
         recovery.assignment,
         Map.put(recovery, :finished_at, now)
       )
+      |> put_present(:windows_reset, windows_reset)
 
     finalize_reserved_attempt(result, Map.put(recovery, :finished_at, now))
   end
 
-  defp finalize_recovery_response(recovery, code, _status, now),
+  defp finalize_recovery_response(recovery, code, _status, now, _windows_reset),
     do: preserve_and_snooze_recovery(recovery, code, now)
 
   defp preserve_and_snooze_recovery(recovery, code, now) do
@@ -2444,7 +2449,8 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
           response_code(response_body, status, endpoint_kind),
           status,
           available_count_before,
-          reserved_claim
+          reserved_claim,
+          consume_windows_reset(response_body)
         )
 
       {:error, _reason} ->
@@ -2454,20 +2460,17 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
     _exception -> preserve_ambiguous_attempt(reserved_claim, "persistence_failed")
   end
 
-  defp handle_consume_response(code, status, available_count_before, claim)
+  defp handle_consume_response(code, status, available_count_before, claim, windows_reset)
        when code in @known_provider_result_codes do
-    {:finalize,
-     result_from_response(
-       code,
-       status,
-       available_count_before,
-       claim.identity,
-       claim.assignment,
-       claim
-     ), claim}
+    result =
+      code
+      |> result_from_response(status, available_count_before, claim.identity, claim.assignment, claim)
+      |> put_present(:windows_reset, windows_reset)
+
+    {:finalize, result, claim}
   end
 
-  defp handle_consume_response(code, _status, _available_count_before, claim),
+  defp handle_consume_response(code, _status, _available_count_before, claim, _windows_reset),
     do: {:ambiguous, code, claim}
 
   defp store_cloudflare_cookies(result, url) do
@@ -2481,9 +2484,10 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
         # The provider consumed a credit as of now; capture that before the
         # refresh so evidence is only accepted when observed at/after it.
         consumed_at = claim[:finished_at] || now()
+        five_hour_before = identity |> Windows.list_evidence() |> five_hour_before()
 
-        case PoolReconciliation.refresh_quota_from_usage(identity, assignment, receive_timeout: claim.receive_timeout) do
-          {:ok, refreshed_identity} ->
+        case PoolReconciliation.refresh_quota_and_probe_from_usage(identity, assignment, receive_timeout: claim.receive_timeout) do
+          {:ok, refreshed_identity, probe} ->
             available_count_after = SavedResets.snapshot(refreshed_identity).available_count
 
             %{
@@ -2496,6 +2500,8 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
               available_count_after: available_count_after,
               http_status: status
             }
+            |> put_present(:five_hour_before, five_hour_before)
+            |> put_present(:five_hour_after, five_hour_after(probe, Windows.list_evidence(refreshed_identity)))
 
           {:error, _reason} ->
             # The provider returned `reset`: a credit was consumed. A failed or
@@ -2514,6 +2520,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
               http_status: status,
               reason: "quota refresh after saved reset is pending confirmation"
             }
+            |> put_present(:five_hour_before, five_hour_before)
         end
 
       code == "no_credit" ->
@@ -3093,7 +3100,56 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
       "available_count_after" => Map.get(result, :available_count_after),
       "http_status" => Map.get(result, :http_status)
     }
+    |> put_present("windows_reset", Map.get(result, :windows_reset))
+    |> put_present("five_hour_before", Map.get(result, :five_hour_before))
+    |> put_present("five_hour_after", Map.get(result, :five_hour_after))
   end
+
+  # What a consume tells about the windows it resets, kept until it is known
+  # whether a reset also clears an exhausted 5-hour window (findings#310):
+  # the provider's own count of reset windows, the account's stored Usage API
+  # 5-hour reading before the consume's quota refresh, and the 5-hour reading
+  # of that refresh's own Usage API response, marked with whether the stored
+  # window took it. The response is read directly because the evidence store
+  # keeps a fresh positive reading against a lone 0% one, which is exactly
+  # the reading a reset of the 5-hour window would produce.
+  defp consume_windows_reset(%{"windows_reset" => count}) when is_integer(count) and count >= 0 and count <= @max_windows_reset, do: count
+  defp consume_windows_reset(_body), do: nil
+
+  defp five_hour_before(windows) do
+    case windows |> Enum.filter(&usage_five_hour_window?/1) |> Enum.max_by(& &1.observed_at, DateTime, fn -> nil end) do
+      nil -> nil
+      window -> reading(window.used_percent, window.reset_at, window.observed_at)
+    end
+  end
+
+  defp five_hour_after(%{windows: observed_windows}, stored_windows) when is_list(observed_windows) do
+    with %{} = observed <- Enum.find(observed_windows, &usage_five_hour_window?/1),
+         %{} = reading <- reading(observed.used_percent, observed.reset_at, observed.observed_at) do
+      Map.put(reading, "accepted", Enum.any?(stored_windows, &(usage_five_hour_window?(&1) and stored_reading?(&1, observed))))
+    else
+      _absent -> nil
+    end
+  end
+
+  defp stored_reading?(%{observed_at: %DateTime{} = stored_at, used_percent: %Decimal{} = stored}, %{observed_at: %DateTime{} = observed_at, used_percent: %Decimal{} = observed}),
+    do: DateTime.compare(stored_at, observed_at) != :lt and Decimal.equal?(stored, observed)
+
+  defp stored_reading?(_stored, _observed), do: false
+
+  defp usage_five_hour_window?(%{quota_key: "account", quota_scope: scope, window_kind: "primary", window_minutes: 300, source: "codex_usage_api", observed_at: %DateTime{}})
+       when scope in [nil, "account"],
+       do: true
+
+  defp usage_five_hour_window?(_window), do: false
+
+  defp reading(%Decimal{} = used_percent, %DateTime{} = reset_at, %DateTime{} = observed_at),
+    do: %{"used_percent" => used_percent |> Decimal.round(1) |> Decimal.to_string(:normal), "reset_at" => DateTime.to_iso8601(reset_at), "observed_at" => DateTime.to_iso8601(observed_at)}
+
+  defp reading(_used_percent, _reset_at, _observed_at), do: nil
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
 
   # A result carrying a lifecycle `:phase` records the phase-driven legacy status
   # plus the consume timestamp and bounded-window deadline. Every other result
