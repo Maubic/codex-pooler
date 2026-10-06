@@ -17,6 +17,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   alias CodexPooler.Gateway.Runtime.Streaming.OpenAIStreamCollector
   alias CodexPooler.Gateway.Runtime.Streaming.StreamAttempt
   alias CodexPooler.Gateway.Runtime.Streaming.StreamLifecycle
+  alias CodexPooler.Gateway.Runtime.Streaming.StreamTiming
   alias CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserver
   alias CodexPooler.Gateway.Runtime.Streaming.Types, as: StreamTypes
   alias CodexPooler.Gateway.Runtime.Streaming.VisibleOutputMark
@@ -267,6 +268,8 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
     request = context.reserved.request
 
     fn state, data ->
+      state = StreamTiming.observe_chunk(state, data)
+
       case normalize_stream_data(response_context, state, data, &visible_websocket_data?/1) do
         {:error, reason, _state} ->
           {:error, reason}
@@ -334,6 +337,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   defp base_stream_relay_state(target, %RequestOptions{} = opts, response) do
     DownstreamStream.initial_state(target, opts, stream_source(response))
     |> Map.put(:rate_limit_identity, stream_rate_limit_identity(response))
+    |> StreamTiming.init_state(response)
   end
 
   defp stream_rate_limit_identity(%Req.Response{body: %WebsocketBridgeStream{}}), do: nil
@@ -402,6 +406,8 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
         )
 
     fn conn, data ->
+      conn = StreamTiming.observe_chunk(conn, data)
+
       if sse_response? do
         previous_state = first_event_state(conn)
 
@@ -416,12 +422,17 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
 
         classification
         |> attach_withheld_body(previous_state, data)
+        |> attach_stream_timing(conn)
         |> handle_classified_stream_data(response_context, conn, data)
       else
         write_stream_data(response_context, conn, data)
       end
     end
   end
+
+  # A first-event failure finalizes without this relay state, so it carries the attempt's timing with it.
+  defp attach_stream_timing({:retry, failure}, state), do: {:retry, StreamTiming.attach_to_failure(failure, state)}
+  defp attach_stream_timing(classification, _state), do: classification
 
   # The relay retains every streamed part — including non-visible blocks that
   # were already written downstream — so the exhaustion path must not replay

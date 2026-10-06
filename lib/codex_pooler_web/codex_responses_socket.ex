@@ -1970,6 +1970,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
           |> maybe_mark_public_turn_output_committed(data)
           |> count_public_downstream_frame(data)
           |> record_public_downstream_terminal(pushed_public_terminal_class(normalized, data))
+          |> record_public_downstream_end_turn(normalized, data)
           |> maybe_mark_public_pushed_terminal(normalized, data)
 
         {:push, {:text, normalized}, state}
@@ -4872,7 +4873,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         highest_frame_class: highest_pushed_frame_class(evidence)
       }
       |> Map.merge(pushed_completed_items(evidence))
-      |> Map.merge(Map.take(evidence, [:write_failure, :write_failed_at, :incomplete_reason]))
+      |> Map.merge(Map.take(evidence, [:write_failure, :write_failed_at, :incomplete_reason, :end_turn]))
       |> DeliveryReceipt.build()
     )
   end
@@ -5402,10 +5403,51 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       |> record_completed_native_response(pid, data)
       |> record_downstream_terminal(pid, DeliveryReceipt.terminal_class_from_outcome(outcome))
       |> record_downstream_incomplete_reason(pid, outcome)
+      |> record_downstream_end_turn(pid, outcome)
     else
       _not_terminal -> state
     end
   end
+
+  # The class the provider's completion named (`response.end_turn`, findings#311), for the receipt: written with the
+  # completed terminal the evidence holds, never with another terminal.
+  defp record_downstream_end_turn(state, pid, outcome) when is_pid(pid) do
+    with class when is_binary(class) <- DeliveryReceipt.end_turn_class_from_outcome(outcome),
+         true <- response_task_delivery_candidate?(state, pid) do
+      update_downstream_delivery_evidence(state, pid, fn
+        %{terminal_class: "response.completed"} = evidence -> Map.put_new(evidence, :end_turn, class)
+        evidence -> evidence
+      end)
+    else
+      _no_class -> state
+    end
+  end
+
+  # The public route names the class of the completion it pushed. Frames that are not the completion cost one map
+  # lookup; the completed frame is parsed once.
+  defp record_public_downstream_end_turn(state, normalized, data) do
+    pid = Map.get(state, :public_response_task_pid)
+
+    case is_pid(pid) and downstream_delivery_evidence(state, pid) do
+      %{terminal_class: "response.completed"} = evidence when not is_map_key(evidence, :end_turn) ->
+        record_downstream_end_turn(state, pid, public_pushed_outcome(normalized, data))
+
+      _recorded_or_not_completed ->
+        state
+    end
+  end
+
+  defp public_pushed_outcome(normalized, data) do
+    with :error <- terminal_outcome_or_error(normalized),
+         :error <- terminal_outcome_or_error(data) do
+      nil
+    else
+      {:ok, outcome} -> outcome
+    end
+  end
+
+  defp terminal_outcome_or_error(frame) when is_binary(frame), do: StreamProtocol.terminal_outcome(frame)
+  defp terminal_outcome_or_error(_frame), do: :error
 
   # Why the pushed `response.incomplete` ended the response, for the receipt:
   # `interrupted` names a response the client stopped (findings#270 row 270-272).

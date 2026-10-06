@@ -6,6 +6,7 @@ defmodule CodexPoolerWeb.Telemetry do
   alias CodexPooler.Gateway.Routing.AffinityTelemetry
   alias CodexPooler.Gateway.Routing.CircuitTelemetry
   alias CodexPooler.Gateway.Runtime.DuplicateTurnTelemetry
+  alias CodexPooler.Gateway.Transports.UpstreamConnectionProbe
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionLifecycleObservation
   alias CodexPooler.Gateway.Transports.Websocket.OwnerErrorVocabulary
   alias CodexPooler.Jobs.DeletionFailureNotifier
@@ -131,6 +132,9 @@ defmodule CodexPoolerWeb.Telemetry do
     # Websocket delivery receipts read their connection's failed writes from it
     # (findings#232 row 232-256), on every role that serves sockets.
     CodexPoolerWeb.WebsocketDownstreamWriteWatch.attach()
+    # The stream timing of an upstream HTTP SSE attempt names whether its request opened its connection or reused a
+    # pooled one; Finch reports that only through these events, on every role that dispatches upstream requests.
+    UpstreamConnectionProbe.attach()
     # Every role attaches it: the job roles run no Prometheus reporter, and a
     # failed job's row is pruned after a day (findings#206 row 206-90).
     FailureLog.attach()

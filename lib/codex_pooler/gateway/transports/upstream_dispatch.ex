@@ -26,6 +26,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   alias CodexPooler.Gateway.Transports.Streaming.RuntimeAdmissionProof
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.TransportFailureReason
+  alias CodexPooler.Gateway.Transports.UpstreamConnectionProbe
   alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
   alias CodexPooler.Gateway.Transports.Websocket.NativeReplayAdmission
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
@@ -479,8 +480,10 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       ]
       |> Keyword.merge(TransportEnvelope.req_timeout_options(timeouts, url))
 
+    streaming? = streaming_request?(payload, opts)
+
     request_options =
-      if streaming_request?(payload, opts) do
+      if streaming? do
         Keyword.put(request_options, :into, :self)
       else
         Keyword.put(
@@ -491,7 +494,8 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       end
 
     with {:ok, receipt} <- admit_http(dispatch_request) do
-      result = OutboundHTTP.post(url, request_options)
+      {result, connection} = post_observing_connection(url, request_options, streaming?)
+      result = UpstreamConnectionProbe.put_connection(result, connection)
       CloudflareCookies.store_from_result(url, result)
 
       result
@@ -512,6 +516,14 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       log_upstream_transport_exception(exception, identity, opts)
       {:error, upstream_transport_error(exception)}
   end
+
+  # A streamed request also learns whether it opened its connection or reused a pooled one, for the stream timing of
+  # its attempt; a collected body has no use for it.
+  defp post_observing_connection(url, request_options, true) do
+    UpstreamConnectionProbe.observe(fn probe_options -> OutboundHTTP.post(url, request_options ++ probe_options) end)
+  end
+
+  defp post_observing_connection(url, request_options, false), do: {OutboundHTTP.post(url, request_options), nil}
 
   defp admit_http(%DispatchRequest{provider_credits_context: context, url: url}) do
     if not is_nil(context) or ProviderCreditsAdmission.generation_endpoint?(URI.parse(url).path),

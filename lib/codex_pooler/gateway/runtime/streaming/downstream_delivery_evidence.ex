@@ -20,6 +20,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence do
           frames: non_neg_integer(),
           terminal_class: String.t() | nil,
           incomplete_reason: String.t() | nil,
+          end_turn: String.t() | nil,
           pushed_at: DateTime.t() | nil,
           write_failed?: boolean(),
           sse: StreamProtocol.sse_block_state()
@@ -31,6 +32,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence do
       frames: 0,
       terminal_class: nil,
       incomplete_reason: nil,
+      end_turn: nil,
       pushed_at: nil,
       write_failed?: false,
       sse: StreamProtocol.new_sse_block_state()
@@ -70,6 +72,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence do
       outcome: outcome(evidence),
       terminal_class: evidence.terminal_class,
       incomplete_reason: evidence.incomplete_reason,
+      end_turn: evidence.end_turn,
       pushed_at: evidence.pushed_at,
       frames_after_visible: evidence.frames,
       transport: @transport
@@ -106,7 +109,13 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence do
 
     case terminal do
       %{} = outcome ->
-        %{evidence | terminal_class: DeliveryReceipt.terminal_class_from_outcome(outcome), incomplete_reason: Map.get(outcome, :incomplete_reason), pushed_at: DateTime.utc_now()}
+        %{
+          evidence
+          | terminal_class: DeliveryReceipt.terminal_class_from_outcome(outcome),
+            incomplete_reason: Map.get(outcome, :incomplete_reason),
+            end_turn: DeliveryReceipt.end_turn_class_from_outcome(outcome),
+            pushed_at: DateTime.utc_now()
+        }
 
       nil ->
         evidence

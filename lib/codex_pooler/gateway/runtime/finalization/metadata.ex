@@ -5,6 +5,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
   alias CodexPooler.Gateway.Payloads.DebugPayloadSummary
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Runtime.Streaming.DownstreamStream
+  alias CodexPooler.Gateway.Runtime.Streaming.StreamTiming
   alias CodexPooler.Gateway.Transports.BoundedResponseBody
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl
   alias CodexPooler.Gateway.Transports.RejectionBody
@@ -506,6 +507,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
     |> Map.put("stream_terminal_type", failure.event_type)
     |> Map.put("stream_error_code", failure.code)
     |> maybe_put_quota_rejection_proof(failure)
+    |> Map.merge(StreamTiming.failure_metadata(failure))
   end
 
   defp maybe_put_quota_rejection_proof(metadata, %{quota_rejection_before_output?: true}),
@@ -519,6 +521,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
     |> Map.merge(public_openai_responses_stream_metadata(state))
     |> Map.merge(DownstreamStream.native_http_progress_metadata(state))
     |> Map.merge(DownstreamStream.native_http_tool_metadata(state))
+    |> Map.merge(StreamTiming.metadata(state))
   end
 
   def merge_stream_state_metadata(metadata, _state), do: metadata

@@ -64,6 +64,11 @@ defmodule CodexPooler.Gateway.Websocket.DeliveryReceipt do
   # served request billed for what it generated. Any other reason reads
   # `other`; a receipt of another terminal has no field.
   @incomplete_reasons ~w(interrupted max_output_tokens content_filter)
+  # Whether the provider's `response.completed` said it affirmatively ended the turn (`response.end_turn`): `true`,
+  # `false`, or `absent` for a missing, null or non-boolean field. A client that reads `false` re-samples the turn
+  # (findings#311), so a pushed completion names the class and the exposure is read from attempt rows. Only the
+  # receipt of a pushed `response.completed` carries it, and only from a transport that classified what it pushed.
+  @end_turn_classes ~w(true false absent)
 
   @type outcome :: String.t()
   @type terminal_class :: String.t() | nil
@@ -174,7 +179,20 @@ defmodule CodexPooler.Gateway.Websocket.DeliveryReceipt do
     |> maybe_put_completed_items(fields)
     |> maybe_put_write_failure(fields)
     |> maybe_put_incomplete_reason(fields)
+    |> maybe_put_end_turn(fields)
   end
+
+  @doc "Every value `build/1` can persist under `end_turn`."
+  @spec end_turn_class_values() :: [String.t()]
+  def end_turn_class_values, do: @end_turn_classes
+
+  @doc """
+  The `end_turn` class of a completed terminal outcome (`StreamProtocol.terminal_outcome/1`), or `nil` for every other
+  outcome and for a completed outcome that did not read the field.
+  """
+  @spec end_turn_class_from_outcome(term()) :: String.t() | nil
+  def end_turn_class_from_outcome(%{kind: :completed, end_turn: class}) when class in @end_turn_classes, do: class
+  def end_turn_class_from_outcome(_outcome), do: nil
 
   @doc "Every value `build/1` can persist under `incomplete_reason`."
   @spec incomplete_reason_values() :: [String.t()]
@@ -184,6 +202,13 @@ defmodule CodexPooler.Gateway.Websocket.DeliveryReceipt do
     do: Map.put(receipt, "incomplete_reason", vocabulary(reason, @incomplete_reasons, "other"))
 
   defp maybe_put_incomplete_reason(receipt, _fields), do: receipt
+
+  # A class belongs to the receipt of a pushed completion only; anything the transport hands over outside the
+  # vocabulary reads `absent` rather than reaching the row.
+  defp maybe_put_end_turn(%{"terminal_class" => "response.completed"} = receipt, %{end_turn: class}) when not is_nil(class),
+    do: Map.put(receipt, "end_turn", vocabulary(class, @end_turn_classes, "absent"))
+
+  defp maybe_put_end_turn(receipt, _fields), do: receipt
 
   # Only a receipt whose connection failed a write before the turn's terminal
   # was written carries the fields; the time only with the class.
@@ -309,7 +334,8 @@ defmodule CodexPooler.Gateway.Websocket.DeliveryReceipt do
         "terminal_class=#{receipt["terminal_class"]} " <>
         "frames_after_visible=#{receipt["frames_after_visible"]}" <>
         write_failure_field(receipt) <>
-        incomplete_reason_field(receipt)
+        incomplete_reason_field(receipt) <>
+        end_turn_field(receipt)
     )
 
     case Map.get(context, :attempt_id) do
@@ -362,6 +388,9 @@ defmodule CodexPooler.Gateway.Websocket.DeliveryReceipt do
 
   defp incomplete_reason_field(%{"incomplete_reason" => reason}) when is_binary(reason), do: " incomplete_reason=#{reason}"
   defp incomplete_reason_field(_receipt), do: ""
+
+  defp end_turn_field(%{"end_turn" => class}) when is_binary(class), do: " end_turn=#{class}"
+  defp end_turn_field(_receipt), do: ""
 
   defp log_persist_failure(:ok, _transport, _request_id, _session_id), do: :ok
 

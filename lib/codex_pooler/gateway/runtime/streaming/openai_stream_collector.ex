@@ -11,6 +11,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.OpenAIStreamCollector do
   alias CodexPooler.Gateway.Runtime.Finalization.{Metadata, ResponseUsage}
   alias CodexPooler.Gateway.Runtime.RateLimitObserver
   alias CodexPooler.Gateway.Runtime.Streaming.ModelDeclarationObserver
+  alias CodexPooler.Gateway.Runtime.Streaming.StreamTiming
   alias CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserver
   alias CodexPooler.Gateway.Runtime.Streaming.VisibleOutputMark
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
@@ -75,11 +76,15 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.OpenAIStreamCollector do
          finalization_callbacks,
          parser
        ) do
-    state = %{
-      chunks: [],
-      rate_limit: RateLimitObserver.event_state(),
-      usage_observer: StreamUsageObserver.new()
-    }
+    state =
+      StreamTiming.init_state(
+        %{
+          chunks: [],
+          rate_limit: RateLimitObserver.event_state(),
+          usage_observer: StreamUsageObserver.new()
+        },
+        response
+      )
 
     response_context = %ResponseContext{context: context, response: response}
 
@@ -108,6 +113,8 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.OpenAIStreamCollector do
            end,
            first_event_retry: first_event_retry_handler(response_context),
            write_chunk: fn state, data ->
+             state = StreamTiming.observe_chunk(state, data)
+
              {:ok, rate_limit_state} =
                RateLimitObserver.collect_events(data, rate_limit_state(state))
 

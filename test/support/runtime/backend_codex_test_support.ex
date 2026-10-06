@@ -30,7 +30,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
     RoutingCircuitState
   }
 
+  alias CodexPooler.Gateway.Runtime.Streaming.StreamTiming
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
+  alias CodexPooler.Gateway.Transports.UpstreamConnectionProbe
   alias CodexPooler.Gateway.Transports.Websocket.ActivityRegistry
   alias CodexPooler.Gateway.Websocket.DeliveryReceipt
   alias CodexPooler.Pools
@@ -192,11 +194,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
   def assert_safe_stream_metadata!(request, attempts) do
     response_metadata = Enum.map(attempts, &(&1.response_metadata || %{}))
     Enum.each(response_metadata, &assert_bounded_downstream_delivery!/1)
+    Enum.each(response_metadata, &assert_bounded_stream_timing!/1)
 
     metadata_text =
       inspect({
         request.request_metadata,
-        Enum.map(response_metadata, &Map.delete(&1, DeliveryReceipt.metadata_key()))
+        Enum.map(response_metadata, &Map.drop(&1, [DeliveryReceipt.metadata_key(), StreamTiming.metadata_key()]))
       })
 
     refute metadata_text =~ "data:"
@@ -206,12 +209,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
 
   # The downstream delivery receipt is a fixed vocabulary whose key names
   # contain the delta sentinel ("frames_after_visible"), so it is checked on
-  # its own bounded shape instead of being scanned for stream bytes.
+  # its own bounded shape instead of being scanned for stream bytes. A pushed
+  # `response.completed` also names the provider's `end_turn` class.
   defp assert_bounded_downstream_delivery!(metadata) do
     case Map.fetch(metadata, DeliveryReceipt.metadata_key()) do
       {:ok, receipt} ->
-        assert Enum.sort(Map.keys(receipt)) ==
-                 ~w(frames_after_visible outcome pushed_at terminal_class transport)
+        expected = ~w(frames_after_visible outcome pushed_at terminal_class transport)
+        expected = if Map.has_key?(receipt, "end_turn"), do: ["end_turn" | expected], else: expected
+        assert Enum.sort(Map.keys(receipt)) == Enum.sort(expected)
+
+        if Map.has_key?(receipt, "end_turn") do
+          assert receipt["terminal_class"] == "response.completed"
+          assert receipt["end_turn"] in DeliveryReceipt.end_turn_class_values()
+        end
 
         assert receipt["outcome"] in (DeliveryReceipt.outcomes() ++ ["unknown"])
 
@@ -229,6 +239,22 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
         :ok
     end
   end
+
+  # The stream timing is a fixed vocabulary too, and its `first_visible_ms`
+  # key carries the same sentinel, so it is checked on its own bounded shape.
+  defp assert_bounded_stream_timing!(metadata) do
+    case Map.fetch(metadata, StreamTiming.metadata_key()) do
+      {:ok, timing} ->
+        assert Map.keys(timing) -- ~w(connection first_event_ms first_visible_ms headers_ms) == []
+        Enum.each(timing, &assert_bounded_stream_timing_field!/1)
+
+      :error ->
+        :ok
+    end
+  end
+
+  defp assert_bounded_stream_timing_field!({"connection", value}), do: assert(value in UpstreamConnectionProbe.connections())
+  defp assert_bounded_stream_timing_field!({_mark, value}), do: assert(is_integer(value) and value >= 0)
 
   def stream_success_sse do
     FakeUpstream.sse_stream([

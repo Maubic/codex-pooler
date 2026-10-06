@@ -43,7 +43,8 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.TerminalOutcom
           required(:event_type) => String.t() | nil,
           required(:data_type) => String.t() | nil,
           optional(:failure) => terminal_failure(),
-          optional(:incomplete_reason) => String.t() | nil
+          optional(:incomplete_reason) => String.t() | nil,
+          optional(:end_turn) => String.t()
         }
 
   @spec first_complete_event(binary()) :: {:ok, map()} | :incomplete
@@ -461,7 +462,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.TerminalOutcom
 
     cond do
       legacy_success?(event_type, decoded) ->
-        {:ok, %{kind: :completed, event_type: nil, data_type: nil}}
+        {:ok, %{kind: :completed, event_type: nil, data_type: nil, end_turn: "absent"}}
 
       data_type in @success_event_types and success_types_agree?(event_type, data_type) and
           valid_success_response?(decoded) ->
@@ -469,13 +470,21 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.TerminalOutcom
          %{
            kind: :completed,
            event_type: event_type || data_type,
-           data_type: data_type
+           data_type: data_type,
+           end_turn: end_turn_class(decoded)
          }}
 
       true ->
         nil
     end
   end
+
+  # Whether the provider said it affirmatively ended the turn (`response.end_turn`): a client that reads `false`
+  # re-samples the turn (findings#311). The class is `true`, `false` or `absent`, and `absent` is everything that is
+  # not a boolean: a missing field, `null` or a value of another type. Only the class leaves this function.
+  defp end_turn_class(%{"response" => %{"end_turn" => true}}), do: "true"
+  defp end_turn_class(%{"response" => %{"end_turn" => false}}), do: "false"
+  defp end_turn_class(_decoded), do: "absent"
 
   defp legacy_success?(nil, %{"id" => id} = decoded) when is_binary(id),
     do: not Map.has_key?(decoded, "type")

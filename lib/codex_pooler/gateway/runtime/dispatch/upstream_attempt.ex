@@ -14,6 +14,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.UpstreamAttempt do
   alias CodexPooler.Gateway.Runtime.Finalization
   alias CodexPooler.Gateway.Runtime.Streaming.StreamDispatch
   alias CodexPooler.Gateway.Runtime.Streaming.StreamLifecycle
+  alias CodexPooler.Gateway.Runtime.Streaming.StreamTiming
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl.TurnSnapshot
   alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.UpstreamDispatch
@@ -177,6 +178,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.UpstreamAttempt do
 
     case UpstreamDispatch.http_request(dispatch_request) do
       {:ok, response} ->
+        # The headers just arrived: stamp when, from this attempt's start, for the stream timing of its row.
+        response = StreamTiming.attach(response, context.started)
+
         if HttpAuthRefresh.eligible?(prepared_context, response) do
           HttpAuthRefresh.handle(prepared_context, response, &dispatch_http(&1, callbacks))
         else
