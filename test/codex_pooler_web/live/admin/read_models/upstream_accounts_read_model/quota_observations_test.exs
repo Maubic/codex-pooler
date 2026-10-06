@@ -3,10 +3,28 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
 
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
   alias CodexPooler.Upstreams.Quota.WindowSelector
+  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservations
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection
   alias CodexPoolerWeb.DateTimeDisplay
 
   @now ~U[2026-09-07 12:00:00Z]
+
+  test "stable retained keys update clocks and values without merging distinct retained rows" do
+    preferences = DateTimeDisplay.preferences_for_user(nil)
+    retained = %{window("codex_usage_api", DateTime.add(@now, -60), "100") | id: "retained-a"}
+    updated = %{retained | observed_at: @now, reset_at: DateTime.add(retained.reset_at, 60), used_percent: Decimal.new("32")}
+    before = QuotaObservations.project(retained, preferences, @now)
+    after_update = QuotaObservations.project(updated, preferences, @now)
+
+    assert before.key == after_update.key
+    refute before.observed_at == after_update.observed_at
+    refute before.reset_at == after_update.reset_at
+    assert after_update.remaining == "68%"
+
+    for distinct <- [%{retained | id: "retained-b"}, %{retained | source: "codex_response_headers"}, %{retained | window_minutes: 43_200}] do
+      refute QuotaObservations.project(distinct, preferences, @now).key == before.key
+    end
+  end
 
   test "retains every entry with selected first and remaining entries in chronological order" do
     for count <- [4, 5, 8], selected_index <- [0, count - 1] do
@@ -196,6 +214,43 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservationsTest d
     assert nonzero_weekly.percent_label == "5%"
 
     assert {"Retained measurement", "5% remaining"} in hd(nonzero_weekly.observations).details
+  end
+
+  test "retained recovery context labels the selected canonical row and keeps historical source freshness" do
+    consumed_at = DateTime.add(@now, -4, :minute)
+    selected = window("codex_usage_api", DateTime.add(@now, -6, :minute), "100")
+    historical = window("codex_response_headers", DateTime.add(@now, -1, :day), "90")
+    redemption = %{"phase" => "consumed_pending_probe", "consumed_at" => DateTime.to_iso8601(consumed_at)}
+    row = QuotaProjection.quota_limit_rows([selected], DateTimeDisplay.preferences_for_user(nil), @now, [selected, historical], redemption) |> Enum.find(&(&1.key == :weekly))
+    assert row.percent_label == "0%"
+    assert row.saved_reset_context.label == "Last verified quota"
+    refute row.saved_reset_context.candidate?
+    assert [canonical, history] = row.observations
+    assert canonical.freshness == "fresh"
+    assert {"Recovery verification", "Source freshness does not mean the new quota cycle has been accepted."} in canonical.details
+    assert history.freshness == "stale"
+    refute Map.has_key?(history, :saved_reset_context)
+  end
+
+  test "generic pending measurement refuses stale future and malformed candidate clocks" do
+    candidate_at = DateTime.add(@now, -1, :minute)
+    selected = window("codex_usage_api", DateTime.add(@now, -2, :minute), "100")
+
+    metadata = %{
+      "__quota_confirmed_candidate_v1" => %{"version" => 1, "used_percent" => "32", "reset_at" => DateTime.to_iso8601(selected.reset_at), "observed_at" => DateTime.to_iso8601(candidate_at), "count" => 1},
+      "__quota_candidate_provider_status_v1" => %{"version" => 1, "allowed" => true, "limit_reached" => false, "observed_at" => DateTime.to_iso8601(candidate_at)}
+    }
+
+    valid = %{selected | metadata: metadata}
+    assert QuotaObservations.project(valid, DateTimeDisplay.preferences_for_user(nil), @now).pending_measurement.role == :unconfirmed_report
+
+    for clock <- [DateTime.to_iso8601(DateTime.add(@now, -16, :minute)), DateTime.to_iso8601(DateTime.add(@now, 1, :second)), "invalid"] do
+      bad = valid |> put_in([Access.key(:metadata), "__quota_confirmed_candidate_v1", "observed_at"], clock) |> put_in([Access.key(:metadata), "__quota_candidate_provider_status_v1", "observed_at"], clock)
+      observation = QuotaObservations.project(bad, DateTimeDisplay.preferences_for_user(nil), @now)
+      refute observation.measurement_pending?
+      assert observation.pending_measurement == nil
+      assert observation.remaining == "0%"
+    end
   end
 
   defp window(source, observed_at, used) do

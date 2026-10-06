@@ -101,18 +101,29 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetConfirmationP
     |> challenge_pair()
   end
 
-  defp candidate_challenge(%AccountQuotaWindow{} = window, consumed_at, snapshot_at) do
+  @spec candidate_observed_at(AccountQuotaWindow.t(), DateTime.t() | nil, DateTime.t()) :: DateTime.t() | nil
+  def candidate_observed_at(%AccountQuotaWindow{} = window, consumed_at, %DateTime{} = snapshot_at) do
     metadata = window.metadata || %{}
 
-    with true <- bounded_account_window?(window),
-         true <- timestamp_between?(window.observed_at, consumed_at, snapshot_at),
+    with true <- reset_account_window?(window),
+         true <- is_map(metadata),
+         %DateTime{} <- nonfuture_observed_at(window, snapshot_at),
          {:ok, candidate} <- EvidenceStore.parse_candidate(metadata),
          true <- EvidenceStore.candidate_valid?(candidate, snapshot_at),
          true <- EvidenceStore.candidate_provider_status_safe?(metadata),
          true <- timestamp_between?(candidate.observed_at, consumed_at, snapshot_at) do
-      [{WindowSelector.logical_key(window), candidate.observed_at}]
+      candidate.observed_at
     else
-      _invalid -> []
+      _invalid -> nil
+    end
+  end
+
+  def candidate_observed_at(_window, _consumed_at, _snapshot_at), do: nil
+
+  defp candidate_challenge(window, consumed_at, snapshot_at) do
+    case candidate_observed_at(window, consumed_at, snapshot_at) do
+      %DateTime{} = observed_at -> [{WindowSelector.logical_key(window), observed_at}]
+      nil -> []
     end
   end
 

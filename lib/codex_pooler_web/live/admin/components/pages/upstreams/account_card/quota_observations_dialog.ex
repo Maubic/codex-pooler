@@ -15,6 +15,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaObservati
       aria-labelledby={"#{@id}-title"}
       aria-describedby={"#{@id}-description"}
       aria-modal="true"
+      data-preserve-open
+      data-quota-dialog-preserve
     >
       <.focus_wrap
         id={"#{@id}-panel"}
@@ -22,14 +24,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaObservati
       >
         <header class="shrink-0 border-b border-base-300 px-5 py-4">
           <p class="text-xs font-semibold uppercase tracking-wide text-primary">{@limit.label}</p>
-          <h2 id={"#{@id}-title"} class="mt-1 text-xl font-bold text-base-content">
+          <h2 id={"#{@id}-title"} tabindex="-1" data-dialog-focus-fallback class="mt-1 text-xl font-bold text-base-content">
             Quota evidence
           </h2>
           <p id={"#{@id}-description"} class="mt-1 text-xs leading-5 text-base-content/60">
             Retained quota state, not a history of provider responses. Values may be reconciled across multiple reports.
           </p>
         </header>
-        <div class="grid min-h-0 gap-4 overflow-y-auto px-5 py-4">
+        <div id={"#{@id}-scroll"} data-preserve-scroll class="grid min-h-0 gap-4 overflow-y-auto px-5 py-4">
           <div>
             <p class="mb-3 flex justify-between gap-2 text-[11px] text-base-content/60">
               <span class="font-semibold uppercase tracking-wide">{length(@limit.observations)} retained records</span><span>Selected first, then newest</span>
@@ -40,6 +42,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaObservati
             >
               <li
                 :for={{observation, index} <- Enum.with_index(@limit.observations)}
+                id={"#{@id}-record-#{observation.key}"}
                 data-role="quota-observation"
                 data-selected={to_string(observation.selected?)}
                 data-measurement-pending={if observation_measurement_pending?(observation), do: "true", else: nil}
@@ -52,7 +55,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaObservati
                   data-preserve-open
                   class="group"
                 >
-                  <summary class="grid gap-1.5 cursor-pointer list-none rounded transition-colors hover:bg-base-200/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
+                  <summary id={"#{@id}-observation-#{observation.key}-summary"} class="grid gap-1.5 cursor-pointer list-none rounded transition-colors hover:bg-base-200/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
                     <div class="flex items-baseline justify-between gap-3">
                       <p class="min-w-0 truncate text-sm font-semibold leading-5 text-base-content">
                         {observation.source}
@@ -68,6 +71,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaObservati
                         ]}
                         title="Remaining quota"
                       ><span :if={observation.freshness == "stale"} class="font-normal">last known </span>{observation.remaining}</span>
+                    </div>
+                    <div :if={context = Map.get(observation, :saved_reset_context)} class="grid gap-1 text-[11px] leading-5 text-base-content/70">
+                      <span data-role="last-verified-quota">{context.label}</span>
+                      <span :if={context.candidate?} data-role="unconfirmed-quota-report">{context.candidate_label}</span>
                     </div>
                     <progress
                       data-role="quota-observation-progress"

@@ -241,40 +241,30 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Sections do
           id={"cockpit-redeem-saved-reset-upstream-account-#{@cockpit.identity.id}"}
           icon="hero-bolt"
           label="Redeem saved reset"
-          action={@cockpit.actions.redeem_saved_reset}
+          data-saved-reset-action="open-redemption"
+          data-server-disabled={to_string(!saved_reset_action(@cockpit).available?)}
+          action={saved_reset_action(@cockpit)}
           phx-click="open_saved_reset_redemption_confirmation"
           phx-value-id={@cockpit.identity.id}
           phx-value-pool-id={default_pool_id(@cockpit)}
         />
-        <div
+        <AdminComponents.saved_reset_confirmation
           :if={confirming_saved_reset_redemption?(@confirming_saved_reset_redemption, @cockpit)}
           id="cockpit-saved-reset-redemption-confirmation"
-          class="grid gap-2.5 border-t border-warning/20 bg-warning/5 px-4 py-3"
-        >
-          <p class="text-xs leading-5 text-base-content/70">
-            Queues one manual redemption for this account, separate from the auto redeem policy.
-          </p>
-          <div class="flex flex-wrap items-center gap-2">
-            <button
-              id="cockpit-saved-reset-redemption-confirm"
-              type="button"
-              phx-click="redeem_saved_reset"
-              phx-value-id={@cockpit.identity.id}
-              phx-value-pool-id={default_pool_id(@cockpit)}
-              class="btn btn-primary btn-xs gap-1.5"
-            >
-              <.icon name="hero-check" class="size-3.5" />
-              <span>Confirm redemption</span>
-            </button>
-            <button
-              id="cockpit-saved-reset-redemption-cancel"
-              type="button"
-              phx-click="cancel_saved_reset_redemption"
-              class="btn btn-ghost btn-xs text-base-content/60 hover:text-base-content"
-            >
-              Keep resets in bank
-            </button>
-          </div>
+          identity_id={@cockpit.identity.id}
+          surface={:cockpit}
+          confirm_id="cockpit-saved-reset-redemption-confirm"
+          cancel_id="cockpit-saved-reset-redemption-cancel"
+          confirm_event={Phoenix.LiveView.JS.push("redeem_saved_reset", value: %{"id" => @cockpit.identity.id, "pool-id" => @confirming_saved_reset_redemption.pool_id})}
+          disabled={!saved_reset_action(@cockpit).available?}
+        />
+        <div :if={@cockpit.saved_reset_operation.refreshable? || @cockpit.saved_reset_operation.show_latest_receipt?} class="px-4 py-3">
+          <AdminComponents.saved_reset_operation
+            identity_id={@cockpit.identity.id}
+            surface={:cockpit}
+            operation={@cockpit.saved_reset_operation}
+            refreshing={Map.get(@cockpit, :saved_reset_status_refreshing?, false)}
+          />
         </div>
         <.rail_action
           id={"cockpit-download-reset-calendar-#{@cockpit.identity.id}"}
@@ -716,6 +706,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Sections do
     do: identity_id == cockpit.identity.id
 
   defp confirming_saved_reset_redemption?(_confirmation, _cockpit), do: false
+
+  defp saved_reset_action(cockpit) do
+    operation = cockpit.saved_reset_operation
+    action = cockpit.actions.redeem_saved_reset
+
+    if operation.request.state in [:queued, :processing, :unavailable] or operation.provider_outcome == :unknown or operation.active? do
+      %{action | available?: false, reason: "Review the recorded saved reset status before taking another action"}
+    else
+      action
+    end
+  end
 
   defp default_pool_id(%{assignments: %{items: [%{pool_id: pool_id} | _items]}}), do: pool_id
   defp default_pool_id(_cockpit), do: nil

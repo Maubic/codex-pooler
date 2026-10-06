@@ -2439,7 +2439,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
       })
 
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-    stale_started_at = now |> DateTime.add(-5, :minute) |> DateTime.to_iso8601()
     reset_expires_at = now |> DateTime.add(13, :day) |> DateTime.to_iso8601()
     reset_first_seen_at = now |> DateTime.add(-1, :day) |> DateTime.to_iso8601()
 
@@ -2463,17 +2462,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
               %{"expires_at" => reset_expires_at, "first_seen_at" => reset_first_seen_at}
             ],
             "next_expires_at" => reset_expires_at
-          },
-          "saved_reset_redemption" => %{
-            "probe" => %{"token" => "saved-reset-dialog-sensitive-sentinel"},
-            "result" => %{"provider_body" => "saved-reset-dialog-sensitive-sentinel"},
-            "credit_id" => "saved-reset-dialog-sensitive-sentinel",
-            "status" => "redeeming",
-            "attempt_id" => Ecto.UUID.generate(),
-            "generation" => 1,
-            "trigger_kind" => "admin_manual",
-            "started_at" => stale_started_at,
-            "finished_at" => nil
           }
         }
       })
@@ -2483,7 +2471,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
       |> UpstreamAccountsReadModel.list_visible_accounts([pool])
       |> Enum.filter(&(&1.identity.id == identity.id))
 
-    assert account.saved_resets.redemption_stale? == true
+    assert account.saved_resets.redemption_stale? == false
     assert account.saved_resets.in_progress? == false
     assert account.saved_reset_redemption_action.available? == true
 
@@ -2519,7 +2507,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
              "#saved-reset-redemption-confirmation[data-role='saved-reset-redemption-confirmation']"
            )
 
-    assert has_element?(view, "#saved-reset-redemption-confirm", "Queue redemption")
+    assert has_element?(view, "#saved-reset-redemption-confirm", "Redeem one reset")
     assert has_element?(view, "#saved-reset-redemption-cancel", "Keep resets in bank")
 
     assert Repo.aggregate(
@@ -3020,11 +3008,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(view, "#upstream-account-#{beta_identity.id}")
     assert has_element?(view, "#upstream-account-#{paused_identity.id}")
 
+    unchanged_filters = :sys.get_state(view.pid).socket.assigns.filter_values
+
     view
     |> element("#upstream-filter-form")
     |> render_submit(%{"filters" => %{"query" => "", "pool_id" => "", "status" => ""}})
 
-    assert_patch(view, ~p"/admin/upstreams")
+    refute_patched(view)
+    assert :sys.get_state(view.pid).socket.assigns.filter_values == unchanged_filters
+    assert has_element?(view, "#filters_query[value='']")
     assert has_element?(view, "#upstream-account-#{alpha_identity.id}")
     assert has_element?(view, "#upstream-account-#{beta_identity.id}")
     assert has_element?(view, "#upstream-account-#{paused_identity.id}")
@@ -6508,62 +6500,493 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(view, "#upstream-account-#{identity.id}", "Async account after")
   end
 
-  test "defers upstream reloads while quota observations are open", %{conn: conn, scope: scope} do
+  @tag :saved_reset_live_status
+  test "updates saved reset status while quota evidence is open", %{conn: conn, scope: scope} do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "quota-reading", name: "Quota reading"})
     %{identity: identity} = upstream_assignment_fixture(pool, %{account_label: "Quota reading"})
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
     render_click(view, "open_quota_observations", %{})
-
-    assert {:ok, _event} =
-             Events.broadcast_upstreams(pool.id, "quota_windows_updated", %{
-               "upstream_identity_id" => identity.id
-             })
-
-    state = :sys.get_state(view.pid)
-    assert state.socket.assigns.upstreams_reload_dirty?
-    refute state.socket.assigns.upstreams_reload_running?
-    render_click(view, "close_quota_observations", %{})
-    _ = render_async(view)
-    refute :sys.get_state(view.pid).socket.assigns.upstreams_reload_dirty?
+    persist_reset_receipt!(identity, "consumed_pending_probe")
+    send(view.pid, {Events, %{topics: ["upstreams"], reason: "quota_windows_updated"}})
+    settle_saved_reset_status(view)
+    assert has_element?(view, "#saved-reset-operation-list-#{identity.id}[data-provider-outcome='applied'][data-verification-state='pending']")
+    assert :sys.get_state(view.pid).socket.assigns.quota_observations_open?
   end
 
-  test "defers an upstream event reload until the saved reset dialog closes", %{
-    conn: conn,
-    scope: scope
-  } do
-    {:ok, pool} =
-      Pools.create_pool(scope, %{slug: "deferred-upstreams", name: "Deferred Upstreams"})
+  @tag :saved_reset_live_status
+  test "bank status updates preserve the exact dirty policy form", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "live-reset-bank", name: "Live reset bank"})
+    %{identity: identity} = upstream_assignment_fixture(pool, %{account_label: "Live reset account"})
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    render_click(view, "open_saved_reset_policy", %{"id" => identity.id})
+    render_change(view, "validate_saved_reset_policy", %{"saved_reset_policy" => %{"keep_credits" => "7", "min_blocked_minutes" => "29", "trigger_mode" => "threshold", "quota_threshold_percent" => "86"}})
+    draft = :sys.get_state(view.pid).socket.assigns.saved_reset_policy_form
+    persist_reset_receipt!(identity, "consumed_pending_probe")
+    send(view.pid, {Events, %{topics: ["upstreams"], reason: "saved_reset_redemption_updated"}})
+    settle_saved_reset_status(view)
+    assert has_element?(view, "#saved-reset-policy-dialog[open]")
+    state = :sys.get_state(view.pid).socket.assigns
+    assert state.saved_reset_policy_form === draft
+    assert state.editing_saved_reset_policy.saved_reset_operation.provider_outcome == :applied
+    assert state.editing_saved_reset_policy.saved_reset_operation.verification == :pending
+    assert has_element?(view, "#saved-reset-operation-list-#{identity.id}", "Reset applied")
+    persist_reset_receipt!(identity, "confirmed_by_quota")
+    render_click(view, "refresh_saved_reset_status", %{"id" => identity.id})
+    settle_saved_reset_status(view)
+    assert :sys.get_state(view.pid).socket.assigns.saved_reset_policy_form === draft
+    assert_confirmed_receipt_reviewable(view, identity)
+    assert has_element?(view, "#saved-reset-policy-dialog[open]")
+  end
 
-    %{identity: identity} =
-      upstream_assignment_fixture(pool, %{
-        account_label: "Deferred account",
-        assignment_label: "Deferred assignment"
-      })
+  @tag :saved_reset_live_status
+  test "paused status refresh performs one scoped DB read without unpausing and resume rereads immediately", %{conn: conn, scope: scope} do
+    {:ok, fake} = FakeUpstream.start_link(:success)
+    on_exit(fn -> FakeUpstream.stop(fake) end)
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "paused-reset-status", name: "Paused reset status"})
+    %{identity: identity} = upstream_assignment_fixture(pool, %{identity_metadata: %{"usage_base_url" => FakeUpstream.url(fake)}})
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    render_click(view, "open_saved_reset_policy", %{"id" => identity.id})
+    render_hook(view, "set_live_updates", %{"paused" => true})
+    persist_reset_receipt!(identity, "consumed_pending_probe")
+
+    {_, automatic_reads} =
+      capture_saved_reset_status_reads(fn ->
+        timer = :sys.get_state(view.pid).socket.assigns.saved_reset_status_timer
+        Process.cancel_timer(timer, async: false, info: false)
+        send(view.pid, :refresh_saved_reset_status_tick)
+        settle_saved_reset_status(view)
+      end)
+
+    assert automatic_reads == 0
+
+    {_, forced_reads} =
+      capture_saved_reset_status_reads(fn ->
+        render_click(view, "refresh_saved_reset_status", %{"id" => identity.id})
+        settle_saved_reset_status(view)
+      end)
+
+    assert forced_reads == 1
+    state = :sys.get_state(view.pid).socket.assigns
+    assert state.live_updates_paused?
+    assert state.editing_saved_reset_policy.saved_reset_operation.provider_outcome == :applied
+    assert has_element?(view, "#saved-reset-operation-list-#{identity.id}", "Reset applied")
+    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id}", "Live updates are paused")
+    persist_reset_receipt!(identity, "confirmed_by_quota")
+    render_hook(view, "set_live_updates", %{"paused" => false})
+    settle_saved_reset_status(view)
+    assert_confirmed_receipt_reviewable(view, identity)
+    assert FakeUpstream.requests(fake) == []
+    stop_saved_reset_fake!(fake)
+    view |> element("#saved-reset-policy-cancel") |> render_click()
+    assert :sys.get_state(view.pid).socket.assigns.saved_reset_status_timer == nil
+    {:ok, remounted, _html} = live(conn, ~p"/admin/upstreams")
+    assert_confirmed_receipt_reviewable(remounted, identity)
+  end
+
+  @tag :saved_reset_live_status
+  test "single flight coalesces a newer receipt and refuses the old read completion", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "coalesced-reset-status", name: "Coalesced reset status"})
+    %{identity: identity} = upstream_assignment_fixture(pool)
+    persist_reset_receipt!(identity, "consumed_pending_probe")
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    render_click(view, "open_saved_reset_policy", %{"id" => identity.id})
+    barrier = block_next_saved_reset_identity_read!()
+    render_click(view, "refresh_saved_reset_status", %{"id" => identity.id})
+    assert_receive {^barrier, :read_blocked, worker}, 2_000
+    on_exit(fn -> send(worker, {barrier, :release}) end)
+    old_generation = :sys.get_state(view.pid).socket.assigns.saved_reset_status_running.generation
+    persist_reset_receipt!(identity, "confirmed_by_quota")
+    send(view.pid, {Events, %{topics: ["upstreams"], reason: "quota_windows_updated"}})
+    send(view.pid, {Events, %{topics: ["upstreams"], reason: "saved_reset_redemption_updated"}})
+    state = :sys.get_state(view.pid).socket.assigns
+    assert state.saved_reset_status_running.generation == old_generation
+    assert state.saved_reset_status_generation > old_generation
+    assert state.saved_reset_status_rerun.identity_ids == [identity.id]
+    send(worker, {barrier, :release})
+    settle_saved_reset_status(view)
+    assert_confirmed_receipt_reviewable(view, identity)
+    assert :sys.get_state(view.pid).socket.assigns.saved_reset_status_running == nil
+    assert :sys.get_state(view.pid).socket.assigns.saved_reset_status_rerun == nil
+  end
+
+  @tag :saved_reset_live_status
+  test "visibility loss overrides paused dirty bank and cancels the older read", %{scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "revoked-reset-status", name: "Revoked reset status"})
+    %{identity: identity} = upstream_assignment_fixture(pool)
+    %{user: operator} = operator_fixture(scope, %{"email" => unique_user_email(), "role" => "instance_admin", "password_change_required" => "false"})
+    operator_pool_assignment_fixture(operator, pool, created_by_user_id: scope.user.id)
+    assert {:ok, %{token: token}} = Accounts.login_user(%{"email" => operator.email, "password" => valid_user_password()})
+    conn = build_conn() |> log_in_user(operator, token)
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    render_click(view, "open_saved_reset_policy", %{"id" => identity.id})
+    render_change(view, "validate_saved_reset_policy", %{"saved_reset_policy" => %{"keep_credits" => "9"}})
+    render_hook(view, "set_live_updates", %{"paused" => true})
+    barrier = block_next_saved_reset_identity_read!()
+    render_click(view, "refresh_saved_reset_status", %{"id" => identity.id})
+    assert_receive {^barrier, :read_blocked, worker}, 2_000
+    on_exit(fn -> send(worker, {barrier, :release}) end)
+    monitor = CodexPooler.TestProcess.monitor_flushed(worker)
+    assert {:ok, _operator} = Accounts.update_operator(scope, operator, %{"pool_ids" => []})
+    send(view.pid, {CodexPoolerWeb.Admin.NotificationCenterHooks, :viewer_visibility_changed})
+    _ = :sys.get_state(view.pid)
+    settle_saved_reset_status(view)
+    assert_receive {:DOWN, ^monitor, :process, ^worker, _reason}, 2_000
+    refute has_element?(view, "#upstream-account-#{identity.id}")
+    refute has_element?(view, "#saved-reset-policy-dialog")
+    state = :sys.get_state(view.pid).socket.assigns
+    assert state.live_updates_paused?
+    assert state.saved_reset_status_running == nil
+    assert state.saved_reset_status_timer == nil
+    assert state.confirming_saved_reset_redemption == nil
+  end
+
+  @tag :saved_reset_live_status
+  test "an older normal page read cannot overwrite a newer targeted receipt", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "old-page-reset-status", name: "Old page reset status"})
+    %{identity: identity} = upstream_assignment_fixture(pool)
+    persist_reset_receipt!(identity, "consumed_pending_probe")
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    barrier = block_next_saved_reset_identity_read!()
+    send(view.pid, :reload_upstreams_from_events)
+    assert_receive {^barrier, :read_blocked, old_worker}, 2_000
+    on_exit(fn -> send(old_worker, {barrier, :release}) end)
+    parent = self()
+    marker = make_ref()
+
+    :sys.replace_state(view.pid, fn state ->
+      socket =
+        Phoenix.LiveView.attach_hook(state.socket, marker, :handle_async, fn
+          {:saved_reset_status, _}, _, socket ->
+            send(parent, {marker, :new_status_completed})
+            {:cont, socket}
+
+          _, _, socket ->
+            {:cont, socket}
+        end)
+
+      %{state | socket: socket}
+    end)
+
+    persist_reset_receipt!(identity, "confirmed_by_quota")
+    render_click(view, "refresh_saved_reset_status", %{"id" => identity.id})
+    assert_receive {^marker, :new_status_completed}, 2_000
+    _ = :sys.get_state(view.pid)
+    assert_confirmed_receipt_reviewable(view, identity)
+    send(old_worker, {barrier, :release})
+    settle_saved_reset_status(view)
+    assert_confirmed_receipt_reviewable(view, identity)
+  end
+
+  @tag :saved_reset_live_status
+  test "filter replacement cancels the older targeted read and retains the current filter", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "filter-reset-status", name: "Filter reset status"})
+    %{identity: identity} = upstream_assignment_fixture(pool, %{account_label: "Original reset account"})
+    %{identity: other} = upstream_assignment_fixture(pool, %{account_label: "Replacement reset account"})
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    barrier = block_next_saved_reset_identity_read!()
+    render_click(view, "refresh_saved_reset_status", %{"id" => identity.id})
+    assert_receive {^barrier, :read_blocked, worker}, 2_000
+    on_exit(fn -> send(worker, {barrier, :release}) end)
+    monitor = CodexPooler.TestProcess.monitor_flushed(worker)
+    render_change(view, "filter", %{"filters" => %{"query" => "Replacement"}})
+    assert_patch(view, ~p"/admin/upstreams?query=Replacement")
+    settle_saved_reset_status(view)
+    assert_receive {:DOWN, ^monitor, :process, ^worker, _reason}, 2_000
+    refute has_element?(view, "#upstream-account-#{identity.id}")
+    assert has_element?(view, "#upstream-account-#{other.id}")
+    assert :sys.get_state(view.pid).socket.assigns.filter_values["query"] == "Replacement"
+  end
+
+  @tag :saved_reset_live_status
+  test "one open bank follows queued applied candidate and confirmed persisted facts with zero provider calls", %{conn: conn, scope: scope} do
+    {:ok, fake} = FakeUpstream.start_link(:success)
+    on_exit(fn -> FakeUpstream.stop(fake) end)
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "live-reset-receipt-states", name: "Live reset receipt states"})
+    %{identity: identity, assignment: assignment} = upstream_assignment_fixture(pool, %{identity_metadata: %{"usage_base_url" => FakeUpstream.url(fake), "saved_resets" => %{"status" => "reported", "available_count" => 2}}})
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    render_click(view, "open_saved_reset_policy", %{"id" => identity.id})
+    draft = :sys.get_state(view.pid).socket.assigns.saved_reset_policy_form
+    filters = :sys.get_state(view.pid).socket.assigns.filter_values
+    args = %{"trigger_kind" => "admin_manual", "pool_upstream_assignment_id" => assignment.id, "manual_request_target" => %{"pool_id" => pool.id, "upstream_identity_id" => identity.id}}
+    job = args |> SavedResetRedemptionWorker.new(unique: false) |> Oban.insert!()
+    render_click(view, "refresh_saved_reset_status", %{"id" => identity.id})
+    settle_saved_reset_status(view)
+    assert has_element?(view, "#saved-reset-operation-list-#{identity.id} [data-role='saved-reset-request']", "Request accepted")
+    refute has_element?(view, "#saved-reset-operation-list-#{identity.id}[data-provider-outcome='applied']")
+    job |> Ecto.Changeset.change(state: "executing") |> Repo.update!()
+    render_click(view, "refresh_saved_reset_status", %{"id" => identity.id})
+    settle_saved_reset_status(view)
+    assert :sys.get_state(view.pid).socket.assigns.editing_saved_reset_policy.saved_reset_operation.request.state == :processing
+    persist_reset_receipt!(identity, "consumed_pending_probe")
+    send(view.pid, {Events, %{topics: ["upstreams"], reason: "saved_reset_redemption_updated"}})
+    settle_saved_reset_status(view)
+    assert has_element?(view, "#saved-reset-operation-list-#{identity.id}[data-provider-outcome='applied'][data-verification-state='pending']")
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    observed_at = DateTime.add(now, -60, :second)
+    attrs = %{quota_key: "account", quota_scope: "account", quota_family: "account", window_kind: "secondary", window_minutes: 10_080, source: "codex_usage_api", source_precision: "observed", freshness_state: "fresh", last_sync_at: observed_at, observed_at: observed_at, reset_at: DateTime.add(now, 6, :day), merge_precedence: 60, used_percent: Decimal.new(100), metadata: %{}}
+    candidate = struct!(Evidence, %{attrs | used_percent: Decimal.new(32), observed_at: DateTime.add(now, -5, :second), last_sync_at: DateTime.add(now, -5, :second), metadata: %{"rate_limit_allowed" => true, "rate_limit_reached" => false}})
+    window = %AccountQuotaWindow{} |> AccountQuotaWindow.changeset(Map.merge(attrs, %{upstream_identity_id: identity.id, metadata: EvidenceStore.put_candidate(%{}, candidate), created_at: now, updated_at: now})) |> Repo.insert!()
+    send(view.pid, {Events, %{topics: ["upstreams"], reason: "quota_windows_updated"}})
+    settle_saved_reset_status(view)
+    assert has_element?(view, "#saved-reset-operation-list-#{identity.id}[data-verification-state='candidate']")
+    assert has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "Last verified quota")
+    assert has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "New quota report awaiting verification")
+    persist_reset_receipt!(identity, "confirmed_by_quota")
+    Repo.delete!(job)
+    send(view.pid, {Events, %{topics: ["upstreams"], reason: "saved_reset_redemption_updated"}})
+    settle_saved_reset_status(view)
+    assert_confirmed_receipt_reviewable(view, identity)
+    state = :sys.get_state(view.pid).socket.assigns
+    assert state.saved_reset_policy_form === draft
+    assert state.filter_values == filters
+    assert state.editing_saved_reset_policy.identity.id == identity.id
+    assert has_element?(view, "#saved-reset-policy-dialog[open]")
+    refute has_element?(view, "#upstream-account-#{identity.id}-saved-reset-meter-confirmation")
+    assert Repo.get!(AccountQuotaWindow, window.id).id == window.id
+    assert FakeUpstream.requests(fake) == []
+    CodexPooler.TestDiagnostics.puts(Jason.encode!(%{scenario: "list_open_receipt_updates", states: [:queued, :processing, :pending, :candidate, :quota_confirmed], provider_calls: FakeUpstream.count(fake), retained_window: true, form_identical: true, dialog_open: true}))
+    stop_saved_reset_fake!(fake)
+  end
+
+  @tag :saved_reset_live_status
+  test "fallback batches monitored accounts and rejects an untrusted refresh target", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "batch-reset-status", name: "Batch reset status"})
+
+    identities =
+      for _index <- 1..3 do
+        %{identity: identity} = upstream_assignment_fixture(pool)
+        persist_reset_receipt!(identity, "consumed_pending_probe")
+        identity
+      end
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    timer = :sys.get_state(view.pid).socket.assigns.saved_reset_status_timer
+    assert is_reference(timer)
+    assert Process.read_timer(timer) in 1..5_000
+    Enum.each(identities, &persist_reset_receipt!(&1, "confirmed_by_quota"))
 
-    render_click(view, "open_saved_reset_policy", %{"id" => identity.id})
-    assert has_element?(view, "#saved-reset-policy-dialog[open]")
+    {_, reads} =
+      capture_saved_reset_status_reads(fn ->
+        Process.cancel_timer(timer, async: false, info: false)
+        send(view.pid, :refresh_saved_reset_status_tick)
+        settle_saved_reset_status(view)
+      end)
 
-    assert {:ok, _event} =
-             Events.broadcast_upstreams(pool.id, "quota_windows_updated", %{
-               "upstream_identity_id" => identity.id
-             })
+    assert reads == 1
+    assert :sys.get_state(view.pid).socket.assigns.saved_reset_status_timer == nil
 
-    state = :sys.get_state(view.pid)
-    assert Map.get(state.socket.assigns, :upstreams_reload_dirty?, false)
-    refute Map.get(state.socket.assigns, :upstreams_reload_running?, false)
-    assert is_nil(state.socket.assigns[:upstreams_reload_timer])
-    assert has_element?(view, "#saved-reset-policy-dialog[open]")
+    for identity <- identities do
+      assert_confirmed_receipt_reviewable(view, identity)
+    end
 
     view |> element("#saved-reset-policy-cancel") |> render_click()
+    assert :sys.get_state(view.pid).socket.assigns.saved_reset_status_timer == nil
 
-    state = :sys.get_state(view.pid)
-    assert state.socket.assigns[:upstreams_reload_running?]
-    _ = render_async(view)
+    {_, hidden_reads} =
+      capture_saved_reset_status_reads(fn ->
+        render_click(view, "refresh_saved_reset_status", %{"id" => Ecto.UUID.generate()})
+        settle_saved_reset_status(view)
+      end)
 
-    refute :sys.get_state(view.pid).socket.assigns[:upstreams_reload_dirty?]
-    refute has_element?(view, "#saved-reset-policy-dialog")
+    assert hidden_reads == 0
+  end
+
+  @tag :saved_reset_live_status
+  test "an unrelated rename dialog defers automatic status reads", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "rename-reset-status", name: "Rename reset status"})
+    %{identity: identity} = upstream_assignment_fixture(pool)
+    persist_reset_receipt!(identity, "consumed_pending_probe")
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    render_click(view, "open_rename_account", %{"id" => identity.id})
+    persist_reset_receipt!(identity, "confirmed_by_quota")
+
+    {_, reads} =
+      capture_saved_reset_status_reads(fn ->
+        send(view.pid, {Events, %{topics: ["upstreams"], reason: "saved_reset_redemption_updated"}})
+        settle_saved_reset_status(view)
+      end)
+
+    assert reads == 0
+    assert has_element?(view, "#rename-upstream-account-dialog[open]")
+    assert :sys.get_state(view.pid).socket.assigns.saved_reset_status_timer == nil
+    assert has_element?(view, "#saved-reset-operation-list-#{identity.id}[data-verification-state='pending']")
+  end
+
+  @tag :compact_list_live_status
+  test "normal paused cards hide historical receipt while active View status preserves access to the completed result", %{conn: conn, scope: scope} do
+    {:ok, fake} = FakeUpstream.start_link(:success)
+    on_exit(fn -> FakeUpstream.stop(fake) end)
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "compact-reset-status", name: "Compact reset status"})
+    %{identity: identity, assignment: assignment} = upstream_assignment_fixture(pool, %{identity_metadata: %{"usage_base_url" => FakeUpstream.url(fake)}})
+    now = DateTime.utc_now()
+
+    assert {:ok, _windows} = QuotaWindows.upsert_quota_windows(identity, [%{window_kind: "primary", window_minutes: 300, used_percent: Decimal.new(15), reset_at: DateTime.add(now, 5, :hour), source: "codex_usage_api", source_precision: "observed", freshness_state: "fresh", observed_at: now}, %{window_kind: "secondary", window_minutes: 10_080, used_percent: Decimal.new(15), reset_at: DateTime.add(now, 6, :day), source: "codex_usage_api", source_precision: "observed", freshness_state: "fresh", observed_at: now}])
+    args = %{"trigger_kind" => "admin_manual", "pool_upstream_assignment_id" => assignment.id, "manual_request_target" => %{"pool_id" => pool.id, "upstream_identity_id" => identity.id}}
+    job = args |> SavedResetRedemptionWorker.new(unique: false) |> Oban.insert!()
+    job |> Ecto.Changeset.change(state: "completed", completed_at: now) |> Repo.update!()
+    persist_reset_receipt!(identity, "confirmed_by_quota")
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    render_hook(view, "set_live_updates", %{"paused" => true})
+    account = Enum.find(:sys.get_state(view.pid).socket.assigns.upstream_accounts, &(&1.identity.id == identity.id))
+    assert account.saved_reset_operation.serving_readiness.routing_ready_now?
+    assert account.saved_reset_operation.request.state == :stopped
+    refute has_element?(view, "#saved-reset-operation-list-#{identity.id}")
+    assert has_element?(view, "#upstream-account-#{identity.id}-quota-readiness-contract[data-routing-ready-now='true']")
+
+    render_hook(view, "set_live_updates", %{"paused" => false})
+    persist_reset_receipt!(identity, "consumed_pending_probe")
+    send(view.pid, {Events, %{topics: ["upstreams"], reason: "saved_reset_redemption_updated"}})
+    execute_scheduled_upstreams_reload(view)
+    settle_saved_reset_status(view)
+    assert has_element?(view, "#saved-reset-operation-list-#{identity.id}[data-presentation='compact']", "Reset applied")
+    refute has_element?(view, "#saved-reset-operation-list-#{identity.id} dl")
+    view |> element("#saved-reset-view-status-list-#{identity.id}") |> render_click()
+    assert has_element?(view, "#saved-reset-policy-dialog[open]")
+    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id}[data-verification-state='pending']")
+    persist_reset_receipt!(identity, "confirmed_by_quota")
+    render_click(view, "refresh_saved_reset_status", %{"id" => identity.id})
+    settle_saved_reset_status(view)
+    assert_confirmed_receipt_reviewable(view, identity)
+    view |> element("#saved-reset-policy-cancel") |> render_click()
+    {:ok, remounted, _html} = live(conn, ~p"/admin/upstreams")
+    assert_confirmed_receipt_reviewable(remounted, identity)
+    assert FakeUpstream.requests(fake) == []
+    CodexPooler.TestDiagnostics.puts(Jason.encode!(%{scenario: "normal_paused_historical_compact_active_detail_remount", initial_routing_ready: true, terminal_request_state: "stopped", paused_normal_list_receipts: 0, active_compact_rows: 1, view_status_opened_safe_bank: true, confirmed_hidden_from_list: true, latest_bank_receipt_after_remount: true, provider_calls: 0}))
+    stop_saved_reset_fake!(fake)
+  end
+
+  @tag :saved_reset_cursor_privacy
+  test "private saved reset refresh cursor stays server-only in rendered list and bank", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "private-reset-cursor", name: "Private reset cursor"})
+    %{identity: identity} = upstream_assignment_fixture(pool)
+    persist_reset_receipt!(identity, "consumed_pending_probe")
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    sentinel = "synthetic-private-saved-reset-cursor-not-for-rendering"
+
+    :sys.replace_state(view.pid, fn state ->
+      accounts =
+        Enum.map(state.socket.assigns.upstream_accounts, fn account ->
+          %{account | saved_reset_refresh_cursor: Map.put(account.saved_reset_refresh_cursor, :request_generation, sentinel)}
+        end)
+
+      %{state | socket: Phoenix.Component.assign(state.socket, :upstream_accounts, accounts)}
+    end)
+
+    render_click(view, "open_saved_reset_policy", %{"id" => identity.id})
+    html = render(view)
+    refute html =~ sentinel
+    refute html =~ "saved_reset_refresh_cursor"
+    assert has_element?(view, "#upstream-account-#{identity.id}")
+    assert has_element?(view, "#saved-reset-policy-dialog[open]")
+    state = :sys.get_state(view.pid).socket.assigns
+    [account] = state.upstream_accounts
+    assert account.saved_reset_refresh_cursor.request_generation == sentinel
+    assert state.editing_saved_reset_policy.saved_reset_refresh_cursor.request_generation == sentinel
+    CodexPooler.TestDiagnostics.puts(Jason.encode!(%{scenario: "list_bank_cursor_render_privacy", cursor_retained_in_server_account: true, cursor_retained_in_server_editing_account: true, cursor_key_or_sentinel_in_actual_dom: false, list_and_bank_rendered: true}))
+  end
+
+  defp assert_confirmed_receipt_reviewable(view, identity) do
+    refute has_element?(view, "#saved-reset-operation-list-#{identity.id}")
+
+    editing = :sys.get_state(view.pid).socket.assigns.editing_saved_reset_policy
+
+    if editing == nil or editing.identity.id != identity.id do
+      render_click(view, "open_saved_reset_policy", %{"id" => identity.id})
+    end
+
+    assert has_element?(view, "#saved-reset-policy-dialog[open]")
+    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id}[data-verification-state='quota_confirmed']", "Quota confirmed")
+    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id}-details[data-preserve-open] > summary", "Quota confirmed")
+  end
+
+  defp stop_saved_reset_fake!(fake) do
+    monitors = for pid <- [fake.pid, fake.server, fake.supervisor], do: {pid, Process.monitor(pid)}
+    assert :ok = FakeUpstream.stop(fake)
+
+    for {pid, monitor} <- monitors do
+      assert_receive {:DOWN, ^monitor, :process, ^pid, _reason}, 2_000
+    end
+  end
+
+  defp settle_saved_reset_status(view, remaining \\ 10)
+  defp settle_saved_reset_status(_view, 0), do: flunk("saved reset status reads did not settle")
+
+  defp settle_saved_reset_status(view, remaining) do
+    html = render_async(view)
+    state = :sys.get_state(view.pid).socket.assigns
+
+    if state.saved_reset_status_running || state.saved_reset_status_rerun || state.upstreams_reload_running? do
+      settle_saved_reset_status(view, remaining - 1)
+    else
+      html
+    end
+  end
+
+  defp capture_saved_reset_status_reads(fun) do
+    ref = make_ref()
+    parent = self()
+    on_exit(fn -> :telemetry.detach(ref) end)
+
+    :ok =
+      :telemetry.attach(
+        ref,
+        [:codex_pooler, :repo, :query],
+        fn _, _, metadata, _ ->
+          if metadata[:repo] == Repo and is_binary(metadata[:query]) and String.contains?(String.downcase(metadata.query), "row_number()") do
+            send(parent, {ref, :scoped_read})
+          end
+        end,
+        nil
+      )
+
+    try do
+      result = fun.()
+      {result, drain_saved_reset_status_reads(ref, 0)}
+    after
+      :telemetry.detach(ref)
+    end
+  end
+
+  defp drain_saved_reset_status_reads(ref, count) do
+    receive do
+      {^ref, :scoped_read} -> drain_saved_reset_status_reads(ref, count + 1)
+    after
+      0 -> count
+    end
+  end
+
+  defp block_next_saved_reset_identity_read! do
+    ref = make_ref()
+    parent = self()
+    once = :atomics.new(1, [])
+    on_exit(fn -> :telemetry.detach(ref) end)
+
+    :ok =
+      :telemetry.attach(
+        ref,
+        [:codex_pooler, :repo, :query],
+        fn _, _, metadata, _ ->
+          if metadata[:repo] == Repo and metadata[:source] == "upstream_identities" and self() != parent and :atomics.compare_exchange(once, 1, 0, 1) == :ok do
+            send(parent, {ref, :read_blocked, self()})
+
+            receive do
+              {^ref, :release} -> :ok
+            after
+              2_000 -> raise "saved reset status read barrier was not released"
+            end
+          end
+        end,
+        nil
+      )
+
+    ref
+  end
+
+  defp persist_reset_receipt!(identity, phase) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    record = %{"phase" => phase, "status" => "succeeded", "generation" => 4, "started_at" => DateTime.to_iso8601(DateTime.add(now, -30, :second)), "consumed_at" => DateTime.to_iso8601(DateTime.add(now, -20, :second)), "deadline_at" => DateTime.to_iso8601(DateTime.add(now, 180, :second)), "result" => %{"applied" => true, "code" => "reset"}}
+    identity = Repo.get!(UpstreamIdentity, identity.id)
+    identity |> UpstreamIdentity.changeset(%{metadata: Map.put(identity.metadata, "saved_reset_redemption", record)}) |> Repo.update!()
   end
 
   test "refreshes quota limits when upstream quota windows change outside the LiveView", %{
@@ -9139,6 +9562,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
   defp stop_live_view_proxy!(view) do
     monitor = Process.monitor(view.pid)
+    _ = :sys.get_state(view.pid)
     {_ref, _topic, proxy_pid} = view.proxy
     ClientProxy.stop(proxy_pid, {:shutdown, :cleanup})
     assert_receive {:DOWN, ^monitor, :process, _pid, _reason}, @mounted_recovery_timeout_ms

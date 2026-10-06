@@ -2,7 +2,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive.SavedResetWorkflow do
   @moduledoc false
 
   import Phoenix.Component, only: [assign: 3, to_form: 2]
-  import Phoenix.LiveView, only: [put_flash: 3]
+  import Phoenix.LiveView, only: [put_flash: 3, clear_flash: 2]
 
   alias CodexPooler.Upstreams
 
@@ -51,8 +51,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive.SavedResetWorkflow do
       confirming_redemption_for?(socket, identity_id) ->
         close_redemption_confirmation(socket)
 
+      status_only?(socket.assigns.cockpit) ->
+        resume_status(socket)
+
       action_available?(socket, :redeem_saved_reset, identity_id) ->
-        assign(socket, :confirming_saved_reset_redemption, %{
+        assign(clear_flash(socket, :error), :confirming_saved_reset_redemption, %{
           identity_id: identity_id,
           pool_id: pool_id,
           label: socket.assigns.cockpit.header.title
@@ -84,26 +87,24 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive.SavedResetWorkflow do
         ) ::
           Phoenix.LiveView.Socket.t()
   def redeem(socket, identity_id, pool_id, reload_fun) do
+    confirmed? = confirmed?(socket, identity_id, pool_id)
+    socket = reload_fun.(socket)
+
     cond do
-      identity_id != socket.assigns.cockpit.identity.id ->
+      not match?(%{identity: %{id: ^identity_id}}, socket.assigns.cockpit) ->
         put_flash(socket, :error, "Upstream account was not found")
 
-      not confirmed?(socket, identity_id, pool_id) ->
+      status_only?(socket.assigns.cockpit) ->
+        resume_status(socket)
+
+      not confirmed? ->
         put_flash(socket, :error, "Confirm saved reset redemption before queueing it")
 
+      action_available?(socket, :redeem_saved_reset, identity_id) ->
+        enqueue_redemption(socket, identity_id, pool_id, reload_fun)
+
       true ->
-        socket = reload_fun.(socket)
-
-        cond do
-          identity_id != socket.assigns.cockpit.identity.id ->
-            put_flash(socket, :error, "Upstream account was not found")
-
-          action_available?(socket, :redeem_saved_reset, identity_id) ->
-            enqueue_redemption(socket, identity_id, pool_id, reload_fun)
-
-          true ->
-            put_unavailable_action_error(socket, :redeem_saved_reset)
-        end
+        put_unavailable_action_error(socket, :redeem_saved_reset)
     end
   end
 
@@ -116,19 +117,38 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive.SavedResetWorkflow do
          ) do
       {:ok, %{status: :already_queued}} ->
         socket
+        |> clear_flash(:error)
         |> close_redemption_confirmation()
         |> put_flash(:info, "Saved reset redemption is already queued")
         |> reload_fun.()
 
       {:ok, _result} ->
         socket
+        |> clear_flash(:error)
         |> close_redemption_confirmation()
         |> put_flash(:info, "Saved reset redemption queued")
         |> reload_fun.()
 
-      {:error, reason} ->
-        put_flash(socket, :error, error_message(reason))
+      {:error, %{code: :saved_reset_redemption_in_progress}} ->
+        socket |> reload_fun.() |> resume_status()
+
+      {:error, _reason} ->
+        socket
+        |> put_flash(:error, "Saved reset request was not accepted. Refresh status to review the current account state")
+        |> reload_fun.()
     end
+  end
+
+  defp status_only?(%{saved_reset_operation: operation}) do
+    operation.request.state in [:queued, :processing, :unavailable] or
+      operation.provider_outcome == :unknown or operation.active?
+  end
+
+  defp resume_status(socket) do
+    socket
+    |> clear_flash(:error)
+    |> close_redemption_confirmation()
+    |> put_flash(:info, "Review the recorded saved reset status before taking another action")
   end
 
   defp confirmed?(socket, identity_id, pool_id) do

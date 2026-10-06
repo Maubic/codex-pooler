@@ -90,6 +90,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaLimitRow 
           <span data-role="relative-countdown-value">{strip_in_prefix(@limit.reset_label)}</span>
         </span>
       </div>
+      <div :if={context = Map.get(@limit, :saved_reset_context)} class="grid gap-1 text-[11px] leading-5 text-base-content/70" title={context.detail}>
+        <span data-role="last-verified-quota">{context.label}</span>
+        <span :if={context.candidate?} data-role="unconfirmed-quota-report">{context.candidate_label}</span>
+      </div>
     </div>
     <QuotaObservationsDialog.dialog
       :if={Map.get(@limit, :observations, []) != []}

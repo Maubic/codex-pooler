@@ -150,6 +150,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjection do
 
   @spec redemption_action(map()) :: action()
   def redemption_action(account) do
+    existing_action = domain_redemption_action(account)
+
+    if existing_action.available? and get_in(account, [:saved_reset_operation, :request, :state]) in [:queued, :processing] do
+      action(false, "saved reset request is already accepted")
+    else
+      existing_action
+    end
+  end
+
+  defp domain_redemption_action(account) do
     cond do
       account.identity.status == "deleted" ->
         action(false, "deleted accounts cannot redeem saved resets")

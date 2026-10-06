@@ -1,10 +1,11 @@
 defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservations do
   @moduledoc false
 
-  alias CodexPooler.Quotas.{AdditionalMeterIdentity, Evidence}
+  alias CodexPooler.Quotas.{AdditionalMeterIdentity, Evidence, WindowClassifier}
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
   alias CodexPooler.Upstreams.Quota.Windows.EvidenceStore
   alias CodexPooler.Upstreams.Quota.WindowSelector
+  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetConfirmationProjection
   alias CodexPoolerWeb.DateTimeDisplay
 
   @sources %{
@@ -14,22 +15,32 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservations do
     "codex_rate_limit_error" => "Rate-limit error"
   }
 
+  @type saved_reset_context :: %{
+          role: :last_verified,
+          label: String.t(),
+          detail: String.t(),
+          candidate?: boolean(),
+          candidate_label: String.t() | nil,
+          candidate_role: :unconfirmed_report | nil
+        }
+
   @type observation :: %{
-          key: String.t(),
-          source: String.t(),
-          slot: String.t(),
-          used: String.t(),
-          remaining: String.t(),
-          remaining_value: float() | nil,
-          observed_at: String.t(),
-          reset_at: String.t(),
-          freshness: String.t(),
-          elapsed?: boolean(),
-          selected?: boolean(),
-          measurement_pending?: boolean(),
-          pending_measurement: map() | nil,
-          permission_facts: %{allowed: boolean() | nil, limit_reached: boolean() | nil},
-          details: [{String.t(), String.t()}]
+          optional(:saved_reset_context) => saved_reset_context(),
+          required(:key) => String.t(),
+          required(:source) => String.t(),
+          required(:slot) => String.t(),
+          required(:used) => String.t(),
+          required(:remaining) => String.t(),
+          required(:remaining_value) => float() | nil,
+          required(:observed_at) => String.t(),
+          required(:reset_at) => String.t(),
+          required(:freshness) => String.t(),
+          required(:elapsed?) => boolean(),
+          required(:selected?) => boolean(),
+          required(:measurement_pending?) => boolean(),
+          required(:pending_measurement) => map() | nil,
+          required(:permission_facts) => %{allowed: boolean() | nil, limit_reached: boolean() | nil},
+          required(:details) => [{String.t(), String.t()}]
         }
 
   @spec group_key(AccountQuotaWindow.t()) :: String.t()
@@ -43,11 +54,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservations do
   @spec project(AccountQuotaWindow.t(), DateTimeDisplay.preferences(), DateTime.t()) ::
           observation()
   def project(window, preferences, as_of) do
-    pending_measurement = pending_measurement(window, preferences)
+    pending_measurement = pending_measurement(window, preferences, as_of)
     permission_facts = permission_facts(window, pending_measurement)
 
     %{
-      key: fingerprint({window.id, window.source, window.observed_at, window.reset_at}),
+      key: fingerprint({window.id, window.source, group_key(window)}),
       source: Map.get(@sources, window.source, "Other source"),
       slot: allowed(window.window_kind, ~w(primary secondary)),
       used: percent(window.used_percent),
@@ -70,7 +81,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservations do
   def attach(rows, windows, preferences, as_of) do
     groups =
       windows
-      |> Enum.filter(&(DateTime.compare(&1.observed_at, as_of) != :gt))
+      |> Enum.filter(&nonfuture_observation?(&1, as_of))
       |> Enum.sort_by(&{-DateTime.to_unix(&1.observed_at, :microsecond), &1.source, &1.id})
       |> Enum.group_by(&group_key/1)
 
@@ -91,6 +102,71 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservations do
       end
     end)
   end
+
+  @spec attach_saved_reset_context([map()], [AccountQuotaWindow.t()], map(), DateTime.t()) :: [map()]
+  def attach_saved_reset_context(rows, windows, redemption, %DateTime{} = as_of) when is_map(redemption) do
+    with true <- redemption["phase"] in ["consumed_pending_probe", "reblocked", "confirmed_by_upstream", "expired"],
+         {:ok, consumed_at, 0} <- parse_consumed_at(redemption["consumed_at"]),
+         true <- DateTime.compare(consumed_at, as_of) != :gt do
+      contexts =
+        windows
+        |> Enum.filter(&WindowClassifier.saved_reset_window?/1)
+        |> Enum.group_by(&group_key/1)
+        |> Map.new(fn {key, grouped_windows} ->
+          candidate? = Enum.any?(grouped_windows, &(not is_nil(SavedResetConfirmationProjection.candidate_observed_at(&1, consumed_at, as_of))))
+
+          {key,
+           %{
+             role: :last_verified,
+             label: "Last verified quota",
+             detail: "Source freshness does not mean the new quota cycle has been accepted.",
+             candidate?: candidate?,
+             candidate_label: if(candidate?, do: "New quota report awaiting verification"),
+             candidate_role: if(candidate?, do: :unconfirmed_report)
+           }}
+        end)
+
+      Enum.map(rows, &attach_row_context(&1, contexts))
+    else
+      _invalid -> rows
+    end
+  end
+
+  def attach_saved_reset_context(rows, _windows, _redemption, _as_of), do: rows
+
+  defp attach_row_context(row, contexts) do
+    case Map.get(contexts, Map.get(row, :observation_group)) do
+      nil ->
+        row
+
+      context ->
+        row
+        |> Map.put(:saved_reset_context, context)
+        |> Map.update!(:observations, &Enum.map(&1, fn observation -> put_selected_context(observation, context) end))
+    end
+  end
+
+  defp put_selected_context(%{selected?: true} = observation, context),
+    do: put_saved_reset_context(observation, context)
+
+  defp put_selected_context(observation, _context), do: observation
+
+  defp put_saved_reset_context(observation, context) do
+    details = observation.details ++ [{"Quota role", context.label}, {"Recovery verification", context.detail}]
+    details = if context.candidate?, do: details ++ [{"Incoming quota report", context.candidate_label}], else: details
+
+    observation
+    |> Map.put(:saved_reset_context, context)
+    |> Map.put(:details, details)
+  end
+
+  defp nonfuture_observation?(%{observed_at: %DateTime{} = observed_at}, as_of),
+    do: DateTime.compare(observed_at, as_of) != :gt
+
+  defp nonfuture_observation?(_window, _as_of), do: false
+
+  defp parse_consumed_at(value) when is_binary(value), do: DateTime.from_iso8601(value)
+  defp parse_consumed_at(_value), do: :error
 
   defp fingerprint(value) do
     value
@@ -135,14 +211,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservations do
            used_percent: %Decimal{} = retained_percent,
            metadata: metadata
          },
-         preferences
+         preferences,
+         as_of
        )
        when is_map(metadata) do
     with {:ok, candidate} <- EvidenceStore.parse_candidate(metadata),
+         true <- EvidenceStore.candidate_valid?(candidate, as_of),
+         true <- DateTime.compare(candidate.observed_at, as_of) != :gt,
          {:ok, %{allowed: true, limit_reached: false, observed_at: observed_at}} <-
            EvidenceStore.parse_candidate_provider_status(metadata),
          true <- positive_lower_percent?(candidate.used_percent, retained_percent) do
       %{
+        role: :unconfirmed_report,
         used: percent(candidate.used_percent),
         remaining: remaining(candidate.used_percent),
         retained_remaining: remaining(retained_percent) <> " remaining",
@@ -154,7 +234,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaObservations do
     end
   end
 
-  defp pending_measurement(_window, _preferences), do: nil
+  defp pending_measurement(_window, _preferences, _as_of), do: nil
 
   defp positive_lower_percent?(%Decimal{} = candidate, %Decimal{} = retained) do
     Decimal.compare(candidate, Decimal.new(0)) == :gt and

@@ -518,8 +518,108 @@ defmodule CodexPooler.Jobs.AccountPrimingJobsTest do
       assert job.id == first_job.id
       assert job.args["pool_upstream_assignment_id"] == assignment.id
       assert job.args["trigger_kind"] == "admin_manual"
+
+      assert job.args["manual_request_target"] == %{
+               "pool_id" => assignment.pool_id,
+               "upstream_identity_id" => assignment.upstream_identity_id
+             }
+
+      refute Map.has_key?(job.args, "upstream_identity_id")
       refute Map.has_key?(job.args, "credit_id")
       refute Map.has_key?(job.args, "redeem_request_id")
+    end
+
+    test "manual enqueue retains the original persisted target after assignment retargeting" do
+      fake = start_path_upstream(%{})
+      %{assignment: assignment} = upstream_assignment_fixture(pool_fixture(), %{identity_metadata: %{"base_url" => FakeUpstream.url(fake)}})
+
+      assert {:ok, job} = Jobs.enqueue_saved_reset_redemption(assignment.id)
+
+      replacement_pool = pool_fixture()
+      replacement_identity = upstream_identity_fixture(%{metadata: %{"base_url" => FakeUpstream.url(fake)}})
+
+      assert {:ok, _retargeted} =
+               PoolAssignments.update_pool_assignment(assignment, %{
+                 pool_id: replacement_pool.id,
+                 upstream_identity_id: replacement_identity.id
+               })
+
+      assert Repo.get!(Oban.Job, job.id).args == %{
+               "pool_upstream_assignment_id" => assignment.id,
+               "trigger_kind" => "admin_manual",
+               "manual_request_target" => %{
+                 "pool_id" => assignment.pool_id,
+                 "upstream_identity_id" => assignment.upstream_identity_id
+               }
+             }
+
+      assert FakeUpstream.requests(fake) == []
+    end
+
+    test "manual enqueue resolves stale structs and supplied target fields from persisted assignment" do
+      fake = start_path_upstream(%{})
+
+      for ref_kind <- [:struct, :map] do
+        %{assignment: stale_assignment} = upstream_assignment_fixture(pool_fixture(), %{identity_metadata: %{"base_url" => FakeUpstream.url(fake)}})
+        replacement_pool = pool_fixture()
+        replacement_identity = upstream_identity_fixture(%{metadata: %{"base_url" => FakeUpstream.url(fake)}})
+
+        assert {:ok, current_assignment} =
+                 PoolAssignments.update_pool_assignment(stale_assignment, %{
+                   pool_id: replacement_pool.id,
+                   upstream_identity_id: replacement_identity.id
+                 })
+
+        stale_ref =
+          case ref_kind do
+            :struct -> stale_assignment
+            :map -> Map.take(stale_assignment, [:id, :pool_id, :upstream_identity_id])
+          end
+
+        assert {:ok, job} = Jobs.enqueue_saved_reset_redemption(stale_ref)
+
+        assert Repo.get!(Oban.Job, job.id).args == %{
+                 "pool_upstream_assignment_id" => current_assignment.id,
+                 "trigger_kind" => "admin_manual",
+                 "manual_request_target" => %{
+                   "pool_id" => current_assignment.pool_id,
+                   "upstream_identity_id" => current_assignment.upstream_identity_id
+                 }
+               }
+      end
+
+      assert FakeUpstream.requests(fake) == []
+    end
+
+    test "nonmanual enqueue preserves its existing args" do
+      fake = start_path_upstream(%{})
+      %{assignment: assignment} = upstream_assignment_fixture(pool_fixture(), %{identity_metadata: %{"base_url" => FakeUpstream.url(fake)}})
+
+      assert {:ok, job} = Jobs.enqueue_saved_reset_redemption(assignment, trigger_kind: "operator_retry")
+
+      assert Repo.get!(Oban.Job, job.id).args == %{
+               "pool_upstream_assignment_id" => assignment.id,
+               "trigger_kind" => "operator_retry"
+             }
+
+      assert FakeUpstream.requests(fake) == []
+    end
+
+    test "invalid refs keep existing errors and missing binary targets remain unbound" do
+      for invalid <- [nil, 42, %{}, %{id: nil}, %{id: 42}] do
+        assert {:error, :pool_upstream_assignment_id_required} = Jobs.enqueue_saved_reset_redemption(invalid)
+      end
+
+      assert all_enqueued(worker: SavedResetRedemptionWorker) == []
+
+      for missing_id <- [Ecto.UUID.generate(), "missing-assignment", ""] do
+        assert {:ok, job} = Jobs.enqueue_saved_reset_redemption(%{id: missing_id, pool_id: Ecto.UUID.generate(), upstream_identity_id: Ecto.UUID.generate()})
+
+        assert Repo.get!(Oban.Job, job.id).args == %{
+                 "pool_upstream_assignment_id" => missing_id,
+                 "trigger_kind" => "admin_manual"
+               }
+      end
     end
   end
 

@@ -23,6 +23,7 @@ defmodule CodexPooler.Jobs do
     UpstreamEnqueue
   }
 
+  alias CodexPooler.Jobs.ReadModel.SavedResetRequests
   alias CodexPooler.Pools
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
@@ -212,6 +213,9 @@ defmodule CodexPooler.Jobs do
   def worker_job_summaries_by_group(scope, worker_groups, opts \\ []) do
     ReadModel.worker_job_summaries_by_group(scope, worker_groups, opts)
   end
+
+  @spec saved_reset_request_summaries(CodexPooler.Accounts.Scope.t(), [Ecto.UUID.t()], SavedResetRequests.options()) :: SavedResetRequests.summaries()
+  defdelegate saved_reset_request_summaries(scope, identity_ids, opts \\ []), to: SavedResetRequests, as: :summaries
 
   @spec cleanup_runtime_state(DateTime.t()) :: orchestration_result()
   def cleanup_runtime_state(now \\ DateTime.utc_now()) do

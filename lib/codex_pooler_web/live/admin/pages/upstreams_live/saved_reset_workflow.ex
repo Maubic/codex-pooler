@@ -2,7 +2,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SavedResetWorkflow do
   @moduledoc false
 
   import Phoenix.Component, only: [assign: 3, to_form: 2]
-  import Phoenix.LiveView, only: [put_flash: 3]
+  import Phoenix.LiveView, only: [put_flash: 3, clear_flash: 2]
 
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
@@ -53,24 +53,29 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SavedResetWorkflow do
   def redeem(socket, identity_id, opts) do
     reload_fun = Keyword.fetch!(opts, :reload)
     refresh_editing_fun = Keyword.fetch!(opts, :refresh_editing)
+    confirmed? = confirmed?(socket, identity_id)
+    socket = reload_fun.(socket)
 
-    if confirmed?(socket, identity_id) do
-      socket = reload_fun.(socket)
+    case visible_account(socket, identity_id) do
+      nil ->
+        put_flash(socket, :error, "Upstream account was not found")
 
-      case visible_account(socket, identity_id) do
-        nil ->
-          put_flash(socket, :error, "Upstream account was not found")
+      account ->
+        cond do
+          status_only?(account) ->
+            resume_status(socket, account, refresh_editing_fun)
 
-        %{saved_reset_redemption_action: %{available?: false, reason: reason}} ->
-          socket
-          |> put_flash(:error, reason || "Saved reset redemption is not available")
-          |> then(&refresh_editing_fun.(&1, identity_id))
+          not confirmed? ->
+            put_flash(socket, :error, "Confirm saved reset redemption before continuing")
 
-        account ->
-          enqueue_redemption(socket, account, reload_fun, refresh_editing_fun)
-      end
-    else
-      put_flash(socket, :error, "Confirm saved reset redemption before continuing")
+          not account.saved_reset_redemption_action.available? ->
+            socket
+            |> put_flash(:error, account.saved_reset_redemption_action.reason || "Saved reset redemption is not available")
+            |> then(&refresh_editing_fun.(&1, identity_id))
+
+          true ->
+            enqueue_redemption(socket, account, reload_fun, refresh_editing_fun)
+        end
     end
   end
 
@@ -79,14 +84,22 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SavedResetWorkflow do
   def maybe_confirm_redemption(socket, identity_id, _params \\ %{}) do
     case socket.assigns.editing_saved_reset_policy do
       %{identity: %UpstreamIdentity{id: ^identity_id}} = account ->
-        if account.saved_reset_redemption_action.available? do
-          assign(
-            socket,
-            :confirming_saved_reset_redemption,
-            redemption_confirmation(account)
-          )
-        else
-          put_flash(socket, :error, account.saved_reset_redemption_action.reason)
+        cond do
+          status_only?(account) ->
+            socket
+            |> clear_flash(:error)
+            |> assign(:confirming_saved_reset_redemption, nil)
+            |> put_flash(:info, "Review the recorded saved reset status before taking another action")
+
+          account.saved_reset_redemption_action.available? ->
+            assign(
+              clear_flash(socket, :error),
+              :confirming_saved_reset_redemption,
+              redemption_confirmation(account)
+            )
+
+          true ->
+            put_flash(socket, :error, account.saved_reset_redemption_action.reason)
         end
 
       _account ->
@@ -110,15 +123,40 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SavedResetWorkflow do
 
       socket =
         socket
+        |> clear_flash(:error)
         |> put_flash(:info, message)
         |> assign(:confirming_saved_reset_redemption, nil)
         |> reload_fun.()
 
       refresh_editing_fun.(socket, account.identity.id)
     else
-      {:error, reason} ->
-        put_flash(socket, :error, WorkflowError.message(reason))
+      {:error, %{code: :saved_reset_redemption_in_progress}} ->
+        socket = reload_fun.(socket)
+
+        case visible_account(socket, account.identity.id) do
+          nil -> put_flash(socket, :error, "Upstream account was not found")
+          current -> resume_status(socket, current, refresh_editing_fun)
+        end
+
+      {:error, _reason} ->
+        socket
+        |> put_flash(:error, "Saved reset request was not accepted. Refresh status to review the current account state")
+        |> reload_fun.()
+        |> then(&refresh_editing_fun.(&1, account.identity.id))
     end
+  end
+
+  defp status_only?(%{saved_reset_operation: operation}) do
+    operation.request.state in [:queued, :processing, :unavailable] or
+      operation.provider_outcome == :unknown or operation.active?
+  end
+
+  defp resume_status(socket, account, refresh_editing_fun) do
+    socket
+    |> clear_flash(:error)
+    |> assign(:confirming_saved_reset_redemption, nil)
+    |> put_flash(:info, "Review the recorded saved reset status before taking another action")
+    |> then(&refresh_editing_fun.(&1, account.identity.id))
   end
 
   defp visible_account(socket, identity_id) do

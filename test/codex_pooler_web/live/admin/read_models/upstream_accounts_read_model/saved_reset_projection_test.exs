@@ -6,6 +6,30 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjectionTes
 
   @prefs DateTimeDisplay.preferences_for_user(nil)
 
+  test "open manual request presentation refuses another submission without changing domain facts" do
+    account = %{
+      identity: %{status: "active"},
+      reauth_required?: false,
+      refresh_status: "imported",
+      secret_status: :present,
+      assignments: [%{id: "trusted-assignment"}],
+      saved_resets: %{reported?: true, available?: true, in_progress?: false}
+    }
+
+    assert SavedResetProjection.redemption_action(account) == %{available?: true, reason: nil}
+
+    for state <- [:queued, :processing] do
+      projected = Map.put(account, :saved_reset_operation, %{request: %{state: state}})
+      assert SavedResetProjection.redemption_action(projected) == %{available?: false, reason: "saved reset request is already accepted"}
+      assert projected.saved_resets == account.saved_resets
+    end
+
+    for state <- [:none, :stopped, :unavailable] do
+      projected = Map.put(account, :saved_reset_operation, %{request: %{state: state}})
+      assert SavedResetProjection.redemption_action(projected).available?
+    end
+  end
+
   defp metadata(phase, extra \\ %{}) do
     consumed_at = ~U[2026-07-14 03:20:00.000000Z]
 

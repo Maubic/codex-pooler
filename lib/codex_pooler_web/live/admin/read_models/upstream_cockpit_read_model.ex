@@ -15,6 +15,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.Formatting
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection
+  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProjection
+  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjection
   alias CodexPoolerWeb.DateTimeDisplay
 
   @reactivatable_statuses ~w(paused refresh_due refresh_failed)
@@ -159,6 +161,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
           required(:saved_resets) => SavedResets.snapshot_projection(),
           required(:saved_reset_policy) => SavedResets.auto_policy_projection(),
           required(:saved_reset_confirmation) => QuotaProjection.saved_reset_confirmation() | nil,
+          required(:saved_reset_operation) => SavedResetOperationProjection.t() | nil,
+          required(:saved_reset_refresh_cursor) => UpstreamAccountsReadModel.saved_reset_refresh_cursor() | nil,
           required(:quota_limits) => [UpstreamAccountsReadModel.quota_limit_row()],
           required(:quota_readiness) => UpstreamAccountsReadModel.quota_readiness(),
           required(:provider_credits_policy) => %{allow_provider_credits: boolean()},
@@ -341,6 +345,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
       saved_resets: saved_resets,
       saved_reset_policy: saved_reset_policy,
       saved_reset_confirmation: saved_reset_confirmation,
+      saved_reset_operation: Map.get(account, :saved_reset_operation),
+      saved_reset_refresh_cursor: Map.get(account, :saved_reset_refresh_cursor),
       quota_limits: quota_limits(account),
       quota_readiness: quota_readiness,
       provider_credits_policy: account.provider_credits_policy,
@@ -857,30 +863,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
     do: "You do not have permission to permanently delete this account."
 
   defp redeem_saved_reset_action(account, header) do
-    cond do
-      account.identity.status == "deleted" ->
-        action(false, "deleted accounts cannot redeem saved resets")
-
-      account.identity.status == "disabled" ->
-        action(false, "disabled accounts cannot redeem saved resets")
-
-      not auth_clearly_usable?(header) ->
-        action(false, "saved reset redemption requires usable credentials")
-
-      account.assignments == [] ->
-        action(false, "saved reset redemption requires a Pool assignment")
-
-      account.saved_resets.reported? == false ->
-        action(false, "saved reset count is not reported")
-
-      account.saved_resets.available? == false ->
-        action(false, "no saved resets are available")
-
-      account.saved_resets.in_progress? == true ->
-        action(false, "saved reset redemption is already in progress")
-
-      true ->
-        action(true, nil)
+    if account.identity.status not in ["deleted", "disabled"] and not auth_clearly_usable?(header) do
+      action(false, "saved reset redemption requires usable credentials")
+    else
+      Map.get_lazy(account, :saved_reset_redemption_action, fn -> SavedResetProjection.redemption_action(account) end)
     end
   end
 

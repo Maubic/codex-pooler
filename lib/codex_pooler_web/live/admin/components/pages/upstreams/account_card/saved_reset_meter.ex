@@ -49,12 +49,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.SavedResetMete
   attr :saved_resets, :map, required: true
   attr :saved_reset_policy, :map, required: true
   attr :saved_reset_confirmation, :map, default: nil
+  attr :show_confirmation, :boolean, default: true
   attr :class, :any, default: nil
   attr :now, :any, default: nil
 
   def saved_reset_meter(assigns) do
     confirmation =
-      saved_reset_confirmation(assigns.saved_reset_confirmation, assigns.saved_resets)
+      if assigns.show_confirmation, do: saved_reset_confirmation(assigns.saved_reset_confirmation, assigns.saved_resets), else: nil
 
     now = assigns.now || DateTime.utc_now()
 
@@ -142,7 +143,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.SavedResetMete
         </span>
       </div>
       <div
-        :if={@confirmation}
+        :if={@show_confirmation and @confirmation}
         id={"#{@id}-confirmation"}
         data-role="upstream-saved-reset-confirmation"
         data-confirmation-state={@confirmation.state}

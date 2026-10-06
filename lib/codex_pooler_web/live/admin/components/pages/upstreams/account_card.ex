@@ -22,6 +22,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
     ReconciliationStatus,
     ReinviteLink,
     RoutePath,
+    SavedResetOperation,
     UsagePollPause
   }
 
@@ -190,9 +191,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
                 saved_resets={@saved_resets}
                 saved_reset_policy={@saved_reset_policy}
                 saved_reset_confirmation={@saved_reset_confirmation}
+                show_confirmation={not Map.has_key?(@account, :saved_reset_operation)}
                 class={saved_reset_meter_grid_class(@reported_quota_limits)}
               />
             </div>
+            <AdminComponents.saved_reset_operation
+              :if={Map.has_key?(@account, :saved_reset_operation) && SavedResetOperation.list_visible?(@account.saved_reset_operation)}
+              identity_id={@account.identity.id}
+              surface={:list}
+              operation={@account.saved_reset_operation}
+              refreshing={Map.get(@account, :saved_reset_status_refreshing?, false)}
+              status_view_disabled={UpstreamAccountActions.assignment_unavailable_reason(@account.assignments) != nil or @account.identity.status == "deleted"}
+            />
           </section>
 
           <section

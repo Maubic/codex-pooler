@@ -1,0 +1,271 @@
+defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProjectionTest do
+  use ExUnit.Case, async: true
+
+  alias CodexPooler.Admin.{UpstreamQuotaReadiness, UpstreamRoutingReadiness}
+  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProjection, as: Projection
+  alias CodexPoolerWeb.DateTimeDisplay
+
+  @now ~U[2026-07-14 03:30:00.000000Z]
+  @started ~U[2026-07-14 03:29:40.000000Z]
+  @consumed ~U[2026-07-14 03:29:45.000000Z]
+  @prefs DateTimeDisplay.preferences_for_user(nil)
+
+  defp context(extra \\ %{}) do
+    readiness = UpstreamRoutingReadiness.from_inputs("active", [], UpstreamQuotaReadiness.from_windows([], @now))
+    Map.merge(%{snapshot_at: @now, datetime_preferences: @prefs, serving_readiness: readiness}, extra)
+  end
+
+  defp redemption(phase, code \\ "reset", applied \\ true) do
+    %{
+      "phase" => phase,
+      "status" => if(phase in ["consuming", "consumed_pending_probe"], do: "redeeming", else: "succeeded"),
+      "started_at" => DateTime.to_iso8601(@started),
+      "consumed_at" => DateTime.to_iso8601(@consumed),
+      "finished_at" => DateTime.to_iso8601(@consumed),
+      "deadline_at" => DateTime.to_iso8601(DateTime.add(@consumed, 15, :minute)),
+      "result" => %{"code" => code, "applied" => applied, "http_status" => 200, "available_count_before" => 2, "available_count_after" => 1}
+    }
+  end
+
+  defp project(record, extra \\ %{}), do: Projection.project(context(Map.put(extra, :redemption, record)))
+
+  @tag :operation_truth_matrix
+  test "current applied and recovered results independently preserve quota verification and readiness" do
+    for code <- ["reset", "already_redeemed", "target_redeemed"] do
+      result = project(redemption("consumed_pending_probe", code))
+      assert result.provider_outcome == :applied
+      assert result.verification == :pending
+      assert result.headline == "Reset applied — verifying quota"
+      assert result.summary == "The reset was applied. Quota availability is still being verified. This verification does not start another redemption."
+      assert result.serving_readiness == context().serving_readiness
+      assert result.active? and result.refreshable? and result.show_latest_receipt?
+      assert result.consumed_at == DateTimeDisplay.format_datetime(@consumed, @prefs)
+      assert is_binary(result.started_at) and is_binary(result.finished_at) and is_binary(result.deadline_at)
+    end
+  end
+
+  @tag :operation_truth_matrix
+  test "candidate, quota confirmation and request verification remain distinct" do
+    candidate = %{confirmation_state: :awaiting_confirmation, challenged_evidence_state: :candidate_progressing, additional_account_blocker_state: :none, observed_at: @now}
+    assert project(redemption("consumed_pending_probe"), %{confirmation: candidate}).verification == :candidate
+
+    quota = project(redemption("confirmed_by_quota"))
+    assert quota.verification == :quota_confirmed
+    assert quota.headline == "Quota confirmed"
+    refute quota.active?
+    assert quota.show_latest_receipt?
+
+    request = project(redemption("confirmed_by_upstream"))
+    assert request.verification == :request_verified
+    assert request.headline == "Recovery verified by a request"
+    assert request.summary == "Quota synchronization is still pending. Availability remains subject to the existing recovery limits."
+  end
+
+  @tag :operation_truth_matrix
+  test "definitive noops require explicit matching application facts" do
+    for {code, headline} <- [{"no_credit", "No saved reset was available"}, {"nothing_to_reset", "No eligible quota needed resetting"}] do
+      result = project(%{"status" => "noop", "result" => %{"code" => code, "applied" => false}})
+      assert result.provider_outcome == :not_applied
+      assert result.verification == :not_started
+      assert result.headline == headline
+      refute Map.has_key?(result, :consumed_at)
+      assert result.show_latest_receipt?
+    end
+  end
+
+  @tag :operation_truth_matrix
+  test "consume_not_applied needs the version one zero-dispatch replay contract" do
+    record = %{"phase" => "consume_not_applied", "result" => %{"code" => "consume_not_applied", "applied" => false}, "provider_replay" => %{"version" => 1, "provider_dispatches" => 0}}
+    result = project(record)
+    assert result.provider_outcome == :not_applied
+    assert result.headline == "Reset was not applied"
+    assert result.detail =~ "stopped before provider dispatch"
+  end
+
+  @tag :operation_truth_matrix
+  test "zero-dispatch observe-only settlement retains a known non-dispatch recovery observation" do
+    # enter_observe_only!/4 and persist_observe_only_locked!/4 retain these codes;
+    # settle_consume_not_applied!/5 preserves the replay map on the terminal record.
+    for code <- ["write_budget_exhausted", "scope_changed"] do
+      record = %{
+        "phase" => "consume_not_applied",
+        "status" => "failed",
+        "started_at" => DateTime.to_iso8601(DateTime.add(@now, -30, :minute)),
+        "finished_at" => DateTime.to_iso8601(@now),
+        "result" => %{"code" => "consume_not_applied", "applied" => false, "available_count_before" => nil, "available_count_after" => nil, "http_status" => nil},
+        "provider_replay" => %{
+          "version" => 1,
+          "endpoint_family" => "codex_api",
+          "scope_fingerprint" => "synthetic-scope-fingerprint",
+          "provider_dispatches" => 0,
+          "mode" => "observe_only",
+          "replay_exhausted_at" => DateTime.to_iso8601(@now),
+          "unresolved_since" => DateTime.to_iso8601(@now),
+          "next_action_at" => DateTime.to_iso8601(@now),
+          "last_code" => code
+        }
+      }
+
+      result = project(record)
+      assert result.provider_outcome == :not_applied
+      assert result.headline == "Reset was not applied"
+      assert result.verification == :not_started
+      refute Map.has_key?(result, :consumed_at)
+      assert project(put_in(record, ["provider_replay", "last_provider_dispatched_at"], DateTime.to_iso8601(@started))).provider_outcome == :unknown
+      assert project(put_in(record, ["provider_replay", "last_code"], "transport_error")).provider_outcome == :unknown
+      assert project(put_in(record, ["provider_replay", "provider_dispatches"], 1)).provider_outcome == :unknown
+      assert project(put_in(record, ["provider_replay", "mode"], "replay")).provider_outcome == :unknown
+    end
+  end
+
+  @tag :operation_truth_matrix
+  test "a new accepted request and an older latest receipt stay separate" do
+    summary = %{open: %{state: :queued, requested_at: @now, scheduled_at: DateTime.add(@now, 5, :second)}, latest_terminal: nil}
+    result = project(redemption("confirmed_by_quota"), %{request_summary: summary})
+    assert result.request.state == :queued
+    assert result.request.headline == "Request accepted"
+    assert result.request.summary == "Your request is queued. Provider application has not been confirmed yet."
+    assert is_binary(result.request.requested_at) and is_binary(result.request.scheduled_at)
+    assert result.provider_outcome == :applied and result.verification == :quota_confirmed
+    assert result.headline == "Quota confirmed"
+    assert result.active? and result.show_latest_receipt?
+  end
+
+  @tag :operation_truth_matrix
+  test "normal fresh consuming distinguishes in progress from application" do
+    # build_redemption_claim!/9 persists the result key before a provider reply exists.
+    result = project(%{"phase" => "consuming", "status" => "redeeming", "result" => nil, "started_at" => DateTime.to_iso8601(@started)})
+    assert result.provider_outcome == :unknown
+    assert result.verification == :not_started
+    assert result.headline == "Reset request in progress"
+    assert result.summary == "Provider application has not been confirmed yet."
+    refute Map.has_key?(result, :consumed_at)
+    refute Map.has_key?(result, :deadline_at)
+  end
+
+  @tag :operation_truth_matrix
+  test "reblocked and expired preserve independently proven application" do
+    for {phase, verification, headline} <- [{"reblocked", :reblocked, "Quota is still unavailable"}, {"expired", :expired, "Quota confirmation timed out"}] do
+      result = project(redemption(phase))
+      assert result.provider_outcome == :applied
+      assert result.verification == verification
+      assert result.headline == headline
+      assert result.detail =~ "reset was applied"
+      assert result.show_latest_receipt?
+    end
+
+    result = project(redemption("reblocked", "no_credit", false) |> Map.delete("consumed_at"))
+    assert result.provider_outcome == :not_applied and result.verification == :reblocked
+    refute result.detail =~ "reset was applied"
+  end
+
+  @tag :operation_truth_matrix
+  test "polling and view pauses are observations without changing outcome or readiness" do
+    pause = %{paused_until: DateTime.add(@now, 5, :minute), paused_until_label: "ignored", remaining_label: "ignored", status_code: 429, origin_label: "ignored", origin_count: 1}
+    result = project(redemption("consumed_pending_probe"), %{usage_poll_pause: pause, view_paused?: true, last_checked_at: @now})
+    assert result.headline == "Quota checks are delayed"
+    assert result.provider_outcome == :applied and result.verification == :pending
+    assert result.view_paused?
+    assert result.usage_poll_pause.state == :paused
+    assert is_binary(result.pause_until) and is_binary(result.last_checked_at)
+    assert result.refreshable?
+    disconnected = project(redemption("consumed_pending_probe"), %{view_connected?: false})
+    assert disconnected.headline == "Status updates are disconnected"
+    assert disconnected.provider_outcome == :applied
+    assert project(redemption("consumed_pending_probe"), %{view_paused?: true}).headline == "Live updates are paused"
+    assert project(redemption("consumed_pending_probe"), %{usage_poll_pause: :unavailable}).headline == "Quota checks are delayed"
+  end
+
+  @tag :unknown_and_contradictory_outcomes
+  test "missing malformed contradictory and legacy results cannot establish application" do
+    for record <- [nil, %{}, %{"phase" => "confirmed_by_quota"}, %{"phase" => "expired"}, %{"phase" => "reblocked"}, %{"result" => []}, %{"result" => %{"code" => "reset"}}, %{"result" => %{"code" => "reset", "applied" => false}}, %{"result" => %{"code" => "no_credit", "applied" => true}}, %{"result" => %{"code" => "transport_error", "applied" => false}}, %{"result" => %{"code" => "target_redeemed", "applied" => "true"}}] do
+      result = project(record)
+      assert result.provider_outcome in [:unknown, :not_recorded]
+      refute Map.has_key?(result, :consumed_at)
+    end
+
+    legacy = project(%{"phase" => "confirmed_by_quota"})
+    assert legacy.verification == :quota_confirmed
+    assert legacy.detail =~ "Application details are not available"
+  end
+
+  @tag :unknown_and_contradictory_outcomes
+  test "zero-dispatch claims fail closed for malformed contradictory replay evidence" do
+    for replay <- [nil, [], %{}, %{"version" => 2, "provider_dispatches" => 0}, %{"version" => 1, "provider_dispatches" => 1}, %{"version" => 1, "provider_dispatches" => "0"}, %{"version" => 1, "provider_dispatches" => 0, "last_provider_dispatched_at" => DateTime.to_iso8601(@started)}, %{"version" => 1, "provider_dispatches" => 0, "last_code" => "transport_error"}] do
+      result = project(%{"phase" => "consume_not_applied", "result" => %{"code" => "consume_not_applied", "applied" => false}, "provider_replay" => replay})
+      assert result.provider_outcome == :unknown
+      assert result.headline == "Reset outcome not confirmed"
+    end
+
+    contradiction = redemption("consumed_pending_probe") |> Map.put("provider_replay", %{"version" => 1, "provider_dispatches" => 0})
+    assert project(contradiction).provider_outcome == :unknown
+  end
+
+  @tag :unknown_and_contradictory_outcomes
+  test "authoritative-looking application cannot override malformed persisted replay shapes" do
+    for replay <- [[], %{}, %{"version" => 1, "provider_dispatches" => -1}, %{"version" => 2, "provider_dispatches" => 1}, %{"version" => 1, "provider_dispatches" => "1"}] do
+      result = project(Map.put(redemption("consumed_pending_probe"), "provider_replay", replay))
+      assert result.provider_outcome == :unknown
+      assert result.headline == "Reset outcome not confirmed"
+    end
+
+    recovered = redemption("consumed_pending_probe", "target_redeemed") |> Map.put("provider_replay", %{"version" => 1, "provider_dispatches" => 1, "last_code" => "transport_error", "last_provider_dispatched_at" => DateTime.to_iso8601(@started)})
+    assert project(recovered).provider_outcome == :applied
+  end
+
+  @tag :unknown_and_contradictory_outcomes
+  test "ambiguity stale execution and future clocks never become no-spend proof" do
+    consuming = %{"phase" => "consuming", "started_at" => DateTime.to_iso8601(@started)}
+
+    for replay <- [%{"version" => 1, "provider_dispatches" => 1, "last_code" => "transport_error"}, %{"version" => 1, "provider_dispatches" => 1, "last_code" => "no_credit"}, %{"last_code" => "synthetic-provider-detail"}, []] do
+      result = project(Map.put(consuming, "provider_replay", replay))
+      assert result.provider_outcome == :unknown
+      assert result.headline == "Reset outcome not confirmed"
+      assert result.summary =~ "Do not submit another redemption"
+    end
+
+    for started <- [DateTime.add(@now, -76, :second), DateTime.add(@now, 1, :second)] do
+      assert project(Map.put(consuming, "started_at", DateTime.to_iso8601(started))).headline == "Reset outcome not confirmed"
+    end
+
+    future = redemption("consumed_pending_probe") |> Map.put("consumed_at", DateTime.to_iso8601(DateTime.add(@now, 1, :second)))
+    result = project(future)
+    assert result.provider_outcome == :unknown
+    refute Map.has_key?(result, :consumed_at)
+  end
+
+  @tag :unknown_and_contradictory_outcomes
+  test "elapsed clock reports a deadline without fabricating persisted expiry" do
+    result = project(redemption("consumed_pending_probe") |> Map.put("deadline_at", DateTime.to_iso8601(DateTime.add(@now, -1, :second))))
+    assert result.verification == :pending
+    assert result.provider_outcome == :applied
+    assert result.headline == "Confirmation deadline passed; latest status is being checked"
+  end
+
+  @tag :unknown_and_contradictory_outcomes
+  test "terminal pruned or unavailable job context never erases a latest receipt or proves application" do
+    terminal = %{open: nil, latest_terminal: %{state: :stopped, requested_at: @now, scheduled_at: nil}}
+
+    for summary <- [nil, terminal, :unavailable] do
+      result = project(redemption("confirmed_by_quota"), %{request_summary: summary})
+      assert result.provider_outcome == :applied and result.show_latest_receipt?
+    end
+
+    result = project(nil, %{request_summary: terminal})
+    assert result.request.state == :stopped
+    assert result.provider_outcome == :not_recorded
+    refute result.show_latest_receipt?
+    result = project(nil, %{request_summary: %{open: %{state: :processing}, latest_terminal: nil}})
+    assert result.request.state == :processing and result.provider_outcome == :not_recorded
+  end
+
+  @tag :unknown_and_contradictory_outcomes
+  test "synthetic private metadata and unrecognized codes never enter output" do
+    sentinel = "synthetic-operation-private-detail"
+    record = redemption("consuming") |> Map.put("result", %{"code" => sentinel, "applied" => false, "body" => sentinel}) |> Map.put("attempt_id", sentinel) |> Map.put("provider_replay", %{"last_code" => sentinel, "locator" => sentinel}) |> Map.put("terminal_reason", sentinel)
+    result = project(record, %{request_summary: %{open: %{state: :queued, args: sentinel, errors: sentinel, job_id: sentinel}, latest_terminal: nil}})
+    refute inspect(result) =~ sentinel
+    refute Map.has_key?(result, :redemption)
+    assert result.provider_outcome == :unknown
+  end
+end

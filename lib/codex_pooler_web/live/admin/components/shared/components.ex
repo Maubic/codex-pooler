@@ -6,8 +6,36 @@ defmodule CodexPoolerWeb.Admin.Components do
 
   alias CodexPoolerWeb.Admin.Components.Shell
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.Formatting, as: RelativeTime
+  alias CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation
 
   def admin_shell(assigns), do: Shell.admin_shell(assigns)
+
+  attr :id, :string, required: true
+
+  @spec saved_reset_connection_notice(map()) :: Phoenix.LiveView.Rendered.t()
+  def saved_reset_connection_notice(assigns), do: SavedResetOperation.saved_reset_connection_notice(assigns)
+
+  attr :identity_id, :string, required: true
+  attr :surface, :atom, required: true, values: [:list, :bank, :cockpit]
+  attr :operation, :map, required: true
+  attr :refresh_event, :string, default: "refresh_saved_reset_status"
+  attr :refreshing, :boolean, default: false
+  attr :status_view_disabled, :boolean, default: false
+
+  @spec saved_reset_operation(map()) :: Phoenix.LiveView.Rendered.t()
+  def saved_reset_operation(assigns), do: SavedResetOperation.saved_reset_operation(assigns)
+
+  attr :identity_id, :string, required: true
+  attr :surface, :atom, required: true, values: [:list, :bank, :cockpit]
+  attr :id, :string, default: nil
+  attr :confirm_id, :string, default: nil
+  attr :cancel_id, :string, default: nil
+  attr :confirm_event, :any, default: "redeem_saved_reset"
+  attr :cancel_event, :any, default: "cancel_saved_reset_redemption"
+  attr :disabled, :boolean, default: false
+
+  @spec saved_reset_confirmation(map()) :: Phoenix.LiveView.Rendered.t()
+  def saved_reset_confirmation(assigns), do: SavedResetOperation.saved_reset_confirmation(assigns)
 
   @docs_url "https://www.codex-pooler.com/docs/operators/admin-ui/"
 

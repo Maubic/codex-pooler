@@ -14,18 +14,23 @@ import {
 } from "./admin_overlay_dismissal.mjs";
 import { cumulativeChartSeries } from "./chart_series.mjs";
 import { attachChartWheelScroll } from "./chart_wheel_scroll.mjs";
+import { HoldToLaunch } from "./hold_to_launch.mjs";
 import { classifyLiveSocketConnection } from "./live_socket_connection.mjs";
 import {
-	liveUpdatesConnectParams,
 	LiveUpdatesToggle,
+	liveUpdatesConnectParams,
 } from "./live_updates_toggle.mjs";
 import {
 	ObservatoryRefresh,
 	observatoryRefreshConnectParams,
 } from "./observatory_refresh.mjs";
-import { HoldToLaunch } from "./hold_to_launch.mjs";
 import { PoolTrafficVisibility } from "./pool_traffic_visibility.mjs";
+import { createQuotaDialogPreservation } from "./quota_dialog_preservation.js";
 import { RelativeCountdown } from "./relative_countdown.mjs";
+import {
+	SavedResetConnection,
+	savedResetConnectParams,
+} from "./saved_reset_connection.mjs";
 import {
 	connectionActionLabel,
 	connectionFooterParts,
@@ -233,7 +238,9 @@ const AssignmentTools = {
 		this.el.removeEventListener("click", this.onClick);
 	},
 	cards() {
-		return Array.from(this.el.querySelectorAll("[data-assignment-scroll] label"));
+		return Array.from(
+			this.el.querySelectorAll("[data-assignment-scroll] label"),
+		);
 	},
 	visibleCards() {
 		return this.cards().filter((card) => !card.hidden);
@@ -242,14 +249,17 @@ const AssignmentTools = {
 		const query = (this.filterInput?.value || "").trim().toLowerCase();
 
 		for (const card of this.cards()) {
-			card.hidden = query !== "" && !card.textContent.toLowerCase().includes(query);
+			card.hidden =
+				query !== "" && !card.textContent.toLowerCase().includes(query);
 		}
 	},
 };
 const ModelServingTools = {
 	mounted() {
 		this.onClick = (event) => {
-			const trigger = event.target.closest("[data-role='model-serving-set-all-auto']");
+			const trigger = event.target.closest(
+				"[data-role='model-serving-set-all-auto']",
+			);
 
 			if (!trigger || !this.el.contains(trigger)) {
 				return;
@@ -257,7 +267,9 @@ const ModelServingTools = {
 
 			let changed = null;
 
-			for (const radio of this.el.querySelectorAll("input[type='radio'][value='auto']")) {
+			for (const radio of this.el.querySelectorAll(
+				"input[type='radio'][value='auto']",
+			)) {
 				if (!radio.disabled && !radio.checked) {
 					radio.checked = true;
 					changed = radio;
@@ -1079,7 +1091,12 @@ const renderConnectionTimeline = (popover, steps) => {
 	);
 };
 
-const applyConnectionVisualState = (root, popover, visualState, transportKey) => {
+const applyConnectionVisualState = (
+	root,
+	popover,
+	visualState,
+	transportKey,
+) => {
 	const button = root.querySelector("[data-ws-button]");
 	const icon = root.querySelector("[data-ws-icon] span");
 	const label = root.querySelector("[data-ws-label]");
@@ -1144,7 +1161,10 @@ const updateConnectionIndicator = () => {
 	);
 	renderConnectionTimeline(
 		popover,
-		connectionTimelineSteps(connection.visualState, connectionIndicator.history),
+		connectionTimelineSteps(
+			connection.visualState,
+			connectionIndicator.history,
+		),
 	);
 
 	const hint = connectionHint(connection.visualState);
@@ -1176,7 +1196,8 @@ const updateConnectionIndicator = () => {
 	const actionEl = popover.querySelector("[data-ws-action]");
 	if (actionEl) {
 		setTextIfChanged(actionEl, actionLabel || "");
-		if (actionEl.hidden === Boolean(actionLabel)) actionEl.hidden = !actionLabel;
+		if (actionEl.hidden === Boolean(actionLabel))
+			actionEl.hidden = !actionLabel;
 	}
 };
 
@@ -1336,20 +1357,9 @@ const liveSocket = new LiveSocket("/live", Socket, {
 		_csrf_token: csrfToken,
 		...observatoryRefreshConnectParams(),
 		...liveUpdatesConnectParams(),
+		...savedResetConnectParams(),
 	}),
-	dom: {
-		// Client-toggled disclosure state lives only in the DOM; without this,
-		// any LiveView patch of the surrounding card would fold the element
-		// shut again.
-		onBeforeElUpdated(from, to) {
-			if (
-				from.hasAttribute("data-preserve-open") &&
-				from.hasAttribute("open")
-			) {
-				to.setAttribute("open", "");
-			}
-		},
-	},
+	dom: createQuotaDialogPreservation(),
 	hooks: {
 		...colocatedHooks,
 		AdminFilterDropdowns,
@@ -1367,6 +1377,7 @@ const liveSocket = new LiveSocket("/live", Socket, {
 		PoolTrafficVisibility,
 		QuotaPressureChart,
 		RelativeCountdown,
+		SavedResetConnection,
 		TotpSetupTools,
 		WorkerFailureMarker,
 	},

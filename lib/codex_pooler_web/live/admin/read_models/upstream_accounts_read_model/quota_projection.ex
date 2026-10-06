@@ -45,6 +45,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
   @type reset_display_state :: :countdown | :static | :unconfirmed | :absent
 
   @type quota_limit_row :: %{
+          optional(:saved_reset_context) => QuotaObservations.saved_reset_context(),
           optional(:observation_group) => String.t(),
           optional(:observations) => [QuotaObservations.observation()],
           required(:key) => atom() | String.t(),
@@ -231,6 +232,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
     windows
     |> quota_limit_rows(preferences, snapshot_at)
     |> QuotaObservations.attach(raw_windows, preferences, snapshot_at)
+  end
+
+  @spec quota_limit_rows([Quota.AccountQuotaWindow.t()], DateTimeDisplay.preferences(), DateTime.t(), [Quota.AccountQuotaWindow.t()], map()) :: [quota_limit_row()]
+  def quota_limit_rows(windows, preferences, snapshot_at, raw_windows, redemption) do
+    windows
+    |> quota_limit_rows(preferences, snapshot_at, raw_windows)
+    |> QuotaObservations.attach_saved_reset_context(raw_windows, redemption, snapshot_at)
   end
 
   @type provider_credits_summary :: %{

@@ -54,7 +54,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
 
   def upstreams_page(assigns) do
     ~H"""
-    <section id="admin-upstreams-live" class="grid min-w-0 gap-6">
+    <section id="admin-upstreams-live" phx-hook="SavedResetConnection" class="grid min-w-0 gap-6">
+      <AdminComponents.saved_reset_connection_notice id="saved-reset-connection-list" />
       <AdminComponents.page_header
         id="upstream-account-page-header"
         title="Upstreams"
@@ -698,8 +699,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
           </p>
         </div>
 
+        <AdminComponents.saved_reset_connection_notice id="saved-reset-connection-bank" />
         <.form
           id="saved-reset-policy-form"
+          data-saved-reset-form
+          data-saved-reset-identity={@account.identity.id}
           for={@form}
           phx-change="validate_saved_reset_policy"
           phx-submit="save_saved_reset_policy"
@@ -772,11 +776,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
                   }
                   id="saved-reset-redemption-action"
                   data-role="saved-reset-redemption-action"
+                  data-saved-reset-action="open-redemption"
+                  data-server-disabled={to_string(!@account.saved_reset_redemption_action.available? || status_only?(@account.saved_reset_operation))}
                   type="button"
                   class="btn btn-secondary btn-sm gap-2"
                   phx-click="open_saved_reset_redemption_confirmation"
                   phx-value-id={@account.identity.id}
-                  disabled={!@account.saved_reset_redemption_action.available?}
+                  disabled={!@account.saved_reset_redemption_action.available? || status_only?(@account.saved_reset_operation)}
                   title={saved_reset_redemption_title(@account.saved_reset_redemption_action)}
                 >
                   <.icon name="hero-bolt" class="size-4" />
@@ -784,7 +790,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
                 </button>
               </span>
             </div>
-            <div
+            <AdminComponents.saved_reset_confirmation
               :if={
                 confirming_saved_reset_redemption?(
                   @confirming_saved_reset_redemption,
@@ -792,33 +798,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
                 )
               }
               id="saved-reset-redemption-confirmation"
-              data-role="saved-reset-redemption-confirmation"
-              class="flex flex-wrap items-center justify-between gap-2 rounded-box border border-warning/30 bg-warning/10 px-3 py-2"
-            >
-              <p class="text-xs leading-5 text-base-content/75">
-                Queue one account-level recovery attempt? Account state is checked again before a job runs.
-              </p>
-              <span class="flex items-center gap-2">
-                <button
-                  id="saved-reset-redemption-confirm"
-                  type="button"
-                  class="btn btn-primary btn-sm gap-2"
-                  phx-click="redeem_saved_reset"
-                  phx-value-id={@account.identity.id}
-                >
-                  <.icon name="hero-check" class="size-4" />
-                  <span>Queue redemption</span>
-                </button>
-                <button
-                  id="saved-reset-redemption-cancel"
-                  type="button"
-                  class="btn btn-ghost btn-sm gap-2 text-base-content/60 hover:text-base-content"
-                  phx-click="cancel_saved_reset_redemption"
-                >
-                  <span>Keep resets in bank</span>
-                </button>
-              </span>
-            </div>
+              identity_id={@account.identity.id}
+              surface={:bank}
+              confirm_id="saved-reset-redemption-confirm"
+              cancel_id="saved-reset-redemption-cancel"
+              disabled={!@account.saved_reset_redemption_action.available? || status_only?(@account.saved_reset_operation)}
+            />
+            <AdminComponents.saved_reset_operation
+              identity_id={@account.identity.id}
+              surface={:bank}
+              operation={@account.saved_reset_operation}
+              refreshing={Map.get(@account, :saved_reset_status_refreshing?, false)}
+            />
             <p
               :if={
                 !@account.saved_reset_redemption_action.available? &&
@@ -891,12 +882,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
           <:actions>
             <AdminComponents.action_button
               id="saved-reset-policy-cancel"
-              label="Cancel"
+              label="Leave this view"
               variant={:ghost}
               phx-click="cancel_saved_reset_policy"
             />
             <AdminComponents.action_button
               id="saved-reset-policy-submit"
+              data-saved-reset-action="save-policy"
+              data-server-disabled="false"
               icon="hero-check"
               label="Save policy"
               type="submit"
@@ -941,6 +934,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
 
   defp confirming_saved_reset_redemption?(%{identity_id: identity_id}, identity_id), do: true
   defp confirming_saved_reset_redemption?(_confirmation, _identity_id), do: false
+
+  defp status_only?(operation) do
+    operation.request.state in [:queued, :processing, :unavailable] or
+      operation.provider_outcome == :unknown or operation.active?
+  end
 
   defp saved_reset_redemption_title(%{available?: true}), do: "Queue manual redemption"
 

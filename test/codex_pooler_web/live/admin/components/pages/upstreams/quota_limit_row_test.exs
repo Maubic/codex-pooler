@@ -11,6 +11,83 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.ProviderCreditsComponents
   alias CodexPoolerWeb.DateTimeDisplay
 
+  test "renders qualified recovery context beside canonical values with stable disclosure controls" do
+    now = ~U[2026-09-07 12:00:00Z]
+    consumed_at = DateTime.add(now, -4, :minute)
+    candidate_at = DateTime.add(now, -1, :minute)
+    reset_at = DateTime.add(now, 6, :day)
+
+    window = %AccountQuotaWindow{
+      id: "retained-quota",
+      quota_key: "account",
+      quota_scope: "account",
+      quota_family: "account",
+      source: "codex_usage_api",
+      source_precision: "observed",
+      freshness_state: "fresh",
+      window_kind: "secondary",
+      window_minutes: 10_080,
+      used_percent: Decimal.new(100),
+      observed_at: DateTime.add(now, -6, :minute),
+      last_sync_at: now,
+      reset_at: reset_at,
+      metadata: %{
+        "__quota_confirmed_candidate_v1" => %{"version" => 1, "used_percent" => "32", "reset_at" => DateTime.to_iso8601(reset_at), "observed_at" => DateTime.to_iso8601(candidate_at), "count" => 1},
+        "__quota_candidate_provider_status_v1" => %{"version" => 1, "allowed" => true, "limit_reached" => false, "observed_at" => DateTime.to_iso8601(candidate_at)}
+      }
+    }
+
+    redemption = %{"phase" => "consumed_pending_probe", "consumed_at" => DateTime.to_iso8601(consumed_at)}
+    preferences = DateTimeDisplay.preferences_for_user(nil)
+    project = fn retained -> QuotaProjection.quota_limit_rows([retained], preferences, now, [retained], redemption) |> Enum.find(&(&1.key == :weekly)) end
+    limit = project.(window)
+    html = render_quota_row(limit)
+    document = LazyHTML.from_fragment(html)
+    assert LazyHTML.query(document, "#quota-row [data-role='last-verified-quota']") |> LazyHTML.text() == "Last verified quota"
+    assert LazyHTML.query(document, "#quota-row [data-role='unconfirmed-quota-report']") |> LazyHTML.text() == "New quota report awaiting verification"
+    assert LazyHTML.query(document, "#quota-row-progress[value='0']") != []
+    assert LazyHTML.query(document, "#quota-row-reset") |> LazyHTML.text() != ""
+    assert LazyHTML.query(document, "#quota-row-observations-dialog[data-preserve-open][data-quota-dialog-preserve]") != []
+    assert LazyHTML.query(document, "#quota-row-observations-dialog-title[tabindex='-1'][data-dialog-focus-fallback]") != []
+    assert LazyHTML.query(document, "#quota-row-observations-dialog-scroll[data-preserve-scroll]") != []
+    assert LazyHTML.query(document, "[data-selected='true'] [data-role='last-verified-quota']") |> LazyHTML.text() == "Last verified quota"
+    assert LazyHTML.query(document, "[data-selected='true'] summary") |> LazyHTML.text() =~ "fresh"
+    assert LazyHTML.query(document, "[data-selected='true'] dl") |> LazyHTML.text() =~ "Source freshness does not mean the new quota cycle has been accepted."
+
+    updated_limit = project.(%{window | observed_at: DateTime.add(now, -5, :minute), reset_at: DateTime.add(reset_at, 60), used_percent: Decimal.new(96)})
+    updated_document = updated_limit |> render_quota_row() |> LazyHTML.from_fragment()
+    assert LazyHTML.query(updated_document, "#quota-row-progress[value='4']") != []
+    assert LazyHTML.query(updated_document, "#quota-row-reset[data-countdown-at='#{DateTime.to_iso8601(DateTime.add(reset_at, 60))}']") != []
+    refute LazyHTML.query(document, "[data-selected='true'] summary") |> LazyHTML.text() == LazyHTML.query(updated_document, "[data-selected='true'] summary") |> LazyHTML.text()
+
+    for selector <- ["details", "details > summary"] do
+      assert LazyHTML.query(document, "[data-selected='true'] #{selector}") |> LazyHTML.attribute("id") == LazyHTML.query(updated_document, "[data-selected='true'] #{selector}") |> LazyHTML.attribute("id")
+    end
+
+    unqualified_window = put_in(window.metadata["__quota_confirmed_candidate_v1"]["observed_at"], DateTime.to_iso8601(DateTime.add(now, 1)))
+    unqualified_html = project.(unqualified_window) |> render_quota_row()
+    refute unqualified_html =~ "New quota report awaiting verification"
+    assert unqualified_html =~ "Last verified quota"
+
+    sibling = %{window | id: "retained-quota-sibling", observed_at: DateTime.add(now, -7, :minute)}
+    distinct_limit = QuotaProjection.quota_limit_rows([window], preferences, now, [window, sibling], redemption) |> Enum.find(&(&1.key == :weekly))
+    distinct_document = distinct_limit |> render_quota_row() |> LazyHTML.from_fragment()
+
+    for selector <- ["[data-role='quota-observation']", "[data-role='quota-observation'] details", "[data-role='quota-observation'] summary"] do
+      ids = LazyHTML.query(distinct_document, selector) |> LazyHTML.attribute("id")
+      assert length(ids) == 2
+      assert length(Enum.uniq(ids)) == 2
+    end
+
+    if evidence_dir = System.get_env("SAVED_RESET_COMPONENT_EVIDENCE_DIR") do
+      File.mkdir_p!(evidence_dir)
+      File.write!(Path.join(evidence_dir, "task-9-quota-rendered.html"), html)
+      File.write!(Path.join(evidence_dir, "task-9-quota-updated.html"), render_quota_row(updated_limit))
+      File.write!(Path.join(evidence_dir, "task-9-quota-unqualified.html"), unqualified_html)
+      File.write!(Path.join(evidence_dir, "task-9-quota-distinct.html"), render_quota_row(distinct_limit))
+    end
+  end
+
   test "opens observations without changing the compact meter and renders a closed accessible dialog" do
     now = ~U[2026-09-07 12:00:00Z]
 

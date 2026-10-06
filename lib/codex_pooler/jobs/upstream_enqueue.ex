@@ -162,6 +162,7 @@ defmodule CodexPooler.Jobs.UpstreamEnqueue do
         "pool_upstream_assignment_id" => assignment_id,
         "trigger_kind" => Keyword.get(opts, :trigger_kind, "admin_manual")
       }
+      |> put_manual_saved_reset_target()
       |> SavedResetRedemptionWorker.new(Options.job_options(opts, unique_keys: [:pool_upstream_assignment_id]))
       |> Oban.insert()
       |> tap_saved_reset_redemption_enqueue(assignment_or_id)
@@ -426,6 +427,20 @@ defmodule CodexPooler.Jobs.UpstreamEnqueue do
   end
 
   defp maybe_put_recovery_fence(args, _assignment), do: args
+
+  defp put_manual_saved_reset_target(%{"trigger_kind" => "admin_manual", "pool_upstream_assignment_id" => assignment_id} = args) do
+    with {:ok, persisted_id} <- Ecto.UUID.cast(assignment_id),
+         %PoolUpstreamAssignment{} = assignment <- Repo.get(PoolUpstreamAssignment, persisted_id) do
+      Map.put(args, "manual_request_target", %{
+        "pool_id" => assignment.pool_id,
+        "upstream_identity_id" => assignment.upstream_identity_id
+      })
+    else
+      _missing_assignment -> args
+    end
+  end
+
+  defp put_manual_saved_reset_target(args), do: args
 
   defp pool_id(%{id: id}) when is_binary(id), do: {:ok, id}
   defp pool_id(id) when is_binary(id), do: {:ok, id}

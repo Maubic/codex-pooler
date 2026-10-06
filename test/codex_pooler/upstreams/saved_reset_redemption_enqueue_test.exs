@@ -190,7 +190,11 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionEnqueueTest do
 
       assert job.args == %{
                "pool_upstream_assignment_id" => assignment.id,
-               "trigger_kind" => "admin_manual"
+               "trigger_kind" => "admin_manual",
+               "manual_request_target" => %{
+                 "pool_id" => assignment.pool_id,
+                 "upstream_identity_id" => assignment.upstream_identity_id
+               }
              }
     end
 
@@ -209,7 +213,11 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionEnqueueTest do
 
       assert first_job.args == %{
                "pool_upstream_assignment_id" => assignment.id,
-               "trigger_kind" => "admin_manual"
+               "trigger_kind" => "admin_manual",
+               "manual_request_target" => %{
+                 "pool_id" => assignment.pool_id,
+                 "upstream_identity_id" => assignment.upstream_identity_id
+               }
              }
 
       refute Map.has_key?(first_job.args, "credit_id")
@@ -255,7 +263,11 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionEnqueueTest do
 
       assert manual_job.args == %{
                "pool_upstream_assignment_id" => assignment.id,
-               "trigger_kind" => "admin_manual"
+               "trigger_kind" => "admin_manual",
+               "manual_request_target" => %{
+                 "pool_id" => assignment.pool_id,
+                 "upstream_identity_id" => assignment.upstream_identity_id
+               }
              }
 
       assert {:ok, scheduled_job} =

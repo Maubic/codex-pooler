@@ -26,6 +26,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
     Filter,
     Formatting,
     QuotaProjection,
+    SavedResetOperationProjection,
     SavedResetProjection,
     TokenBurnProjection
   }
@@ -98,6 +99,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
   @type token_burn :: TokenBurnProjection.token_burn()
   @type saved_reset_snapshot :: SavedResetProjection.snapshot()
   @type action :: SavedResetProjection.action()
+  @type saved_reset_refresh_cursor :: %{
+          identity_id: Ecto.UUID.t(),
+          credential_epoch: non_neg_integer() | nil,
+          lifecycle_generation: non_neg_integer() | nil,
+          request_generation: String.t()
+        }
   @type account_snapshot :: %{
           required(:identity) => UpstreamIdentity.t(),
           required(:label) => String.t(),
@@ -123,6 +130,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
           required(:saved_reset_policy) => SavedResets.auto_policy_projection(),
           required(:saved_reset_redemption_action) => action(),
           required(:saved_reset_confirmation) => QuotaProjection.saved_reset_confirmation() | nil,
+          required(:saved_reset_operation) => SavedResetOperationProjection.t(),
+          required(:saved_reset_refresh_cursor) => saved_reset_refresh_cursor(),
           required(:token_burn) => token_burn(),
           required(:assignments) => [assignment_snapshot()],
           required(:quota_readiness) => quota_readiness(),
@@ -176,9 +185,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
         ]
   def list_visible_accounts(scope, pools, filters, datetime_preferences)
       when is_list(pools) and is_map(filters) and is_map(datetime_preferences) do
-    # :identity_id narrows the projection to one account BEFORE the expensive
-    # per-identity snapshot work; detail pages must not pay fleet cost.
+    # Trusted atom options narrow scoped identities before per-account work.
+    # String-keyed browser filters never establish ownership or monitoring targets.
     {identity_id, filters} = Map.pop(filters, :identity_id)
+    {identity_ids, filters} = Map.pop(filters, :identity_ids, :all)
 
     pools = intersect_visible_pools(scope, pools)
     pool_lookup = Map.new(pools, &{&1.id, &1})
@@ -194,6 +204,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
         include_unassigned: Map.get(filters, "pool_id") in [nil, ""]
       )
       |> narrow_to_identity(identity_id)
+      |> narrow_to_identities(identity_ids)
 
     assignments = narrow_assignments_to_identities(assignments, identities)
     circuit_observed_at = DateTime.utc_now()
@@ -212,6 +223,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
     deletion_permissions = Upstreams.account_deletion_permissions(scope, identity_ids)
     deletion_states = Upstreams.account_deletion_states(identity_ids)
     credit_policy_permissions = ProviderCreditsPolicy.management_permissions(scope, identity_ids)
+    request_summaries = Jobs.saved_reset_request_summaries(scope, identity_ids, pool_ids: Enum.map(pools, & &1.id))
 
     snapshot_at = DateTime.utc_now()
 
@@ -225,7 +237,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       deletion_state = Map.get(deletion_states, identity.id)
 
       identity
-      |> account_snapshot(assignments, token_burns, datetime_preferences, Map.fetch!(quota_snapshots, identity.id))
+      |> account_snapshot(assignments, token_burns, datetime_preferences, Map.fetch!(quota_snapshots, identity.id), Map.get(request_summaries, identity.id))
       |> Map.put(:can_manage_provider_credits?, Map.get(credit_policy_permissions, identity.id, false))
       |> Map.put(:deletion_state, deletion_state)
       |> Map.put(:can_delete?, Map.get(deletion_permissions, identity.id, false) and deletion_state != :in_progress)
@@ -237,6 +249,28 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
 
   defp narrow_to_identity(identities, identity_id) when is_binary(identity_id),
     do: Enum.filter(identities, &(&1.id == identity_id))
+
+  defp narrow_to_identity(_identities, _identity_id), do: []
+
+  defp narrow_to_identities(identities, :all), do: identities
+
+  defp narrow_to_identities(identities, identity_ids) when is_list(identity_ids) do
+    targets = trusted_identity_ids(identity_ids, [])
+    Enum.filter(identities, &(&1.id in targets))
+  end
+
+  defp narrow_to_identities(_identities, _identity_ids), do: []
+
+  defp trusted_identity_ids([], acc), do: acc
+
+  defp trusted_identity_ids([id | rest], acc) do
+    case Ecto.UUID.cast(id) do
+      {:ok, id} -> trusted_identity_ids(rest, [id | acc])
+      :error -> trusted_identity_ids(rest, acc)
+    end
+  end
+
+  defp trusted_identity_ids(_improper_tail, _acc), do: []
 
   defp narrow_assignments_to_identities(assignments, identities) do
     Map.take(assignments, Enum.map(identities, & &1.id))
@@ -402,13 +436,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
          assignments,
          token_burns,
          datetime_preferences,
-         quota_snapshot
+         quota_snapshot,
+         request_summary
        ) do
     snapshot_at = quota_snapshot.as_of
     raw_quota_windows = RoutingQuotaSnapshot.time_visible_raw_windows(quota_snapshot)
     quota_windows = RoutingQuotaSnapshot.effective_windows(quota_snapshot)
     quota_readiness = QuotaProjection.readiness(quota_snapshot, snapshot_at)
     token_burn = Map.fetch!(token_burns, identity.id)
+    redemption = (identity.metadata || %{})["saved_reset_redemption"]
 
     identity_assignments =
       identity_assignments(identity, assignments, quota_readiness, token_burn)
@@ -480,7 +516,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       saved_reset_policy: SavedResetProjection.policy(identity),
       saved_reset_confirmation:
         QuotaProjection.saved_reset_confirmation(
-          (identity.metadata || %{})["saved_reset_redemption"] || %{},
+          redemption || %{},
           raw_quota_windows,
           quota_windows,
           snapshot_at
@@ -496,11 +532,29 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
           quota_windows,
           datetime_preferences,
           snapshot_at,
-          raw_quota_windows
+          raw_quota_windows,
+          redemption
         ),
       identity_observability: identity_observability,
       usage_poll_pause: usage_poll_pause(identity, snapshot_at, datetime_preferences)
     }
+
+    operation =
+      SavedResetOperationProjection.project(%{
+        snapshot_at: snapshot_at,
+        datetime_preferences: datetime_preferences,
+        redemption: redemption,
+        request_summary: request_summary,
+        confirmation: account.saved_reset_confirmation,
+        serving_readiness: account.routing_readiness,
+        usage_poll_pause: account.usage_poll_pause,
+        last_checked_at: snapshot_at
+      })
+
+    account =
+      account
+      |> Map.put(:saved_reset_operation, operation)
+      |> Map.put(:saved_reset_refresh_cursor, saved_reset_refresh_cursor(identity, redemption, request_summary))
 
     Map.put(
       account,
@@ -508,6 +562,22 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       SavedResetProjection.redemption_action(account)
     )
   end
+
+  # Private LiveView invalidation state; never pass this cursor to components or DOM.
+  @spec saved_reset_refresh_cursor(UpstreamIdentity.t(), map() | nil, SavedResetOperationProjection.request_summary() | nil) :: saved_reset_refresh_cursor()
+  defp saved_reset_refresh_cursor(identity, redemption, request_summary) do
+    metadata = identity.metadata || %{}
+
+    %{
+      identity_id: identity.id,
+      credential_epoch: cursor_counter(metadata["credential_epoch"]),
+      lifecycle_generation: cursor_counter(redemption["generation"]),
+      request_generation: :crypto.hash(:sha256, :erlang.term_to_binary(request_summary)) |> Base.encode16(case: :lower)
+    }
+  end
+
+  defp cursor_counter(value) when is_integer(value) and value >= 0, do: value
+  defp cursor_counter(_value), do: nil
 
   defp identity_assignments(identity, assignments, quota_readiness, token_burn) do
     assignments

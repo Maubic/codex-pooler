@@ -1,0 +1,218 @@
+defmodule CodexPoolerWeb.Admin.SavedResetSubmissionWorkflowTest do
+  use CodexPoolerWeb.ConnCase, async: false
+
+  import Ecto.Query
+  import Phoenix.LiveViewTest
+  import CodexPooler.PoolerFixtures
+
+  alias CodexPooler.FakeUpstream
+  alias CodexPooler.Repo
+  alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
+
+  @worker "CodexPooler.Jobs.SavedResetRedemptionWorker"
+  @confirmation_copy "Redeem one saved reset for this account? The provider may apply it before quota checks finish. Verification can take a few minutes. You can leave this view and return to check the status."
+
+  setup :register_and_log_in_user
+
+  setup %{scope: scope} do
+    pool = pool_fixture(%{created_by_user_id: scope.user.id})
+    now = DateTime.utc_now()
+    {:ok, fake} = FakeUpstream.start_link({:json_response, 500, %{"error" => "sample-private-provider-response"}})
+    on_exit(fn -> FakeUpstream.stop(fake) end)
+
+    fixture =
+      active_upstream_assignment_fixture(pool,
+        account_label: "Sample saved reset account",
+        metadata: %{
+          "usage_base_url" => FakeUpstream.url(fake),
+          "access_token_expires_at" => DateTime.to_iso8601(DateTime.add(now, 2, :hour)),
+          "token_refresh" => %{"status" => "succeeded", "finished_at" => DateTime.to_iso8601(now)},
+          "saved_resets" => %{
+            "status" => "reported",
+            "available_count" => 1,
+            "observed_at" => DateTime.to_iso8601(now),
+            "source" => "codex_usage_api",
+            "available_expirations" => [
+              %{"expires_at" => DateTime.to_iso8601(DateTime.add(now, 7, :day)), "first_seen_at" => DateTime.to_iso8601(now)}
+            ]
+          }
+        }
+      )
+
+    Map.merge(fixture, %{pool: pool, fake: fake})
+  end
+
+  for surface <- [:bank, :cockpit] do
+    @surface surface
+
+    test "#{surface} confirmation enqueues one request and duplicate/remount resumes persisted status", context do
+      %{conn: conn, identity: identity, assignment: assignment, pool: pool} = context
+      view = mount_surface(conn, identity.id, @surface)
+      params = %{"id" => identity.id, "pool-id" => pool.id}
+
+      render_click(view, "redeem_saved_reset", params)
+      assert jobs(assignment.id) == []
+
+      render_click(view, "open_saved_reset_redemption_confirmation", params)
+      assert has_element?(view, confirmation(@surface), @confirmation_copy)
+      assert has_element?(view, confirm(@surface) <> "[phx-disable-with='Requesting...']", "Redeem one reset")
+      capture_html(@surface, "confirmation", render(view))
+
+      view |> element(confirm(@surface)) |> render_click()
+      assert [job] = jobs(assignment.id)
+      assert job.args["manual_request_target"] == %{"upstream_identity_id" => identity.id, "pool_id" => pool.id}
+      assert job.args["trigger_kind"] == "admin_manual"
+      assert has_element?(view, receipt(@surface, identity.id) <> " [data-role='saved-reset-request']", "Request accepted")
+      assert has_element?(view, receipt(@surface, identity.id), "Provider application has not been confirmed yet")
+      refute has_element?(view, receipt(@surface, identity.id) <> " [data-role='saved-reset-latest']")
+      refute has_element?(view, confirmation(@surface))
+      capture_html(@surface, "queued", render(view))
+
+      render_click(view, "redeem_saved_reset", params)
+      assert [same_job] = jobs(assignment.id)
+      assert same_job.id == job.id
+      assert Phoenix.Flash.get(:sys.get_state(view.pid).socket.assigns.flash, :error) == nil
+      assert has_element?(view, receipt(@surface, identity.id), "Request accepted")
+
+      Process.unlink(view.pid)
+      ref = Process.monitor(view.pid)
+      GenServer.stop(view.pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}
+      remounted = mount_surface(conn, identity.id, @surface)
+      assert has_element?(remounted, receipt(@surface, identity.id), "Request accepted")
+      refute has_element?(remounted, receipt(@surface, identity.id) <> " [data-role='saved-reset-latest']")
+      assert [retained_job] = jobs(assignment.id)
+      assert retained_job.id == job.id
+      capture_html(@surface, "remount", render(remounted))
+      finish_scenario(context.fake, @surface, "one-request", %{unconfirmed_jobs: 0, confirmed_jobs: 1, repeated_jobs: 1, remounted_jobs: 1, target_binding_matches?: true})
+    end
+
+    test "#{surface} cancel and stale target retain policy without enqueue", context do
+      %{conn: conn, identity: identity, assignment: assignment, pool: pool} = context
+      view = mount_surface(conn, identity.id, @surface)
+      draft = %{"auto_redeem_enabled" => "true", "trigger_mode" => "threshold", "quota_threshold_percent" => "87", "min_blocked_minutes" => "31", "keep_credits" => "1"}
+      view |> element("#saved-reset-policy-form") |> render_change(%{"saved_reset_policy" => draft})
+      params = %{"id" => identity.id, "pool-id" => pool.id}
+      render_click(view, "open_saved_reset_redemption_confirmation", params)
+      view |> element(cancel(@surface)) |> render_click()
+      refute has_element?(view, confirmation(@surface))
+      assert has_element?(view, "#saved-reset-policy-min-blocked-minutes[value='31']")
+      refute Repo.get!(UpstreamIdentity, identity.id).saved_reset_auto_redeem_enabled
+      assert jobs(assignment.id) == []
+
+      render_click(view, "open_saved_reset_redemption_confirmation", params)
+      render_click(view, "redeem_saved_reset", %{"id" => Ecto.UUID.generate(), "pool-id" => pool.id})
+      assert jobs(assignment.id) == []
+      assert has_element?(view, "#saved-reset-policy-min-blocked-minutes[value='31']")
+
+      current = Repo.get!(UpstreamIdentity, identity.id)
+      metadata = put_in(current.metadata, ["saved_resets", "available_count"], 0)
+      current |> Ecto.Changeset.change(metadata: metadata) |> Repo.update!()
+      render_click(view, "redeem_saved_reset", params)
+      assert jobs(assignment.id) == []
+      assert has_element?(view, confirm(@surface) <> "[disabled]")
+      assert has_element?(view, "#saved-reset-policy-min-blocked-minutes[value='31']")
+      capture_html(@surface, "stale", render(view))
+      finish_scenario(context.fake, @surface, "stale", %{jobs: 0, dirty_form_retained?: true, auto_policy_unchanged?: true})
+    end
+
+    test "#{surface} unknown provider outcome resumes status without another redemption", context do
+      %{conn: conn, identity: identity, assignment: assignment, pool: pool} = context
+      sentinel = "sample-private-provider-result"
+      current = Repo.get!(UpstreamIdentity, identity.id)
+
+      redemption = %{
+        "status" => "redeeming",
+        "phase" => "consuming",
+        "started_at" => DateTime.to_iso8601(DateTime.add(DateTime.utc_now(), -10, :minute)),
+        "result" => %{"applied" => true, "code" => sentinel, "body" => sentinel},
+        "attempt_id" => Ecto.UUID.generate()
+      }
+
+      current |> Ecto.Changeset.change(metadata: Map.put(current.metadata, "saved_reset_redemption", redemption)) |> Repo.update!()
+      view = mount_surface(conn, identity.id, @surface)
+      params = %{"id" => identity.id, "pool-id" => pool.id}
+      render_click(view, "open_saved_reset_redemption_confirmation", params)
+      refute has_element?(view, confirmation(@surface))
+      render_click(view, "redeem_saved_reset", params)
+      assert jobs(assignment.id) == []
+      assert has_element?(view, receipt(@surface, identity.id) <> "[data-provider-outcome='unknown']")
+      assert has_element?(view, receipt(@surface, identity.id), "Do not submit another redemption")
+      refute render(view) =~ sentinel
+      refute render(view) =~ redemption["attempt_id"]
+      capture_html(@surface, "unknown", render(view))
+      finish_scenario(context.fake, @surface, "unknown", %{jobs: 0, provider_outcome: :unknown, private_result_absent?: true})
+    end
+
+    for {code, headline} <- [{"no_credit", "No saved reset was available"}, {"nothing_to_reset", "No eligible quota needed resetting"}] do
+      @noop_code code
+      @noop_headline headline
+
+      test "#{surface} #{@noop_code} renders a recorded no-op without a consumed claim", context do
+        %{identity: identity, assignment: assignment} = context
+        current = Repo.get!(UpstreamIdentity, identity.id)
+        redemption = %{"status" => "noop", "result" => %{"code" => @noop_code, "applied" => false, "body" => "sample-private-noop-body"}}
+        current |> Ecto.Changeset.change(metadata: Map.put(current.metadata, "saved_reset_redemption", redemption)) |> Repo.update!()
+        view = mount_surface(context.conn, identity.id, @surface)
+        assert has_element?(view, receipt(@surface, identity.id) <> "[data-provider-outcome='not_applied']", @noop_headline)
+        refute has_element?(view, receipt(@surface, identity.id) <> " [data-role='saved-reset-consumed-at']")
+        assert jobs(assignment.id) == []
+        assert Repo.get!(UpstreamIdentity, identity.id).metadata["saved_resets"]["available_count"] == 1
+        refute render(view) =~ "sample-private-noop-body"
+        capture_html(@surface, @noop_code, render(view))
+        finish_scenario(context.fake, @surface, @noop_code, %{jobs: 0, provider_outcome: :not_applied, bank_unchanged?: true, private_result_absent?: true})
+      end
+    end
+  end
+
+  defp mount_surface(conn, identity_id, :bank) do
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    render_click(view, "open_saved_reset_policy", %{"id" => identity_id})
+    view
+  end
+
+  defp mount_surface(conn, identity_id, :cockpit) do
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity_id}")
+    view
+  end
+
+  defp jobs(assignment_id) do
+    Repo.all(from job in Oban.Job, where: job.worker == ^@worker and fragment("?->>'pool_upstream_assignment_id'", job.args) == ^assignment_id)
+  end
+
+  defp confirmation(:bank), do: "#saved-reset-redemption-confirmation"
+  defp confirmation(:cockpit), do: "#cockpit-saved-reset-redemption-confirmation"
+  defp confirm(surface), do: confirmation(surface) |> String.replace("-confirmation", "-confirm")
+  defp cancel(surface), do: confirmation(surface) |> String.replace("-confirmation", "-cancel")
+  defp receipt(surface, identity_id), do: "#saved-reset-operation-#{surface}-#{identity_id}"
+
+  defp capture_html(surface, scenario, html) do
+    case System.get_env("SAVED_RESET_SUBMISSION_EVIDENCE_DIR") do
+      nil ->
+        :ok
+
+      directory ->
+        File.mkdir_p!(directory)
+        File.write!(Path.join(directory, "#{surface}-#{scenario}.html"), html)
+    end
+  end
+
+  defp finish_scenario(fake, surface, scenario, facts) do
+    assert FakeUpstream.requests(fake) == []
+    counts = FakeUpstream.physical_counts(fake)
+    assert Enum.all?(Map.values(counts), &(&1 == 0))
+    assert :ok = FakeUpstream.stop(fake)
+    refute Process.alive?(fake.pid)
+    refute Process.alive?(fake.server)
+    refute Process.alive?(fake.supervisor)
+
+    case System.get_env("SAVED_RESET_SUBMISSION_EVIDENCE_DIR") do
+      nil ->
+        :ok
+
+      directory ->
+        File.mkdir_p!(directory)
+        File.write!(Path.join(directory, "#{surface}-#{scenario}.json"), Jason.encode!(Map.merge(facts, %{physical_counts: counts, owned_fake_stopped?: true}), pretty: true))
+    end
+  end
+end

@@ -90,7 +90,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
             id="upstream-quota-saved-reset-meter"
             saved_resets={@cockpit.saved_resets}
             saved_reset_policy={@cockpit.saved_reset_policy}
-            saved_reset_confirmation={@cockpit.saved_reset_confirmation}
+            saved_reset_confirmation={if Map.has_key?(@cockpit, :saved_reset_operation), do: nil, else: @cockpit.saved_reset_confirmation}
           />
         </summary>
         <div class="grid gap-3 px-4 pb-3">
@@ -130,6 +130,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
         </summary>
         <.form
           id="saved-reset-policy-form"
+          data-saved-reset-form
           for={@saved_reset_policy_form}
           phx-change="validate_saved_reset_policy"
           phx-submit="save_saved_reset_policy"
@@ -163,6 +164,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
           <div class="flex justify-end border-t border-base-300/70 pt-3">
             <AdminComponents.action_button
               id="saved-reset-policy-submit"
+              data-saved-reset-action="save-policy"
+              data-server-disabled={to_string(@cockpit.assignments.empty?)}
               label="Save policy"
               icon="hero-check"
               type="submit"
