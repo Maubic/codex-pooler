@@ -171,19 +171,30 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
   @doc """
   Finalizes a request routing refused (route filtering refused the remaining
   candidates, a circuit refused the next one, the held-back partition refused
-  every candidate), its reservation released in full. The release is a
-  pre-attempt `routing_rejected` one only while the request has no attempt.
-  After an earlier candidate's attempt it carries the latest attempt and no
-  phase, with usage unknown, as every release written after an attempt does
-  (findings#221): these refusals used to record a pre-attempt release then
-  (findings#321).
+  every candidate), its reservation released in full: a pre-attempt
+  `routing_rejected` release while the request has no attempt, otherwise a
+  release after its latest attempt (`finalize_before_candidate_attempt/3`,
+  findings#321).
   """
   @spec finalize_routing_refusal(Request.t(), attrs()) :: settlement_result()
-  def finalize_routing_refusal(%Request{} = request, attrs) do
+  def finalize_routing_refusal(%Request{} = request, attrs),
+    do: finalize_before_candidate_attempt(request, attrs, PreAttemptRelease.routing_rejected())
+
+  @doc """
+  Finalizes a request stopped before its next candidate's attempt, its
+  reservation released in full. While the request has no attempt the release
+  is a pre-attempt one declaring `phase`. After an earlier candidate's attempt
+  it carries the latest attempt and no phase, with usage unknown, as every
+  release written after an attempt does (findings#221): the routing refusals
+  and the drain checkpoint that stop a later candidate used to record a
+  pre-attempt release then (findings#321).
+  """
+  @spec finalize_before_candidate_attempt(Request.t(), attrs(), String.t()) :: settlement_result()
+  def finalize_before_candidate_attempt(%Request{} = request, attrs, phase) when is_binary(phase) do
     release =
       case Repo.one(from attempt in Attempt, where: attempt.request_id == ^request.id, order_by: [desc: attempt.attempt_number], limit: 1) do
         %Attempt{} = attempt -> %{usage_status: "usage_unknown", released_after_attempt: attempt}
-        nil -> %{usage_status: "not_applicable", pre_attempt_phase: PreAttemptRelease.routing_rejected()}
+        nil -> %{usage_status: "not_applicable", pre_attempt_phase: phase}
       end
 
     finalize_reservation_failure(request, attrs |> Map.new() |> Map.drop([:usage_status, :pre_attempt_phase, :released_after_attempt]) |> Map.merge(release))

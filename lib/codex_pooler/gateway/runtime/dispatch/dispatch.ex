@@ -244,18 +244,19 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch do
     end
   end
 
+  # A drain can stop a later candidate after an earlier candidate's attempt;
+  # the release then carries that attempt (findings#321 row 321-2).
   defp drain_checkpoint(context) do
     case Admission.checkpoint() do
       :ok ->
         :ok
 
       {:error, error} ->
-        case AttemptSettlement.finalize_reservation_failure(context.reserved.request, %{
-               response_status_code: 499,
-               last_error_code: "owner_drained",
-               usage_status: "not_applicable",
-               pre_attempt_phase: PreAttemptRelease.turn_interrupted()
-             }) do
+        case AttemptSettlement.finalize_before_candidate_attempt(
+               context.reserved.request,
+               %{response_status_code: 499, last_error_code: "owner_drained"},
+               PreAttemptRelease.turn_interrupted()
+             ) do
           {:ok, _} -> {:error, Map.delete(error, :accounting_disposition)}
           {:error, _} = failure -> failure
         end
