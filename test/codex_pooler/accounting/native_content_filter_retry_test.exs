@@ -8,6 +8,8 @@ defmodule CodexPooler.Accounting.NativeContentFilterRetryTest do
   alias CodexPooler.Accounting.{ClientRetry, NativeContentFilterRetry, Request, RequestClientRetryLink}
   alias CodexPooler.Gateway.Persistence.CodexSession
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
+  alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
   test "strict metadata rejects old, partial, unknown and extra-field authority" do
     terminal = %{"version" => 1, "event_type" => "response.incomplete", "reason" => "content_filter"}
@@ -147,6 +149,41 @@ defmodule CodexPooler.Accounting.NativeContentFilterRetryTest do
     # Dispatch reads only the binding: a request with nothing but the pin is not required to carry one.
     scope = %{assignment_id: Ecto.UUID.generate(), identity_id: Ecto.UUID.generate(), credential_epoch: 1, serving_mode: "full", effective_model: setup.model.exposed_model_id, upstream_model: setup.model.upstream_model_id}
     assert NativeContentFilterRetry.dispatch_allowed?(pinned, scope)
+  end
+
+  # Admission (`current_source?/1`), attempt creation (`dispatch_allowed?/2`, `create_attempt`) and the remote owner (`dispatch_context_allowed?/1`) take one credential decision (`CredentialFencing.same_credential_since?/2`): a token refresh since the content-filter terminal keeps the binding, a replacement refuses it, and a scope that does not dispatch with the identity's current credential refuses it (findings#330).
+  test "the binding's credential decision is one at admission, attempt creation and the remote owner" do
+    setup = accounting_setup()
+    now = db_now()
+    predecessor = request_fixture(setup, %{model_id: setup.model.id, requested_model: setup.model.exposed_model_id, transport: "websocket"})
+    attempt = attempt_fixture(predecessor, setup.assignment, %{upstream_model_id: setup.model.upstream_model_id})
+    source = %{"version" => 1, "attempt_id" => attempt.id, "assignment_id" => setup.assignment.id, "identity_id" => setup.identity.id, "credential_epoch" => 1, "serving_mode" => "full", "requested_model" => setup.model.exposed_model_id, "effective_model" => setup.model.exposed_model_id, "upstream_model" => setup.model.upstream_model_id}
+    terminal = %{"version" => 1, "event_type" => "response.incomplete", "reason" => "content_filter"}
+    attempt = attempt |> Ecto.Changeset.change(model_id: setup.model.id, response_metadata: %{"native_content_filter_source" => source, "native_content_filter_terminal" => terminal}) |> Repo.update!()
+    session = Repo.insert!(%CodexSession{pool_id: setup.pool.id, api_key_id: setup.api_key.id, session_key: Ecto.UUID.generate(), status: "active", created_at: now, updated_at: now})
+    turn = ClientRetry.insert_successor_turn!(session, predecessor, :crypto.hash(:sha256, "synthetic"), now)
+    turn |> Ecto.Changeset.change(status: "succeeded", completed_at: now, final_attempt_id: attempt.id) |> Repo.update!()
+    successor = request_fixture(setup, %{model_id: setup.model.id, requested_model: setup.model.exposed_model_id, transport: "websocket", status: "in_progress", completed_at: nil, request_metadata: %{"effective_model" => setup.model.exposed_model_id, "client_resend" => %{"predecessor_shape" => "content_filter_retry"}, "native_content_filter_binding" => source}})
+    ClientRetry.insert_link!(predecessor, successor, now)
+    assert decisions(setup, attempt, successor, 1) == {true, true, true}
+
+    identity = Repo.get!(UpstreamIdentity, setup.identity.id)
+    assert {:ok, refreshed, 2} = CredentialFencing.prepare_refresh_metadata(identity)
+    identity |> Ecto.Changeset.change(metadata: refreshed) |> Repo.update!()
+    assert decisions(setup, attempt, successor, 2) == {true, true, true}
+    assert decisions(setup, attempt, successor, 1) == {true, false, false}
+
+    identity = Repo.get!(UpstreamIdentity, setup.identity.id)
+    assert {:ok, replaced, 3} = CredentialFencing.prepare_replacement_metadata(identity)
+    identity |> Ecto.Changeset.change(metadata: replaced) |> Repo.update!()
+    assert decisions(setup, attempt, successor, 3) == {false, false, false}
+    assert {:error, %{code: :invalid_content_filter_retry_binding}} = CodexPooler.Accounting.create_attempt(successor, setup.assignment, %{model: setup.model, response_metadata: %{"routing" => %{"model_serving_mode" => "full"}}})
+  end
+
+  defp decisions(setup, attempt, successor, scope_epoch) do
+    scope = %{assignment_id: setup.assignment.id, identity_id: setup.identity.id, credential_epoch: scope_epoch, serving_mode: "full", effective_model: setup.model.exposed_model_id, upstream_model: setup.model.upstream_model_id}
+    context = %{request_id: successor.id, pool_upstream_assignment_id: setup.assignment.id, upstream_identity_id: setup.identity.id, credential_epoch: scope_epoch, serving_mode: :full, model: setup.model.exposed_model_id, upstream_model: setup.model.upstream_model_id}
+    {NativeContentFilterRetry.current_source?(Repo.reload!(attempt)), NativeContentFilterRetry.dispatch_allowed?(successor, scope), NativeContentFilterRetry.dispatch_context_allowed?(context)}
   end
 
   defp db_now do

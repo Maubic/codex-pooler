@@ -447,7 +447,7 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
 
     with :ok <- require_current_access_token(expiry),
          {:ok, replacement_metadata, credential_epoch} <-
-           CredentialFencing.prepare_replacement_metadata(identity),
+           CredentialFencing.prepare_refresh_metadata(identity),
          {:ok, _secret} <-
            Secrets.store_encrypted_secret(identity, %{
              secret_kind: "access_token",

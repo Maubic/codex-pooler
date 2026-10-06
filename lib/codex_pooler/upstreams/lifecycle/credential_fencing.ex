@@ -12,6 +12,7 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
   alias CodexPooler.Upstreams.StatusVocabulary.Identity, as: IdentityStatus
 
   @credential_epoch_key "credential_epoch"
+  @credential_lineage_key "credential_lineage"
   @probe_sequence_key "usage_probe_sequence"
   @applied_sequence_key "usage_probe_applied_sequence"
   @completed_sequence_key "usage_probe_completed_sequence"
@@ -44,22 +45,53 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
     |> Map.put_new(@completed_sequence_key, 0)
   end
 
+  # Every credential epoch advance records the identity's credential lineage
+  # (findings#330): `since_epoch` is the epoch at which the credential the
+  # identity holds was put in place, `credential_epoch` the epoch the marker was
+  # written for, in the same identity-locked write that advances the epoch. A
+  # token refresh renews the access of the credential in place and keeps
+  # `since_epoch`; every other advance (an operator link, import or relink, a
+  # pause or a reactivation) starts a new lineage at its own epoch. The marker
+  # holds a version and two integers, never a secret or a provider id.
   @spec advance_credential_epoch(UpstreamIdentity.t()) :: map()
   def advance_credential_epoch(%UpstreamIdentity{} = identity) do
     metadata = initialize_metadata(identity.metadata)
+    epoch = metadata[@credential_epoch_key] + 1
 
     metadata
-    |> Map.put(@credential_epoch_key, metadata[@credential_epoch_key] + 1)
+    |> Map.put(@credential_epoch_key, epoch)
+    |> put_credential_lineage(epoch, epoch)
     |> preserve_terminal_provider_auth_rejection()
   end
 
+  @doc """
+  The metadata of a credential replacement (an operator link, import or relink
+  storing new tokens) and its credential epoch. The replaced credential's
+  lineage ends: the new one starts at that epoch.
+  """
   @spec prepare_replacement_metadata(UpstreamIdentity.t()) ::
           {:ok, map(), pos_integer()} | {:error, %{code: atom(), message: String.t()}}
-  def prepare_replacement_metadata(%UpstreamIdentity{metadata: %{"permanent_deletion_requested_at" => _}}) do
+  def prepare_replacement_metadata(%UpstreamIdentity{} = identity),
+    do: prepare_epoch_metadata(identity, fn epoch -> epoch end)
+
+  @doc """
+  The metadata of a successful token refresh and its credential epoch: exactly
+  what `prepare_replacement_metadata/1` writes, except that the credential's
+  lineage goes on. A refresh exchanges the refresh token the identity holds
+  for the access of the same provider account, so the credential in place
+  keeps the epoch it was put in place at, or, without a trusted lineage, the
+  epoch the refresh started at (findings#330).
+  """
+  @spec prepare_refresh_metadata(UpstreamIdentity.t()) ::
+          {:ok, map(), pos_integer()} | {:error, %{code: atom(), message: String.t()}}
+  def prepare_refresh_metadata(%UpstreamIdentity{} = identity),
+    do: prepare_epoch_metadata(identity, fn _epoch -> credential_lineage_since(identity) end)
+
+  defp prepare_epoch_metadata(%UpstreamIdentity{metadata: %{"permanent_deletion_requested_at" => _}}, _since) do
     {:error, %{code: :upstream_account_deleting, message: "upstream account is being deleted"}}
   end
 
-  def prepare_replacement_metadata(%UpstreamIdentity{} = identity) do
+  defp prepare_epoch_metadata(%UpstreamIdentity{} = identity, since) do
     metadata = normalize_metadata(identity.metadata)
 
     case replacement_epoch(identity.status, Map.fetch(metadata, @credential_epoch_key)) do
@@ -68,6 +100,7 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
           metadata
           |> initialize_metadata()
           |> Map.put(@credential_epoch_key, epoch)
+          |> put_credential_lineage(since.(epoch), epoch)
           |> preserve_terminal_provider_auth_rejection()
 
         {:ok, metadata, epoch}
@@ -76,6 +109,42 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
         {:error, %{code: :invalid_credential_epoch, message: "credential epoch is invalid"}}
     end
   end
+
+  @doc """
+  True when the identity still holds the credential it held at credential
+  epoch `epoch`: its epoch is `epoch`, or every advance since then was a token
+  refresh of that credential (findings#330). The lineage marker is trusted only
+  when written for the identity's current epoch: a missing marker, or one an
+  epoch advance left behind (a release that predates the marker), reads as a
+  new credential at the current epoch. Its start only ever moves forward, so
+  once a replacement happened after `epoch` no later refresh makes this true.
+  """
+  @spec same_credential_since?(UpstreamIdentity.t(), term()) :: boolean()
+  def same_credential_since?(%UpstreamIdentity{} = identity, epoch) when is_integer(epoch) and epoch > 0 do
+    case credential_epoch(identity) do
+      current when is_integer(current) and current >= epoch -> credential_lineage_since(identity) <= epoch
+      _invalid_or_older -> false
+    end
+  end
+
+  def same_credential_since?(_identity, _epoch), do: false
+
+  defp credential_lineage_since(%UpstreamIdentity{} = identity) do
+    metadata = initialize_metadata(identity.metadata)
+    current = metadata[@credential_epoch_key]
+
+    case metadata[@credential_lineage_key] do
+      %{"version" => 1, "since_epoch" => since, "credential_epoch" => ^current} = marker
+      when map_size(marker) == 3 and is_integer(since) and since > 0 and is_integer(current) and since <= current ->
+        since
+
+      _missing_or_stale ->
+        current
+    end
+  end
+
+  defp put_credential_lineage(metadata, since, epoch),
+    do: Map.put(metadata, @credential_lineage_key, %{"version" => 1, "since_epoch" => since, "credential_epoch" => epoch})
 
   @spec advance_credential_epoch_preserving_expiry(UpstreamIdentity.t()) :: map()
   def advance_credential_epoch_preserving_expiry(%UpstreamIdentity{} = identity) do
