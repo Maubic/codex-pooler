@@ -32,6 +32,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks
   alias CodexPooler.Repo
 
+  # A submitted turn's progress, as its owner's upstream session reports it
+  # (`track_request_progress/1`): nothing written yet, its payload started to
+  # leave (or a frame of it arrived), or taken back from a dead owner.
+  @unsent 0
+  @started 1
+  @claimed 2
+
   @restore_downstream_keys [:correlation_id, :epoch, :pid]
   @stable_downstream_keys [:active_turn_reconnect? | @restore_downstream_keys]
   @public_per_call_downstream_keys [:owner_turn_id | @stable_downstream_keys]
@@ -1526,41 +1533,49 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
          submission_notification?,
          opts
        ) do
-    {request, visibility} = track_request_visibility(request)
+    {tracked_request, progress} = track_request_progress(request)
 
     do_submit_remote_owner_request(
       owner_pid,
       codex_session_id,
       downstream,
-      request,
+      {request, tracked_request},
       submission_notification?,
-      visibility,
+      progress,
       opts
     )
   end
 
+  # An owner that dies under the submission hands its turn to a replacement
+  # owner only while the turn's payload never started to leave: once the
+  # upstream session reported the write, or a frame of the turn arrived, the
+  # provider may be running it, and the turn settles `owner_crashed` instead
+  # of reaching the provider a second time (findings#327, the rule of
+  # findings#325 row 325-6). The claim is the last check, so it is taken only
+  # for a turn that is then resubmitted; a session that reaches its write
+  # after it ends the request unsent.
   defp do_submit_remote_owner_request(
          owner_pid,
          codex_session_id,
          downstream,
-         request,
+         {request, tracked_request},
          submission_notification?,
-         visibility,
+         progress,
          opts
        ) do
     with :ok <- refuse_abandoned_submission(opts) do
       WebsocketOwnerSession.submit_request(
         owner_pid,
         downstream,
-        request,
+        tracked_request,
         submission_notification?
       )
     end
   catch
     :exit, reason ->
       if bound_reset_probe?(request) or Process.alive?(owner_pid) or
-           :atomics.get(visibility, 1) == 1 or
-           not recoverable_owner_exit?(reason) do
+           not recoverable_owner_exit?(reason) or
+           not claim_unsent_request(progress) do
         {:error, :owner_crashed}
       else
         with {:ok, {replacement_pid, replacement_downstream, replacement_session}} <-
@@ -1600,23 +1615,45 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   defp recoverable_owner_exit?({:shutdown, _details}), do: false
   defp recoverable_owner_exit?(_reason), do: true
 
-  defp track_request_visibility(%UpstreamWebsocketSession.Request{} = request) do
-    visibility = :atomics.new(1, [])
-    observer = request.frame_observer
+  # Both observers run in the owner's upstream session process, on the owner's
+  # node, where this submission runs too: the frame observer for every frame
+  # the provider sends, the payload write observer once, before the payload can
+  # leave. One compare-and-swap decides between the write and a resubmission
+  # (`claim_unsent_request/1`): a write that finds the turn claimed is refused.
+  defp track_request_progress(%UpstreamWebsocketSession.Request{} = request) do
+    progress = :atomics.new(1, [])
+    frame_observer = request.frame_observer
+    payload_write_observer = request.payload_write_observer
 
-    tracked_observer = fn frame, decoded ->
-      unless StreamProtocol.internal_control_event?(decoded),
-        do: :atomics.put(visibility, 1, 1)
+    tracked_frame_observer = fn frame, decoded ->
+      unless StreamProtocol.internal_control_event?(decoded), do: mark_started(progress)
 
       cond do
-        is_function(observer, 2) -> observer.(frame, decoded)
-        is_function(observer, 1) -> observer.(frame)
+        is_function(frame_observer, 2) -> frame_observer.(frame, decoded)
+        is_function(frame_observer, 1) -> frame_observer.(frame)
         true -> :ok
       end
     end
 
-    {%{request | frame_observer: tracked_observer}, visibility}
+    tracked_payload_write_observer = fn ->
+      case :atomics.compare_exchange(progress, 1, @unsent, @started) do
+        @claimed -> :refused
+        _unsent_or_started -> observe_payload_write(payload_write_observer)
+      end
+    end
+
+    {%{request | frame_observer: tracked_frame_observer, payload_write_observer: tracked_payload_write_observer}, progress}
   end
+
+  defp mark_started(progress) do
+    _previous = :atomics.compare_exchange(progress, 1, @unsent, @started)
+    :ok
+  end
+
+  defp observe_payload_write(observer) when is_function(observer, 0), do: observer.()
+  defp observe_payload_write(_no_observer), do: :ok
+
+  defp claim_unsent_request(progress), do: :atomics.compare_exchange(progress, 1, @unsent, @claimed) == :ok
 
   defp bound_reset_probe?(%UpstreamWebsocketSession.Request{
          reset_probe: %ResetProbe{} = probe

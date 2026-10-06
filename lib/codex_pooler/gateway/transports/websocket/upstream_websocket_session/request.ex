@@ -14,6 +14,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Requ
     :writer,
     :message_mapper,
     :frame_observer,
+    :payload_write_observer,
     :submission_observer,
     :reset_probe,
     :provider_credits_context,
@@ -45,6 +46,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Requ
           | nil
   @type delivery_mode :: :relay | :collect_compaction | :collect_full_history
   @type effective_serving_mode :: String.t() | nil
+  # Called once in the upstream session process before the request's payload
+  # is written to the provider (`UpstreamWebsocketSession`'s
+  # `observe_payload_write/1`): `:ok` lets the write go ahead, any other answer
+  # ends the request unsent.
+  @type payload_write_observer :: (-> :ok | :refused) | nil
   @type frame_observer ::
           (binary() -> any())
           | (binary(), CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.decoded_frame() ->
@@ -59,6 +65,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Requ
           writer: writer(),
           message_mapper: CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.message_mapper(),
           frame_observer: frame_observer(),
+          payload_write_observer: payload_write_observer(),
           submission_observer: (-> any()) | nil,
           reset_probe: ResetProbe.t() | nil,
           provider_credits_context: CodexPooler.Gateway.Transports.ProviderCreditsAdmission.Context.t() | nil,

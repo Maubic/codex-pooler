@@ -1224,6 +1224,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
          :ok <- require_live_request_caller(receive_state),
          {:ok, request} <- authorize_forwarded_generation(request, receipt),
          :ok <- require_live_request_caller(receive_state),
+         :ok <- observe_payload_write(request),
          {state, receive_state} <- begin_connection_request(state, receive_state, connection_usage),
          {:ok, state, consumed_phase} <- consume_request_capability(state, request),
          :ok <- require_live_request_caller(receive_state),
@@ -1251,7 +1252,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       {:error, %{reason: :provider_credits_policy_denied} = denial} ->
         {:ok, {:error, Map.merge(denial, %{body: "", headers: []})}, state}
 
-      {:error, :owner_unavailable} ->
+      {:error, reason} when reason in [:owner_unavailable, :payload_write_refused] ->
         {:ok, {:error, %{reason: :owner_unavailable, body: "", headers: [], started: false}}, state}
 
       {:error, state} ->
@@ -1275,6 +1276,33 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   defp require_live_request_caller(receive_state),
     do: if(request_caller_down?(receive_state), do: {:error, :client_disconnected}, else: :ok)
+
+  # The forwarder that submitted the request through an owner learns here,
+  # before the payload can leave, that it is about to (findings#327): an owner
+  # that dies from now on may have handed the turn to the provider, so the
+  # forwarder settles it instead of submitting it to a replacement owner. A
+  # refusal means the forwarder already took the turn back from a dead owner
+  # and gave it to another one, so this request ends unsent. A failing observer
+  # is logged and the write goes ahead, as a failing frame observer is.
+  defp observe_payload_write(%Request{payload_write_observer: observer}) when is_function(observer, 0) do
+    case observer.() do
+      :ok -> :ok
+      _refused -> {:error, :payload_write_refused}
+    end
+  rescue
+    exception -> report_payload_write_observer_failure(:error, exception.__struct__)
+  catch
+    kind, _reason when kind in [:throw, :exit] -> report_payload_write_observer_failure(kind, nil)
+  end
+
+  defp observe_payload_write(%Request{}), do: :ok
+
+  defp report_payload_write_observer_failure(failure_kind, exception_class) do
+    Logger.warning(
+      "upstream websocket payload write observer failed operation=observe_payload_write " <>
+        "failure_kind=#{failure_kind} exception_class=#{exception_class || "none"}"
+    )
+  end
 
   defp authorize_forwarded_generation(%Request{forwarded_owner: owner} = request, receipt) when is_pid(owner),
     do: WebsocketOwnerSession.authorize_generation_send(owner, request, receipt)

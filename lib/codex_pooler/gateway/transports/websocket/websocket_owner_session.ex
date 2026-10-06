@@ -6229,6 +6229,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
   defp jittered_owner_renewal_delay(timeout), do: OwnerRenewalSchedule.staggered_delay(timeout)
 
+  @doc false
+  # The production upstream boundary, for a test boundary that wraps the real
+  # upstream session around one of its steps instead of standing in for it.
+  @spec default_upstream_boundary() :: map()
+  def default_upstream_boundary, do: upstream_boundary([])
+
   # `start` runs inside `init/1`, so the session reports every anchor-ending
   # close between requests to this owner (findings#270).
   defp upstream_boundary(opts) do
