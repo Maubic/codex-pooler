@@ -62,8 +62,8 @@ defmodule CodexPoolerWeb.Admin.SavedResetSubmissionWorkflowTest do
       assert [job] = jobs(assignment.id)
       assert job.args["manual_request_target"] == %{"upstream_identity_id" => identity.id, "pool_id" => pool.id}
       assert job.args["trigger_kind"] == "admin_manual"
-      assert has_element?(view, receipt(@surface, identity.id) <> " [data-role='saved-reset-request']", "Request accepted")
-      assert has_element?(view, receipt(@surface, identity.id), "Provider application has not been confirmed yet")
+      assert has_element?(view, heading(@surface, identity.id), "Request accepted")
+      assert has_element?(view, receipt(@surface, identity.id) <> " [data-role='saved-reset-request']", "Queued. Nothing has been sent to the provider yet.")
       refute has_element?(view, receipt(@surface, identity.id) <> " [data-role='saved-reset-latest']")
       refute has_element?(view, confirmation(@surface))
       capture_html(@surface, "queued", render(view))
@@ -72,14 +72,14 @@ defmodule CodexPoolerWeb.Admin.SavedResetSubmissionWorkflowTest do
       assert [same_job] = jobs(assignment.id)
       assert same_job.id == job.id
       assert Phoenix.Flash.get(:sys.get_state(view.pid).socket.assigns.flash, :error) == nil
-      assert has_element?(view, receipt(@surface, identity.id), "Request accepted")
+      assert has_element?(view, heading(@surface, identity.id), "Request accepted")
 
       Process.unlink(view.pid)
       ref = Process.monitor(view.pid)
       GenServer.stop(view.pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}
       remounted = mount_surface(conn, identity.id, @surface)
-      assert has_element?(remounted, receipt(@surface, identity.id), "Request accepted")
+      assert has_element?(remounted, heading(@surface, identity.id), "Request accepted")
       refute has_element?(remounted, receipt(@surface, identity.id) <> " [data-role='saved-reset-latest']")
       assert [retained_job] = jobs(assignment.id)
       assert retained_job.id == job.id
@@ -137,14 +137,21 @@ defmodule CodexPoolerWeb.Admin.SavedResetSubmissionWorkflowTest do
       render_click(view, "redeem_saved_reset", params)
       assert jobs(assignment.id) == []
       assert has_element?(view, receipt(@surface, identity.id) <> "[data-provider-outcome='unknown']")
-      assert has_element?(view, receipt(@surface, identity.id), "Do not submit another redemption")
+      assert has_element?(view, heading(@surface, identity.id), "Reset outcome not confirmed")
+      assert has_element?(view, receipt(@surface, identity.id), "Don't redeem again until this resolves.")
       refute render(view) =~ sentinel
       refute render(view) =~ redemption["attempt_id"]
       capture_html(@surface, "unknown", render(view))
+
+      # Pausing live updates replaces the receipt's summary, so the warning has to stay visible as its caveat line.
+      render_hook(view, "set_live_updates", %{"paused" => true})
+      assert has_element?(view, receipt(@surface, identity.id) <> " [data-role='saved-reset-headline']", "Live updates paused")
+      assert has_element?(view, receipt(@surface, identity.id) <> " [data-role='saved-reset-provider-outcome']", "Don't redeem again until this resolves.")
+      assert has_element?(view, heading(@surface, identity.id), "Reset outcome not confirmed")
       finish_scenario(context.fake, @surface, "unknown", %{jobs: 0, provider_outcome: :unknown, private_result_absent?: true})
     end
 
-    for {code, headline} <- [{"no_credit", "No saved reset was available"}, {"nothing_to_reset", "No eligible quota needed resetting"}] do
+    for {code, headline} <- [{"no_credit", "No saved reset was available"}, {"nothing_to_reset", "Nothing needed resetting"}] do
       @noop_code code
       @noop_headline headline
 
@@ -154,7 +161,8 @@ defmodule CodexPoolerWeb.Admin.SavedResetSubmissionWorkflowTest do
         redemption = %{"status" => "noop", "result" => %{"code" => @noop_code, "applied" => false, "body" => "sample-private-noop-body"}}
         current |> Ecto.Changeset.change(metadata: Map.put(current.metadata, "saved_reset_redemption", redemption)) |> Repo.update!()
         view = mount_surface(context.conn, identity.id, @surface)
-        assert has_element?(view, receipt(@surface, identity.id) <> "[data-provider-outcome='not_applied']", @noop_headline)
+        assert has_element?(view, receipt(@surface, identity.id) <> "[data-provider-outcome='not_applied']")
+        assert has_element?(view, heading(@surface, identity.id), @noop_headline)
         refute has_element?(view, receipt(@surface, identity.id) <> " [data-role='saved-reset-consumed-at']")
         assert jobs(assignment.id) == []
         assert Repo.get!(UpstreamIdentity, identity.id).metadata["saved_resets"]["available_count"] == 1
@@ -185,6 +193,8 @@ defmodule CodexPoolerWeb.Admin.SavedResetSubmissionWorkflowTest do
   defp confirm(surface), do: confirmation(surface) |> String.replace("-confirmation", "-confirm")
   defp cancel(surface), do: confirmation(surface) |> String.replace("-confirmation", "-cancel")
   defp receipt(surface, identity_id), do: "#saved-reset-operation-#{surface}-#{identity_id}"
+  # The disclosure summary: the receipt's only heading, carrying its headline.
+  defp heading(surface, identity_id), do: "#saved-reset-operation-heading-#{surface}-#{identity_id}"
 
   defp capture_html(surface, scenario, html) do
     case System.get_env("SAVED_RESET_SUBMISSION_EVIDENCE_DIR") do

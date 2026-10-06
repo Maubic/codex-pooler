@@ -10,7 +10,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation do
   @outcomes [:applied, :not_applied, :unknown, :not_recorded]
   @verifications [:not_started, :pending, :candidate, :quota_confirmed, :request_verified, :reblocked, :expired, :unknown]
   @confirmation_copy "Redeem one saved reset for this account? The provider may apply it before quota checks finish. Verification can take a few minutes. You can leave this view and return to check the status."
-  @timestamps [started_at: "Started", consumed_at: "Consumed", finished_at: "Finished", deadline_at: "Confirmation deadline", last_checked_at: "Last checked", pause_until: "Checks paused until"]
+  @timestamps [started_at: "Started", consumed_at: "Consumed", finished_at: "Finished", deadline_at: "Deadline", last_checked_at: "Checked", pause_until: "Checks paused until"]
 
   attr :identity_id, :string, required: true
   attr :surface, :atom, required: true, values: @surfaces
@@ -38,6 +38,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation do
       |> assign(:timestamps, timestamp_facts(operation, @timestamps))
       |> assign(:request_times, timestamp_facts(operation.request, requested_at: "Requested", scheduled_at: "Scheduled"))
       |> assign(:announcement, announcement(operation))
+      |> assign(:two_facts?, operation.request.state != :none and operation.show_latest_receipt?)
 
     ~H"""
     <section
@@ -70,7 +71,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation do
       >View status</button>
     </section>
     <details :if={@visible? && @surface != :list} id={"#{@id}-details"} data-preserve-open open={@detail_open?} class="min-w-0 text-xs leading-5 text-base-content/70">
-      <summary class="cursor-pointer font-medium text-base-content">Saved reset status: {@compact_headline}</summary>
+      <summary id={@heading_id} class="cursor-pointer font-medium text-base-content"><span class="font-normal text-base-content/55">Saved reset ·</span> {@compact_headline}</summary>
       <section
         id={@id}
         aria-labelledby={@heading_id}
@@ -78,50 +79,54 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation do
         data-role="saved-reset-operation"
         data-provider-outcome={@provider_outcome}
         data-verification-state={@verification}
-        class="grid min-w-0 gap-2 rounded-box border border-base-300 bg-base-200/45 px-3 py-2 text-xs leading-5 text-base-content/70"
+        class="mt-2 grid min-w-0 gap-2 rounded-box border border-base-300 bg-base-200/45 px-3 py-2 text-xs leading-5 text-base-content/70"
       >
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <h3 id={@heading_id} tabindex="-1" class="font-semibold text-base-content">Saved reset status</h3>
+        <span id={"#{@id}-announcement"} role="status" aria-live="polite" aria-atomic="true" class="sr-only">{@announcement}</span>
+        <div class="flex min-w-0 items-start justify-between gap-2">
+          <div class="grid min-w-0 gap-2">
+            <div :if={@operation.request.state != :none} data-role="saved-reset-request" class="grid min-w-0 gap-0.5">
+              <p :if={@two_facts?} class="font-semibold text-base-content">Request</p>
+              <p :if={@two_facts?} class="font-medium">{@operation.request.headline}</p>
+              <p :if={@operation.request.summary}>{@operation.request.summary}</p>
+              <.timestamp_facts :if={@request_times != []} facts={@request_times} />
+            </div>
+            <div :if={@operation.show_latest_receipt?} data-role="saved-reset-latest" class="grid min-w-0 gap-0.5">
+              <p :if={@two_facts?} class="font-semibold text-base-content">Latest reset</p>
+              <p :if={@two_facts? || @operation.headline != @compact_headline} data-role="saved-reset-headline" class="font-medium">{@operation.headline}</p>
+              <p :if={@operation.summary}>{@operation.summary}</p>
+              <p :if={@operation.detail} data-role="saved-reset-provider-outcome">{@operation.detail}</p>
+            </div>
+            <div :if={!@operation.show_latest_receipt? && @operation.headline != @operation.request.headline} data-role="saved-reset-observation" class="grid min-w-0 gap-0.5">
+              <p :if={@operation.headline != @compact_headline} class="font-medium">{@operation.headline}</p>
+              <p :if={@operation.summary}>{@operation.summary}</p>
+            </div>
+          </div>
           <button
             :if={@operation.refreshable?}
             id={@refresh_id}
             type="button"
-            class="btn btn-ghost btn-sm gap-2 text-base-content/60 hover:text-base-content"
+            class="btn btn-ghost btn-xs shrink-0 gap-1 text-base-content/60 hover:text-base-content"
             phx-click={@refresh_event}
             phx-value-id={@identity_id}
             disabled={@refreshing}
+            title="Reads the recorded status. It does not contact the provider or start another redemption."
             data-saved-reset-action="status-refresh"
             data-server-disabled={to_string(@refreshing)}
             aria-describedby={"#{@id}-refresh-description"}
           >
-            <.icon name="hero-arrow-path" class="size-4" />
-            <span>Refresh status</span>
+            <.icon name="hero-arrow-path" class="size-3.5" />
+            <span>Refresh</span>
           </button>
-        </div>
-        <span id={"#{@id}-announcement"} role="status" aria-live="polite" aria-atomic="true" class="sr-only">{@announcement}</span>
-        <div :if={@operation.request.state != :none} data-role="saved-reset-request" class="grid min-w-0 gap-1">
-          <h4 class="font-semibold text-base-content">Request</h4>
-          <p class="font-medium">{@operation.request.headline}</p>
-          <p>{@operation.request.summary}</p>
-          <.timestamp_facts :if={@request_times != []} facts={@request_times} />
-        </div>
-        <div :if={@operation.show_latest_receipt?} data-role="saved-reset-latest" class="grid min-w-0 gap-1">
-          <h4 class="font-semibold text-base-content">Latest account reset</h4>
-          <p data-role="saved-reset-headline" class="font-medium">{@operation.headline}</p>
-          <p>{@operation.summary}</p>
-          <p data-role="saved-reset-provider-outcome">{@operation.detail}</p>
-        </div>
-        <div :if={!@operation.show_latest_receipt? && @operation.headline != @operation.request.headline} data-role="saved-reset-observation" class="grid min-w-0 gap-1">
-          <p class="font-medium">{@operation.headline}</p>
-          <p>{@operation.summary}</p>
         </div>
         <p id={"#{@id}-summary"} class="sr-only">Request status and the latest account reset are separate recorded facts.</p>
         <.timestamp_facts :if={@timestamps != []} facts={@timestamps} />
-        <div :if={@operation.serving_readiness} data-role="saved-reset-serving-readiness" class="grid min-w-0 gap-1 border-t border-base-300 pt-2">
-          <p class="font-medium text-base-content">Current serving readiness: {@operation.serving_readiness.label}</p>
-          <p>{@operation.serving_readiness.reason}</p>
-        </div>
-        <p :if={@operation.refreshable?} id={"#{@id}-refresh-description"} class="text-[11px] text-base-content/60">Refresh reads the recorded status. It does not contact the provider or start another redemption.</p>
+        <%!-- The reason is visible while the account cannot route, when the
+        operator needs it; a routing account keeps it for assistive tech. --%>
+        <p :if={@operation.serving_readiness && @surface != :cockpit} data-role="saved-reset-serving-readiness" title={@operation.serving_readiness.reason} class="text-[11px] text-base-content/60">
+          Routing: <span class="font-medium text-base-content/75">{@operation.serving_readiness.label}</span>
+          <span class={if(@operation.serving_readiness.routing_ready_now?, do: "sr-only", else: "block")} data-role="saved-reset-serving-reason">{@operation.serving_readiness.reason}</span>
+        </p>
+        <p :if={@operation.refreshable?} id={"#{@id}-refresh-description"} class="sr-only">Refresh reads the recorded status. It does not contact the provider or start another redemption.</p>
       </section>
     </details>
     """
@@ -160,7 +165,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation do
   @spec saved_reset_connection_notice(map()) :: Phoenix.LiveView.Rendered.t()
   def saved_reset_connection_notice(assigns) do
     ~H"""
-    <p id={@id} data-saved-reset-connection-notice hidden role="status" aria-live="polite" class="text-xs leading-5 text-base-content/70">Status updates are disconnected. The operation continues independently. Reconnect to read the current recorded status before acting.</p>
+    <p id={@id} data-saved-reset-connection-notice hidden role="status" aria-live="polite" class="text-xs leading-5 text-base-content/70">Live updates disconnected. The reset continues. Reconnect to see the latest status before acting.</p>
     """
   end
 
@@ -200,10 +205,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation do
 
   defp timestamp_facts(assigns) do
     ~H"""
-    <dl class="grid min-w-0 grid-cols-1 gap-x-3 gap-y-1 text-[11px] sm:grid-cols-2">
-      <div :for={fact <- @facts} class="min-w-0">
-        <dt class="font-medium text-base-content/60">{fact.label}</dt>
-        <dd data-role={fact.role} class="break-words tabular-nums">{fact.value}</dd>
+    <dl class="flex min-w-0 flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-base-content/60">
+      <div :for={fact <- @facts} class="flex min-w-0 gap-1">
+        <dt>{fact.label}</dt>
+        <dd data-role={fact.role} class="break-words tabular-nums text-base-content/75">{fact.value}</dd>
       </div>
     </dl>
     """

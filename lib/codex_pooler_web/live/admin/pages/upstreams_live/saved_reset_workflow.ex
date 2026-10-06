@@ -140,7 +140,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SavedResetWorkflow do
 
       {:error, _reason} ->
         socket
-        |> put_flash(:error, "Saved reset request was not accepted. Refresh status to review the current account state")
+        |> put_flash(:error, "Saved reset request was not accepted. Use Refresh to see the current account state.")
         |> reload_fun.()
         |> then(&refresh_editing_fun.(&1, account.identity.id))
     end

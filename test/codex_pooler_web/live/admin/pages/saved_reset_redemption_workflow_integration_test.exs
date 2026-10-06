@@ -67,8 +67,8 @@ defmodule CodexPoolerWeb.Admin.SavedResetRedemptionWorkflowIntegrationTest do
     assert job.args["trigger_kind"] == "admin_manual"
     assert job.args["manual_request_target"] == %{"upstream_identity_id" => identity.id, "pool_id" => fixture.pool.id}
     refresh_views([list, cockpit], identity)
-    assert has_element?(list, receipt(:bank, identity), "Request accepted")
-    assert has_element?(cockpit, receipt(:cockpit, identity), "Request accepted")
+    assert has_element?(list, heading(:bank, identity), "Request accepted")
+    assert has_element?(cockpit, heading(:cockpit, identity), "Request accepted")
     render_click(list, "redeem_saved_reset", target(fixture))
     assert [same] = owned_jobs(assignment)
     assert same.id == job.id
@@ -174,7 +174,7 @@ defmodule CodexPoolerWeb.Admin.SavedResetRedemptionWorkflowIntegrationTest do
     {:ok, replacement, _} = live(context.conn, ~p"/admin/upstreams")
     remember(context, {:view, replacement.pid})
     render_click(replacement, "open_saved_reset_policy", %{"id" => fixture.identity.id})
-    assert has_element?(replacement, receipt(:bank, fixture.identity), "Request accepted")
+    assert has_element?(replacement, heading(:bank, fixture.identity), "Request accepted")
     render_click(replacement, "redeem_saved_reset", target(fixture))
     assert [retained] = owned_jobs(fixture.assignment)
     assert retained.id == job.id
@@ -192,10 +192,10 @@ defmodule CodexPoolerWeb.Admin.SavedResetRedemptionWorkflowIntegrationTest do
     finish(context, [replacement, cockpit], [fake], "lost_browser_ack")
   end
 
-  for {code, outcome, headline} <- [
-        {"lost_reply", "unknown", "Do not submit another redemption"},
-        {"no_credit", "not_applied", "No saved reset was available"},
-        {"nothing_to_reset", "not_applied", "No eligible quota needed resetting"}
+  for {code, outcome, headline, guidance} <- [
+        {"lost_reply", "unknown", "Reset outcome not confirmed", "Don't redeem again until this resolves."},
+        {"no_credit", "not_applied", "No saved reset was available", "The provider had no saved reset to apply."},
+        {"nothing_to_reset", "not_applied", "Nothing needed resetting", "The provider found no exhausted quota to reset."}
       ] do
     test "lost_provider_reply_and_definitive_noop #{code}", context do
       code = unquote(code)
@@ -226,7 +226,8 @@ defmodule CodexPoolerWeb.Admin.SavedResetRedemptionWorkflowIntegrationTest do
       refresh_views([list, cockpit], fixture.identity)
 
       for {surface, view} <- [{:bank, list}, {:cockpit, cockpit}] do
-        assert has_element?(view, receipt(surface, fixture.identity) <> "[data-provider-outcome='#{unquote(outcome)}']", unquote(headline))
+        assert has_element?(view, receipt(surface, fixture.identity) <> "[data-provider-outcome='#{unquote(outcome)}']", unquote(guidance))
+        assert has_element?(view, heading(surface, fixture.identity), unquote(headline))
         refute has_element?(view, receipt(surface, fixture.identity) <> " [data-role='saved-reset-consumed-at']")
       end
 
@@ -265,7 +266,8 @@ defmodule CodexPoolerWeb.Admin.SavedResetRedemptionWorkflowIntegrationTest do
     render_click(list, "open_saved_reset_policy", %{"id" => identity.id})
 
     for {surface, view} <- [{:bank, list}, {:cockpit, cockpit}] do
-      assert has_element?(view, receipt(surface, identity) <> "[data-provider-outcome='applied']", "Reset applied")
+      assert has_element?(view, receipt(surface, identity) <> "[data-provider-outcome='applied']")
+      assert has_element?(view, heading(surface, identity), "Reset applied")
       refute has_element?(view, receipt(surface, identity) <> " [data-role='saved-reset-request']")
     end
 
@@ -490,6 +492,8 @@ defmodule CodexPoolerWeb.Admin.SavedResetRedemptionWorkflowIntegrationTest do
   end
 
   defp receipt(surface, identity), do: "#saved-reset-operation-#{surface}-#{identity.id}"
+  # The disclosure summary: the receipt's only heading, carrying its headline.
+  defp heading(surface, identity), do: "#saved-reset-operation-heading-#{surface}-#{identity.id}"
 
   defp assert_operation(views, identity, outcome, verification) do
     for {surface, view} <- views do

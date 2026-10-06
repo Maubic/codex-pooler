@@ -143,6 +143,35 @@ defmodule CodexPooler.Admin.UpstreamRoutingReadinessTest do
                  quota_readiness
                )
     end
+
+    for phase <- ["consuming", "consumed_pending_probe"] do
+      test "explains that a #{phase} banked reset waits for a request on included quota" do
+        # The window is still exhausted: the readiness that applies is the pending recovery, not the exhaustion.
+        exhausted = %{account_primary_window() | used_percent: Decimal.new("100")}
+
+        identity = %UpstreamIdentity{
+          status: "active",
+          metadata: %{"credential_epoch" => 1, "saved_reset_redemption" => %{"phase" => unquote(phase)}}
+        }
+
+        quota_readiness =
+          identity
+          |> RoutingQuotaSnapshot.from_identity([exhausted], @as_of)
+          |> UpstreamQuotaReadiness.from_snapshot()
+
+        assert quota_readiness.reason_codes == ["saved_reset_probe_pending"]
+
+        assert %{
+                 routing_ready_now?: false,
+                 state: "quota_blocked",
+                 label: "Banked-reset recovery pending",
+                 tone: :warning,
+                 reason_code: "saved_reset_probe_pending",
+                 reason: "Waiting for a request on included quota to confirm the reset. Requests paid with provider credits do not count."
+               } =
+                 UpstreamRoutingReadiness.from_inputs(identity, [healthy_assignment()], quota_readiness)
+      end
+    end
   end
 
   describe "assignment_routing_ready?/1" do

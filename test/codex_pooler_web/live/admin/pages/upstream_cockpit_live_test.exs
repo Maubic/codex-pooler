@@ -232,6 +232,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     view |> element("#saved-reset-view-status-list-#{identity.id}") |> render_click()
     assert has_element?(view, "#saved-reset-policy-dialog[open]")
     assert has_element?(view, "#saved-reset-operation-bank-#{identity.id} [data-role='saved-reset-serving-readiness']", account.routing_readiness.label)
+    # The unconfirmed reset keeps the account from routing, so the bank prints the account's own reason under the label.
+    refute account.routing_readiness.routing_ready_now?
+    assert account.routing_readiness.reason_code == "saved_reset_probe_pending"
+    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id} [data-role='saved-reset-serving-reason'].block", account.routing_readiness.reason)
+    refute has_element?(view, "#saved-reset-operation-bank-#{identity.id} [data-role='saved-reset-serving-reason'].sr-only")
   end
 
   test "reconciliation status renders one attention region for a blocked summary" do
@@ -2405,7 +2410,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
 
     assert has_element?(
              view,
-             "#{operation}[data-provider-outcome='applied'][data-verification-state='pending']",
+             "#{operation}[data-provider-outcome='applied'][data-verification-state='pending']"
+           )
+
+    assert has_element?(
+             view,
+             "#saved-reset-operation-heading-cockpit-#{identity.id}",
              "Reset applied — verifying quota"
            )
 
@@ -5503,11 +5513,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert is_reference(timer)
     assert Process.read_timer(timer) in 1..5_000
     operation = "#saved-reset-operation-cockpit-#{identity.id}"
-    assert has_element?(view, "#{operation} [data-role='saved-reset-request']", "Request accepted")
+    assert has_element?(view, "#saved-reset-operation-heading-cockpit-#{identity.id}", "Request accepted")
+    assert has_element?(view, "#{operation} [data-role='saved-reset-request']", "Queued. Nothing has been sent to the provider yet.")
     Repo.get!(Oban.Job, job.id) |> Ecto.Changeset.change(state: "completed", completed_at: now) |> Repo.update!()
     set_reset_phase!(identity, "consumed_pending_probe", now)
     publish_reset_status!(view, pool, identity)
     assert has_element?(view, "#{operation}[data-provider-outcome='applied'][data-verification-state='pending']")
+    # The routing lanes own the account's readiness, so the receipt does not repeat it.
+    assert has_element?(view, "#upstream-routing-verdict", reset_status_assigns(view).cockpit.header.routing_readiness.label)
+    refute has_element?(view, "#{operation} [data-role='saved-reset-serving-readiness'], #{operation} [data-role='saved-reset-serving-reason']")
     [window] = Repo.all(from w in AccountQuotaWindow, where: w.upstream_identity_id == ^identity.id)
     window |> Ecto.Changeset.change(metadata: cockpit_candidate_metadata(DateTime.add(now, -5, :second), now)) |> Repo.update!()
     publish_reset_status!(view, pool, identity)
@@ -5516,11 +5530,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert has_element?(view, "#upstream-quota-limit-weekly", "New quota report awaiting verification")
     set_reset_phase!(identity, "confirmed_by_quota", now)
     publish_reset_status!(view, pool, identity)
-    assert has_element?(view, "#{operation}[data-verification-state='quota_confirmed']", "Quota confirmed")
+    assert has_element?(view, "#{operation}[data-verification-state='quota_confirmed']")
+    assert has_element?(view, "#saved-reset-operation-heading-cockpit-#{identity.id}", "Quota confirmed")
     assert reset_status_assigns(view).quota_observations_open?
     set_reset_phase!(identity, "confirmed_by_upstream", now)
     publish_reset_status!(view, pool, identity)
-    assert has_element?(view, "#{operation}[data-verification-state='request_verified']", "Recovery verified by a request")
+    assert has_element?(view, "#{operation}[data-verification-state='request_verified']")
+    assert has_element?(view, "#saved-reset-operation-heading-cockpit-#{identity.id}", "Recovery verified by a request")
     counts = FakeUpstream.physical_counts(fake)
     assert Enum.all?(Map.values(counts), &(&1 == 0))
     assert FakeUpstream.requests(fake) == []
@@ -5550,7 +5566,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert reset_status_assigns(view).saved_reset_status_running == nil
     assert Agent.get(probe, & &1.status_reads) == 0
     assert reset_status_assigns(view).cockpit.saved_reset_operation.verification == :pending
-    assert has_element?(view, "#saved-reset-operation-cockpit-#{identity.id}", "Live updates are paused")
+    assert has_element?(view, "#saved-reset-operation-cockpit-#{identity.id} [data-role='saved-reset-headline']", "Live updates paused")
     render_click(view, "refresh_saved_reset_status", %{"id" => Ecto.UUID.generate()})
     assert Agent.get(probe, & &1.status_reads) == 0
     render_click(view, "refresh_saved_reset_status", %{"id" => identity.id})

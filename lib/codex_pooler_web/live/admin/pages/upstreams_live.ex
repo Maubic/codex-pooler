@@ -14,6 +14,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
   alias CodexPoolerWeb.Admin.PoolWizardComponents
   alias CodexPoolerWeb.Admin.ProviderCreditsWorkflow
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel
+  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProjection
   alias CodexPoolerWeb.Admin.UpstreamAuthJsonImport
   alias CodexPoolerWeb.Admin.UpstreamFilterForm
   alias CodexPoolerWeb.Admin.UpstreamPageComponents
@@ -1167,14 +1168,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
     running = assigns.saved_reset_status_running
 
     decorate = fn account ->
-      operation = account.saved_reset_operation
-
-      operation =
-        cond do
-          not connected? -> Map.merge(operation, %{headline: "Status updates are disconnected", summary: "The operation continues independently. Reconnect to read the current recorded status before acting."})
-          paused? -> Map.merge(operation, %{headline: "Live updates are paused", summary: "The operation continues independently. Refresh status reads stored data without resuming live updates.", view_paused?: true})
-          true -> operation
-        end
+      operation = SavedResetOperationProjection.observe(account.saved_reset_operation, paused?: paused?, connected?: connected?)
 
       account |> Map.put(:saved_reset_operation, operation) |> Map.put(:saved_reset_status_refreshing?, running != nil and account.identity.id in running.identity_ids)
     end

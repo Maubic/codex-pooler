@@ -813,7 +813,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
             <p
               :if={
                 !@account.saved_reset_redemption_action.available? &&
-                  @account.saved_reset_redemption_action.reason
+                  @account.saved_reset_redemption_action.reason &&
+                  !@account.saved_reset_operation.active?
               }
               id="saved-reset-redemption-unavailable-reason"
               class="text-xs leading-5 text-base-content/55"
@@ -882,7 +883,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
           <:actions>
             <AdminComponents.action_button
               id="saved-reset-policy-cancel"
-              label="Leave this view"
+              label="Close"
               variant={:ghost}
               phx-click="cancel_saved_reset_policy"
             />

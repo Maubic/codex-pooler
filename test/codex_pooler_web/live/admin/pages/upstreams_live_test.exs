@@ -6570,7 +6570,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert state.live_updates_paused?
     assert state.editing_saved_reset_policy.saved_reset_operation.provider_outcome == :applied
     assert has_element?(view, "#saved-reset-operation-list-#{identity.id}", "Reset applied")
-    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id}", "Live updates are paused")
+    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id} [data-role='saved-reset-headline']", "Live updates paused")
+    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id}", "The reset continues. Refresh reads the stored status.")
     persist_reset_receipt!(identity, "confirmed_by_quota")
     render_hook(view, "set_live_updates", %{"paused" => false})
     settle_saved_reset_status(view)
@@ -6843,10 +6844,20 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     view |> element("#saved-reset-view-status-list-#{identity.id}") |> render_click()
     assert has_element?(view, "#saved-reset-policy-dialog[open]")
     assert has_element?(view, "#saved-reset-operation-bank-#{identity.id}[data-verification-state='pending']")
+    # While the reset is unconfirmed the account cannot route, and the bank prints why next to the routing label.
+    blocked = :sys.get_state(view.pid).socket.assigns.editing_saved_reset_policy.saved_reset_operation.serving_readiness
+    refute blocked.routing_ready_now?
+    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id} [data-role='saved-reset-serving-reason'].block", blocked.reason)
+    refute has_element?(view, "#saved-reset-operation-bank-#{identity.id} [data-role='saved-reset-serving-reason'].sr-only")
     persist_reset_receipt!(identity, "confirmed_by_quota")
     render_click(view, "refresh_saved_reset_status", %{"id" => identity.id})
     settle_saved_reset_status(view)
     assert_confirmed_receipt_reviewable(view, identity)
+    # Once the account routes again the reason stays for assistive technology only.
+    ready = :sys.get_state(view.pid).socket.assigns.editing_saved_reset_policy.saved_reset_operation.serving_readiness
+    assert ready.routing_ready_now?
+    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id} [data-role='saved-reset-serving-reason'].sr-only", ready.reason)
+    refute has_element?(view, "#saved-reset-operation-bank-#{identity.id} [data-role='saved-reset-serving-reason'].block")
     view |> element("#saved-reset-policy-cancel") |> render_click()
     {:ok, remounted, _html} = live(conn, ~p"/admin/upstreams")
     assert_confirmed_receipt_reviewable(remounted, identity)
@@ -6895,8 +6906,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     end
 
     assert has_element?(view, "#saved-reset-policy-dialog[open]")
-    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id}[data-verification-state='quota_confirmed']", "Quota confirmed")
-    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id}-details[data-preserve-open] > summary", "Quota confirmed")
+    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id}[data-verification-state='quota_confirmed']")
+    # The headline sits in the disclosure summary that labels the section; the section itself shows the summary line.
+    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id}-details[data-preserve-open] > summary#saved-reset-operation-heading-bank-#{identity.id}", "Quota confirmed")
+    assert has_element?(view, "#saved-reset-operation-bank-#{identity.id} [data-role='saved-reset-latest']", "The new quota cycle is confirmed.")
   end
 
   defp stop_saved_reset_fake!(fake) do

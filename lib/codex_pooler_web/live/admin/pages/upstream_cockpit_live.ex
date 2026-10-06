@@ -11,6 +11,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive do
   alias CodexPoolerWeb.Admin.PoolEventSubscriptions
   alias CodexPoolerWeb.Admin.ProviderCreditsWorkflow
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel
+  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProjection
   alias CodexPoolerWeb.Admin.UpstreamAuthJsonImport
   alias CodexPoolerWeb.Admin.UpstreamCockpitComponents
   alias CodexPoolerWeb.Admin.UpstreamCockpitLive.AccountLifecycleWorkflow
@@ -673,12 +674,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive do
     operation = cockpit.saved_reset_operation
 
     operation =
-      if is_map(operation) and assigns[:live_updates_paused?] == true do
-        operation = Map.put(operation, :view_paused?, true)
-        if operation.usage_poll_pause.state == :none and (operation.active? or operation.show_latest_receipt?), do: %{operation | headline: "Live updates are paused", summary: "The operation continues independently. Refresh status reads stored data without resuming live updates."}, else: operation
-      else
-        operation
-      end
+      if is_map(operation) and assigns[:live_updates_paused?] == true,
+        do: SavedResetOperationProjection.observe(operation, paused?: true),
+        else: operation
 
     cockpit |> Map.delete(:saved_reset_refresh_cursor) |> Map.put(:saved_reset_status_refreshing?, assigns.saved_reset_status_running != nil) |> Map.put(:saved_reset_operation, operation)
   end

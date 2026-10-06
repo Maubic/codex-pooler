@@ -61,7 +61,9 @@ defmodule CodexPoolerWeb.Admin.SavedResetCockpitReceiptTest do
       capture_html!(@state, html)
       operation = "#saved-reset-operation-cockpit-#{identity.id}"
 
-      assert has_element?(view, "#{operation}[data-provider-outcome='#{@outcome}'][data-verification-state='#{@verification}']", @headline)
+      assert has_element?(view, "#{operation}[data-provider-outcome='#{@outcome}'][data-verification-state='#{@verification}']")
+      # The headline is read from the disclosure summary that labels the receipt; inside the section it only repeats in the screen-reader live region.
+      assert has_element?(view, "#saved-reset-operation-heading-cockpit-#{identity.id}", @headline)
       assert has_element?(view, "#upstream-quota-saved-reset-meter-bar[aria-label='2 saved resets'][aria-valuenow='2']")
       refute has_element?(view, "#upstream-quota-saved-reset-meter-confirmation")
       refute has_element?(view, "#upstream-quota-saved-reset-meter [data-role='upstream-saved-reset-consumed-at']")

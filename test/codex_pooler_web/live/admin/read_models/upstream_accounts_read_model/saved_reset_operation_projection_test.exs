@@ -9,6 +9,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProj
   @started ~U[2026-07-14 03:29:40.000000Z]
   @consumed ~U[2026-07-14 03:29:45.000000Z]
   @prefs DateTimeDisplay.preferences_for_user(nil)
+  @unknown_caveat "The request may have reached the provider. Don't redeem again until this resolves."
+  @refused_caveat "The provider reported that the reset was not applied."
 
   defp context(extra \\ %{}) do
     readiness = UpstreamRoutingReadiness.from_inputs("active", [], UpstreamQuotaReadiness.from_windows([], @now))
@@ -36,7 +38,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProj
       assert result.provider_outcome == :applied
       assert result.verification == :pending
       assert result.headline == "Reset applied — verifying quota"
-      assert result.summary == "The reset was applied. Quota availability is still being verified. This verification does not start another redemption."
+      assert result.summary == "Waiting for a usage report to confirm the new quota."
       assert result.serving_readiness == context().serving_readiness
       assert result.active? and result.refreshable? and result.show_latest_receipt?
       assert result.consumed_at == DateTimeDisplay.format_datetime(@consumed, @prefs)
@@ -58,16 +60,20 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProj
     request = project(redemption("confirmed_by_upstream"))
     assert request.verification == :request_verified
     assert request.headline == "Recovery verified by a request"
-    assert request.summary == "Quota synchronization is still pending. Availability remains subject to the existing recovery limits."
+    assert request.summary == "A request succeeded on the new quota; the usage report has not caught up yet."
   end
 
   @tag :operation_truth_matrix
   test "definitive noops require explicit matching application facts" do
-    for {code, headline} <- [{"no_credit", "No saved reset was available"}, {"nothing_to_reset", "No eligible quota needed resetting"}] do
+    for {code, headline, summary} <- [{"no_credit", "No saved reset was available", "The provider had no saved reset to apply."}, {"nothing_to_reset", "Nothing needed resetting", "The provider found no exhausted quota to reset."}] do
       result = project(%{"status" => "noop", "result" => %{"code" => code, "applied" => false}})
       assert result.provider_outcome == :not_applied
       assert result.verification == :not_started
       assert result.headline == headline
+      assert result.summary == summary
+      # The provider answered, so its refusal is the provider's; the summary already says so, hence no repeated detail line.
+      assert result.outcome_caveat == @refused_caveat
+      assert result.detail == nil
       refute Map.has_key?(result, :consumed_at)
       assert result.show_latest_receipt?
     end
@@ -79,7 +85,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProj
     result = project(record)
     assert result.provider_outcome == :not_applied
     assert result.headline == "Reset was not applied"
-    assert result.detail =~ "stopped before provider dispatch"
+    assert result.summary == "The request stopped before reaching the provider."
+    # Zero dispatches means the provider never saw the request, so it is never described as the provider's refusal.
+    assert result.outcome_caveat == "The request stopped before reaching the provider."
+    refute result.outcome_caveat == @refused_caveat
+    assert result.detail == nil
   end
 
   @tag :operation_truth_matrix
@@ -124,7 +134,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProj
     result = project(redemption("confirmed_by_quota"), %{request_summary: summary})
     assert result.request.state == :queued
     assert result.request.headline == "Request accepted"
-    assert result.request.summary == "Your request is queued. Provider application has not been confirmed yet."
+    assert result.request.summary == "Queued. Nothing has been sent to the provider yet."
     assert is_binary(result.request.requested_at) and is_binary(result.request.scheduled_at)
     assert result.provider_outcome == :applied and result.verification == :quota_confirmed
     assert result.headline == "Quota confirmed"
@@ -138,25 +148,35 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProj
     assert result.provider_outcome == :unknown
     assert result.verification == :not_started
     assert result.headline == "Reset request in progress"
-    assert result.summary == "Provider application has not been confirmed yet."
+    assert result.summary == "Waiting for the provider's answer."
     refute Map.has_key?(result, :consumed_at)
     refute Map.has_key?(result, :deadline_at)
   end
 
   @tag :operation_truth_matrix
   test "reblocked and expired preserve independently proven application" do
-    for {phase, verification, headline} <- [{"reblocked", :reblocked, "Quota is still unavailable"}, {"expired", :expired, "Quota confirmation timed out"}] do
+    for {phase, verification, headline, summary} <- [
+          {"reblocked", :reblocked, "Quota is still unavailable", "The reset was applied, but quota is still blocked. No further reset is spent automatically."},
+          {"expired", :expired, "Quota confirmation timed out", "No usage report confirmed the new quota in time. The spent reset is not refunded."}
+        ] do
       result = project(redemption(phase))
       assert result.provider_outcome == :applied
       assert result.verification == verification
       assert result.headline == headline
-      assert result.detail =~ "reset was applied"
+      assert result.summary == summary
+      assert result.detail == nil
       assert result.show_latest_receipt?
     end
 
-    result = project(redemption("reblocked", "no_credit", false) |> Map.delete("consumed_at"))
-    assert result.provider_outcome == :not_applied and result.verification == :reblocked
-    refute result.detail =~ "reset was applied"
+    # Application is stated only where the provider outcome proves it: any other outcome gets neutral wording and its own caveat.
+    for {phase, verification, summary} <- [{"reblocked", :reblocked, "Quota is still blocked."}, {"expired", :expired, "No usage report confirmed the new quota in time."}],
+        {record, outcome, caveat} <- [{redemption(phase, "no_credit", false) |> Map.delete("consumed_at"), :not_applied, @refused_caveat}, {%{"phase" => phase}, :unknown, @unknown_caveat}] do
+      result = project(record)
+      assert result.provider_outcome == outcome and result.verification == verification
+      assert result.summary == summary
+      assert result.detail == caveat
+      refute result.summary =~ ~r/was applied|spent reset/
+    end
   end
 
   @tag :operation_truth_matrix
@@ -170,10 +190,36 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProj
     assert is_binary(result.pause_until) and is_binary(result.last_checked_at)
     assert result.refreshable?
     disconnected = project(redemption("consumed_pending_probe"), %{view_connected?: false})
-    assert disconnected.headline == "Status updates are disconnected"
+    assert disconnected.headline == "Live updates disconnected"
     assert disconnected.provider_outcome == :applied
-    assert project(redemption("consumed_pending_probe"), %{view_paused?: true}).headline == "Live updates are paused"
+    assert project(redemption("consumed_pending_probe"), %{view_paused?: true}).headline == "Live updates paused"
     assert project(redemption("consumed_pending_probe"), %{usage_poll_pause: :unavailable}).headline == "Quota checks are delayed"
+  end
+
+  @tag :operation_truth_matrix
+  test "an unresolved outcome keeps its redemption warning under every observation override" do
+    unresolved = %{"phase" => "consuming", "started_at" => DateTime.to_iso8601(DateTime.add(@now, -1, :hour))}
+    pause = %{paused_until: DateTime.add(@now, 5, :minute)}
+
+    # Each override replaces the summary, so the warning has to survive as the detail line.
+    for {name, extra} <- [paused: %{view_paused?: true}, disconnected: %{view_connected?: false}, polling_unavailable: %{usage_poll_pause: :unavailable}, polling_paused: %{usage_poll_pause: pause}] do
+      result = project(unresolved, extra)
+      assert result.provider_outcome == :unknown, "#{name}"
+      refute result.headline == "Reset outcome not confirmed", "#{name}"
+      refute result.summary =~ "Don't redeem again", "#{name}"
+      assert result.detail == @unknown_caveat, "#{name}"
+    end
+
+    # The LiveViews apply the same overrides to an operation that is already projected.
+    operation = project(unresolved)
+    assert operation.summary == @unknown_caveat
+    assert operation.detail == nil
+    assert Projection.observe(operation, paused?: true) == project(unresolved, %{view_paused?: true})
+    assert Projection.observe(operation, connected?: false) == project(unresolved, %{view_connected?: false})
+    assert Projection.observe(operation, []) == operation
+
+    # A resolved outcome has no warning to preserve.
+    assert project(redemption("consumed_pending_probe"), %{view_paused?: true}).detail == nil
   end
 
   @tag :unknown_and_contradictory_outcomes
@@ -186,7 +232,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProj
 
     legacy = project(%{"phase" => "confirmed_by_quota"})
     assert legacy.verification == :quota_confirmed
-    assert legacy.detail =~ "Application details are not available"
+    assert legacy.provider_outcome == :unknown
+    assert legacy.summary == "The new quota cycle is confirmed."
+    assert legacy.detail == @unknown_caveat
   end
 
   @tag :unknown_and_contradictory_outcomes
@@ -221,7 +269,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProj
       result = project(Map.put(consuming, "provider_replay", replay))
       assert result.provider_outcome == :unknown
       assert result.headline == "Reset outcome not confirmed"
-      assert result.summary =~ "Do not submit another redemption"
+      assert result.summary =~ "Don't redeem again until this resolves."
     end
 
     for started <- [DateTime.add(@now, -76, :second), DateTime.add(@now, 1, :second)] do
@@ -239,7 +287,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetOperationProj
     result = project(redemption("consumed_pending_probe") |> Map.put("deadline_at", DateTime.to_iso8601(DateTime.add(@now, -1, :second))))
     assert result.verification == :pending
     assert result.provider_outcome == :applied
-    assert result.headline == "Confirmation deadline passed; latest status is being checked"
+    assert result.headline == "Deadline passed — checking quota"
   end
 
   @tag :unknown_and_contradictory_outcomes
