@@ -390,7 +390,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
 
   defp unreserved_turn_claim?(%Request{}), do: false
 
-  defp link_semantic_execution_retry!(_opts, %{predecessor_request_id: id, predecessor_shape: shape}, request, timestamp) when shape in [:previsible_idle_timeout, :identical_resend, :partial_http_tool_cut, :mailbox_continuation, :content_filter_retry],
+  defp link_semantic_execution_retry!(_opts, %{predecessor_request_id: id, predecessor_shape: shape}, request, timestamp) when shape in [:previsible_idle_timeout, :identical_resend, :partial_http_tool_cut, :mailbox_continuation, :content_filter_retry, :zero_output_http_failure],
     do: ClientRetry.insert_link!(%Request{id: id}, request, timestamp)
 
   defp link_semantic_execution_retry!(_opts, %{predecessor_request_id: id, execution_recovery?: true}, request, timestamp),
@@ -686,20 +686,6 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
     Repo.one(from request in Request, where: request.correlation_id == ^correlation_id)
   end
 
-  # Codes whose failure happened after the relay to this client had begun. A
-  # code outside this set failed before the provider produced anything for the
-  # turn (a first-event verdict, a refusal, or no dispatch at all), so a resend
-  # of it buys nothing twice.
-  @post_relay_cut_codes [
-    "owner_drained",
-    "client_disconnected",
-    "upstream_stream_error",
-    "stream_idle_timeout",
-    "owner_task_exception",
-    "dead_execution_recovered",
-    "absent_instance_recovered"
-  ]
-
   # The fence exists to stop the provider being paid twice for one turn, so it
   # refuses only a resend whose predecessor already delivered provider output
   # for that turn: a completed turn, or a cut that happened mid-relay. Anything
@@ -723,15 +709,16 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
 
   defp delivered_provider_output?(%Request{status: "succeeded"}), do: true
 
-  defp delivered_provider_output?(%Request{last_error_code: code, id: request_id})
-       when code in @post_relay_cut_codes do
-    Repo.exists?(
-      from turn in CodexTurn,
-        where: turn.request_id == ^request_id and not is_nil(turn.first_visible_output_at)
-    )
+  # A code outside `ClientRetry.post_relay_cut_code?/1` failed before the
+  # provider produced anything for the turn (a first-event verdict, a refusal,
+  # or no dispatch at all), so a resend of it buys nothing twice.
+  defp delivered_provider_output?(%Request{last_error_code: code, id: request_id}) do
+    ClientRetry.post_relay_cut_code?(code) and
+      Repo.exists?(
+        from turn in CodexTurn,
+          where: turn.request_id == ^request_id and not is_nil(turn.first_visible_output_at)
+      )
   end
-
-  defp delivered_provider_output?(%Request{}), do: false
 
   defp witness_alternates(%ClientRetry.OriginalWitness{alternates: alternates}) when is_list(alternates),
     do: alternates

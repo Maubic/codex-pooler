@@ -30,6 +30,9 @@ defmodule CodexPooler.Accounting.ClientRetry do
   @retry_window_seconds 30
   @max_chain_depth 16
   @task_exception_code "owner_task_exception"
+  # `post_relay_cut_code?/1`: codes whose failure happened after the relay of
+  # the turn's output to the client had begun.
+  @post_relay_cut_codes ~w(owner_drained client_disconnected upstream_stream_error stream_idle_timeout owner_task_exception dead_execution_recovered absent_instance_recovered)
   @pre_attempt_phase_key PreAttemptRelease.detail_key()
   @turn_interrupted_phase PreAttemptRelease.turn_interrupted()
   @stream_error_code "upstream_stream_error"
@@ -2223,6 +2226,62 @@ defmodule CodexPooler.Accounting.ClientRetry do
       do: ErrorCodes.retryable_first_event_code?(code)
 
   def verified_provider_terminal_failure?(_turn, _request, _attempt), do: false
+
+  @doc """
+  True when `code` names a failure that happened after the relay of the turn's
+  output to the client had begun. Any other failure code was decided before
+  the provider produced anything for the turn (a first-event verdict, a
+  refusal, or no dispatch at all), so a retry of it buys nothing twice. The
+  native HTTP claim walk (`Reservation`) and
+  `verified_native_http_zero_output_failure?/3` read the same list.
+  """
+  @spec post_relay_cut_code?(term()) :: boolean()
+  def post_relay_cut_code?(code), do: code in @post_relay_cut_codes
+
+  @doc """
+  A native HTTP request of an ordinary turn (opening, steered continuation or
+  tool continuation) that failed without delivering any provider output: a
+  failure decided before the relay began (`post_relay_cut_code?/1` false: a
+  first-event verdict such as `server_error`, a rate limit, a relayed status),
+  or a cut code other than `upstream_stream_error` while the turn showed the
+  client nothing, and no completed output item counted on its final attempt.
+  The native HTTP claim walk steps over such a request when it is the first of
+  its turn (findings#212 row 212-50); later in a chain the resend policy admits
+  the client's exact retry of it (`FailedPredecessorResend`, findings#314 row
+  314-1), because the released client retries a retryable first-event verdict
+  of the request it resent. `upstream_stream_error` keeps its own proofs
+  (`admit_native_http_zero_done`, the partial-tool cut). The caller still
+  checks the exact witness, authorization epoch, session, lineage, live work,
+  entitlement and retry window.
+  """
+  @spec verified_native_http_zero_output_failure?(term(), term(), term()) :: boolean()
+  def verified_native_http_zero_output_failure?(
+        %CodexTurn{request_id: request_id, status: turn_status, error_code: code, final_attempt_id: attempt_id, transport_kind: transport, completed_at: %DateTime{}} = turn,
+        %Request{
+          id: request_id,
+          status: "failed",
+          last_error_code: code,
+          transport: transport,
+          endpoint: "/backend-api/codex/responses",
+          completed_at: %DateTime{},
+          request_metadata: %{"native_http_claim_arm" => arm}
+        },
+        %Attempt{id: attempt_id, request_id: request_id, status: "failed", network_error_code: code, transport: transport, replay_generation: 0, completed_at: %DateTime{}, response_metadata: metadata}
+      )
+      when is_binary(request_id) and is_binary(attempt_id) and is_binary(code) and transport in ["http_sse", "http_json"] and turn_status in ["failed", "interrupted"] and
+             arm in ["opening", "steered_continuation", "tool_continuation"],
+      do: zero_output_failure_code?(code, turn) and no_counted_output_item?(metadata)
+
+  def verified_native_http_zero_output_failure?(_turn, _request, _attempt), do: false
+
+  defp zero_output_failure_code?(@stream_error_code, _turn), do: false
+  defp zero_output_failure_code?(code, %CodexTurn{first_visible_output_at: visible_at}), do: not post_relay_cut_code?(code) or is_nil(visible_at)
+
+  # A first-event failure finalizes without the relay state and records no
+  # progress; a stream that relayed completed items records their count.
+  defp no_counted_output_item?(%{"native_http_resume_progress" => %{"output_item_done_count" => 0}}), do: true
+  defp no_counted_output_item?(%{"native_http_resume_progress" => _progress}), do: false
+  defp no_counted_output_item?(metadata), do: is_map(metadata) or is_nil(metadata)
 
   @doc false
   @spec verified_quota_rejection?(term(), term(), term()) :: boolean()

@@ -97,6 +97,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           | :lifecycle_cut
           | :partial_reasoning_cut
           | :partial_http_tool_cut
+          | :zero_output_http_failure
           | :advanced_http_resume
           | :previsible_disconnect
           | :undelivered_completion
@@ -433,6 +434,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     if chain_edges_only?(request, chain_edges), do: :ok, else: {:error, :terminal_predecessor}
   end
 
+  # `admit_native_http_zero_output_retry/3` already proved the exact witness,
+  # epoch and session of the node.
+  defp validate_semantic_retry(request, :zero_output_http_failure, _scope, chain_edges) do
+    if chain_edges_only?(request, chain_edges), do: :ok, else: {:error, :terminal_predecessor}
+  end
+
   defp validate_semantic_retry(request, :mailbox_continuation, _scope, chain_edges) do
     if chain_edges_only?(request, chain_edges), do: :ok, else: {:error, :terminal_predecessor}
   end
@@ -556,6 +563,9 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
       request.status == "succeeded" ->
         undelivered_completion(request, scope, now)
 
+      native_http_zero_output_node?(request, scope) ->
+        admit_native_http_zero_output_retry(request, scope, now)
+
       native_http_tool_scope?(request, scope) ->
         admit_native_http_stream_cut(request, scope, now)
 
@@ -645,6 +655,45 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     with {:ok, shape} <- ClientRetry.compaction_resend_shape(turn, request, attempt),
          :ok <- validate_retry_window(request, attempt, now, scope, ClientRetry.compaction_retry_window_seconds()),
          do: {:ok, shape}
+  end
+
+  # A native HTTP request of the chain that failed without delivering any
+  # provider output (a first-event `server_error`, a rate limit, a relayed
+  # status; `ClientRetry.verified_native_http_zero_output_failure?/3`). The
+  # claim walk steps over such a request only while it is the first of its turn
+  # (findings#212 row 212-50); behind a delivered request the client's retry of
+  # it reached this policy, whose HTTP stream-cut shapes admit only
+  # `upstream_stream_error`, and met `409 duplicate_turn` (findings#314 row
+  # 314-1). The released client retries a retryable first-event verdict of the
+  # request it resent, so a provider overload during a resend failed the turn.
+  # Only the exact retry is admitted, from a native HTTP request: the node's
+  # sealed witness, its authorization epoch and session, no live work or
+  # entitlement, and its retry window. The successor is linked to it.
+  defp native_http_zero_output_node?(%Request{transport: transport} = request, %{native_http_transport: scope_transport})
+       when transport in ["http_sse", "http_json"] and scope_transport in ["http_sse", "http_json"] do
+    turn = lock_turn(request.id)
+    ClientRetry.verified_native_http_zero_output_failure?(turn, request, lock_final_attempt(turn, request.id))
+  end
+
+  defp native_http_zero_output_node?(_request, _scope), do: false
+
+  defp admit_native_http_zero_output_retry(request, scope, now) do
+    turn = lock_turn(request.id)
+    attempt = lock_final_attempt(turn, request.id)
+
+    with %CodexTurn{codex_session_id: session_id} <- turn,
+         true <- session_id == Map.get(scope, :codex_session_id),
+         %ClientRetry.OriginalWitness{version: 1, digest: digest, auth_epoch: epoch, alternates: alternates} <- Map.get(scope, :native_client_retry_witness),
+         true <- ClientRetry.original_witness_eligible?(request),
+         true <- ClientRetry.witness_matches?(request.native_client_retry_digest, digest, alternates),
+         true <- request.native_client_retry_auth_epoch == epoch,
+         false <- live_turn?(request.id) or live_attempt?(request.id) or entitlement?(request.id),
+         :ok <- validate_retry_window(request, attempt, now, scope) do
+      {:ok, :zero_output_http_failure}
+    else
+      {:error, :retry_expired} = error -> error
+      _unproved -> {:error, :terminal_predecessor}
+    end
   end
 
   # A client-side tool is dispatched only once its output_item.done arrives.
