@@ -920,6 +920,36 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     end
   end
 
+  # The compact route adds no `instructions` default: a compact request that omits the key reaches the upstream double without it, in Full and in
+  # Lite alike, where an ordinary Responses request is sent with an empty string in Full.
+  @tag :model_serving_modes
+  test "native compact without instructions sends no instructions key in Full or Lite", %{conn: conn} do
+    upstream = start_upstream(FakeUpstream.json_response(%{"output" => []}))
+    setup = gateway_setup(upstream, compact?: true)
+
+    for mode <- ["full", "lite"] do
+      put_model_serving_mode!(setup, mode)
+
+      response =
+        conn
+        |> recycle()
+        |> auth(setup)
+        |> post("/backend-api/codex/responses/compact", %{"model" => setup.model.exposed_model_id, "input" => native_text_input("synthetic compact request")})
+
+      assert response.status == 200
+    end
+
+    assert [full_capture, lite_capture] = FakeUpstream.requests(upstream)
+    assert full_capture.path == "/backend-api/codex/responses/compact"
+    assert lite_capture.path == "/backend-api/codex/responses/compact"
+    refute Map.has_key?(full_capture.json, "instructions")
+    refute Map.has_key?(lite_capture.json, "instructions")
+
+    assert [full_request, lite_request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id, order_by: [asc: r.admitted_at]))
+    assert Enum.map([full_request, lite_request], & &1.endpoint) == ["/backend-api/codex/responses/compact", "/backend-api/codex/responses/compact"]
+    assert Enum.map([full_request, lite_request], &get_in(&1.request_metadata, ["routing", "model_serving_mode"])) == ["full", "lite"]
+  end
+
   @tag :model_serving_modes
   test "Responses Lite rejects typed tool choice before upstream dispatch", %{conn: conn} do
     upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_unexpected"}))
