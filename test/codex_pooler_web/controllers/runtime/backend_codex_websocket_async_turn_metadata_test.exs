@@ -183,13 +183,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketAsyncTurnMetadataTest do
   # resend gained `workspaces`, the socket node's replay preflight finds the
   # lost request's stored witness among the resend's alternates and rebinds
   # the frame to it (findings#319 row 1), so the running generation answers it
-  # once and nothing is dispatched again.
+  # once and nothing is dispatched again. The request is unanchored, so its
+  # witness is its claim and its reservation records no other.
   for mode <- ["full", "lite"] do
     test "forwarding on, #{mode}: the resend of a lost turn that gained the async workspaces reattaches to the running generation" do
       result = lost_turn!(unquote(mode), :first_turn, %{}, @filled, :reattached)
 
       assert %{"type" => "response.completed", "response" => %{"id" => "resp_async_cut_turn"}} = result.outcome, "the resend was refused: #{inspect(result.outcome)} #{result.logs}"
       assert result.logs =~ "reconnect_disposition=same_turn_replay"
+      refute Map.has_key?(result.original.request_metadata, "native_replay_claim")
       assert [%Request{status: "succeeded"} = served] = await_all_settled!(result.setup)
       assert served.id == result.original.id
       assert Repo.all(from(a in Attempt, where: a.request_id == ^served.id, select: {a.replay_generation, a.status})) == [{0, "succeeded"}]
@@ -197,37 +199,59 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketAsyncTurnMetadataTest do
     end
   end
 
-  # The rebind is to the lost request's own stored witness and only through
-  # the fields the client fills late: a resend with another document field
-  # changed, or one that dropped the `workspaces` its request carried, is a
-  # different request and the owner refuses it as before.
-  for {label, original, resend} <- [{"another document field changed", %{}, @changed}, {"the workspaces the lost request carried dropped", @filled, %{}}] do
-    test "forwarding on: the resend of a lost turn with #{label} is not rebound and is refused owner_busy" do
-      result = lost_turn!("full", :first_turn, unquote(Macro.escape(original)), unquote(Macro.escape(resend)), :refused)
+  # The anchored position (findings#323): the next turn's first request, sent
+  # anchored on the previous turn's response, comes back after the lost socket
+  # as the anchor-free full history, identical or with `workspaces` gained.
+  # Its stored witness is the anchor-free digest of its items, which the owner
+  # never holds, so its reservation also records the claim it runs under; the
+  # socket node names that claim once the resend's alternates matched the
+  # witness, and the owner's exact match succeeds.
+  for mode <- ["full", "lite"], {label, resend} <- [{"identical", %{}}, {"that gained the async workspaces", @filled}] do
+    test "forwarding on, #{mode}: the full-history resend of an anchored lost turn, #{label}, reattaches to the running generation" do
+      result = lost_turn!(unquote(mode), :anchored_turn, %{}, unquote(Macro.escape(resend)), :reattached)
 
-      assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = result.outcome
-      assert result.logs =~ "reason_code=owner_busy"
-      assert FakeUpstream.count(result.upstream) == 1
+      assert %{"type" => "response.completed", "response" => %{"id" => "resp_async_cut_turn"}} = result.outcome, "the resend was refused: #{inspect(result.outcome)} #{result.logs}"
+      assert result.logs =~ "reconnect_disposition=same_turn_replay"
+      assert %{"native_replay_claim" => %{"version" => 1, "digest" => <<_::binary-size(43)>>}} = result.original.request_metadata
+      assert [%Request{status: "succeeded"} = earlier, %Request{status: "succeeded"} = served] = await_all_settled!(result.setup)
+      assert served.id == result.original.id
+      refute Map.has_key?(earlier.request_metadata, "native_replay_claim")
+      assert Repo.all(from(a in Attempt, where: a.request_id == ^served.id, select: {a.replay_generation, a.status})) == [{0, "succeeded"}]
+      assert FakeUpstream.count(result.upstream) == 2
     end
   end
 
-  # Known gap, pinned (not part of findings#319 row 1): an anchored request
-  # stores the anchor-free digest of its items, while the owner matches the
-  # reattach on the anchored frame's replay claim, so the full-history resend
-  # of an anchored lost turn is refused `owner_busy` even when nothing else
-  # changed.
-  test "forwarding on: the identical full-history resend of an anchored lost turn is refused owner_busy (known gap)" do
-    result = lost_turn!("full", :anchored_turn, %{}, %{}, :refused)
+  # The rebind is to the lost request's own claim and only through the fields
+  # the client fills late: a resend with another document field changed, or
+  # one that dropped the `workspaces` its request carried, is a different
+  # request and the owner refuses it as before, in either position.
+  for position <- [:first_turn, :anchored_turn], {label, original, resend} <- [{"another document field changed", %{}, @changed}, {"the workspaces the lost request carried dropped", @filled, %{}}] do
+    test "forwarding on, #{position}: the resend of a lost turn with #{label} is not rebound and is refused owner_busy" do
+      result = lost_turn!("full", unquote(position), unquote(Macro.escape(original)), unquote(Macro.escape(resend)), :refused)
+
+      assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = result.outcome
+      assert result.logs =~ "reason_code=owner_busy"
+      assert FakeUpstream.count(result.upstream) == upstream_requests(unquote(position))
+    end
+  end
+
+  # A rolling deploy (findings#323): an anchored request recorded by a node of
+  # the previous release carries no recorded claim. The socket node then has
+  # only its witness, which the owner never holds, so the resend stays refused
+  # `owner_busy` as before and the client's HTTPS fallback serves the turn.
+  test "forwarding on: the full-history resend of an anchored lost turn recorded without its claim stays refused owner_busy" do
+    result = lost_turn!("full", :anchored_turn, %{}, %{}, :refused, :without_recorded_claim)
 
     assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = result.outcome
     assert result.logs =~ "reason_code=owner_busy"
+    assert FakeUpstream.count(result.upstream) == 2
   end
 
   # The lost turn: the socket process dies without running its cleanup while
   # the provider holds the request before its first frame. The resend goes out
   # on a new socket; a reattached resend is answered by the running generation
   # once the provider is released, a refused one before it.
-  defp lost_turn!(mode, position, original_document, resend_document, expect) do
+  defp lost_turn!(mode, position, original_document, resend_document, expect, recorded \\ :as_reserved) do
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
     release_ref = make_ref()
     upstream = start_upstream(upstream_script(:lost, position, :none, release_ref))
@@ -239,11 +263,22 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketAsyncTurnMetadataTest do
     {conn, websocket, cut_frame, full_history, _earlier} = open_turn!(position, client, {conn, websocket, ref}, original_document)
     {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, cut_frame)
     original = cut!(:lost, :on, conn, websocket, ref, setup, upstream, release_ref)
+    if recorded == :without_recorded_claim, do: forget_recorded_claim!(original)
     owner = owner!(setup)
     resend = frame(setup, client.thread, client.turn_id, full_history, resend_document, %{})
     {outcome, logs} = with_info_log(fn -> reattach!(client, resend, owner, upstream, release_ref, expect) end)
     %{original: original, outcome: outcome, logs: logs, setup: setup, upstream: upstream}
   end
+
+  # What a node of the previous release reserves: the same row without the
+  # recorded claim.
+  defp forget_recorded_claim!(request) do
+    assert %{"native_replay_claim" => %{}} = request.request_metadata
+    assert {1, _rows} = Repo.update_all(from(r in Request, where: r.id == ^request.id, update: [set: [request_metadata: fragment("? - 'native_replay_claim'", r.request_metadata)]]), [])
+  end
+
+  defp upstream_requests(:first_turn), do: 1
+  defp upstream_requests(:anchored_turn), do: 2
 
   defp reattach!(client, resend, owner, upstream, release_ref, expect) do
     {conn, websocket, ref} = public_websocket_connect!(client.port, client.setup, client.thread)

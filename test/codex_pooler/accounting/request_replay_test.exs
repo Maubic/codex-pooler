@@ -357,6 +357,41 @@ defmodule CodexPooler.Accounting.RequestReplayTest do
     assert counts() == before_counts
   end
 
+  # findings#323: an anchored request's stored witness is the anchor-free
+  # digest of its items, and its reservation records the claim it runs under.
+  # The anchor-free resend that carries the witness among its alternates is
+  # named that claim; a row recorded without it (by the previous release, or
+  # with a shape the sanitizer would drop) falls back to the witness.
+  test "active preflight names an anchored request's recorded claim when the resend's alternates hold its witness" do
+    fixture = replay_fixture()
+    witness = <<3::256>>
+    claim = <<4::256>>
+    other = <<7::256>>
+    recorded = %{"version" => 1, "digest" => Base.url_encode64(claim, padding: false)}
+    metadata = Map.put(fixture.request.request_metadata || %{}, "native_replay_claim", recorded)
+    fixture.request |> Ecto.Changeset.change(%{native_client_retry_digest: witness, request_metadata: metadata}) |> Repo.update!()
+    before_counts = counts()
+
+    assert {:active_generation_zero, rebound} = RequestReplay.preflight_snapshot(Map.put(fixture.preflight, :replay_claim_alternates, [other, witness]))
+    assert rebound.matched_replay_claim_digest == claim
+
+    # The resend is the anchored frame itself, or a different request: nothing
+    # to rebind.
+    for unmatched <- [Map.put(%{fixture.preflight | replay_claim_digest: claim}, :replay_claim_alternates, [witness]), Map.put(fixture.preflight, :replay_claim_alternates, [other, claim]), fixture.preflight] do
+      assert {:active_generation_zero, snapshot} = RequestReplay.preflight_snapshot(unmatched)
+      refute Map.has_key?(snapshot, :matched_replay_claim_digest)
+    end
+
+    for unusable <- [nil, %{"version" => 2, "digest" => recorded["digest"]}, Map.put(recorded, "extra", true), %{"version" => 1, "digest" => "invalid"}] do
+      metadata = if unusable, do: Map.put(metadata, "native_replay_claim", unusable), else: Map.delete(metadata, "native_replay_claim")
+      fixture.request |> Repo.reload!() |> Ecto.Changeset.change(%{request_metadata: metadata}) |> Repo.update!()
+      assert {:active_generation_zero, fallback} = RequestReplay.preflight_snapshot(Map.put(fixture.preflight, :replay_claim_alternates, [witness]))
+      assert fallback.matched_replay_claim_digest == witness
+    end
+
+    assert counts() == before_counts
+  end
+
   test "armed preflight rejects expired and incoherent durable lifecycle" do
     expired = replay_fixture()
 

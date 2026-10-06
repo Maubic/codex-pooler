@@ -5,6 +5,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.AccountingReservation do
 
   alias CodexPooler.Access
   alias CodexPooler.Accounting.FailureResponse
+  alias CodexPooler.Accounting.NativeReplayClaim
   alias CodexPooler.Accounting.NativeResampledCompletion
   alias CodexPooler.Accounting.PricingResolution
   alias CodexPooler.Catalog.Model
@@ -397,6 +398,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.AccountingReservation do
     |> Map.merge(compaction_bridge_metadata(request_options.payload_context))
     |> Map.merge(native_http_claim_metadata(native_http_claim))
     |> Map.merge(native_websocket_turn_progress_metadata(request_options))
+    |> Map.merge(native_websocket_replay_claim_metadata(request_options))
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
     |> SessionContinuity.put_session_metadata(request_options)
@@ -497,6 +499,21 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.AccountingReservation do
     do: %{"native_turn_progress" => recorded_turn_progress(progress, Map.get(extra, :native_turn_position))}
 
   defp native_websocket_turn_progress_metadata(%RequestOptions{}), do: %{}
+
+  # A websocket request whose resend witness is not its replay claim (an
+  # anchored request: its witness is the anchor-free digest of its items)
+  # records the claim it runs under, which the session's owner matches a lost
+  # turn's reattach on; the socket node's replay preflight names it for the
+  # anchor-free resend that matched the witness (findings#323).
+  defp native_websocket_replay_claim_metadata(%RequestOptions{
+         transport: %{transport: "websocket"},
+         continuity: %{replay_claim_digest: <<_::256>> = claim},
+         native_client_retry_witness: %CodexPooler.Accounting.ClientRetry.OriginalWitness{digest: <<_::256>> = witness}
+       })
+       when witness != claim,
+       do: %{NativeReplayClaim.key() => NativeReplayClaim.metadata(claim)}
+
+  defp native_websocket_replay_claim_metadata(%RequestOptions{}), do: %{}
 
   # The digest, and beside it the position that orders a later request of the
   # turn against this row (findings#206 row 206-423): the compaction pivot's

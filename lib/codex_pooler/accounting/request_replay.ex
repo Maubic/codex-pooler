@@ -12,6 +12,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
     Attempt,
     LedgerEntry,
     LedgerReads,
+    NativeReplayClaim,
     Request,
     RequestLifecycle,
     RequestReplayEntitlement
@@ -1584,20 +1585,24 @@ defmodule CodexPooler.Accounting.RequestReplay do
 
   # A generation-zero turn whose socket died without its cleanup keeps running
   # in its owner for a resend to reattach to, and the owner matches the
-  # reattach on the exact replay claim of the request it runs. The released
-  # client fills `workspaces` in its turn metadata after a turn's first request
-  # can already have gone out, so the resend can be that request with the field
-  # added (findings#319 row 1): one of the resend's transient witness
-  # alternates is then the request's stored witness, which for an unanchored
-  # request is its replay claim, and the socket rebinds the frame to it before
-  # the owner checks it. An anchored request stored the anchor-free digest of
-  # its items, never its replay claim, so a match there leaves the owner's
-  # verdict as it was. A resend already carrying the request's claim, or none
-  # of its alternates, keeps its own claim.
-  defp active_matched_replay_claim(%Request{native_client_retry_digest: stored}, input) do
+  # reattach on the exact replay claim of the request it runs. A resend that
+  # is not byte-identical can still be that request: one whose turn metadata
+  # gained the `workspaces` the client fills late (findings#319 row 1), or the
+  # anchor-free full-history resend of an anchored request (findings#323). Its
+  # transient witness alternates then hold the request's stored witness, and
+  # the socket rebinds the frame to the request's claim before the owner checks
+  # it. An unanchored request's witness is its claim; an anchored request's is
+  # the anchor-free digest of its items, so its claim is the one its
+  # reservation recorded (`NativeReplayClaim`). A row recorded without it falls
+  # back to the witness, which the owner never holds, so its verdict stays as
+  # it was. A resend already carrying the claim, or none of the alternates,
+  # keeps its own claim.
+  defp active_matched_replay_claim(%Request{native_client_retry_digest: stored} = request, input) do
+    claim = NativeReplayClaim.recorded(request) || stored
+
     cond do
-      secure_digest_match?(stored, input.replay_claim_digest) -> nil
-      Enum.any?(Map.get(input, :replay_claim_alternates, []), &secure_digest_match?(stored, &1)) -> stored
+      secure_digest_match?(claim, input.replay_claim_digest) -> nil
+      Enum.any?(Map.get(input, :replay_claim_alternates, []), &secure_digest_match?(stored, &1)) -> claim
       true -> nil
     end
   end

@@ -4,6 +4,7 @@ defmodule CodexPooler.Accounting.Metadata do
   import Ecto.Query
 
   alias CodexPooler.Accounting.NativeContentFilterRetry
+  alias CodexPooler.Accounting.NativeReplayClaim
   alias CodexPooler.Accounting.NativeResampledCompletion
   alias CodexPooler.Accounting.{Request, RequestLogFacts}
   alias CodexPooler.Events
@@ -403,6 +404,9 @@ defmodule CodexPooler.Accounting.Metadata do
 
   defp sanitize_value(value, key) when key in [:native_content_filter_original, "native_content_filter_original"],
     do: NativeContentFilterRetry.sanitize_original(value)
+
+  defp sanitize_value(value, key) when key in [:native_replay_claim, "native_replay_claim"],
+    do: NativeReplayClaim.sanitize(value)
 
   defp sanitize_value(value, key) when key in [:native_content_filter_source, "native_content_filter_source", :native_content_filter_binding, "native_content_filter_binding"],
     do: NativeContentFilterRetry.sanitize_source(value)
