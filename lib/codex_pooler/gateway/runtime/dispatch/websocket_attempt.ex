@@ -38,6 +38,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
   @dialyzer {:nowarn_function,
              [
                finalize_not_retryable_auth_refresh: 6,
+               auth_exhaustion: 1,
                retry_after_websocket_auth_refresh: 5,
                record_auth_refresh_first_attempt_failure: 4,
                auth_refresh_failover?: 1,
