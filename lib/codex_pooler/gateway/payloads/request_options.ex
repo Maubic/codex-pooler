@@ -1063,6 +1063,13 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
     |> Map.put(:portable_full_history?, portable_full_history?(payload))
   end
 
+  # A full history is portable when another account can serve it. Measured
+  # directly against the provider, another account reads a `compaction`
+  # checkpoint (findings#320) but drops a `reasoning` item's
+  # `encrypted_content` without an error (findings#318): a move keeps the
+  # compacted context and costs the model only its earlier reasoning. A request
+  # that must keep that reasoning is pinned after reservation
+  # (`Runtime.Dispatch.ContentFilterRetryPin`).
   defp portable_full_history?(%{"input" => input} = payload) do
     CompactionTrigger.compaction_input_mode(payload) == :full_history and
       (is_binary(input) or is_list(input)) and not upstream_bound_input?(input)
@@ -1070,11 +1077,14 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
 
   defp portable_full_history?(_payload), do: false
 
-  # The provider's `compaction` checkpoint is portable: production served the
-  # same checkpoint on two accounts of one Pool, over the released client's
-  # HTTPS fallback, after the websocket had pinned it to the exhausted one
-  # (findings#206 row 206-357). Only what it wraps besides its own encrypted
-  # payload can still bind it.
+  # The provider's `compaction` checkpoint is portable: another account reads it.
+  # A direct probe counted the same input tokens for a checkpoint on the
+  # producing and on another account, and the other account recalled a fact
+  # planted only in it (findings#320); production served the same checkpoint on
+  # two accounts of one Pool, over the released client's HTTPS fallback, after
+  # the websocket had pinned it to the exhausted one (findings#206 row
+  # 206-357). Only what it wraps besides its own encrypted payload can still
+  # bind it.
   defp upstream_bound_input?(%{"type" => "compaction"} = item),
     do: item |> Map.drop(["type", "id", "encrypted_content"]) |> Map.values() |> upstream_bound_input?()
 
@@ -1099,6 +1109,10 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
 
   defp upstream_bound_input?(_value), do: false
 
+  # A `reasoning` item's `encrypted_content` binds nothing: another account
+  # accepts the item and drops it (input tokens as without it, and the model
+  # reasons again; findings#318), so a move loses that reasoning but never
+  # fails the request. Any other encrypted content stays bound.
   defp upstream_bound_fields?(item) do
     Map.get(item, "type") in ["item_reference", "compaction_trigger"] or
       Map.has_key?(item, "file_id") or
