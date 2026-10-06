@@ -57,6 +57,8 @@ local helmVersion = 'v4.3.0';
           'mix local.rebar --force',
           'mix deps.get',
           'mix compile --warnings-as-errors',
+          // The image build runs this compile-connected graph check too, but only after the suites have passed.
+          'mix quality.xref',
           'mix format --check-formatted',
           'TEST_FAST_COMMAND="mix test.product --warnings-as-errors" make test-fast N=4',
           'apt-get install -y --no-install-recommends docker-cli docker-compose',
