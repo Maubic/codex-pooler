@@ -863,6 +863,53 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentityTest do
       assert {:ok, candidates} = WebsocketTurnIdentity.grown_resend_candidates(ctx.semantic, long)
       assert Enum.map(candidates, &length(&1.items)) == [1, 2, 3, 4]
     end
+
+    # The candidates of several variants of one request (Lite-marked, or as it
+    # was before the client filled `workspaces`, findings#319 row 2) hash every
+    # input item once; each variant's candidates are exactly the ones the rule
+    # names: per appended count, the shorter request's replay digest and
+    # trailing-slice alternates, and the appended items' digests.
+    test "the candidates of request variants are each variant's own, items hashed once", ctx do
+      answers = for n <- 1..5, do: put_in(ctx.client_message, ["content", Access.at(0), "text"], "answer #{n}")
+      history = for n <- 1..300, do: %{"type" => "message", "role" => if(rem(n, 2) == 0, do: "assistant", else: "user"), "content" => [%{"type" => "input_text", "text" => "history #{n}"}]}
+      filled = put_in(ctx.original, ["client_metadata", "x-codex-turn-metadata"], CodexPooler.JSON.encode!(%{"thread_id" => "t", "turn_id" => "turn-g", "request_kind" => "turn", "workspaces" => %{"/synthetic" => %{"has_changes" => true}}}))
+      marked = put_in(filled, ["client_metadata", "ws_request_header_x_openai_internal_codex_responses_lite"], "true")
+
+      for input <- [ctx.original["input"] ++ answers, history ++ answers, [hd(ctx.original["input"]), ctx.client_message], ctx.original["input"] ++ [ctx.client_reasoning, ctx.client_message]] do
+        variants = Enum.map([ctx.original, filled, marked], &Map.put(&1, "input", input))
+        assert {:ok, shared} = WebsocketTurnIdentity.grown_resend_candidates_of_variants(ctx.semantic, variants)
+        assert shared == Enum.map(variants, &reference_grown_candidates(ctx.semantic, &1))
+        assert Enum.map(variants, &WebsocketTurnIdentity.grown_resend_candidates(ctx.semantic, &1)) == Enum.map(shared, &{:ok, &1})
+      end
+
+      anchored = ctx.original |> Map.put("previous_response_id", "resp_synthetic") |> Map.update!("input", &(&1 ++ answers))
+      assert {:ok, [[], []]} = WebsocketTurnIdentity.grown_resend_candidates_of_variants(ctx.semantic, [anchored, anchored])
+
+      other_input = Map.update!(ctx.original, "input", &(&1 ++ [ctx.client_message]))
+      assert {:ok, [first, second]} = WebsocketTurnIdentity.grown_resend_candidates_of_variants(ctx.semantic, [Map.update!(ctx.original, "input", &(&1 ++ answers)), other_input])
+      assert first == reference_grown_candidates(ctx.semantic, Map.update!(ctx.original, "input", &(&1 ++ answers)))
+      assert second == reference_grown_candidates(ctx.semantic, other_input)
+    end
+  end
+
+  # The grown-resend rule written out from the public digests (findings#232 row
+  # 232-232): for each count of trailing completed-output items up to four,
+  # the request without them and the items' digests.
+  defp reference_grown_candidates(semantic, %{"input" => input} = payload) do
+    run = input |> Enum.reverse() |> Enum.take(min(4, length(input) - 1)) |> Enum.take_while(&(&1["type"] in ["message", "reasoning"] and &1["role"] in ["assistant", nil])) |> length()
+
+    for count <- 1..run//1 do
+      {prefix, appended} = Enum.split(input, -count)
+      prefix_payload = Map.put(payload, "input", prefix)
+      {:ok, digest} = WebsocketTurnIdentity.replay_claim_digest(semantic, prefix_payload)
+      {:ok, alternates} = WebsocketTurnIdentity.replay_claim_alternates(semantic, prefix_payload)
+      %{items: Enum.map(appended, &item_digest!/1), digest: digest, alternates: alternates}
+    end
+  end
+
+  defp item_digest!(item) do
+    {:ok, digest} = WebsocketTurnIdentity.completed_item_digest(item)
+    digest
   end
 
   defp assert_identity(payload, raw_turn_id) do

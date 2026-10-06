@@ -45,6 +45,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketAsyncTurnMetadataTest do
   # The frames before the second text delta: the client saw output, and no
   # completed item, when its socket closed.
   @delta_hold 5
+  @item_text "synthetic completed answer"
 
   setup do
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
@@ -88,6 +89,31 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketAsyncTurnMetadataTest do
       result = scenario!(%{forwarding: unquote(forwarding), cut: :delta, mode: "lite", position: unquote(position), transport: unquote(transport), original: %{}, resend: @filled})
 
       assert_served_successor!(result, if(unquote(forwarding) == :on and unquote(transport) == :websocket, do: :owner_preflight, else: :resend_policy))
+    end
+  end
+
+  # A request cut after its client was shown a completed item and no terminal
+  # is resent with exactly that item appended, as the client keeps it
+  # (findings#232 row 232-232). When the resend also gained `workspaces`, its
+  # grown candidates name the shorter request without them too (findings#319
+  # row 2), so it is matched on a new socket, over HTTPS, and through the
+  # owner's client-retry preflight.
+  for forwarding <- [:off, :on], position <- [:first_turn, :anchored_turn], transport <- [:websocket, :https], mode <- ["full", "lite"] do
+    test "forwarding #{forwarding}, #{mode}, #{position}: the #{transport} grown resend of a request cut after a completed item that gained the async workspaces is served" do
+      result = scenario!(%{forwarding: unquote(forwarding), cut: :item_done, mode: unquote(mode), position: unquote(position), transport: unquote(transport), original: %{}, resend: @filled})
+
+      assert_served_successor!(result, if(unquote(forwarding) == :on and unquote(transport) == :websocket, do: :owner_preflight, else: :resend_policy))
+    end
+  end
+
+  # The stripped grown candidates keep the grown rule: the appended item must
+  # be the one the socket pushed, and nothing else in the document may change.
+  for forwarding <- [:off, :on], {label, resend, appended} <- [{"another document field changed", @changed, :pushed}, {"an appended item that is not the pushed one", @filled, :altered}] do
+    test "forwarding #{forwarding}: a grown resend with #{label} stays refused" do
+      result = scenario!(%{forwarding: unquote(forwarding), cut: :item_done, mode: "full", position: :anchored_turn, transport: :websocket, original: %{}, resend: unquote(Macro.escape(resend)), appended: unquote(appended)})
+
+      assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = result.outcome
+      assert FakeUpstream.count(result.upstream) == length(result.earlier) + 1
     end
   end
 
@@ -225,7 +251,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketAsyncTurnMetadataTest do
     Enum.reject(result.requests, &(&1.id in earlier))
   end
 
-  defp scenario!(%{forwarding: forwarding, cut: cut, mode: mode, position: position, transport: transport, original: original_document, resend: resend_document}) do
+  defp scenario!(%{forwarding: forwarding, cut: cut, mode: mode, position: position, transport: transport, original: original_document, resend: resend_document} = arm) do
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, forwarding == :on)
     release_ref = make_ref()
     upstream = start_upstream(upstream_script(cut, position, transport, release_ref))
@@ -238,7 +264,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketAsyncTurnMetadataTest do
     {conn, websocket, cut_frame, full_history, earlier} = open_turn!(position, client, {conn, websocket, ref}, original_document)
     {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, cut_frame)
     original = cut!(cut, forwarding, conn, websocket, ref, setup, upstream, release_ref)
-    resend = frame(setup, client.thread, client.turn_id, full_history, resend_document, %{})
+    resend = frame(setup, client.thread, client.turn_id, full_history ++ appended_items(cut, Map.get(arm, :appended, :pushed)), resend_document, %{})
     {outcome, logs} = with_info_log(fn -> resend!(transport, client, resend) end)
     if cut == :lost, do: :ok = FakeUpstream.release_remaining_frames(upstream, release_ref)
     requests = if forwarding == :on and cut == :previsible and outcome["type"] == "error", do: all_requests(setup), else: await_all_settled!(setup)
@@ -281,6 +307,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketAsyncTurnMetadataTest do
         :previsible -> FakeUpstream.websocket_close_without_terminal_barrier(notify: self(), release_ref: release_ref, code: 1001, reason: "synthetic pre-visible downstream loss")
         :delta -> FakeUpstream.barrier_websocket_frames(stream_frames("resp_async_cut_turn"), notify: self(), release_ref: release_ref)
         :lost -> FakeUpstream.barrier_websocket_frames(completed_frames("resp_async_cut_turn", []), notify: self(), release_ref: release_ref)
+        :item_done -> FakeUpstream.barrier_websocket_frames(item_frames("resp_async_cut_turn"), notify: self(), release_ref: release_ref)
       end
 
     after_cut =
@@ -322,6 +349,26 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketAsyncTurnMetadataTest do
 
     assert_receive {:fake_upstream_frame_barrier, @delta_hold, _handler, ^release_ref}, @timeout_ms
     conn = receive_until!(conn, websocket, ref, "response.output_text.delta")
+    _closed = Mint.HTTP.close(conn)
+    request = setup |> await_all_settled!() |> List.last()
+    await_receipt!(request)
+    :ok = FakeUpstream.release_remaining_frames(upstream, release_ref)
+    request
+  end
+
+  # Held right before the terminal: the client was pushed the completed item
+  # and nothing after it. The provider is released once the request settled
+  # and its receipt names the item.
+  defp cut!(:item_done, _forwarding, conn, websocket, ref, setup, upstream, release_ref) do
+    hold = length(item_frames("resp_async_cut_turn")) - 1
+
+    for ordinal <- 0..(hold - 1) do
+      assert_receive {:fake_upstream_frame_barrier, ^ordinal, _handler, ^release_ref}, @timeout_ms
+      :ok = FakeUpstream.release_frame(upstream, release_ref)
+    end
+
+    assert_receive {:fake_upstream_frame_barrier, ^hold, _handler, ^release_ref}, @timeout_ms
+    conn = receive_until!(conn, websocket, ref, "response.output_item.done")
     _closed = Mint.HTTP.close(conn)
     request = setup |> await_all_settled!() |> List.last()
     await_receipt!(request)
@@ -437,6 +484,31 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketAsyncTurnMetadataTest do
       &CodexPooler.JSON.encode!/1
     )
   end
+
+  # A message streamed and completed without a phase, as the grown-resend
+  # tests of findings#232 row 232-232 measured it: the client keeps the item
+  # without its status and its parts' annotations and logprobs.
+  defp item_frames(response_id) do
+    item_id = "msg_" <> response_id
+    item = %{"id" => item_id, "type" => "message", "role" => "assistant", "status" => "completed", "content" => [%{"type" => "output_text", "text" => @item_text, "annotations" => [], "logprobs" => []}]}
+
+    Enum.map(
+      [
+        %{"type" => "response.created", "response" => %{"id" => response_id, "status" => "in_progress", "output" => []}},
+        %{"type" => "response.output_item.added", "output_index" => 0, "item" => %{"id" => item_id, "type" => "message", "role" => "assistant", "status" => "in_progress", "content" => []}},
+        %{"type" => "response.output_text.delta", "item_id" => item_id, "output_index" => 0, "content_index" => 0, "delta" => @item_text},
+        %{"type" => "response.output_item.done", "output_index" => 0, "item" => item},
+        %{"type" => "response.completed", "response" => %{"id" => response_id, "status" => "completed", "output" => [item], "usage" => %{"input_tokens" => 3, "output_tokens" => 2, "total_tokens" => 5}}}
+      ],
+      &CodexPooler.JSON.encode!/1
+    )
+  end
+
+  defp appended_items(:item_done, :pushed), do: [client_recorded_item(@item_text)]
+  defp appended_items(:item_done, :altered), do: [client_recorded_item(@item_text <> " altered")]
+  defp appended_items(_cut, _appended), do: []
+
+  defp client_recorded_item(text), do: %{"id" => "msg_resp_async_cut_turn", "type" => "message", "role" => "assistant", "content" => [%{"type" => "output_text", "text" => text}]}
 
   defp provider_message(id), do: %{"type" => "message", "id" => id, "role" => "assistant", "phase" => "final_answer", "status" => "completed", "content" => [%{"type" => "output_text", "text" => "synthetic text of #{id}", "annotations" => [], "logprobs" => []}]}
   defp client_message(id), do: %{"type" => "message", "id" => id, "role" => "assistant", "phase" => "final_answer", "content" => [%{"type" => "output_text", "text" => "synthetic text of #{id}"}]}

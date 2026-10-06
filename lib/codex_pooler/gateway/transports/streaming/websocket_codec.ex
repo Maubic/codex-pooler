@@ -1130,8 +1130,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
            WebsocketTurnIdentity.replay_claim_digest(semantic_turn_key, payload),
          {:ok, witness_digest} <-
            resend_witness_digest(semantic_turn_key, payload, replay_claim_digest),
-         {:ok, alternates, async_alternates} <- replay_alternates(semantic_turn_key, payload),
-         {:ok, grown} <- WebsocketTurnIdentity.grown_resend_candidates(semantic_turn_key, payload) do
+         {:ok, alternates, async_alternates, grown} <- replay_alternates(semantic_turn_key, payload) do
       request_options =
         RequestOptions.put_continuity(request_options,
           request_claim_key: request_claim_key,
@@ -1166,30 +1165,32 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodec do
   defp put_native_request_claim(%PreparedWebsocketFrame{} = prepared), do: {:ok, prepared}
 
   # The frame's own trailing-slice alternates (an anchored original's witness
-  # found in its full-history resend, findings#232 row 232-160), and the
-  # alternates of the frame as it was before the released client filled its
-  # asynchronous turn metadata. The client fills `workspaces` in its turn
-  # metadata document from a git task it starts for every turn, and nothing on
-  # its request path waits for it, so a frame sent after the task finished can
-  # repeat one sent before it (findings#314 row 314-2). An unanchored frame
-  # whose document carries such a field therefore also names the stripped
-  # frame's replay digest (an unanchored original's witness) and its
-  # trailing-slice digests (an anchored original's), under the same bound as
-  # its own; both variants share their input, so its items are hashed once.
-  # The claim, the stored witness and the grown candidates stay those of the
-  # frame as sent, and nothing derived from the stripped frame is persisted or
-  # logged.
+  # found in its full-history resend, findings#232 row 232-160) and grown-resend
+  # candidates (row 232-232), and those of the frame as it was before the
+  # released client filled its asynchronous turn metadata. The client fills
+  # `workspaces` in its turn metadata document from a git task it starts for
+  # every turn, and nothing on its request path waits for it, so a frame sent
+  # after the task finished can repeat one sent before it (findings#314 row
+  # 314-2, findings#319 row 2). An unanchored frame whose document carries such
+  # a field therefore also names the stripped frame's replay digest (an
+  # unanchored original's witness), its trailing-slice digests (an anchored
+  # original's) and its grown candidates, under the same bounds as its own;
+  # the variants share their input, so its items are hashed once. The claim
+  # and the stored witness stay those of the frame as sent, and nothing derived
+  # from the stripped frame is persisted or logged.
   defp replay_alternates(semantic_turn_key, payload) do
     case async_metadata_payload(payload) do
       {:ok, earlier} ->
         with {:ok, [alternates, earlier_tails]} <- WebsocketTurnIdentity.replay_claim_alternates_of_variants(semantic_turn_key, [payload, earlier]),
-             {:ok, earlier_digest} <- WebsocketTurnIdentity.replay_claim_digest(semantic_turn_key, earlier) do
-          {:ok, alternates, [earlier_digest | earlier_tails]}
+             {:ok, earlier_digest} <- WebsocketTurnIdentity.replay_claim_digest(semantic_turn_key, earlier),
+             {:ok, grown} <- WebsocketTurnIdentity.grown_resend_candidates_of_variants(semantic_turn_key, [payload, earlier]) do
+          {:ok, alternates, [earlier_digest | earlier_tails], List.flatten(grown)}
         end
 
       :none ->
         with {:ok, alternates} <- WebsocketTurnIdentity.replay_claim_alternates(semantic_turn_key, payload),
-             do: {:ok, alternates, []}
+             {:ok, grown} <- WebsocketTurnIdentity.grown_resend_candidates(semantic_turn_key, payload),
+             do: {:ok, alternates, [], grown}
     end
   end
 

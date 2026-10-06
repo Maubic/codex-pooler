@@ -633,19 +633,9 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
   input of fewer than two items.
   """
   @spec grown_resend_candidates(<<_::256>>, map()) :: {:ok, [grown_candidate()]} | {:error, Error.reason()}
-  def grown_resend_candidates(semantic_turn_key, %{"input" => [_first, _second | _rest] = input} = payload)
+  def grown_resend_candidates(semantic_turn_key, %{"input" => [_first, _second | _rest]} = payload)
       when is_binary(semantic_turn_key) and byte_size(semantic_turn_key) == 32 do
-    if anchored?(payload) do
-      {:ok, []}
-    else
-      input
-      |> trailing_output_run(min(@grown_resend_item_limit, length(input) - 1))
-      |> Enum.reduce_while({:ok, []}, &collect_grown_resend_candidate(semantic_turn_key, payload, input, &1, &2))
-      |> case do
-        {:ok, candidates} -> {:ok, Enum.reverse(candidates)}
-        {:error, _reason} = error -> error
-      end
-    end
+    with {:ok, [candidates]} <- grown_resend_candidates_of_variants(semantic_turn_key, [payload]), do: {:ok, candidates}
   end
 
   def grown_resend_candidates(semantic_turn_key, payload)
@@ -655,22 +645,80 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
   def grown_resend_candidates(_semantic_turn_key, _payload),
     do: invalid_replay_claim("semantic_turn_key")
 
-  defp collect_grown_resend_candidate(semantic_turn_key, payload, input, count, {:ok, candidates}) do
-    case grown_resend_candidate(semantic_turn_key, payload, input, count) do
-      {:ok, candidate} -> {:cont, {:ok, [candidate | candidates]}}
-      {:error, _reason} = error -> {:halt, error}
+  @doc """
+  `grown_resend_candidates/2` of each of several variants of one request that
+  share the very same `input` and differ only in other fields (the native HTTP
+  opener's Lite variants, a request as sent and as it was before the client
+  filled its asynchronous turn metadata), in variant order and equal to what
+  `grown_resend_candidates/2` returns for each. Every input item is hashed
+  once for all variants and appended counts; each variant adds only its own
+  shorter-request digests and trailing-slice chains. Variants whose inputs
+  differ are answered one by one.
+  """
+  @spec grown_resend_candidates_of_variants(<<_::256>>, [map()]) ::
+          {:ok, [[grown_candidate()]]} | {:error, Error.reason()}
+  def grown_resend_candidates_of_variants(semantic_turn_key, [%{"input" => [_first, _second | _rest] = input} | _more] = variants)
+      when is_binary(semantic_turn_key) and byte_size(semantic_turn_key) == 32 do
+    if Enum.all?(variants, &(is_map(&1) and Map.get(&1, "input") === input)),
+      do: shared_grown_resend_candidates(semantic_turn_key, variants, input),
+      else: collect_variant_alternates(variants, &grown_resend_candidates(semantic_turn_key, &1))
+  end
+
+  def grown_resend_candidates_of_variants(semantic_turn_key, variants) when is_list(variants),
+    do: collect_variant_alternates(variants, &grown_resend_candidates(semantic_turn_key, &1))
+
+  # Per appended count `k`: the completed-item digests of the last `k` items,
+  # and the trailing-slice item digests of the shorter request, which are those
+  # of the whole input without its last `k` items (each item hashed once). Per
+  # variant: the shorter request's replay digest and its chain from the
+  # variant's own base, which does not depend on the input.
+  defp shared_grown_resend_candidates(semantic_turn_key, variants, input) do
+    counts = trailing_output_run(input, min(@grown_resend_item_limit, length(input) - 1))
+
+    with {:ok, appended} <- appended_item_digests(input, counts) do
+      tail_digests = input |> tl() |> Enum.reverse() |> Enum.take(@replay_tail_suffix_limit + @grown_resend_item_limit) |> Enum.map(&replay_tail_item_digest/1)
+      collect_variant_alternates(variants, &variant_grown_resend_candidates(semantic_turn_key, &1, input, appended, tail_digests))
     end
   end
 
-  defp grown_resend_candidate(semantic_turn_key, payload, input, count) do
-    {prefix, appended} = Enum.split(input, -count)
-    prefix_payload = Map.put(payload, "input", prefix)
+  defp appended_item_digests(input, counts) do
+    Enum.reduce_while(counts, {:ok, []}, fn count, {:ok, acc} ->
+      case completed_item_digests(Enum.take(input, -count)) do
+        {:ok, items} -> {:cont, {:ok, [{count, items} | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp variant_grown_resend_candidates(semantic_turn_key, variant, input, appended, tail_digests) do
+    if anchored?(variant) or appended == [],
+      do: {:ok, []},
+      else: unanchored_grown_resend_candidates(semantic_turn_key, variant, input, appended, tail_digests)
+  end
+
+  defp unanchored_grown_resend_candidates(semantic_turn_key, variant, input, appended, tail_digests) do
+    with {:ok, key, base} <- replay_tail_base(semantic_turn_key, variant) do
+      collect_variant_alternates(appended, &grown_resend_candidate(semantic_turn_key, variant, input, &1, {key, base, tail_digests}))
+    end
+  end
+
+  # The shorter request keeps at least one item. Its trailing-slice digests
+  # cover its own items after the first (`replay_claim_alternates/2`), none
+  # when it is a single item.
+  defp grown_resend_candidate(semantic_turn_key, variant, input, {count, items}, {key, base, tail_digests}) do
+    prefix_payload = Map.put(variant, "input", Enum.drop(input, -count))
+
+    alternates =
+      if length(input) - count >= 2,
+        do: trailing_tail_chain(key, base, tail_digests |> Enum.drop(count) |> Enum.take(@replay_tail_suffix_limit)),
+        else: []
 
     with {:ok, digest} <- replay_claim_digest(semantic_turn_key, prefix_payload),
-         {:ok, alternates} <- replay_claim_alternates(semantic_turn_key, prefix_payload),
-         {:ok, items} <- completed_item_digests(appended) do
-      {:ok, %{items: items, digest: digest, alternates: alternates}}
-    end
+         do: {:ok, %{items: items, digest: digest, alternates: alternates}}
   end
 
   defp completed_item_digests(items) do
