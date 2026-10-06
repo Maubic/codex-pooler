@@ -5470,16 +5470,13 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   defp public_pushed_outcome(normalized, data) do
-    with :error <- terminal_outcome_or_error(normalized),
-         :error <- terminal_outcome_or_error(data) do
+    with :error <- StreamProtocol.terminal_outcome(normalized),
+         :error <- StreamProtocol.terminal_outcome(data) do
       nil
     else
       {:ok, outcome} -> outcome
     end
   end
-
-  defp terminal_outcome_or_error(frame) when is_binary(frame), do: StreamProtocol.terminal_outcome(frame)
-  defp terminal_outcome_or_error(_frame), do: :error
 
   # Why the pushed `response.incomplete` ended the response, for the receipt:
   # `interrupted` names a response the client stopped (findings#270 row 270-272).
