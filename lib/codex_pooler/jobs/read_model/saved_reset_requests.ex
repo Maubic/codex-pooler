@@ -12,9 +12,7 @@ defmodule CodexPooler.Jobs.ReadModel.SavedResetRequests do
   alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
   alias CodexPooler.Upstreams.StatusVocabulary.Assignment, as: AssignmentStatus
 
-  @open_states Query.open_job_states()
   @assignment_deleted AssignmentStatus.deleted_status()
-  @worker SavedResetRedemptionWorker |> Atom.to_string() |> String.replace_prefix("Elixir.", "")
 
   @type request :: %{
           required(:state) => :queued | :processing | :stopped,
@@ -60,7 +58,7 @@ defmodule CodexPooler.Jobs.ReadModel.SavedResetRequests do
   end
 
   defp put_request_summary(row, summaries) do
-    key = if row.state in @open_states, do: :open, else: :latest_terminal
+    key = if row.state in Query.open_job_states(), do: :open, else: :latest_terminal
     request = %{state: request_state(row.state), requested_at: row.requested_at, scheduled_at: row.scheduled_at}
     Map.update!(summaries, row.identity_id, &Map.put(&1, key, request))
   end
@@ -94,13 +92,13 @@ defmodule CodexPooler.Jobs.ReadModel.SavedResetRequests do
         join: assignment in PoolUpstreamAssignment,
         on: fragment("?->>'pool_upstream_assignment_id'", job.args) == type(assignment.id, :string),
         where: assignment.upstream_identity_id in ^identity_ids and assignment.pool_id in ^pool_ids and assignment.status != ^@assignment_deleted,
-        where: job.worker == ^@worker and fragment("?->>'trigger_kind'", job.args) == "admin_manual",
+        where: job.worker == ^worker_name() and fragment("?->>'trigger_kind'", job.args) == "admin_manual",
         where: not fragment("jsonb_exists(?, 'recovery_kind')", job.args),
         where: fragment("?->'manual_request_target'->>'upstream_identity_id'", job.args) == type(assignment.upstream_identity_id, :string),
         where: fragment("?->'manual_request_target'->>'pool_id'", job.args) == type(assignment.pool_id, :string),
         windows: [
           identity_request: [
-            partition_by: [assignment.upstream_identity_id, job.state in ^@open_states],
+            partition_by: [assignment.upstream_identity_id, job.state in ^Query.open_job_states()],
             order_by: [desc: job.inserted_at, desc: job.id]
           ]
         ],
@@ -130,6 +128,9 @@ defmodule CodexPooler.Jobs.ReadModel.SavedResetRequests do
   defp normalize_ids(_improper_tail, _acc), do: []
 
   defp request_state("executing"), do: :processing
-  defp request_state(state) when state in @open_states, do: :queued
-  defp request_state(_terminal_state), do: :stopped
+  defp request_state(state), do: if(state in Query.open_job_states(), do: :queued, else: :stopped)
+
+  # Computed at runtime: a module attribute built from these modules would make this read model a compile-time dependent
+  # of the worker and of `Query` (`mix quality.xref` permits none).
+  defp worker_name, do: SavedResetRedemptionWorker |> Atom.to_string() |> String.replace_prefix("Elixir.", "")
 end
