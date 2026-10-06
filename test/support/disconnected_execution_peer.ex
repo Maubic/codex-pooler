@@ -89,6 +89,8 @@ defmodule CodexPooler.DisconnectedExecutionPeer do
         %{failed: true} = :sys.get_state(publisher)
       end)
 
+    await_pending_proof(attempt.owner_execution_id, System.monotonic_time(:millisecond) + 15_000)
+
     %{
       queued: Enum.count(ExecutionRegistry.pending(100)),
       warned: String.contains?(logs, "publication unavailable"),
@@ -221,6 +223,29 @@ defmodule CodexPooler.DisconnectedExecutionPeer do
       end
 
       await_acknowledged(deadline)
+    end
+  end
+
+  # `ExecutionIdentity.status/1` can answer `:dead` before the registry has received its own DOWN for the process (the window
+  # `ExecutionProofSupport.publish_terminal!` documents), and the proof is pending only from then on: wait for the registry to
+  # hold this execution's proof before counting what is queued.
+  defp await_pending_proof(execution_id, deadline) do
+    case ExecutionRegistry.pending_proofs([execution_id]) do
+      [_proof] ->
+        :ok
+
+      :unknown ->
+        raise "execution registry is unavailable while awaiting the pending proof"
+
+      [] ->
+        if System.monotonic_time(:millisecond) >= deadline, do: raise("registry did not retain a pending proof for execution #{execution_id}")
+
+        receive do
+        after
+          10 -> :ok
+        end
+
+        await_pending_proof(execution_id, deadline)
     end
   end
 
