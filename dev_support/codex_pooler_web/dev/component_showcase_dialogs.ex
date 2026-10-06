@@ -20,7 +20,7 @@ defmodule CodexPoolerWeb.Dev.ComponentShowcaseDialogs do
 
   alias CodexPooler.Accounts.User
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
-  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjection
+  alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.{SavedResetOperationProjection, SavedResetProjection}
   alias CodexPoolerWeb.DateTimeDisplay
 
   alias CodexPoolerWeb.Admin.{
@@ -258,10 +258,13 @@ defmodule CodexPoolerWeb.Dev.ComponentShowcaseDialogs do
       saved_reset_first_seen_ledger: %{"version" => 1, "entries" => []}
     }
 
+    preferences = DateTimeDisplay.preferences_for_user(nil)
+
     account = %{
       identity: identity,
       label: "design-review-account",
-      saved_resets: SavedResetProjection.snapshot(identity, DateTimeDisplay.preferences_for_user(nil))
+      saved_resets: SavedResetProjection.snapshot(identity, preferences),
+      saved_reset_operation: SavedResetOperationProjection.project(%{snapshot_at: DateTime.utc_now(), datetime_preferences: preferences})
     }
 
     Map.put(

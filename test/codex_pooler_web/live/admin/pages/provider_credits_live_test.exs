@@ -283,22 +283,38 @@ defmodule CodexPoolerWeb.Admin.ProviderCreditsLiveTest do
     assert has_element?(cockpit, "#provider-credits-enabled:not([checked])")
   end
 
-  @tag credits_negative: true
-  test "pending banked reset remains visible independently of the credit policy", %{conn: conn, scope: scope} do
-    fixture = shared_account!(:weekly_credit_only)
-    now = DateTime.utc_now()
-    metadata = fixture.identity.metadata |> Map.put("saved_reset_redemption", %{"phase" => "consumed_pending_probe", "consumed_at" => DateTime.to_iso8601(now), "deadline_at" => DateTime.to_iso8601(DateTime.add(now, 900))})
-    identity = fixture.identity |> Ecto.Changeset.change(metadata: metadata) |> Repo.update!()
-    assert {:ok, _} = Upstreams.update_provider_credits_policy_for_scope(scope, identity.id, %{allow_provider_credits: false})
-    {:ok, list, _} = live(conn, ~p"/admin/upstreams")
-    {:ok, cockpit, _} = live(conn, ~p"/admin/upstreams/#{identity.id}")
-    assert has_element?(list, "#{summary(identity)}[title^='Banked-reset recovery pending']")
-    assert has_element?(cockpit, "#upstream-provider-credits[title^='Banked-reset recovery pending']")
-    assert has_element?(list, "#upstream-account-#{identity.id}-saved-reset-meter [data-confirmation-state='awaiting_confirmation']")
-    assert has_element?(cockpit, "#upstream-quota-saved-reset-meter [data-confirmation-state='awaiting_confirmation']")
-    assert has_element?(cockpit, "#upstream-provider-credits-policy", "Disabled")
-    assert Repo.reload!(identity).metadata["saved_reset_redemption"]["phase"] == "consumed_pending_probe"
-    assert Repo.aggregate(Oban.Job, :count) == 0
+  for enabled? <- [true, false] do
+    @tag credits_negative: true
+    test "pending banked reset remains visible with provider credits #{if enabled?, do: "enabled", else: "disabled"}", %{conn: conn, scope: scope} do
+      fixture = shared_account!(:weekly_credit_only)
+      now = DateTime.utc_now()
+      redemption = %{"phase" => "consumed_pending_probe", "consumed_at" => DateTime.to_iso8601(now), "deadline_at" => DateTime.to_iso8601(DateTime.add(now, 900))}
+      metadata = Map.put(fixture.identity.metadata, "saved_reset_redemption", redemption)
+      identity = fixture.identity |> Ecto.Changeset.change(metadata: metadata) |> Repo.update!()
+      assert {:ok, _} = Upstreams.update_provider_credits_policy_for_scope(scope, identity.id, %{allow_provider_credits: unquote(enabled?)})
+      counts = FakeUpstream.physical_counts(fixture.fake)
+      {:ok, list, _} = live(conn, ~p"/admin/upstreams")
+      {:ok, cockpit, _} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+      assert has_element?(list, "#{summary(identity)}[title^='Banked-reset recovery pending']")
+      assert has_element?(cockpit, "#upstream-provider-credits[title^='Banked-reset recovery pending']")
+      assert has_element?(list, "#saved-reset-operation-list-#{identity.id}[data-verification-state='pending']")
+
+      list |> element("#saved-reset-view-status-list-#{identity.id}") |> render_click()
+      assert has_element?(list, "#saved-reset-policy-dialog[open]")
+      assert has_element?(list, "#saved-reset-operation-bank-#{identity.id}[data-provider-outcome='unknown'][data-verification-state='pending']")
+      assert has_element?(list, "#saved-reset-operation-bank-#{identity.id}", "Latest account reset")
+      assert has_element?(list, "#saved-reset-operation-bank-#{identity.id}", "Do not submit another redemption")
+      assert has_element?(cockpit, "#saved-reset-operation-cockpit-#{identity.id}-details[open]")
+      assert has_element?(cockpit, "#saved-reset-operation-cockpit-#{identity.id}", "Do not submit another redemption")
+      assert has_element?(cockpit, "#saved-reset-operation-cockpit-#{identity.id}[data-provider-outcome='unknown'][data-verification-state='pending']")
+      assert has_element?(cockpit, "#upstream-provider-credits-policy", unquote(if enabled?, do: "Enabled", else: "Disabled"))
+      persisted = Repo.reload!(identity)
+      assert persisted.allow_provider_credits == unquote(enabled?)
+      assert persisted.metadata["saved_reset_redemption"] == redemption
+      assert Repo.aggregate(Oban.Job, :count) == 0
+      assert FakeUpstream.physical_counts(fixture.fake) == counts
+      CodexPooler.TestDiagnostics.puts(Jason.encode!(%{scenario: "pending_reset_explicit_status_independent_of_credit_policy", provider_credits_enabled: unquote(enabled?), bank_open: true, verification: "pending", provider_outcome: "unknown", jobs: 0, provider_calls_added: 0}))
+    end
   end
 
   defp shared_account!(state, opts \\ []) do
