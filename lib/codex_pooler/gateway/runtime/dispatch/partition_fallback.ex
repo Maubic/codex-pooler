@@ -22,8 +22,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback do
     limit before any output while a held-back candidate can serve the model
     now. The held-back candidates go through ordinary route filtering (circuits,
     quota, workspace denials, the saved-reset decisions an ordinary request
-    makes) with quota and circuit snapshots read now, and the turn is
-    dispatched over the resulting plan with the same reservation.
+    makes, none once the request recorded a redemption) with quota and circuit
+    snapshots read now, and the turn is dispatched over the resulting plan
+    with the same reservation.
 
   Translated surfaces route over every partition and record no fallback. A
   hard pin and a file affinity leave no held-back candidate, and a
@@ -85,7 +86,11 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback do
 
   defp run_before_dispatch(input, route_state, refusal, fallback) do
     held_back_state = RouteState.take_partition_fallback(route_state, input.auth, input.model, input.request_options)
-    held_back_input = CandidateEligibility.FilterInput.put_candidates(input, held_back_state.candidates)
+
+    held_back_input =
+      input
+      |> CandidateEligibility.FilterInput.put_candidates(held_back_state.candidates)
+      |> CandidateEligibility.FilterInput.put_request_options(record_recovery_outcome(input.request_options, refusal))
 
     case RouteFiltering.filter_candidates_with_route_state(held_back_input, held_back_state) do
       {:ok, candidates, request_options, state} ->
@@ -98,6 +103,17 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback do
         {:error, pool_refusal(input, refusal, held_back_refusal), request_options}
     end
   end
+
+  # The selected partition can refuse after its filtering redeemed a reset (or
+  # met one still converging on its seat). The held-back filtering then starts
+  # with that recovery recorded, so it runs no saved-reset scan of its own and
+  # the request spends at most one reset (findings#331). The redemption's
+  # locked cohort fence refuses that second consume too, since the cohort
+  # holds both partitions.
+  defp record_recovery_outcome(%RequestOptions{} = request_options, %{non_credit_recovery_outcome: outcome}) when outcome in ["pending", "confirmed"],
+    do: RequestOptions.put_routing(request_options, quota_decision: Map.put(request_options.routing.quota_decision || %{}, "non_credit_recovery_outcome", outcome))
+
+  defp record_recovery_outcome(request_options, _refusal), do: request_options
 
   # One bounded, metadata-only line per pre-dispatch fallback: the phase, the
   # outcome, fixed refusal codes and counts. The request correlator comes from

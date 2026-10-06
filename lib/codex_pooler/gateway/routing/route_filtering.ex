@@ -20,6 +20,15 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
           | {:saved_reset_refilter_clock, refilter_clock()}
   @type filter_options :: [filter_option()]
 
+  # A request spends at most one banked reset (findings#331). Once its routing
+  # options record a pending or confirmed recovery (a reset it redeemed, or one
+  # still converging on a candidate), every later filtering of the request (the
+  # retry over the remaining candidates, either held-back partition hop) runs
+  # neither saved-reset scan and keeps that outcome. The redemption's locked
+  # cohort fence refuses the same consume while the cohort holds the redeemed
+  # account, but the retry narrows the cohort to the candidates it has left.
+  @recorded_recovery_outcomes ["pending", "confirmed"]
+
   @spec filter_candidates_with_route_state(
           CandidateEligibility.FilterInput.t(),
           RouteState.t(),
@@ -105,11 +114,35 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
        ) do
     {result, route_state, refresh_attempted?} = refresh_non_credit_candidates(filter_input, route_state)
     recovery_plan = %{filter_input: filter_input, route_state: route_state, capacity_band: :non_credit}
-    result = SavedResetAutoRedeem.maybe_redeem_before_quota_exhaustion(result, recovery_plan, quota_mode, saved_reset_scan_at, saved_reset_opts)
+    {result, recorded, recovery_plan} = threshold_recovery(result, recovery_plan, quota_mode, saved_reset_scan_at, saved_reset_opts)
 
-    case result do
-      {:error, _error} -> recover_or_defer_capacity(result, recovery_plan, quota_mode, saved_reset_scan_at, saved_reset_opts, refresh_attempted?)
-      admitted -> admit_servable_capacity(admitted, filter_input, quota_mode, route_state, refresh_attempted?)
+    filtered =
+      case result do
+        {:error, _error} -> recover_or_defer_capacity(result, recovery_plan, quota_mode, saved_reset_scan_at, saved_reset_opts, refresh_attempted?, recorded)
+        admitted -> admit_servable_capacity(admitted, filter_input, quota_mode, route_state, refresh_attempted?)
+      end
+
+    keep_recorded_recovery_outcome(filtered, recorded)
+  end
+
+  # The threshold scan runs only while the request records no recovery; a
+  # redemption it applies is recorded for the rest of the request. A refusal
+  # after that redemption is then judged on quota reread now: on the reading
+  # from before the redemption, the redeemed account looked routable and was
+  # admitted, and the final admission refused its pending reset at send time,
+  # leaving an attempt that sent nothing (findings#331).
+  defp threshold_recovery(result, %{filter_input: input, route_state: state} = recovery_plan, quota_mode, scan_at, opts) do
+    case recorded_recovery_outcome(input.request_options) do
+      nil ->
+        scanned = SavedResetAutoRedeem.maybe_redeem_before_quota_exhaustion(result, recovery_plan, quota_mode, scan_at, opts)
+
+        case applied_recovery_outcome(scanned) do
+          nil -> {scanned, nil, recovery_plan}
+          applied -> {scanned, applied, %{recovery_plan | route_state: RouteState.refresh_quota_snapshots(state)}}
+        end
+
+      recorded ->
+        {result, recorded, recovery_plan}
     end
   end
 
@@ -137,7 +170,7 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
     end
   end
 
-  defp recover_or_defer_capacity(result, recovery_plan, quota_mode, scan_at, opts, refresh_attempted?) do
+  defp recover_or_defer_capacity(result, recovery_plan, quota_mode, scan_at, opts, refresh_attempted?, recorded) do
     %{filter_input: input, route_state: state} = recovery_plan
 
     case Plan.filter_eligible_candidates(input, state) do
@@ -145,20 +178,28 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
         {:ok, candidates, decision, state}
 
       {:refreshable_quota, _plan} ->
-        recover_unavailable_capacity(result, recovery_plan, quota_mode, scan_at, opts, refresh_attempted?)
+        recover_unavailable_capacity(result, recovery_plan, quota_mode, scan_at, opts, refresh_attempted?, recorded)
     end
   end
 
-  defp recover_unavailable_capacity(result, recovery_plan, quota_mode, scan_at, opts, refresh_attempted?) do
+  defp recover_unavailable_capacity(result, recovery_plan, quota_mode, scan_at, opts, refresh_attempted?, recorded) do
     %{filter_input: input, route_state: state} = recovery_plan
-    recovery = %{candidate_exclusions: non_credit_exclusions(input, state), result: result}
-    recovered = SavedResetAutoRedeem.recover_non_credit_exhaustion(recovery, recovery_plan, quota_mode, scan_at, opts)
+    recovered = blocked_recovery(result, recovery_plan, quota_mode, scan_at, opts, recorded)
 
     case recovered do
       {:error, _error} -> deferred_capacity(recovered, input, state, quota_mode, refresh_attempted?)
       admitted -> maybe_allow_missing_quota(admitted, input, quota_mode, state)
     end
   end
+
+  # The blocked scan runs only while the request records no recovery, a
+  # redemption the threshold scan applied in this filtering included.
+  defp blocked_recovery(result, %{filter_input: input, route_state: state} = recovery_plan, quota_mode, scan_at, opts, nil) do
+    recovery = %{candidate_exclusions: non_credit_exclusions(input, state), result: result}
+    SavedResetAutoRedeem.recover_non_credit_exhaustion(recovery, recovery_plan, quota_mode, scan_at, opts)
+  end
+
+  defp blocked_recovery(result, _recovery_plan, _quota_mode, _scan_at, _opts, recorded), do: keep_recorded_recovery_outcome(result, recorded)
 
   defp non_credit_exclusions(input, state) do
     case Plan.filter_non_credit_candidates(input, state) do
@@ -183,6 +224,35 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
   end
 
   defp put_recovery_outcome({:error, error}, outcome), do: {:error, Map.put(error, :non_credit_recovery_outcome, Atom.to_string(outcome))}
+
+  defp recorded_recovery_outcome(%RequestOptions{routing: %{quota_decision: %{"non_credit_recovery_outcome" => outcome}}})
+       when outcome in @recorded_recovery_outcomes,
+       do: outcome
+
+  defp recorded_recovery_outcome(_request_options), do: nil
+
+  defp applied_recovery_outcome(result) do
+    case SavedResetAutoRedeem.recovery_outcome(result) do
+      outcome when outcome in [:pending, :confirmed] -> Atom.to_string(outcome)
+      _not_applied -> nil
+    end
+  end
+
+  # The recorded outcome stays on the decision and the refusal of every later
+  # filtering of the request, so each one skips the scans too and the request
+  # keeps the record of the reset it redeemed. Such a refusal stays the
+  # retryable `503`: the redeemed account's return is not known (a pending
+  # probe has none), and a retry that left it out of its candidates cannot see
+  # it (`UsageLimit`).
+  defp keep_recorded_recovery_outcome(result, nil), do: result
+
+  defp keep_recorded_recovery_outcome({:ok, candidates, decision, route_state}, recorded) when is_map(decision),
+    do: {:ok, candidates, Map.put(decision, "non_credit_recovery_outcome", recorded), route_state}
+
+  defp keep_recorded_recovery_outcome({:error, %{} = error}, recorded),
+    do: {:error, error |> Map.put(:non_credit_recovery_outcome, recorded) |> UsageLimit.retryable()}
+
+  defp keep_recorded_recovery_outcome(result, _recorded), do: result
 
   # A workspace-level provider denial removes the account for every model and
   # Pool (findings#206 row 206-509). It runs after the saved-reset decisions so
