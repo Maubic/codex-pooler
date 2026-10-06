@@ -28,6 +28,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpWindowAdvanceTest do
   alias CodexPooler.Accounting.Request
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, BridgeSessionAlias, CodexSession}
+  alias CodexPooler.Pools
   alias CodexPooler.Repo
   alias CodexPoolerWeb.GatewayControllerHelpers
 
@@ -148,6 +149,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpWindowAdvanceTest do
   # thread served on, as a lapse on the same window does (findings#270 row
   # 270-282). Without a prompt cache key, and with the ring seeded towards the
   # other assignment, only that preference keeps the turn where it was.
+  # Sticky session affinity would seed the ring from the replacement session's
+  # id, which is new on every run, so the request's `x-request-id` would never
+  # be read and half of the runs would pass without the preference
+  # (findings#324 row 324-3): the Pool's sticky sessions are off for this turn,
+  # so the ring is seeded by that request id.
   test "after the thread's session lapses, the next window's new session prefers its assignment", %{conn: conn} do
     upstream = start_upstream(FakeUpstream.strict_sequence(upstream_responses(Enum.take(window_advance_requests(:remote), 3)) ++ [turn_sse("resp_lapse_next_turn")]))
     other_upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_lapse_other"}))
@@ -165,7 +171,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpWindowAdvanceTest do
     expire_owner_lease!(session.id)
 
     setup = %{setup | model: put_model_source_assignments!(setup.model, [setup.assignment, other.assignment])}
-    use_routing_strategy!(setup.pool, "bridge_ring", 2)
+    pin_ring_seed!(setup.pool, 2)
     seed = seed_preferring_assignment([setup.assignment.id, other.assignment.id], other.assignment.id)
     next_turn = %{ids | turn: "turn-" <> unique_suffix()}
     input = history() ++ [compaction_item("one"), assistant("done"), user("next task")]
@@ -177,7 +183,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpWindowAdvanceTest do
     assert %CodexSession{status: "closed"} = Repo.get!(CodexSession, session.id)
     assert [_old, replacement] = Enum.sort_by(pool_sessions(setup), & &1.created_at, DateTime)
     assert replacement.session_key == window_session_key(ids.thread, 1)
-    assert List.last(pool_requests(setup)).request_metadata["codex_session_id"] == replacement.id
+    assert %Request{request_metadata: %{"codex_session_id" => replacement_id, "routing" => routing}} = List.last(pool_requests(setup))
+    assert replacement_id == replacement.id
+    assert routing["affinity_kind"] == "request_correlation"
+    assert {routing["session_preference_kind"], routing["session_preference_status"]} == {"recreated", "applied"}
   end
 
   # A file whose affinity names another assignment than the thread session's
@@ -345,6 +354,21 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpWindowAdvanceTest do
   defp pool_requests(setup), do: Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id and r.api_key_id == ^setup.api_key.id, order_by: r.admitted_at))
 
   defp active_lease!(session_id), do: Repo.one!(from(l in BridgeOwnerLease, where: l.codex_session_id == ^session_id and l.status == "active"))
+
+  # The ring orders by the request's own correlation id instead of the session
+  # id, which a recreation draws fresh on every run.
+  defp pin_ring_seed!(pool, ring_size) do
+    pool
+    |> Pools.ensure_routing_settings()
+    |> Ecto.Changeset.change(%{
+      routing_strategy: "bridge_ring",
+      bridge_ring_size: ring_size,
+      sticky_websocket_sessions: false,
+      sticky_http_sessions: false,
+      updated_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    })
+    |> Repo.update!()
+  end
 
   defp expire_owner_lease!(session_id) do
     expired_at = DateTime.utc_now() |> DateTime.add(-1, :second) |> DateTime.truncate(:microsecond)
