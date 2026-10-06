@@ -487,21 +487,39 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
     end
   end
 
+  # A reset restores the account's long window, the weekly secondary or the monthly primary, so the scan opens on an
+  # exhaustion of that window or on the provider-blocked account availability, which names no window. The 5-hour primary
+  # takes no part: its exhaustion alone never opens the scan, and next to an exhausted long window it does not keep it
+  # closed. A window of any other shape keeps the scan closed. The scan only opens: every spend fence still decides.
   defp account_exhaustion_exclusions?([_ | _] = exclusions, identity) do
-    Enum.all?(exclusions, &account_exhaustion_exclusion?/1) and
-      (not Enum.any?(exclusions, fn exclusion ->
-         Enum.any?(
-           reason_token(exclusion, :reasons),
-           &(reason_token(&1, :window_kind) == "primary")
-         )
-       end) or
-         Enum.any?(
-           Windows.list_quota_windows(identity),
-           &WindowClassifier.monthly_primary?/1
-         ))
+    if Enum.all?(exclusions, &account_exhaustion_exclusion?/1) do
+      windows = Windows.list_quota_windows(identity)
+      roles = for exclusion <- exclusions, reason <- reason_token(exclusion, :reasons), do: exhaustion_window_role(reason, windows)
+
+      :other not in roles and :long_window in roles
+    else
+      false
+    end
   end
 
   defp account_exhaustion_exclusions?(_missing, _identity), do: false
+
+  defp exhaustion_window_role(reason, windows) do
+    case reason_token(reason, :window_kind) do
+      nil -> :long_window
+      "secondary" -> if Enum.any?(windows, &WindowClassifier.weekly_secondary?/1), do: :long_window, else: :other
+      "primary" -> primary_window_role(windows)
+      _other_kind -> :other
+    end
+  end
+
+  defp primary_window_role(windows) do
+    cond do
+      Enum.any?(windows, &WindowClassifier.monthly_primary?/1) -> :long_window
+      Enum.any?(windows, &WindowClassifier.primary_5h?/1) -> :five_hour
+      true -> :other
+    end
+  end
 
   defp candidate_order(%{filter_input: %{candidates: candidates}}) when is_list(candidates),
     do: candidates
@@ -718,6 +736,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
     case {reason_token(reason, :code), reason_token(reason, :window_kind)} do
       {"quota_weekly_exhausted", "secondary"} -> true
       {"quota_window_unusable", "primary"} -> true
+      {"quota_window_unusable", "secondary"} -> true
       {"quota_window_unusable", nil} -> true
       _other -> false
     end

@@ -32,12 +32,19 @@ defmodule CodexPooler.Gateway.Routing.AccountDenialAutoRedeemInvarianceTest do
   # arrangement.
   #
   # A workspace marker on the target does not decide a redemption either way
-  # (findings#206 row 206-521). The zeros in the `target` and `target_first`
-  # rows of a `weekly_exhausted` target come from a gate that ignores the
-  # marker, and the `primary_header` control shows the same zero without one:
-  # a primary 5h row next to the exhausted weekly turns the exclusion into
-  # `quota_window_unusable`/`secondary`, which the after-exhaustion scan does
-  # not open on; only the provider-blocked availability exclusion does.
+  # (findings#206 row 206-521). A primary 5h row next to the exhausted weekly
+  # turns the exclusion into `quota_window_unusable`/`secondary`, which the
+  # after-exhaustion scan did not open on, so the `target`, `target_first`,
+  # `primary_header` and `two_window` rows of an exhausted weekly were 0. The
+  # 5-hour window takes no part in the decision (findings#310): the scan opens on an exhausted long window, weekly or
+  # monthly, whatever the 5-hour window says, and those rows consume once,
+  # like the same target without a 5h row. An exhausted 5-hour window alone
+  # still never opens it (`five_hour_exhausted`). Every spend fence after the
+  # scan is unchanged, and one of them still reads the 5-hour window: a reset
+  # restores the long window only, so `target_windows_resettable?/3` spends it
+  # only when every other window of the target has room. With the 5h spent as
+  # well (`two_window_both_exhausted`) the scan opens and that fence answers
+  # 0: the reset could not serve the request until the 5h resets.
   #
   # The `target_weekly`, `weekly_header` and `observed_pro_weekly_spent` rows
   # add a fresh weekly header row at the percentage the confirmed Usage API
@@ -61,11 +68,11 @@ defmodule CodexPooler.Gateway.Routing.AccountDenialAutoRedeemInvarianceTest do
   # They record what auto-redeem would have done had it been enabled.
   @cases [
     {"blocked", :weekly_exhausted, :missing, :none, 1},
-    {"blocked", :weekly_exhausted, :missing, :target, 0},
-    {"blocked", :weekly_exhausted, :missing, :target_first, 0},
+    {"blocked", :weekly_exhausted, :missing, :target, 1},
+    {"blocked", :weekly_exhausted, :missing, :target_first, 1},
     {"threshold", :weekly_exhausted, :missing, :none, 1},
-    {"threshold", :weekly_exhausted, :missing, :target, 0},
-    {"threshold", :weekly_exhausted, :missing, :target_first, 0},
+    {"threshold", :weekly_exhausted, :missing, :target, 1},
+    {"threshold", :weekly_exhausted, :missing, :target_first, 1},
     {"blocked", :weekly_exhausted, :missing, :target_weekly, 1},
     {"threshold", :weekly_exhausted, :missing, :target_weekly, 1},
     {"blocked", :weekly_exhausted, :primary_exhausted, :none, 1},
@@ -79,9 +86,11 @@ defmodule CodexPooler.Gateway.Routing.AccountDenialAutoRedeemInvarianceTest do
     {"threshold", :weekly_pressure, :weekly_pressure, :target, 0},
     {"threshold", :weekly_pressure, :weekly_pressure, :target_first, 0},
     {"threshold", :weekly_pressure, :weekly_pressure, :sibling, 0},
-    {"blocked", :weekly_exhausted, :missing, :primary_header, 0},
+    {"blocked", :weekly_exhausted, :missing, :primary_header, 1},
     {"blocked", :weekly_exhausted, :missing, :weekly_header, 1},
-    {"blocked", :two_window, :missing, :none, 0},
+    {"blocked", :two_window, :missing, :none, 1},
+    {"blocked", :two_window_both_exhausted, :missing, :none, 0},
+    {"blocked", :five_hour_exhausted, :missing, :none, 0},
     {"blocked", :two_window_provider_blocked, :missing, :none, 1},
     {"blocked", :two_window_provider_blocked, :missing, :target, 1},
     {"blocked", :two_window_provider_blocked, :missing, :target_first, 1},
@@ -184,6 +193,18 @@ defmodule CodexPooler.Gateway.Routing.AccountDenialAutoRedeemInvarianceTest do
   defp put_quota!(identity, :two_window) do
     put_quota!(identity, :weekly_exhausted)
     assert {:ok, [_window]} = QuotaWindows.upsert_quota_windows(identity, [primary_attrs(Decimal.new("40"))])
+  end
+
+  # The 5h primary spent next to the exhausted weekly.
+  defp put_quota!(identity, :two_window_both_exhausted) do
+    put_quota!(identity, :weekly_exhausted)
+    assert {:ok, [_window]} = QuotaWindows.upsert_quota_windows(identity, [primary_attrs(Decimal.new("100"))])
+  end
+
+  # The 5h primary spent while the weekly still has room: nothing a reset is for.
+  defp put_quota!(identity, :five_hour_exhausted) do
+    assert {:ok, [_window]} = QuotaWindows.upsert_quota_windows(identity, [weekly_attrs(Decimal.new("40"))])
+    assert {:ok, [_window]} = QuotaWindows.upsert_quota_windows(identity, [primary_attrs(Decimal.new("100"))])
   end
 
   defp put_quota!(identity, :two_window_provider_blocked) do
