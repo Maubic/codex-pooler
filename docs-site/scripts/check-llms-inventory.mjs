@@ -20,6 +20,7 @@ const expectedInventory = {
     "/getting-started/quick-start/",
     "/getting-started/configuration/",
     "/clients/codex-cli-desktop/",
+    "/clients/magpie/",
     "/clients/openai-compatible/",
     "/clients/aider/",
     "/clients/continue/",
