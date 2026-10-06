@@ -8,14 +8,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
   # (findings#327). The upstream session now tells the submission before the
   # payload can leave, and the submission resubmits only a turn whose payload
   # never started to leave; any other turn settles `owner_crashed` (findings#325
-  # row 325-6: settle after commit, never resend).
+  # row 325-6: settle after commit, never resend). A client socket's turn is
+  # never handed over at all: the socket closes `1011` on its owner's crash
+  # before a replacement owner can answer, so the takeover reached nobody and
+  # the client's resend sent the turn to the provider a second time, charged
+  # twice (findings#328). The HTTP bridge's relay takes a replacement's frames,
+  # and its turn still is.
   #
   # One node: the real public listener, owner forwarding on, the session's
   # owner and its upstream session on this node, the Pool's serving mode
   # forced to Full or Lite, FakeUpstream over a real websocket, the released
-  # client's native frames or a public `/v1` SDK request. The socket is held
-  # while the owner goes (`OwnerCrashAfterSendScenario`), so its response task
-  # meets the owner's exit first; the peer family is
+  # client's native frames or a public `/v1` SDK request. The socket and its
+  # response task meet the owner's exit in the order the schedulers give, or
+  # the socket is held so the task meets it first
+  # (`OwnerCrashAfterSendScenario`); the peer family is
   # `remote_owner_crash_after_send_test.exs`.
   use CodexPoolerWeb.ConnCase, async: false
 
@@ -24,6 +30,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [receive_native_terminal!: 3, socket_connection_state!: 1]
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, RequestClientRetryLink}
+  alias CodexPooler.Gateway.Persistence.CodexSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Platform.ExecutionTerminalProofs
   alias CodexPooler.Repo
@@ -62,26 +69,57 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
       assert List.last(Crash.close_client!(client)) == @crashed_close
     end
 
-    @tag route: route, mode: mode
-    test "#{route} #{mode}: a turn whose payload never left is served once by a replacement owner when its owner is killed", ctx do
+    for order <- [:natural, :task_first] do
+      @tag route: route, mode: mode, order: order
+      test "#{route} #{mode} (#{order}): a turn whose payload never left settles owner_crashed when its owner is killed, and the client's resend is its one send", ctx do
+        :ok = Crash.start_proof_publisher!(:sandboxed)
+        release_ref = make_ref()
+        upstream = Crash.upstream!(:before_write, "resp_owner_unsent", release_ref)
+        %{setup: setup, client: client, port: port, window: window} = connect!(upstream, ctx)
+        frame = Crash.frame(setup, client, "the turn whose connection is still opening")
+        client = Crash.send_frame!(client, frame)
+
+        :ok = Crash.await_kill_point!(:before_write, upstream, "resp_owner_unsent", release_ref)
+        assert Crash.generations(upstream) == 0
+        %{owner: owner, session_id: session_id, request_id: request_id} = turn!(client, setup)
+        :ok = Crash.stop_session_owner_on_exit(node(), session_id)
+
+        assert List.last(kill_and_close!(ctx.order, client, owner, upstream, request_id, session_id)) == @crashed_close
+        {served, _answers} = Crash.resend_like_released_client!(port, setup, ctx.route, window, frame)
+        assert %{"type" => "response.completed", "response" => %{"id" => "resp_owner_unsent_first_send"}} = served
+        :ok = Crash.assert_resend_served_once!(setup, upstream, ctx.route, request_id)
+      end
+    end
+  end
+
+  # The HTTP bridge's relay is no socket: it takes the replacement owner's
+  # frames, so a bridged turn whose payload never left is still handed over and
+  # answered once (findings#328).
+  for mode <- ["full", "lite"] do
+    @tag mode: mode
+    test "HTTP bridge #{mode}: a turn whose payload never left is answered once by a replacement owner when its owner is killed", ctx do
       release_ref = make_ref()
-      upstream = Crash.upstream!(:before_write, "resp_owner_unsent", release_ref)
-      %{setup: setup, client: client} = connect!(upstream, ctx)
-      client = Crash.send_turn!(client, setup, "the turn whose connection is still opening")
+      upstream = Crash.upstream!(:before_write, "resp_bridge_unsent", release_ref)
+      setup = gateway_setup(upstream)
+      :ok = Crash.serve!(setup, ctx.mode)
+      session_header = "owner-crash-bridge-#{System.unique_integer([:positive])}"
+      payload = %{"model" => setup.model.exposed_model_id, "input" => "the bridged turn whose connection is still opening", "stream" => true}
+      bridged = Task.async(fn -> post_bridged!(setup, session_header, payload) end)
 
-      :ok = Crash.await_kill_point!(:before_write, upstream, "resp_owner_unsent", release_ref)
-      assert Crash.generations(upstream) == 0
-      %{owner: owner, session_id: session_id, request_id: request_id} = turn!(client, setup)
-      :ok = Crash.stop_session_owner_on_exit(node(), session_id)
-
-      :ok = Crash.hold_socket!(client.socket)
+      :ok = Crash.await_kill_point!(:before_write, upstream, "resp_bridge_unsent", release_ref)
+      session = Repo.one!(from(s in CodexSession, where: s.pool_id == ^setup.pool.id))
+      assert {:ok, owner} = WebsocketOwnerSession.lookup(session.id)
+      :ok = Crash.stop_session_owner_on_exit(node(), session.id)
+      request_id = Crash.turn_request_id!(setup)
       :ok = Crash.kill_owner!(owner)
 
-      assert Crash.await_outcome!(upstream, request_id, 1) == :settled
+      response = Task.await(bridged, @detection_timeout_ms)
+      assert response.status == 200
+      assert response.resp_body =~ ~s("id":"resp_bridge_unsent_first_send")
+      assert response.resp_body =~ "response.completed"
+      assert [_one] = Crash.await_settled!(setup, 1)
       assert Crash.generations(upstream) == 1
-      :ok = Crash.assert_recovered!(request_id, session_id)
-      # The socket handles its killed owner's DOWN before the replacement's frames, as before.
-      assert List.last(Crash.close_client!(client)) == @crashed_close
+      :ok = Crash.assert_recovered!(request_id, session.id)
     end
   end
 
@@ -165,6 +203,29 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
     assert Crash.generations(upstream) == 2
     assert settled_cost(request_id) == Decimal.new(0)
     assert Decimal.gt?(settled_cost(successor_id), 0)
+  end
+
+  # Kills the owner, in the order the schedulers give or with the socket held
+  # so its response task meets the exit first, and returns the frames the
+  # client read until its socket's Close.
+  defp kill_and_close!(:natural, client, owner, _upstream, _request_id, _session_id) do
+    :ok = Crash.kill_owner!(owner)
+    Crash.await_close!(client)
+  end
+
+  defp kill_and_close!(:task_first, client, owner, upstream, request_id, session_id) do
+    :ok = Crash.hold_socket!(client.socket)
+    :ok = Crash.kill_owner!(owner)
+    assert Crash.await_outcome!(upstream, request_id, 0) == :settled
+    :ok = Crash.assert_settled_on_crash!(request_id, session_id)
+    Crash.close_client!(client)
+  end
+
+  defp post_bridged!(setup, session_header, payload) do
+    Phoenix.ConnTest.build_conn()
+    |> Plug.Conn.put_req_header("authorization", setup.authorization)
+    |> Plug.Conn.put_req_header("x-session-id", session_header)
+    |> Phoenix.ConnTest.dispatch(CodexPoolerWeb.Endpoint, :post, "/v1/responses", payload)
   end
 
   defp connect!(upstream, ctx) do

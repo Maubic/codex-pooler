@@ -1551,9 +1551,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   # upstream session reported the write, or a frame of the turn arrived, the
   # provider may be running it, and the turn settles `owner_crashed` instead
   # of reaching the provider a second time (findings#327, the rule of
-  # findings#325 row 325-6). The claim is the last check, so it is taken only
-  # for a turn that is then resubmitted; a session that reaches its write
-  # after it ends the request unsent.
+  # findings#325 row 325-6). A session that reaches its write after the claim
+  # ends the request unsent, whether or not the turn is then handed over; a
+  # client socket's turn never is (`takeover_reaches_client?/1`).
   defp do_submit_remote_owner_request(
          owner_pid,
          codex_session_id,
@@ -1575,7 +1575,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
     :exit, reason ->
       if bound_reset_probe?(request) or Process.alive?(owner_pid) or
            not recoverable_owner_exit?(reason) or
-           not claim_unsent_request(progress) do
+           not claim_unsent_request(progress) or
+           not takeover_reaches_client?(submission_notification?) do
         {:error, :owner_crashed}
       else
         with {:ok, {replacement_pid, replacement_downstream, replacement_session}} <-
@@ -1607,6 +1608,17 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   catch
     :exit, _reason -> {:error, :owner_crashed}
   end
+
+  # Only a client socket's response task asks for the owner's submission
+  # notification (`Service.execute_prepared_websocket_response_for_socket/4`),
+  # and a socket closes `1011` on its owner's crash
+  # (`DownstreamSession.handle_monitor_down/3`, findings#276), long before a
+  # replacement owner can answer: the takeover of a socket's turn reached
+  # nobody, and the client's resend on a new socket sent the turn to the
+  # provider a second time (findings#328). Such a turn settles `owner_crashed`
+  # and the resend is its one send. The HTTP bridge's relay takes the
+  # replacement's frames, so its turn is still handed over.
+  defp takeover_reaches_client?(submission_notification?), do: not submission_notification?
 
   defp recoverable_owner_exit?({reason, {GenServer, :call, _details}}),
     do: recoverable_owner_exit?(reason)

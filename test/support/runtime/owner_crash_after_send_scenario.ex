@@ -16,9 +16,12 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
   #   * the hold of `held_write_boundary/3`: the forwarder's payload write
   #     observer has run and the payload is not written yet.
   #
-  # The client's socket is held while the owner goes, so its response task
-  # meets the owner's exit before the socket handles its owner's DOWN (which
-  # closes the socket `1011` on a crash).
+  # The order the socket and its response task meet the owner's exit in is
+  # either left to the schedulers, as in production, or forced: a held socket
+  # (`hold_socket!/1`) lets the response task meet it first; the socket closes
+  # `1011` on its owner's crash whenever it handles the DOWN. The client then
+  # resends as the released Codex client does (`resend_like_released_client!/5`,
+  # findings#328).
 
   import ExUnit.Assertions
   import ExUnit.Callbacks, only: [on_exit: 1]
@@ -26,21 +29,27 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
 
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport,
-    only: [completed_response_frames: 4, receive_frames_until_close!: 3, released_client_frame: 2]
+    only: [completed_response_frames: 4, receive_frames_until_close!: 3, receive_native_terminal!: 3, released_client_frame: 2]
 
   alias CodexPooler.Access
-  alias CodexPooler.Accounting.{Attempt, Request}
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.BridgeOwnerLease
   alias CodexPooler.Gateway.Transports.Websocket.{UpstreamWebsocketSession, WebsocketOwnerSession}
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
   alias CodexPooler.Gateway.Websocket, as: Gateway
+  alias CodexPooler.Platform.ExecutionTerminalProof
   alias CodexPooler.Pools.ModelServingOverride
   alias CodexPooler.Repo
+  alias CodexPooler.UnboxedFixture
+  alias CodexPoolerWeb.Runtime.OwnerLossScenario, as: Scenario
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
 
   @native_route "/backend-api/codex/responses"
   @detection_timeout_ms 15_000
+  # The released Codex client resends a turn whose socket closed after 200 ms,
+  # then backs off on each `409 duplicate_turn` (the duplicate-turn fence manual).
+  @released_client_backoff_ms [200, 400, 800, 1600, 3200]
 
   @doc "The provider for `kill_point`, notifying the calling test process."
   def upstream!(:after_receipt, prefix, release_ref) do
@@ -68,7 +77,29 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
     # this mode. Released at the end, before the fake stops, which otherwise
     # waits out its listener's shutdown timeout (15 s) for the held handler.
     on_exit(fn -> send(handler, {:fake_upstream_release_timeout, release_ref}) end)
-    :ok = FakeUpstream.set_mode(upstream, completed_response_frames("#{prefix}_recovered", [], 3, 2))
+
+    :ok =
+      FakeUpstream.set_mode(
+        upstream,
+        # provenance: synthetic_adversarial (the turn's first and second provider sends after its owner's death, each answered at once)
+        FakeUpstream.repeat_last([completed_response_frames("#{prefix}_first_send", [], 3, 2), completed_response_frames("#{prefix}_second_send", [], 3, 2)])
+      )
+  end
+
+  @doc """
+  Runs the execution proof publisher as production does, so the duplicate-turn
+  fence admits the client's resend of a turn settled `owner_crashed` once its
+  executor's end is proven. Under the peer topology the sandbox commits, and
+  the proofs published during the test are removed at its end (`:committed`).
+  """
+  def start_proof_publisher!(sandbox) when sandbox in [:sandboxed, :committed] do
+    if sandbox == :committed do
+      before = Repo.all(from(proof in ExecutionTerminalProof, select: proof.execution_id))
+      UnboxedFixture.register_unboxed_cleanup!(fn -> Repo.delete_all(from(proof in ExecutionTerminalProof, where: proof.execution_id not in ^before)) end)
+    end
+
+    _publisher = CodexPooler.ExecutionProofSupport.start_publisher!()
+    :ok
   end
 
   @doc "Forces the Pool's serving mode for the setup's model."
@@ -154,7 +185,7 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
     :ok
   end
 
-  @doc "The turn was served once by a replacement owner that took the session over, with one attempt."
+  @doc "The turn was served once by a replacement owner that took the session over, with one attempt (the HTTP bridge)."
   def assert_recovered!(request_id, session_id) do
     request = Repo.get!(Request, request_id)
     assert {request.status, request.response_status_code, request.last_error_code} == {"succeeded", 200, nil}
@@ -166,10 +197,94 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
   @doc "Resumes the held socket and reads its client's frames until the Close; the socket is gone after."
   def close_client!(client) do
     :ok = :sys.resume(client.socket)
+    await_close!(client)
+  end
+
+  @doc "Reads the client's frames until the Close of a socket nobody holds; the socket is gone after."
+  def await_close!(client) do
     {conn, _websocket, frames} = receive_frames_until_close!(client.conn, client.websocket, client.ref)
     Mint.HTTP.close(conn)
     :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(client.socket, @detection_timeout_ms)
     frames
+  end
+
+  @doc """
+  Resends `frame` on new sockets as the released Codex client does after its
+  socket closed: after 200 ms, then after each `409 duplicate_turn` with the
+  client's backoff. Returns the served terminal and every answer in order.
+  """
+  def resend_like_released_client!(port, setup, route, window, frame),
+    do: resend_like_released_client!(port, setup, route, window, frame, @released_client_backoff_ms, [])
+
+  defp resend_like_released_client!(_port, _setup, _route, _window, _frame, [], answers),
+    do: flunk("the released client's resends were all refused: #{inspect(Enum.reverse(answers))}")
+
+  defp resend_like_released_client!(port, setup, route, window, frame, [delay | backoff], answers) do
+    receive do
+    after
+      delay -> :ok
+    end
+
+    retry = Scenario.connect!(port, setup, route, window)
+    retry = send_frame!(retry, frame)
+    {conn, websocket, terminal} = receive_native_terminal!(retry.conn, retry.websocket, retry.ref)
+    Scenario.close!(%{retry | conn: conn, websocket: websocket})
+
+    case terminal do
+      %{"type" => "error", "status" => 409} -> resend_like_released_client!(port, setup, route, window, frame, backoff, [terminal | answers])
+      served -> {served, Enum.reverse([served | answers])}
+    end
+  end
+
+  @doc """
+  The turn reached the provider once, by the client's resend: the predecessor
+  failed `owner_crashed` at no charge (`499` when the socket's crash cleanup
+  settled it first, `502` when its response task did), the resend succeeded
+  and is the one charge, linked to the predecessor on the native route (a
+  translated `/v1` request is not claimed by the duplicate-turn fence, so its
+  resend is a request of its own).
+  """
+  def assert_resend_served_once!(setup, upstream, route, predecessor_id) do
+    assert generations(upstream) == 1
+    assert [predecessor, successor] = await_settled!(setup, 2)
+    assert predecessor.id == predecessor_id
+    assert {predecessor.status, predecessor.last_error_code} == {"failed", "owner_crashed"}
+    assert predecessor.response_status_code in [499, 502]
+    assert [%Attempt{status: "failed", network_error_code: "owner_crashed"}] = attempts(predecessor_id)
+    assert {successor.status, successor.response_status_code} == {"succeeded", 200}
+    assert [%Attempt{status: "succeeded"}] = attempts(successor.id)
+    assert recorded_costs(predecessor_id) == [Decimal.new(0)]
+    assert [successor_cost] = recorded_costs(successor.id)
+    assert Decimal.gt?(successor_cost, 0)
+    links = Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^predecessor_id, select: link.successor_request_id))
+    assert links == if(route == @native_route, do: [successor.id], else: [])
+    :ok
+  end
+
+  @doc "The Pool's requests, oldest first, once `count` of them exist and none is still running."
+  def await_settled!(setup, count), do: await_settled!(setup, count, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+
+  defp await_settled!(setup, count, deadline) do
+    requests = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id, order_by: [asc: r.admitted_at]))
+
+    cond do
+      length(requests) == count and Enum.all?(requests, &(&1.status not in ["accepted", "in_progress"])) ->
+        requests
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("the Pool's requests never settled: #{inspect(Enum.map(requests, & &1.status))}")
+
+      true ->
+        receive do
+        after
+          20 -> await_settled!(setup, count, deadline)
+        end
+    end
+  end
+
+  defp recorded_costs(request_id) do
+    Repo.all(from(entry in LedgerEntry, where: entry.request_id == ^request_id and entry.entry_kind == "settlement" and entry.amount_status == "recorded", select: entry.settled_cost_micros))
+    |> Enum.map(&Decimal.normalize/1)
   end
 
   @doc """
