@@ -151,6 +151,22 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
     )
   end
 
+  # Reads a public websocket connection's frames up to the turn's terminal
+  # (`response.completed`, `response.failed` or `error`): the connection, the
+  # types seen before it in order, and the decoded terminal.
+  def receive_public_websocket_until_terminal(conn, websocket, ref, seen_types) do
+    {conn, websocket, frame} = public_websocket_receive_text!(conn, websocket, ref)
+
+    case CodexPooler.JSON.decode!(frame) do
+      %{"type" => type} = terminal
+      when type in ["response.completed", "response.failed", "error"] ->
+        {conn, websocket, Enum.reverse(seen_types), terminal}
+
+      %{"type" => type} ->
+        receive_public_websocket_until_terminal(conn, websocket, ref, [type | seen_types])
+    end
+  end
+
   # A half-open `proxy_websocket` circuit on the assignment with its probe slot
   # free, so the next websocket turn routed to it claims the probe.
   def half_open_websocket_circuit!(setup, assignment) do

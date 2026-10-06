@@ -1,15 +1,14 @@
 defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ConnectFailoverRouteHealthTest do
-  # A websocket failure with nothing received fails over to the next route
-  # candidate through the empty-body retry clause of the failed-websocket
-  # finalization: a connect-phase failure (findings#208) and an upstream close
-  # after the request before any frame. The failed candidate's route health is
-  # recorded there as on the last candidate and on HTTP: a probe it claimed on
-  # a half-open circuit resolves as a failed probe instead of staying counted in
-  # flight until the staleness self-heal, and a closed circuit counts the
-  # failure (findings#325 row 325-4). The refusal is real (a kernel-refused
-  # loopback port), the close is the provider double's 1011 without a frame,
-  # and the next candidate serves the turn, on the direct path and through an
-  # owner session.
+  # A websocket connect-phase failure fails over to the next route candidate
+  # through the empty-body retry clause of the failed-websocket finalization
+  # (findings#208). The failed candidate's route health is recorded there as on
+  # the last candidate and on HTTP: a probe it claimed on a half-open circuit
+  # resolves as a failed probe instead of staying counted in flight until the
+  # staleness self-heal, and a closed circuit counts the failure (findings#325
+  # row 325-4). The refusal is real (a kernel-refused loopback port) and the
+  # next candidate serves the turn, on the direct path and through an owner
+  # session. An upstream close after the payload was written no longer fails
+  # over (row 325-6, `committed_close_settles_test.exs`).
   use CodexPoolerWeb.ConnCase, async: false
 
   import Ecto.Query
@@ -27,7 +26,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ConnectFailoverRouteHealt
   alias CodexPooler.Repo
   alias CodexPoolerWeb.CodexResponsesSocket
 
-  @shapes [{:refused_connect, :half_open}, {:refused_connect, :closed}, {:close_before_frame, :half_open}]
+  @shapes [{:refused_connect, :half_open}, {:refused_connect, :closed}]
 
   for mode <- ["full", "lite"], {shape, circuit} <- @shapes do
     @mode mode
@@ -108,28 +107,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ConnectFailoverRouteHealt
 
     {setup, second} = websocket_failover_candidates!(failing, served, mode)
     refused_circuit = if circuit == :half_open, do: half_open_websocket_circuit!(setup, setup.assignment)
-    {setup, {second, served, failing}, refused_circuit}
+    {setup, {second, served}, refused_circuit}
   end
 
   # A kernel-refused loopback port: the connect fails before anything is sent.
   defp failing_upstream(:refused_connect), do: %FakeUpstream{url: "http://127.0.0.1:#{reserve_closed_port!()}"}
 
-  # Strict: the provider double accepts the turn's request and closes the
-  # websocket (1011) without sending a frame.
-  defp failing_upstream(:close_before_frame) do
-    start_upstream(
-      # provenance: synthetic_adversarial
-      FakeUpstream.strict_sequence([strict_native_request(1, FakeUpstream.websocket_close())])
-    )
-  end
-
   defp expected_transport_failure(:refused_connect), do: %{"phase" => "connect", "reason" => "econnrefused", "upstream_committed" => false}
-  defp expected_transport_failure(:close_before_frame), do: %{"phase" => "upstream_close", "reason" => "upstream_websocket_closed_before_terminal", "upstream_committed" => true}
 
-  defp verify_failing_upstream!(:refused_connect, _failing), do: :ok
-  defp verify_failing_upstream!(:close_before_frame, failing), do: assert(:ok = FakeUpstream.verify!(failing))
-
-  defp assert_failed_over!(setup, {second, served, failing}, refused_circuit, mode, shape, circuit) do
+  defp assert_failed_over!(setup, {second, served}, refused_circuit, mode, shape, circuit) do
     assert [request] = Repo.all(from(r in CodexPooler.Accounting.Request, where: r.pool_id == ^setup.pool.id))
     assert {request.status, request.last_error_code} == {"succeeded", nil}
     assert request.request_metadata["routing"]["model_serving_mode"] == mode
@@ -140,7 +126,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ConnectFailoverRouteHealt
     assert Map.take(first_attempt.response_metadata["transport_failure"], ~w(phase reason upstream_committed)) == expected_transport_failure(shape)
     assert {second_attempt.pool_upstream_assignment_id, second_attempt.status} == {second.assignment.id, "succeeded"}
     assert :ok = FakeUpstream.verify!(served)
-    verify_failing_upstream!(shape, failing)
 
     case circuit do
       # The probe this turn claimed resolved as a failed probe: the circuit

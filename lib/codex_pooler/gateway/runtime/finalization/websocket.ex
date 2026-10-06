@@ -1340,7 +1340,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
          code,
          metadata
        ) do
-    if RequestOptions.connection_bound_compaction?(context.request_options) do
+    if RequestOptions.connection_bound_compaction?(context.request_options) or upstream_committed?(finalization) do
       finalize_failed_after_health(
         %{context | allow_retry?: false},
         finalization,
@@ -1413,6 +1413,17 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
         {:error, gateway_error}
     end
   end
+
+  # A failure after the turn's payload reached the provider settles on its
+  # account instead of failing over: the provider may already be running the
+  # turn there, and another account must not run it a second time. HTTP fails
+  # over only before submission (`TransportFailureReason.retry_safe_before_submission?/1`).
+  # The client gets the same post-submission answer, `502
+  # upstream_request_failed`, and its resend steps over the zero-output
+  # predecessor (findings#325 row 325-6). A failure whose metadata does not say
+  # the payload was committed keeps the failover.
+  defp upstream_committed?(%{transport_failure: %{"upstream_committed" => true}}), do: true
+  defp upstream_committed?(_finalization), do: false
 
   defp record_failed_health(context, :upstream_websocket_closed_before_terminal = reason, code) do
     if native_full_history_compaction?(context.request_options) do

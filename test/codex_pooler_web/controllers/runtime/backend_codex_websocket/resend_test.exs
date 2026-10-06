@@ -2444,17 +2444,4 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendTest do
       0 -> Enum.reverse(acc)
     end
   end
-
-  defp receive_public_websocket_until_terminal(conn, websocket, ref, seen_types) do
-    {conn, websocket, frame} = public_websocket_receive_text!(conn, websocket, ref)
-
-    case CodexPooler.JSON.decode!(frame) do
-      %{"type" => type} = terminal
-      when type in ["response.completed", "response.failed", "error"] ->
-        {conn, websocket, Enum.reverse(seen_types), terminal}
-
-      %{"type" => type} ->
-        receive_public_websocket_until_terminal(conn, websocket, ref, [type | seen_types])
-    end
-  end
 end
