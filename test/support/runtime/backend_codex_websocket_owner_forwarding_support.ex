@@ -1624,16 +1624,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
   # every session of the Pool that has no owner.
   defp stop_registered_owner!(codex_session_id) do
     for {owner_pid, _value} <- Registry.lookup(WebsocketOwnerSession.Registry, codex_session_id) do
-      monitor = Process.monitor(owner_pid)
-
-      try do
-        GenServer.stop(owner_pid, :shutdown, @handoff_detection_timeout_ms)
-      catch
-        :exit, {:noproc, _details} -> :ok
-        :exit, {:normal, _details} -> :ok
-      end
-
-      assert_receive {:DOWN, ^monitor, :process, ^owner_pid, _reason}, @handoff_detection_timeout_ms
+      stop_retirable_owner!(owner_pid, :shutdown)
     end
 
     # The registry drops a dead owner's entry asynchronously; a live one here is a restarted owner.
@@ -1666,23 +1657,30 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
 
   def await_owner_cleanup!(codex_session_id) do
     case WebsocketOwnerSession.lookup(codex_session_id) do
-      {:ok, owner_pid} ->
-        monitor = Process.monitor(owner_pid)
-
-        try do
-          GenServer.stop(owner_pid, :shutdown, @handoff_detection_timeout_ms)
-        catch
-          :exit, {:noproc, _details} -> :ok
-          :exit, {:normal, _details} -> :ok
-        end
-
-        assert_receive {:DOWN, ^monitor, :process, ^owner_pid, _reason},
-                       @handoff_detection_timeout_ms
-
-      {:error, :owner_unavailable} ->
-        :ok
+      {:ok, owner_pid} -> stop_retirable_owner!(owner_pid, :shutdown)
+      {:error, :owner_unavailable} -> :ok
     end
 
     assert {:error, :owner_unavailable} = WebsocketOwnerSession.lookup(codex_session_id)
+  end
+
+  # Stops a local owner that can retire on its own at any time (its upstream session ended, a cancelled authorization, a lease
+  # takeover, a stale lease). Finding it registered or alive does not promise that a stop will find it so: the retirement can win
+  # between the lookup and the stop, or while the stop is waiting, and `GenServer.stop/3` then exits with the owner's own reason
+  # (`noproc`, `owner_crashed`, `{:shutdown, :stale_owner}`; findings#303 row 303-10, Drone 1814). The stop is a request and
+  # the monitor's DOWN, whatever its reason, is the proof the owner is gone; a test whose claim is a clean stop asserts it in its
+  # own body. `stop_remote_owner!/2` is the same for an owner on a peer.
+  @spec stop_retirable_owner!(pid(), term()) :: :ok
+  def stop_retirable_owner!(owner_pid, reason \\ :normal) when is_pid(owner_pid) do
+    owner_monitor = Process.monitor(owner_pid)
+
+    try do
+      GenServer.stop(owner_pid, reason, @handoff_detection_timeout_ms)
+    catch
+      :exit, _already_gone_or_retiring -> :ok
+    end
+
+    assert_receive {:DOWN, ^owner_monitor, :process, ^owner_pid, _reason}, @handoff_detection_timeout_ms
+    :ok
   end
 end

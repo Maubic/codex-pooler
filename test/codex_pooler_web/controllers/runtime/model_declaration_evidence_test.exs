@@ -3,7 +3,7 @@ defmodule CodexPoolerWeb.Runtime.ModelDeclarationEvidenceTest do
 
   import Ecto.Query
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
-  import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [enter_peer_owner_topology!: 0, start_peer_session_owner!: 2]
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [enter_peer_owner_topology!: 0, start_peer_session_owner!: 2, stop_retirable_owner!: 1]
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
   alias CodexPooler.FakeUpstream
@@ -116,7 +116,7 @@ defmodule CodexPoolerWeb.Runtime.ModelDeclarationEvidenceTest do
       after
         for session <- Repo.all(from(s in CodexSession, where: s.api_key_id == ^setup.api_key.id)) do
           case WebsocketOwnerSession.lookup(session.id) do
-            {:ok, owner} -> GenServer.stop(owner, :normal, 15_000)
+            {:ok, owner} -> stop_retirable_owner!(owner)
             _absent -> :ok
           end
         end

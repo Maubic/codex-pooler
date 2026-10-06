@@ -1003,7 +1003,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
       Repo.one!(from session in CodexSession, order_by: [desc: session.created_at], limit: 1)
 
     case WebsocketOwnerSession.lookup(session.id) do
-      {:ok, owner_pid} -> GenServer.stop(owner_pid, :normal)
+      {:ok, owner_pid} -> stop_retirable_owner!(owner_pid)
       {:error, :owner_unavailable} -> :ok
     end
   end
