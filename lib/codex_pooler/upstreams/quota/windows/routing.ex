@@ -21,6 +21,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
     routing_windows =
       windows
       |> Enum.filter(&window_in_model_scope?(&1, opts))
+      |> reject_dropped_meter_windows(timestamp)
       |> reject_superseded_primary_windows(timestamp)
       |> WindowSelector.logical_windows(timestamp)
       |> select_current_account_primary_variant(timestamp)
@@ -377,6 +378,67 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
         false
       end
     end)
+  end
+
+  @doc """
+  Rejects the windows of an additional meter the provider stopped reporting.
+
+  A meter (the model, upstream-model or feature windows of one quota group) is
+  dropped when every one of its rows carries a reset that has passed, and the
+  identity's account usage reading kept syncing for at least one full
+  freshness TTL after the meter's newest observation: the provider still
+  reports the account and no longer reports the meter, and the meter's last
+  cycle, already ended, says nothing about the running one. Before this an
+  expired meter blocked its model until retention, 30 days after its reset,
+  because a usage refresh only deletes descriptors its payload covers
+  (findings#305 row 498-4). Routing stops reading a dropped meter; its rows
+  stay for retention and for every read surface that lists evidence. A meter
+  with a row still in its cycle, a resetless row, or no account usage reading
+  a full TTL newer keeps blocking as before.
+  """
+  @spec reject_dropped_meter_windows([Quota.AccountQuotaWindow.t()], DateTime.t()) ::
+          [Quota.AccountQuotaWindow.t()]
+  def reject_dropped_meter_windows(windows, timestamp \\ now()) when is_list(windows) do
+    case latest_account_usage_evidence_at(windows, timestamp) do
+      %DateTime{} = usage_synced_at ->
+        dropped =
+          windows
+          |> Enum.filter(&meter_window?/1)
+          |> Enum.group_by(&quota_group_key/1)
+          |> Enum.filter(fn {_group, rows} -> dropped_meter?(rows, usage_synced_at, timestamp) end)
+          |> MapSet.new(fn {group, _rows} -> group end)
+
+        Enum.reject(windows, &(meter_window?(&1) and MapSet.member?(dropped, quota_group_key(&1))))
+
+      nil ->
+        windows
+    end
+  end
+
+  defp meter_window?(%Quota.AccountQuotaWindow{quota_scope: scope}), do: scope in ["model", "upstream_model", "feature"]
+
+  defp latest_account_usage_evidence_at(windows, timestamp) do
+    windows
+    |> Enum.filter(&(&1.quota_scope == "account" and &1.source == "codex_usage_api"))
+    |> latest_evidence_at(timestamp)
+  end
+
+  defp dropped_meter?(rows, usage_synced_at, timestamp) do
+    case latest_evidence_at(rows, timestamp) do
+      %DateTime{} = meter_synced_at ->
+        Enum.all?(rows, &(Evidence.reset_bearing?(&1) and Evidence.expired?(&1, timestamp))) and
+          DateTime.diff(usage_synced_at, meter_synced_at, :second) >= Evidence.freshness_ttl_seconds()
+
+      nil ->
+        false
+    end
+  end
+
+  defp latest_evidence_at(windows, timestamp) do
+    windows
+    |> Enum.map(&window_latest_evidence_at(&1, timestamp))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.max(DateTime, fn -> nil end)
   end
 
   defp quota_scope(%Quota.AccountQuotaWindow{quota_scope: scope})

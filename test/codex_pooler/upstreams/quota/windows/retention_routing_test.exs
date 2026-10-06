@@ -11,10 +11,13 @@ defmodule CodexPooler.Upstreams.Quota.Windows.RetentionRoutingTest do
   @day 86_400
   @spark "gpt-5.3-codex-spark"
 
-  # A model window the provider stopped reporting keeps its last row. While
-  # that row is inside retention it stays a blocker, as it always was; once it
-  # is past retention every decision must equal the one taken after the
-  # runtime-cleanup prune deleted it, whether or not that pass has run.
+  # A model window the provider stopped reporting keeps its last row for
+  # retention. Inside retention routing stops reading it once its reset has
+  # passed and the account's usage reading kept syncing for a full freshness
+  # TTL after its last report (findings#305 row 498-4); a row last read within
+  # that TTL still blocks. Once it is past retention every decision must equal
+  # the one taken after the runtime-cleanup prune deleted it, whether or not
+  # that pass has run.
   describe "a retired model primary on a weekly-only account" do
     test "past retention it no longer blocks the weekly-only probe, exactly as after the prune" do
       now = now()
@@ -29,10 +32,19 @@ defmodule CodexPooler.Upstreams.Quota.Windows.RetentionRoutingTest do
       assert %{eligible?: true, routing_state: :weekly_only_probe} = snapshot_eligibility(identity, now)
     end
 
-    test "inside retention it still blocks the weekly-only probe" do
+    test "inside retention, once the account's usage reading outlived it by a TTL, it no longer blocks the weekly-only probe" do
       now = now()
       identity = weekly_only_account!(now)
       insert_window!(identity, spark_attrs("primary", 300, days_ago(now, retention_days() - 1)))
+
+      assert %{eligible?: true, routing_state: :weekly_only_probe} = spark_eligibility(identity, now)
+      assert %{eligible?: true, routing_state: :weekly_only_probe} = snapshot_eligibility(identity, now)
+    end
+
+    test "inside retention, last read within a TTL of the account's usage reading, it still blocks the weekly-only probe" do
+      now = now()
+      identity = weekly_only_account!(now)
+      insert_window!(identity, %{spark_attrs("primary", 300, minutes_ago(now, 1)) | observed_at: minutes_ago(now, 5)})
 
       assert %{eligible?: false} = spark_eligibility(identity, now)
       assert %{eligible?: false} = snapshot_eligibility(identity, now)
@@ -49,11 +61,20 @@ defmodule CodexPooler.Upstreams.Quota.Windows.RetentionRoutingTest do
       assert %{eligible?: true, routing_state: :precise} = snapshot_eligibility(identity, now)
     end
 
-    test "inside retention it keeps the model request off the account" do
+    test "inside retention, once the account's usage reading outlived it by a TTL, it no longer keeps the model request off the account" do
       now = now()
       identity = weekly_only_account!(now)
       insert_window!(identity, account_attrs("primary", 300, DateTime.add(now, 3_600, :second), now))
       insert_window!(identity, spark_attrs("secondary", 10_080, days_ago(now, retention_days() - 1)))
+
+      assert %{eligible?: true, routing_state: :precise} = snapshot_eligibility(identity, now)
+    end
+
+    test "inside retention, last read within a TTL of the account's usage reading, it keeps the model request off the account" do
+      now = now()
+      identity = weekly_only_account!(now)
+      insert_window!(identity, account_attrs("primary", 300, DateTime.add(now, 3_600, :second), now))
+      insert_window!(identity, %{spark_attrs("secondary", 10_080, minutes_ago(now, 1)) | observed_at: minutes_ago(now, 5)})
 
       assert %{eligible?: false} = snapshot_eligibility(identity, now)
     end
@@ -138,6 +159,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.RetentionRoutingTest do
   end
 
   defp days_ago(now, days), do: DateTime.add(now, -days * @day, :second)
+  defp minutes_ago(now, minutes), do: DateTime.add(now, -minutes * 60, :second)
   defp retention_days, do: div(Retention.retention_seconds(), @day)
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:microsecond)
 end

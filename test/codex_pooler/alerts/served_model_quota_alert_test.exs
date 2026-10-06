@@ -14,6 +14,12 @@ defmodule CodexPooler.Alerts.Evaluation.ServedModelQuotaAlertTest do
   # plus the model windows of models one of the account's Pools serves. A
   # model no Pool serves any more (retired, stale, suppressed) keeps its last
   # rows until retention, and those rows must not make the account stale.
+  #
+  # These rules read the routing projection, so a meter routing reads as
+  # dropped (findings#305 row 498-4: its cycle ended and the account's usage
+  # reading kept syncing for a freshness TTL after its last report) counts for
+  # neither. The expired rows below are ones routing still counts: the cycle
+  # ended a minute ago and the meter was read five minutes ago.
   describe "a rule without a model" do
     test "ignores model rows of a model no Pool of the account serves" do
       now = now()
@@ -71,6 +77,23 @@ defmodule CodexPooler.Alerts.Evaluation.ServedModelQuotaAlertTest do
 
       assert [%{action: :match, match_attrs: match}] = evaluate(pool, "pool_all_assignments_in_state", "stale", @retired, now)
       assert match.safe_evidence_snapshot["state_counts"] == %{"stale" => 1}
+    end
+  end
+
+  # A served model's meter the provider stopped reporting days ago keeps its
+  # row for retention, but routing no longer reads it, so neither do these
+  # rules. The controls above, the same served model with an expired row
+  # routing still counts, match.
+  describe "a served model's meter the provider stopped reporting" do
+    test "no longer makes the account stale" do
+      now = now()
+      %{pool: pool, identity: identity} = account_with_usable_account_windows!(now)
+      model_fixture(pool, %{exposed_model_id: @retired, upstream_model_id: @retired})
+      insert_dropped_model_row!(identity, @retired, now)
+
+      assert [%{action: :clear}] = evaluate(pool, "pool_all_assignments_in_state", "stale", nil, now)
+      assert [%{action: :clear}] = evaluate(pool, "pool_all_assignments_in_state", "stale", @retired, now)
+      assert Enum.any?(Windows.list_quota_windows(identity), &(&1.quota_scope == "model" and &1.model == @retired))
     end
   end
 
@@ -183,12 +206,21 @@ defmodule CodexPooler.Alerts.Evaluation.ServedModelQuotaAlertTest do
     %{quota_key: "account", quota_scope: "account", quota_family: "account", window_kind: kind, window_minutes: minutes, used_percent: Decimal.new("10"), reset_at: reset_at, source: "codex_usage_api", source_precision: "observed", freshness_state: "fresh", last_sync_at: now, observed_at: now}
   end
 
-  # The last row of a model window, five days after its reset: inside the
-  # 30-day retention, so every reader still sees it.
+  # The last row of a model window whose cycle ended a minute ago, read five
+  # minutes ago: the provider may still list it, so routing counts it.
   defp insert_expired_model_row!(identity, model, now) do
-    reset_at = DateTime.add(now, -5, :day)
-    observed_at = DateTime.add(reset_at, -5, :hour)
+    insert_model_row!(identity, model, DateTime.add(now, -60, :second), DateTime.add(now, -5, :minute))
+  end
 
+  # The last row of a model window, five days after its reset and read five
+  # hours before it while the account's reading is current: inside the 30-day
+  # retention, so every reader still lists it, but routing reads it as dropped.
+  defp insert_dropped_model_row!(identity, model, now) do
+    reset_at = DateTime.add(now, -5, :day)
+    insert_model_row!(identity, model, reset_at, DateTime.add(reset_at, -5, :hour))
+  end
+
+  defp insert_model_row!(identity, model, reset_at, observed_at) do
     %AccountQuotaWindow{}
     |> AccountQuotaWindow.changeset(%{
       upstream_identity_id: identity.id,
