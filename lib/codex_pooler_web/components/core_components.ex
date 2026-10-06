@@ -32,7 +32,7 @@ defmodule CodexPoolerWeb.CoreComponents do
       {@rest}
     >
       <div class={[
-        "alert w-80 sm:w-96 max-w-80 sm:max-w-96 text-wrap border shadow-xl",
+        "alert w-80 sm:w-96 max-w-[min(20rem,calc(100vw_-_6rem))] sm:max-w-96 text-wrap border shadow-xl",
         @kind == :info && "border-success/25 bg-success/10 text-base-content",
         @kind == :error && "border-error/25 bg-error/10 text-base-content"
       ]}>

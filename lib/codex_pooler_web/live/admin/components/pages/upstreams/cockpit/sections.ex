@@ -180,7 +180,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Sections do
 
   @doc """
   Actions rail: every lifecycle/recovery action, always visible; unavailable
-  actions stay disabled with the gating reason as tooltip and hint.
+  actions stay disabled with the gating reason as tooltip and hint. Below the
+  `sm` breakpoint, where a tooltip cannot be reached on touch, the reason is
+  also shown as a line under the action.
   """
   attr :cockpit, :map, required: true
   attr :confirming_saved_reset_redemption, :map, default: nil
@@ -313,6 +315,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Sections do
       </.link>
       """
     else
+      assigns =
+        assigns
+        |> assign(:reason_id, "#{assigns.id}-reason")
+        |> assign(:show_reason?, !assigns.action.available? and is_binary(assigns.action.reason))
+
       ~H"""
       <button
         id={@id}
@@ -320,6 +327,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Sections do
         class={rail_action_class(@variant, @action.available?)}
         disabled={!@action.available?}
         title={@action.reason}
+        aria-describedby={@show_reason? && @reason_id}
         {@rest}
       >
         <.icon name={@icon} class="size-4 shrink-0" />
@@ -331,6 +339,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Sections do
           unavailable
         </span>
       </button>
+      <%!-- A tooltip cannot be reached on touch, so below `sm` the reason also shows as text under the action. From `sm` it stays in the title only. --%>
+      <p
+        :if={@show_reason?}
+        id={@reason_id}
+        data-role="cockpit-action-reason"
+        class="-mt-1.5 pr-4 pb-2.5 pl-[42px] text-xs leading-4 text-base-content/60 sm:hidden"
+      >
+        {@action.reason}
+      </p>
       """
     end
   end

@@ -144,7 +144,8 @@ defmodule CodexPoolerWeb.Layouts do
 
   def flash_group(assigns) do
     ~H"""
-    <div id={@id} aria-live="polite" class="toast toast-top toast-end z-50">
+    <%!-- Below `sm` the stack sits at the bottom so it clears the top header and the page connection notices; a bottom-sheet dialog (z 999) would hide it there, so while one is open it goes back to the top. From `sm` it sits at the top as before. --%>
+    <div id={@id} aria-live="polite" class="toast toast-end z-50 sm:toast-top max-sm:[body:has(dialog[open])_&]:top-4 max-sm:[body:has(dialog[open])_&]:bottom-auto">
       <.flash kind={:info} flash={@flash} />
       <.flash kind={:error} flash={@flash} />
 

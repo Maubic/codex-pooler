@@ -88,6 +88,27 @@ defmodule CodexPoolerWeb.Admin.UpstreamsUsagePollPauseLiveTest do
     refute has_element?(unpaused_view, "#upstream-cockpit-usage-poll-pause")
   end
 
+  # The deadline in the heading is the one fact the card exists to show, so below `sm` it wraps instead of truncating, and
+  # from `sm` up, where it may still truncate in a narrow card, the title carries the whole text
+  # (https://github.com/icoretech/codex-pooler-findings/issues/326, row 326-3).
+  test "the pause heading wraps below sm and carries its full text in a title", %{conn: conn} do
+    %{identity: identity} = account = throttled_account!("326-heading")
+    assert {:ok, _result} = reconcile!(account)
+
+    {:ok, list, _html} = live(conn, ~p"/admin/upstreams")
+    {:ok, cockpit, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+
+    for {view, selector} <- [{list, "#upstream-account-#{identity.id}-usage-poll-pause-title"}, {cockpit, "#upstream-cockpit-usage-poll-pause-title"}] do
+      heading = view |> element(selector) |> render() |> LazyHTML.from_fragment() |> LazyHTML.query("h3")
+      full = heading |> LazyHTML.text() |> String.split() |> Enum.join(" ")
+
+      assert full =~ ~r/^Usage polling paused until \S+ \S+ UTC$/
+      assert LazyHTML.attribute(heading, "title") == [full]
+      assert has_element?(view, "#{selector}[class~='sm:truncate']")
+      refute has_element?(view, "#{selector}[class~='truncate']")
+    end
+  end
+
   test "an account whose usage polling is not paused shows no pause", %{conn: conn} do
     %{identity: identity} = active_upstream_assignment_fixture(pool_fixture(), %{account_label: "Unpaused Sample Account"})
 
