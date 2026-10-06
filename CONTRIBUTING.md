@@ -24,7 +24,7 @@ Development tools, Mix tasks and test-infrastructure contracts run separately fr
 mix test.tooling
 ```
 
-To partition the tooling profile with the same scheduler and database isolation as product tests, run `TEST_FAST_COMMAND="mix test.tooling --warnings-as-errors" make test-fast N=4`. CI runs the two four-partition profiles sequentially, so it never doubles the configured CPU budget.
+To partition the tooling profile with the same scheduler and database isolation as product tests, run `TEST_FAST_COMMAND="mix test.tooling --warnings-as-errors" make test-fast N=4`. CI runs the two four-partition profiles sequentially, so it never doubles the configured CPU budget. The static checks of `mix quality` run in CI too: the format check, xref, Sobelow and Credo before the suites in the quality step, and Dialyzer in a parallel `dialyzer` step held to four schedulers, one partition's share beside the suites.
 
 Use `mix test.unix` to run just the Unix subset. These commands select files before loading them; `mix test --only unix_integration` remains valid but loads the entire test tree before applying tags. `CodexPooler.TestProfiles` owns the profile inventory. The normal suite rejects a Unix-tagged test in an application file not covered by the tooling inventory, so newly added Unix cases cannot silently disappear from CI.
 

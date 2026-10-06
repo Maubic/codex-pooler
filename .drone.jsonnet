@@ -60,6 +60,10 @@ local helmVersion = 'v4.3.0';
           // The image build runs this compile-connected graph check too, but only after the suites have passed.
           'mix quality.xref',
           'mix format --check-formatted',
+          // The other static checks of `mix quality` except Dialyzer (its own step below), cheapest first, so a violation
+          // fails here within a minute instead of after the suites.
+          'mix quality.security',
+          'mix quality.credo',
           'TEST_FAST_COMMAND="mix test.product --warnings-as-errors" make test-fast N=4',
           'apt-get install -y --no-install-recommends docker-cli docker-compose',
           'docker compose version',
@@ -76,9 +80,33 @@ local helmVersion = 'v4.3.0';
         },
       },
       {
+        // The Dialyzer part of `mix quality`, in `:test` like the local gate: Dialyxir is a dev/test dependency, and `:test`
+        // also analyses `dev_support` and `test/support`. It starts with the build and runs beside the quality step, which
+        // it finishes well before: a cold run (its own compile and PLT build) is a fraction of that step, so it stays off the
+        // critical path, and `tag` waits for it so a red analysis never publishes an image. A cold PLT build does not
+        // speed up past four cores, so the BEAM is held to four schedulers, which keeps it from starving the suites. The
+        // steps share the workspace, so it builds into its own paths.
+        name: 'dialyzer',
+        image: 'elixir:1.20.4-otp-29-slim',
+        commands: [
+          'apt-get update',
+          'apt-get install -y --no-install-recommends build-essential ca-certificates cmake git',
+          'mix local.hex --force',
+          'mix local.rebar --force',
+          'mix deps.get',
+          'mix quality.dialyzer',
+        ],
+        environment: {
+          MIX_ENV: 'test',
+          MIX_BUILD_PATH: '/tmp/dialyzer/_build',
+          MIX_DEPS_PATH: '/tmp/dialyzer/deps',
+          ERL_FLAGS: '+S 4:4',
+        },
+      },
+      {
         name: 'tag',
         image: tagImage,
-        depends_on: ['quality'],
+        depends_on: ['quality', 'dialyzer'],
         commands: [
           'CUSTOM_BRANCH_NAME=$(basename "${DRONE_SOURCE_BRANCH:-$DRONE_BRANCH}" | tr "[:upper:]" "[:lower:]" | sed "s/_/-/g")',
           'printf "%s" "$CUSTOM_BRANCH_NAME-$SHORT_SHA-$(date +%s)" > .tags',
