@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.Transports.TransportFailureReasonEventTaxonomyTest
   use ExUnit.Case, async: true
 
   alias CodexPooler.Gateway.Transports.TransportFailureReason
+  alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.EventTaxonomy
 
   test "keeps finite known unknown and legacy response event buckets" do
     cases = [
@@ -9,6 +10,7 @@ defmodule CodexPooler.Gateway.Transports.TransportFailureReasonEventTaxonomyTest
       {"response.reasoning", "response_event"},
       {"response.mcp_call", "response_event"},
       {"response.metadata", "response_event"},
+      {"response.compaction", "response_event"},
       {"response.unknown", "response_unknown_event"},
       {"response.other", "response_event"}
     ]
@@ -35,5 +37,15 @@ defmodule CodexPooler.Gateway.Transports.TransportFailureReasonEventTaxonomyTest
       })
 
     assert metadata == %{"last_upstream_event_class" => "response_event"}
+  end
+
+  # The provider's compaction stream carries `response.compaction.compacting`
+  # between the announced item and the closed one (measured, gpt-6-luna), so it
+  # has a family of its own; a sibling the taxonomy does not list still
+  # surfaces as unknown.
+  test "classifies the compaction phase event in its own family and keeps unlisted siblings unknown" do
+    assert EventTaxonomy.classify("response.compaction.compacting") == {"response.compaction", "response_event"}
+    assert EventTaxonomy.allowed_event_type?("response.compaction")
+    assert EventTaxonomy.classify("response.compaction.summarizing") == {"response.unknown", "response_unknown_event"}
   end
 end

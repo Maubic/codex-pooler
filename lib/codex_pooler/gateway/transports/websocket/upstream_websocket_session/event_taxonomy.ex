@@ -72,7 +72,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Even
     # The provider's answers to a client's `response.interrupt` (findings#270
     # row 270-272); neither is a terminal.
     {"response.interrupt", ~w(response.interrupt.accepted response.interrupt.failed)},
-    {"response.moderation", ~w(response.moderation.started response.moderation.completed)}
+    {"response.moderation", ~w(response.moderation.started response.moderation.completed)},
+    # The phase event the provider's compaction stream reports between the
+    # announced item and the closed one (measured); not a terminal.
+    {"response.compaction", ~w(response.compaction.compacting)}
   ]
   @known_response_event_family_by_type @known_response_event_families
                                        |> Enum.flat_map(fn {family, event_types} ->
