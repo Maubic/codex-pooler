@@ -124,6 +124,10 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuation do
   @max_thread_id_bytes 256
   @thread_id_pattern ~r/\A[A-Za-z0-9_.:-]+\z/
 
+  # Canonical document fields the released client fills in after a turn's first
+  # request can already have gone out (see `without_async_turn_metadata/1`).
+  @async_turn_metadata_keys ["workspaces"]
+
   @doc "The native Codex compaction route."
   @spec compact_endpoint() :: String.t()
   def compact_endpoint, do: @compact_endpoint
@@ -550,6 +554,38 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuation do
   end
 
   def canonical_metadata_map(_metadata), do: %{}
+
+  @doc """
+  The request as it was before the client filled the asynchronous fields of its
+  body's canonical document, or `:none` when the document carries none of them.
+
+  The released client fills `workspaces` from a git task it spawns per turn and
+  never waits for (`turn_metadata.rs` `spawn_git_enrichment_task`,
+  `current_workspaces`), and rebuilds the document for every request it sends
+  (`session/turn.rs`, `responses_metadata` per sampling attempt). The task runs
+  once per turn and only ever adds the field, so a request sent before it
+  finished carries no `workspaces` while its retry, sent after, carries them.
+  The resend witness binds the document (only `turn_id` is dropped), so the
+  retry stopped matching its own predecessor (findings#314 row 314-2). A
+  witness derived from this payload is only ever an extra transient
+  alternate of the request; claims and stored witnesses keep the document as
+  sent.
+  """
+  @spec without_async_turn_metadata(map()) :: {:ok, map()} | :none
+  def without_async_turn_metadata(%{"client_metadata" => %{@canonical_metadata_key => document} = client_metadata} = payload)
+      when is_map(document) or is_binary(document) do
+    case canonical_metadata_map(document) do
+      %{} = metadata when map_size(metadata) > 0 ->
+        if Enum.any?(@async_turn_metadata_keys, &Map.has_key?(metadata, &1)),
+          do: {:ok, Map.put(payload, "client_metadata", Map.put(client_metadata, @canonical_metadata_key, Map.drop(metadata, @async_turn_metadata_keys)))},
+          else: :none
+
+      _empty ->
+        :none
+    end
+  end
+
+  def without_async_turn_metadata(_payload), do: :none
 
   @doc """
   The client's stable thread identity for this request, or `nil`.

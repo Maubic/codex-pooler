@@ -33,7 +33,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
          %{"agent_name" => agent} when is_binary(agent) and byte_size(agent) in 1..256 <-
            payload |> NativeTurnContinuation.canonical_document(options) |> NativeTurnContinuation.canonical_metadata_map(),
          runs when length(runs) <= @max_mailbox_runs <- mailbox_runs(input, agent) do
-      build_candidates(semantic_key, payload, input, runs)
+      build_candidates(semantic_key, witness_payloads(payload, options), input, runs)
     else
       _ineligible -> []
     end
@@ -41,9 +41,23 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
 
   defp candidates(_semantic_key, _payload, _options), do: []
 
-  defp build_candidates(semantic_key, payload, input, runs) do
+  # A native HTTP request whose canonical document carries the fields the
+  # released client fills asynchronously also names the request it was before
+  # they were filled, so a predecessor (or a historical successor) sent before
+  # them still matches (`NativeTurnContinuation.without_async_turn_metadata/1`,
+  # findings#314 row 314-2). Websocket frames keep their own witnesses.
+  defp witness_payloads(payload, %RequestOptions{transport: %{transport: transport}}) when is_binary(transport) and transport != "websocket" do
+    case NativeTurnContinuation.without_async_turn_metadata(payload) do
+      {:ok, earlier} -> [payload, earlier]
+      :none -> [payload]
+    end
+  end
+
+  defp witness_payloads(payload, _options), do: [payload]
+
+  defp build_candidates(semantic_key, payloads, input, runs) do
     ranges = Enum.flat_map(runs, &candidate_ranges(input, &1))
-    {candidates, _cache} = Enum.reduce(ranges, {[], %{}}, &build_candidate(semantic_key, payload, input, &1, &2))
+    {candidates, _cache} = Enum.reduce(ranges, {[], %{}}, &build_candidate(semantic_key, payloads, input, &1, &2))
     candidates
   end
 
@@ -98,9 +112,9 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
   defp tool_result_pair(%{"type" => type, "call_id" => id, "output" => output}) when type in ["function_call_output", "custom_tool_call_output"] and is_binary(id) and byte_size(id) > 0 and (is_binary(output) or (is_list(output) and is_integer(length(output)))), do: {type, id}
   defp tool_result_pair(_item), do: nil
 
-  defp build_candidate(semantic_key, payload, input, {prefix_count, output, finish}, {candidates, cache}) do
-    {prefix, cache} = witnesses_at(semantic_key, payload, prefix_count, cache)
-    {ending, cache} = witnesses_at(semantic_key, payload, finish, cache)
+  defp build_candidate(semantic_key, payloads, input, {prefix_count, output, finish}, {candidates, cache}) do
+    {prefix, cache} = witnesses_at(semantic_key, payloads, prefix_count, cache)
+    {ending, cache} = witnesses_at(semantic_key, payloads, finish, cache)
 
     case {prefix, ending, output_digests(output)} do
       {%{} = prefix, %{} = ending, {:ok, items}} ->
@@ -148,35 +162,58 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
   defp preemptible_output?(%{"type" => "message", "role" => "assistant", "phase" => phase}) when phase in @preemptible_message_phases, do: true
   defp preemptible_output?(_item), do: false
 
-  defp witnesses_at(semantic_key, payload, count, cache) do
+  defp witnesses_at(semantic_key, payloads, count, cache) do
     case Map.fetch(cache, count) do
       {:ok, witnesses} ->
         {witnesses, cache}
 
       :error ->
-        witnesses = prefix_witnesses(semantic_key, Map.update!(payload, "input", &Enum.take(&1, count)))
+        witnesses = prefix_witnesses(semantic_key, Enum.map(payloads, fn payload -> Map.update!(payload, "input", &Enum.take(&1, count)) end))
         {witnesses, Map.put(cache, count, witnesses)}
     end
   end
 
-  defp prefix_witnesses(semantic_key, payload) do
-    frame = Map.put(payload, "type", "response.create")
-    metadata = Map.get(frame, "client_metadata")
-    marked = if is_map(metadata) or is_nil(metadata), do: Map.put(frame, "client_metadata", Map.put(metadata || %{}, @lite_marker, "true")), else: frame
+  # `payloads` share one input: the request, then (native HTTP only) the request
+  # as it was before the client filled its asynchronous turn metadata
+  # (`witness_payloads/2`), which adds its three frame digests and no
+  # trailing-slice digests, a fixed count.
+  defp prefix_witnesses(semantic_key, [payload | earlier]) do
+    variants = frame_variants(payload) |> Enum.uniq()
 
     with {:ok, http} <- WebsocketTurnIdentity.http_resume_input_digest(semantic_key, payload["input"]),
-         {:ok, plain} <- WebsocketTurnIdentity.replay_claim_digest(semantic_key, frame),
-         {:ok, lite} <- WebsocketTurnIdentity.replay_claim_digest(semantic_key, marked),
-         {:ok, unframed} <- WebsocketTurnIdentity.replay_claim_digest(semantic_key, payload),
-         {:ok, tails} <- WebsocketTurnIdentity.replay_claim_alternates_of_variants(semantic_key, Enum.uniq([frame, marked, payload])) do
+         {:ok, digests} <- replay_claim_digests(semantic_key, variants ++ Enum.flat_map(earlier, &frame_variants/1)),
+         {:ok, tails} <- WebsocketTurnIdentity.replay_claim_alternates_of_variants(semantic_key, variants) do
       # HTTP tool continuations retain their original unframed replay witness;
       # opening HTTP requests use the reconstructed websocket variants instead.
       # A websocket opener may have been anchored with only its input delta.
       # Its stored tail witness is matched before retained output and mail are
       # appended, using the same bounded full-history proof as an exact resend.
-      %{http: http, websocket: Enum.uniq([plain, lite, unframed] ++ List.flatten(tails))}
+      %{http: http, websocket: Enum.uniq(digests ++ List.flatten(tails))}
     else
       _unproved -> nil
+    end
+  end
+
+  # The websocket frame (plain and Lite-marked) and the unframed body.
+  defp frame_variants(payload) do
+    frame = Map.put(payload, "type", "response.create")
+    metadata = Map.get(frame, "client_metadata")
+    marked = if is_map(metadata) or is_nil(metadata), do: Map.put(frame, "client_metadata", Map.put(metadata || %{}, @lite_marker, "true")), else: frame
+    [frame, marked, payload]
+  end
+
+  # In variant order: the plain frame's digest stays the first witness.
+  defp replay_claim_digests(semantic_key, variants) do
+    variants
+    |> Enum.reduce_while({:ok, []}, fn variant, {:ok, digests} ->
+      case WebsocketTurnIdentity.replay_claim_digest(semantic_key, variant) do
+        {:ok, digest} -> {:cont, {:ok, [digest | digests]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, digests} -> {:ok, Enum.reverse(digests)}
+      {:error, _reason} = error -> error
     end
   end
 

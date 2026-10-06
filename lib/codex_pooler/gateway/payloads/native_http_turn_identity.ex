@@ -383,6 +383,14 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
   # predecessor, whichever shape the websocket resend itself was admitted for.
   # The grown-resend candidates of both variants ride along: after a cut that
   # pushed completed items the fallback carries them appended (row 232-232).
+  #
+  # A request whose canonical document carries the fields the released client
+  # fills asynchronously also names, as two more transient alternates, its frame
+  # under both Lite variants as it was before they were filled
+  # (`NativeTurnContinuation.without_async_turn_metadata/1`, findings#314 row
+  # 314-2): the predecessor an exact retry repeats was sent before them. The
+  # stored witness is still the frame as sent; the trailing-slice digests and
+  # grown candidates stay those of the frame as sent, so the count is fixed.
   defp native_client_retry_witness(identity, %{"input" => input} = payload, request_options, :opening)
        when is_list(input) do
     frame = Map.put(payload, "type", "response.create")
@@ -393,11 +401,12 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
     with {:ok, [digest | variant_digests]} <- collect_digests(variants, &WebsocketTurnIdentity.replay_claim_digest(identity.semantic_turn_key, &1)),
          {:ok, tail_digests} <- WebsocketTurnIdentity.replay_claim_alternates_of_variants(identity.semantic_turn_key, variants),
          {:ok, grown} <- collect_digests(variants, &WebsocketTurnIdentity.grown_resend_candidates(identity.semantic_turn_key, &1)),
+         {:ok, async_digests} <- collect_digests(async_metadata_variants(frame), &WebsocketTurnIdentity.replay_claim_digest(identity.semantic_turn_key, &1)),
          {:ok, witness} <-
            ClientRetry.original_witness(
              digest,
              request_options.runtime.api_key_runtime_epoch,
-             Enum.uniq(variant_digests ++ List.flatten(tail_digests)) -- [digest],
+             Enum.uniq(variant_digests ++ List.flatten(tail_digests) ++ async_digests) -- [digest],
              List.flatten(grown)
            ) do
       witness
@@ -413,8 +422,8 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
   # reasoning/commentary before incoming mail, never delivered tool items.
   defp native_client_retry_witness(identity, %{"input" => input} = payload, request_options, :tool_continuation)
        when is_list(input) do
-    with {:ok, digest} <- WebsocketTurnIdentity.replay_claim_digest(identity.semantic_turn_key, payload),
-         {:ok, witness} <- ClientRetry.original_witness(digest, request_options.runtime.api_key_runtime_epoch) do
+    with {:ok, [digest | async_digests]} <- collect_digests([payload | async_metadata_payload(payload)], &WebsocketTurnIdentity.replay_claim_digest(identity.semantic_turn_key, &1)),
+         {:ok, witness} <- ClientRetry.original_witness(digest, request_options.runtime.api_key_runtime_epoch, async_digests -- [digest]) do
       witness
       |> NativeMailboxContinuation.attach(identity.semantic_turn_key, payload, request_options)
       |> NativeContentFilterRetry.attach(identity.semantic_turn_key, payload, request_options)
@@ -424,6 +433,17 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
   end
 
   defp native_client_retry_witness(_identity, _payload, _request_options, _arm), do: nil
+
+  # The frame before the client filled its asynchronous turn metadata, under
+  # both Lite variants; none when it carries no such field.
+  defp async_metadata_variants(frame), do: frame |> async_metadata_payload() |> Enum.flat_map(&lite_marker_variants/1)
+
+  defp async_metadata_payload(payload) do
+    case NativeTurnContinuation.without_async_turn_metadata(payload) do
+      {:ok, earlier} -> [earlier]
+      :none -> []
+    end
+  end
 
   # A body that already carries the marker is its own marked variant; it is
   # digested once.

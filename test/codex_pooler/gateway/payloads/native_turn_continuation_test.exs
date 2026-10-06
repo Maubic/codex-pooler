@@ -65,6 +65,38 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuationTest do
     end
   end
 
+  # The released client fills `workspaces` after a turn's first request can
+  # already have gone out (findings#314 row 314-2); the earlier request is the
+  # same body without it, whichever carrier form the document has.
+  describe "without_async_turn_metadata/1" do
+    @workspaces %{"/synthetic/repository" => %{"latest_git_commit_hash" => String.duplicate("b", 40), "has_changes" => false}}
+
+    test "drops workspaces from a JSON or map document and keeps every other field" do
+      fields = %{"turn_id" => "t-async", "request_kind" => "turn", "thread_id" => "thread-async", "window_number" => 0}
+
+      for carrier <- [&document/1, & &1] do
+        payload = %{"input" => [], "client_metadata" => %{@metadata_key => carrier.(Map.put(fields, "workspaces", @workspaces)), "thread_id" => "thread-async"}}
+
+        assert {:ok, earlier} = NativeTurnContinuation.without_async_turn_metadata(payload)
+        assert earlier["client_metadata"][@metadata_key] == fields
+        assert earlier["client_metadata"]["thread_id"] == "thread-async"
+        assert Map.delete(earlier, "client_metadata") == Map.delete(payload, "client_metadata")
+      end
+    end
+
+    test "is :none when the body document carries no asynchronous field, or there is no body document" do
+      for payload <- [
+            %{"client_metadata" => %{@metadata_key => document(%{"turn_id" => "t-async", "request_kind" => "turn"})}},
+            %{"client_metadata" => %{@metadata_key => "not-json"}},
+            %{"client_metadata" => %{@metadata_key => ""}},
+            %{"client_metadata" => %{"thread_id" => "thread-async"}},
+            %{"input" => []}
+          ] do
+        assert NativeTurnContinuation.without_async_turn_metadata(payload) == :none
+      end
+    end
+  end
+
   describe "thread_identity/2" do
     # The thread is what a remote compaction leaves alone while the window
     # rotates, so it is what the turn claim is scoped by
