@@ -90,7 +90,7 @@ Leave `requires_openai_auth = true` unless you are deliberately running Codex Po
 
 ### Model catalog discovery
 
-`model_catalog_url` and `api_key_model_discovery` are what let Codex 0.156.0 and later read the Pool's model catalog. Starting with 0.156.0 (first shipped in the 0.156.0-alpha.7 prerelease), Codex treats any provider with `env_key` as API-key authentication and, for a custom `base_url`, no longer requests `<base_url>/models` on its own. Without both settings it keeps the catalog bundled with the Codex release: models that only your Pool serves are missing from the model picker, and context window, automatic compaction, and reasoning defaults come from Codex's built-in metadata instead of the Pool. Signing in with a ChatGPT account does not change this.
+`model_catalog_url` and `api_key_model_discovery` are what let Codex 0.156.0 and later read the Pool's model catalog. Starting with 0.156.0 (first shipped in the 0.156.0-alpha.7 prerelease), Codex treats any provider with `env_key` as API-key authentication and, for a custom `base_url`, does not request `<base_url>/models` on its own. Without both settings it keeps the catalog bundled with the Codex release: models that only your Pool serves are missing from the model picker, and context window, automatic compaction, and reasoning defaults come from Codex's built-in metadata instead of the Pool. Signing in with a ChatGPT account does not change this.
 
 Earlier Codex releases ignore both settings and keep reading the Pool catalog from `base_url` while a ChatGPT account is signed in, so the same configuration works across the version boundary. Codex Desktop and the IDE extension run their own bundled Codex core and read the same `CODEX_HOME/config.toml`; they follow the same rule once that core reaches 0.156.0. The core version is the number after the client name in the user agent those apps send, which Codex Pooler request logs show.
 
@@ -99,7 +99,7 @@ When you set `model_catalog_url`:
 - Use the absolute URL of the Pool catalog, `/backend-api/codex/models` under the same host as `base_url`. Codex adds its `client_version` query parameter itself and authenticates with the same Pool API key.
 - Point it at the final URL. Codex refuses redirects on this request, so an `http://` URL that the ingress redirects to `https://` fails.
 - Codex refuses a catalog response larger than 1 MiB and then keeps its bundled catalog. The upstream catalog repeats each model's instructions in a legacy `base_instructions` field for older Codex releases; Codex Pooler leaves that copy out for Codex 0.148.0 and later, which read the same text from `model_messages`, and keeps it for older releases and for any client whose `User-Agent` is not a Codex build's. The release is read from the Codex `User-Agent`, the same header every Responses turn carries, so the catalog `ETag` a turn announces always matches the catalog that client fetched and Codex never refetches the catalog after each turn. For current releases that makes the catalog about a third smaller, and entries are typically 25 to 65 KB each (40 to 90 KB with the legacy copy), so a Pool that exposes many models can still reach the limit.
-- Codex discards the whole catalog when one entry fails to decode. For the Codex releases Codex Pooler has been verified against (0.154.0 through 0.158.0), an entry that release cannot decode is left out instead: that model is missing from the picker but still works when requested by name. Operators see a `codex catalog entry left out` warning; see [Codex Catalog Entries Left Out](/operators/pools/#codex-catalog-entries-left-out).
+- Codex discards the whole catalog when one entry fails to decode. For Codex releases 0.154.0 through 0.160.1, an entry that release cannot decode is left out instead: that model is missing from the picker but still works when requested by name. Operators see a `codex catalog entry left out` warning; see [Codex Catalog Entries Left Out](/operators/pools/#codex-catalog-entries-left-out).
 
 `api_key_model_discovery` is marked as under development in Codex. Codex prints an under-development warning at startup while it is enabled; set `suppress_unstable_features_warning = true` at the top level of the config file to hide it. Because the feature is still under development, a later Codex release may rename or change it; recheck this page when you upgrade Codex.
 
@@ -146,9 +146,9 @@ Both providers use the same Pool API key and the same Codex backend compatibilit
 
 ### Tool-output preservation
 
-Codex Pooler preserves accepted tool-output text on Codex backend Responses, compatible aliases, native compact and supported websocket requests. No client or Pool compression switch is required. Existing Full/Lite normalization and provider or client compaction remain unchanged.
+Codex Pooler preserves accepted tool-output text on Codex backend Responses, compatible aliases, native compact and supported websocket requests. No client or Pool compression switch is required. Full/Lite normalization and provider or client compaction are separate features.
 
-Raw tool outputs are not stored in request logs, and compression savings are not displayed. During an upgrade, old nodes retain their old behavior until replaced; changing the serialized upstream prefix can also change prompt-cache reuse.
+Raw tool outputs are not stored in request logs, and compression savings are not displayed. During a rolling upgrade, serving nodes that are not yet replaced keep the behavior of their own version; changing the serialized upstream prefix can also change prompt-cache reuse.
 
 ### Existing session migration
 
@@ -260,7 +260,7 @@ When every account in the Pool has used up its quota, Codex CLI names the time t
 
 An account running out of quota does not exhaust a Pool that still has compatible capacity. If that happens during an anchored native websocket continuation, Codex Pooler returns a retryable error so the client can reconnect and resend its full history to another account. The previous response anchor stays bound to the original connection.
 
-If Codex repeatedly enters a broken login/account state with a Pooler provider, advanced users can change the provider to `requires_openai_auth = false`. That makes Codex treat the provider as gateway-only and use only `env_key` for runtime auth, but Codex will no longer appear signed in for that provider and account-dependent features, including mobile/app-server features, may be unavailable.
+If Codex repeatedly enters a broken login/account state with a Pooler provider, advanced users can change the provider to `requires_openai_auth = false`. That makes Codex treat the provider as gateway-only and use only `env_key` for runtime auth, but Codex does not appear signed in for that provider and account-dependent features, including mobile/app-server features, may be unavailable.
 
 <a id="route-boundaries"></a>
 

@@ -633,8 +633,10 @@ descriptions, defaults and the model's place in the model picker do not count).
 Before refusing, Codex Pooler checks them once with the same quota rules,
 reading any quota older than the freshness window again first, and moves the
 request to one of them that has quota. When none has, the earliest reset covers
-them too. A compaction that has to stay on the WebSocket connection it runs on
-is the exception.
+them too. A compaction that has to stay on the WebSocket connection it runs on,
+a request that session continuity hard-pins to its account (for example one
+anchored on `previous_response_id`) and a request tied to the account that holds
+its file are the exceptions: they stay with their account and are not moved.
 
 Codex Desktop is the exception on the Codex backend Responses routes
 (`/backend-api/codex/responses` over HTTP and websocket,
@@ -673,7 +675,7 @@ Pooler kept out of the request because it advertises the model with a
 different catalog shape: when the last account of the chosen shape refuses
 with a usage limit, the request moves to such an account once.
 
-On the native websocket, an ordinary continuation can be bound to one account even while another compatible account has capacity. If its account returns a usage limit before output, Codex Pooler checks capacity before that connection binding. A healthy sibling or an unknown return time produces a retryable `503 pinned_continuation_unavailable`, without an account reset, so the client can reconnect and resend its full history. Codex Pooler never sends the old response anchor to a different connection. A native websocket compaction that can run only on its connection gets the same answer for the same refusal; the Codex client then retries it and finally sends it over HTTPS, which can move to another account. When every compatible account is exhausted, both get the Pool's usage limit described below. Public `/v1` keeps its own recovery rules.
+On the native websocket, an ordinary continuation can be bound to one account even while another compatible account has capacity. If its account returns a usage limit before output, Codex Pooler checks capacity before that connection binding. A healthy sibling or an unknown return time produces a retryable `503 pinned_continuation_unavailable`, without an account reset, so the client can reconnect and resend its full history. Codex Pooler never sends the old response anchor to a different connection. A native websocket compaction that can run only on its connection gets the same answer for the same refusal; the Codex client then retries it and finally sends it over HTTPS, which can move to another account. When every compatible account is exhausted, both get the Pool's usage limit described below. Public `/v1` answers differently: a `GET /v1/responses` websocket compaction that can run only on the connection holding its anchor, and that the provider refuses with its usage limit, gets the usage limit of the account that holds the anchor even while another account could serve a new request. The answer is an `error` event with `"status": 429`, `usage_limit_reached`, `quota_exhausted`, `resets_at` and `resets_in_seconds` for that account's reset, and `headers.retry-after`.
 
 When no compatible account is left and the Codex backend's
 usage-limit refusal names the account's reset, that refusal gets the same
@@ -887,7 +889,7 @@ be a member of an `allowed_tools` choice.
 
 Accepted tool-output text on `POST /v1/responses`, `POST /v1/chat/completions` and the supported Responses websocket route reaches the upstream without gateway minification or summarization. Protocol adapters may change the surrounding request or split text into ordered parts; the output text itself is preserved. Full/Lite tool handling and strict-schema normalization remain in effect.
 
-No Pool compression switch or savings display remains. Raw outputs are not stored. Public `/v1/responses/compact` remains unsupported, while provider and client compaction keep their separate contracts.
+There is no Pool compression switch or savings display. Raw outputs are not stored. Public `/v1/responses/compact` remains unsupported, while provider and client compaction keep their separate contracts.
 
 ## Routed but unsupported boundaries
 
@@ -917,7 +919,7 @@ Within `POST /v1/responses`, OpenAI Responses remote MCP tool definitions are un
 
 Every method and every path under `/v1/agents` and `/v1/vaults` answers `404` with the OpenAI-shaped error code `unsupported_endpoint` and the message `Unsupported OpenAI /v1 endpoint: the beta Agents API is not supported`. The answer follows the Pool API key and `/v1` compatibility checks and comes before the request body is read, so nothing is dispatched upstream, reserved or recorded. The Codex backend behind Codex Pooler serves no Agents route, so there is nothing to relay, and Codex Pooler does not run tools itself.
 
-The OpenAI Node SDK helpers under `client.beta.agents` call those routes and do not work against a Codex Pooler base URL: `sessions.create` and `sessions.stream` with their `toolHandlers` and `functionTool` results (sent as `agent.session.input.tool_result` events), typed final results such as `finalResult()` with `zodAgentTextFormat`, `environments.files.prepare` and `upload`, and `artifacts.forResult(...).download`. `environments.files.prepare` first uploads each file with `POST /v1/files`. That upload is an ordinary Files upload and keeps working, but no Agents environment can use it through Codex Pooler.
+The OpenAI Node SDK helpers under `client.beta.agents` call those routes and do not work against a Codex Pooler base URL: `sessions.create` and `sessions.stream` with their `toolHandlers` and `functionTool` results (sent as `agent.session.input.tool_result` events), typed final results such as `finalResult()` with `zodAgentTextFormat`, `environments.files.prepare` and `upload`, and `artifacts.forResult(...).download`. `environments.files.prepare` first uploads each file with `POST /v1/files`. That upload is an ordinary Files upload, but no Agents environment can use it through Codex Pooler.
 
 To use tools through Codex Pooler, send `POST /v1/responses`. A function definition with the `type`, `name`, `description` and `parameters` that an Agents tool carries is an ordinary Responses function tool in Full and Lite serving modes, and the tool result goes back in the next request as a `function_call_output` item. The SDK's `client.responses` helpers send those requests.
 
@@ -950,7 +952,7 @@ Yes, for selected SDK routes. Set the SDK `base_url` or `baseURL` to `https://co
 No. Codex backend-compatible clients should use `/backend-api/codex`. The `/v1` surface is for selected OpenAI SDK-compatible clients and translates supported requests into Codex-compatible work. A Codex client pointed at `/v1` also behaves differently from one on the backend alias in two ways:
 
 - Codex's own post-turn compaction is a bare `compaction_trigger`, and `/v1` refuses it with `400 invalid_request` because visible input is required before the trigger. Only a mid-turn compaction reaches the provider through `/v1`.
-- When the provider refuses a connection-bound compaction with its usage limit, `/v1` answers the `429` of the account that holds the conversation's anchor, which is the documented `/v1` contract for SDK clients, and Codex stops. The backend alias answers `503 pinned_continuation_unavailable` when another account can serve, and Codex then falls back to a compaction served by another account.
+- When the provider refuses a connection-bound compaction with its usage limit, `/v1` answers `429 usage_limit_reached` with the reset of the account that holds the conversation's anchor, even while another account could serve a new request, because an SDK client does not rebuild the compaction without its anchor, and Codex stops. The backend alias answers `503 pinned_continuation_unavailable` when another account can serve, and Codex then falls back to a compaction served by another account.
 
 ### Does `/v1` support OpenAI Realtime?
 

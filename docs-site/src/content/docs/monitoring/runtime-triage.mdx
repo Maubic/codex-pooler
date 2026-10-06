@@ -19,7 +19,7 @@ When the rate rises, compare database checkout pressure, owner-process logs and 
 
 ## Duplicate-turn refusals
 
-`codex_pooler_gateway_duplicate_turn_refused_count` counts client-visible `409 duplicate_turn` refusals. The refused duplicate does not get its own request row, so database-derived request/error totals do not include it.
+`codex_pooler_gateway_duplicate_turn_refused_count` counts client-visible `409 duplicate_turn` refusals that get no request row of their own, so database-derived request/error totals do not include them. A guided retry of a content-filtered turn that dispatch refuses because its account binding does not hold is also answered `409 duplicate_turn`, but it is an admitted request: its row records status `409` and the error code `invalid_content_filter_retry_binding`, so Request logs show it and this counter does not count it.
 
 A few refusals can be normal after a disconnect: a client resends while an earlier execution is still reserved or has already produced output.
 

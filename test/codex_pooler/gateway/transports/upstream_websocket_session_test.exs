@@ -6080,10 +6080,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     assert_receive {:DOWN, ^supervisor_monitor, :process, _, :shutdown}, @message_detection_timeout_ms
 
     # Nothing orders the request task against the fake's shutdown, so its outcome depends on how far it got: it was
-    # answered before the connection closed, or it sent its frame and decoded the close, or its reads lagged behind the
-    # whole shutdown: one read returned the upgrade response together with the close frame, which the upgrade does not
-    # decode, and the end of the connection then came before its send (the send found it closed) or after it (the
-    # receive saw it). A node shared with other suites produced the send-phase one (findings#303 row 303-7, Drone 1809).
+    # answered before the connection closed, or it decoded the close (a close frame in the same read as the upgrade
+    # response is decoded behind the 101 and fails the request before its payload is written), or its reads lagged
+    # behind the whole shutdown and the end of the connection reached it before a close frame it had read: before its
+    # send (the send found it closed) or after it (the receive saw it). A node shared with other suites produced the
+    # send-phase one (findings#303 row 303-7, Drone 1809).
     case Task.await(request_task, @message_detection_timeout_ms) do
       {:ok, %{terminal: "response.completed", status: 200}} -> :ok
       {:error, %{reason: :upstream_websocket_closed_before_terminal}} -> :ok

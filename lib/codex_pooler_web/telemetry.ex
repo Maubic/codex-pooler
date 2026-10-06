@@ -695,8 +695,9 @@ defmodule CodexPoolerWeb.Telemetry do
         tags: [:stage, :transport],
         tag_values: &duplicate_turn_refused_tag_values/1,
         description:
-          "Client-visible 409 duplicate_turn refusals, by bounded refusing stage and transport class. " <>
-            "None writes a request row for the refused request, so request-log counts never include these."
+          "Client-visible 409 duplicate_turn refusals that get no request row, by bounded refusing stage and transport class, " <>
+            "so request-log counts never include these. A guided content-filter retry that dispatch refuses for its account binding " <>
+            "is also answered 409 duplicate_turn, but its request has a row (409, invalid_content_filter_retry_binding) and is not counted."
       )
     ]
   end
