@@ -73,12 +73,45 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentityTest do
     assert predecessor.native_client_retry_witness.digest in proof.prefix.websocket
     assert current.native_client_retry_witness.digest in proof.ending.websocket
 
-    # A websocket frame keeps its own witnesses.
+    # A websocket frame that gained them names the same predecessor: the
+    # websocket mailbox branch takes the same stripped variants.
     websocket = RequestOptions.build(%{transport: "websocket", codex_session: %CodexSession{id: @session_id}, api_key_runtime_epoch: 1}, "/backend-api/codex/responses", %{})
     assert {:ok, witness} = ClientRetry.original_witness(current.native_client_retry_witness.digest, 1)
     assert [frame_proof] = NativeMailboxContinuation.attach(witness, current.semantic_turn_key, candidate, websocket).mailbox
-    refute predecessor.native_client_retry_witness.digest in frame_proof.prefix.websocket
-    assert length(proof.prefix.websocket) == length(frame_proof.prefix.websocket) + 3
+    assert predecessor.native_client_retry_witness.digest in frame_proof.prefix.websocket
+    assert frame_proof.prefix == proof.prefix
+  end
+
+  # A later turn's first websocket request is anchored on the previous turn's
+  # response and stores the anchor-free tail digest of its own items; its
+  # full-history resend over HTTPS, or on a new socket, finds it among its
+  # trailing-slice alternates. When the resend gained the async `workspaces`
+  # its own slices bind them, so the slices of the frame without them come
+  # along, under the same bound, two per input item for the two Lite variants
+  # (findings#314 row 314-2).
+  test "a later turn's full history that gained the async workspaces names its anchored first request sent before them" do
+    previous = [%{"type" => "message", "role" => "user", "content" => "synthetic first"}, %{"type" => "message", "role" => "assistant", "phase" => "final_answer", "content" => [%{"type" => "output_text", "text" => "synthetic answer"}]}]
+    turn = [%{"type" => "message", "role" => "user", "content" => "synthetic second"}]
+    full = %{payload(0) | "input" => previous ++ turn}
+    later = put_in(full, ["client_metadata", "x-codex-turn-metadata", "workspaces"], @workspaces)
+    assert {:ok, plain} = NativeHttpTurnIdentity.request_claim(options(), full)
+    assert {:ok, current} = NativeHttpTurnIdentity.request_claim(options(), later)
+
+    anchored = full |> Map.merge(%{"input" => turn, "previous_response_id" => "resp_synthetic_previous", "type" => "response.create"})
+    assert {:ok, original} = WebsocketTurnIdentity.replay_tail_digest(current.semantic_turn_key, anchored)
+    assert original in plain.native_client_retry_witness.alternates
+    assert original in current.native_client_retry_witness.alternates
+    assert length(current.native_client_retry_witness.alternates) == length(plain.native_client_retry_witness.alternates) + 2 * length(full["input"])
+
+    # The websocket mailbox branch: a continuation of that turn that gained the
+    # field proves the same anchored predecessor.
+    reasoning = %{"type" => "reasoning", "id" => "rs_synthetic", "summary" => [], "encrypted_content" => "synthetic-reasoning"}
+    mail = %{"type" => "agent_message", "author" => "/root/worker", "recipient" => "/root", "content" => [%{"type" => "input_text", "text" => "synthetic update"}]}
+    continuation = later |> Map.put("type", "response.create") |> Map.update!("input", &(&1 ++ [reasoning, mail]))
+    websocket = RequestOptions.build(%{transport: "websocket", codex_session: %CodexSession{id: @session_id}, api_key_runtime_epoch: 1}, "/backend-api/codex/responses", %{})
+    assert {:ok, witness} = ClientRetry.original_witness(:crypto.hash(:sha256, "synthetic continuation"), 1)
+    assert [proof] = NativeMailboxContinuation.attach(witness, current.semantic_turn_key, continuation, websocket).mailbox
+    assert original in proof.prefix.websocket
   end
 
   # A re-sample (findings#311) is its predecessor's input, then that response's

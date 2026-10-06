@@ -387,23 +387,26 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
   # pushed completed items the fallback carries them appended (row 232-232).
   #
   # A request whose canonical document carries the fields the released client
-  # fills asynchronously also names, as two more transient alternates, its frame
-  # under both Lite variants as it was before they were filled
+  # fills asynchronously also names, as transient alternates, its frame under
+  # both Lite variants as it was before they were filled, and those frames'
+  # trailing-slice digests under the same bound as its own
   # (`NativeTurnContinuation.without_async_turn_metadata/1`, findings#314 row
-  # 314-2): the predecessor an exact retry repeats was sent before them. The
-  # stored witness is still the frame as sent; the trailing-slice digests and
-  # grown candidates stay those of the frame as sent, so the count is fixed.
+  # 314-2): the predecessor an exact retry repeats, or the anchored websocket
+  # request its HTTPS fallback repeats, was sent before them. The stored witness
+  # is still the frame as sent, and the grown candidates stay those of the frame
+  # as sent.
   defp native_client_retry_witness(identity, %{"input" => input} = payload, request_options, :opening)
        when is_list(input) do
     frame = Map.put(payload, "type", "response.create")
     variants = lite_marker_variants(frame)
+    async_variants = async_metadata_variants(frame)
 
-    # The two variants share their input, so its items are hashed once for the
-    # trailing-slice digests of both.
+    # The variants share their input, so its items are hashed once for the
+    # trailing-slice digests of all of them.
     with {:ok, [digest | variant_digests]} <- collect_digests(variants, &WebsocketTurnIdentity.replay_claim_digest(identity.semantic_turn_key, &1)),
-         {:ok, tail_digests} <- WebsocketTurnIdentity.replay_claim_alternates_of_variants(identity.semantic_turn_key, variants),
+         {:ok, tail_digests} <- WebsocketTurnIdentity.replay_claim_alternates_of_variants(identity.semantic_turn_key, variants ++ async_variants),
          {:ok, grown} <- collect_digests(variants, &WebsocketTurnIdentity.grown_resend_candidates(identity.semantic_turn_key, &1)),
-         {:ok, async_digests} <- collect_digests(async_metadata_variants(frame), &WebsocketTurnIdentity.replay_claim_digest(identity.semantic_turn_key, &1)),
+         {:ok, async_digests} <- collect_digests(async_variants, &WebsocketTurnIdentity.replay_claim_digest(identity.semantic_turn_key, &1)),
          {:ok, witness} <-
            ClientRetry.original_witness(
              digest,

@@ -41,19 +41,17 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
 
   defp candidates(_semantic_key, _payload, _options), do: []
 
-  # A native HTTP request whose canonical document carries the fields the
-  # released client fills asynchronously also names the request it was before
-  # they were filled, so a predecessor (or a historical successor) sent before
-  # them still matches (`NativeTurnContinuation.without_async_turn_metadata/1`,
-  # findings#314 row 314-2). Websocket frames keep their own witnesses.
-  defp witness_payloads(payload, %RequestOptions{transport: %{transport: transport}}) when is_binary(transport) and transport != "websocket" do
+  # A request whose canonical document carries the fields the released client
+  # fills asynchronously also names the request it was before they were
+  # filled, so a predecessor (or a historical successor) sent before them
+  # still matches (`NativeTurnContinuation.without_async_turn_metadata/1`,
+  # findings#314 row 314-2), on either transport.
+  defp witness_payloads(payload, _options) do
     case NativeTurnContinuation.without_async_turn_metadata(payload) do
       {:ok, earlier} -> [payload, earlier]
       :none -> [payload]
     end
   end
-
-  defp witness_payloads(payload, _options), do: [payload]
 
   defp build_candidates(semantic_key, payloads, input, runs) do
     ranges = Enum.flat_map(runs, &candidate_ranges(input, &1))
@@ -173,16 +171,18 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
     end
   end
 
-  # `payloads` share one input: the request, then (native HTTP only) the request
-  # as it was before the client filled its asynchronous turn metadata
-  # (`witness_payloads/2`), which adds its three frame digests and no
-  # trailing-slice digests, a fixed count.
+  # `payloads` share one input: the request, then the request as it was before
+  # the client filled its asynchronous turn metadata (`witness_payloads/2`),
+  # whose frame digests and trailing-slice digests (an anchored websocket
+  # original's witness) join the request's own under the same bound; every
+  # variant's items are hashed once.
   defp prefix_witnesses(semantic_key, [payload | earlier]) do
     variants = frame_variants(payload) |> Enum.uniq()
+    earlier_variants = earlier |> Enum.flat_map(&frame_variants/1) |> Enum.uniq()
 
     with {:ok, http} <- WebsocketTurnIdentity.http_resume_input_digest(semantic_key, payload["input"]),
-         {:ok, digests} <- replay_claim_digests(semantic_key, variants ++ Enum.flat_map(earlier, &frame_variants/1)),
-         {:ok, tails} <- WebsocketTurnIdentity.replay_claim_alternates_of_variants(semantic_key, variants) do
+         {:ok, digests} <- replay_claim_digests(semantic_key, variants ++ earlier_variants),
+         {:ok, tails} <- WebsocketTurnIdentity.replay_claim_alternates_of_variants(semantic_key, variants ++ earlier_variants) do
       # HTTP tool continuations retain their original unframed replay witness;
       # opening HTTP requests use the reconstructed websocket variants instead.
       # A websocket opener may have been anchored with only its input delta.
