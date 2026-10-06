@@ -29,6 +29,12 @@ defmodule CodexPooler.Gateway.Metadata.CanonicalModelSource do
   # This narrows grouping, never the payload: every field below is still served
   # verbatim from the selected anchor source.
   #
+  # `priority` is the model picker's sort order: the released Codex client
+  # reads it only to order its picker and to make the first visible entry
+  # its default model, and no request reads it (findings#305 row 498-6;
+  # accounts whose catalogs list the same model at another position used to
+  # be held back from every turn of it).
+  #
   # Behavioral fields deliberately stay in the digest: `slug`, the
   # context-window family, `use_responses_lite`, `service_tiers`,
   # `supported_reasoning_levels`, `capabilities`, and any field not listed here.
@@ -36,6 +42,7 @@ defmodule CodexPooler.Gateway.Metadata.CanonicalModelSource do
                           default_reasoning_level
                           default_service_tier
                           description
+                          priority
                           visibility
                         ]
 

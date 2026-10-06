@@ -72,6 +72,7 @@ defmodule CodexPooler.CompatibilityMatrix do
           "default_reasoning_level",
           "default_service_tier",
           "description",
+          "priority",
           "visibility"
         ],
         shell_type: %{

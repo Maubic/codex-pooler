@@ -150,6 +150,25 @@ defmodule CodexPooler.Gateway.Metadata.CanonicalModelSourceTest do
     refute canonical_drifted.source == canonical_base.source
   end
 
+  # The model picker's sort order: accounts list the same model at different
+  # positions without changing how a turn runs (findings#305 row 498-6).
+  test "picker priority drift keeps one canonical digest while staying in the served source" do
+    base = Map.put(source_metadata(), "priority", 1)
+    drifted = Map.put(base, "priority", 0)
+
+    assert {:ok, canonical_base} = CanonicalModelSource.canonical_source(base)
+    assert {:ok, canonical_drifted} = CanonicalModelSource.canonical_source(drifted)
+
+    assert canonical_drifted.digest == canonical_base.digest
+    assert canonical_drifted.reasoning_agnostic_digest == canonical_base.reasoning_agnostic_digest
+    assert canonical_drifted.source["priority"] == 0
+    assert canonical_base.source["priority"] == 1
+
+    # Control: a behavioral field still splits.
+    assert {:ok, wider} = CanonicalModelSource.canonical_source(Map.put(base, "context_window", 500_000))
+    refute wider.reasoning_agnostic_digest == canonical_base.reasoning_agnostic_digest
+  end
+
   test "canonical shell digest groups feature-equivalent shell values and isolates disabled" do
     known_shell_types = ~w(default local shell_command unified_exec)
     unknown_shell_type = "future_shell"

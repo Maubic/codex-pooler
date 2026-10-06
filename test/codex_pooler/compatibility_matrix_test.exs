@@ -665,6 +665,12 @@ defmodule CodexPooler.CompatibilityMatrixTest do
                translated_openai_responses: "all_valid_canonical_assignments"
              }
 
+      # Presentation and default hints that drift between accounts without
+      # changing how a turn executes; `priority` is the picker's sort order
+      # (findings#305 row 498-6). Moves with `CanonicalModelSource`'s
+      # `@digest_excluded_keys`.
+      assert feature.canonical_partition.digest_excluded_hints == ["default_reasoning_level", "default_service_tier", "description", "priority", "visibility"]
+
       assert feature.canonical_partition.shell_type == %{
                equivalent_known_values: ["default", "local", "shell_command", "unified_exec"],
                digest_value: "shell_command",

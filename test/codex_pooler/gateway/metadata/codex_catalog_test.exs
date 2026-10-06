@@ -872,6 +872,69 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalogTest do
              anchor_source["description"]
   end
 
+  # `priority` is the model picker's sort order (findings#305 row 498-6). A
+  # source that lists the model at another position, here also with another
+  # default reasoning level as the production sources that motivated the row
+  # do, joins the anchor's partition. The family then has two reasoning
+  # projections and is served through the reasoning union, which keeps the
+  # anchor's default and level entries, so the catalog body and its ETag
+  # equal the control's.
+  test "sources differing only in picker priority form one partition and serve the anchor's priority" do
+    anchor_source = Map.put(pristine_source("gpt-priority"), "priority", 1)
+    joining = Map.merge(anchor_source, %{"priority" => 0, "default_reasoning_level" => "low"})
+    {anchor_id, first_id, second_id} = assignment_ids()
+
+    identical_model =
+      "gpt-priority"
+      |> model(%{"source_assignment_models" => %{}})
+      |> put_source_models(%{anchor_id => anchor_source, first_id => anchor_source, second_id => anchor_source})
+
+    drifted_model =
+      "gpt-priority"
+      |> model(%{"source_assignment_models" => %{}})
+      |> put_source_models(%{anchor_id => anchor_source, first_id => anchor_source, second_id => joining})
+
+    identical_candidates = partition_candidates(identical_model, [anchor_id, first_id, second_id])
+    drifted_candidates = partition_candidates(drifted_model, [anchor_id, first_id, second_id])
+
+    assert [%{assignment_ids: selected_ids, partition_count: 1, source: source}] =
+             CodexCatalog.select_canonical_sources([drifted_model], drifted_candidates)
+
+    assert selected_ids == Enum.sort([anchor_id, first_id, second_id])
+    assert source["priority"] == 1
+
+    identical = build_canonical([identical_model], identical_candidates)
+    drifted_result = build_canonical([drifted_model], drifted_candidates)
+
+    assert drifted_result.body == identical.body
+    assert drifted_result.etag == identical.etag
+    assert get_in(drifted_result.body, ["models", Access.at(0), "priority"]) == 1
+  end
+
+  # Merging can move the anchor: when the source whose priority differs is the
+  # oldest assignment, the merged partition is anchored on it and its fields
+  # are served, priority and description included, which can reorder the
+  # client's model picker and change its default model. Before, the larger
+  # partition of the two newer sources was selected and its oldest member's
+  # fields were served.
+  test "a priority-only difference on the oldest assignment makes it the anchor of the merged partition" do
+    newer_source = Map.put(pristine_source("gpt-priority-anchor"), "priority", 1)
+    oldest_source = Map.merge(newer_source, %{"priority" => 0, "description" => "oldest account copy"})
+    {oldest_id, first_id, second_id} = assignment_ids()
+
+    model =
+      "gpt-priority-anchor"
+      |> model(%{"source_assignment_models" => %{}})
+      |> put_source_models(%{oldest_id => oldest_source, first_id => newer_source, second_id => newer_source})
+
+    candidates = partition_candidates(model, [oldest_id, first_id, second_id])
+
+    assert [%{assignment_ids: selected_ids, partition_count: 1}] = CodexCatalog.select_canonical_sources([model], candidates)
+    assert selected_ids == Enum.sort([oldest_id, first_id, second_id])
+
+    assert [%{"priority" => 0, "description" => "oldest account copy"}] = build_canonical([model], candidates).body["models"]
+  end
+
   test "shell capability partitions preserve raw payload while isolating disabled" do
     source = pristine_source("gpt-shell-capability")
 

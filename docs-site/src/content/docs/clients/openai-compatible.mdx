@@ -599,7 +599,9 @@ retry it.
 
 On the Codex backend routes, those accounts include the ones Codex Pooler keeps
 out of a request because they advertise the model with a different catalog
-shape. Before refusing, Codex Pooler checks them once with the same quota rules,
+shape (a field that changes how the model runs, such as its context window;
+descriptions, defaults and the model's place in the model picker do not count).
+Before refusing, Codex Pooler checks them once with the same quota rules,
 reading any quota older than the freshness window again first, and moves the
 request to one of them that has quota. When none has, the earliest reset covers
 them too. A compaction that has to stay on the WebSocket connection it runs on
