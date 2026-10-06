@@ -5120,11 +5120,43 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # Codex closes immediately after reading a content-filter terminal, before
   # settlement acknowledgement. That changes cleanup, not the written facts.
   defp written_content_filter_terminal?(state, pid) do
+    evidence = downstream_delivery_evidence(state, pid)
+
     case WebsocketDownstreamWriteWatch.confirmed() do
-      %{^pid => %{terminal_class: "response.incomplete", incomplete_reason: "content_filter", pushed_at: %DateTime{}, skipped?: false}} -> pushed_terminal_evidence?(written_delivery_evidence(pid, downstream_delivery_evidence(state, pid)))
-      _not_written -> false
+      %{^pid => %{terminal_class: "response.incomplete", incomplete_reason: "content_filter", pushed_at: %DateTime{}, skipped?: false}} -> pushed_terminal_evidence?(written_delivery_evidence(pid, evidence))
+      confirmed -> content_filter_terminal_written_before_close?(confirmed, pid, evidence)
     end
   end
+
+  # The client's close can also be processed between the terminal's write and
+  # the write watch's reading right after it: the port is gone, the reading
+  # cannot tell, and the terminal stayed unconfirmed, so the guided retry of a
+  # client that had read it answered 409 duplicate_turn (findings#315, traced
+  # on a natural failure). The terminal still counts as written when no write
+  # failed, it is the only frame of the turn left unconfirmed, and the driver
+  # queue was read empty right before its write
+  # (`WebsocketDownstreamWriteWatch.closed_before_latest_write_read?/0`): the
+  # frame then went to the kernel directly. What remains is a partial write
+  # into a full send buffer with the client closing in that same instant; such
+  # a client never read the content-filter terminal, so it cannot send the
+  # guided retry this receipt authorizes, and every other resend of the turn
+  # is answered the same whatever the receipt says.
+  defp content_filter_terminal_written_before_close?(confirmed, pid, %{terminal_class: "response.incomplete", incomplete_reason: "content_filter", pushed_at: %DateTime{}, skipped?: false} = evidence) do
+    WebsocketDownstreamWriteWatch.closed_before_latest_write_read?() and
+      only_terminal_unconfirmed?(confirmed_task_evidence(confirmed, pid), evidence)
+  end
+
+  defp content_filter_terminal_written_before_close?(_confirmed, _pid, _evidence), do: false
+
+  defp confirmed_task_evidence(%{} = confirmed, pid), do: Map.get(confirmed, pid, new_downstream_delivery_evidence())
+  defp confirmed_task_evidence(_none, _pid), do: new_downstream_delivery_evidence()
+
+  # Everything the task pushed before its terminal was confirmed: the terminal
+  # added exactly one frame and no completed item.
+  defp only_terminal_unconfirmed?(%{terminal_class: nil, frames: frames} = before, %{frames: total} = evidence),
+    do: frames + 1 == total and Map.get(before, :completed_items, 0) == Map.get(evidence, :completed_items, 0) and Map.get(before, :completed_item_digests, []) == Map.get(evidence, :completed_item_digests, [])
+
+  defp only_terminal_unconfirmed?(_before, _evidence), do: false
 
   # The authoritative target with its registry status; a task the registry
   # does not track answers from the socket's own state.

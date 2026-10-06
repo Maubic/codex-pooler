@@ -211,6 +211,47 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
     end
   end
 
+  # The same close can also be processed between Bandit's write of the terminal and the write watch's reading right after it: the watch then finds the port gone and cannot tell whether the terminal reached the kernel, the terminal stayed unconfirmed and the receipt `aborted`, so the guided retry answered 409 duplicate_turn (findings#315: Drone 1815 and 1839, both output shapes, forwarding on and off). This hold runs before the watch's own handler and parks the socket until the client's close has taken the port; only then does the watch read.
+  for mode <- ["full", "lite"], forwarding? <- [false, true], retained? <- [false, true] do
+    @tag mode: mode, forwarding?: forwarding?, retained?: retained?
+    test "#{mode} websocket owner #{forwarding?} retains #{retained?} content-filter terminal stays delivered when the client closes before the write watch reads the queue", context do
+      CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
+      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, context.forwarding?)
+      output = if context.retained?, do: [%{"type" => "reasoning", "id" => "rs_synthetic", "summary" => [], "encrypted_content" => "synthetic"}], else: []
+      terminal = %{"type" => "response.incomplete", "response" => %{"id" => "resp_synthetic_cf", "status" => "incomplete", "incomplete_details" => %{"reason" => "content_filter"}, "output" => output, "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+      frames = Enum.map(output, &%{"type" => "response.output_item.done", "item" => &1}) ++ [terminal]
+      upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.websocket_text_frames(Enum.map(frames, &CodexPooler.JSON.encode!/1)), FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(completed)])]))
+      setup = gateway_setup(upstream, compact?: true)
+      set_model_serving_mode!(model_serving_scope(), setup, context.mode)
+      port = start_public_endpoint!()
+      thread = Ecto.UUID.generate()
+      input = native_text_input("synthetic")
+      original = payload(setup, thread, input, 0) |> Map.put("type", "response.create")
+      original = if context.mode == "lite", do: put_in(original, ["client_metadata", "ws_request_header_x_openai_internal_codex_responses_lite"], "true"), else: original
+      hold = hold_before_write_watch_read!(setup)
+      {conn, websocket, ref} = public_websocket_connect!(port, setup, thread)
+      on_exit(fn -> Mint.HTTP.close(conn) end)
+      {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(original))
+      {conn, _websocket, terminal} = receive_terminal(conn, websocket, ref)
+      assert terminal["type"] == "response.incomplete"
+      assert_receive {:terminal_written, ^hold, socket}, @budget
+      port_monitor = Port.monitor(connection_port!(socket))
+      Mint.HTTP.close(conn)
+      assert_receive {:DOWN, ^port_monitor, :port, _port, _reason}, @budget
+      send(socket, {hold, :release})
+      first = await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget)
+      await_delivery(first, System.monotonic_time(:millisecond) + @budget, %{type: terminal["type"], reason: get_in(terminal, ["response", "incomplete_details", "reason"])})
+      {conn, websocket, ref} = public_websocket_connect!(port, setup, thread)
+      successor = Map.put(original, "input", input ++ output ++ [guidance()])
+      {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(successor))
+      {conn, _websocket, terminal} = receive_terminal(conn, websocket, ref)
+      Mint.HTTP.close(conn)
+      assert terminal["type"] == "response.completed"
+      assert FakeUpstream.count(upstream) == 2
+    end
+  end
+
   for mode <- ["full", "lite"], retained? <- [false, true], resume? <- [false, true] do
     @tag mode: mode, retained?: retained?, resume?: resume?
     test "#{mode} content-filter retry retains complete output #{retained?} after compaction #{resume?}", context do
@@ -374,7 +415,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
     end
   end
 
-  # Runs in the socket's connection process right after Bandit wrote a frame (ThousandIsland reports each successful write synchronously, in that process): the frame that carries the content-filter terminal parks the process until the test releases it, or until the test is gone. The socket is the one process of the listener subscribed to its Pool's events. The write watch's own send handler, attached when the application boots, must read the write's driver queue before this one parks the process: a read after the port exited does not count the terminal, and the arm then fails `aborted`. Telemetry calls handlers in attachment order without promising it (`:telemetry.persist/0` reverses it), so the hold asserts that order, which `:telemetry.list_handlers/1` reports as dispatched.
+  # Runs in the socket's connection process right after Bandit wrote a frame (ThousandIsland reports each successful write synchronously, in that process): the frame that carries the content-filter terminal parks the process until the test releases it, or until the test is gone. The socket is the one process of the listener subscribed to its Pool's events. With `hold_after_terminal_write!/1` the write watch's own send handler, attached when the application boots, must read the write's driver queue before this one parks the process, so the arm holds the race between that reading and the socket's next callback; `hold_before_write_watch_read!/1` puts the watch's handler behind this one, so the watch reads only after the client's close took the port (findings#315). Telemetry calls handlers in attachment order without promising it (`:telemetry.persist/0` reverses it), so each hold asserts its order, which `:telemetry.list_handlers/1` reports as dispatched.
   def park_after_terminal_write(_event, %{data: data}, _metadata, %{test: test, topic: topic, hold: hold}) do
     if String.contains?(IO.iodata_to_binary(data), "response.incomplete") and List.keymember?(Registry.lookup(CodexPooler.PubSub, topic), self(), 0) do
       test_monitor = Process.monitor(test)
@@ -399,6 +440,25 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexContentFilterRetryTest do
     :ok = :telemetry.attach(handler_id, [:thousand_island, :connection, :send], &__MODULE__.park_after_terminal_write/4, config)
     watch = {CodexPoolerWeb.WebsocketDownstreamWriteWatch, :send}
     assert [^watch, ^handler_id] = for(%{id: id} <- :telemetry.list_handlers([:thousand_island, :connection, :send]), id in [watch, handler_id], do: id)
+    hold
+  end
+
+  # Telemetry has no handler priority, so the write watch's send handler is detached and attached again behind the hold; the module is synchronous, so no other test writes in between, and the watch stays attached when the test ends.
+  defp hold_before_write_watch_read!(setup) do
+    hold = make_ref()
+    handler_id = {__MODULE__, hold}
+    watch = {CodexPoolerWeb.WebsocketDownstreamWriteWatch, :send}
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+      :ok = CodexPoolerWeb.WebsocketDownstreamWriteWatch.attach()
+    end)
+
+    config = %{test: self(), topic: CodexPooler.Events.pubsub_topic(setup.pool.id, "pools"), hold: hold}
+    :ok = :telemetry.detach(watch)
+    :ok = :telemetry.attach(handler_id, [:thousand_island, :connection, :send], &__MODULE__.park_after_terminal_write/4, config)
+    :ok = CodexPoolerWeb.WebsocketDownstreamWriteWatch.attach()
+    assert [^handler_id, ^watch] = for(%{id: id} <- :telemetry.list_handlers([:thousand_island, :connection, :send]), id in [watch, handler_id], do: id)
     hold
   end
 

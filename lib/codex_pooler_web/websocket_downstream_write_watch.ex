@@ -44,6 +44,17 @@ defmodule CodexPoolerWeb.WebsocketDownstreamWriteWatch do
   # first have read it. A queue never observed counts as not empty, and so does
   # the queue of a write whose port was already gone when it was read: an
   # earlier write's observation says nothing about the latest frame.
+  #
+  # That reading runs after the write returned, and the client can read the
+  # frame and close before it does: a socket descheduled in between finds the
+  # port gone (findings#315, traced on a natural failure with Drone 1815's and
+  # 1839's receipt; on loopback the client read a content-filter terminal
+  # about 30 µs after its write). Such a write stays unconfirmed. The watch
+  # reports it as a fact of its own (`closed_before_latest_write_read?/0`)
+  # when the driver queue was read empty right before it, so the frame went to
+  # the kernel directly; it cannot tell a whole write from one a full send
+  # buffer cut short, and only the socket's content-filter terminal relies on
+  # it.
 
   @event [:thousand_island, :connection, :send_error]
   @sent_event [:thousand_island, :connection, :send]
@@ -55,6 +66,7 @@ defmodule CodexPoolerWeb.WebsocketDownstreamWriteWatch do
   @confirmed_key {__MODULE__, :confirmed}
   @port_key {__MODULE__, :port}
   @queue_empty_key {__MODULE__, :queue_empty}
+  @closed_before_read_key {__MODULE__, :closed_before_read}
   @failures ~w(timeout closed other)
 
   @spec attach() :: :ok
@@ -126,6 +138,16 @@ defmodule CodexPoolerWeb.WebsocketDownstreamWriteWatch do
   @spec confirmed() :: term()
   def confirmed, do: Process.get(@confirmed_key)
 
+  @doc """
+  Whether the latest successful write of this connection could not be read
+  because its port had already exited, after the driver queue was read empty
+  right before it, while no write has failed. Such a write went to the kernel
+  directly but stays unconfirmed: only a full send buffer could have cut it
+  short, which this cannot tell.
+  """
+  @spec closed_before_latest_write_read?() :: boolean()
+  def closed_before_latest_write_read?, do: is_nil(failure()) and Process.get(@closed_before_read_key) == true
+
   defp connection_port do
     case Process.info(self(), :links) do
       {:links, links} -> Enum.find(links, &tcp_port?/1)
@@ -149,11 +171,13 @@ defmodule CodexPoolerWeb.WebsocketDownstreamWriteWatch do
 
   defp remember_queue(:undefined), do: Process.get(@queue_empty_key, false)
 
-  # Right after a successful write: whether everything written so far is in the kernel. A port already gone cannot tell, so the latest frame then counts as not written, whatever an earlier read found.
+  # Right after a successful write: whether everything written so far is in the kernel. A port already gone cannot tell, so the latest frame then counts as not written, whatever an earlier read found; whether that earlier read found the queue empty is kept apart for `closed_before_latest_write_read?/0`.
   defp observe_written_queue(nil), do: :ok
 
   defp observe_written_queue(port) do
-    _previous = Process.put(@queue_empty_key, :erlang.port_info(port, :queue_size) == {:queue_size, 0})
+    reading = :erlang.port_info(port, :queue_size)
+    _previous = Process.put(@closed_before_read_key, reading == :undefined and Process.get(@queue_empty_key) == true)
+    _previous = Process.put(@queue_empty_key, reading == {:queue_size, 0})
     :ok
   end
 

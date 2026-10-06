@@ -176,6 +176,67 @@ defmodule CodexPoolerWeb.WebsocketDownstreamWriteWatchTest do
     end
   end
 
+  # A port already gone at the latest write's reading leaves that write unknown, and `confirm/1` counts it as not written (above). The watch also reports such a write as a fact of its own when the driver queue was empty as it started, so the frame went to the kernel directly; the socket uses it only for a content-filter terminal, which Codex closes right after reading (findings#315).
+  describe "the latest write read after the port exited" do
+    test "is reported when the write started on an empty driver queue" do
+      assert with_connection(fn server, client ->
+               :ok = :gen_tcp.send(server, "synthetic frame one")
+               sent()
+               :ok = :gen_tcp.send(server, "synthetic frame two")
+               close_client_and_await_port_exit!(server, client)
+               sent()
+               :ok = WebsocketDownstreamWriteWatch.confirm(:written)
+               {WebsocketDownstreamWriteWatch.closed_before_latest_write_read?(), WebsocketDownstreamWriteWatch.confirmed()}
+             end) == {true, nil}
+    end
+
+    test "is not reported when the driver queue was not empty as the write started" do
+      assert with_connection([sndbuf: 4_096, high_watermark: 64 * 1024 * 1024], fn server, client ->
+               :ok = :gen_tcp.send(server, :binary.copy("x", 16 * 1024 * 1024))
+               assert {:queue_size, queued} = :erlang.port_info(server, :queue_size)
+               assert queued > 0
+               sent()
+               :ok = :gen_tcp.send(server, "synthetic frame two")
+               close_client_and_await_port_exit!(server, client)
+               sent()
+               WebsocketDownstreamWriteWatch.closed_before_latest_write_read?()
+             end) == false
+    end
+
+    test "is not reported when no reading preceded the write" do
+      assert with_connection(fn server, client ->
+               :ok = :gen_tcp.send(server, "synthetic frame one")
+               close_client_and_await_port_exit!(server, client)
+               sent()
+               WebsocketDownstreamWriteWatch.closed_before_latest_write_read?()
+             end) == false
+    end
+
+    test "is not reported once a write failed" do
+      assert with_connection(fn server, client ->
+               :ok = :gen_tcp.send(server, "synthetic frame one")
+               sent()
+               :ok = :gen_tcp.send(server, "synthetic frame two")
+               close_client_and_await_port_exit!(server, client)
+               sent()
+               send_error(:closed)
+               WebsocketDownstreamWriteWatch.closed_before_latest_write_read?()
+             end) == false
+    end
+
+    test "is not reported when the latest write was read while the port was open" do
+      assert with_connection(fn server, client ->
+               :ok = :gen_tcp.send(server, "synthetic frame one")
+               sent()
+               :ok = :gen_tcp.send(server, "synthetic frame two")
+               sent()
+               close_client_and_await_port_exit!(server, client)
+               :ok = WebsocketDownstreamWriteWatch.confirm(:written)
+               {WebsocketDownstreamWriteWatch.closed_before_latest_write_read?(), WebsocketDownstreamWriteWatch.confirmed()}
+             end) == {false, :written}
+    end
+  end
+
   # Bandit writes the upgrade's 101 in the same process before `CodexResponsesSocket.init/1` watches it.
   test "a write before the process is watched leaves nothing a closed port could confirm" do
     assert with_connection([watch?: false], fn server, client ->
