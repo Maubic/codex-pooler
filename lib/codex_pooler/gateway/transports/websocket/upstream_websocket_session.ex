@@ -1002,20 +1002,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
        ) do
     case ensure_connection(state, key, url, headers, timeouts, request_caller(receive_state)) do
       {:ok, state} ->
-        connection_use = connection_use(connection_usage)
+        {upgrade_frames, state} = Map.pop(state, :upgrade_frames, [])
 
-        cond do
-          not Map.get(request, :connection_bound_continuation?, false) ->
-            send_request_payload(state, request, receive_state, connection_usage)
+        case settle_upgrade_frames(state, receive_state, upgrade_frames, connection_usage) do
+          {:ok, state, receive_state} ->
+            send_on_connection(state, request, receive_state, connection_usage)
 
-          connection_use != :reused ->
-            guard_connection_bound_continuation(state, receive_state, connection_usage)
-
-          lite_anchor_on_full_context?(state, request) ->
-            guard_connection_bound_continuation(state, receive_state, connection_usage, :previous_response_serving_mode_mismatch)
-
-          true ->
-            send_request_payload(state, request, receive_state, connection_usage)
+          {:failed, result, state} ->
+            {:ok, put_result_connection_metadata(result, state, connection_usage), state}
         end
 
       {:error, :client_disconnected, state} ->
@@ -1031,6 +1025,78 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
         {:error, reason, state}
     end
+  end
+
+  defp send_on_connection(state, request, receive_state, connection_usage) do
+    connection_use = connection_use(connection_usage)
+
+    cond do
+      not Map.get(request, :connection_bound_continuation?, false) ->
+        send_request_payload(state, request, receive_state, connection_usage)
+
+      connection_use != :reused ->
+        guard_connection_bound_continuation(state, receive_state, connection_usage)
+
+      lite_anchor_on_full_context?(state, request) ->
+        guard_connection_bound_continuation(state, receive_state, connection_usage, :previous_response_serving_mode_mismatch)
+
+      true ->
+        send_request_payload(state, request, receive_state, connection_usage)
+    end
+  end
+
+  # Frames that arrived in the same read as the `101` come out of the upgrade already decoded and in order
+  # (`ConnectionUpgrade`), by the websocket that holds that read's decoder state. The peer wrote them before this
+  # request existed, so what ends the connection ends the request before its payload is written, through the
+  # `handle_frame/2` clauses a frame read during the request takes: a Close fails it with the peer's own code and
+  # reason size, a frame the decoder rejected or a binary frame fails it as it would later, and a Ping gets its Pong.
+  # The failure says the payload never left (`upstream_committed` false) and keeps the phase of the same failure read
+  # later, never `connect`: that phase takes the same-assignment retry and the `/v1` bridge's HTTP fallback. Text
+  # frames wait in the receive state and fold through `handle_frames/3` ahead of the first read
+  # (`await_sent_request/2`), the path they take when they arrive in a read of their own; nothing is relayed before
+  # the payload is written. One bounded info line records what the upgrade carried (findings#304).
+  defp settle_upgrade_frames(state, %ReceiveState{} = receive_state, [], _connection_usage), do: {:ok, state, receive_state}
+
+  defp settle_upgrade_frames(state, %ReceiveState{} = receive_state, frames, connection_usage) do
+    receive_state = %{receive_state | connection_use: connection_use(connection_usage)}
+    outcome = Enum.reduce_while(frames, {:continue, state, receive_state, []}, &settle_upgrade_frame/2)
+    :ok = Logger.info(upgrade_frames_line(state, frames))
+
+    case outcome do
+      {:continue, state, receive_state, text_frames} ->
+        {:ok, state, %{receive_state | upgrade_frames: Enum.reverse(text_frames)}}
+
+      {:failure, _state, _receive_state, _reason} = halted ->
+        {{:error, failure}, state} = finish_receive_result(halted)
+        {:failed, {:error, put_in(failure, [:transport_failure, "upstream_committed"], false)}, state}
+    end
+  end
+
+  defp settle_upgrade_frame({:text, _text} = frame, {:continue, state, receive_state, text_frames}),
+    do: {:cont, {:continue, state, receive_state, [frame | text_frames]}}
+
+  defp settle_upgrade_frame(frame, {:continue, state, receive_state, text_frames}) do
+    case handle_frame(frame, {:continue, state, receive_state}) do
+      {:cont, {:continue, state, receive_state}} -> {:cont, {:continue, state, receive_state, text_frames}}
+      {:halt, halted} -> {:halt, halted}
+    end
+  end
+
+  # Counts by frame kind and the first Close's code only, never a payload, a close reason or a Ping's bytes.
+  defp upgrade_frames_line(state, frames) do
+    counts = Enum.frequencies_by(frames, &elem(&1, 0))
+
+    close_code =
+      Enum.find_value(frames, "none", fn
+        {:close, code, _reason} -> coalesced_close_code(code)
+        _frame -> nil
+      end)
+
+    lifecycle = connection_lifecycle_state(state)
+
+    "upstream websocket upgrade frames handled frames=#{length(frames)} " <>
+      Enum.map_join(~w(ping pong text binary close error)a, " ", &"#{&1}=#{Map.get(counts, &1, 0)}") <>
+      " close_code=#{close_code} lifecycle_id=#{lifecycle.lifecycle_id} generation=#{lifecycle.generation}"
   end
 
   defp collect_connection_eligible?(
@@ -1403,7 +1469,20 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # interval until the request ends; the reply re-arms the idle keepalive.
   defp await_sent_request(state, receive_state) do
     :erlang.garbage_collect(self())
-    {result, state} = receive_events(schedule_keepalive(state), renew_receive_deadline(receive_state))
+    state = schedule_keepalive(state)
+    receive_state = renew_receive_deadline(receive_state)
+
+    {result, state} =
+      case receive_state.upgrade_frames do
+        [] ->
+          receive_events(state, receive_state)
+
+        # Text frames the peer wrote behind the `101` come before anything this loop reads, in the order they came
+        # (`settle_upgrade_frames/4`).
+        frames ->
+          state |> handle_frames(frames, %{receive_state | upgrade_frames: []}) |> finish_receive_result()
+      end
+
     {:ok, result, state}
   end
 
@@ -2248,6 +2327,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     receive_state = %{receive_state | termination_source: :unexpected_binary_frame}
     {:halt, {:failure, state, receive_state, :unexpected_upstream_websocket_binary}}
   end
+
+  # The decoder reports a frame it cannot read in-band as `{:error, reason}`. It fails the request like the decode
+  # error of `handle_data/3`; without this clause the session crashed on it (findings#304). Only the leading atom of
+  # the reason is kept, because Mint's frame errors can carry the frame's own bytes.
+  defp handle_frame({:error, reason}, {:continue, state, receive_state}) do
+    receive_state = %{receive_state | termination_source: :websocket_decode_error}
+    {:halt, {:failure, state, receive_state, {:websocket_decode_failed, frame_error_class(reason)}}}
+  end
+
+  defp frame_error_class(reason) when is_atom(reason), do: reason
+  defp frame_error_class(reason) when is_tuple(reason) and tuple_size(reason) > 0 and is_atom(elem(reason, 0)), do: elem(reason, 0)
+  defp frame_error_class(_reason), do: :unreadable_frame
 
   defp new_public_tool_completion(%Request{message_mapper: mapper, websocket_delivery_mode: :relay}) do
     if mapper == (&StreamProtocol.normalize_public_openai_responses_json_message/1),

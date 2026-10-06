@@ -63,7 +63,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Rece
     body: {[], 0},
     collected_body: :disabled,
     websocket_frame_headers: %{},
-    peer_close_metadata: %{}
+    peer_close_metadata: %{},
+    upgrade_frames: []
   ]
 
   @type t :: %__MODULE__{
@@ -106,6 +107,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Rece
           text_frame_count: non_neg_integer(),
           websocket_frame_headers: %{optional(String.t()) => String.t()},
           peer_close_metadata: CodexPooler.Gateway.Transports.TransportFailureReason.transport_failure_metadata(),
+          upgrade_frames: [{:text, binary()}],
           body: RetainedBody.t(),
           collected_body: CollectedBody.t()
         }
