@@ -1147,6 +1147,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     {:halt, {:terminal, state, receive_state, "error"}} =
       handle_text_frame(state, receive_state, terminal, decoded, mapped, mapped_decoded)
 
+    # The guard's own refusal: the provider never received the request, so the
+    # connection stays usable and is not retired like after a provider refusal.
+    receive_state = %{receive_state | provider_refusal?: false}
+
     {{:ok, result}, state} =
       finish_receive_result({:terminal, state, receive_state, "error"})
 
@@ -2119,10 +2123,39 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp coalesced_close_code(_code), do: "invalid"
 
   defp maybe_retire_exhausted_connection(state, receive_state) do
-    if exhausted_connection?(receive_state),
-      do: retire_exhausted_connection(state, receive_state),
-      else: state
+    cond do
+      exhausted_connection?(receive_state) -> retire_exhausted_connection(state, receive_state)
+      receive_state.provider_refusal? and Map.has_key?(state, :conn) -> retire_refused_connection(state)
+      true -> state
+    end
   end
+
+  # The provider refuses a request it will not generate for with the wrapped
+  # `{"type": "error", "status": 400, ...}` frame and, for the refusals it
+  # sends before validating the payload (an unsupported parameter or tool
+  # type, an anchor it cannot resolve), answers nothing more on that
+  # connection and drops it without a Close frame about 3 s later (direct
+  # probe 2026-10-06, findings#333, Full and Lite). A request sent on it in
+  # that window is lost: it failed `502 upstream_request_failed` when the drop
+  # came. The connection is retired at the refusal, so the next request of
+  # the socket opens a fresh one; an anchor that connection produced is lost
+  # with it, as the provider's drop loses it.
+  defp retire_refused_connection(state) do
+    lifecycle = connection_lifecycle_state(state)
+
+    Logger.info(
+      "websocket connection retirement decision " <>
+        "reason_code=provider_refusal " <>
+        "lifecycle_id=#{lifecycle.lifecycle_id} old_generation=#{lifecycle.generation}"
+    )
+
+    close_state(state)
+  end
+
+  defp provider_refusal_frame?(%{"type" => "error"} = decoded),
+    do: Map.get(decoded, "status", Map.get(decoded, "status_code")) == 400
+
+  defp provider_refusal_frame?(_decoded), do: false
 
   defp retire_exhausted_connection(state, receive_state) do
     if exhausted_connection?(receive_state) do
@@ -2789,7 +2822,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
           | terminal_upstream_error_code:
               receive_state.terminal_upstream_error_code ||
                 StreamProtocol.upstream_error_code(decoded),
-            terminal_upstream_error_param: receive_state.terminal_upstream_error_param || UpstreamErrorParam.extract(decoded)
+            terminal_upstream_error_param: receive_state.terminal_upstream_error_param || UpstreamErrorParam.extract(decoded),
+            provider_refusal?: receive_state.provider_refusal? or provider_refusal_frame?(decoded)
         }
 
       _other ->

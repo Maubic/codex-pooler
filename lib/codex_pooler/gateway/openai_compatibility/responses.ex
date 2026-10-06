@@ -18,7 +18,9 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
   @reasoning_summaries ~w(auto concise detailed)
   @service_tiers ~w(auto default flex priority scale ultrafast)
   @truncation_modes ~w(auto disabled)
-  @allowed_tools_builtin_types ~w(programmatic_tool_calling web_search_preview web_search image_generation)
+  # The type-only built-ins an `allowed_tools` choice may name (Full only). `programmatic_tool_calling` and
+  # `web_search_preview` left on 2026-10-06: the Codex backend refuses both tool types on a Full request (findings#333).
+  @allowed_tools_builtin_types ~w(web_search image_generation)
   @locally_unsupported_fields ~w(background context_management conversation max_tool_calls prompt top_logprobs user)
 
   # The hosted `web_search` tool keys the provider accepts, in Full and in the Lite manifest alike (direct probe,
@@ -30,6 +32,11 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
   @web_search_context_sizes ~w(low medium high)
   @web_search_content_types ~w(text image)
   @tool_search_keys ~w(type execution description parameters)
+  # The public API's `metadata` contract (raw probe 2026-10-06, findings#333): an object of at most 16 properties, names
+  # of at most 64 characters, string values of at most 512 characters, or null; the codes are the public API's.
+  @metadata_max_properties 16
+  @metadata_max_name_length 64
+  @metadata_max_value_length 512
   @tool_search_executions ~w(server client)
 
   @endpoint "/backend-api/codex/responses"
@@ -46,6 +53,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
          :ok <- Validation.reject_unsupported_fields(payload, :responses),
          :ok <- Validation.require_model(payload),
          :ok <- reject_locally_unsupported_fields(payload),
+         :ok <- validate_metadata(payload),
          :ok <- validate_access_programs(payload),
          :ok <- validate_prompt_cache_options(payload),
          {:ok, payload} <- Input.drop_public_call_id_item_ids(payload),
@@ -131,6 +139,41 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
     do: {:error, Error.invalid_request("access_programs must be an object", "access_programs")}
 
   defp validate_access_programs(_payload), do: :ok
+
+  # `metadata` is accepted with the public API's shape and never reaches the Codex backend, which refuses the
+  # parameter (`PayloadNormalizer` strips it with the other upstream-unsupported controls, findings#333). The
+  # refusals carry the public API's codes on `metadata`, without echoing a client key or value.
+  defp validate_metadata(%{"metadata" => nil}), do: :ok
+
+  defp validate_metadata(%{"metadata" => metadata}) when is_map(metadata) do
+    cond do
+      map_size(metadata) > @metadata_max_properties ->
+        {:error, Error.reason(400, "object_above_max_properties", "metadata must have at most #{@metadata_max_properties} properties", "metadata")}
+
+      Enum.any?(metadata, fn {name, _value} -> not within_length?(name, @metadata_max_name_length) end) ->
+        {:error, Error.reason(400, "property_name_above_max_length", "metadata property names must be at most #{@metadata_max_name_length} characters", "metadata")}
+
+      Enum.any?(metadata, fn {_name, value} -> not is_binary(value) end) ->
+        {:error, Error.reason(400, "invalid_type", "metadata values must be strings", "metadata")}
+
+      Enum.any?(metadata, fn {_name, value} -> not within_length?(value, @metadata_max_value_length) end) ->
+        {:error, Error.reason(400, "string_above_max_length", "metadata values must be at most #{@metadata_max_value_length} characters", "metadata")}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_metadata(%{"metadata" => _metadata}),
+    do: {:error, Error.reason(400, "invalid_type", "metadata must be an object", "metadata")}
+
+  defp validate_metadata(_payload), do: :ok
+
+  # A length in characters (code points), bounded before counting: at most 4 bytes encode one.
+  defp within_length?(value, max) when is_binary(value) and byte_size(value) <= max, do: true
+  defp within_length?(value, max) when is_binary(value) and byte_size(value) > max * 4, do: false
+  defp within_length?(value, max) when is_binary(value), do: value |> String.codepoints() |> length() <= max
+  defp within_length?(_value, _max), do: false
 
   defp surface(opts) when is_list(opts), do: Keyword.get(opts, :surface, :responses)
   defp surface(%RequestOptions{}), do: :responses
@@ -612,8 +655,12 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
   defp validate_tool(%{"type" => "programmatic_tool_calling"} = tool),
     do: validate_exact_builtin_tool(tool, ["type"])
 
-  defp validate_tool(%{"type" => "web_search_preview"} = tool),
-    do: validate_exact_builtin_tool(tool, ["type"])
+  # The Codex backend refuses `web_search_preview` on a Full request (`Unsupported tool type: web_search_preview`) and,
+  # in a Lite manifest, on some requests and not others while the refusal rolls out (6 of 9 samples, HTTP and
+  # websocket; direct probe 2026-10-06, findings#333). It is refused here on every serving mode, never rewritten to
+  # `web_search`, which the backend accepts.
+  defp validate_tool(%{"type" => "web_search_preview"}),
+    do: {:error, Error.invalid_request("web_search_preview tools are not supported; declare web_search", "tools")}
 
   defp validate_tool(%{"type" => "web_search"} = tool) do
     with :ok <- validate_exact_builtin_tool(tool, @web_search_keys),
@@ -991,14 +1038,6 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
 
   defp validate_tool_choice(
          %{"tool_choice" => %{"type" => "image_generation"} = choice},
-         _surface
-       ),
-       do: validate_exact_tool_choice_keys(choice, ["type"])
-
-  defp validate_tool_choice(
-         %{
-           "tool_choice" => %{"type" => "programmatic_tool_calling"} = choice
-         },
          _surface
        ),
        do: validate_exact_tool_choice_keys(choice, ["type"])

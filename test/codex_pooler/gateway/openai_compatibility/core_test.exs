@@ -5021,7 +5021,6 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
            "parameters" => %{"type" => "object", "properties" => %{}}
          }, %{"type" => "function", "name" => "lookup_fixture"}},
         {%{"type" => "custom", "name" => "custom_fixture"}, %{"type" => "custom", "name" => "custom_fixture"}},
-        {%{"type" => "programmatic_tool_calling"}, %{"type" => "programmatic_tool_calling"}},
         {%{"type" => "image_generation"}, %{"type" => "image_generation"}}
       ]
 
@@ -5044,8 +5043,6 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
         flat_function_tool("lookup_fixture", non_strict_tool_schema(), false)
         |> Map.put("defer_loading", false),
         %{"type" => "custom", "name" => "custom_fixture"},
-        %{"type" => "programmatic_tool_calling"},
-        %{"type" => "web_search_preview"},
         %{"type" => "web_search"},
         %{"type" => "web_search"},
         %{"type" => "image_generation"}
@@ -5055,9 +5052,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
         %{"type" => "custom", "name" => "custom_fixture"},
         %{"type" => "web_search"},
         %{"type" => "function", "name" => "lookup_fixture"},
-        %{"type" => "programmatic_tool_calling"},
         %{"type" => "image_generation"},
-        %{"type" => "web_search_preview"},
         %{"type" => "function", "name" => "lookup_fixture"},
         %{"type" => "web_search"}
       ]
@@ -5100,7 +5095,6 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
         direct_custom,
         namespace,
         %{"type" => "programmatic_tool_calling"},
-        %{"type" => "web_search_preview"},
         %{"type" => "web_search"},
         %{"type" => "image_generation"}
       ]
@@ -5209,6 +5203,19 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
            "type" => "allowed_tools",
            "mode" => "auto",
            "tools" => [%{"type" => "web_search", "name" => "web"}]
+         }, base_tools, nil},
+        # Refused by the Codex backend on Full, the only mode an allowed_tools choice serves (findings#333).
+        {"declared programmatic_tool_calling member",
+         %{
+           "type" => "allowed_tools",
+           "mode" => "auto",
+           "tools" => [%{"type" => "programmatic_tool_calling"}]
+         }, base_tools, nil},
+        {"web_search_preview member",
+         %{
+           "type" => "allowed_tools",
+           "mode" => "auto",
+           "tools" => [%{"type" => "web_search_preview"}]
          }, base_tools, nil},
         {"namespace member",
          %{
@@ -5354,19 +5361,25 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
       end)
     end
 
-    test "Responses accepts only the exact programmatic hosted tool and tool choice" do
+    # The declaration passes the adapter (a Lite manifest accepts it; a Full request is refused once the serving mode is
+    # resolved, `PayloadNormalizer.validate/2`), while a type-only choice naming it is refused on every mode: the Codex
+    # backend refuses the tool on Full and Lite refuses an object choice (findings#333).
+    test "Responses accepts only the exact programmatic hosted tool and refuses a choice naming it" do
       hosted_tool = %{"type" => "programmatic_tool_calling"}
 
       payload = %{
         "model" => "gpt-fixture-text",
         "input" => "synthetic input",
-        "tools" => [hosted_tool],
-        "tool_choice" => hosted_tool
+        "tools" => [hosted_tool]
       }
 
       assert {:ok, result} = Responses.coerce(payload)
       assert result.payload["tools"] == [hosted_tool]
-      assert result.payload["tool_choice"] == hosted_tool
+
+      assert {:error, %{status: 400, code: "invalid_request", param: "tool_choice"}} =
+               payload
+               |> Map.put("tool_choice", hosted_tool)
+               |> Responses.coerce()
 
       for invalid_tool <- [
             %{"type" => "programmatic_tool_calling", "unexpected" => true},
@@ -5687,7 +5700,6 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
 
     test "Responses allows only exact safe passthrough built-in tool shapes" do
       for tool <- [
-            %{"type" => "web_search_preview"},
             %{
               "type" => "web_search",
               "external_web_access" => false
@@ -5725,6 +5737,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
 
     test "Responses rejects unsupported hosted built-in and deferred tools" do
       rejected_tools = [
+        # The Codex backend refuses the tool type (findings#333); never rewritten to `web_search`.
+        %{"type" => "web_search_preview"},
         %{"type" => "web_search_preview", "search_context_size" => "low"},
         %{"type" => "web_search", "external_web_access" => "true"},
         %{
@@ -6365,7 +6379,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
                "model" => "gpt-fixture-text",
                "input" => "synthetic input",
                "tools" => [
-                 %{"type" => "web_search_preview"},
+                 %{"type" => "web_search"},
                  flat_function_tool("lookup_nested_object", %{
                    "type" => "object",
                    "additionalProperties" => false,

@@ -1744,7 +1744,7 @@ defmodule CodexPooler.CompatibilityMatrixTest do
   end
 
   defp responses_allowed_tools_summary do
-    "direct public Responses HTTP and websocket response.create accept an exact type=allowed_tools choice only in Full mode, with mode auto or required and a nonempty ordered tools list; named function and custom entries must resolve to undeferred direct top-level same-kind declarations, while type-only programmatic_tool_calling, web_search_preview, web_search, and image_generation entries require a declared top-level tool of the same type; order and duplicates are forwarded unchanged after only the existing tool-definition schema lowering; malformed or undeclared Full choices fail before admission or accounting, valid Lite choices create one rejected Request without Attempts or Ledger rows, top-level MCP declarations retain the tools error while MCP allow-list members use the tool_choice error, and Chat, native backend Responses, namespaces, additional_tools, deferred tools, aliases, unsupported entries, Realtime, and broad OpenAI tool parity remain excluded"
+    "direct public Responses HTTP and websocket response.create accept an exact type=allowed_tools choice only in Full mode, with mode auto or required and a nonempty ordered tools list; named function and custom entries must resolve to undeferred direct top-level same-kind declarations, while type-only web_search and image_generation entries require a declared top-level tool of the same type; order and duplicates are forwarded unchanged after only the existing tool-definition schema lowering; malformed or undeclared Full choices fail before admission or accounting, valid Lite choices create one rejected Request without Attempts or Ledger rows, top-level MCP declarations retain the tools error while MCP allow-list members use the tool_choice error, and Chat, native backend Responses, namespaces, additional_tools, deferred tools, aliases, unsupported entries, Realtime, and broad OpenAI tool parity remain excluded"
   end
 
   defp responses_allowed_tools_contract do
@@ -1767,12 +1767,7 @@ defmodule CodexPooler.CompatibilityMatrixTest do
           defer_loading: ["absent", false]
         },
         built_in: %{
-          types: [
-            "programmatic_tool_calling",
-            "web_search_preview",
-            "web_search",
-            "image_generation"
-          ],
+          types: ["web_search", "image_generation"],
           exact_keys: ["type"],
           declaration_scope: "top_level_tools_only",
           resolution: "at_least_one_same_type_declaration",

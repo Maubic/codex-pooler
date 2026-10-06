@@ -63,6 +63,7 @@ defmodule CodexPooler.FakeUpstream do
           | :close_before_headers
           | {:websocket_text, [String.t()]}
           | {:websocket_text_then_abrupt_close, [String.t()]}
+          | {:provider_refusal, String.t()}
           | {:websocket_sse_then_close, [String.t()], non_neg_integer(), String.t()}
           | {:websocket_terminal_then_close_barrier, String.t(), non_neg_integer(), String.t(), pid(), reference()}
           | {:websocket_connection_limit_terminal_barrier, atom(), pid(), reference()}
@@ -1072,6 +1073,10 @@ defmodule CodexPooler.FakeUpstream do
         record_rejected_request(pid, request)
         respond_http_previous_response_id_rejection(conn)
 
+      refusal = provider_request_refusal(request) ->
+        record_rejected_request(pid, request)
+        respond_provider_refusal(conn, refusal)
+
       true ->
         mode = take_response_mode(pid, request)
 
@@ -1098,6 +1103,64 @@ defmodule CodexPooler.FakeUpstream do
   end
 
   defp provider_rejects_http_previous_response_id?(_request), do: false
+
+  # The Codex backend refuses these request fields before it generates anything (direct probe 2026-10-06,
+  # findings#333, `gpt-6-luna`, Full and Lite request shapes, HTTP and websocket): a top-level `metadata` (an empty
+  # object included) and a top-level `tools` entry of type `programmatic_tool_calling` or `web_search_preview` (the
+  # Full shape; a Lite `additional_tools` manifest accepts `programmatic_tool_calling`). Over HTTP the answer is
+  # `400 {"detail": "Unsupported parameter: metadata"}` or `400 {"detail": "Unsupported tool type: <type>"}`; on the
+  # websocket it is the codeless wrapped error frame with the same text (`provider_refusal_frame/1`), after which the
+  # provider answers nothing more on that connection and drops it, without a Close frame, about 3 s later. The fake
+  # answers both transports the same way, so no test can certify a request the provider refuses: the refused request
+  # is captured and no scripted response is consumed.
+  @refused_tool_types ~w(programmatic_tool_calling web_search_preview)
+
+  @doc "The provider's refusal text for a request it refuses before generating, or `nil` (findings#333)."
+  @spec provider_refusal_message(term()) :: String.t() | nil
+  def provider_refusal_message(%{"metadata" => _metadata}), do: "Unsupported parameter: metadata"
+
+  def provider_refusal_message(%{"tools" => tools}) when is_list(tools) do
+    Enum.find_value(tools, fn
+      %{"type" => type} when type in @refused_tool_types -> "Unsupported tool type: " <> type
+      _tool -> nil
+    end)
+  end
+
+  def provider_refusal_message(_json), do: nil
+
+  @doc """
+  The codeless wrapped error frame the Codex backend's websocket answers to a request it refuses before generating
+  (direct probe 2026-10-06, findings#333): the HTTP refusal's text in `error.message`, `code` and `param` null.
+  """
+  @spec provider_refusal_frame(String.t()) :: String.t()
+  def provider_refusal_frame(message) when is_binary(message) do
+    CodexPooler.JSON.encode!(%{
+      "type" => "error",
+      "status" => 400,
+      "error" => %{"type" => "invalid_request_error", "code" => nil, "message" => message, "param" => nil}
+    })
+  end
+
+  @doc """
+  A scripted provider refusal: `400 {"detail": message}` over HTTP, and over the websocket the codeless wrapped error
+  frame with the same text, after which the connection answers nothing more and is dropped without a Close frame when
+  the next request frame arrives on it (the provider drops it about 3 s after the refusal, ignoring what it receives
+  meanwhile; direct probe 2026-10-06, findings#333).
+  """
+  @spec provider_refusal(String.t()) :: mode()
+  def provider_refusal(message) when is_binary(message), do: {:provider_refusal, message}
+
+  defp provider_request_refusal(%{method: "POST", path: path, json: %{} = json}) do
+    if String.ends_with?(path, "/codex/responses"), do: provider_refusal_message(json)
+  end
+
+  defp provider_request_refusal(_request), do: nil
+
+  defp respond_provider_refusal(conn, message) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(400, CodexPooler.JSON.encode!(%{"detail" => message}))
+  end
 
   @doc """
   Makes the fake refuse `model` on `POST .../codex/responses` the way the
@@ -1134,6 +1197,10 @@ defmodule CodexPooler.FakeUpstream do
   defp record_rejected_request(pid, request) do
     Agent.update(pid, &record_physical_request(&1, request))
   end
+
+  @doc false
+  @spec record_unanswered_request(pid(), map()) :: :ok
+  def record_unanswered_request(pid, request) when is_pid(pid) and is_map(request), do: record_rejected_request(pid, request)
 
   defp record_physical_request(state, request) do
     ordinal = state.physical_ordinal + 1
@@ -1405,6 +1472,7 @@ defmodule CodexPooler.FakeUpstream do
       websocket_connection_limit_terminal_barrier/1
       websocket_close_without_terminal_barrier/1
       websocket_upgrade_error/2
+      provider_refusal/1
     )
   end
 
@@ -1417,7 +1485,10 @@ defmodule CodexPooler.FakeUpstream do
   defp native_websocket_mode?({:websocket_connection_limit_terminal_barrier, _, _, _}), do: true
   defp native_websocket_mode?({:websocket_close_without_terminal_barrier, _, _, _, _}), do: true
   defp native_websocket_mode?({:websocket_upgrade_error, _, _, _, _, _}), do: true
+  defp native_websocket_mode?({:provider_refusal, _message}), do: true
   defp native_websocket_mode?(_mode), do: false
+
+  defp respond(_pid, conn, {:provider_refusal, message}, _request), do: respond_provider_refusal(conn, message)
 
   defp respond(_pid, conn, {:scenario_failure, _diagnostic}, _request) do
     conn
@@ -2336,10 +2407,27 @@ defmodule CodexPooler.FakeUpstream do
         json: decode_json(payload)
       }
 
-      mode = CodexPooler.FakeUpstream.take_response_mode(pid, request)
+      cond do
+        # The provider answers nothing more on a connection it refused a request on and drops it without a Close
+        # frame (findings#333): the request is captured, nothing is consumed.
+        Map.get(state, :refused?, false) ->
+          CodexPooler.FakeUpstream.record_unanswered_request(pid, request)
+          send(self(), :fake_upstream_abrupt_close_websocket)
+          {:ok, state}
 
-      handle_websocket_message(websocket_messages(mode, request), state)
+        message = CodexPooler.FakeUpstream.provider_refusal_message(request.json) ->
+          CodexPooler.FakeUpstream.record_unanswered_request(pid, request)
+          {:push, {:text, CodexPooler.FakeUpstream.provider_refusal_frame(message)}, Map.put(state, :refused?, true)}
+
+        true ->
+          mode = CodexPooler.FakeUpstream.take_response_mode(pid, request)
+
+          handle_websocket_message(websocket_messages(mode, request), state)
+      end
     end
+
+    defp handle_websocket_message({:provider_refusal, frame}, state),
+      do: {:push, {:text, frame}, Map.put(state, :refused?, true)}
 
     defp handle_websocket_message({:close, code, reason}, state),
       do: {:stop, reason, {code, reason}, state}
@@ -2491,6 +2579,9 @@ defmodule CodexPooler.FakeUpstream do
     end
 
     defp websocket_messages({:websocket_text, messages}, _request), do: messages
+
+    defp websocket_messages({:provider_refusal, message}, _request),
+      do: {:provider_refusal, CodexPooler.FakeUpstream.provider_refusal_frame(message)}
 
     defp websocket_messages({:websocket_text_then_abrupt_close, messages}, _request),
       do: {:push_then_abrupt_close, messages}

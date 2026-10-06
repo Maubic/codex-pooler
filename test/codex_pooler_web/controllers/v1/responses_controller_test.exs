@@ -2677,8 +2677,8 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     invalid_cases = [
       {"input", put_programmatic_payload_item(payload, 0, "unexpected", true)},
       {"input", put_programmatic_payload_item(payload, 1, "caller", %{"type" => "program"})},
-      {"tools", put_programmatic_payload_tool(payload, 0, "unexpected", true)},
-      {"tools", put_programmatic_payload_tool(payload, 1, "output_schema", [])}
+      {"tools", Map.update!(payload, "tools", &[%{"type" => "programmatic_tool_calling", "unexpected" => true} | &1])},
+      {"tools", put_programmatic_payload_tool(payload, 0, "output_schema", [])}
     ]
 
     counts = durable_accounting_counts()
@@ -4048,8 +4048,6 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     tools = [
       function_tool,
       custom_tool,
-      %{"type" => "programmatic_tool_calling"},
-      %{"type" => "web_search_preview"},
       %{"type" => "web_search"},
       %{"type" => "image_generation"}
     ]
@@ -4058,9 +4056,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       %{"type" => "custom", "name" => custom_tool["name"]},
       %{"type" => "web_search"},
       %{"type" => "function", "name" => function_tool["name"]},
-      %{"type" => "programmatic_tool_calling"},
       %{"type" => "image_generation"},
-      %{"type" => "web_search_preview"},
       %{"type" => "function", "name" => function_tool["name"]},
       %{"type" => "web_search"}
     ]
@@ -12051,13 +12047,15 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     end
   end
 
+  # A stateless replay of a programmatic turn: the program and its output items, and the function tool the program
+  # called. The hosted `programmatic_tool_calling` tool and a choice naming it are not declared: the Codex backend refuses
+  # the tool on Full and the choice on every mode (findings#333, `responses_refused_request_fields_test.exs`).
   defp programmatic_tool_payload(model, sentinels) do
     %{
       "model" => model,
       "store" => true,
       "input" => programmatic_tool_items(sentinels),
       "tools" => [
-        %{"type" => "programmatic_tool_calling"},
         %{
           "type" => "function",
           "name" => "lookup_programmatic_fixture",
@@ -12068,8 +12066,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
             "x-opaque-programmatic-schema" => sentinels.schema
           }
         }
-      ],
-      "tool_choice" => %{"type" => "programmatic_tool_calling"}
+      ]
     }
   end
 

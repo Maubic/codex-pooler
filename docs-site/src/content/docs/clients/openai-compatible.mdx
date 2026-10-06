@@ -208,12 +208,15 @@ complete stateless replay path. Independently, Codex Pooler forces upstream
 This is narrow, closed-world compatibility, not general OpenAI programmatic-tool
 or Responses parity. Supported shapes are `program` and `program_output`,
 caller-enabled `function_call` and `function_call_output`, the type-only
-`programmatic_tool_calling` tool and tool choice, plus `allowed_callers` and
-map-only `output_schema`. Reference-only and ordinary stored-response
-continuations are not supported. Codex Pooler does not locally persist raw
-program code, results, schemas, or identifiers. A request accepted by the
-gateway can still be rejected when its selected upstream model or account lacks
-the required capability.
+`programmatic_tool_calling` tool, plus `allowed_callers` and map-only
+`output_schema`. The upstream accepts the `programmatic_tool_calling` tool only
+in Lite serving mode: in Full serving mode Codex Pooler rejects the declaration
+before dispatch with `400 invalid_request` on `tools`. A `tool_choice` naming
+it is rejected in both modes with `400 invalid_request` on `tool_choice`.
+Reference-only and ordinary stored-response continuations are not supported.
+Codex Pooler does not locally persist raw program code, results, schemas, or
+identifiers. A request accepted by the gateway can still be rejected when its
+selected upstream model or account lacks the required capability.
 
 Responses `function_call_output` replay has two closed forms over HTTP and the
 narrow Responses websocket bridge. A paired item requires a nonblank `call_id`;
@@ -383,6 +386,18 @@ The OpenAI-compatible `/v1` surface supports or translates selected routes only:
 - `POST /v1/images/edits`
 
 The `/v1` surface is compatibility over Codex routing, not a separate OpenAI engine. Supported requests still require a Pool API key and a Pool with eligible upstream capacity for the requested model.
+
+### Request metadata
+
+`POST /v1/responses`, the Responses websocket and `POST /v1/chat/completions`
+accept `metadata` as the OpenAI API defines it: `null`, or an object of at most
+16 properties whose names have at most 64 characters and whose values are
+strings of at most 512 characters. A malformed value is rejected before
+dispatch on `metadata`, with the OpenAI API's error code: `invalid_type`,
+`object_above_max_properties`, `property_name_above_max_length` or
+`string_above_max_length`. An accepted value is not forwarded, because the
+upstream rejects the parameter, and it is neither stored nor echoed in the
+response.
 
 ### Chat Completions request compatibility
 
@@ -766,9 +781,8 @@ In Full serving mode, direct `POST /v1/responses` and narrow Responses websocket
 `response.create` accept an `allowed_tools` choice only when every member is
 backed by a direct top-level declaration. Named `function` and `custom` members
 must match the declared kind and name. The only type-only built-ins are
-`programmatic_tool_calling`, `web_search_preview`, `web_search`, and
-`image_generation`, each declared at the top level. Caller order and repeated
-members are preserved.
+`web_search` and `image_generation`, each declared at the top level. Caller
+order and repeated members are preserved.
 
 This is a narrow declaration-backed contract, not broad OpenAI tool parity. It
 doesn't cover Chat, backend Responses, namespaces, additional tools, deferred
@@ -812,8 +826,11 @@ refuses it as an unknown parameter in both Full and Lite serving mode.
 
 Accepted values are forwarded unchanged. As with domain filters, Codex Pooler
 guarantees local validation and forwarding of this shape only; availability and
-enforcement can vary by selected upstream model and account. `web_search_preview`
-stays a type-only tool.
+enforcement can vary by selected upstream model and account.
+
+`web_search_preview` is rejected before dispatch with `400 invalid_request` on
+`tools` in both serving modes, because the upstream refuses it. Declare
+`web_search` instead; Codex Pooler does not rewrite one into the other.
 
 ### Hosted web search history replay
 

@@ -945,9 +945,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Chat do
   defp translate_tool(%{"type" => "custom"}),
     do: {:error, Error.invalid_request("custom tool requires nested custom properties", "tools")}
 
-  defp translate_tool(%{"type" => type} = tool)
-       when type in ["web_search_preview", "image_generation"],
-       do: {:ok, tool}
+  # `web_search_preview` is refused like on `/v1/responses`: the Codex backend refuses the tool type (findings#333).
+  defp translate_tool(%{"type" => "image_generation"} = tool), do: {:ok, tool}
 
   defp translate_tool(_tool),
     do: {:error, Error.invalid_request("tool shape is not translatable", "tools")}

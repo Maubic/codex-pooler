@@ -29,16 +29,16 @@
     "tool_choice_root": "type=allowed_tools",
     "allowed_modes": ["auto", "required"],
     "direct_named_entry_forms": ["function:name", "custom:name"],
-    "type_only_builtin_entry_forms": ["programmatic_tool_calling", "web_search_preview", "web_search", "image_generation"],
+    "type_only_builtin_entry_forms": ["web_search", "image_generation"],
     "entry_order_preserved": true,
     "duplicate_entries_preserved": true,
     "declaration_scope": "already_declared_top_level_tools_only",
-    "excluded_entry_forms": ["mcp", "namespace", "deferred", "tool_search", "unknown"],
+    "excluded_entry_forms": ["mcp", "namespace", "deferred", "tool_search", "programmatic_tool_calling", "web_search_preview", "unknown"],
     "raw_payload_stored": false,
     "placeholder_values_only": true,
     "notes": [
       "This is public Responses HTTP and narrow public Responses WebSocket response.create provenance, not Realtime or broad OpenAI tool compatibility.",
-      "The accepted vocabulary is deliberately narrower than the Vercel client inventory and excludes MCP, namespace, deferred, tool-search, and unknown entries."
+      "The accepted vocabulary is deliberately narrower than the Vercel client inventory and excludes MCP, namespace, deferred, tool-search, and unknown entries, and the programmatic_tool_calling and web_search_preview built-ins the Codex backend refuses on a Full request (findings#333)."
     ]
   },
   "redaction_status": {

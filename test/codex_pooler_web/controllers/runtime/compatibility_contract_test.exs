@@ -310,12 +310,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                "tool_choice_root" => "type=allowed_tools",
                "allowed_modes" => ["auto", "required"],
                "direct_named_entry_forms" => ["function:name", "custom:name"],
-               "type_only_builtin_entry_forms" => [
-                 "programmatic_tool_calling",
-                 "web_search_preview",
-                 "web_search",
-                 "image_generation"
-               ],
+               "type_only_builtin_entry_forms" => ["web_search", "image_generation"],
                "entry_order_preserved" => true,
                "duplicate_entries_preserved" => true,
                "declaration_scope" => "already_declared_top_level_tools_only",
@@ -324,13 +319,15 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                  "namespace",
                  "deferred",
                  "tool_search",
+                 "programmatic_tool_calling",
+                 "web_search_preview",
                  "unknown"
                ],
                "raw_payload_stored" => false,
                "placeholder_values_only" => true,
                "notes" => [
                  "This is public Responses HTTP and narrow public Responses WebSocket response.create provenance, not Realtime or broad OpenAI tool compatibility.",
-                 "The accepted vocabulary is deliberately narrower than the Vercel client inventory and excludes MCP, namespace, deferred, tool-search, and unknown entries."
+                 "The accepted vocabulary is deliberately narrower than the Vercel client inventory and excludes MCP, namespace, deferred, tool-search, and unknown entries, and the programmatic_tool_calling and web_search_preview built-ins the Codex backend refuses on a Full request (findings#333)."
                ]
              }
 
@@ -351,8 +348,8 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                version: "`4.0.43`, commit `a062795bbe22ecc96a38d114bf8b8ea4af070914`",
                endpoint: "`POST /v1/responses` and `GET /v1/responses` websocket `response.create`",
                decision: "accept",
-               observed_shape: "`tool_choice` is `type=allowed_tools` with mode `auto` or `required`; direct function/custom entries are named, while supported built-ins are type-only `programmatic_tool_calling`, `web_search_preview`, `web_search`, or `image_generation`; order and duplicates remain significant",
-               notes: "Vercel client provenance only. Pooler accepts this deliberately narrow, declaration-backed vocabulary on public Responses HTTP and the narrow public WebSocket `response.create` surface. MCP, namespace, deferred, tool-search, and unknown entries remain excluded. This does not claim broad OpenAI compatibility, Realtime compatibility, or availability of any declared tool on every model or account"
+               observed_shape: "`tool_choice` is `type=allowed_tools` with mode `auto` or `required`; direct function/custom entries are named, while supported built-ins are type-only `web_search` or `image_generation`; order and duplicates remain significant",
+               notes: "Vercel client provenance only. Pooler accepts this deliberately narrow, declaration-backed vocabulary on public Responses HTTP and the narrow public WebSocket `response.create` surface. MCP, namespace, deferred, tool-search, and unknown entries remain excluded, and so do the client's `programmatic_tool_calling` and `web_search_preview` built-ins, which the Codex backend refuses on a Full request (findings#333). This does not claim broad OpenAI compatibility, Realtime compatibility, or availability of any declared tool on every model or account"
              }
     end
 
@@ -1801,6 +1798,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       assert responses_chat.contract =~ "never merged into executable tools"
       assert responses_chat.contract =~ "never used to satisfy tool_choice"
       assert responses_chat.contract =~ "truncation accepts auto and disabled locally"
+      assert responses_chat.contract =~ "metadata is accepted with the public API's shape and stripped before dispatch"
       assert responses_chat.contract =~ "remote MCP tool definitions"
       assert responses_chat.contract =~ "additional_tools.tools"
       assert responses_chat.contract =~ "not forwarded upstream"
@@ -1842,7 +1840,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       }
 
       expected_responses_builtin_tools = %{
-        web_search_preview: %{accepted_shape: "type_only"},
+        web_search_preview: %{accepted: false, serving_modes: ["full", "lite"], refusal: %{status: 400, code: "invalid_request", param: "tools", upstream_dispatch: false}, rewritten: false},
         web_search: %{
           accepted_required: ["type"],
           accepted_optional: [
@@ -1943,6 +1941,20 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
              }
 
       assert v1_fixture.responses_truncation == responses_fixture.responses_truncation
+
+      assert responses_fixture.responses_metadata == %{
+               accepted: ["null", "object"],
+               max_properties: 16,
+               max_property_name_length: 64,
+               value: "string",
+               max_value_length: 512,
+               refusal_codes: ["invalid_type", "object_above_max_properties", "property_name_above_max_length", "string_above_max_length"],
+               refusal_param: "metadata",
+               forwarded_upstream: false,
+               native_routes: "stripped"
+             }
+
+      assert v1_fixture.responses_metadata == responses_fixture.responses_metadata
       refute Map.has_key?(responses_fixture, :responses_builtin_tools)
       assert v1_fixture.responses_builtin_tools == expected_responses_builtin_tools
     end
@@ -2018,8 +2030,10 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
 
       assert programmatic.hosted_tool.type == "programmatic_tool_calling"
       assert programmatic.hosted_tool.exact_keys == ["type"]
+      assert programmatic.hosted_tool.serving_modes == %{full: "refused_before_dispatch", lite: "forwarded_in_manifest"}
       assert programmatic.tool_choice.type == "programmatic_tool_calling"
-      assert programmatic.tool_choice.exact_keys == ["type"]
+      assert programmatic.tool_choice.refusal == %{status: 400, code: "invalid_request", param: "tool_choice", upstream_dispatch: false}
+      assert feature.programmatic_tool_calling_contract =~ "refused before dispatch when the model is served Full"
       assert programmatic.function_options.scopes == ["flat", "namespace"]
       assert programmatic.function_options.optional_boolean_keys == ["strict", "defer_loading"]
       assert programmatic.function_options.allowed_callers == ["direct", "programmatic"]
@@ -3509,7 +3523,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
   end
 
   defp responses_allowed_tools_summary do
-    "direct public Responses HTTP and websocket response.create accept an exact type=allowed_tools choice only in Full mode, with mode auto or required and a nonempty ordered tools list; named function and custom entries must resolve to undeferred direct top-level same-kind declarations, while type-only programmatic_tool_calling, web_search_preview, web_search, and image_generation entries require a declared top-level tool of the same type; order and duplicates are forwarded unchanged after only the existing tool-definition schema lowering; malformed or undeclared Full choices fail before admission or accounting, valid Lite choices create one rejected Request without Attempts or Ledger rows, top-level MCP declarations retain the tools error while MCP allow-list members use the tool_choice error, and Chat, native backend Responses, namespaces, additional_tools, deferred tools, aliases, unsupported entries, Realtime, and broad OpenAI tool parity remain excluded"
+    "direct public Responses HTTP and websocket response.create accept an exact type=allowed_tools choice only in Full mode, with mode auto or required and a nonempty ordered tools list; named function and custom entries must resolve to undeferred direct top-level same-kind declarations, while type-only web_search and image_generation entries require a declared top-level tool of the same type; order and duplicates are forwarded unchanged after only the existing tool-definition schema lowering; malformed or undeclared Full choices fail before admission or accounting, valid Lite choices create one rejected Request without Attempts or Ledger rows, top-level MCP declarations retain the tools error while MCP allow-list members use the tool_choice error, and Chat, native backend Responses, namespaces, additional_tools, deferred tools, aliases, unsupported entries, Realtime, and broad OpenAI tool parity remain excluded"
   end
 
   defp responses_allowed_tools_contract do
@@ -3532,12 +3546,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
           defer_loading: ["absent", false]
         },
         built_in: %{
-          types: [
-            "programmatic_tool_calling",
-            "web_search_preview",
-            "web_search",
-            "image_generation"
-          ],
+          types: ["web_search", "image_generation"],
           exact_keys: ["type"],
           declaration_scope: "top_level_tools_only",
           resolution: "at_least_one_same_type_declaration",
@@ -3900,7 +3909,8 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
 
       assert captured.json["parallel_tool_calls"] == true
       assert captured.json["prompt_cache_key"] == "synthetic-cache-key"
-      assert captured.json["metadata"] == %{"purpose" => "synthetic"}
+      # The Codex backend refuses `metadata` (findings#333): stripped with the other upstream-unsupported controls.
+      refute Map.has_key?(captured.json, "metadata")
       refute Map.has_key?(captured.json, "previous_response_id")
       refute Map.has_key?(captured.json, "service_tier")
     end

@@ -757,6 +757,35 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.MetadataTest do
     assert Metadata.rejection_error(detail_response.(unbounded)) == %{}
   end
 
+  # provenance: observed findings#333 direct websocket probe (the codeless
+  # wrapped error object the provider's websocket sends for an unsupported
+  # top-level parameter: the HTTP detail's text, `code` and `param` null); the
+  # coded and paramed controls are synthetic
+  test "a codeless websocket error naming an unsupported parameter reads as the HTTP detail does" do
+    error_response = fn error -> %Req.Response{status: 400, body: CodexPooler.JSON.encode!(%{"error" => error})} end
+    codeless = %{"type" => "invalid_request_error", "code" => nil, "message" => "Unsupported parameter: metadata", "param" => nil}
+
+    assert Metadata.rejection_error(error_response.(codeless)) == %{code: "unsupported_parameter", type: "invalid_request_error", param: "metadata"}
+
+    metadata = error_response.(codeless) |> Metadata.response_metadata("upstream_status", %{})
+    assert metadata["rejection_message_class"] == "unsupported_parameter"
+    assert metadata["rejection_error_param"] == "metadata"
+    assert metadata["rejection_error_type"] == "invalid_request_error"
+    # The provider sent no code: none is recorded.
+    refute Map.has_key?(metadata, "rejection_error_code")
+
+    # A provider code or param is never overridden, and only the bounded template qualifies.
+    coded = %{codeless | "code" => "unknown_parameter"}
+    assert Metadata.rejection_error(error_response.(coded)) == %{code: "unknown_parameter", type: "invalid_request_error"}
+    paramed = %{codeless | "param" => "tools"}
+    assert Metadata.rejection_error(error_response.(paramed)) == %{type: "invalid_request_error", param: "tools"}
+    other_type = %{codeless | "type" => "server_error"}
+    assert Metadata.rejection_error(error_response.(other_type)) == %{type: "server_error"}
+    unbounded = %{codeless | "message" => "Unsupported parameter: metadata synthetic prompt sentinel"}
+    assert Metadata.rejection_error(error_response.(unbounded)) == %{type: "invalid_request_error"}
+    refute inspect(error_response.(unbounded) |> Metadata.response_metadata("upstream_status", %{})) =~ "synthetic prompt sentinel"
+  end
+
   test "response metadata records response body limit evidence without retaining body bytes" do
     collect = BoundedResponseBody.collector(8)
 

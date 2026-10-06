@@ -40,7 +40,8 @@
     "placeholder_values_only": true,
     "notes": [
       "The inventory is closed-world and does not claim full OpenAI tool compatibility.",
-      "Remote MCP and unrelated hosted tools are outside this scenario."
+      "Remote MCP and unrelated hosted tools are outside this scenario.",
+      "The Codex backend refuses the hosted programmatic_tool_calling tool on a Full request and accepts it in a Lite manifest, and the type-only tool choice cannot succeed on either (findings#333): the declaration is refused before dispatch on Full and forwarded on Lite, the choice is refused, and the program replay vocabulary is still forwarded."
     ]
   },
   "redaction_status": {

@@ -110,15 +110,23 @@ Direct public Responses HTTP and narrow websocket `response.create` accept the
 map-shaped `allowed_tools` choice only in Full mode. It must use `auto` or
 `required` mode with a nonempty list. Named `function` and `custom` members must
 match undeferred direct top-level declarations of the same kind and name. The
-only accepted type-only built-ins are `programmatic_tool_calling`,
-`web_search_preview`, `web_search`, and `image_generation`, each backed by a
-top-level declaration of that type. Preserve caller order and duplicates. Do not
-extend this claim to Chat, backend Responses, namespaces, additional tools,
-deferred declarations, aliases, remote MCP, Realtime, or broad OpenAI tool
-parity. Malformed or undeclared Full choices reject before admission. Lite
+only accepted type-only built-ins are `web_search` and `image_generation`, each
+backed by a top-level declaration of that type. Preserve caller order and
+duplicates. Do not extend this claim to Chat, backend Responses, namespaces,
+additional tools, deferred declarations, aliases, remote MCP, Realtime, or broad
+OpenAI tool parity. Malformed or undeclared Full choices reject before admission. Lite
 rejects a valid map-shaped choice with `unsupported_parameter` on `tool_choice`.
 Remote MCP declarations continue to reject on `tools`; an MCP member in an
 `allowed_tools` choice rejects on `tool_choice`.
+
+`metadata` is accepted on `/v1/responses`, the Responses websocket and Chat
+Completions with the OpenAI API's shape and is never forwarded, stored or
+echoed: the upstream refuses the parameter. Malformed values reject before
+dispatch on `metadata` with the OpenAI API's codes. The `programmatic_tool_calling`
+declaration is accepted only in Lite mode, where it is forwarded in the
+manifest; Full rejects it before dispatch on `tools`, and a type-only
+`tool_choice` naming it rejects in both modes. `web_search_preview` rejects
+before dispatch in both modes and is never rewritten to `web_search`.
 
 Direct `POST /v1/responses` and narrow Responses websocket `response.create`
 accept exact top-level custom definitions and nested custom definitions in an
@@ -214,7 +222,7 @@ upstream refuses and Codex Pooler does not rewrite. `indexed_web_access` is a bo
 nonblank string `country`, `region`, `city` and `timezone`; `search_context_size` is `low`,
 `medium` or `high`; `search_content_types` is a nonempty list of `text` and
 `image`. Accepted values forward unchanged and the same local-validation-only
-wording applies. `web_search_preview` stays type only.
+wording applies. `web_search_preview` rejects before dispatch.
 
 `agent_message` history items are accepted on `/v1/responses` only as plaintext
 `input_text` content or as the exact sealed `NEW_TASK` or `MESSAGE` handoff the
