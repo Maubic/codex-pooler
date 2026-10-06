@@ -27,7 +27,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
 
   import Ecto.Query
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
-  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [receive_native_terminal!: 3, socket_connection_state!: 1]
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [receive_native_terminal!: 3, socket_connection_state!: 1, with_info_log: 1]
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, RequestClientRetryLink}
   alias CodexPooler.Gateway.Persistence.CodexSession
@@ -61,11 +61,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
       %{owner: owner, session_id: session_id, request_id: request_id} = turn!(client, setup)
 
       :ok = Crash.hold_socket!(client.socket)
-      :ok = Crash.kill_owner!(owner)
 
-      assert Crash.await_outcome!(upstream, request_id, 1) == :settled
+      {:ok, log} =
+        with_info_log(fn ->
+          :ok = Crash.kill_owner!(owner)
+          assert Crash.await_outcome!(upstream, request_id, 1) == :settled
+          :ok
+        end)
+
       assert Crash.generations(upstream) == 1
       :ok = Crash.assert_settled_on_crash!(request_id, session_id)
+      :ok = Crash.assert_fence_decision!(log, "settled", "payload_started", Crash.turn_correlators(request_id, session_id))
+      assert Crash.write_refusal_lines(log) == []
       assert List.last(Crash.close_client!(client)) == @crashed_close
     end
 
@@ -84,7 +91,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
         %{owner: owner, session_id: session_id, request_id: request_id} = turn!(client, setup)
         :ok = Crash.stop_session_owner_on_exit(node(), session_id)
 
-        assert List.last(kill_and_close!(ctx.order, client, owner, upstream, request_id, session_id)) == @crashed_close
+        {frames, log} = with_info_log(fn -> kill_and_close!(ctx.order, client, owner, upstream, request_id, session_id) end)
+        assert List.last(frames) == @crashed_close
+        :ok = assert_socket_turn_fence!(log, ctx, Crash.turn_correlators(request_id, session_id))
         {served, _answers} = Crash.resend_like_released_client!(port, setup, ctx.route, window, frame)
         assert %{"type" => "response.completed", "response" => %{"id" => "resp_owner_unsent_first_send"}} = served
         :ok = Crash.assert_resend_served_once!(setup, upstream, ctx.route, request_id)
@@ -111,9 +120,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
       assert {:ok, owner} = WebsocketOwnerSession.lookup(session.id)
       :ok = Crash.stop_session_owner_on_exit(node(), session.id)
       request_id = Crash.turn_request_id!(setup)
-      :ok = Crash.kill_owner!(owner)
 
-      response = Task.await(bridged, @detection_timeout_ms)
+      {response, log} =
+        with_info_log(fn ->
+          :ok = Crash.kill_owner!(owner)
+          Task.await(bridged, @detection_timeout_ms)
+        end)
+
+      :ok = Crash.assert_fence_decision!(log, "takeover", "payload_unsent", Crash.turn_correlators(request_id, session.id))
       assert response.status == 200
       assert response.resp_body =~ ~s("id":"resp_bridge_unsent_first_send")
       assert response.resp_body =~ "response.completed"
@@ -149,26 +163,119 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
       session_monitor = Process.monitor(session_pid)
 
       :ok = Crash.hold_socket!(client.socket)
-      :ok = Crash.kill_owner!(held.owner_pid)
-      assert Crash.await_outcome!(upstream, request_id, 0) == :settled
 
-      case ctx.link do
-        :linked ->
-          assert_receive {:DOWN, ^session_monitor, :process, ^session_pid, :killed}, @detection_timeout_ms
-          assert Crash.generations(upstream) == 0
+      {:ok, log} =
+        with_info_log(fn ->
+          :ok = Crash.kill_owner!(held.owner_pid)
+          assert Crash.await_outcome!(upstream, request_id, 0) == :settled
 
-        :unlinked ->
-          :ok = Crash.release_held_write(session_pid, hold_ref)
-          :ok = Crash.await_kill_point!(:after_receipt, upstream, "resp_owner_marked", release_ref)
-          assert Crash.generations(upstream) == 1
-          Process.exit(session_pid, :kill)
-          assert_receive {:DOWN, ^session_monitor, :process, ^session_pid, :killed}, @detection_timeout_ms
-      end
+          case ctx.link do
+            :linked ->
+              assert_receive {:DOWN, ^session_monitor, :process, ^session_pid, :killed}, @detection_timeout_ms
+              assert Crash.generations(upstream) == 0
+
+            :unlinked ->
+              :ok = Crash.release_held_write(session_pid, hold_ref)
+              :ok = Crash.await_kill_point!(:after_receipt, upstream, "resp_owner_marked", release_ref)
+              assert Crash.generations(upstream) == 1
+              Process.exit(session_pid, :kill)
+              assert_receive {:DOWN, ^session_monitor, :process, ^session_pid, :killed}, @detection_timeout_ms
+          end
+
+          :ok
+        end)
 
       :ok = Crash.assert_settled_on_crash!(request_id, held.session.id)
+      :ok = Crash.assert_fence_decision!(log, "settled", "payload_started", Crash.turn_correlators(request_id, held.session.id))
+      assert Crash.write_refusal_lines(log) == []
       assert List.last(Crash.close_client!(client)) == @crashed_close
       assert Crash.generations(upstream) == if(ctx.link == :linked, do: 0, else: 1)
     end
+  end
+
+  # The owner is killed while its upstream session waits right before the
+  # payload write observer: nothing of the turn left, the submission claims it
+  # and, the turn being a socket's, settles it `owner_crashed`. Linked, the
+  # session goes with its owner; unlinked, it reaches the observer once
+  # released, finds the turn claimed and ends the request unsent, with one
+  # `upstream websocket payload write refused` line (findings#329 row J).
+  for link <- [:linked, :unlinked] do
+    @tag link: link
+    test "native full: a claimed turn's late write is refused (#{link}), and the provider never receives it", ctx do
+      release_ref = make_ref()
+      hold_ref = make_ref()
+      upstream = Crash.upstream!(:after_receipt, "resp_owner_claimed", release_ref)
+      setup = gateway_setup(upstream)
+      :ok = Crash.serve!(setup, "full")
+      window = Scenario.window()
+      held = Crash.start_held_owner!(setup, window.id, node(), hold_ref, ctx.link, :before_mark)
+      {_server, port} = start_public_endpoint_with_server!()
+      client = Scenario.connect!(port, setup, Scenario.native_route(), window)
+      client = Crash.send_turn!(client, setup, "the turn held before its write")
+
+      assert_receive {:payload_write_held, session_pid, ^hold_ref, :unmarked}, @detection_timeout_ms
+      request_id = Crash.turn_request_id!(setup)
+      session_monitor = Process.monitor(session_pid)
+      :ok = Crash.hold_socket!(client.socket)
+
+      {:ok, log} =
+        with_info_log(fn ->
+          :ok = Crash.kill_owner!(held.owner_pid)
+          assert Crash.await_outcome!(upstream, request_id, 0) == :settled
+
+          if ctx.link == :unlinked do
+            :ok = Crash.release_held_write(session_pid, hold_ref)
+            # The session serves one call at a time: once it answers, the
+            # released request has met its refusal. It outlives its owner, so
+            # it is stopped here.
+            _served = :sys.get_state(session_pid)
+            Process.exit(session_pid, :kill)
+          end
+
+          assert_receive {:DOWN, ^session_monitor, :process, ^session_pid, :killed}, @detection_timeout_ms
+          :ok
+        end)
+
+      assert Crash.generations(upstream) == 0
+      :ok = Crash.assert_settled_on_crash!(request_id, held.session.id)
+      turn = Crash.turn_correlators(request_id, held.session.id)
+      :ok = Crash.assert_fence_decision!(log, "settled", "socket_turn", turn)
+
+      case ctx.link do
+        :linked -> assert Crash.write_refusal_lines(log) == []
+        :unlinked -> :ok = Crash.assert_write_refused!(log, turn)
+      end
+
+      assert List.last(Crash.close_client!(client)) == @crashed_close
+    end
+  end
+
+  # An owner stopped as the reuse check stops a stale one, `{:shutdown,
+  # :stale_owner}` (`stop_stale_owner/2`), while its turn's handshake is held:
+  # an exit the submission does not recover, so it settles the turn without
+  # a takeover, and says so.
+  test "native full: an owner stopped stale under a turn settles it with the exit it does not recover" do
+    release_ref = make_ref()
+    upstream = Crash.upstream!(:before_write, "resp_owner_stale", release_ref)
+    %{setup: setup, client: client} = connect!(upstream, %{route: Scenario.native_route(), mode: "full"})
+    client = Crash.send_turn!(client, setup, "the turn whose owner goes stale")
+    :ok = Crash.await_kill_point!(:before_write, upstream, "resp_owner_stale", release_ref)
+    %{owner: owner, session_id: session_id, request_id: request_id} = turn!(client, setup)
+
+    {:ok, log} =
+      with_info_log(fn ->
+        owner_monitor = Process.monitor(owner)
+        _ordered = :sys.get_state(owner)
+        :ok = GenServer.stop(owner, {:shutdown, :stale_owner}, @detection_timeout_ms)
+        assert_receive {:DOWN, ^owner_monitor, :process, ^owner, {:shutdown, :stale_owner}}, @detection_timeout_ms
+        assert Crash.await_outcome!(upstream, request_id, 0) == :settled
+        :ok
+      end)
+
+    assert Crash.generations(upstream) == 0
+    turn = Crash.turn_correlators(request_id, session_id)
+    :ok = Crash.assert_fence_decision!(log, "settled", "exit_not_recoverable", turn, %{"owner_exit" => "shutdown"})
+    Mint.HTTP.close(client.conn)
   end
 
   # The released client closes on the socket's 1011 and resends the turn whole
@@ -220,6 +327,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
     :ok = Crash.assert_settled_on_crash!(request_id, session_id)
     Crash.close_client!(client)
   end
+
+  # A public `/v1` socket cancels its turn's response task when it handles its
+  # owner's crash first (`maybe_abort_public_owner_turn/2`), so in the natural
+  # order the submission may be stopped before it decides anything: then there
+  # is no fence line, and the socket's cleanup settles the turn. A native
+  # socket waits for its task, and a held socket lets the task decide first.
+  defp assert_socket_turn_fence!(log, %{route: "/v1/responses", order: :natural}, turn) do
+    case Crash.fence_lines(log) do
+      [] -> :ok
+      _decided -> Crash.assert_fence_decision!(log, "settled", "socket_turn", turn)
+    end
+  end
+
+  defp assert_socket_turn_fence!(log, _ctx, turn), do: Crash.assert_fence_decision!(log, "settled", "socket_turn", turn)
 
   defp post_bridged!(setup, session_header, payload) do
     Phoenix.ConnTest.build_conn()

@@ -50,6 +50,10 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
   # The released Codex client resends a turn whose socket closed after 200 ms,
   # then backs off on each `409 duplicate_turn` (the duplicate-turn fence manual).
   @released_client_backoff_ms [200, 400, 800, 1600, 3200]
+  # The fence's two lines (findings#329 row J): the submission's decision on
+  # the owner's node, and a session's write refused after a claim.
+  @fence_line "websocket owner exit fence "
+  @write_refused_line "upstream websocket payload write refused "
 
   @doc "The provider for `kill_point`, notifying the calling test process."
   def upstream!(:after_receipt, prefix, release_ref) do
@@ -100,6 +104,68 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
 
     _publisher = CodexPooler.ExecutionProofSupport.start_publisher!()
     :ok
+  end
+
+  @doc "The turn's internal correlators, as the fence lines carry them."
+  def turn_correlators(request_id, session_id) do
+    attempt_id = Repo.one!(from(a in Attempt, where: a.request_id == ^request_id, select: a.id))
+    %{request_id: request_id, attempt_id: attempt_id, session_id: session_id}
+  end
+
+  @doc "The fields of every `websocket owner exit fence` line in `log`."
+  def fence_lines(log), do: lines_after(log, @fence_line)
+
+  @doc "The fields of every `upstream websocket payload write refused` line in `log`."
+  def write_refusal_lines(log), do: lines_after(log, @write_refused_line)
+
+  @doc "The line prefixes the fence logs, for `PeerLogRelay.attach!/3`."
+  def fence_line_prefixes, do: [@fence_line, @write_refused_line]
+
+  @doc """
+  Exactly one fence line, deciding `decision` for `reason` about the turn whose
+  owner was killed: its fixed fields and the turn's internal correlators, every
+  one of them a UUID, and nothing else (no provider identifier, no content).
+  """
+  def assert_fence_decision!(log, decision, reason, turn, extra \\ %{}) do
+    expected =
+      Map.merge(
+        %{"decision" => decision, "reason" => reason, "owner_exit" => "killed", "codex_session_id" => turn.session_id, "request_id" => turn.request_id, "attempt_id" => turn.attempt_id},
+        extra
+      )
+
+    assert fence_lines(log) == [expected]
+    assert Enum.all?([turn.session_id, turn.request_id, turn.attempt_id], &match?({:ok, _uuid}, Ecto.UUID.cast(&1)))
+    :ok
+  end
+
+  @doc "Exactly one refused write, of the turn's attempt."
+  def assert_write_refused!(log, turn) do
+    assert write_refusal_lines(log) == [%{"reason_code" => "turn_claimed", "request_id" => turn.request_id, "attempt_id" => turn.attempt_id}]
+    :ok
+  end
+
+  @doc "Waits for `count` lines a peer relayed (`PeerLogRelay`) and returns them as one log."
+  def await_peer_lines!(peer_node, count) do
+    Enum.map_join(1..count//1, "\n", fn _line ->
+      assert_receive {:peer_log, ^peer_node, line}, @detection_timeout_ms
+      line
+    end)
+  end
+
+  defp lines_after(log, prefix) do
+    log
+    |> String.split("\n")
+    |> Enum.flat_map(fn line ->
+      case String.split(line, prefix, parts: 2) do
+        [_before, fields] -> [fields |> String.split(" ", trim: true) |> Map.new(&field/1)]
+        [_other] -> []
+      end
+    end)
+  end
+
+  defp field(pair) do
+    [key, value] = String.split(pair, "=", parts: 2)
+    {key, value}
   end
 
   @doc "Forces the Pool's serving mode for the setup's model."
@@ -290,12 +356,12 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
   @doc """
   Starts the session the socket on `window_id` resolves, owned on
   `owner_node` (this node or a peer's) by an owner whose upstream boundary is
-  `held_write_boundary/3`. Call it before the socket connects.
+  `held_write_boundary/4` holding at `at`. Call it before the socket connects.
   """
-  def start_held_owner!(%{authorization: authorization}, window_id, owner_node, hold_ref, link) do
+  def start_held_owner!(%{authorization: authorization}, window_id, owner_node, hold_ref, link, at \\ :after_mark) do
     {:ok, auth} = Access.authenticate_authorization_header(authorization)
     {:ok, session} = Gateway.start_codex_session(auth, %{session_header: window_id, session_header_source: "x-codex-window-id", owner_instance_id: Atom.to_string(owner_node)})
-    boundary = :erpc.call(owner_node, __MODULE__, :held_write_boundary, [self(), hold_ref, link], @detection_timeout_ms)
+    boundary = :erpc.call(owner_node, __MODULE__, :held_write_boundary, [self(), hold_ref, link, at], @detection_timeout_ms)
 
     persistence =
       if owner_node == node(),

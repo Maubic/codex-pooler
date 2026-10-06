@@ -18,6 +18,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   alias CodexPooler.Gateway.Transports.Websocket.CompactionRetrySubmitHold
   alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
+  alias CodexPooler.Gateway.Transports.Websocket.OwnerErrorVocabulary
   alias CodexPooler.Gateway.Transports.Websocket.RemoteReconnectControlV2
   alias CodexPooler.Gateway.Transports.Websocket.ResponseInterrupt
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
@@ -29,6 +30,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV7
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger, as: OwnerLogger
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks
   alias CodexPooler.Repo
 
@@ -1553,7 +1555,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   # of reaching the provider a second time (findings#327, the rule of
   # findings#325 row 325-6). A session that reaches its write after the claim
   # ends the request unsent, whether or not the turn is then handed over; a
-  # client socket's turn never is (`takeover_reaches_client?/1`).
+  # client socket's turn never is (`takeover_reaches_client?/1`). Every
+  # decision logs one `websocket owner exit fence` line (findings#329 row J).
   defp do_submit_remote_owner_request(
          owner_pid,
          codex_session_id,
@@ -1573,30 +1576,81 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
     end
   catch
     :exit, reason ->
-      if bound_reset_probe?(request) or Process.alive?(owner_pid) or
-           not recoverable_owner_exit?(reason) or
-           not claim_unsent_request(progress) or
-           not takeover_reaches_client?(submission_notification?) do
-        {:error, :owner_crashed}
-      else
-        with {:ok, {replacement_pid, replacement_downstream, replacement_session}} <-
-               recover_remote_owner(
-                 codex_session_id,
-                 downstream,
-                 opts,
-                 :replace_unavailable_lease
-               ),
-             :ok <- notify_recovered_runtime(replacement_session, replacement_downstream),
-             :ok <- refuse_abandoned_submission(opts) do
-          WebsocketOwnerSession.submit_request(
-            replacement_pid,
-            replacement_downstream,
-            request,
-            submission_notification?
-          )
-        end
+      fence = %{request: request, codex_session_id: codex_session_id, owner_exit: owner_exit_class(reason)}
+
+      case owner_exit_decision(request, owner_pid, reason, progress, submission_notification?) do
+        :takeover ->
+          take_over_turn(fence, downstream, submission_notification?, opts)
+
+        {:settled, why} ->
+          :ok = log_owner_exit_fence(fence, :settled, why)
+          {:error, :owner_crashed}
       end
   end
+
+  # The checks run in this order, so the claim is taken only from a turn whose
+  # owner died of a recoverable exit and that is no bound reset probe.
+  defp owner_exit_decision(request, owner_pid, reason, progress, submission_notification?) do
+    cond do
+      bound_reset_probe?(request) -> {:settled, :reset_probe}
+      # Defensive: a local owner's submit call exits only once that owner is gone.
+      Process.alive?(owner_pid) -> {:settled, :owner_alive}
+      not recoverable_owner_exit?(reason) -> {:settled, :exit_not_recoverable}
+      not claim_unsent_request(progress) -> {:settled, :payload_started}
+      not takeover_reaches_client?(submission_notification?) -> {:settled, :socket_turn}
+      true -> :takeover
+    end
+  end
+
+  defp take_over_turn(%{request: request, codex_session_id: codex_session_id} = fence, downstream, submission_notification?, opts) do
+    with {:ok, {replacement_pid, replacement_downstream, replacement_session}} <-
+           recover_remote_owner(
+             codex_session_id,
+             downstream,
+             opts,
+             :replace_unavailable_lease
+           ),
+         :ok <- notify_recovered_runtime(replacement_session, replacement_downstream),
+         :ok <- refuse_abandoned_submission(opts) do
+      :ok = log_owner_exit_fence(fence, :takeover, :payload_unsent)
+
+      WebsocketOwnerSession.submit_request(
+        replacement_pid,
+        replacement_downstream,
+        request,
+        submission_notification?
+      )
+    else
+      {:error, refusal} = refused ->
+        :ok = log_owner_exit_fence(fence, :settled, :takeover_refused, fence_refusal(refusal))
+        refused
+    end
+  end
+
+  defp log_owner_exit_fence(%{request: request, codex_session_id: codex_session_id, owner_exit: owner_exit}, decision, reason, refusal \\ nil) do
+    OwnerLogger.owner_exit_fence(decision, reason, owner_exit,
+      refusal: refusal,
+      codex_session_id: codex_session_id,
+      request_id: request.request_id,
+      attempt_id: request.attempt_id
+    )
+  end
+
+  # A refused takeover's reason, from the owner error vocabulary, read at run
+  # time; anything outside it is `other`.
+  defp fence_refusal(refusal) when is_atom(refusal) do
+    if refusal in OwnerErrorVocabulary.owner_errors(), do: refusal, else: :other
+  end
+
+  defp fence_refusal(_refusal), do: :other
+
+  # How the owner went, as its submit call's exit carries it: a fixed class,
+  # never the exit term itself.
+  defp owner_exit_class({reason, {GenServer, :call, _details}}), do: owner_exit_class(reason)
+  defp owner_exit_class(reason) when reason in [:killed, :noproc, :normal, :shutdown, :owner_crashed], do: reason
+  defp owner_exit_class({:shutdown, _details}), do: :shutdown
+  defp owner_exit_class({_error, [_frame | _frames]}), do: :exception
+  defp owner_exit_class(_reason), do: :other
 
   defp submit_collect_owner_request(owner_pid, downstream, request, submission_notification?) do
     WebsocketOwnerSession.submit_request(

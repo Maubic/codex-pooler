@@ -21,6 +21,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.UpstreamErrorParam
   alias CodexPooler.Gateway.Transports.TransportFailureReason
+  alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
   alias CodexPooler.Gateway.Transports.Websocket.ForwardedOwnerRequestHandoff
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission.Binding
@@ -1281,21 +1282,38 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # before the payload can leave, that it is about to (findings#327): an owner
   # that dies from now on may have handed the turn to the provider, so the
   # forwarder settles it instead of submitting it to a replacement owner. A
-  # refusal means the forwarder already took the turn back from a dead owner
-  # and gave it to another one, so this request ends unsent. A failing observer
-  # is logged and the write goes ahead, as a failing frame observer is.
-  defp observe_payload_write(%Request{payload_write_observer: observer}) when is_function(observer, 0) do
+  # refusal means the forwarder already took the turn back from a dead owner,
+  # so this request ends unsent, with one line (findings#329 row J). A failing
+  # observer is logged and the write goes ahead, as a failing frame observer
+  # is.
+  defp observe_payload_write(%Request{payload_write_observer: observer} = request) when is_function(observer, 0) do
+    case run_payload_write_observer(observer) do
+      :ok ->
+        :ok
+
+      :refused ->
+        Logger.info(
+          "upstream websocket payload write refused reason_code=turn_claimed " <>
+            "request_id=#{DiagnosticTaxonomy.safe_correlator(request.request_id)} " <>
+            "attempt_id=#{DiagnosticTaxonomy.safe_correlator(request.attempt_id)}"
+        )
+
+        {:error, :payload_write_refused}
+    end
+  end
+
+  defp observe_payload_write(%Request{}), do: :ok
+
+  defp run_payload_write_observer(observer) do
     case observer.() do
       :ok -> :ok
-      _refused -> {:error, :payload_write_refused}
+      _refused -> :refused
     end
   rescue
     exception -> report_payload_write_observer_failure(:error, exception.__struct__)
   catch
     kind, _reason when kind in [:throw, :exit] -> report_payload_write_observer_failure(kind, nil)
   end
-
-  defp observe_payload_write(%Request{}), do: :ok
 
   defp report_payload_write_observer_failure(failure_kind, exception_class) do
     Logger.warning(
