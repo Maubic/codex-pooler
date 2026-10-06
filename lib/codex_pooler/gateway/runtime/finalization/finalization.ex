@@ -371,9 +371,9 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
               to: Streaming,
               as: :record_retryable_first_event_failure
 
-  @spec finalize_first_event_stream_failure(binary(), stream_failure(), ResponseContext.t()) ::
+  @spec finalize_first_event_stream_failure(binary(), stream_failure(), ResponseContext.t(), keyword()) ::
           stream_finalization_result()
-  defdelegate finalize_first_event_stream_failure(body, failure, response_context),
+  defdelegate finalize_first_event_stream_failure(body, failure, response_context, opts \\ []),
     to: Streaming,
     as: :finalize_first_event_failure
 
@@ -582,6 +582,23 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
 
   defp record_status_route_failure(%SelectedCandidateContext{} = context, status) do
     status |> status_demotion_code() |> record_dispatch_route_failure(context)
+  end
+
+  @doc """
+  Route health of a provider usage limit the upstream websocket answered as
+  its first event, classified as the HTTP `429` of the same refusal
+  (`record_status_route_health/2`): a neutral completion when the frame's
+  headers exclude the account, otherwise the `429` route failure. The refusal
+  completes the candidate's circuit admission whether the turn fails over,
+  hops to a held-back partition or settles on it (findings#325 row 325-5).
+  """
+  @spec record_websocket_usage_limit_route_health(SelectedCandidateContext.t(), map(), String.t()) ::
+          :ok | {:error, map()}
+  def record_websocket_usage_limit_route_health(%SelectedCandidateContext{model: model} = context, headers, denial_code)
+      when is_map(headers) and is_binary(denial_code) do
+    if UsageLimitRefusal.headers_route_neutral?(headers, denial_code, model.upstream_model_id),
+      do: DispatchLifecycle.neutral_completion(context),
+      else: record_status_route_failure(context, 429)
   end
 
   defp record_dispatch_route_failure(code, %SelectedCandidateContext{} = context) do

@@ -156,8 +156,18 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
       not compact_assignment_model_miss?(failure, context) and
         Keyword.get(opts, :record_health?, true)
 
+    # A caller that classifies the refusal itself (a usage limit, read like its
+    # HTTP twin, findings#325 row 325-5) records that health instead.
+    route_health = Keyword.get(opts, :route_health)
+
     attrs =
       cond do
+        is_function(route_health, 0) and not is_nil(context.attempt) ->
+          Map.put(attrs, :before_finalize, fn ->
+            SideEffects.observe_stream_response(context, response, body, nil)
+            route_health.()
+          end)
+
         record_health? and not is_nil(context.attempt) ->
           Map.put(attrs, :before_finalize, fn ->
             SideEffects.observe_stream_response(context, response, body, nil)
@@ -187,12 +197,15 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
 
   defp maybe_record_retryable_health(%SelectedCandidateContext{}, _code, _record_health?), do: :ok
 
-  @spec finalize_first_event_failure(binary(), stream_failure(), ResponseContext.t()) ::
+  @spec finalize_first_event_failure(binary(), stream_failure(), ResponseContext.t(), keyword()) ::
           finalization_result()
+  def finalize_first_event_failure(body, failure, response_context, opts \\ [])
+
   def finalize_first_event_failure(
         _body,
         failure,
-        %ResponseContext{context: %SelectedCandidateContext{attempt: nil} = context}
+        %ResponseContext{context: %SelectedCandidateContext{attempt: nil} = context},
+        _opts
       ) do
     code = stream_failure_code(failure, context)
 
@@ -213,11 +226,13 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
   def finalize_first_event_failure(
         body,
         failure,
-        %ResponseContext{context: context, response: response} = response_context
+        %ResponseContext{context: context, response: response} = response_context,
+        opts
       ) do
     code = stream_failure_code(failure, context)
     health_code = stream_health_code(failure, code)
     failure = %{failure | code: code}
+    route_health = Keyword.get(opts, :route_health, fn -> record_terminal_health_failure(health_code, response.headers, context) end)
 
     websocket_attempt_metadata = upstream_websocket_attempt_metadata(response_context)
     transports = resolved_transports(response_context, websocket_attempt_metadata)
@@ -245,7 +260,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
 
           if compact_assignment_model_miss?(failure, context),
             do: :ok,
-            else: record_terminal_health_failure(health_code, response.headers, context)
+            else: route_health.()
         end),
         context.request_options.runtime.session_owner_witness
       )

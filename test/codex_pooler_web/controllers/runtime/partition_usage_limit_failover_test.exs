@@ -24,6 +24,9 @@ defmodule CodexPoolerWeb.Runtime.PartitionUsageLimitFailoverTest do
   import Ecto.Query
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
 
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport,
+    only: [half_open_websocket_circuit!: 2, model_serving_scope: 0, set_model_serving_mode!: 3]
+
   alias CodexPooler.Access
   alias CodexPooler.Accounting
   alias CodexPooler.Accounting.{Attempt, Request}
@@ -77,6 +80,31 @@ defmodule CodexPoolerWeb.Runtime.PartitionUsageLimitFailoverTest do
     assert [row] = settled_rows!(pool)
     assert attempts!(row, pool) == [{"retryable_failed", 200, :refusing}, {"succeeded", 200, :other_partition}]
     assert FakeUpstream.websocket_connection_count(pool.exhausted_upstream) == 0
+  end
+
+  # The hop completes the refusing candidate's circuit admission as HTTP does
+  # for the same refusal: the frame's exhausted window excludes the account,
+  # so a half-open probe the refused attempt claimed is released neutrally
+  # (findings#325 row 325-5). It used to stay counted in flight until the
+  # staleness self-heal.
+  for mode <- ["full", "lite"], forwarding <- [false, true] do
+    @mode mode
+    @forwarding forwarding
+    test "native websocket #{mode} forwarding=#{forwarding}: the hop releases the refusing candidate's half-open probe", _context do
+      put_owner_forwarding!(@forwarding)
+      pool = split_pool!(:routable, :websocket)
+      _revision = set_model_serving_mode!(model_serving_scope(), pool.setup, @mode)
+      circuit = half_open_websocket_circuit!(pool.setup, pool.refusing.assignment)
+      {_server, port} = start_public_endpoint_with_server!()
+
+      terminal = native_websocket_turn!(port, pool, @mode)
+
+      assert %{"type" => "response.completed"} = terminal
+      assert [row] = settled_rows!(pool)
+      assert attempts!(row, pool) == [{"retryable_failed", 200, :refusing}, {"succeeded", 200, :other_partition}]
+      assert row.request_metadata["routing"]["model_serving_mode"] == @mode
+      assert %RoutingCircuitState{status: "half_open", failure_count: 1, metadata: %{"probe_in_flight_count" => 0}} = Repo.get!(RoutingCircuitState, circuit.id)
+    end
   end
 
   test "the hop happens once: a held-back account refusing too ends the turn on the terminal usage limit", _context do
@@ -505,18 +533,18 @@ defmodule CodexPoolerWeb.Runtime.PartitionUsageLimitFailoverTest do
     |> post(@turn_endpoint, CodexPooler.JSON.encode!(%{"model" => pool.setup.model.exposed_model_id, "input" => native_text_input("synthetic partition prompt"), "stream" => stream?}))
   end
 
-  defp native_websocket_turn!(port, pool) do
+  defp native_websocket_turn!(port, pool, mode \\ "lite") do
     thread_id = Ecto.UUID.generate()
     {:ok, conn} = Mint.HTTP.connect(:http, "127.0.0.1", port, protocols: [:http1])
 
-    headers = [
-      {"authorization", pool.setup.authorization},
-      {"session-id", thread_id},
-      {"thread-id", thread_id},
-      {"x-client-request-id", thread_id},
-      {"x-codex-window-id", "#{thread_id}:0"},
-      {"x-openai-internal-codex-responses-lite", "true"}
-    ]
+    headers =
+      [
+        {"authorization", pool.setup.authorization},
+        {"session-id", thread_id},
+        {"thread-id", thread_id},
+        {"x-client-request-id", thread_id},
+        {"x-codex-window-id", "#{thread_id}:0"}
+      ] ++ if(mode == "lite", do: [{"x-openai-internal-codex-responses-lite", "true"}], else: [])
 
     {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, @turn_endpoint, headers)
     {:ok, conn, status, response_headers} = await_public_websocket_upgrade(conn, ref)

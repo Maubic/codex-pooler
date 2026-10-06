@@ -59,13 +59,22 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.UsageLimitRefusal do
   @spec route_neutral?(Req.Response.t(), String.t() | nil, DateTime.t()) :: boolean()
   def route_neutral?(%Req.Response{} = response, dispatched_model, %DateTime{} = now \\ DateTime.utc_now()) do
     case denial_code(response) do
-      nil ->
-        false
-
-      code ->
-        windows = QuotaEvidence.codex_header_windows(response.headers, now, dispatched_model, code)
-        Enum.any?(windows, &exhausted_ahead?(&1, now)) or workspace_denial_ahead?(response.headers, windows, now)
+      nil -> false
+      code -> headers_route_neutral?(response.headers, code, dispatched_model, now)
     end
+  end
+
+  @doc """
+  The same decision for a usage limit already identified by its refusal code,
+  read from the provider headers it carried: the HTTP response's, or the
+  `headers` object of the upstream websocket's error frame, which carries the
+  same `x-codex-*` names (findings#325 row 325-5).
+  """
+  @spec headers_route_neutral?(map() | list(), String.t(), String.t() | nil, DateTime.t()) :: boolean()
+  def headers_route_neutral?(headers, denial_code, dispatched_model, %DateTime{} = now \\ DateTime.utc_now())
+      when is_binary(denial_code) do
+    windows = QuotaEvidence.codex_header_windows(headers, now, dispatched_model, denial_code)
+    Enum.any?(windows, &exhausted_ahead?(&1, now)) or workspace_denial_ahead?(headers, windows, now)
   end
 
   defp exhausted_ahead?(%{used_percent: %Decimal{} = used, reset_at: %DateTime{} = reset_at}, now),

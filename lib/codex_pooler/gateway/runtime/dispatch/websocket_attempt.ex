@@ -81,10 +81,18 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
     end
   end
 
+  # A usage limit before any output completes the refusing candidate's circuit
+  # admission as its HTTP `429` twin does, whether the turn fails over, hops
+  # to a held-back partition or settles here: neutral when the frame's headers
+  # exclude the account, the `429` route failure otherwise. The failover and
+  # the hop used to record no health, so a half-open probe the attempt claimed
+  # stayed counted in flight until the staleness self-heal (findings#325 row
+  # 325-5).
   defp handle_quota_exhausted_first_event(context, dispatch_request, response, failure) do
     SideEffects.observe_websocket_response(context, response)
 
     retry_reason = quota_first_event_retry_reason(context)
+    route_health = fn -> Finalization.record_websocket_usage_limit_route_health(context, Map.get(response, :websocket_frame_headers, %{}), failure.code) end
 
     if retry_reason do
       response_context = retryable_websocket_response_context(context, response)
@@ -93,14 +101,14 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
              Map.get(response, :body, ""),
              failure,
              response_context,
-             record_health?: false
+             route_health: route_health
            ) do
         {:stale_generation, finalized} -> {:ok, finalized}
         {:ok, _recorded_failure} -> {:retry, retry_reason}
         {:error, _reason} = error -> error
       end
     else
-      finalize_retryable_first_websocket_event(context, dispatch_request, response, failure)
+      finalize_retryable_first_websocket_event(context, dispatch_request, response, failure, route_health: route_health)
     end
   end
 
@@ -436,7 +444,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
          context,
          dispatch_request,
          response,
-         failure
+         failure,
+         opts \\ []
        ) do
     {answered, result_messages} = answer_retry_exhausted_websocket_failure(context, dispatch_request, response)
 
@@ -448,7 +457,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
     case Finalization.finalize_first_event_stream_failure(
            Map.get(response, :body, ""),
            failure,
-           response_context
+           response_context,
+           opts
          ) do
       {:ok, _finalized} -> {:ok, %{status: 200, headers: [], websocket_messages: if(answer, do: result_messages, else: [])}}
       {:error, _reason} = error -> error
