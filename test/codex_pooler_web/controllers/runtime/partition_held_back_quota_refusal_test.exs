@@ -362,8 +362,9 @@ defmodule CodexPoolerWeb.Runtime.PartitionHeldBackQuotaRefusalTest do
     # The released client (0.160.1) retries the 503: the failed request used
     # up the connection's last response, so its resend on the socket carries
     # the full history without the anchor, and the resend is refused
-    # `409 duplicate_turn` before dispatch (no row, no provider request; the
-    # client retries that too). Once its stream retries are spent it sends the
+    # `409 duplicate_turn` before dispatch (no row, no provider request). Its
+    # compaction stream budget is `min(stream_max_retries, 2)`, so the
+    # released-client lane sees two such resends; once they are spent it sends the
     # compaction over HTTPS, two seconds later in the report, and that request
     # can move to the held-back partition (`PartitionFallback.before_dispatch/3`).
     test "with a quota-fresh pro seat the refusal is retryable and the HTTPS compaction moves to the pro partition" do
@@ -416,7 +417,7 @@ defmodule CodexPoolerWeb.Runtime.PartitionHeldBackQuotaRefusalTest do
   end
 
   # The row and the attempt record the provider's refusal as a 429 on the
-  # session's plus seat; the attempt keeps no Pool advice; the resend met the
+  # session's plus seat; the attempt keeps no Pool advice; both resends met the
   # recorded turn before dispatch.
   defp assert_retryable_compaction_refusal!(timeline) do
     assert %{"type" => "response.failed", "status" => 503, "error" => %{"code" => "pinned_continuation_unavailable", "type" => "server_error"} = error} = timeline.compaction_terminal,
@@ -430,7 +431,7 @@ defmodule CodexPoolerWeb.Runtime.PartitionHeldBackQuotaRefusalTest do
     assert [line] = timeline.usage_limit_lines
     assert line =~ "status=429 error_code=usage_limit_reached advice=withheld answered_status=503"
 
-    assert %{"type" => "error", "status" => 409, "error" => %{"code" => "duplicate_turn"}} = timeline.resend_terminal
+    assert [%{"type" => "error", "status" => 409, "error" => %{"code" => "duplicate_turn"}}, %{"type" => "error", "status" => 409, "error" => %{"code" => "duplicate_turn"}}] = timeline.resend_terminals
     assert timeline.rows_before_https == 2
     assert timeline.plus1_websocket_requests == 2
   end
@@ -449,8 +450,8 @@ defmodule CodexPoolerWeb.Runtime.PartitionHeldBackQuotaRefusalTest do
   end
 
   # `follow_up: :client_retries` (default) sends what the released client
-  # sends after a retryable answer: the compaction again on the socket, full
-  # history and no anchor, then over HTTPS. `:none` stops after the refusal.
+  # sends after a retryable answer: the compaction twice more on the socket,
+  # full history and no anchor, then over HTTPS. `:none` stops after the refusal.
   defp websocket_compaction_timeline!(pro_state, opts \\ []) do
     put_owner_forwarding!(false)
     follow_up = Keyword.get(opts, :follow_up, :client_retries)
@@ -461,7 +462,7 @@ defmodule CodexPoolerWeb.Runtime.PartitionHeldBackQuotaRefusalTest do
     pool = astra_pool!(pro_state, plus1: :fresh, plus1_mode: refusing_session_seat_mode(anchor_response_id, refusal_reset))
     {_server, port} = start_public_endpoint_with_server!()
 
-    {{turn_terminal, compaction_terminal, resend_terminal}, log} =
+    {{turn_terminal, compaction_terminal, resend_terminals}, log} =
       with_info_log(fn ->
         websocket_session!(port, pool, ids, Keyword.get(opts, :originator, @desktop), &compaction_scenario!(&1, &2, &3, pool, ids, anchor_response_id, follow_up))
       end)
@@ -473,7 +474,7 @@ defmodule CodexPoolerWeb.Runtime.PartitionHeldBackQuotaRefusalTest do
     timeline = %{
       turn_terminal_type: turn_terminal["type"],
       compaction_terminal: compaction_terminal,
-      resend_terminal: resend_terminal,
+      resend_terminals: resend_terminals,
       rows_before_https: length(rows!(pool)),
       plus1_websocket_requests: plus1_websocket_requests,
       usage_limit_lines: log |> String.split("\n") |> Enum.filter(&(&1 =~ "websocket usage limit answered")),
@@ -506,16 +507,22 @@ defmodule CodexPoolerWeb.Runtime.PartitionHeldBackQuotaRefusalTest do
     {conn, websocket, compaction_terminal} = receive_terminal!(conn, websocket, ref)
     await_settled_rows!(pool, 2)
 
-    {turn_terminal, compaction_terminal, client_resend!(conn, websocket, ref, ids, follow_up)}
+    {turn_terminal, compaction_terminal, client_resends!(conn, websocket, ref, ids, follow_up)}
   end
 
-  defp client_resend!(_conn, _websocket, _ref, _ids, :none), do: nil
+  defp client_resends!(_conn, _websocket, _ref, _ids, :none), do: nil
 
-  defp client_resend!(conn, websocket, ref, ids, :client_retries) do
+  defp client_resends!(conn, websocket, ref, ids, :client_retries) do
     resend = websocket_frame(ids, native_text_input("synthetic turn prompt") ++ [%{"type" => "compaction_trigger"}], :post_turn_compaction)
-    {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(resend))
-    {_conn, _websocket, resend_terminal} = receive_terminal!(conn, websocket, ref)
-    resend_terminal
+
+    {terminals, _socket} =
+      Enum.map_reduce(1..2, {conn, websocket}, fn _resend, {conn, websocket} ->
+        {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(resend))
+        {conn, websocket, terminal} = receive_terminal!(conn, websocket, ref)
+        {terminal, {conn, websocket}}
+      end)
+
+    terminals
   end
 
   defp https_compaction!(pool, ids, turn_row, compaction_row) do
