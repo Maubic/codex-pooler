@@ -23,8 +23,6 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.HttpAuthRefresh do
   alias CodexPooler.Gateway.Runtime.Routing.DispatchLifecycle
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes
 
-  @exhausted_status ErrorCodes.upstream_unauthorized_status()
-  @exhausted_message ErrorCodes.upstream_unauthorized_message()
   @compact_endpoint "/backend-api/codex/responses/compact"
   @error_kind "http_auth_refresh"
 
@@ -191,9 +189,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.HttpAuthRefresh do
     attrs =
       SettlementAttrs.failure(
         context,
-        @exhausted_status,
+        ErrorCodes.upstream_unauthorized_status(),
         unauthorized_code(),
-        @exhausted_message,
+        ErrorCodes.upstream_unauthorized_message(),
         attempt_metadata(context, response),
         latency_ms: elapsed_ms(context.started),
         usage: %{status: "usage_unknown", source: "upstream_status"},
@@ -212,9 +210,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.HttpAuthRefresh do
       {:ok, _finalized} ->
         {:error,
          %{
-           status: @exhausted_status,
+           status: ErrorCodes.upstream_unauthorized_status(),
            code: unauthorized_code(),
-           message: @exhausted_message,
+           message: ErrorCodes.upstream_unauthorized_message(),
            param: nil
          }}
 
