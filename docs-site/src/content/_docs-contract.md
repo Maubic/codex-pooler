@@ -197,9 +197,8 @@ availability or domain-filter enforcement.
 `web_search` accepts exactly `type`, `external_web_access`, `indexed_web_access`,
 `filters`, `user_location`, `search_context_size` and `search_content_types`: the
 keys the upstream accepts and released Codex serializes. Every other key rejects
-before dispatch, `index_gated_web_access` included: that was the Codex 0.142 and
-0.143 spelling, the upstream now refuses it, and Codex Pooler does not rewrite
-it. `indexed_web_access` is a boolean that requires `external_web_access: true`;
+before dispatch, including `index_gated_web_access`, an older Codex spelling the
+upstream refuses and Codex Pooler does not rewrite. `indexed_web_access` is a boolean that requires `external_web_access: true`;
 `user_location` is an object that requires `type` `approximate` and may add
 nonblank string `country`, `region`, `city` and `timezone`; `search_context_size` is `low`,
 `medium` or `high`; `search_content_types` is a nonempty list of `text` and

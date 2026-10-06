@@ -798,10 +798,8 @@ before dispatch with `400 invalid_request` on `tools`, because the upstream
 refuses it as an unknown parameter in both Full and Lite serving mode.
 
 - `indexed_web_access` is a boolean and requires `external_web_access: true`.
-  `index_gated_web_access`, the name Codex 0.142 and 0.143 used before 0.144
-  renamed the field, is no longer accepted: the upstream refuses it, and Codex
-  Pooler does not rewrite it, so a client still sending it must switch to the
-  new name.
+  `index_gated_web_access`, an older Codex spelling of this field, is rejected:
+  the upstream refuses it, and Codex Pooler does not rewrite it.
 - `user_location` is an object that requires `type` (only `approximate`) and
   may add nonblank string `country`, `region`, `city` and `timezone` fields.
 - `search_context_size` is `low`, `medium` or `high`.

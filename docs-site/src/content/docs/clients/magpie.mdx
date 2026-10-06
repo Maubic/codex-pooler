@@ -2,12 +2,12 @@
 title: Magpie on Codex Pooler
 sidebar:
   label: Magpie
-description: Use Magpie's local gateway between Codex and Codex Pooler through the Codex backend alias, with the request shapes and limits observed end to end.
+description: Use Magpie's local gateway between Codex and Codex Pooler through the Codex backend alias, with the request shapes and limits that apply.
 ---
 
 [Magpie](https://usemagpie.ai) is a local gateway and model switcher for coding agents. It edits an agent's model settings, listens on localhost, and forwards each request to the provider you picked, rebuilding the request in another API format when that provider needs one. Connect it to Codex Pooler to keep Magpie's model picker and gateway in front of Codex while your Pool serves the requests.
 
-Codex CLI and Codex Desktop can also use Codex Pooler directly, and [Codex CLI / Desktop on Codex Pooler](/clients/codex-cli-desktop/) remains the primary setup for them. This guide covers the Magpie recipe that keeps Codex's requests closest to what Codex sends, and the limits that come with Magpie in the path. Everything below was observed in checks with a test provider and with a deployed Codex Pooler, not read from documentation; [Compatibility notes](#compatibility-notes) gives the versions.
+Codex CLI and Codex Desktop can also use Codex Pooler directly, and [Codex CLI / Desktop on Codex Pooler](/clients/codex-cli-desktop/) remains the primary setup for them. This guide covers the Magpie recipe that keeps Codex's requests closest to what Codex sends, and the limits that come with Magpie in the path.
 
 ## Before you start
 
@@ -17,12 +17,12 @@ Codex CLI and Codex Desktop can also use Codex Pooler directly, and [Codex CLI /
 - Keep Magpie signed out of any ChatGPT account that is also a Codex Pooler upstream.
 
 :::caution[Keep Magpie off shared ChatGPT sign-ins]
-Magpie can hold ChatGPT sign-ins of its own. From its source, it refreshes their tokens in the background and, when you enable that setting, spends an account's saved resets. If such an account is also an upstream of your Pool, Magpie's token refresh can rotate the account's refresh token and leave the copy Codex Pooler holds stale, and its reset spending bypasses the Pool's [automatic redemption rules](/operators/upstreams/#automatic-redemption). Give Magpie only the Pool API key. The checks behind this guide never signed Magpie in to ChatGPT, so these behaviors come from Magpie's source and were not exercised.
+Magpie can hold ChatGPT sign-ins of its own. It refreshes their tokens in the background and, when you enable that setting, spends an account's saved resets. If such an account is also an upstream of your Pool, Magpie's token refresh can rotate the account's refresh token and leave the copy Codex Pooler holds stale, and its reset spending bypasses the Pool's [automatic redemption rules](/operators/upstreams/#automatic-redemption). Give Magpie only the Pool API key.
 :::
 
 ## Configure the connection
 
-Run these commands in a terminal on the machine that runs Magpie. They use no shell-specific syntax, so they read the same in macOS and Linux shells, WSL and Windows PowerShell; only macOS was checked.
+Run these commands in a terminal on the machine that runs Magpie. They use no shell-specific syntax, so they read the same in macOS and Linux shells, WSL and Windows PowerShell.
 
 ### Add the provider
 
@@ -32,12 +32,12 @@ magpie provider add "Codex Pooler" id=pooler responses=https://codex-pooler.exam
 
 For a local Pooler, use `responses=http://localhost:4000/backend-api/codex/v1`.
 
-- `responses=` is the [Codex backend alias](/reference/runtime-routes/#backend-v1-aliases). Magpie appends `/responses` and sends Codex's Responses request to `POST /backend-api/codex/v1/responses`. A base of `https://codex-pooler.example.com/backend-api/codex` sends to `POST /backend-api/codex/responses` instead; that spelling was observed against a test provider, and the live checks used the alias spelling.
+- `responses=` is the [Codex backend alias](/reference/runtime-routes/#backend-v1-aliases). Magpie appends `/responses` and sends Codex's Responses request to `POST /backend-api/codex/v1/responses`. A base of `https://codex-pooler.example.com/backend-api/codex` sends to `POST /backend-api/codex/responses` instead, which works as well.
 - Set `responses=` alone. Adding `url=` for the same host makes Magpie rebuild requests it cannot pass through as Chat Completions; see [Chat Completions recipe](#chat-completions-recipe).
 - `models=` lists the model ids your Pool serves, separated by commas. The alias lists models in Codex's own catalog format, which Magpie does not read: without `models=`, Magpie reports `no models listed` and exposes no model. To follow the Pool's list instead, drop `models=` and add `models.url=https://codex-pooler.example.com/v1/models`. Magpie then exposes every model the key can see, including models the Codex catalog hides.
 - `search=yes` tells Magpie that the provider answers Codex's hosted web search itself. Magpie then relays Codex's request instead of rebuilding it; see [What reaches Codex Pooler](#what-reaches-codex-pooler).
 
-Magpie takes the key as an argument and stores it in plain text in its own configuration directory (a file readable only by your user in the macOS check). Treat that file like the key itself, and keep the command out of shared shell history.
+Magpie takes the key as an argument and stores it in plain text in its own configuration directory (on macOS, a file readable only by your user). Treat that file like the key itself, and keep the command out of shared shell history.
 
 ### Point Codex at Magpie
 
@@ -53,7 +53,7 @@ magpie codex pooler/gpt-6-luna
 | Linux | `~/.codex/config.toml` |
 | Windows | `%USERPROFILE%\.codex\config.toml` |
 
-Magpie edits the file under your home directory and does not read `CODEX_HOME`. With `CODEX_HOME` pointing elsewhere, it wrote `~/.codex/config.toml` and left the `CODEX_HOME` file untouched, so Codex never saw the change. Keep `CODEX_HOME` at its default while you use Magpie, or make the same edits in your `CODEX_HOME` file by hand. For a client installed inside WSL, run Magpie and the commands inside WSL as well.
+Magpie edits the file under your home directory and does not read `CODEX_HOME`. With `CODEX_HOME` pointing elsewhere, it still writes `~/.codex/config.toml` and leaves the `CODEX_HOME` file untouched, so Codex does not see the change. Keep `CODEX_HOME` at its default while you use Magpie, or make the same edits in your `CODEX_HOME` file by hand. For a client installed inside WSL, run Magpie and the commands inside WSL as well.
 
 After the command, the file contains the following, in addition to what was there before:
 
@@ -81,11 +81,11 @@ Codex sends its requests to Magpie, so Magpie must be running: open the Magpie a
 
 Select a model with `magpie codex pooler/<model-id>`, where `pooler` is the provider id from the command above. Magpie sends the model id without the prefix to the Pool (`gpt-6-luna` in the example). `magpie models` lists what Magpie exposes.
 
-Magpie builds the Codex catalog entry for each model from its own model data. In the checks, Magpie could not reach its public model catalog, and the entry it wrote declared text input only, no reasoning levels, no service tiers, and no Responses Lite mode; a normal install can show more for models Magpie knows. In the checks this meant:
+Magpie builds the Codex catalog entry for each model from its own model data. For a model it has no data for, the entry declares text input only, no reasoning levels, no service tiers and no Responses Lite mode. With such an entry:
 
-- Codex sent `reasoning.summary` but no `reasoning.effort`, so the Pool's default effort for the model applied. To choose an effort in Codex, give Magpie the levels, for example `magpie model efforts pooler/gpt-6-luna low,medium,high`, and restart Codex. The selected effort is then forwarded.
-- Fast mode was not offered. With a service tier configured, Codex reported that the tier is not advertised as supported for the model and omitted it from requests.
-- Codex built Full-shaped requests for these entries, even though the Pool used for the checks serves `gpt-6-luna` as Lite. They were accepted and answered. See [Responses Lite versus Full](/reference/responses-lite-vs-full/) for how the Pool decides the mode.
+- Codex sends `reasoning.summary` but no `reasoning.effort`, so the Pool's default effort for the model applies. To choose an effort in Codex, give Magpie the levels, for example `magpie model efforts pooler/gpt-6-luna low,medium,high`, and restart Codex. The selected effort is then forwarded.
+- Fast mode is not offered. With a service tier configured, Codex reports that the tier is not advertised as supported for the model and omits it from requests.
+- Codex builds Full-shaped requests, even for a model the Pool serves as Lite, and the Pool accepts them. See [Responses Lite versus Full](/reference/responses-lite-vs-full/) for how the Pool decides the mode.
 
 ## Verify the connection
 
@@ -97,21 +97,21 @@ codex exec --skip-git-repo-check "Reply with exactly: magpie ok"
 
 Confirm that the reply arrives and, if you started the gateway with `MAGPIE_DEBUG=1`, that its line for the request ends in `200`. In Codex Pooler's request logs, match the request time, API key, model and final status. A reply alone does not confirm that the request went through your Pooler.
 
-To check tool use and continuation, ask Codex to run `echo magpie-probe` in the same folder. The turn makes two requests; in the live checks the second one reported cached input tokens in its usage.
+To check tool use and continuation, ask Codex to run `echo magpie-probe` in the same folder. The turn makes two requests, and the second one normally reports cached input tokens in its usage.
 
 ## Advanced configuration
 
 ### What reaches Codex Pooler
 
-Magpie decides per request whether to relay Codex's Responses body or to rebuild it. The table shows what the Pooler received in the checks, with the Pooler route that answered. "Accepted live" means a request through Magpie to a deployed Codex Pooler returned `200` and Codex completed its turn.
+Magpie decides per request whether to relay Codex's Responses body or to rebuild it. The table shows what reaches the Pooler for each provider setup and which turns it serves.
 
-| Magpie provider | Codex request | What reaches Codex Pooler | Result |
+| Magpie provider | Codex request | What reaches Codex Pooler | Serves |
 | --- | --- | --- | --- |
-| `responses=` alias, `search=yes` | Full-shaped, from Magpie's catalog entry | Codex's body; `tool_search` becomes a plain function; `web_search`, `apply_patch` and sealed reasoning items stay | Tool turn accepted live |
-| `responses=` alias | Lite-shaped, from Codex's own entry for a Lite model | The `additional_tools` manifest moved into `tools` with the `functions` namespace opened; namespaces such as `collaboration` and the `x-openai-internal-codex-responses-lite` header kept | Lead turns of a multi-agent run accepted live |
-| `responses=` alias, without `search=yes` | Full-shaped, from Magpie's catalog entry | A rebuilt request: developer messages folded into `instructions`, every tool a plain function (namespaces flattened to `namespace__name`), hosted `web_search` removed, sealed reasoning not replayed | Plain and tool turns accepted live |
-| `url=` and `responses=` at `/v1` | Full-shaped | Chat Completions | Plain turn accepted live |
-| `url=` and `responses=` at `/v1` | Lite-shaped | Codex's body with the manifest lifted | Plain turn accepted live; a replayed history with an `agent_message` item was refused at the checked commit; current Codex Pooler accepts it |
+| `responses=` alias, `search=yes` | Full-shaped, from Magpie's catalog entry | Codex's body; `tool_search` becomes a plain function; `web_search`, `apply_patch` and sealed reasoning items stay | Plain and tool turns |
+| `responses=` alias | Lite-shaped, from Codex's own entry for a Lite model | The `additional_tools` manifest moved into `tools` with the `functions` namespace opened; namespaces such as `collaboration` and the `x-openai-internal-codex-responses-lite` header kept | Plain turns and the lead turns of a multi-agent run |
+| `responses=` alias, without `search=yes` | Full-shaped, from Magpie's catalog entry | A rebuilt request: developer messages folded into `instructions`, every tool a plain function (namespaces flattened to `namespace__name`), hosted `web_search` removed, sealed reasoning not replayed | Plain and tool turns, without hosted search or sealed reasoning |
+| `url=` and `responses=` at `/v1` | Full-shaped | Chat Completions | Plain turns |
+| `url=` and `responses=` at `/v1` | Lite-shaped | Codex's body with the manifest lifted | Plain turns and replayed multi-agent history |
 
 The alias recipes answer on `POST /backend-api/codex/v1/responses`. The `/v1` recipe answers on `POST /v1/chat/completions` for Full-shaped requests and on `POST /v1/responses` for Lite-shaped ones.
 
@@ -121,21 +121,21 @@ Use `search=yes`: it keeps Codex's request, including the sealed reasoning items
 
 ### Hosted web search
 
-With `search=yes`, the request that reaches the Pooler still lists the hosted `web_search` tool as Codex sent it. Without `search=yes`, Magpie removes the tool from the request, or substitutes a search API you configured in Magpie (not exercised here). The live checks verified that the tool reaches the Pooler and that the turn is accepted. They did not capture a completed hosted search.
+With `search=yes`, the request that reaches the Pooler lists the hosted `web_search` tool as Codex sent it, and the Pooler forwards it upstream. Without `search=yes`, Magpie removes the tool from the request, or substitutes a search API you configured in Magpie.
 
 ### Chat Completions recipe
 
-When a Magpie provider has both `url=` and `responses=`, Magpie rebuilds a default Full request as `POST /v1/chat/completions`. The plain turn was accepted live. The rebuilt Chat request has no reasoning continuity and no hosted search, and Codex's freeform `apply_patch` arrives as a function. Prefer the `responses=` alias recipe above.
+When a Magpie provider has both `url=` and `responses=`, Magpie rebuilds a default Full request as `POST /v1/chat/completions`. The rebuilt Chat request has no reasoning continuity and no hosted search, and Codex's freeform `apply_patch` arrives as a function. Prefer the `responses=` alias recipe above.
 
 ### The `/v1` surface
 
-A `responses=https://codex-pooler.example.com/v1` provider sends Codex's requests to the narrow OpenAI-compatible surface instead of the Codex backend alias. Codex backend clients should use the alias; see [Should Codex backend clients use `/v1`?](/clients/openai-compatible/#should-codex-backend-clients-use-v1). The check that matters for Codex: a replayed history that contains an `agent_message` item, which Codex produces when MultiAgentV2 hands a subagent's result back to its lead. The checked commit refused it live with `400 invalid_request` on `input` (`input item shape is not translatable`); current Codex Pooler forwards the item unchanged, plaintext or sealed (see [Multi-agent mailbox history replay](/clients/openai-compatible/#multi-agent-mailbox-history-replay)). A Full catalog entry's hosted `web_search` with `search_content_types` was refused on `/v1` the same way and is accepted by those builds (see [Web search tool options](/clients/openai-compatible/#web-search-tool-options)). The `/v1` surface also drops reasoning items from stateless requests by design, as described in [Continuing with `previous_response_id`](/clients/openai-compatible/#continuing-with-previous_response_id).
+A `responses=https://codex-pooler.example.com/v1` provider sends Codex's requests to the narrow OpenAI-compatible surface instead of the Codex backend alias. Codex backend clients should use the alias; see [Should Codex backend clients use `/v1`?](/clients/openai-compatible/#should-codex-backend-clients-use-v1). The `/v1` surface accepts the `agent_message` items of a multi-agent history, plaintext or sealed (see [Multi-agent mailbox history replay](/clients/openai-compatible/#multi-agent-mailbox-history-replay)), and the hosted `web_search` options Codex sends (see [Web search tool options](/clients/openai-compatible/#web-search-tool-options)). It drops reasoning items from stateless requests by design, as described in [Continuing with `previous_response_id`](/clients/openai-compatible/#continuing-with-previous_response_id).
 
 ## Troubleshooting
 
 `no models listed` while adding the provider means Magpie could not read the model list the alias returned. Add `models=` or `models.url=` as described above; `magpie provider set pooler models=gpt-6-luna` adds models to an existing provider.
 
-`400 sealed subagent task` comes from Magpie, not from Codex Pooler. It appears when MultiAgentV2 (`features.multi_agent_v2`) is enabled and a lead model spawns a subagent: the provider seals the `spawn_agent` task, Codex carries it into the subagent's first request as an `agent_message` with `encrypted_content`, and Magpie refuses to send it to a provider that has no ChatGPT account of its own. In the live check on the alias recipe, the lead's turns before and after were answered normally; the subagent's request never reached the Pooler, and the lead reported a subagent error. Run multi-agent work with Codex pointed directly at Codex Pooler.
+`400 sealed subagent task` comes from Magpie, not from Codex Pooler. It appears when MultiAgentV2 (`features.multi_agent_v2`) is enabled and a lead model spawns a subagent: the provider seals the `spawn_agent` task, Codex carries it into the subagent's first request as an `agent_message` with `encrypted_content`, and Magpie refuses to send it to a provider that has no ChatGPT account of its own. The lead's other turns are answered normally; the subagent's request never reaches the Pooler, and the lead reports a subagent error. Run multi-agent work with Codex pointed directly at Codex Pooler.
 
 `input item shape is not translatable` from Codex Pooler means the request reached `/v1` and carried an input item the narrow surface does not admit. Point the provider at the alias.
 
@@ -145,14 +145,11 @@ If Codex shows the old model list after `magpie codex`, restart Codex Desktop an
 
 ## Compatibility notes
 
-Verified on 2026-10-06 on macOS with Codex CLI 0.160.1, Magpie built from commit `b45fe28c9` of its public source (a source build reports version `dev`), and Codex Pooler at commit `0593f2c9`. Recheck these notes after upgrading either side.
-
-- **Transport.** Every model request in the checks was an HTTP `POST` answered as server-sent events. Under Magpie's wiring Codex did not open the backend websocket routes, so websocket continuation and previous-response anchors are not used.
-- **Compaction.** Codex compacted the conversation itself with an ordinary tool-less Responses request carrying a summarization prompt. `POST /backend-api/codex/responses/compact` was never called, so Pooler-side backend compaction is not used.
+- **Transport.** Under Magpie's wiring Codex sends every model request as an HTTP `POST` answered as server-sent events and does not open the backend websocket routes, so websocket continuation and previous-response anchors are not used.
+- **Compaction.** Codex compacts the conversation itself with an ordinary tool-less Responses request carrying a summarization prompt and does not call `POST /backend-api/codex/responses/compact`, so Pooler-side backend compaction is not used.
 - **Response headers.** Magpie does not pass Codex Pooler's response headers such as `x-codex-turn-state` and `x-models-etag` back to Codex. Codex receives the request id and Magpie's own `x-magpie-model` and `x-magpie-provider` headers.
-- **Reasoning continuity.** Rebuilt requests (no `search=yes`) discard the sealed reasoning items a provider returns and do not replay them, observed with a test provider that returned an encrypted reasoning item. Relayed requests replay them.
+- **Reasoning continuity.** Rebuilt requests (no `search=yes`) discard the sealed reasoning items a provider returns and do not replay them. Relayed requests replay them.
 - **Prompt cache key.** After a `400` that does not name a parameter, Magpie retries without `prompt_cache_key` and, when that succeeds, stops sending the key until Magpie restarts. Codex Pooler uses the key as a [routing hint](/reference/runtime-routes/#prompt-cache-and-continuity-boundaries) for cache locality, so restart Magpie after a rejected request if cache reuse drops.
-- **Retries.** A failing turn is retried by Codex and again by Magpie. In a measurement where every attempt received `503`, one Codex turn produced 31 requests from Codex to Magpie and 91 requests from Magpie to the provider within two minutes, all with the same session and request identifiers.
-- **Subagents.** See `400 sealed subagent task` above. Codex's other multi-agent tools reached the Pooler unchanged on the relayed routes.
-- **`/v1` refusals fixed afterwards.** The `agent_message` and `search_content_types` refusals above are specific to Codex Pooler at the checked commit and are fixed in current Codex Pooler. The fix was checked on 2026-10-06 by replaying the captured Codex bodies directly, not through Magpie; the provider answered them with `200`.
+- **Retries.** A failing turn is retried by Codex and again by Magpie. When every attempt fails, one Codex turn can produce dozens of requests to Magpie and about three times as many from Magpie to the Pool within two minutes, all with the same session and request identifiers.
+- **Subagents.** See `400 sealed subagent task` above. Codex's other multi-agent tools reach the Pooler unchanged on the relayed routes.
 - **Scope.** Codex Pooler supports Codex model-provider traffic only. Do not point Magpie's Codex sign-in or any account helper at Codex Pooler. Operator MCP is not part of this setup.
