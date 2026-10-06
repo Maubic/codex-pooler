@@ -5557,7 +5557,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
         %{
           "type" => "web_search",
           "external_web_access" => true,
-          "index_gated_web_access" => true
+          "indexed_web_access" => true
         }
       ]
 
@@ -5577,14 +5577,14 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
             %{
               "type" => "web_search",
               "external_web_access" => true,
-              "index_gated_web_access" => false
+              "indexed_web_access" => false
             },
             %{
               "type" => "web_search",
               "external_web_access" => false,
-              "index_gated_web_access" => true
+              "indexed_web_access" => true
             },
-            %{"type" => "web_search", "index_gated_web_access" => true}
+            %{"type" => "web_search", "indexed_web_access" => true}
           ] do
         assert {:error, %{status: 400, code: "invalid_request", param: "tools"}} =
                  Responses.coerce(%{
@@ -5683,7 +5683,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
             %{
               "type" => "web_search",
               "external_web_access" => true,
-              "index_gated_web_access" => true
+              "indexed_web_access" => true
             },
             %{
               "type" => "web_search",
@@ -5718,19 +5718,19 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
         %{
           "type" => "web_search",
           "external_web_access" => true,
-          "index_gated_web_access" => "true"
+          "indexed_web_access" => "true"
         },
         %{
           "type" => "web_search",
           "external_web_access" => true,
-          "index_gated_web_access" => false
+          "indexed_web_access" => false
         },
         %{
           "type" => "web_search",
           "external_web_access" => false,
-          "index_gated_web_access" => true
+          "indexed_web_access" => true
         },
-        %{"type" => "web_search", "index_gated_web_access" => true},
+        %{"type" => "web_search", "indexed_web_access" => true},
         %{"type" => "web_search", "external_web_access" => true, "filters" => %{}},
         %{"type" => "image_generation", "quality" => "high"},
         %{"type" => "file_search", "vector_store_ids" => ["vs_fixture"]},

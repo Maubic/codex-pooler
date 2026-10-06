@@ -10,6 +10,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   @metadata_passthrough_key "internal_chat_message_metadata_passthrough"
   @known_input_item_types ~w(
     additional_tools
+    agent_message
     message
     reasoning
     compaction
@@ -344,6 +345,11 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   end
 
   defp normalize_input_item(%{"type" => "additional_tools"} = item), do: {:ok, item}
+
+  # The item carries a top-level `content` list, so it has to be matched before
+  # the generic `content` clauses below would rewrite it into a user message.
+  # `Input.AgentMessage` owns its exact shape and refuses every other form.
+  defp normalize_input_item(%{"type" => "agent_message"} = item), do: {:ok, item}
 
   defp normalize_input_item(%{"type" => type}) when type not in @known_input_item_types,
     do: {:error, Error.invalid_request("input item shape is not translatable", "input")}

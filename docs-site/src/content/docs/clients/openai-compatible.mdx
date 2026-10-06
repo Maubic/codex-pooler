@@ -224,6 +224,29 @@ named standalone item requires a nonblank `name` and an `output` field, permits
 reject before dispatch. Classification and debug summaries remain metadata-only.
 This does not expand general Responses parity or prove provider-live acceptance.
 
+### Multi-agent mailbox history replay
+
+A Codex multi-agent (v2) history contains `agent_message` items: a message one
+agent delivered to another, such as a subagent's answer handed back to its lead
+or the lead's task handed to a subagent. A gateway that relays that history to
+`POST /v1/responses` sends them in `input`. Codex Pooler accepts the two forms
+Codex serializes and forwards them unchanged, in Full and Lite serving mode
+alike, as part of a stateless replay:
+
+- A plaintext item with `author`, `recipient` and a nonempty `content` list of
+  `input_text` parts, plus an optional `id` and an optional
+  `internal_chat_message_metadata_passthrough` object.
+- A sealed task handoff whose `content` is exactly one `input_text` envelope
+  followed by one nonblank `encrypted_content` part. The envelope reads
+  `Message Type: NEW_TASK` or `Message Type: MESSAGE`, names the recipient as the
+  task name and the author as the sender, and both are `/root` or `/morpheus`
+  agent paths. The encrypted part is opaque to Codex Pooler and never persisted.
+
+Any other shape, every other encrypted `agent_message` included, is rejected
+before dispatch with `400 invalid_request` on `input` instead of being filtered
+out of the history. Plaintext and sealed items keep the position the client sent
+them in.
+
 ### Hosted shell history replay
 
 OpenAI Responses history may include completed `shell_call` and
@@ -765,6 +788,29 @@ duplicates, and bytes.
 forwarding of this accepted shape only. Web search availability and any
 allow-list or block-list enforcement can vary by selected upstream model and
 account.
+
+### Web search tool options
+
+`web_search` accepts the keys the upstream accepts and Codex serializes:
+`external_web_access`, `indexed_web_access`, `filters`, `user_location`,
+`search_context_size` and `search_content_types`. Every other key is rejected
+before dispatch with `400 invalid_request` on `tools`, because the upstream
+refuses it as an unknown parameter in both Full and Lite serving mode.
+
+- `indexed_web_access` is a boolean and requires `external_web_access: true`.
+  `index_gated_web_access`, the name Codex 0.142 and 0.143 used before 0.144
+  renamed the field, is no longer accepted: the upstream refuses it, and Codex
+  Pooler does not rewrite it, so a client still sending it must switch to the
+  new name.
+- `user_location` is an object that requires `type` (only `approximate`) and
+  may add nonblank string `country`, `region`, `city` and `timezone` fields.
+- `search_context_size` is `low`, `medium` or `high`.
+- `search_content_types` is a nonempty list of `text` and `image`.
+
+Accepted values are forwarded unchanged. As with domain filters, Codex Pooler
+guarantees local validation and forwarding of this shape only; availability and
+enforcement can vary by selected upstream model and account. `web_search_preview`
+stays a type-only tool.
 
 ## Tool-output preservation
 

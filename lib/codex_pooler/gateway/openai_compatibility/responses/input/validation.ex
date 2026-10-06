@@ -2,6 +2,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
   @moduledoc false
 
   alias CodexPooler.Gateway.OpenAICompatibility.Error
+  alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.AgentMessage
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Audio
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.HostedShell
   alias CodexPooler.Gateway.Payloads.ToolResultShape
@@ -51,6 +52,9 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
 
   defp validate_input_item(%{"type" => "additional_tools"} = item, _payload),
     do: validate_additional_tools_item(item)
+
+  defp validate_input_item(%{"type" => "agent_message"} = item, _payload),
+    do: AgentMessage.validate_item(item)
 
   defp validate_input_item(%{"role" => "assistant"} = item, _payload),
     do: validate_assistant_replay_item(item)

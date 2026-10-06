@@ -21,6 +21,15 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
   @allowed_tools_builtin_types ~w(programmatic_tool_calling web_search_preview web_search image_generation)
   @locally_unsupported_fields ~w(background context_management conversation max_tool_calls prompt top_logprobs user)
 
+  # The hosted `web_search` tool keys the provider accepts, in Full and in the Lite manifest alike (direct probe,
+  # 2026-10-06: every other key, `zz_probe_unknown_key` and the pre-0.144.0 Codex spelling `index_gated_web_access`
+  # included, is refused `400 unknown_parameter`). Released Codex serializes exactly these since 0.144.0
+  # (`indexed_web_access` replaced `index_gated_web_access` there), and the vocabularies below are the provider's own.
+  @web_search_keys ~w(type external_web_access indexed_web_access filters user_location search_context_size search_content_types)
+  @web_search_user_location_keys ~w(type country region city timezone)
+  @web_search_context_sizes ~w(low medium high)
+  @web_search_content_types ~w(text image)
+
   @endpoint "/backend-api/codex/responses"
 
   @spec validate(term()) :: {:ok, map()} | {:error, Error.reason()}
@@ -605,17 +614,14 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
     do: validate_exact_builtin_tool(tool, ["type"])
 
   defp validate_tool(%{"type" => "web_search"} = tool) do
-    with :ok <-
-           validate_exact_builtin_tool(tool, [
-             "type",
-             "external_web_access",
-             "index_gated_web_access",
-             "filters"
-           ]),
+    with :ok <- validate_exact_builtin_tool(tool, @web_search_keys),
          :ok <- validate_optional_boolean_tool_field(tool, "external_web_access"),
-         :ok <- validate_optional_boolean_tool_field(tool, "index_gated_web_access"),
-         :ok <- validate_optional_web_search_filters(tool) do
-      validate_index_gated_web_access(tool)
+         :ok <- validate_optional_boolean_tool_field(tool, "indexed_web_access"),
+         :ok <- validate_optional_web_search_filters(tool),
+         :ok <- validate_optional_web_search_user_location(tool),
+         :ok <- validate_optional_web_search_context_size(tool),
+         :ok <- validate_optional_web_search_content_types(tool) do
+      validate_indexed_web_access(tool)
     end
   end
 
@@ -823,6 +829,50 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
 
   defp valid_web_search_domain?(_domain), do: false
 
+  defp validate_optional_web_search_user_location(%{"user_location" => %{} = location}) do
+    with :ok <- validate_exact_tool_keys(location, @web_search_user_location_keys),
+         :ok <- validate_web_search_location_type(location) do
+      if location |> Map.delete("type") |> Map.values() |> Enum.all?(&nonblank_string?/1),
+        do: :ok,
+        else: {:error, Error.invalid_request("tool shape is not translatable", "tools")}
+    end
+  end
+
+  defp validate_optional_web_search_user_location(%{"user_location" => _location}),
+    do: {:error, Error.invalid_request("tool shape is not translatable", "tools")}
+
+  defp validate_optional_web_search_user_location(_tool), do: :ok
+
+  # The provider requires `type` once `user_location` is present (`missing_required_parameter` on
+  # `tools[0].user_location.type`) and knows only `approximate`; a location of `type` alone is accepted.
+  defp validate_web_search_location_type(%{"type" => "approximate"}), do: :ok
+
+  defp validate_web_search_location_type(_location),
+    do: {:error, Error.invalid_request("tool shape is not translatable", "tools")}
+
+  defp nonblank_string?(value) when is_binary(value), do: String.trim(value) != ""
+  defp nonblank_string?(_value), do: false
+
+  defp validate_optional_web_search_context_size(%{"search_context_size" => size})
+       when size in @web_search_context_sizes,
+       do: :ok
+
+  defp validate_optional_web_search_context_size(%{"search_context_size" => _size}),
+    do: {:error, Error.invalid_request("tool shape is not translatable", "tools")}
+
+  defp validate_optional_web_search_context_size(_tool), do: :ok
+
+  defp validate_optional_web_search_content_types(%{"search_content_types" => [_type | _rest] = types}) do
+    if Enum.all?(types, &(&1 in @web_search_content_types)),
+      do: :ok,
+      else: {:error, Error.invalid_request("tool shape is not translatable", "tools")}
+  end
+
+  defp validate_optional_web_search_content_types(%{"search_content_types" => _types}),
+    do: {:error, Error.invalid_request("tool shape is not translatable", "tools")}
+
+  defp validate_optional_web_search_content_types(_tool), do: :ok
+
   defp validate_optional_allowed_callers(%{"allowed_callers" => allowed_callers})
        when is_list(allowed_callers) do
     if Enum.all?(allowed_callers, &(&1 in ["direct", "programmatic"])),
@@ -844,24 +894,24 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
 
   defp validate_optional_output_schema(_tool), do: :ok
 
-  defp validate_index_gated_web_access(%{"index_gated_web_access" => false}) do
+  defp validate_indexed_web_access(%{"indexed_web_access" => false}) do
     {:error, Error.invalid_request("tool shape is not translatable", "tools")}
   end
 
-  defp validate_index_gated_web_access(%{
+  defp validate_indexed_web_access(%{
          "external_web_access" => false,
-         "index_gated_web_access" => true
+         "indexed_web_access" => true
        }) do
     {:error, Error.invalid_request("tool shape is not translatable", "tools")}
   end
 
-  defp validate_index_gated_web_access(%{"index_gated_web_access" => true} = tool) do
+  defp validate_indexed_web_access(%{"indexed_web_access" => true} = tool) do
     if Map.has_key?(tool, "external_web_access"),
       do: :ok,
       else: {:error, Error.invalid_request("tool shape is not translatable", "tools")}
   end
 
-  defp validate_index_gated_web_access(_tool), do: :ok
+  defp validate_indexed_web_access(_tool), do: :ok
 
   defp validate_exact_builtin_tool(tool, allowed_keys) do
     validate_exact_tool_keys(tool, allowed_keys)

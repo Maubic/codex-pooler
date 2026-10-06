@@ -111,7 +111,7 @@ Magpie decides per request whether to relay Codex's Responses body or to rebuild
 | `responses=` alias | Lite-shaped, from Codex's own entry for a Lite model | The `additional_tools` manifest moved into `tools` with the `functions` namespace opened; namespaces such as `collaboration` and the `x-openai-internal-codex-responses-lite` header kept | Lead turns of a multi-agent run accepted live |
 | `responses=` alias, without `search=yes` | Full-shaped, from Magpie's catalog entry | A rebuilt request: developer messages folded into `instructions`, every tool a plain function (namespaces flattened to `namespace__name`), hosted `web_search` removed, sealed reasoning not replayed | Plain and tool turns accepted live |
 | `url=` and `responses=` at `/v1` | Full-shaped | Chat Completions | Plain turn accepted live |
-| `url=` and `responses=` at `/v1` | Lite-shaped | Codex's body with the manifest lifted | Plain turn accepted live; a replayed history with an `agent_message` item refused |
+| `url=` and `responses=` at `/v1` | Lite-shaped | Codex's body with the manifest lifted | Plain turn accepted live; a replayed history with an `agent_message` item was refused at the checked commit; current Codex Pooler accepts it |
 
 The alias recipes answer on `POST /backend-api/codex/v1/responses`. The `/v1` recipe answers on `POST /v1/chat/completions` for Full-shaped requests and on `POST /v1/responses` for Lite-shaped ones.
 
@@ -129,7 +129,7 @@ When a Magpie provider has both `url=` and `responses=`, Magpie rebuilds a defau
 
 ### The `/v1` surface
 
-A `responses=https://codex-pooler.example.com/v1` provider sends Codex's requests to the narrow OpenAI-compatible surface instead of the Codex backend alias. Codex backend clients should use the alias; see [Should Codex backend clients use `/v1`?](/clients/openai-compatible/#should-codex-backend-clients-use-v1). The check that matters for Codex: a replayed history that contains an `agent_message` item, which Codex produces when MultiAgentV2 hands a subagent's result back to its lead, was refused live with `400 invalid_request` on `input` (`input item shape is not translatable`). The `/v1` surface also drops reasoning items from stateless requests by design, as described in [Continuing with `previous_response_id`](/clients/openai-compatible/#continuing-with-previous_response_id).
+A `responses=https://codex-pooler.example.com/v1` provider sends Codex's requests to the narrow OpenAI-compatible surface instead of the Codex backend alias. Codex backend clients should use the alias; see [Should Codex backend clients use `/v1`?](/clients/openai-compatible/#should-codex-backend-clients-use-v1). The check that matters for Codex: a replayed history that contains an `agent_message` item, which Codex produces when MultiAgentV2 hands a subagent's result back to its lead. The checked commit refused it live with `400 invalid_request` on `input` (`input item shape is not translatable`); current Codex Pooler forwards the item unchanged, plaintext or sealed (see [Multi-agent mailbox history replay](/clients/openai-compatible/#multi-agent-mailbox-history-replay)). A Full catalog entry's hosted `web_search` with `search_content_types` was refused on `/v1` the same way and is accepted by those builds (see [Web search tool options](/clients/openai-compatible/#web-search-tool-options)). The `/v1` surface also drops reasoning items from stateless requests by design, as described in [Continuing with `previous_response_id`](/clients/openai-compatible/#continuing-with-previous_response_id).
 
 ## Troubleshooting
 
@@ -137,7 +137,7 @@ A `responses=https://codex-pooler.example.com/v1` provider sends Codex's request
 
 `400 sealed subagent task` comes from Magpie, not from Codex Pooler. It appears when MultiAgentV2 (`features.multi_agent_v2`) is enabled and a lead model spawns a subagent: the provider seals the `spawn_agent` task, Codex carries it into the subagent's first request as an `agent_message` with `encrypted_content`, and Magpie refuses to send it to a provider that has no ChatGPT account of its own. In the live check on the alias recipe, the lead's turns before and after were answered normally; the subagent's request never reached the Pooler, and the lead reported a subagent error. Run multi-agent work with Codex pointed directly at Codex Pooler.
 
-`input item shape is not translatable` from Codex Pooler means the request reached `/v1`; point the provider at the alias.
+`input item shape is not translatable` from Codex Pooler means the request reached `/v1` and carried an input item the narrow surface does not admit. Point the provider at the alias.
 
 `Configured service tier ... is not advertised as supported` is Codex declining a service tier that Magpie's catalog entry does not list. It is not an error.
 
@@ -154,4 +154,5 @@ Verified on 2026-10-06 on macOS with Codex CLI 0.160.1, Magpie built from commit
 - **Prompt cache key.** After a `400` that does not name a parameter, Magpie retries without `prompt_cache_key` and, when that succeeds, stops sending the key until Magpie restarts. Codex Pooler uses the key as a [routing hint](/reference/runtime-routes/#prompt-cache-and-continuity-boundaries) for cache locality, so restart Magpie after a rejected request if cache reuse drops.
 - **Retries.** A failing turn is retried by Codex and again by Magpie. In a measurement where every attempt received `503`, one Codex turn produced 31 requests from Codex to Magpie and 91 requests from Magpie to the provider within two minutes, all with the same session and request identifiers.
 - **Subagents.** See `400 sealed subagent task` above. Codex's other multi-agent tools reached the Pooler unchanged on the relayed routes.
+- **`/v1` refusals fixed afterwards.** The `agent_message` and `search_content_types` refusals above are specific to Codex Pooler at the checked commit and are fixed in current Codex Pooler. The fix was checked on 2026-10-06 by replaying the captured Codex bodies directly, not through Magpie; the provider answered them with `200`.
 - **Scope.** Codex Pooler supports Codex model-provider traffic only. Do not point Magpie's Codex sign-in or any account helper at Codex Pooler. Operator MCP is not part of this setup.

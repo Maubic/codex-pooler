@@ -1925,6 +1925,28 @@ defmodule CodexPooler.CompatibilityMatrix do
           full_openai_hosted_tool_parity: false
         }
       },
+      agent_message_history: %{
+        accepted_items: ["agent_message"],
+        shapes: %{
+          plaintext: %{
+            required: ["type", "author", "recipient", "content"],
+            optional: ["id", "internal_chat_message_metadata_passthrough"],
+            content: "nonempty_input_text_parts_only"
+          },
+          sealed_handoff: %{
+            required: ["type", "author", "recipient", "content"],
+            optional: ["id", "internal_chat_message_metadata_passthrough"],
+            content: "exact_input_text_envelope_then_one_nonblank_encrypted_content",
+            message_types: ["NEW_TASK", "MESSAGE"],
+            recognized_by: "native_agent_v2_handoff_predicate"
+          }
+        },
+        forwarding: "unchanged_in_client_position",
+        refusal: %{status: 400, code: "invalid_request", param: "input", upstream_dispatch: false},
+        serving_modes: ["full", "lite"],
+        continuation: %{stateless_history_replay: "accepted"},
+        privacy: %{mode: "metadata_only", content_persisted: false, ciphertext_persisted: false}
+      },
       responses_truncation: %{
         accepted_values: ["auto", "disabled"],
         forwarded_upstream: false
@@ -3752,12 +3774,19 @@ defmodule CodexPooler.CompatibilityMatrix do
         web_search_preview: %{accepted_shape: "type_only"},
         web_search: %{
           accepted_required: ["type"],
-          accepted_optional: ["external_web_access", "index_gated_web_access", "filters"],
+          accepted_optional: [
+            "external_web_access",
+            "indexed_web_access",
+            "filters",
+            "user_location",
+            "search_context_size",
+            "search_content_types"
+          ],
           valid_combinations: [
             "type_only",
             "external_web_access=false",
             "external_web_access=true",
-            "external_web_access=true,index_gated_web_access=true"
+            "external_web_access=true,indexed_web_access=true"
           ],
           filters: %{
             shape: "nonempty_object",
@@ -3782,7 +3811,21 @@ defmodule CodexPooler.CompatibilityMatrix do
               "allowed_domains,blocked_domains"
             ]
           },
-          rejected_options: ["search_context_size", "user_location"],
+          user_location: %{
+            shape: "object",
+            required: ["type"],
+            allowed_keys: ["type", "country", "region", "city", "timezone"],
+            type: "approximate",
+            fields: "nonblank_strings",
+            forwarding: "unchanged"
+          },
+          search_context_size: %{accepted_values: ["low", "medium", "high"], forwarding: "unchanged"},
+          search_content_types: %{
+            shape: "nonempty_list",
+            accepted_values: ["text", "image"],
+            forwarding: "unchanged"
+          },
+          rejected_options: ["index_gated_web_access"],
           upstream_confidence: %{
             pooler_contract: "validation_and_unchanged_forwarding",
             availability_and_enforcement: "selected_model_and_account_dependent",

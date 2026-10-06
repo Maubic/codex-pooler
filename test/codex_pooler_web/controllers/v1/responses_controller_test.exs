@@ -6844,7 +6844,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     tool = %{
       "type" => "web_search",
       "external_web_access" => true,
-      "index_gated_web_access" => true
+      "indexed_web_access" => true
     }
 
     upstream =

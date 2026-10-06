@@ -1844,12 +1844,19 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
         web_search_preview: %{accepted_shape: "type_only"},
         web_search: %{
           accepted_required: ["type"],
-          accepted_optional: ["external_web_access", "index_gated_web_access", "filters"],
+          accepted_optional: [
+            "external_web_access",
+            "indexed_web_access",
+            "filters",
+            "user_location",
+            "search_context_size",
+            "search_content_types"
+          ],
           valid_combinations: [
             "type_only",
             "external_web_access=false",
             "external_web_access=true",
-            "external_web_access=true,index_gated_web_access=true"
+            "external_web_access=true,indexed_web_access=true"
           ],
           filters: %{
             shape: "nonempty_object",
@@ -1874,7 +1881,21 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
               "allowed_domains,blocked_domains"
             ]
           },
-          rejected_options: ["search_context_size", "user_location"],
+          user_location: %{
+            shape: "object",
+            required: ["type"],
+            allowed_keys: ["type", "country", "region", "city", "timezone"],
+            type: "approximate",
+            fields: "nonblank_strings",
+            forwarding: "unchanged"
+          },
+          search_context_size: %{accepted_values: ["low", "medium", "high"], forwarding: "unchanged"},
+          search_content_types: %{
+            shape: "nonempty_list",
+            accepted_values: ["text", "image"],
+            forwarding: "unchanged"
+          },
+          rejected_options: ["index_gated_web_access"],
           upstream_confidence: %{
             pooler_contract: "validation_and_unchanged_forwarding",
             availability_and_enforcement: "selected_model_and_account_dependent",
