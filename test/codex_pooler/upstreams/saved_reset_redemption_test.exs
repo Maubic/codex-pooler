@@ -19,6 +19,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
   alias CodexPooler.Quotas.Evidence
   alias CodexPooler.Repo
   alias CodexPooler.SavedResetConfirmationFixtures
+  alias CodexPooler.TestDiagnostics
   alias CodexPooler.UpstreamConnPoolTelemetry
   alias CodexPooler.Upstreams.Assignments.PoolAssignments
   alias CodexPooler.Upstreams.Quota.AccountAvailabilityStore
@@ -64,8 +65,11 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
              "/backend-api/wham/rate-limit-reset-credits" =>
                {200,
                 %{
-                  "credits" => [%{"id" => "credit_1", "status" => "available"}],
-                  "available_count" => 1
+                  "credits" => [
+                    %{"id" => "credit_1", "status" => "available", "expires_at" => "2026-12-01T00:00:00Z"},
+                    %{"id" => "credit_2", "status" => "available", "expires_at" => "2026-11-01T00:00:00Z"}
+                  ],
+                  "available_count" => 2
                 }},
              "/backend-api/wham/rate-limit-reset-credits/consume" => {200, %{"code" => "reset"}},
              "/api/codex/usage" => {404, %{}},
@@ -106,6 +110,8 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
       metadata_json = CodexPooler.JSON.encode!(persisted.metadata)
       refute metadata_json =~ "credit_1"
       refute metadata_json =~ redeem_request_id
+      # Account expiry preference does not reorder the provider's physical list.
+      TestDiagnostics.puts("EXPIRY_PHYSICAL_RECEIPT " <> CodexPooler.JSON.encode!(%{scenario: "manual_chatgpt_list_order", consumes: Enum.count(requests, &(&1.method == "POST")), generation_sends: Enum.count(requests, &String.ends_with?(&1.path, "/responses")), first_listed_later_expiry_selected: consume.json["credit_id"] == "credit_1"}))
     end
 
     test "redemption list and consume carry the upstream connection idle bound from settings" do
@@ -320,6 +326,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
 
       # the settled lifecycle does not block a later genuine claim
       refute RedemptionLifecycle.blocks_new_redemption?(settled, DateTime.utc_now())
+      TestDiagnostics.puts("EXPIRY_PRESEND_RECEIPT " <> CodexPooler.JSON.encode!(%{scenario: "proof_prepost_veto", consumes: Enum.count(FakeUpstream.requests(fake), &(&1.method == "POST")), generation_sends: Enum.count(FakeUpstream.requests(fake), &String.ends_with?(&1.path, "/responses")), provider_dispatches: settled["provider_replay"]["provider_dispatches"], topology: "shared_sandbox_transaction"}))
     end
 
     test "gateway auto settles a zero-dispatch claim when the bank drops to keep credits before the POST" do
@@ -378,6 +385,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
       settled = Repo.reload!(identity).metadata["saved_reset_redemption"]
       assert settled["phase"] == "consume_not_applied"
       assert settled["provider_replay"]["provider_dispatches"] == 0
+      TestDiagnostics.puts("EXPIRY_PRESEND_RECEIPT " <> CodexPooler.JSON.encode!(%{scenario: "keep_prepost_veto", consumes: Enum.count(FakeUpstream.requests(fake), &(&1.method == "POST")), generation_sends: Enum.count(FakeUpstream.requests(fake), &String.ends_with?(&1.path, "/responses")), provider_dispatches: settled["provider_replay"]["provider_dispatches"], topology: "shared_sandbox_transaction"}))
     end
 
     test "revalidates assignment status before reserving a provider dispatch" do
@@ -8753,7 +8761,11 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
         end
       end)
 
-    case await_cohort_fixture_task(task, timeout) || Task.shutdown(task, :brutal_kill) do
+    monitor = CodexPooler.TestProcess.monitor_flushed(task.pid)
+    result = await_cohort_fixture_task(task, timeout) || Task.shutdown(task, :brutal_kill)
+    assert_receive {:DOWN, ^monitor, :process, _pid, _reason}, @cohort_fixture_task_timeout
+
+    case result do
       {:ok, {:ok, fixture}} -> fixture
       {:ok, {:raised, kind, reason, stacktrace}} -> :erlang.raise(kind, reason, stacktrace)
       nil -> raise "timed out creating committed cohort fixture"
@@ -8813,14 +8825,9 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
     owned = %{identity_ids: [partial.identity_id], pool_ids: partial.pool_ids}
     on_exit(fn -> cleanup_committed_gateway_auto_cohort_fixture!(owned) end)
 
-    # The failure arm hands its error back through `Task.yield/2`, which returns on the reply the
-    # task sends before it exits, so the task can still be alive for a moment here. Wait for the
-    # exit within the detection budget rather than sampling liveness once: a task that really
-    # outlives the failure never reports `:DOWN` and still fails.
-    task_monitor = Process.monitor(task_pid)
-
-    assert_receive {:DOWN, ^task_monitor, :process, ^task_pid, _reason},
-                   @cohort_fixture_task_timeout
+    # The fixture helper independently monitors the task before waiting or terminating it,
+    # so returning or raising here already proves the task has exited before row cleanup.
+    refute Process.alive?(task_pid)
 
     run_unboxed(fn ->
       refute Repo.exists?(from identity in UpstreamIdentity, where: identity.id == ^partial.identity_id)
@@ -9391,6 +9398,7 @@ defmodule CodexPooler.Upstreams.SavedResetRedemptionTest do
     assert Enum.count(evidence.results, &match?({:ok, %{applied?: true}}, &1)) == 1
     assert length(evidence.results) == 2
     assert provider_consume_count(fixture.fake) == 1
+    TestDiagnostics.puts("EXPIRY_CONCURRENT_RECEIPT " <> CodexPooler.JSON.encode!(%{scenario: "two_redeemers", consumes: provider_consume_count(fixture.fake), generation_sends: Enum.count(FakeUpstream.requests(fixture.fake), &String.ends_with?(&1.path, "/responses")), distinct_backends: evidence.winner_backend_pid != evidence.loser_backend_pid, blocking_witness: evidence.winner_backend_pid in evidence.blocking_pids, applied_results: Enum.count(evidence.results, &match?({:ok, %{applied?: true}}, &1))}))
   end
 
   @tag :saved_reset_transient_circuit_reversed_order

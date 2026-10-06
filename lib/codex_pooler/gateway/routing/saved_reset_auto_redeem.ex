@@ -9,6 +9,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
   alias CodexPooler.Gateway.Routing.CandidateEligibility
   alias CodexPooler.Gateway.Routing.ProviderCredits
   alias CodexPooler.Gateway.Routing.QuotaRefresh.{Executor, Plan}
+  alias CodexPooler.Gateway.Routing.SavedResetAutoRedeem.ExpiryPriority
   alias CodexPooler.Gateway.Routing.SessionContinuity
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Quotas.WindowClassifier
@@ -160,10 +161,14 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
 
   defp maybe_redeem_candidate(candidates, result, refresh_plan, trigger, timestamp, opts) do
     candidates
-    |> Enum.find(fn candidate ->
-      redeemable_candidate?(candidate, timestamp) and
-        resettable_candidate?(candidate, refresh_plan, timestamp)
+    |> Enum.with_index()
+    |> Enum.filter(fn {candidate, _index} ->
+      redeemable? = redeemable_candidate?(candidate, timestamp)
+      resettable? = resettable_candidate?(candidate, refresh_plan, timestamp)
+      redeemable? and resettable?
     end)
+    |> ExpiryPriority.order(timestamp)
+    |> List.first()
     |> case do
       {assignment, identity} ->
         redeem_and_refilter(result, refresh_plan, assignment, identity, trigger, timestamp, opts)

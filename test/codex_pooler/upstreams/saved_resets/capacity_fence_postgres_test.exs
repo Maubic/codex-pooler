@@ -9,6 +9,7 @@ defmodule CodexPooler.Upstreams.SavedResets.CapacityFencePostgresTest do
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
   alias CodexPooler.SavedResetConfirmationFixtures
+  alias CodexPooler.TestDiagnostics
   alias CodexPooler.Upstreams.Quota.AccountAvailabilityStore
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
@@ -65,6 +66,7 @@ defmodule CodexPooler.Upstreams.SavedResets.CapacityFencePostgresTest do
     assert evidence.wait_event_type == "Lock"
     assert {:ok, %{status: :succeeded, applied?: true, code: "reset"}} = evidence.claim_result
     assert provider_consume_count(fixture.fake) == 1
+    TestDiagnostics.puts("EXPIRY_LOCK_RECEIPT " <> CodexPooler.JSON.encode!(%{scenario: "circuit_open_consume", consumes: provider_consume_count(fixture.fake), generation_sends: Enum.count(FakeUpstream.requests(fixture.fake), &String.ends_with?(&1.path, "/responses")), distinct_backends: evidence.writer_backend_pid != evidence.claim_backend_pid, blocking_witness: evidence.writer_backend_pid in evidence.blocking_pids}))
   end
 
   test "open to closed rereads current C and vetoes before provider I/O" do
@@ -81,6 +83,7 @@ defmodule CodexPooler.Upstreams.SavedResets.CapacityFencePostgresTest do
              evidence.claim_result
 
     assert provider_consume_count(fixture.fake) == 0
+    TestDiagnostics.puts("EXPIRY_LOCK_RECEIPT " <> CodexPooler.JSON.encode!(%{scenario: "circuit_close_veto", consumes: provider_consume_count(fixture.fake), generation_sends: Enum.count(FakeUpstream.requests(fixture.fake), &String.ends_with?(&1.path, "/responses")), distinct_backends: evidence.writer_backend_pid != evidence.claim_backend_pid, blocking_witness: evidence.writer_backend_pid in evidence.blocking_pids}))
   end
 
   test "quota becoming usable while the claim waits is evaluated after locks" do
@@ -107,6 +110,7 @@ defmodule CodexPooler.Upstreams.SavedResets.CapacityFencePostgresTest do
              evidence.claim_result
 
     assert provider_consume_count(fixture.fake) == 0
+    TestDiagnostics.puts("EXPIRY_LOCK_RECEIPT " <> CodexPooler.JSON.encode!(%{scenario: "capacity_after_scan_veto", consumes: provider_consume_count(fixture.fake), generation_sends: Enum.count(FakeUpstream.requests(fixture.fake), &String.ends_with?(&1.path, "/responses")), distinct_backends: evidence.writer_backend_pid != evidence.claim_backend_pid, blocking_witness: evidence.writer_backend_pid in evidence.blocking_pids}))
   end
 
   test "an allowed provider receipt committed while the claim waits clears the proof after locks" do

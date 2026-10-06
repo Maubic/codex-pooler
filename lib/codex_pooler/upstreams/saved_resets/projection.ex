@@ -306,14 +306,75 @@ defmodule CodexPooler.Upstreams.SavedResets do
 
   @spec expiration_observation_fresh?(snapshot_projection(), DateTime.t()) :: boolean()
   def expiration_observation_fresh?(snapshot, %DateTime{} = timestamp) do
-    with {:ok, observed_at} <- parse_iso8601_datetime(snapshot.expires_observed_at),
+    expiration_observation_fresh?(snapshot.expires_observed_at, snapshot.next_expires_at, timestamp)
+  end
+
+  @spec expiration_observation_fresh?(term(), String.t() | nil, DateTime.t()) :: boolean()
+  defp expiration_observation_fresh?(expires_observed_at, next_expires_at, timestamp) do
+    with {:ok, observed_at} <- parse_iso8601_datetime(expires_observed_at),
          false <- DateTime.after?(observed_at, timestamp) do
       observation_age = whole_second_diff(timestamp, observed_at)
-      observation_age >= 0 and observation_age < expiration_observation_ttl(snapshot, timestamp)
+      observation_age >= 0 and observation_age < expiration_observation_ttl(%{next_expires_at: next_expires_at}, timestamp)
     else
       _invalid_or_future -> false
     end
   end
+
+  @doc "Returns an account ordering hint from fresh authoritative expiration detail, never spend permission."
+  @spec expiration_priority_hint(UpstreamIdentity.t() | map() | nil, DateTime.t()) :: {:known, DateTime.t()} | :unknown
+  def expiration_priority_hint(%UpstreamIdentity{} = identity, %DateTime{} = timestamp),
+    do: expiration_priority_hint(identity.metadata, timestamp)
+
+  def expiration_priority_hint(%{} = metadata, %DateTime{} = timestamp) do
+    raw = Map.get(metadata, "saved_resets", metadata)
+
+    with %{} <- raw,
+         %{"status" => @reported, "expires_detail_status" => "authoritative_rows"} <- raw,
+         {:ok, count} when count > 0 <- non_negative_truncated_integer(raw["available_count"]),
+         {:ok, expirations} <- priority_expirations(raw),
+         true <- Enum.all?(expirations, &DateTime.after?(&1, timestamp)),
+         minimum <- Enum.min_by(expirations, &DateTime.to_unix(&1, :microsecond)),
+         true <- expiration_observation_fresh?(raw["expires_observed_at"], DateTime.to_iso8601(minimum), timestamp) do
+      {:known, minimum}
+    else
+      _unqualified -> :unknown
+    end
+  end
+
+  def expiration_priority_hint(_metadata, %DateTime{}), do: :unknown
+
+  defp priority_expirations(raw) do
+    collections =
+      for key <- ["available_expires_at", "available_expirations"], Map.has_key?(raw, key) do
+        priority_expiration_collection(raw[key], key)
+      end
+
+    case Enum.uniq(collections) do
+      [{:ok, [_ | _] = expirations}] -> {:ok, expirations}
+      _missing_invalid_or_disagreeing -> :error
+    end
+  end
+
+  defp priority_expiration_collection([_ | _] = values, key) do
+    values
+    |> Enum.reduce_while({:ok, []}, fn value, {:ok, acc} ->
+      value = if key == "available_expirations", do: priority_expiration_row(value), else: value
+
+      case parse_iso8601_datetime(value) do
+        {:ok, datetime} -> {:cont, {:ok, [DateTime.from_unix!(DateTime.to_unix(datetime, :microsecond), :microsecond) | acc]}}
+        :error -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, dates} -> {:ok, dates |> Enum.uniq_by(&DateTime.to_unix(&1, :microsecond)) |> Enum.sort_by(&DateTime.to_unix(&1, :microsecond))}
+      :error -> :error
+    end
+  end
+
+  defp priority_expiration_collection(_values, _key), do: :error
+  defp priority_expiration_row(%{"expires_at" => value}), do: value
+  defp priority_expiration_row(%{expires_at: value}), do: value
+  defp priority_expiration_row(_row), do: nil
 
   @spec reuse_expiration_metadata(term(), UpstreamIdentity.t() | map()) :: term()
   @spec reuse_expiration_metadata(term(), UpstreamIdentity.t() | map(), DateTime.t() | nil) ::

@@ -12,6 +12,7 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.RequestOptions.ResetProbe
+  alias CodexPooler.Gateway.Payloads.RequestOptions.Transport
   alias CodexPooler.Gateway.Persistence.BridgeSessionAlias
   alias CodexPooler.Gateway.Persistence.CodexSession
   alias CodexPooler.Gateway.Persistence.RoutingCircuitState
@@ -24,6 +25,7 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
   alias CodexPooler.Quotas.Evidence
   alias CodexPooler.Repo
   alias CodexPooler.SavedResetConfirmationFixtures
+  alias CodexPooler.TestDiagnostics
   alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
   alias CodexPooler.Upstreams.Quota.AccountAvailabilityStore
   alias CodexPooler.Upstreams.Quota.AccountQuotaWindow
@@ -676,6 +678,144 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
       refute metadata_json =~ "credit_id"
     end
 
+    for window_kind <- [:weekly, :monthly], serving_mode <- ["full", "lite"], carrier <- [:http_sse, :native_websocket, :bridged_websocket] do
+      @tag :saved_reset_expiry_priority
+      test "blocked #{window_kind} recovery ranks qualified expiry in #{serving_mode} #{carrier} context" do
+        now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+        payload = usage_payload(1, window_minutes: if(unquote(window_kind) == :monthly, do: 43_200, else: 10_080))
+        mode = {:path_json, %{"/api/codex/rate-limit-reset-credits/consume" => {200, %{"code" => "reset"}}, "/api/codex/usage" => {200, payload}}}
+        {:ok, later_fake} = FakeUpstream.start_link(mode)
+        {:ok, earlier_fake} = FakeUpstream.start_link(mode)
+
+        on_exit(fn ->
+          FakeUpstream.stop(later_fake)
+          FakeUpstream.stop(earlier_fake)
+        end)
+
+        %{pool: pool, api_key: api_key} = active_api_key_fixture()
+
+        candidates =
+          for {fake, seconds} <- [{later_fake, 7200}, {earlier_fake, 3600}] do
+            expiration = saved_reset_expiration_attrs(now, seconds) |> Map.put("expires_detail_status", "authoritative_rows")
+            %{identity: identity, assignment: assignment} = active_upstream_assignment_fixture(pool, %{metadata: saved_reset_metadata(fake, 2, expiration)})
+            identity = enable_saved_reset_auto_redeem!(identity)
+
+            if unquote(window_kind) == :weekly do
+              upsert_weekly_exhausted_quota!(identity)
+            else
+              attrs = primary_quota_attrs(Decimal.new("100")) |> Map.merge(%{window_minutes: 43_200, reset_at: DateTime.add(now, 20, :day)})
+              assert {:ok, [window]} = QuotaWindows.upsert_quota_windows(identity, [attrs])
+              SavedResetConfirmationFixtures.confirm_automatic_pressure!(identity, windows: [window])
+            end
+
+            {assignment, identity}
+          end
+
+        [later, {earlier_assignment, earlier_identity}] = candidates
+        input = filter_input(pool, api_key, candidates, "expiry-priority")
+
+        options =
+          RequestOptions.put_transport(input.request_options,
+            transport: if(unquote(carrier) == :native_websocket, do: "websocket", else: "http_sse"),
+            upstream_websocket_bridge?: unquote(carrier) == :bridged_websocket
+          )
+
+        input = %{input | request_options: options}
+        assert Transport.upstream_transport(options.transport) == unquote(carrier)
+        options = RequestOptions.put_model_serving_mode(options, configured_mode: unquote(serving_mode), effective_mode: unquote(serving_mode), source: "override")
+        input = %{input | request_options: options}
+        assert input.request_options.routing.model_serving_mode == unquote(serving_mode)
+
+        {result, _log} = with_info_log(fn -> RouteFiltering.filter_candidates(input) end)
+        assert consume_count(later_fake) == 0
+        assert consume_count(earlier_fake) == 1
+        assert Repo.reload!(earlier_identity).metadata["saved_reset_redemption"]["phase"] == "consumed_pending_probe"
+        refute Repo.reload!(elem(later, 1)).metadata["saved_reset_redemption"]
+        assert Repo.reload!(earlier_identity).metadata["saved_resets"]["available_count"] == 1
+        assert priority_generation_count(earlier_fake) == 0
+        assert priority_generation_count(later_fake) == 0
+        [consume] = Enum.filter(FakeUpstream.requests(earlier_fake), &(&1.method == "POST"))
+        refute Map.has_key?(consume.json, "credit_id")
+
+        if unquote(window_kind) == :weekly do
+          assert {:ok, [{assignment, identity}], returned_options} = result
+          assert {assignment.id, identity.id} == {earlier_assignment.id, earlier_identity.id}
+          assert ResetProbe.bound?(returned_options.routing.reset_probe)
+        else
+          assert {:error, %{code: "quota_exhausted", non_credit_recovery_outcome: "pending"}} = result
+        end
+
+        with_info_log(fn -> RouteFiltering.filter_candidates(input) end)
+        assert consume_count(earlier_fake) == 1
+        assert consume_count(later_fake) == 0
+        TestDiagnostics.puts("EXPIRY_RECEIPT " <> CodexPooler.JSON.encode!(%{window: unquote(window_kind), mode: unquote(serving_mode), carrier: unquote(carrier), selected: "earlier", earlier_consumes: consume_count(earlier_fake), later_consumes: consume_count(later_fake), generation_sends: priority_generation_count(earlier_fake) + priority_generation_count(later_fake)}))
+      end
+    end
+
+    for blocker <- [:disabled, :primary_and_weekly, :model_and_weekly, :additional_and_weekly, :equal, :unknown] do
+      @tag :saved_reset_expiry_priority
+      test "expiry preference retains exact eligibility and fallback for #{blocker}" do
+        blocker = Enum.at([unquote(blocker)], 0)
+        sibling_block = if blocker in [:disabled, :equal, :unknown], do: :missing, else: blocker
+        %{upstream: fake, target: target, sibling: sibling, input: input} = mixed_exclusion_arrangement(sibling_block, "blocked")
+        now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+        target_hint = saved_reset_expiration_attrs(now, 7200) |> Map.put("expires_detail_status", "authoritative_rows")
+        sibling_hint = saved_reset_expiration_attrs(now, if(blocker == :equal, do: 7200, else: 3600)) |> Map.put("expires_detail_status", "authoritative_rows")
+
+        for {identity, hint} <- [{target.identity, target_hint}, {sibling.identity, sibling_hint}] do
+          identity |> Ecto.Changeset.change(metadata: Map.update!(identity.metadata, "saved_resets", &Map.merge(&1, hint))) |> Repo.update!()
+        end
+
+        if blocker in [:disabled, :equal, :unknown], do: upsert_weekly_exhausted_quota!(sibling.identity)
+        if blocker == :disabled, do: sibling.identity |> Ecto.Changeset.change(saved_reset_auto_redeem_enabled: false) |> Repo.update!()
+
+        if blocker == :unknown do
+          for identity <- [target.identity, sibling.identity] do
+            persisted = Repo.reload!(identity)
+            persisted |> Ecto.Changeset.change(metadata: Map.update!(persisted.metadata, "saved_resets", &Map.put(&1, "expires_detail_status", "incomplete"))) |> Repo.update!()
+          end
+        end
+
+        candidates = Enum.map(input.candidates, fn {assignment, identity} -> {assignment, Repo.reload!(identity)} end)
+        input = FilterInput.put_candidates(input, candidates)
+        {{:ok, [{selected_assignment, selected_identity}], _options}, _log} = with_info_log(fn -> RouteFiltering.filter_candidates(input) end)
+        expected = if blocker in [:equal, :unknown], do: sibling, else: target
+        assert {selected_assignment.id, selected_identity.id} == {expected.assignment.id, expected.identity.id}
+        assert consume_count(fake) == 1
+        assert priority_generation_count(fake) == 0
+        other = if expected == target, do: sibling, else: target
+        refute Repo.reload!(other.identity).metadata["saved_reset_redemption"]
+        with_info_log(fn -> RouteFiltering.filter_candidates(input) end)
+        assert consume_count(fake) == 1
+        TestDiagnostics.puts("EXPIRY_FENCE_RECEIPT " <> CodexPooler.JSON.encode!(%{scenario: blocker, consumes: consume_count(fake), generation_sends: priority_generation_count(fake), selected: if(expected == target, do: "eligible_target", else: "original_first")}))
+      end
+    end
+
+    @tag :saved_reset_expiry_priority
+    test "a ranked target losing locked policy authority never consumes the next account" do
+      %{upstream: fake, target: target, sibling: sibling, input: input} = mixed_exclusion_arrangement(:missing, "blocked")
+      upsert_weekly_exhausted_quota!(sibling.identity)
+      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      for {identity, seconds} <- [{target.identity, 7200}, {sibling.identity, 3600}] do
+        hint = saved_reset_expiration_attrs(now, seconds) |> Map.put("expires_detail_status", "authoritative_rows")
+        identity |> Ecto.Changeset.change(metadata: Map.update!(identity.metadata, "saved_resets", &Map.merge(&1, hint))) |> Repo.update!()
+      end
+
+      candidates = Enum.map(input.candidates, fn {assignment, identity} -> {assignment, Repo.reload!(identity)} end)
+      input = FilterInput.put_candidates(input, candidates)
+      # The scan owns an enabled snapshot; the shared locked row has lost authorization.
+      Repo.reload!(sibling.identity) |> Ecto.Changeset.change(saved_reset_auto_redeem_enabled: false) |> Repo.update!()
+      {result, log} = with_info_log(fn -> RouteFiltering.filter_candidates(input) end)
+      assert {:error, %{code: "quota_exhausted"}} = result
+      assert log =~ "result_code=gateway_auto_policy_disabled"
+      assert consume_count(fake) == 0
+      assert priority_generation_count(fake) == 0
+      refute Repo.reload!(target.identity).metadata["saved_reset_redemption"]
+      refute Repo.reload!(sibling.identity).metadata["saved_reset_redemption"]
+      TestDiagnostics.puts("EXPIRY_FENCE_RECEIPT " <> CodexPooler.JSON.encode!(%{scenario: "ranked_locked_policy_loss", consumes: consume_count(fake), generation_sends: priority_generation_count(fake), selected: "refused_without_fallthrough"}))
+    end
+
     for sibling_block <- [
           :missing,
           :primary,
@@ -803,6 +943,60 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
           assert {:error, _error} = result
         end
       end
+    end
+
+    @tag :saved_reset_expiry_priority
+    test "expired model evidence releases weekly recovery only at the newer usage reading TTL boundary" do
+      %{upstream: upstream, input: input, target: target} = mixed_exclusion_arrangement(:missing, "blocked", :model_and_weekly)
+      timestamp = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      ttl = Evidence.freshness_ttl_seconds()
+      # The supported weekly-only account shape retains the separate model meter.
+      Repo.delete_all(from(window in AccountQuotaWindow, where: window.upstream_identity_id == ^target.identity.id and window.quota_scope == "account" and window.window_kind == "primary"))
+
+      for {gap, expected} <- [{ttl - 1, {:noop, "gateway_auto_trigger_not_current"}}, {ttl, :ok}] do
+        # Each arm owns its entire expired meter group: retention preserves an
+        # in-cycle sibling, and evidence upsert refuses an older observation.
+        Repo.delete_all(from(window in AccountQuotaWindow, where: window.upstream_identity_id == ^target.identity.id and window.quota_scope == "model"))
+        observed_at = DateTime.add(timestamp, -gap, :second)
+
+        attrs =
+          weekly_exhausted_quota_attrs()
+          |> Map.merge(%{
+            quota_key: "sample_model",
+            quota_scope: "model",
+            quota_family: "codex_model",
+            model: input.model.exposed_model_id,
+            reset_at: DateTime.add(timestamp, -1, :second),
+            observed_at: observed_at,
+            last_sync_at: observed_at
+          })
+
+        assert {:ok, [_window]} = QuotaWindows.upsert_quota_windows(target.identity, [attrs])
+
+        assert {:ok, [_window]} =
+                 QuotaWindows.upsert_quota_windows(target.identity, [
+                   weekly_exhausted_quota_attrs() |> Map.merge(%{observed_at: timestamp, last_sync_at: timestamp})
+                 ])
+
+        identity = SavedResetConfirmationFixtures.confirm_automatic_pressure!(target.identity, observed_at: timestamp)
+
+        {:ok, context} =
+          %{filter_input: input}
+          |> SavedResetAutoRedeem.gateway_auto_context(target.assignment, identity, :blocked_weekly_exhaustion)
+          |> AutoEligibility.normalize_context()
+
+        assert AutoEligibility.target_windows_resettable?(identity, context.quota_scope, timestamp) == (gap == ttl)
+        assert AutoEligibility.validate_locked_gateway_auto(identity, target.assignment, context, timestamp) == expected
+        assert AutoEligibility.validate_reserved_gateway_auto(identity, target.assignment, context, timestamp) == expected
+        assert consume_count(upstream) == 0
+      end
+
+      candidates = Enum.map(input.candidates, fn {assignment, identity} -> {assignment, Repo.reload!(identity)} end)
+      input = FilterInput.put_candidates(input, candidates)
+      {{:ok, [{assignment, _identity}], _options}, _log} = with_info_log(fn -> RouteFiltering.filter_candidates(input) end)
+      assert assignment.id == target.assignment.id
+      assert consume_count(upstream) == 1
+      assert priority_generation_count(upstream) == 0
     end
 
     @tag :saved_reset_mixed_exclusions
@@ -3626,6 +3820,12 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
       },
       attrs
     )
+  end
+
+  defp priority_generation_count(fake) do
+    Enum.count(FakeUpstream.requests(fake), fn request ->
+      not String.ends_with?(request.path, "/usage") and not String.contains?(request.path, "/rate-limit-reset-credits")
+    end)
   end
 
   defp auto_redeem_fake do

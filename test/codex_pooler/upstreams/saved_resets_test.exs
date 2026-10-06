@@ -2,6 +2,76 @@ defmodule CodexPooler.Upstreams.SavedResetsTest do
   use CodexPooler.DataCase, async: true
 
   alias CodexPooler.Upstreams.SavedResets
+  alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
+
+  describe "expiration_priority_hint/2" do
+    @now ~U[2026-10-05 10:00:00.123456Z]
+
+    test "qualifies raw authoritative collections and retains microseconds across offsets" do
+      expiry = "2026-10-05T14:00:00.123457+02:00"
+      metadata = priority_metadata([expiry, expiry])
+      assert {:known, ~U[2026-10-05 12:00:00.123457Z]} = SavedResets.expiration_priority_hint(metadata, @now)
+      assert {:known, _} = SavedResets.expiration_priority_hint(%{"saved_resets" => metadata}, @now)
+      assert {:known, _} = SavedResets.expiration_priority_hint(%UpstreamIdentity{metadata: %{"saved_resets" => metadata}}, @now)
+      assert metadata["available_count"] == 3
+    end
+
+    test "uses the minimum deadline for exact near and ordinary freshness boundaries" do
+      for {seconds, ttl} <- [{7200, 1800}, {172_800, 21_600}] do
+        expiry = @now |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
+        metadata = priority_metadata([expiry]) |> Map.put("next_expires_at", "2099-01-01T00:00:00Z")
+        fresh = Map.put(metadata, "expires_observed_at", @now |> DateTime.add(-(ttl - 1), :second) |> DateTime.to_iso8601())
+        stale = Map.put(metadata, "expires_observed_at", @now |> DateTime.add(-ttl, :second) |> DateTime.to_iso8601())
+        assert {:known, _} = SavedResets.expiration_priority_hint(fresh, @now)
+        assert :unknown = SavedResets.expiration_priority_hint(stale, @now)
+      end
+    end
+
+    test "refuses corrupt partial scalar nonfuture and unreliable provenance without repairing it" do
+      good = priority_metadata(["2026-10-05T12:00:00Z"])
+
+      for bad <- [
+            nil,
+            %{},
+            Map.delete(good, "expires_detail_status"),
+            Map.put(good, "expires_detail_status", "incomplete"),
+            Map.put(good, "expires_detail_status", "authoritative_zero"),
+            Map.put(good, "status", "unavailable"),
+            Map.put(good, "available_count", 0),
+            Map.put(good, "expires_observed_at", "2026-10-05T10:00:01Z"),
+            Map.put(good, "expires_observed_at", "invalid"),
+            Map.put(good, "available_expires_at", ["2026-10-05T12:00:00Z", "invalid"]),
+            Map.put(good, "available_expirations", [%{"expires_at" => "invalid"}]),
+            Map.put(good, "available_expirations", [%{"expires_at" => "2026-10-05T13:00:00Z"}]),
+            Map.put(good, "available_expires_at", []),
+            Map.put(good, "available_expirations", "invalid"),
+            Map.drop(good, ["available_expires_at", "available_expirations"]),
+            priority_metadata([DateTime.to_iso8601(@now)]),
+            priority_metadata(["2026-10-04T12:00:00Z"])
+          ] do
+        assert :unknown = SavedResets.expiration_priority_hint(bad, @now), inspect(bad)
+      end
+    end
+
+    test "one valid collection suffices but supplied collections must agree by unique instants" do
+      good = priority_metadata(["2026-10-05T12:00:00Z"])
+      assert {:known, _} = SavedResets.expiration_priority_hint(Map.delete(good, "available_expirations"), @now)
+      assert {:known, _} = SavedResets.expiration_priority_hint(Map.delete(good, "available_expires_at"), @now)
+      good = Map.put(good, "available_expirations", [%{"expires_at" => "2026-10-05T14:00:00.000000+02:00"}])
+      assert {:known, _} = SavedResets.expiration_priority_hint(good, @now)
+    end
+  end
+
+  defp priority_metadata(expiries) do
+    %{
+      "status" => "reported",
+      "available_count" => 3,
+      "expires_detail_status" => "authoritative_rows",
+      "expires_observed_at" => DateTime.to_iso8601(@now),
+      "available_expires_at" => expiries,
+      "available_expirations" => Enum.map(expiries, &%{"expires_at" => &1})
+    }
+  end
 
   describe "count_from_usage_payload/1" do
     test "baseline characterization preserves count coercion and current detail freshness" do
