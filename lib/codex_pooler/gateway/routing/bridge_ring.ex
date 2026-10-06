@@ -17,20 +17,14 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Gateway.Payloads.RequestOptions
 
-  alias CodexPooler.Gateway.Persistence.{
-    BridgeAffinity,
-    BridgeDemotion,
-    CodexSession,
-    RoutingCircuitState
-  }
-
+  alias CodexPooler.Gateway.Persistence.{BridgeAffinity, BridgeDemotion, CodexSession}
   alias CodexPooler.Gateway.Routing.AffinityTelemetry
-  alias CodexPooler.Gateway.Routing.BridgeRing.{Metadata, Status}
+  alias CodexPooler.Gateway.Routing.BridgeRing.Metadata
   alias CodexPooler.Gateway.Routing.ProviderCredits
   alias CodexPooler.Gateway.Routing.RoutePlanInput
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
-  alias CodexPooler.Pools.{Pool, RoutingSettings}
   alias CodexPooler.Pools.Routing, as: PoolRouting
+  alias CodexPooler.Pools.RoutingSettings
   alias CodexPooler.Quotas.Evidence
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
@@ -86,15 +80,6 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
           selected_assignment_id: Ecto.UUID.t() | nil,
           planned_at: DateTime.t()
         }
-  @type routing_status :: %{
-          settings: RoutingSettings.t() | nil,
-          active_affinity_count: non_neg_integer(),
-          active_demotion_count: non_neg_integer(),
-          active_circuit_count: non_neg_integer(),
-          recent_demotions: [BridgeDemotion.t()],
-          recent_circuits: [RoutingCircuitState.t()]
-        }
-
   @type plan_input :: %{
           required(:auth) => routing_auth(),
           required(:model) => Model.t(),
@@ -364,9 +349,6 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
 
   @spec demotion_metadata(term()) :: map()
   defdelegate demotion_metadata(reason_code), to: Metadata
-
-  @spec routing_status(Pool.t() | Ecto.UUID.t() | term()) :: routing_status()
-  defdelegate routing_status(pool_or_id), to: Status
 
   defp strategy_order("deterministic_rotation", candidates, _model, seed, _route_state) do
     rotate_candidates(candidates, seed)
