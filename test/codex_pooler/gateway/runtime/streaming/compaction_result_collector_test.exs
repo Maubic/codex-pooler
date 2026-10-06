@@ -28,6 +28,33 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollectorTest do
     end
   end
 
+  # The provider announces the checkpoint before it closes it, and the announcement carries a ciphertext of its own
+  # that holds nothing when replayed (measured on the Codex backend, `gpt-6-luna`: 996 bytes announced against 1252
+  # closed). The completed response listed the closed item in one trace and nothing (`output: []`) in another. The
+  # collected checkpoint is the done item, in either item mode, whatever the completed output lists, also when
+  # `response.compaction.compacting` repeats the announcement with an item.
+  test "websocket body takes the checkpoint from the done item, never from its announcement" do
+    announced = %{"type" => "compaction", "id" => nil, "encrypted_content" => "gAAAAA-announced-" <> String.duplicate("a", 979)}
+    closed = %{announced | "encrypted_content" => "gAAAAA-closed-" <> String.duplicate("c", 1238)}
+
+    for compacting <- [%{"type" => "response.compaction.compacting", "output_index" => 0}, %{"type" => "response.compaction.compacting", "item" => announced}], mode <- [:native, :public], completed_output <- [[closed], []] do
+      body =
+        websocket_body([
+          CodexPooler.JSON.encode!(%{"type" => "response.created", "response" => %{"id" => "resp_compact_fixture", "status" => "in_progress", "output" => []}}),
+          CodexPooler.JSON.encode!(%{"type" => "response.in_progress", "response" => %{"id" => "resp_compact_fixture", "status" => "in_progress", "output" => []}}),
+          CodexPooler.JSON.encode!(%{"type" => "response.output_item.added", "output_index" => 0, "item" => announced}),
+          CodexPooler.JSON.encode!(compacting),
+          CodexPooler.JSON.encode!(%{"type" => "response.output_item.done", "output_index" => 0, "item" => closed}),
+          CodexPooler.JSON.encode!(%{"type" => "response.completed", "response" => %{"id" => "resp_compact_fixture", "status" => "completed", "output" => completed_output}})
+        ])
+
+      assert {:ok, %{raw_body: raw, compaction_item: item}} = CompactionResultCollector.collect_websocket_body(body, mode)
+      assert item["encrypted_content"] == closed["encrypted_content"]
+      assert %{"output" => [%{"encrypted_content" => content}]} = CodexPooler.JSON.decode!(raw)
+      assert content == closed["encrypted_content"]
+    end
+  end
+
   test "websocket body rejects missing duplicate blank malformed and post-terminal shapes" do
     invalid_bodies = [
       websocket_body([completed_event()]),

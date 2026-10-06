@@ -1376,6 +1376,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
     %{body: body, reason: reason, started: started} = finalization
     %{reserved: reserved, attempt: attempt, endpoint: endpoint} = context
     transports = resolved_transports(context)
+    auth_exhaustion = Map.get(finalization, :auth_exhaustion)
 
     case AttemptSettlement.finalize_partial_stream_failure(
            reserved.request,
@@ -1383,16 +1384,16 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
            response_usage(finalization, body),
            SettlementAttrs.partial_stream_failure(
              context,
-             502,
+             failed_status(auth_exhaustion),
              code,
-             Metadata.safe_reason(reason),
+             failed_message(auth_exhaustion, reason),
              metadata,
              started: started
            )
            |> maybe_put_before_finalize(fn ->
              SideEffects.observe_websocket_response(context, finalization)
 
-             record_failed_health(context, reason, code)
+             record_failed_health(context, reason, code, auth_exhaustion)
            end),
            context.request_options.runtime.session_owner_witness
          ) do
@@ -1402,10 +1403,10 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
       {:ok, _finalized} = result ->
         emit_settlement_outcome(result, "failed", transports)
 
-        if native_full_history_compaction?(context.request_options) do
-          {:error, compact_ack_error()}
-        else
-          {:error, failed_error_response(endpoint, code, reason)}
+        cond do
+          native_full_history_compaction?(context.request_options) -> {:error, compact_ack_error()}
+          auth_exhaustion -> {:error, error(ErrorCodes.upstream_unauthorized_status(), code, ErrorCodes.upstream_unauthorized_message())}
+          true -> {:error, failed_error_response(endpoint, code, reason)}
         end
 
       {:error, gateway_error} = error ->
@@ -1424,6 +1425,26 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
   # the payload was committed keeps the failover.
   defp upstream_committed?(%{transport_failure: %{"upstream_committed" => true}}), do: true
   defp upstream_committed?(_finalization), do: false
+
+  # Exhausted upstream auth the client was shown nothing of settles as HTTP's
+  # (`HttpAuthRefresh`): `503 upstream_unauthorized`, recorded and answered,
+  # with the route failure and the account's reconciliation, or a neutral
+  # completion and no reconciliation for a refresh follower, whose refusal is
+  # another caller's refresh in flight (findings#325 row 325-7).
+  defp failed_status(nil), do: 502
+  defp failed_status(_auth_exhaustion), do: ErrorCodes.upstream_unauthorized_status()
+
+  defp failed_message(nil, reason), do: Metadata.safe_reason(reason)
+  defp failed_message(_auth_exhaustion, _reason), do: ErrorCodes.upstream_unauthorized_message()
+
+  defp record_failed_health(context, _reason, _code, :follower), do: DispatchLifecycle.neutral_completion(context)
+
+  defp record_failed_health(context, reason, code, :exhausted) do
+    SideEffects.maybe_enqueue_gateway_reconciliation(context.reserved.request.pool_id, context.assignment)
+    record_failed_health(context, reason, code)
+  end
+
+  defp record_failed_health(context, reason, code, nil), do: record_failed_health(context, reason, code)
 
   defp record_failed_health(context, :upstream_websocket_closed_before_terminal = reason, code) do
     if native_full_history_compaction?(context.request_options) do

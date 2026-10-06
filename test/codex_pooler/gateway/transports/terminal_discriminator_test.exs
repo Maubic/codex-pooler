@@ -134,7 +134,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.TerminalDiscriminatorTest do
        response.mcp_list_tools.failed
      )},
     {"response.metadata", ~w(response.metadata)},
-    {"response.moderation", ~w(response.moderation.started response.moderation.completed)}
+    {"response.moderation", ~w(response.moderation.started response.moderation.completed)},
+    {"response.compaction", ~w(response.compaction.compacting)}
   ]
 
   test "classifies upstream response websocket event families without treating sibling events as terminals" do

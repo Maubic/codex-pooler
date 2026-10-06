@@ -417,10 +417,87 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.AuthTest d
         assert {first_attempt.pool_upstream_assignment_id, first_attempt.status, first_attempt.network_error_code} == {setup.assignment.id, "retryable_failed", "upstream_unauthorized"}
         assert {second_attempt.pool_upstream_assignment_id, second_attempt.status} == {second.assignment.id, "succeeded"}
         assert route_circuit_failures(setup.assignment.id) == [{"upstream_unauthorized", 1}]
+        assert [_job] = account_reconciliation_jobs(setup.identity.id)
 
         assert :ok = FakeUpstream.verify!(first_upstream)
         assert :ok = FakeUpstream.verify!(second_upstream)
         refute inspect({request.request_metadata, first_attempt.response_metadata}) =~ "refresh-token-owner-ws-failover-do-not-leak"
+      after
+        CodexResponsesSocket.terminate(:closed, state)
+      end
+    end
+  end
+
+  # The same handshake 401 on the owner's only candidate settles as HTTP's
+  # exhausted auth does (findings#325 row 325-7): the socket pushes
+  # `503 upstream_unauthorized`, the request records it, and the route failure
+  # and an account reconciliation are recorded, except under another caller's
+  # refresh, which completes neutrally and reconciles nothing.
+  for mode <- ["full", "lite"],
+      {refresh_status, refresh} <- [
+        {"reauth_required", {:provider, 400, %{"error" => "invalid_grant"}}},
+        {"refresh_failed", {:provider, 503, %{"error" => "temporary"}}},
+        {"noop", :identity_paused},
+        {"refresh_in_progress", :identity_refreshing}
+      ] do
+    @mode mode
+    @refresh_status refresh_status
+    @refresh refresh
+    @tag :feature_websocket_terminal_auth_refresh
+    test "#{mode}: owner-forwarded websocket handshake 401 whose refresh returns #{refresh_status} on the last candidate answers 503 upstream_unauthorized" do
+      refresh_status = @refresh_status
+      release_ref = make_ref()
+
+      # Strict: the only candidate's held 401 handshake, then its provider
+      # refresh when one is made, and nothing after it.
+      upstream =
+        start_upstream(
+          # provenance: synthetic_adversarial
+          FakeUpstream.strict_sequence([held_websocket_handshake_401(self(), release_ref) | provider_refresh(@refresh)])
+        )
+
+      setup = gateway_setup(upstream)
+      _revision = set_model_serving_mode!(model_serving_scope(), setup, @mode)
+
+      assert {:ok, _secret} =
+               Upstreams.store_encrypted_secret(setup.identity, %{
+                 secret_kind: "refresh_token",
+                 plaintext: "refresh-token-owner-ws-last-candidate-do-not-leak"
+               })
+
+      {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
+      turn_state = "owner-auth-last-candidate-#{@mode}-#{refresh_status}"
+      {:ok, state} = owner_socket(auth, "ws-#{turn_state}", turn_state)
+
+      try do
+        assert {:ok, state} = CodexResponsesSocket.handle_in({websocket_payload(setup, "owner auth last candidate"), [opcode: :text]}, state)
+        assert_receive {:fake_upstream_timeout_barrier, :before_headers, upstream_pid, ^release_ref}, @detection_timeout_ms
+        :ok = put_refresh_state!(setup.identity, @refresh)
+        send(upstream_pid, {:fake_upstream_release_timeout, release_ref})
+
+        assert {_state, frames} = collect_native_turn_frames!(state)
+
+        assert %{
+                 "type" => "error",
+                 "status" => 503,
+                 "error" => %{"type" => "server_error", "code" => "upstream_unauthorized", "message" => "upstream authentication failed; retry the request"}
+               } = List.last(frames)
+
+        assert [request] = request_logs(setup.pool.id)
+        assert {request.status, request.last_error_code, request.response_status_code} == {"failed", "upstream_unauthorized", 503}
+        assert request.request_metadata["routing"]["model_serving_mode"] == @mode
+        assert request.request_metadata["auth_refresh"]["status"] == refresh_status
+        assert [%{status: "failed", network_error_code: "upstream_unauthorized"}] = pool_attempts(setup.pool.id)
+
+        if refresh_status == "refresh_in_progress" do
+          assert route_circuit_failures(setup.assignment.id) == []
+          assert account_reconciliation_jobs(setup.identity.id) == []
+        else
+          assert route_circuit_failures(setup.assignment.id) == [{"upstream_unauthorized", 1}]
+          assert [_job] = account_reconciliation_jobs(setup.identity.id)
+        end
+
+        assert :ok = FakeUpstream.verify!(upstream)
       after
         CodexResponsesSocket.terminate(:closed, state)
       end

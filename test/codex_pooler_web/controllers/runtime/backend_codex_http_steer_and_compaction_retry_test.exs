@@ -22,7 +22,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpSteerAndCompactionRetryTest do
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
 
-  alias CodexPooler.Accounting.{LedgerEntry, Request, RequestClientRetryLink}
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Repo
 
@@ -139,6 +139,94 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpSteerAndCompactionRetryTest do
     assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(post(conn, setup, ids, "compaction", compaction), 409)
     assert length(pool_requests(setup)) == 2
     assert :ok = FakeUpstream.verify!(upstream)
+  end
+
+  # The provider cuts the compaction at each stage of its measured stream
+  # (before any output, after `response.compaction.compacting`, after the
+  # closed item), by a dropped connection or by a stream that ends without a
+  # terminal, with owner forwarding off and on. The Pooler writes the client
+  # nothing of a compaction before its terminal, so the cut answers 502 with no
+  # provider output delivered: the claim walk steps over it, the identical
+  # resend is served once under the derived claim, and the resend of that
+  # resend's lost reply chains onto it. A native HTTP compaction keeps no
+  # client-retry observation, so no stage changes the outcome through one.
+  for forwarding <- [false, true], {ending, code} <- [{:abrupt, "upstream_stream_error"}, {:clean, "invalid_compaction_response"}], {stage, frames} <- [{:before_output, 2}, {:after_compacting, 4}, {:after_done, 5}] do
+    test "an HTTP compaction the provider cut #{stage} (#{ending}, forwarding #{forwarding}) is served once on its resend", %{conn: conn} do
+      assert provider_cut_compaction!(conn, unquote(forwarding), unquote(ending), unquote(frames)) == %{
+               cut: {502, "failed", unquote(code)},
+               observation: %{},
+               resends: [200, 200],
+               claims: ["codex-turn", "codex-request", "codex-request-retry", "codex-request-retry"],
+               first_resend_linked?: false,
+               second_resend_predecessor: :first_resend,
+               settlements: [1, 1, 1, 1],
+               upstream_requests: 4
+             }
+    end
+  end
+
+  defp provider_cut_compaction!(conn, forwarding?, ending, frames) do
+    put_owner_forwarding!(forwarding?)
+    events = Enum.take(measured_compaction_events(), frames)
+    cut = if ending == :abrupt, do: FakeUpstream.abrupt_close_mid_stream(events), else: FakeUpstream.sse_stream(events, done: false)
+    # provenance: synthetic_adversarial; the provider's measured compaction stream cut after the given event count, then the released client's two identical HTTPS resends
+    upstream = start_upstream(FakeUpstream.strict_sequence([turn_sse("resp_open"), cut, compaction_sse("resp_compaction_two"), compaction_sse("resp_compaction_three")]))
+    setup = setup!(upstream, "full")
+    ids = ids()
+    open = native_text_input("open the turn")
+    compaction = open ++ [assistant("working"), %{"type" => "compaction_trigger"}]
+
+    assert response(post(conn, setup, ids, "turn", open), 200)
+    cut_status = post(conn, setup, ids, "compaction", compaction).status
+    resends = for _retry <- 1..2, do: post(conn, setup, ids, "compaction", compaction).status
+    [_open, cut_request, first_resend, second_resend] = requests = pool_requests(setup)
+    [cut_attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^cut_request.id))
+    second_predecessor = get_in(second_resend.request_metadata, ["client_resend", "predecessor_request_id"])
+
+    %{
+      cut: {cut_status, cut_request.status, cut_request.last_error_code},
+      observation: Map.take(cut_attempt.response_metadata, ["native_client_retry_observation", "native_client_retry_authority_loss"]),
+      resends: resends,
+      claims: Enum.map(requests, &(&1.correlation_id |> String.split(":") |> hd())),
+      first_resend_linked?: Map.has_key?(first_resend.request_metadata, "client_resend"),
+      second_resend_predecessor: if(second_predecessor == first_resend.id, do: :first_resend, else: second_predecessor),
+      settlements: Enum.map(requests, &Repo.aggregate(from(e in LedgerEntry, where: e.request_id == ^&1.id and e.entry_kind == "settlement"), :count)),
+      upstream_requests: FakeUpstream.count(upstream)
+    }
+  end
+
+  # The provider's compaction stream as measured on the wire, with synthetic
+  # ciphertexts of the measured lengths (the announcement's 996 bytes, the
+  # closed item's 1252); the completed response lists nothing.
+  defp measured_compaction_events do
+    announced = %{"type" => "compaction", "id" => nil, "encrypted_content" => "gAAAAA-announced-" <> String.duplicate("a", 979)}
+    closed = %{announced | "encrypted_content" => "gAAAAA-closed-" <> String.duplicate("c", 1238)}
+    opening = %{"id" => "resp_cut", "status" => "in_progress", "output" => []}
+    completed = %{"id" => "resp_cut", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 5, "output_tokens" => 2, "total_tokens" => 7}}
+
+    Enum.map(
+      [
+        %{"type" => "response.created", "response" => opening},
+        %{"type" => "response.in_progress", "response" => opening},
+        %{"type" => "response.output_item.added", "output_index" => 0, "item" => announced},
+        %{"type" => "response.compaction.compacting", "output_index" => 0},
+        %{"type" => "response.output_item.done", "output_index" => 0, "item" => closed},
+        %{"type" => "response.completed", "response" => completed}
+      ],
+      &{&1["type"], &1}
+    )
+  end
+
+  defp put_owner_forwarding!(enabled?) do
+    previous = Application.fetch_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, enabled?)
+
+    on_exit(fn ->
+      case previous do
+        :error -> Application.delete_env(:codex_pooler, :websocket_owner_forwarding_enabled)
+        {:ok, value} -> Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, value)
+      end
+    end)
   end
 
   defp lost_http_compaction!(conn, upstream, age) do

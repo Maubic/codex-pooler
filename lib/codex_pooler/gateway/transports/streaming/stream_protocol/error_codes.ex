@@ -168,6 +168,16 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes do
   @spec upstream_unauthorized_code() :: String.t()
   def upstream_unauthorized_code, do: @upstream_unauthorized_code
 
+  # The answer to an upstream credential the Pooler could not refresh, on HTTP
+  # and the websocket alike: retryable `503`, never a client-facing 401, which
+  # stays reserved for the Pooler's own API-key rejection (findings#325 row
+  # 325-7).
+  @spec upstream_unauthorized_status() :: 503
+  def upstream_unauthorized_status, do: 503
+
+  @spec upstream_unauthorized_message() :: String.t()
+  def upstream_unauthorized_message, do: "upstream authentication failed; retry the request"
+
   @spec upstream_request_failed_code() :: String.t()
   def upstream_request_failed_code, do: @upstream_request_failed_code
 

@@ -4886,6 +4886,35 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     assert raw_websocket_peer_connection_count(peer) == 2
   end
 
+  # A compaction reports `response.compaction.compacting` before its closed
+  # item, so a drain or a cancelled task can find it in that phase; the close
+  # line then names the compaction family, not `response.unknown`.
+  test "request caller exit in a compaction's compacting phase names the compaction family in the close line" do
+    peer = start_raw_websocket_peer(response_mode: :hold_after_compacting)
+    {:ok, session} = UpstreamWebsocketSession.start_link([])
+    on_exit(fn -> UpstreamWebsocketSession.close(session) end)
+
+    request = %{raw_websocket_request(peer.url, self()) | timeouts: @held_timeouts, request_id: Ecto.UUID.generate(), attempt_id: Ecto.UUID.generate()}
+    request_task = Task.async(fn -> UpstreamWebsocketSession.request(session, request) end)
+    assert_receive {:raw_upstream_websocket_request, 1, 1}, @message_detection_timeout_ms
+
+    for type <- ~w(response.created response.in_progress response.output_item.added response.compaction.compacting) do
+      assert_receive {:upstream_websocket_frame, frame}, @detection_timeout_ms
+      assert %{"type" => ^type} = CodexPooler.JSON.decode!(frame)
+    end
+
+    {_lifecycle, log} =
+      with_info_log(fn ->
+        assert Task.shutdown(request_task, :brutal_kill) == nil
+        assert :closed = wait_for_raw_websocket_connection_closed(1, 200)
+        lifecycle_state(session)
+      end)
+
+    assert log =~ "upstream websocket request connection closed reason_code=request_caller_down closed_by=pooler close_completed=true"
+    assert log =~ "terminal_seen=false last_upstream_event_type=response.compaction last_upstream_event_class=response_event text_frame_count=4"
+    refute log =~ "response.unknown"
+  end
+
   test "a caller that exits after the response terminal keeps the upstream reusable without a cancellation close" do
     peer = start_raw_websocket_peer()
     {:ok, session} = UpstreamWebsocketSession.start_link([])
@@ -7218,19 +7247,32 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
         send(owner, {:raw_upstream_websocket_request, connection_id, request_count})
         :ok
 
-      :hold_after_created ->
-        response = %{
-          "type" => "response.created",
-          "response" => %{"id" => "resp_raw_ws_#{connection_id}_#{request_count}"}
-        }
-
-        :gen_tcp.send(socket, raw_websocket_server_text_frame(CodexPooler.JSON.encode!(response)))
+      mode when mode in [:hold_after_created, :hold_after_compacting] ->
+        send_raw_websocket_peer_held_frames(mode, socket, owner, connection_id, request_count)
 
       :terminal ->
         send(owner, {:raw_upstream_websocket_request, connection_id, request_count})
         response = %{"id" => "resp_raw_ws_#{connection_id}_#{request_count}"}
         :gen_tcp.send(socket, raw_websocket_server_text_frame(CodexPooler.JSON.encode!(response)))
     end
+  end
+
+  # What a held peer writes before it stops answering: `response.created`
+  # alone, or the measured compaction stream up to its compacting phase, which
+  # also reports the request so a test can wait for it.
+  defp send_raw_websocket_peer_held_frames(:hold_after_created, socket, _owner, connection_id, request_count) do
+    response = %{
+      "type" => "response.created",
+      "response" => %{"id" => "resp_raw_ws_#{connection_id}_#{request_count}"}
+    }
+
+    :gen_tcp.send(socket, raw_websocket_server_text_frame(CodexPooler.JSON.encode!(response)))
+  end
+
+  defp send_raw_websocket_peer_held_frames(:hold_after_compacting, socket, owner, connection_id, request_count) do
+    send(owner, {:raw_upstream_websocket_request, connection_id, request_count})
+    frames = Enum.map(compacting_phase_events("resp_raw_ws_#{connection_id}_#{request_count}"), &raw_websocket_server_text_frame(CodexPooler.JSON.encode!(&1)))
+    :ok = :gen_tcp.send(socket, frames)
   end
 
   # The three arms of the coalesced-frame probe: what the peer writes after the
@@ -7376,6 +7418,21 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
   defp raw_websocket_peer_opcode(0x9), do: :ping
   defp raw_websocket_peer_opcode(0xA), do: :pong
   defp raw_websocket_peer_opcode(_opcode), do: :unknown
+
+  # The provider's compaction stream as measured (gpt-6-luna) up to its
+  # compacting phase, with a synthetic ciphertext of the announcement's
+  # measured length (996 bytes); the closed item and the terminal never come.
+  defp compacting_phase_events(response_id) do
+    response = %{"id" => response_id, "status" => "in_progress", "output" => []}
+    announced = %{"type" => "compaction", "id" => nil, "encrypted_content" => "gAAAAA-announced-" <> String.duplicate("a", 979)}
+
+    [
+      %{"type" => "response.created", "response" => response},
+      %{"type" => "response.in_progress", "response" => response},
+      %{"type" => "response.output_item.added", "output_index" => 0, "item" => announced},
+      %{"type" => "response.compaction.compacting", "output_index" => 0}
+    ]
+  end
 
   defp raw_websocket_server_text_frame(payload) when byte_size(payload) < 126 do
     <<0x81, byte_size(payload), payload::binary>>
