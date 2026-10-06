@@ -39,7 +39,7 @@ magpie provider add "Codex Pooler" id=pooler responses=https://codex-pooler.exam
 For a local Pooler, use `responses=http://localhost:4000/backend-api/codex/v1`.
 
 - `responses=` is the [Codex backend alias](/reference/runtime-routes/#backend-v1-aliases). Magpie appends `/responses` and sends Codex's Responses request to `POST /backend-api/codex/v1/responses`. A base of `https://codex-pooler.example.com/backend-api/codex` sends to `POST /backend-api/codex/responses` instead, which works as well.
-- Set `responses=` alone. Adding `url=` for the same host makes Magpie rebuild requests it cannot pass through as Chat Completions; see [Chat Completions recipe](#chat-completions-recipe).
+- Set `responses=` alone. A provider that declares `responses=` gets Codex's requests on the Responses route whether or not it also has `url=`; only a provider with `url=` and no `responses=` is spoken to in Chat Completions, see [Chat Completions recipe](#chat-completions-recipe).
 - `models=` lists the model ids your Pool serves, separated by commas. The alias lists models in Codex's own catalog format, which Magpie does not read: without `models=`, Magpie reports `no models listed` and exposes no model. To follow the Pool's list instead, drop `models=` and add `models.url=https://codex-pooler.example.com/v1/models`. Magpie then exposes every model the key can see, including models the Codex catalog hides.
 - `search=yes` tells Magpie that the provider answers Codex's hosted web search itself. Magpie then relays Codex's request instead of rebuilding it; see [What reaches Codex Pooler](#what-reaches-codex-pooler).
 
@@ -116,10 +116,11 @@ Magpie decides per request whether to relay Codex's Responses body or to rebuild
 | `responses=` alias, `search=yes` | Full-shaped, from Magpie's catalog entry | Codex's body; `tool_search` becomes a plain function; `web_search`, `apply_patch` and sealed reasoning items stay | Plain and tool turns |
 | `responses=` alias | Lite-shaped, from Codex's own entry for a Lite model | The `additional_tools` manifest moved into `tools` with the `functions` namespace opened; namespaces such as `collaboration` and the `x-openai-internal-codex-responses-lite` header kept | Plain turns and the lead turns of a multi-agent run |
 | `responses=` alias, without `search=yes` | Full-shaped, from Magpie's catalog entry | A rebuilt request: developer messages folded into `instructions`, every tool a plain function (namespaces flattened to `namespace__name`), hosted `web_search` removed, sealed reasoning not replayed | Plain and tool turns, without hosted search or sealed reasoning |
-| `url=` and `responses=` at `/v1` | Full-shaped | Chat Completions | Plain turns |
-| `url=` and `responses=` at `/v1` | Lite-shaped | Codex's body with the manifest lifted | Plain turns and replayed multi-agent history |
+| `responses=` at `/v1` | Full-shaped | A rebuilt request as for the alias without `search=yes`, sent to `POST /v1/responses` | Plain and tool turns, without hosted search or sealed reasoning |
+| `responses=` at `/v1` | Lite-shaped | Codex's body with the manifest lifted | Plain turns and replayed multi-agent history |
+| `url=` without `responses=` | Full-shaped | A rebuilt Chat Completions request on `POST /v1/chat/completions` | Plain and tool turns, without reasoning continuity or hosted search |
 
-The alias recipes answer on `POST /backend-api/codex/v1/responses`. The `/v1` recipe answers on `POST /v1/chat/completions` for Full-shaped requests and on `POST /v1/responses` for Lite-shaped ones.
+The alias recipes answer on `POST /backend-api/codex/v1/responses` and the `/v1` recipe on `POST /v1/responses`, for Full-shaped and Lite-shaped requests alike. The Chat Completions recipe answers on `POST /v1/chat/completions`.
 
 Lite-shaped requests appear when Codex uses its own catalog entry for a Lite model, for example the bundled `gpt-6-luna` entry, instead of Magpie's entry. They carry no hosted tools, so Magpie relays them with or without `search=yes`. Codex's identification and continuity headers (`originator`, `session-id`, `thread-id`, `x-client-request-id`, `x-codex-turn-metadata`, `x-codex-window-id` and `x-codex-beta-features`) reach the Pooler on every route above.
 
@@ -131,7 +132,7 @@ With `search=yes`, the request that reaches the Pooler lists the hosted `web_sea
 
 ### Chat Completions recipe
 
-When a Magpie provider has both `url=` and `responses=`, Magpie rebuilds a default Full request as `POST /v1/chat/completions`. The rebuilt Chat request has no reasoning continuity and no hosted search, and Codex's freeform `apply_patch` arrives as a function. Prefer the `responses=` alias recipe above.
+A Magpie provider that has `url=` and no `responses=` has no Responses route, so Magpie rebuilds a default Full request as `POST /v1/chat/completions`. The rebuilt Chat request has no reasoning continuity and no hosted search, and Codex's freeform `apply_patch` arrives as a function. Prefer the `responses=` alias recipe above.
 
 ### The `/v1` surface
 
