@@ -64,9 +64,9 @@ defmodule CodexPoolerWeb.Runtime.MailboxPrefixRaceSupport do
 
   @spec suppress_owned_periodic_renewal!(pid(), :http | :owner) :: :ok
   def suppress_owned_periodic_renewal!(actor, kind) do
-    original = :sys.get_state(actor)
+    original = :sys.get_state(actor, @budget)
     on_exit(fn -> restore_periodic_renewal(actor, kind, original) end)
-    state = :sys.replace_state(actor, &disable_periodic_renewal(&1, kind))
+    state = :sys.replace_state(actor, &disable_periodic_renewal(&1, kind), @budget)
     field = if kind == :http, do: :renewal_ref, else: :owner_renewal_ref
     assert Map.fetch!(state, field) == nil
     :ok
@@ -103,19 +103,25 @@ defmodule CodexPoolerWeb.Runtime.MailboxPrefixRaceSupport do
     end
   end
 
+  # An actor whose lease expired retires on its own, so finding it alive does not promise that it still is when its schedule is put
+  # back: one that is gone has nothing to restore (findings#303 rows 303-10 and 303-11).
   defp restore_periodic_renewal(actor, kind, original) do
     if (node(actor) == node() or node(actor) in Node.list()) and :erpc.call(node(actor), Process, :alive?, [actor]) do
-      restore_owned_timer(actor, kind, original)
+      try do
+        restore_owned_timer(actor, kind, original)
+      catch
+        :exit, _gone_or_retiring -> :ok
+      end
     end
   end
 
   defp restore_owned_timer(actor, :http, original) do
-    :sys.replace_state(actor, fn state -> %{state | renewal_token: original.renewal_token, renewal_ref: nil} end)
+    :sys.replace_state(actor, fn state -> %{state | renewal_token: original.renewal_token, renewal_ref: nil} end, @budget)
     send(actor, {:session_lease_heartbeat_renew, original.renewal_token})
   end
 
   defp restore_owned_timer(actor, :owner, original) do
-    :sys.replace_state(actor, fn state -> %{state | owner_renewal_ms: original.owner_renewal_ms, owner_renewal_delay: original.owner_renewal_delay} end)
+    :sys.replace_state(actor, fn state -> %{state | owner_renewal_ms: original.owner_renewal_ms, owner_renewal_delay: original.owner_renewal_delay} end, @budget)
     send(actor, :renew_owner_lease)
   end
 

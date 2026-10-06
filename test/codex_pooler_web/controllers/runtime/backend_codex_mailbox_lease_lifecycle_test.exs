@@ -15,7 +15,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn, RuntimeCleanup}
   alias CodexPooler.Gateway.Persistence.SessionContinuity
   alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup, as: ExpiredCleanup
-  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
+  alias CodexPooler.Gateway.Transports.Websocket.{OwnerDefaults, WebsocketOwnerSession}
   alias CodexPooler.Gateway.Websocket, as: Gateway
   alias CodexPooler.Platform.ExecutionIdentity
   alias CodexPooler.Platform.ExecutionRegistry
@@ -32,7 +32,22 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
   @moduletag capture_log: true
   @budget 15_000
   @path "/backend-api/codex/responses"
-  @ttl 3
+  # The lease every scenario opens with. It outlives any scheduling delay in the setup (the owner's start, the upgrade, the first
+  # turn), the way the HTTP owner lease tests keep their pre-dispatch window on a stable ttl; the ttl a test is about starts at its
+  # boundary (`observe_boundary!/1`). With the claim's ttl from the start, one stall of the renewing owner (or of its database
+  # round trip) longer than the ttl made the next renewal find the lease expired and retire the owner (findings#303 row 303-11).
+  @stable_ttl 30
+  # What the claims observe at their boundary: a healthy owner renews across its own initial deadline (three renewals fit in it);
+  # every other claim only needs a lease that really expires while its owner cannot renew.
+  @healthy_claim_ttl 3
+  @expiry_claim_ttl 1
+  # The expired-generation cleanup works under the product's owner call budget (5 s; its own deadline is one second less, and it
+  # needs one more second of it to prove the provider connection closed). A stall of about 3 s inside a held cleanup (the session
+  # row it waits for, the owner's mailbox behind the closing socket's own cleanup) exhausts that budget before the cleanup reaches
+  # the step a test is about, and the next step then meets a different state (findings#303 row 303-11). Only tests set this
+  # budget, through `OwnerDefaults`: the tests whose claim is not the budget run on the detection budget, the two tagged
+  # `owner_call_budget: :product` keep the product's.
+  @owner_call_budget_ms @budget
 
   setup_all do
     %{queue_peer: BackendCodexWebsocketOwnerForwardingSupport.start_shared_bridge_peer!()}
@@ -44,14 +59,21 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
     :ok = Sandbox.mode(Repo, :auto)
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
     CodexPooler.TestAppEnv.restore_on_exit(OperationalSettings)
-    settings = %{OperationalSettings.current() | bridge_owner_lease_ttl_seconds: Map.get(context, :lease_ttl, @ttl), bridge_owner_lease_renewal_seconds: 1}
+    settings = %{OperationalSettings.current() | bridge_owner_lease_ttl_seconds: @stable_ttl, bridge_owner_lease_renewal_seconds: 1}
     Application.put_env(:codex_pooler, OperationalSettings, settings: settings)
-    %{lease_settings: settings}
+    owner_defaults = if Map.get(context, :owner_call_budget) == :product, do: [], else: [owner_call_timeout_ms: @owner_call_budget_ms]
+
+    if owner_defaults != [] do
+      CodexPooler.TestAppEnv.restore_on_exit(OwnerDefaults)
+      Application.put_env(:codex_pooler, OwnerDefaults, owner_defaults)
+    end
+
+    %{lease_settings: settings, owner_defaults: owner_defaults}
   end
 
   for mode <- ["full", "lite"], carrier <- [:http, :owner_local, :owner_remote], boundary <- [:healthy, :disconnect_wins, :cleanup_wins, :settled_then_expiry] do
     @tag mode: mode, carrier: carrier, boundary: boundary
-    @tag slow: "observes the actual three-second PostgreSQL ownership deadline with real periodic renewal"
+    @tag slow: if(boundary == :healthy, do: "observes the actual three-second PostgreSQL ownership deadline with real periodic renewal", else: "observes the actual one-second PostgreSQL ownership deadline cross")
     if boundary in [:disconnect_wins, :cleanup_wins], do: @tag(mailbox_lease_negative: true)
     if mode == "full" and carrier == :owner_remote and boundary == :disconnect_wins, do: @tag(mailbox_expired_cut_control: true)
     if carrier in [:owner_local, :owner_remote] and boundary == :disconnect_wins, do: @tag(mailbox_expired_ordering: true)
@@ -131,7 +153,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
     end
   end
 
-  @tag mode: "full", carrier: :owner_local, boundary: :disconnect_wins, mailbox_expired_deadline: true, lease_ttl: 1
+  @tag mode: "full", carrier: :owner_local, boundary: :disconnect_wins, mailbox_expired_deadline: true, lease_ttl: 1, owner_call_budget: :product
   @tag slow: "holds a real PostgreSQL owner lock through the unchanged five-second command budget"
   test "SQL lock deadline exits its child and queued expired command retains real owner state", context do
     with_info_log(fn ->
@@ -619,7 +641,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
     restore
   end
 
-  @tag mode: "full", carrier: :owner_remote, boundary: :disconnect_wins, lease_ttl: 1, mailbox_expired_checkout_queue: true
+  @tag mode: "full", carrier: :owner_remote, boundary: :disconnect_wins, lease_ttl: 1, mailbox_expired_checkout_queue: true, owner_call_budget: :product
   @tag slow: "real serving Repo checkout queue remains bounded by existing owner budget"
   test "never granted second SQL checkout returns before owner call budget without guessing stop", context do
     with_info_log(fn ->
@@ -801,7 +823,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
   end
 
   defp active_owner_task!(owner) do
-    state = :sys.get_state(owner)
+    state = :sys.get_state(owner, @budget)
     state.active_turn.task_pid
   end
 
@@ -874,6 +896,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
     window = "#{thread}:0"
     queue_peer = if Map.get(context, :mailbox_expired_checkout_queue), do: context.queue_peer
     peer = prepare_peer!(carrier, setup, thread, settings, queue_peer)
+    put_owner_defaults!(peer, context)
     port = start_public_endpoint!()
     if carrier == :http, do: MailboxPrefixRaceSupport.observe_http_heartbeat!(self())
     payload = payload(setup, thread, window)
@@ -902,21 +925,26 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
     actor = owning_actor!(carrier, old_session.id, peer)
     assert node(actor) == if(carrier == :owner_remote, do: peer, else: node())
 
-    %{mode: mode, carrier: carrier, boundary: boundary, setup: setup, upstream: upstream, port: port, thread: thread, window: window, payload: payload, transport: transport, handler: handler, gate: gate, original: original, executor: executor, execution_node: execution_node, execution_monitor: execution_monitor, generation_actor: generation_actor, generation_monitor: generation_monitor, actor: actor, old_session: old_session}
+    %{mode: mode, carrier: carrier, boundary: boundary, claim_ttl: claim_ttl(context), setup: setup, upstream: upstream, port: port, thread: thread, window: window, payload: payload, transport: transport, handler: handler, gate: gate, original: original, executor: executor, execution_node: execution_node, execution_monitor: execution_monitor, generation_actor: generation_actor, generation_monitor: generation_monitor, actor: actor, old_session: old_session}
   end
 
-  defp observe_boundary!(%{boundary: boundary, carrier: carrier, actor: actor, old_session: old_session, original: original, upstream: upstream} = fixture) do
+  # A test's `lease_ttl` tag names the ttl of its claim; without one a healthy boundary observes the three-second lease that
+  # renewal sustains and every other boundary a one-second lease that really expires.
+  defp claim_ttl(%{lease_ttl: ttl}) when is_integer(ttl), do: ttl
+  defp claim_ttl(%{boundary: :healthy}), do: @healthy_claim_ttl
+  defp claim_ttl(_context), do: @expiry_claim_ttl
+
+  defp observe_boundary!(%{boundary: boundary, carrier: carrier, actor: actor, old_session: old_session, original: original, upstream: upstream, claim_ttl: claim_ttl} = fixture) do
     # Explicit fixture-only negative profile: the identical healthy oracle must
     # fail when only its owning actor's real periodic scheduling is disabled.
     renewal_off_red? = boundary == :healthy and System.get_env("CODEX_POOLER_TEST_MAILBOX_RENEWAL_OFF_RED") == "1"
+    suppressed? = boundary in [:disconnect_wins, :cleanup_wins] or renewal_off_red?
 
-    if boundary in [:disconnect_wins, :cleanup_wins] or renewal_off_red? do
+    if suppressed? do
       MailboxPrefixRaceSupport.suppress_owned_periodic_renewal!(actor, if(carrier == :http, do: :http, else: :owner))
     end
 
-    initial = MailboxLeaseLifecycleSupport.observe!(old_session.id)
-    assert initial.session_deadline == initial.lease_deadline
-    assert DateTime.compare(initial.clock, initial.session_deadline) == :lt
+    initial = open_lease_window!(old_session.id, boundary, claim_ttl, suppressed?)
     crossed = if boundary == :settled_then_expiry, do: initial, else: await_clock!(old_session.id, initial.session_deadline)
 
     assert_boundary_clock!(boundary, initial, crossed)
@@ -926,6 +954,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
     cleanup = if boundary in [:disconnect_wins, :cleanup_wins], do: start_cleanup_selection!(old_session.id)
 
     Map.merge(fixture, %{initial: initial, crossed: crossed, cleanup: cleanup})
+  end
+
+  # The scenario ran on the stable ttl; the lease the boundary is about starts here. A settled predecessor is only observed: its
+  # expiry is the claim of `expire_settled_predecessor!/1`, which writes the short ttl once the owner is idle.
+  defp open_lease_window!(session_id, :settled_then_expiry, _claim_ttl, _suppressed?) do
+    initial = MailboxLeaseLifecycleSupport.observe!(session_id)
+    assert initial.session_deadline == initial.lease_deadline
+    assert DateTime.compare(initial.clock, initial.session_deadline) == :lt
+    initial
+  end
+
+  defp open_lease_window!(session_id, _boundary, claim_ttl, suppressed?) do
+    MailboxLeaseLifecycleSupport.shorten_lease!(session_id, claim_ttl, suppressed?: suppressed?)
   end
 
   defp assert_boundary_clock!(:healthy, initial, crossed) do
@@ -1086,6 +1127,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
 
   defp prepare_peer!(_carrier, _setup, _window, _settings), do: nil
 
+  # The owner on a peer works under the peer's own budget. Only on a peer this test booted: the shared queue peer belongs to the
+  # test that claims the product's budget.
+  defp put_owner_defaults!(peer, %{owner_defaults: [_ | _] = defaults, carrier: :owner_remote}) when is_atom(peer) and peer != nil, do: :ok = :erpc.call(peer, Application, :put_env, [:codex_pooler, OwnerDefaults, defaults])
+  defp put_owner_defaults!(_peer, _context), do: :ok
+
   defp start_serving_vm_owner!(setup, thread, peer) do
     assert {:ok, _registry} = :erpc.call(peer, GenServer, :start, [ExecutionRegistry, nil, [name: ExecutionRegistry]])
     assert {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
@@ -1131,7 +1177,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
   end
 
   defp await_idle_owner!(owner, deadline) do
-    if :sys.get_state(owner).active_turn != nil do
+    if :sys.get_state(owner, @budget).active_turn != nil do
       assert System.monotonic_time(:millisecond) < deadline, "owned executor ended but owner still tracks its turn"
 
       receive do
