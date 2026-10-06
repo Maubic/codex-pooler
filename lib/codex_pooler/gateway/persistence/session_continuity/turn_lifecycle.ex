@@ -52,7 +52,9 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.TurnLifecycle do
       # the ring left the session pinned to the last one it tried. The durable
       # binding belongs to `update_session_assignment/3`, which runs at terminal
       # completion from the attempt that actually served, under owner-witness
-      # authorization.
+      # authorization; a session with no pin also takes it earlier, from the
+      # account serving its first client output (`AssignmentClaim`,
+      # findings#324), never from dispatch.
       locked_session
       |> Ecto.Changeset.change(%{
         status: @session_active,

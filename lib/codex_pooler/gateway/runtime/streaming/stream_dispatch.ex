@@ -7,6 +7,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   alias CodexPooler.Gateway.Payloads.CompactionTrigger
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Routing.ModelMetadata
+  alias CodexPooler.Gateway.Routing.SessionContinuity
   alias CodexPooler.Gateway.Runtime.Dispatch.ResponseContext
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
@@ -934,7 +935,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
          visible_data?
        )
        when is_function(visible_data?, 1) do
-    %{reserved: reserved, payload: payload, request_options: opts} = context
+    %{payload: payload, request_options: opts} = context
 
     {:ok, rate_limit_state} =
       case Map.get(state, :rate_limit_identity) do
@@ -946,7 +947,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
 
     state = put_usage_state(state, StreamUsageObserver.observe(usage_state(state), data))
 
-    case maybe_mark_visible_output(state, reserved.request, context.attempt, data, visible_data?) do
+    case maybe_mark_visible_output(state, context, data, visible_data?) do
       {:ok, state} ->
         DownstreamStream.normalize_delivery(
           data,
@@ -963,26 +964,40 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
     end
   end
 
-  defp maybe_mark_visible_output(
-         %{visible_output_marked?: true} = state,
-         _request,
-         _attempt,
-         _data,
-         _visible_data?
-       ),
-       do: {:ok, state}
+  defp maybe_mark_visible_output(%{visible_output_marked?: true} = state, _context, _data, _visible_data?),
+    do: {:ok, state}
 
-  defp maybe_mark_visible_output(state, request, attempt, data, visible_data?) do
+  defp maybe_mark_visible_output(state, %{reserved: %{request: request}, attempt: attempt} = context, data, visible_data?) do
     if visible_data?.(data) do
       case VisibleOutputMark.mark(request, attempt) do
-        :ok -> {:ok, Map.put(state, :visible_output_marked?, true)}
-        {:error, :stale_generation} -> {:error, :stale_generation, state}
-        {:error, :visible_output_unavailable} -> {:error, :visible_output_unavailable, state}
+        :ok ->
+          claim_served_session_assignment(context, data)
+          {:ok, Map.put(state, :visible_output_marked?, true)}
+
+        {:error, :stale_generation} ->
+          {:error, :stale_generation, state}
+
+        {:error, :visible_output_unavailable} ->
+          {:error, :visible_output_unavailable, state}
       end
     else
       {:ok, state}
     end
   end
+
+  # The client is about to hold this account's first output, so the session's
+  # later requests have to reach the same account: a session with no pin takes
+  # it now (findings#324, `SessionContinuity.claim_served_assignment/2`). A
+  # provider failure terminal is a refusal, not service, and pins nothing.
+  defp claim_served_session_assignment(%{request_options: %RequestOptions{} = request_options, assignment: %{id: assignment_id}}, data) do
+    unless match?({:ok, %{kind: :failed}}, StreamProtocol.terminal_outcome(data)) do
+      SessionContinuity.claim_served_assignment(request_options, assignment_id)
+    end
+
+    :ok
+  end
+
+  defp claim_served_session_assignment(_context, _data), do: :ok
 
   defp stream_headers(response, %SelectedCandidateContext{} = context) do
     content_type = header(response, "content-type") || "text/event-stream"

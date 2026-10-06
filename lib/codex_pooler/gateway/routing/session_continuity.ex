@@ -3,6 +3,8 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
 
   import Ecto.Query
 
+  require Logger
+
   alias CodexPooler.Accounting.Request
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Files
@@ -196,6 +198,48 @@ defmodule CodexPooler.Gateway.Routing.SessionContinuity do
   end
 
   def start_turn(reserved, %RequestOptions{}), do: {:ok, reserved}
+
+  @doc """
+  Pins a native HTTP request's session to the account serving its client
+  output, when the session had no pin as the request attached (findings#324).
+
+  The relay calls it once, after it marked the turn visible and before it
+  hands the client that account's first output. A session's pin used to come
+  only from a succeeded turn's settlement, so the session's next request,
+  sent while this one still streamed or after the client cut it, read the
+  session unpinned and could move to another account, which drops the
+  reasoning the client replays (findings#318). The claim writes only while the
+  session has no pin and only under this request's owner lease, so an
+  established pin and a superseded request are left alone; a later success
+  still writes its outcome. A database failure here costs the claim, never
+  the stream.
+  """
+  @spec claim_served_assignment(RequestOptions.t(), Ecto.UUID.t()) :: :ok
+  def claim_served_assignment(
+        %RequestOptions{
+          transport: %Transport{transport: transport},
+          openai_compatibility: %{source_endpoint: nil},
+          continuity: %{codex_session: %CodexSession{id: session_id, pool_upstream_assignment_id: nil}},
+          runtime: %{session_owner_witness: %OwnerWitness{session_id: session_id, lease_token: lease_token}}
+        },
+        assignment_id
+      )
+      when transport in ["http_json", "http_sse", "http_compact_json"] and is_binary(assignment_id) and is_binary(lease_token) do
+    _claim = ContinuityStore.claim_session_assignment(session_id, assignment_id, lease_token)
+    :ok
+  rescue
+    error in [DBConnection.ConnectionError, Postgrex.Error] ->
+      Logger.warning("gateway session assignment claim failed codex_session_id=#{session_id} reason_code=#{claim_failure_code(error)}")
+      :ok
+  end
+
+  def claim_served_assignment(%RequestOptions{}, _assignment_id), do: :ok
+
+  # A bounded code: the PostgreSQL condition name when the server answered,
+  # else the exception class.
+  defp claim_failure_code(%Postgrex.Error{postgres: %{code: code}}) when is_atom(code), do: Atom.to_string(code)
+  defp claim_failure_code(%Postgrex.Error{}), do: "database_error"
+  defp claim_failure_code(%DBConnection.ConnectionError{}), do: "database_connection_error"
 
   @spec put_session_metadata(metadata(), RequestOptions.t()) :: metadata()
   def put_session_metadata(

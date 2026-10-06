@@ -15,6 +15,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
     CodexSession,
     CodexTurn,
     SessionContinuity.Aliases,
+    SessionContinuity.AssignmentClaim,
     SessionContinuity.ExpiredSessions,
     SessionContinuity.OwnerLease,
     SessionContinuity.OwnerWitness,
@@ -407,6 +408,13 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity do
              | {:lock_timeout, __MODULE__.LockWaitDiagnostics.t()}}
   defdelegate renew_owner_token(session_ref, owner_lease_token, opts, renewal_opts),
     to: OwnerLease
+
+  @doc """
+  Pins a session that has no pin to the account serving its client output,
+  under the request's own owner lease token (findings#324).
+  """
+  @spec claim_session_assignment(Ecto.UUID.t(), Ecto.UUID.t(), Ecto.UUID.t()) :: AssignmentClaim.result()
+  defdelegate claim_session_assignment(session_id, assignment_id, lease_token), to: AssignmentClaim, as: :claim
 
   @spec start_codex_turn(CodexSession.t(), Request.t(), opts()) :: turn_result()
   defdelegate start_codex_turn(session, request, opts), to: TurnLifecycle
