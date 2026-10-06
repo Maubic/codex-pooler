@@ -718,6 +718,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
     case {reason_token(reason, :code), reason_token(reason, :window_kind)} do
       {"quota_weekly_exhausted", "secondary"} -> true
       {"quota_window_unusable", "primary"} -> true
+      {"quota_window_unusable", "secondary"} -> true
       {"quota_window_unusable", nil} -> true
       _other -> false
     end
