@@ -30,6 +30,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
   alias CodexPooler.Gateway.Transports.Admission
   alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
+  alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
@@ -1452,6 +1453,65 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
 
         receive do
           {:blocking_owner_upstream_release, ^release_ref} -> {:ok, %{body: "", terminal: "response.completed", status: 200, headers: [], websocket_frame_headers: %{}, provider_credits_admission: receipt}}
+        after
+          5_000 -> exit(:blocking_owner_upstream_timeout)
+        end
+      end,
+      close: fn upstream_pid ->
+        Agent.update(upstream_pid, fn state -> %{state | closed?: true} end)
+        Agent.stop(upstream_pid)
+      end
+    }
+  end
+
+  # The same blocking upstream, which also writes the turn's `response.completed`
+  # frame through the owner's writer once the test releases it. It answers the
+  # owner's send with the result a real upstream session returns, as
+  # `blocking_owner_upstream_boundary/2` does. Answering a bare `:ok` gave the
+  # owner a submission result no dispatch path reads, the turn's attempt
+  # reached this boundary a second time, and the response task finished only
+  # when that second send ran out the 5 s release budget below: about five
+  # seconds of every test using it.
+  def terminal_blocking_owner_upstream_boundary(test_pid, release_ref, response_id) do
+    %{
+      start: fn -> Agent.start_link(fn -> %{received?: false, closed?: false} end) end,
+      send: fn upstream_pid, request, writer ->
+        {:ok, receipt} = ProviderCreditsAdmission.admit(request.provider_credits_context)
+        Agent.update(upstream_pid, fn state -> %{state | received?: true} end)
+        send(test_pid, {:blocking_owner_upstream_received, self(), release_ref})
+
+        receive do
+          {:blocking_owner_upstream_release, ^release_ref} ->
+            frame =
+              CodexPooler.JSON.encode!(%{
+                "type" => "response.completed",
+                "response" => %{
+                  "id" => response_id,
+                  "status" => "completed",
+                  "output" => [],
+                  "usage" => %{"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}
+                }
+              })
+
+            decoded = CodexPooler.JSON.decode!(frame)
+
+            cond do
+              is_function(request.frame_observer, 2) -> request.frame_observer.(frame, decoded)
+              is_function(request.frame_observer, 1) -> request.frame_observer.(frame)
+              true -> :ok
+            end
+
+            writer.(frame, TerminalDiscriminator.classify(frame))
+
+            {:ok,
+             %{
+               body: "event: response.completed\ndata: #{frame}\n\n",
+               terminal: "response.completed",
+               status: 200,
+               headers: [],
+               websocket_frame_headers: %{},
+               provider_credits_admission: receipt
+             }}
         after
           5_000 -> exit(:blocking_owner_upstream_timeout)
         end

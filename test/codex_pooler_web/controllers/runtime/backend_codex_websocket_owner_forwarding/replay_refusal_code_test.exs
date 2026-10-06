@@ -22,7 +22,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayRefu
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.CodexSession
   alias CodexPooler.Gateway.Runtime.DuplicateTurnTelemetry
-  alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Websocket
   alias CodexPooler.Gateway.Websocket.Adapter
@@ -38,7 +37,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayRefu
   test "a new turn meeting the busy owner gets the owner's refusal while a resend of the running turn stays a counted duplicate" do
     attach_duplicate_turn_counter!()
     release_ref = make_ref()
-    upstream_boundary = terminal_blocking_owner_upstream_boundary(self(), release_ref)
+    upstream_boundary = terminal_blocking_owner_upstream_boundary(self(), release_ref, "resp_owner_refusal_code")
     upstream = start_upstream(FakeUpstream.json_response(%{"unexpected" => true}))
     setup = gateway_setup(upstream)
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
@@ -205,46 +204,5 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayRefu
         "x-codex-turn-metadata" => CodexPooler.JSON.encode!(%{"turn_id" => turn_id, "request_kind" => "turn"})
       }
     })
-  end
-
-  defp terminal_blocking_owner_upstream_boundary(test_pid, release_ref) do
-    %{
-      start: fn -> Agent.start_link(fn -> %{received?: false, closed?: false} end) end,
-      send: fn upstream_pid, request, writer ->
-        Agent.update(upstream_pid, fn state -> %{state | received?: true} end)
-        send(test_pid, {:blocking_owner_upstream_received, self(), release_ref})
-
-        receive do
-          {:blocking_owner_upstream_release, ^release_ref} ->
-            frame =
-              CodexPooler.JSON.encode!(%{
-                "type" => "response.completed",
-                "response" => %{
-                  "id" => "resp_owner_refusal_code",
-                  "status" => "completed",
-                  "output" => [],
-                  "usage" => %{"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}
-                }
-              })
-
-            decoded = CodexPooler.JSON.decode!(frame)
-
-            cond do
-              is_function(request.frame_observer, 2) -> request.frame_observer.(frame, decoded)
-              is_function(request.frame_observer, 1) -> request.frame_observer.(frame)
-              true -> :ok
-            end
-
-            writer.(frame, TerminalDiscriminator.classify(frame))
-            :ok
-        after
-          5_000 -> exit(:blocking_owner_upstream_timeout)
-        end
-      end,
-      close: fn upstream_pid ->
-        Agent.update(upstream_pid, fn state -> %{state | closed?: true} end)
-        Agent.stop(upstream_pid)
-      end
-    }
   end
 end

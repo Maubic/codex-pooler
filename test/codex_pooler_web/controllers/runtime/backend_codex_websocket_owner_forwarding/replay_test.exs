@@ -867,7 +867,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
   @tag :replay_topology
   test "healthy active owner rejects an exact retry without attachment mutation" do
     release_ref = make_ref()
-    upstream_boundary = terminal_blocking_owner_upstream_boundary(self(), release_ref)
+    upstream_boundary = terminal_blocking_owner_upstream_boundary(self(), release_ref, "resp_owner_active_reconnect")
     upstream = start_upstream(FakeUpstream.json_response(%{"unexpected" => true}))
     setup = gateway_setup(upstream)
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
@@ -2862,47 +2862,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayTest
     |> String.split(message)
     |> length()
     |> Kernel.-(1)
-  end
-
-  defp terminal_blocking_owner_upstream_boundary(test_pid, release_ref) do
-    %{
-      start: fn -> Agent.start_link(fn -> %{received?: false, closed?: false} end) end,
-      send: fn upstream_pid, request, writer ->
-        Agent.update(upstream_pid, fn state -> %{state | received?: true} end)
-        send(test_pid, {:blocking_owner_upstream_received, self(), release_ref})
-
-        receive do
-          {:blocking_owner_upstream_release, ^release_ref} ->
-            frame =
-              CodexPooler.JSON.encode!(%{
-                "type" => "response.completed",
-                "response" => %{
-                  "id" => "resp_owner_active_reconnect",
-                  "status" => "completed",
-                  "output" => [],
-                  "usage" => %{"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}
-                }
-              })
-
-            decoded = CodexPooler.JSON.decode!(frame)
-
-            cond do
-              is_function(request.frame_observer, 2) -> request.frame_observer.(frame, decoded)
-              is_function(request.frame_observer, 1) -> request.frame_observer.(frame)
-              true -> :ok
-            end
-
-            writer.(frame, TerminalDiscriminator.classify(frame))
-            :ok
-        after
-          5_000 -> exit(:blocking_owner_upstream_timeout)
-        end
-      end,
-      close: fn upstream_pid ->
-        Agent.update(upstream_pid, fn state -> %{state | closed?: true} end)
-        Agent.stop(upstream_pid)
-      end
-    }
   end
 
   defp reconnect_handoff_owner_upstream_boundary(test_pid) do
