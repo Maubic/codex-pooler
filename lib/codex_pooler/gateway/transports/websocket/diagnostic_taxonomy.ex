@@ -40,6 +40,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy do
                                partial_reasoning_cut
                                partial_http_tool_cut
                                zero_output_http_failure
+                               resampled_completion
                                quota_rejection
                                advanced_http_resume
                                previsible_disconnect

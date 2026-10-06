@@ -197,7 +197,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
              :mailbox_resume,
              :partial_http_tool_retry,
              :payload_independent_claims,
-             :public_error
+             :public_error,
+             :resampled_completion
            ]
 
     assert contract.documentary_fields == [
@@ -912,6 +913,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
   # so the retry is a different payload and buys a SECOND BILLED DISPATCH on a
   # predecessor that already succeeded. The turn's bare claim projects none of
   # that rebuilt body, so both requests keep the same identity.
+  #
+  # The fence is narrower than that over HTTP SSE (findings#311): after a
+  # succeeded request whose receipt names a delivered `response.completed`, a
+  # grown retry carrying exactly the completed items that response wrote has
+  # the bytes of the client's re-sample of the turn, and it is chained and
+  # billed as that request's linked successor, as an identical resend of a
+  # settled response is (`backend_codex_http_resample_test.exs`). This retry
+  # stays refused: its predecessor answered JSON, so no receipt names the items
+  # it wrote, and the appended item is not one of them.
   test "a turn in a compacted thread is still fenced against its own grown retry", %{conn: conn} do
     upstream =
       start_upstream(
@@ -955,7 +965,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpDuplicateTurnTest do
 
   # The control for the test above, and the fence's headline property: an
   # uncompacted turn's grown retry is refused by the bare claim. Both halves have
-  # to hold, or the compacted branch is being compared against nothing.
+  # to hold, or the compacted branch is being compared against nothing. The
+  # same narrowing applies: only an HTTP SSE retry carrying exactly the items a
+  # delivered completion wrote is admitted, as the re-sample it cannot be told
+  # apart from (findings#311).
   test "an uncompacted turn is fenced against its own grown retry", %{conn: conn} do
     upstream =
       start_upstream(

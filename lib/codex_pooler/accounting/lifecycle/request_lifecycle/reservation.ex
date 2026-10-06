@@ -390,7 +390,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
 
   defp unreserved_turn_claim?(%Request{}), do: false
 
-  defp link_semantic_execution_retry!(_opts, %{predecessor_request_id: id, predecessor_shape: shape}, request, timestamp) when shape in [:previsible_idle_timeout, :identical_resend, :partial_http_tool_cut, :mailbox_continuation, :content_filter_retry, :zero_output_http_failure],
+  defp link_semantic_execution_retry!(_opts, %{predecessor_request_id: id, predecessor_shape: shape}, request, timestamp) when shape in [:previsible_idle_timeout, :identical_resend, :partial_http_tool_cut, :mailbox_continuation, :content_filter_retry, :zero_output_http_failure, :resampled_completion],
     do: ClientRetry.insert_link!(%Request{id: id}, request, timestamp)
 
   defp link_semantic_execution_retry!(_opts, %{predecessor_request_id: id, execution_recovery?: true}, request, timestamp),
@@ -752,8 +752,9 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   defp duplicate_request_error(disposition) when is_atom(disposition),
     do: Map.put(duplicate_request_error(nil), :resend_disposition, disposition)
 
-  defp duplicate_request_error(%{disposition: disposition, mailbox_check: stage}),
-    do: Map.put(duplicate_request_error(disposition), :mailbox_check, stage)
+  # The proofs' furthest stages ride along for the refusal line only.
+  defp duplicate_request_error(%{disposition: disposition} = refusal),
+    do: Map.merge(duplicate_request_error(disposition), Map.take(refusal, [:mailbox_check, :resample_check]))
 
   @spec claim_client_retry_successor(CodexPooler.Access.auth_context(), Model.t(), map(), map()) ::
           {:ok, ClientRetry.SuccessorClaim.t()} | {:error, atom() | map()}
@@ -1454,6 +1455,13 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
     put_client_resend_metadata(metadata, Map.delete(resend, :predecessor_shape))
     |> put_in(["client_resend", "predecessor_shape"], "content_filter_retry")
     |> Map.put("native_content_filter_binding", NativeContentFilterRetry.binding(%Request{id: id}))
+  end
+
+  # A re-sample of a completed response (findings#311) names its shape: the
+  # `reason` string predates it and stays for the readers that match it.
+  defp put_client_resend_metadata(metadata, %{predecessor_shape: :resampled_completion} = resend) do
+    put_client_resend_metadata(metadata, Map.delete(resend, :predecessor_shape))
+    |> put_in(["client_resend", "predecessor_shape"], "resampled_completion")
   end
 
   defp put_client_resend_metadata(metadata, %{predecessor_request_id: predecessor_request_id}) do

@@ -4,6 +4,7 @@ defmodule CodexPooler.Accounting.Metadata do
   import Ecto.Query
 
   alias CodexPooler.Accounting.NativeContentFilterRetry
+  alias CodexPooler.Accounting.NativeResampledCompletion
   alias CodexPooler.Accounting.{Request, RequestLogFacts}
   alias CodexPooler.Events
   alias CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation
@@ -75,7 +76,8 @@ defmodule CodexPooler.Accounting.Metadata do
           optional(:limit_scope) => :window | :request,
           optional(:retry_after_seconds) => pos_integer(),
           optional(:resend_disposition) => atom(),
-          optional(:mailbox_check) => CodexPooler.Accounting.ClientRetry.mailbox_stage()
+          optional(:mailbox_check) => CodexPooler.Accounting.ClientRetry.mailbox_stage(),
+          optional(:resample_check) => CodexPooler.Accounting.NativeResampledCompletion.result()
         }
   @type request_result_row :: %{required(:request) => Request.t(), optional(atom()) => term()}
   @type request_result :: {:ok, request_result_row()} | {:error, accounting_error()}
@@ -428,6 +430,9 @@ defmodule CodexPooler.Accounting.Metadata do
 
       normalized == "native_http_turn_progress" ->
         sanitize_native_http_turn_progress(value)
+
+      normalized == "native_http_input_witness" ->
+        NativeResampledCompletion.sanitize_input_witness(value)
 
       normalized == "native_turn_progress" ->
         sanitize_native_http_turn_progress(value)

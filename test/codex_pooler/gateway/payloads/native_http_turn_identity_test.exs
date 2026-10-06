@@ -81,6 +81,48 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentityTest do
     assert length(proof.prefix.websocket) == length(frame_proof.prefix.websocket) + 3
   end
 
+  # A re-sample (findings#311) is its predecessor's input, then that response's
+  # completed items, then harness items: it derives the opener's claim and
+  # steered claim again, which is why the reservation has to tell the two
+  # apart. The input count and input-only digest an opener records are what a
+  # later re-sample is proved at; neither is part of any claim, and the digest
+  # ignores the turn metadata document the client rebuilds for every request.
+  test "a re-sample derives its opener's claims, and the opener records its input count and input-only digest" do
+    opener = payload(0)
+    resample = Map.update!(opener, "input", &(&1 ++ [%{"type" => "message", "role" => "assistant", "phase" => "commentary", "content" => [%{"type" => "output_text", "text" => "synthetic"}]}, %{"type" => "message", "role" => "developer", "content" => [%{"type" => "input_text", "text" => "synthetic reminder"}]}]))
+    assert {:ok, first} = NativeHttpTurnIdentity.request_claim(options(), opener)
+    assert {:ok, next} = NativeHttpTurnIdentity.request_claim(options(), resample)
+
+    assert {first.arm, next.arm} == {:opening, :opening}
+    assert next.key == first.key
+    assert next.steered_claim == first.steered_claim
+    assert {first.input_count, next.input_count} == {1, 3}
+    assert {:ok, digest} = WebsocketTurnIdentity.http_resume_input_digest(first.semantic_turn_key, opener["input"])
+    assert first.input_digest == digest
+    refute next.input_digest == first.input_digest
+
+    filled = put_in(opener, ["client_metadata", "x-codex-turn-metadata", "workspaces"], @workspaces)
+    assert {:ok, later} = NativeHttpTurnIdentity.request_claim(options(), filled)
+    assert later.input_digest == first.input_digest
+    refute later.native_client_retry_witness.digest == first.native_client_retry_witness.digest
+  end
+
+  test "a post-compaction resume records its count beside the input-only witness it already seals; a tool continuation records neither" do
+    resume = Map.update!(payload(0), "input", &(&1 ++ [%{"type" => "compaction", "encrypted_content" => "synthetic-compaction"}]))
+    assert {:ok, claim} = NativeHttpTurnIdentity.request_claim(options(), resume)
+    assert claim.arm == :post_compaction_resume
+    assert claim.input_count == 2
+    assert {:ok, digest} = WebsocketTurnIdentity.http_resume_input_digest(claim.semantic_turn_key, resume["input"])
+    assert claim.native_client_retry_witness.digest == digest
+    refute Map.has_key?(claim, :input_digest)
+
+    tool = Map.update!(payload(0), "input", &(&1 ++ [%{"type" => "function_call_output", "call_id" => "synthetic-call", "output" => "synthetic"}]))
+    assert {:ok, tool_claim} = NativeHttpTurnIdentity.request_claim(options(), tool)
+    assert tool_claim.arm == :tool_continuation
+    assert tool_claim.input_count == nil
+    refute Map.has_key?(tool_claim, :input_digest)
+  end
+
   defp options do
     RequestOptions.build(%{transport: "http_sse", codex_session: %CodexSession{id: @session_id}, api_key_runtime_epoch: 1}, "/backend-api/codex/responses", %{})
   end

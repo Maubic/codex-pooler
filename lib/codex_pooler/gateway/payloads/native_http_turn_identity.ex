@@ -131,6 +131,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
           required(:native_client_retry_witness) => ClientRetry.OriginalWitness.t() | nil,
           required(:input_count) => non_neg_integer() | nil,
           required(:semantic_turn_key) => <<_::256>>,
+          optional(:input_digest) => <<_::256>>,
           optional(:websocket_compaction_claims) => [String.t()],
           optional(:turn_progress) => <<_::256>>,
           optional(:turn_position) => NativeTurnContinuation.progress_position(),
@@ -196,6 +197,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
          native_client_retry_witness(identity, payload, request_options, claim.arm)
        )
        |> Map.put(:input_count, input_count(payload, claim.arm))
+       |> put_input_digest(identity, payload)
        |> Map.put(:semantic_turn_key, identity.semantic_turn_key)
        |> put_steered_claim(identity, payload, NativeTurnContinuation.window_number(metadata))}
     else
@@ -478,10 +480,28 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
     end
   end
 
-  defp input_count(%{"input" => input}, :post_compaction_resume) when is_list(input),
+  # The input count a later request of the turn is proved at: the resume's
+  # advanced-history proof, and the re-sample of a completed response of the
+  # turn's opener or of a steered continuation, which also records the
+  # input-only digest beside it (`put_input_digest/3`, findings#311). The
+  # claim never includes either.
+  defp input_count(%{"input" => input}, arm) when is_list(input) and arm in [:opening, :post_compaction_resume],
     do: length(input)
 
   defp input_count(_payload, _arm), do: nil
+
+  # The opener's sealed witness binds the whole frame, turn metadata document
+  # included, which the client rebuilds for every request; a re-sample is
+  # proved against its input alone. A post-compaction resume's witness already
+  # is this digest.
+  defp put_input_digest(%{arm: :opening} = claim, identity, %{"input" => input}) when is_list(input) do
+    case WebsocketTurnIdentity.http_resume_input_digest(identity.semantic_turn_key, input) do
+      {:ok, digest} -> Map.put(claim, :input_digest, digest)
+      _unavailable -> claim
+    end
+  end
+
+  defp put_input_digest(claim, _identity, _payload), do: claim
 
   defp kind_claim_arm("prewarm"), do: :prewarm
   defp kind_claim_arm("memory"), do: :memory

@@ -34,6 +34,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
 
   alias CodexPooler.Accounting.NativeContentFilterRetry
   alias CodexPooler.Accounting.NativeHttpToolObservation
+  alias CodexPooler.Accounting.NativeResampledCompletion
   alias CodexPooler.Accounting.RequestLifecycle
   alias CodexPooler.Accounting.RequestLifecycle.DeadExecutionResendRecovery
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
@@ -62,6 +63,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           optional(:payload) => map() | nil,
           optional(:mailbox_successor) => Request.t(),
           optional(:mailbox_check) => ClientRetry.mailbox_result(),
+          optional(:resample_check) => NativeResampledCompletion.result(),
           optional(:anchor_present?) => boolean()
         }
 
@@ -98,6 +100,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           | :partial_reasoning_cut
           | :partial_http_tool_cut
           | :zero_output_http_failure
+          | :resampled_completion
           | :advanced_http_resume
           | :previsible_disconnect
           | :undelivered_completion
@@ -118,7 +121,13 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           optional(:execution_recovery?) => boolean()
         }
 
-  @type refusal :: disposition() | %{disposition: disposition(), mailbox_check: ClientRetry.mailbox_stage()}
+  @type refusal ::
+          disposition()
+          | %{
+              required(:disposition) => disposition(),
+              optional(:mailbox_check) => ClientRetry.mailbox_stage(),
+              optional(:resample_check) => NativeResampledCompletion.result()
+            }
 
   @doc false
   @spec admission_session_ids(String.t() | nil, admission_scope()) :: [Ecto.UUID.t()]
@@ -334,9 +343,10 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
            DeadExecutionResendRecovery.recover(request, scoped?(request, scope), now),
          effective_now <- if(marker, do: db_now(), else: now),
          scoped_validation <- put_mailbox_check(scoped_validation, request),
+         scoped_validation <- put_resample_check(scoped_validation, request, successor),
          {:ok, request_shape} <- validate_chain_node(request, scoped_validation, {previous, successor}, effective_now) do
       markers = if marker, do: [marker | markers], else: markers
-      diagnostic_scope = Map.merge(scope, Map.take(scoped_validation, [:mailbox_check]))
+      diagnostic_scope = Map.merge(scope, Map.take(scoped_validation, [:mailbox_check, :resample_check]))
       resolve_chain(derived, request, request_shape, diagnostic_scope, now, markers, depth + 1)
     end
   end
@@ -386,8 +396,62 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     Map.put(scope, :mailbox_check, result)
   end
 
-  defp mailbox_refusal(disposition, %{mailbox_check: %{stage: stage}}), do: %{disposition: disposition, mailbox_check: stage}
-  defp mailbox_refusal(disposition, _scope), do: disposition
+  # A refusal keeps the furthest stage each proof the node was asked for
+  # reached, for the refusal line; the public answer stays `duplicate_turn`.
+  defp mailbox_refusal(disposition, scope) do
+    refusal =
+      %{disposition: disposition}
+      |> put_refusal_stage(:mailbox_check, Map.get(scope, :mailbox_check))
+      |> put_refusal_stage(:resample_check, Map.get(scope, :resample_check))
+
+    if map_size(refusal) == 1, do: disposition, else: refusal
+  end
+
+  defp put_refusal_stage(refusal, :mailbox_check, %{stage: stage}), do: Map.put(refusal, :mailbox_check, stage)
+  defp put_refusal_stage(refusal, :resample_check, %{stage: _stage} = check), do: Map.put(refusal, :resample_check, check)
+  defp put_refusal_stage(refusal, _key, _check), do: refusal
+
+  # The re-sample proof (`NativeResampledCompletion`, findings#311) is asked of
+  # a settled native HTTP SSE request of the turn's opener, a steered
+  # continuation or a post-compaction resume, and only for a native HTTP SSE
+  # request under a turn or resume claim: a websocket claim's scope carries no
+  # payload or semantic key, so no websocket request reaches it. When the node
+  # already has a successor under the claim derived from it, the edge is proved
+  # at that successor's recorded input count, never at this request's own
+  # length; a successor without one refuses.
+  defp put_resample_check(scope, %Request{transport: "http_sse", status: "succeeded", request_metadata: %{"native_http_claim_arm" => arm}} = request, successor) do
+    with true <- arm in NativeResampledCompletion.claim_arms(),
+         true <- resample_scope?(scope),
+         %{"input" => input} when is_list(input) <- Map.get(scope, :payload),
+         <<_::256>> = semantic_turn_key <- Map.get(scope, :native_http_semantic_turn_key) do
+      turn = lock_turn(request.id)
+      attempt = lock_final_attempt(turn, request.id)
+
+      side = %{
+        input: input,
+        semantic_turn_key: semantic_turn_key,
+        validation_count: resample_validation_count(input, successor),
+        codex_session_id: Map.get(scope, :codex_session_id),
+        witness: Map.get(scope, :native_client_retry_witness)
+      }
+
+      Map.put(scope, :resample_check, NativeResampledCompletion.check(turn, request, attempt, side))
+    else
+      _not_asked -> Map.delete(scope, :resample_check)
+    end
+  end
+
+  defp put_resample_check(scope, _request, _successor), do: Map.delete(scope, :resample_check)
+
+  defp resample_scope?(%{native_http_transport: "http_sse"} = scope), do: Map.get(scope, :semantic_claim?) == true or Map.get(scope, :resume_claim?) == true
+  defp resample_scope?(_scope), do: false
+
+  defp resample_validation_count(input, nil), do: length(input)
+  defp resample_validation_count(_input, %Request{request_metadata: %{"native_http_input_count" => count}}) when is_integer(count) and count >= 0, do: count
+  defp resample_validation_count(_input, %Request{}), do: :missing
+
+  defp resampled_completion?(%{resample_check: %{stage: :verified}}), do: true
+  defp resampled_completion?(_scope), do: false
 
   defp scope_for_predecessor(scope, %Request{} = successor) do
     scope = scope |> Map.put(:successor_admitted?, true) |> Map.put(:mailbox_successor, successor)
@@ -442,6 +506,25 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
 
   defp validate_semantic_retry(request, :mailbox_continuation, _scope, chain_edges) do
     if chain_edges_only?(request, chain_edges), do: :ok, else: {:error, :terminal_predecessor}
+  end
+
+  # A re-sample is never the predecessor's exact witness, so that comparison is
+  # the one check skipped; the sealed witness must still be eligible under the
+  # same authorization epoch, the node may carry only the chain's own edges and
+  # the session is the one the predecessor ran in. Under a turn claim the
+  # general clause below would demand the exact witness, and under a resume
+  # claim the catch-all would check nothing.
+  defp validate_semantic_retry(request, :resampled_completion, scope, chain_edges) do
+    with %ClientRetry.OriginalWitness{version: 1, auth_epoch: epoch} <- Map.get(scope, :native_client_retry_witness),
+         true <- ClientRetry.original_witness_eligible?(request),
+         true <- request.native_client_retry_auth_epoch == epoch,
+         true <- chain_edges_only?(request, chain_edges),
+         %CodexTurn{codex_session_id: session_id} when is_binary(session_id) <- lock_turn(request.id),
+         true <- session_id == Map.get(scope, :codex_session_id) do
+      :ok
+    else
+      _invalid -> {:error, :terminal_predecessor}
+    end
   end
 
   defp validate_semantic_retry(request, :identical_resend, %{semantic_claim?: false} = scope, chain_edges),
@@ -806,6 +889,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   defp resend_claim_scope?(_scope, :unreceived_compaction), do: true
   defp resend_claim_scope?(%{semantic_claim?: true}, _shape), do: true
   defp resend_claim_scope?(_scope, :identical_resend), do: true
+  defp resend_claim_scope?(%{resume_claim?: true}, :resampled_completion), do: true
   defp resend_claim_scope?(_scope, _shape), do: false
 
   # A compaction the client never read is resent after the client's stream
@@ -822,6 +906,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
       ClientRetry.verified_undelivered_completion?(turn, request, attempt) -> :undelivered_completion
       ClientRetry.verified_undelivered_partial_output?(turn, request, attempt) -> :undelivered_partial_output
       completed_item_resend?(turn, request, attempt, scope) -> :completed_item_resend
+      resampled_completion?(scope) -> :resampled_completion
       true -> nil
     end
   end

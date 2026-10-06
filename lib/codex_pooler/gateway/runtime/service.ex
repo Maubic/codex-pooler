@@ -2305,7 +2305,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
       log_duplicate_turn(request_options, :reservation_duplicate,
         stage: "native_http_turn_claim",
         endpoint: endpoint,
-        extra: [resend_disposition: Map.get(reason, :resend_disposition), mailbox_check: Map.get(reason, :mailbox_check)]
+        extra: [resend_disposition: Map.get(reason, :resend_disposition), mailbox_check: Map.get(reason, :mailbox_check)] ++ resample_check_fields(Map.get(reason, :resample_check))
       )
 
       {:error, duplicate_turn_error()}
@@ -2315,6 +2315,29 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   end
 
   defp normalize_native_http_turn_duplicate(result, _endpoint, %RequestOptions{}), do: result
+
+  # The re-sample proof's furthest stage (findings#311). A refused tail item is
+  # named only in `NativeContinuationTail`'s closed vocabulary (a type outside
+  # it reads `other` with a 12-character fingerprint), never by its content;
+  # counts and positions are integers.
+  defp resample_check_fields(%{stage: stage} = check) do
+    tail = Map.get(check, :tail, %{})
+
+    [
+      resample_check: stage,
+      resample_output_items: integer_field(Map.get(check, :output_items)),
+      resample_tail_length: integer_field(Map.get(tail, :tail_length)),
+      resample_tail_index: integer_field(Map.get(tail, :tail_index)),
+      resample_item_type: Map.get(tail, :item_type),
+      resample_item_type_fingerprint: Map.get(tail, :item_type_fingerprint),
+      resample_item_role: Map.get(tail, :item_role)
+    ]
+  end
+
+  defp resample_check_fields(_check), do: []
+
+  defp integer_field(value) when is_integer(value), do: Integer.to_string(value)
+  defp integer_field(_value), do: nil
 
   defp normalize_mailbox_admission_exhaustion({:error, %{code: :duplicate_request, mailbox_check: :session, resend_disposition: :chain_exhausted}}, endpoint, %RequestOptions{transport: %{transport: "websocket"}} = options) do
     stage =

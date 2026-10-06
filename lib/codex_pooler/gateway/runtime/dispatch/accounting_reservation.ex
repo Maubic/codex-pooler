@@ -5,6 +5,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.AccountingReservation do
 
   alias CodexPooler.Access
   alias CodexPooler.Accounting.FailureResponse
+  alias CodexPooler.Accounting.NativeResampledCompletion
   alias CodexPooler.Accounting.PricingResolution
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Gateway.Contracts
@@ -438,6 +439,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.AccountingReservation do
   defp native_http_claim_metadata({:ok, %{arm: arm, input_count: input_count} = claim}) do
     %{"native_http_claim_arm" => Atom.to_string(arm)}
     |> maybe_put_native_http_input_count(input_count)
+    |> maybe_put_native_http_input_witness(Map.get(claim, :input_digest))
     |> maybe_put_native_http_turn_progress(Map.get(claim, :turn_progress), Map.get(claim, :turn_position))
   end
 
@@ -471,6 +473,14 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.AccountingReservation do
        do: Map.put(metadata, "native_http_input_count", input_count)
 
   defp maybe_put_native_http_input_count(metadata, _input_count), do: metadata
+
+  # The input-only witness an opening or steered request records beside its
+  # count, which a re-sample of its completed response is proved against
+  # (findings#311); an opaque digest, never the input.
+  defp maybe_put_native_http_input_witness(metadata, <<_::256>> = digest),
+    do: Map.put(metadata, "native_http_input_witness", NativeResampledCompletion.input_witness_metadata(digest))
+
+  defp maybe_put_native_http_input_witness(metadata, _digest), do: metadata
 
   # What the reservation compares a later `:opening` request of the same turn
   # against (findings#206 row 206-403); an opaque digest, never the body.
