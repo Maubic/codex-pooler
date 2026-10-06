@@ -733,10 +733,13 @@ A second narrow exception covers upstream parameter validation. When upstream
 rejects a `POST /v1/responses` or `POST /v1/chat/completions` request before
 any stream starts with HTTP `400`, type `invalid_request_error`, and one of the
 codes `unsupported_value`, `invalid_value`, `unsupported_parameter`,
-`missing_required_parameter`, `invalid_type`, or `string_above_max_length`,
-streaming and non-streaming clients receive a `400` JSON error with type
-`invalid_request_error`, that code, a bounded `param` field path or `null`, and
-a message written by Codex Pooler from the code and param, for example
+`missing_required_parameter`, `invalid_type`, `string_above_max_length`,
+`unknown_parameter` (a request key upstream does not know, for example a hosted
+tool key it does not accept), or `invalid_parameter` (a field the selected
+model does not support), streaming and non-streaming clients receive a `400`
+JSON error with type `invalid_request_error`, that code, a bounded `param` field
+path or `null`, and a message written by Codex Pooler from the code and param,
+for example
 `upstream rejected parameter reasoning.effort (unsupported_value); supported values: low, medium, high`.
 SDKs expose these as `BadRequestError` with `code` and `param`. The provider
 message is never forwarded; for `unsupported_value` and `invalid_value` the
@@ -809,6 +812,30 @@ Accepted values are forwarded unchanged. As with domain filters, Codex Pooler
 guarantees local validation and forwarding of this shape only; availability and
 enforcement can vary by selected upstream model and account. `web_search_preview`
 stays a type-only tool.
+
+### Hosted web search history replay
+
+A `web_search_call` item is what a Full-served model returns after it ran the
+hosted `web_search` tool. A client that sends `response.output` back as the
+history of its next stateless request sends it in `input`, and Codex Pooler
+forwards it unchanged, in the position the client sent it, in Full and Lite
+serving mode alike. It admits the item the way upstream validates it:
+
+- The keys are `type`, `id`, `status`, `action` and an optional
+  `internal_chat_message_metadata_passthrough` object. `id` and `status` are
+  nonblank strings when present.
+- `action.type` is `search` (`query`, `queries` and `sources`, a list of
+  `{"type": "url", "url": ...}` objects that upstream returns when the request
+  lists `web_search_call.action.sources` in `include`), `open_page` (`url`) or
+  `find_in_page` (`url`, `pattern`). A key that belongs to another action type
+  is rejected.
+- A `null` is rejected for every field except the passthrough object.
+- An item the public stream named `web_search_call` or `web_search_call_<n>`,
+  because upstream sent it without an id, is replayed without that id.
+
+Any other shape is rejected before dispatch with `400 invalid_request` on
+`input`. Neither the search query nor the sources are persisted in request
+metadata, logs or operator views.
 
 ## Tool-output preservation
 

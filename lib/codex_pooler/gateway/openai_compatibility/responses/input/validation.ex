@@ -5,6 +5,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.AgentMessage
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Audio
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.HostedShell
+  alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.WebSearchCall
   alias CodexPooler.Gateway.Payloads.ToolResultShape
 
   @metadata_passthrough_key "internal_chat_message_metadata_passthrough"
@@ -55,6 +56,9 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
 
   defp validate_input_item(%{"type" => "agent_message"} = item, _payload),
     do: AgentMessage.validate_item(item)
+
+  defp validate_input_item(%{"type" => "web_search_call"} = item, _payload),
+    do: WebSearchCall.validate_item(item)
 
   defp validate_input_item(%{"role" => "assistant"} = item, _payload),
     do: validate_assistant_replay_item(item)

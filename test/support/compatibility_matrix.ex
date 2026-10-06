@@ -1495,6 +1495,8 @@ defmodule CodexPooler.CompatibilityMatrix do
         missing_required_parameter
         invalid_type
         string_above_max_length
+        unknown_parameter
+        invalid_parameter
       ),
       source: "private_stream_drain_then_materialized_body",
       relayed_fields: ~w(type code param message),
@@ -1946,6 +1948,27 @@ defmodule CodexPooler.CompatibilityMatrix do
         serving_modes: ["full", "lite"],
         continuation: %{stateless_history_replay: "accepted"},
         privacy: %{mode: "metadata_only", content_persisted: false, ciphertext_persisted: false}
+      },
+      web_search_call_history: %{
+        accepted_items: ["web_search_call"],
+        item: %{
+          required: ["type"],
+          optional: ["id", "status", "action", "internal_chat_message_metadata_passthrough"],
+          id: "nonblank_string",
+          status: "nonblank_string"
+        },
+        action: %{
+          types: ["search", "open_page", "find_in_page"],
+          keys: %{search: ["query", "queries", "sources"], open_page: ["url"], find_in_page: ["url", "pattern"]},
+          sources: "list_of_exact_url_objects"
+        },
+        nulls: "refused_except_passthrough",
+        public_fallback_id: "dropped",
+        forwarding: "unchanged_in_client_position",
+        refusal: %{status: 400, code: "invalid_request", param: "input", upstream_dispatch: false},
+        serving_modes: ["full", "lite"],
+        continuation: %{stateless_history_replay: "accepted"},
+        privacy: %{mode: "metadata_only", queries_persisted: false, sources_persisted: false}
       },
       responses_truncation: %{
         accepted_values: ["auto", "disabled"],

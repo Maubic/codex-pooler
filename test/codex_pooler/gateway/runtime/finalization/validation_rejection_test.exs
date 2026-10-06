@@ -23,6 +23,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ValidationRejectionTest do
              missing_required_parameter
              invalid_type
              string_above_max_length
+             unknown_parameter
+             invalid_parameter
            )
   end
 

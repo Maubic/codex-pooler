@@ -3155,7 +3155,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
         },
         %{"type" => "local_shell_call", "call_id" => "call_fixture"},
         %{"type" => "mcp_approval_response", "call_id" => "call_fixture", "output" => "bad"},
-        %{"type" => "web_search_call", "id" => "ws_fixture"},
+        %{"type" => "web_search_call", "id" => "ws_fixture", "action" => %{"type" => "bogus_action"}},
         %{"type" => "unknown_fixture", "id" => "item_fixture"}
       ]
 

@@ -598,9 +598,10 @@ projected through it.
 When upstream rejects an ordinary Responses or Chat Completions HTTP request
 with status `400`, an error object of type `invalid_request_error`, and one of
 the parameter-validation codes `unsupported_value`, `invalid_value`,
-`unsupported_parameter`, `missing_required_parameter`, `invalid_type`, or
-`string_above_max_length`, the client receives that rejection instead of an
-empty or generic error:
+`unsupported_parameter`, `missing_required_parameter`, `invalid_type`,
+`string_above_max_length`, `unknown_parameter` (a request key upstream does not
+know) or `invalid_parameter` (a field the selected model does not support), the
+client receives that rejection instead of an empty or generic error:
 
 ```json
 {

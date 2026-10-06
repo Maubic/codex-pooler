@@ -11,6 +11,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   @known_input_item_types ~w(
     additional_tools
     agent_message
+    web_search_call
     message
     reasoning
     compaction
@@ -185,16 +186,17 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   # The public stream names an output item the upstream sent without an id
   # `<type>_<output_index>` (or `<type>` without an index; see
   # `PublicResponses.fallback_output_item_id/2`). Replayed into a `store:
-  # false` turn, the Codex backend rejects that id for a message or a
-  # compaction (400 `invalid_value` on `input[i].id`) and accepts the item
+  # false` turn, the Codex backend rejects that id for a message, a
+  # compaction or a web search call (400 `invalid_value` on `input[i].id`;
+  # a web search call wants an id that begins with `ws`) and accepts the item
   # without one; provider ids are a short prefix plus an opaque suffix
-  # (`msg_`, `rs_`, `cmp_`, `fc_`) and never the item type itself. The input
+  # (`msg_`, `rs_`, `cmp_`, `fc_`, `ws_`) and never the item type itself. The input
   # adapter therefore drops exactly the item's own fallback id before
   # normalization, so the upstream receives the item as it produced it
   # (findings#254). A reasoning item keeps its id unless it carries encrypted
   # content, the only form that stays valid without one.
   defp drop_public_fallback_item_id(%{"type" => type, "id" => id} = item)
-       when type in ["message", "compaction"] and is_binary(id) do
+       when type in ["message", "compaction", "web_search_call"] and is_binary(id) do
     if public_fallback_item_id?(type, id), do: Map.delete(item, "id"), else: item
   end
 
@@ -350,6 +352,9 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   # the generic `content` clauses below would rewrite it into a user message.
   # `Input.AgentMessage` owns its exact shape and refuses every other form.
   defp normalize_input_item(%{"type" => "agent_message"} = item), do: {:ok, item}
+
+  # A replayed hosted web search; `Input.WebSearchCall` owns its exact shape.
+  defp normalize_input_item(%{"type" => "web_search_call"} = item), do: {:ok, item}
 
   defp normalize_input_item(%{"type" => type}) when type not in @known_input_item_types,
     do: {:error, Error.invalid_request("input item shape is not translatable", "input")}

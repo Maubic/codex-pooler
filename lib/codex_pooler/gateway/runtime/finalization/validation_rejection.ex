@@ -40,6 +40,12 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ValidationRejection do
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Runtime.Finalization.Metadata
 
+  # `unknown_parameter` (a request key the provider does not know, for example a hosted tool key it no longer
+  # accepts: `tools[0].<key>`, `input[0].tools[0].<key>` in a Lite manifest) and `invalid_parameter` (a field the
+  # model does not support, `prompt_cache_breakpoint`) were observed on the provider with type
+  # `invalid_request_error`, status 400 and a bounded field path in `param` (direct probe 2026-10-06). Like the
+  # four codes before them they are the client's error, carry no value list, and are relayed with the same
+  # Pooler-authored message; the provider message never travels.
   @relayable_codes ~w(
     unsupported_value
     invalid_value
@@ -47,6 +53,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ValidationRejection do
     missing_required_parameter
     invalid_type
     string_above_max_length
+    unknown_parameter
+    invalid_parameter
   )
   @supported_values_codes ~w(unsupported_value invalid_value)
   # The provider's own vocabulary, used only to recognise the rejection. It is
