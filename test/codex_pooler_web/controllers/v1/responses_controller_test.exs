@@ -3308,6 +3308,29 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     refute Map.has_key?(captured.json, "max_output_tokens")
   end
 
+  # `/v1/responses` goes through the same payload normalizer as the native route: a Full request that omits `instructions` is sent upstream
+  # with an empty string, and Lite removes the key again, so a Lite request that omits it gets no instructions message.
+  for stream <- [false, true] do
+    test "POST /v1/responses without instructions sends an empty string in Full and none in Lite with stream=#{stream}", %{conn: conn} do
+      upstream = start_upstream(issue_241_completed_response("v1_instructions_default"))
+      setup = gateway_setup(upstream)
+      payload = %{"model" => setup.model.exposed_model_id, "input" => "synthetic request", "stream" => unquote(stream)}
+
+      for mode <- ~w(full lite) do
+        put_public_model_serving_mode!(setup, mode)
+        response = conn |> recycle() |> auth(setup) |> post("/v1/responses", payload)
+        assert response.status == 200
+      end
+
+      assert [full_capture, lite_capture] = FakeUpstream.requests(upstream)
+      assert full_capture.path == "/backend-api/codex/responses"
+      assert lite_capture.path == "/backend-api/codex/responses"
+      assert full_capture.json["instructions"] == ""
+      refute Map.has_key?(lite_capture.json, "instructions")
+      assert Enum.map(lite_capture.json["input"], & &1["type"]) == ["additional_tools", "message"]
+    end
+  end
+
   test "POST /v1/responses bridges a terminal compaction trigger across JSON and SSE", %{
     conn: conn
   } do

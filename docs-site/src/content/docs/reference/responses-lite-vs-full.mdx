@@ -155,7 +155,7 @@ Served in Full, the tools and instructions stay where they are. Served in Lite, 
 
 Top-level `instructions` and `tools` are gone, the tool list leads the input, and the instructions follow it as a developer message.
 
-These blocks isolate the serving-mode difference. Codex Pooler applies other normalization to every ordinary backend Responses request in both modes — it maps the model id to the selected upstream account's identifier, ensures `include` carries `reasoning.encrypted_content`, and lowers non-strict tool schemas — so a captured upstream body carries those changes too, in Lite and in Full alike.
+These blocks isolate the serving-mode difference. Codex Pooler applies other normalization to every ordinary backend Responses request in both modes — it maps the model id to the selected upstream account's identifier, ensures `include` carries `reasoning.encrypted_content`, and lowers non-strict tool schemas — so a captured upstream body carries those changes too, in Lite and in Full alike. A Full request without `instructions` is sent with an empty `instructions` string; Lite sends no top-level `instructions`.
 
 ## Who Decides The Dialect?
 

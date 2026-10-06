@@ -888,6 +888,38 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     end
   end
 
+  # A Full request that omits `instructions` is sent upstream with an empty `instructions` string, and Lite removes the key again, so
+  # a Lite request that omits it carries no top-level `instructions` and no instructions message. The upstream double records both.
+  for stream? <- [false, true] do
+    @tag :model_serving_modes
+    @tag mode_stream: stream?
+    test "native Responses without instructions sends an empty string in Full and none in Lite with stream=#{stream?}", %{conn: conn, mode_stream: stream?} do
+      upstream = start_upstream(backend_mode_matrix_upstream(:responses, stream?))
+      setup = gateway_setup(upstream)
+      payload = backend_mode_matrix_payload(setup, :responses, stream?)
+      refute Map.has_key?(payload, "instructions")
+
+      for mode <- ["full", "lite"] do
+        put_model_serving_mode!(setup, mode)
+        response = conn |> recycle() |> auth(setup) |> post("/backend-api/codex/responses", payload)
+        assert_backend_mode_matrix_response!(response, :responses, stream?)
+      end
+
+      assert [full_capture, lite_capture] = FakeUpstream.requests(upstream)
+      assert full_capture.path == "/backend-api/codex/responses"
+      assert lite_capture.path == "/backend-api/codex/responses"
+      assert full_capture.json["instructions"] == ""
+      refute Map.has_key?(lite_capture.json, "instructions")
+
+      assert Enum.map(lite_capture.json["input"], &Map.take(&1, ["type", "role"])) == [
+               %{"type" => "additional_tools", "role" => "developer"},
+               %{"type" => "message", "role" => "user"}
+             ]
+
+      assert_backend_mode_matrix_metadata!(setup, ["full", "lite"])
+    end
+  end
+
   @tag :model_serving_modes
   test "Responses Lite rejects typed tool choice before upstream dispatch", %{conn: conn} do
     upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_unexpected"}))
