@@ -71,6 +71,46 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
     end
   end
 
+  # The provider's measured compaction stream (`gpt-6-luna`, Full): `response.created`, `response.in_progress`, the
+  # item announced with a ciphertext of its own, `response.compaction.compacting`, the closed item, and a
+  # `response.completed` that lists nothing. Such a stream makes the client-retry observation ineligible (it models no
+  # `compacting` event and counts no `compaction` item), and no compaction resend reads that observation: the resend is
+  # judged by `ClientRetry.compaction_resend_shape/3`, with owner forwarding off (`FailedPredecessorResend`) and on (the
+  # `:native_compaction` policy). Cut before any output, after `compacting` and after the closed item, the compaction
+  # settles and the released client's first resend is its successor, as in the arms above.
+  for topology <- [:forwarded, :direct], {cut, releases} <- [{:before_output, 2}, {:after_compacting, 4}, {:after_done, 5}] do
+    @tag mode: "full", topology: topology, cut: cut
+    test "full #{topology} measured compaction stream cut #{cut}: it settles and the first resend is its successor", %{topology: topology} do
+      assert run_scenario("full", topology, {:measured, unquote(releases)}) == %{
+               predecessor_settled?: true,
+               retries: [:served],
+               successor_chained?: true,
+               max_charges_per_request: 1,
+               upstream_compactions: 2,
+               replay_entitlements: [],
+               live_rows: 0
+             }
+    end
+  end
+
+  # The same stream cut by the provider at each stage (its websocket closes without a terminal): the compaction fails
+  # `upstream_stream_error` and the released client's first websocket retry is its successor, admitted as
+  # `compaction_cut` while the turn records no visible output and as `unreceived_compaction` (a collected cut) once it
+  # does, whatever the ineligible observation says.
+  for topology <- [:forwarded, :direct], {cut, frames} <- [{:before_output, 2}, {:after_compacting, 4}, {:after_done, 5}] do
+    @tag mode: "full", topology: topology, cut: cut
+    test "full #{topology} measured compaction stream cut by the provider #{cut}: it fails and the first resend is its successor", %{topology: topology} do
+      assert run_provider_cut(topology, unquote(frames)) == %{
+               predecessor: {"failed", "upstream_stream_error"},
+               retries: [:served],
+               successor_chained?: true,
+               max_charges_per_request: 1,
+               upstream_compactions: 2,
+               live_rows: 0
+             }
+    end
+  end
+
   # The settlement's one transaction, held open (findings#288): the provider
   # served the cut compaction, its task is held inside its settlement
   # transaction right after it wrote the turn's completion, and the client
@@ -417,7 +457,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
     release_ref = make_ref()
     ctx = %{mode: mode}
 
-    held = FakeUpstream.barrier_websocket_frames(held_compaction_messages(), notify: self(), release_ref: release_ref)
+    held = FakeUpstream.barrier_websocket_frames(held_messages(cut), notify: self(), release_ref: release_ref)
     compaction = [valid: true, equals: lite_marker_expectation(%{"type" => "response.create"}, mode), forbidden: ["previous_response_id"]]
 
     upstream =
@@ -445,11 +485,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
     second = send_frame!(second, full_history_compaction_frame(ctx))
     await_barrier!(0, release_ref)
 
-    if cut == :after_output do
-      for barrier <- [1, 2] do
-        :ok = FakeUpstream.release_frame(upstream, release_ref)
-        await_barrier!(barrier, release_ref)
-      end
+    for barrier <- released_barriers(cut) do
+      :ok = FakeUpstream.release_frame(upstream, release_ref)
+      await_barrier!(barrier, release_ref)
     end
 
     {settled?, retries} =
@@ -480,9 +518,53 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
       live_rows: Enum.count(rows, &(&1.status in ["accepted", "in_progress"]))
     }
 
-    CodexPooler.TestDiagnostics.puts(fn -> "206-333 #{mode} #{topology} #{cut}: #{inspect(measured)}" end)
+    CodexPooler.TestDiagnostics.puts(fn -> "206-333 #{mode} #{topology} #{inspect(cut)}: #{inspect(measured)}" end)
     if measured.predecessor_settled?, do: assert(:ok = FakeUpstream.verify!(upstream))
     measured
+  end
+
+  defp run_provider_cut(topology, frames) do
+    put_owner_forwarding!(topology == :forwarded)
+    ctx = %{mode: "full"}
+    compaction = [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]]
+
+    upstream =
+      start_upstream(
+        # provenance: synthetic_adversarial; the provider's measured compaction stream closed without a terminal after the given frame count, then the released client's full-history retry and its resumed turn
+        FakeUpstream.strict_sequence([
+          FakeUpstream.expect_request(method: "WEBSOCKET", json: [valid: true, equals: %{"type" => "response.create"}], respond: completed_frames(@anchor, [answer()])),
+          FakeUpstream.expect_request(method: "WEBSOCKET", json: compaction, respond: FakeUpstream.websocket_sse_then_close(measured_compaction_messages() |> Enum.take(frames) |> Enum.map(&CodexPooler.JSON.decode!/1), code: 1011, reason: "synthetic provider cut"))
+          | resend_expectations(:before_output, compaction)
+        ])
+      )
+
+    setup = gateway_setup(upstream, compact?: true)
+    ctx = Map.put(ctx, :setup, setup)
+    port = start_public_endpoint!()
+
+    first = connect!(port, setup)
+    first = ordinary_turn!(first, turn_frame(ctx))
+    Mint.HTTP.close(first.conn)
+    await!(fn -> match?([%Request{status: "succeeded"}], pool_requests(setup.pool.id)) end, "the first turn never settled")
+
+    second = connect!(port, setup)
+    {second, frames_seen} = second |> send_frame!(full_history_compaction_frame(ctx)) |> receive_until_terminal([])
+    Mint.HTTP.close(second.conn)
+    assert List.last(frames_seen) in ["error", "response.failed"], inspect(frames_seen)
+    await!(fn -> cut_compaction_settled?(setup.pool.id) end, "the cut compaction never settled")
+    [predecessor] = Enum.filter(pool_requests(setup.pool.id), &(&1.endpoint == @compact_endpoint))
+    retries = released_client_retries!(ctx, port, fn -> :ok end)
+    rows = await_no_live_requests(setup.pool.id)
+    compactions = Enum.filter(rows, &(&1.endpoint == @compact_endpoint))
+
+    %{
+      predecessor: {predecessor.status, predecessor.last_error_code},
+      retries: retries,
+      successor_chained?: match?([_predecessor, successor] when is_struct(successor, Request), compactions) and chained?(List.last(compactions)),
+      max_charges_per_request: compactions |> Enum.map(&charges/1) |> Enum.max(),
+      upstream_compactions: upstream |> FakeUpstream.requests() |> Enum.count(&compaction_request?/1),
+      live_rows: Enum.count(rows, &(&1.status in ["accepted", "in_progress"]))
+    }
   end
 
   # The peer shares the committed database, so its fixture is committed: the
@@ -663,6 +745,35 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketFullHistoryCompactionCutTe
   defp compaction_metadata do
     compaction = %{"trigger" => "auto", "reason" => "context_limit", "implementation" => "responses_compaction_v2", "phase" => "pre_turn", "strategy" => "memento"}
     turn_metadata(%{"request_kind" => "compaction", "compaction" => compaction, "turn_id" => @next_turn_id, "root_turn_id" => @next_turn_id})
+  end
+
+  # The frames released before the cut: none before any output, the created and closed frames after it, or the
+  # measured stream's first frames.
+  defp released_barriers(:after_output), do: [1, 2]
+  defp released_barriers({:measured, releases}), do: Enum.to_list(1..releases)
+  defp released_barriers(_cut), do: []
+
+  defp held_messages({:measured, _releases}), do: measured_compaction_messages()
+  defp held_messages(_cut), do: held_compaction_messages()
+
+  # The measured order, with synthetic ciphertexts of the measured lengths: the announcement's own (996 bytes) and the
+  # closed item's (1252); the completed response lists nothing.
+  defp measured_compaction_messages do
+    announced = %{"type" => "compaction", "id" => nil, "encrypted_content" => "gAAAAA-announced-" <> String.duplicate("a", 979)}
+    closed = %{announced | "encrypted_content" => "gAAAAA-closed-" <> String.duplicate("c", 1238)}
+    opening = %{"id" => @cut_response, "status" => "in_progress", "output" => []}
+
+    Enum.map(
+      [
+        %{"type" => "response.created", "response" => opening},
+        %{"type" => "response.in_progress", "response" => opening},
+        %{"type" => "response.output_item.added", "output_index" => 0, "item" => announced},
+        %{"type" => "response.compaction.compacting", "output_index" => 0},
+        %{"type" => "response.output_item.done", "output_index" => 0, "item" => closed},
+        %{"type" => "response.completed", "response" => %{"id" => @cut_response, "status" => "completed", "output" => [], "usage" => usage()}}
+      ],
+      &CodexPooler.JSON.encode!/1
+    )
   end
 
   defp held_compaction_messages do
