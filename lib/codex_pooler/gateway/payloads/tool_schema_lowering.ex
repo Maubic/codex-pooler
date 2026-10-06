@@ -6,7 +6,7 @@ defmodule CodexPooler.Gateway.Payloads.ToolSchemaLowering do
 
   @spec lower_non_strict_function_tools(map()) :: map()
   def lower_non_strict_function_tools(%{"tools" => tools} = payload) when is_list(tools) do
-    Map.put(payload, "tools", Enum.map(tools, &lower_tool/1))
+    Map.put(payload, "tools", Enum.map(tools, &lower_tool(&1, :drop_encrypted_markers)))
   end
 
   def lower_non_strict_function_tools(payload), do: payload
@@ -20,105 +20,111 @@ defmodule CodexPooler.Gateway.Payloads.ToolSchemaLowering do
   def lower_backend_non_strict_function_tools(payload), do: payload
 
   defp lower_backend_tool(%{"type" => "namespace"} = tool), do: tool
-  defp lower_backend_tool(tool), do: lower_tool(tool)
+  defp lower_backend_tool(tool), do: lower_tool(tool, :drop_encrypted_markers)
 
-  defp lower_tool(%{"type" => "function", "function" => %{} = function} = tool) do
+  defp lower_tool(%{"type" => "function", "function" => %{} = function} = tool, markers) do
     if strict_function_tool?(function, tool) do
       tool
     else
-      Map.put(tool, "function", lower_function_parameters(function))
+      Map.put(tool, "function", lower_function_parameters(function, markers))
     end
   end
 
-  defp lower_tool(%{"type" => "function"} = tool) do
-    if strict_function_tool?(tool, tool), do: tool, else: lower_function_parameters(tool)
+  defp lower_tool(%{"type" => "function"} = tool, markers) do
+    if strict_function_tool?(tool, tool), do: tool, else: lower_function_parameters(tool, markers)
   end
 
-  defp lower_tool(%{"type" => "namespace", "tools" => tools} = tool) when is_list(tools) do
-    Map.put(tool, "tools", Enum.map(tools, &lower_tool/1))
+  # A namespace's functions keep their `encrypted: true` parameter markers. The provider reserves some namespaced
+  # functions (the Codex client's `collaboration` tools) and refuses a declaration that differs from the schema it has
+  # configured for them, marker included (`400 invalid_request_error`, param `tools`). Ordinary top-level functions
+  # still lose the marker, which the provider refuses for models not configured for encrypted tool use.
+  defp lower_tool(%{"type" => "namespace", "tools" => tools} = tool, _markers) when is_list(tools) do
+    Map.put(tool, "tools", Enum.map(tools, &lower_tool(&1, :keep_encrypted_markers)))
   end
 
-  defp lower_tool(tool), do: tool
+  defp lower_tool(tool, _markers), do: tool
 
   defp strict_function_tool?(function, tool) do
     Map.get(function, "strict") == true or Map.get(tool, "strict") == true
   end
 
-  defp lower_function_parameters(%{"parameters" => parameters} = function)
+  defp lower_function_parameters(%{"parameters" => parameters} = function, markers)
        when is_map(parameters) or is_boolean(parameters) do
-    Map.put(function, "parameters", lower_function_parameters_schema(parameters))
+    Map.put(function, "parameters", lower_function_parameters_schema(parameters, markers))
   end
 
-  defp lower_function_parameters(function), do: function
+  defp lower_function_parameters(function, _markers), do: function
 
-  defp lower_function_parameters_schema(schema) do
+  defp lower_function_parameters_schema(schema, markers) do
     schema
-    |> lower_schema()
+    |> lower_schema(markers)
     |> ensure_function_parameters_object()
   end
 
-  defp lower_schema(schema) when is_boolean(schema), do: %{}
+  defp lower_schema(schema, _markers) when is_boolean(schema), do: %{}
 
-  defp lower_schema(%{} = schema) do
+  defp lower_schema(%{} = schema, markers) do
     schema
-    |> Enum.reduce(%{}, fn {key, value}, acc -> lower_schema_key(acc, to_string(key), value) end)
+    |> Enum.reduce(%{}, fn {key, value}, acc -> lower_schema_key(acc, to_string(key), value, markers) end)
     |> maybe_put_const_enum(schema)
     |> infer_schema_type()
     |> ensure_object_properties()
     |> ensure_array_items()
   end
 
-  defp lower_schema(_schema), do: %{}
+  defp lower_schema(_schema, _markers), do: %{}
 
-  defp lower_schema_key(acc, "$ref", value) when is_binary(value), do: Map.put(acc, "$ref", value)
+  defp lower_schema_key(acc, "$ref", value, _markers) when is_binary(value), do: Map.put(acc, "$ref", value)
 
-  defp lower_schema_key(acc, "description", value) when is_binary(value),
+  defp lower_schema_key(acc, "description", value, _markers) when is_binary(value),
     do: Map.put(acc, "description", value)
 
-  defp lower_schema_key(acc, "type", value) do
+  defp lower_schema_key(acc, "type", value, _markers) do
     if valid_type?(value), do: Map.put(acc, "type", value), else: acc
   end
 
-  defp lower_schema_key(acc, "enum", value) when is_list(value), do: Map.put(acc, "enum", value)
+  defp lower_schema_key(acc, "enum", value, _markers) when is_list(value), do: Map.put(acc, "enum", value)
 
-  defp lower_schema_key(acc, "required", value) when is_list(value) do
+  defp lower_schema_key(acc, "encrypted", true, :keep_encrypted_markers), do: Map.put(acc, "encrypted", true)
+
+  defp lower_schema_key(acc, "required", value, _markers) when is_list(value) do
     if Enum.all?(value, &is_binary/1), do: Map.put(acc, "required", value), else: acc
   end
 
-  defp lower_schema_key(acc, "properties", value) when is_map(value) do
+  defp lower_schema_key(acc, "properties", value, markers) when is_map(value) do
     properties =
       Map.new(value, fn {name, schema} ->
-        {to_string(name), lower_schema(schema)}
+        {to_string(name), lower_schema(schema, markers)}
       end)
 
     Map.put(acc, "properties", properties)
   end
 
-  defp lower_schema_key(acc, "items", value) when is_map(value) or is_boolean(value),
-    do: Map.put(acc, "items", lower_schema(value))
+  defp lower_schema_key(acc, "items", value, markers) when is_map(value) or is_boolean(value),
+    do: Map.put(acc, "items", lower_schema(value, markers))
 
-  defp lower_schema_key(acc, "items", value) when is_list(value),
-    do: Map.put(acc, "items", Enum.map(value, &lower_schema/1))
+  defp lower_schema_key(acc, "items", value, markers) when is_list(value),
+    do: Map.put(acc, "items", Enum.map(value, &lower_schema(&1, markers)))
 
-  defp lower_schema_key(acc, "additionalProperties", value) when is_boolean(value),
+  defp lower_schema_key(acc, "additionalProperties", value, _markers) when is_boolean(value),
     do: Map.put(acc, "additionalProperties", value)
 
-  defp lower_schema_key(acc, "additionalProperties", value) when is_map(value),
-    do: Map.put(acc, "additionalProperties", lower_schema(value))
+  defp lower_schema_key(acc, "additionalProperties", value, markers) when is_map(value),
+    do: Map.put(acc, "additionalProperties", lower_schema(value, markers))
 
-  defp lower_schema_key(acc, key, value) when key in @schema_list_keys and is_list(value),
-    do: Map.put(acc, key, Enum.map(value, &lower_schema/1))
+  defp lower_schema_key(acc, key, value, markers) when key in @schema_list_keys and is_list(value),
+    do: Map.put(acc, key, Enum.map(value, &lower_schema(&1, markers)))
 
-  defp lower_schema_key(acc, key, value) when key in @definition_keys and is_map(value) do
+  defp lower_schema_key(acc, key, value, markers) when key in @definition_keys and is_map(value) do
     definitions =
       Map.new(value, fn {name, schema} ->
-        {to_string(name), lower_schema(schema)}
+        {to_string(name), lower_schema(schema, markers)}
       end)
 
     Map.put(acc, key, definitions)
   end
 
-  defp lower_schema_key(acc, _key, _value), do: acc
+  defp lower_schema_key(acc, _key, _value, _markers), do: acc
 
   defp maybe_put_const_enum(acc, schema) do
     if Map.has_key?(schema, "const") or Map.has_key?(schema, :const) do

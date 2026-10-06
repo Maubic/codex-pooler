@@ -478,8 +478,12 @@ Native backend turns apply the same rule within their canonical cap. When otherw
 Non-strict function tool schemas are lowered before local validation and
 upstream dispatch for backend Responses HTTP, backend Responses websocket
 `response.create`, and public `/v1/responses` compatibility paths. Lowering is
-limited to function tools, including nested function tools inside accepted
-namespace tools. Strict function tools and strict structured-output schemas stay
+limited to function tools. The backend routes lower top-level function tools and
+forward namespace tools unchanged. `/v1/responses` also lowers the function
+tools nested inside accepted namespace tools, and keeps their boolean
+`encrypted: true` parameter markers, which the provider requires for the
+namespaced functions it reserves. Top-level function tools lose that marker on
+every path. Strict function tools and strict structured-output schemas stay
 on the strict validation path and are not made looser.
 
 Direct public Responses requests also accept exact executable custom tools on

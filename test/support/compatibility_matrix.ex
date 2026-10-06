@@ -1061,7 +1061,7 @@ defmodule CodexPooler.CompatibilityMatrix do
       ],
       future_routes: [],
       fixture: :function_tool_schema_lowering,
-      contract: "backend Responses HTTP and websocket response.create lower and remove encrypted markers only for ordinary top-level non-strict function tool schemas while preserving every decoded top-level namespace tool term exactly; public /v1 Responses HTTP and websocket recursively lower nested namespace function tools before local validation or upstream dispatch; lowering converts boolean schemas and const values into supported schema shapes, infers missing object or array structure, drops unsupported JSON Schema keywords, preserves supported refs/definitions/combinators recursively, and never weakens strict function tools or strict structured-output schemas"
+      contract: "backend Responses HTTP and websocket response.create lower and remove encrypted markers only for ordinary top-level non-strict function tool schemas while preserving every decoded top-level namespace tool term exactly; public /v1 Responses HTTP and websocket recursively lower nested namespace function tools before local validation or upstream dispatch while preserving their boolean encrypted: true parameter markers, which the provider requires for reserved namespaced functions, and drop that marker from top-level function tools; lowering converts boolean schemas and const values into supported schema shapes, infers missing object or array structure, drops unsupported JSON Schema keywords, preserves supported refs/definitions/combinators recursively, and never weakens strict function tools or strict structured-output schemas"
     },
     %{
       slug: :direct_responses_strict_schema_repair,
@@ -3272,8 +3272,10 @@ defmodule CodexPooler.CompatibilityMatrix do
       public_v1_nested_lowering: %{
         scope: "namespace_nested_function",
         transports: ["http_sse", "websocket_response_create"],
-        recursive: true
+        recursive: true,
+        encrypted_markers: "boolean_true_preserved"
       },
+      top_level_function_encrypted_markers: "dropped",
       lowered_tool_types: [
         "flat_function",
         "nested_function",

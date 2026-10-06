@@ -1051,6 +1051,45 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketProgrammaticTest do
     end
   end
 
+  # The reserved `collaboration` namespace must reach the provider exactly as the client declared it, `encrypted: true`
+  # markers included, or the provider refuses the declaration (`400 invalid_request_error`, param `tools`); an ordinary
+  # top-level function still loses the marker.
+  for mode <- ~w(full lite) do
+    test "GET /v1/responses websocket keeps encrypted markers inside namespace functions in #{mode}" do
+      upstream = start_upstream(completed_websocket_response("resp_ws_encrypted_namespace"))
+      setup = gateway_setup(upstream)
+      put_public_model_serving_mode!(setup, unquote(mode))
+      port = start_public_endpoint!()
+      message = %{"type" => "string", "description" => "Message text to queue on the target agent.", "encrypted" => true}
+      parameters = %{"type" => "object", "properties" => %{"target" => %{"type" => "string", "description" => "Agent to message."}, "message" => message}, "required" => ["target", "message"], "additionalProperties" => false}
+      send_message = %{"type" => "function", "name" => "send_message", "description" => "Send a message to an existing agent.", "strict" => false, "parameters" => parameters}
+      namespace_tool = %{"type" => "namespace", "name" => "collaboration", "description" => "Tools for spawning and managing sub-agents.", "tools" => [send_message]}
+      flat_tool = %{send_message | "name" => "send_note"}
+      {conn, websocket, ref} = public_v1_websocket_connect!(port, setup, "encrypted-namespace-#{System.unique_integer([:positive])}")
+
+      try do
+        {conn, websocket} = send_response_create!(conn, websocket, ref, setup, %{"input" => "synthetic encrypted namespace websocket request", "tools" => [namespace_tool, flat_tool]})
+        {conn, websocket, frames} = receive_websocket_until_terminal!(conn, websocket, ref, [])
+        assert List.last(frames)["type"] == "response.completed"
+
+        assert [captured] = FakeUpstream.requests(upstream)
+        assert captured.method == "WEBSOCKET"
+
+        manifest =
+          case unquote(mode) do
+            "full" -> captured.json["tools"]
+            "lite" -> Enum.find_value(captured.json["input"], fn item -> item["type"] == "additional_tools" && item["tools"] end)
+          end
+
+        assert [^namespace_tool, captured_flat] = manifest
+        assert get_in(captured_flat, ["parameters", "properties", "message"]) == Map.delete(message, "encrypted")
+        {conn, websocket}
+      after
+        Mint.HTTP.close(conn)
+      end
+    end
+  end
+
   @tag :responses_allowed_tools
   test "GET /v1/responses websocket forwards allowed tools in exact caller order" do
     upstream = start_upstream(completed_websocket_response("resp_ws_allowed_tools"))

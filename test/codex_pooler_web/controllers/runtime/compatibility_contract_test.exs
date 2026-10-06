@@ -1454,6 +1454,9 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
 
       assert fixture.strict_function_tools_lowered == false
       assert fixture.strict_structured_outputs_lowered == false
+      assert fixture.public_v1_nested_lowering.encrypted_markers == "boolean_true_preserved"
+      assert fixture.top_level_function_encrypted_markers == "dropped"
+      assert feature.contract =~ "preserving their boolean encrypted: true parameter markers"
       assert "$schema" in fixture.unsupported_json_schema_keywords_dropped
       assert "$ref" in fixture.supported_schema_keywords_preserved
       assert "const_to_single_value_enum" in fixture.schema_repairs

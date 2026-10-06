@@ -6221,6 +6221,42 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     refute metadata =~ "lookup_namespaced_fixture"
   end
 
+  # The Codex client declares its multi-agent tools in the reserved `collaboration` namespace with `encrypted: true` on
+  # their message parameters, and the provider refuses a reserved function whose declaration differs from the schema it
+  # configured (`400 invalid_request_error`, param `tools`, "must match the configured schema"). A client that sends that
+  # manifest to /v1 reaches the provider with the namespace exactly as declared, marker included, in both serving modes;
+  # an ordinary top-level function still loses the marker.
+  test "POST /v1/responses keeps encrypted markers inside namespace functions in Full and Lite", %{conn: conn} do
+    upstream =
+      start_upstream(
+        FakeUpstream.sse_stream([
+          {"response.completed", %{"type" => "response.completed", "response" => %{"id" => "resp_v1_encrypted_namespace", "status" => "completed", "usage" => %{"input_tokens" => 4, "output_tokens" => 3, "total_tokens" => 7}}}}
+        ])
+      )
+
+    setup = gateway_setup(upstream)
+    message = %{"type" => "string", "description" => "Message text to queue on the target agent.", "encrypted" => true}
+    parameters = %{"type" => "object", "properties" => %{"target" => %{"type" => "string", "description" => "Agent to message."}, "message" => message}, "required" => ["target", "message"], "additionalProperties" => false}
+    send_message = %{"type" => "function", "name" => "send_message", "description" => "Send a message to an existing agent.", "strict" => false, "parameters" => parameters}
+    namespace_tool = %{"type" => "namespace", "name" => "collaboration", "description" => "Tools for spawning and managing sub-agents.", "tools" => [send_message]}
+    flat_tool = %{send_message | "name" => "send_note"}
+    payload = %{"model" => setup.model.exposed_model_id, "input" => "synthetic encrypted namespace request", "tools" => [namespace_tool, flat_tool]}
+
+    for mode <- ["full", "lite"] do
+      put_public_model_serving_mode!(setup, mode)
+      response = conn |> recycle() |> auth(setup) |> post("/v1/responses", payload)
+      assert %{"id" => "resp_v1_encrypted_namespace"} = json_response(response, 200)
+    end
+
+    assert [full_capture, lite_capture] = FakeUpstream.requests(upstream)
+    assert [lite_manifest] = for(%{"type" => "additional_tools", "tools" => tools} <- lite_capture.json["input"], do: tools)
+
+    for {mode, [captured_namespace, captured_flat]} <- [{"full", full_capture.json["tools"]}, {"lite", lite_manifest}] do
+      assert captured_namespace == namespace_tool, mode
+      assert get_in(captured_flat, ["parameters", "properties", "message"]) == Map.delete(message, "encrypted"), mode
+    end
+  end
+
   test "POST /v1/responses rejects malformed namespace and unsupported tools before dispatch", %{
     conn: conn
   } do
