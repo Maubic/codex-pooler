@@ -60,8 +60,8 @@ defmodule CodexPoolerWeb.V1.ResponsesUnknownFieldRejectionTest do
   end
 
   # R-V1: the adapter does not key-validate a `web_search` carried by a client-sent `additional_tools` item (only `mcp`
-  # and `tool_search` are refused there), so a bad key in it reaches the provider. The relayed path names the client's
-  # own position of that item.
+  # is refused there), so a bad key in it reaches the provider. The relayed path names the client's own position of
+  # that item.
   for mode <- ["auto", "lite", "full"] do
     test "#{mode} serving: a bad key inside a client-sent additional_tools item names the client's position", %{conn: conn} do
       provider_path = "input[1].tools[0].#{@manifest_key}"

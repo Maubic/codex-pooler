@@ -837,6 +837,52 @@ Any other shape is rejected before dispatch with `400 invalid_request` on
 `input`. Neither the search query nor the sources are persisted in request
 metadata, logs or operator views.
 
+### Tool search with deferred tools
+
+`POST /v1/responses` and the Responses websocket accept the upstream's
+`tool_search` tool, which loads function tools declared with
+`defer_loading: true` only when the model searches for them. A `tool_search`
+entry accepts `type`, `execution` (`server` or `client`), `description` and
+`parameters`. Any other key, or another `execution` value, is rejected before
+dispatch with `400 invalid_request` on `tools`. A client-executed search
+(`execution: "client"`) describes itself with `description` and `parameters`.
+Accepted entries are forwarded unchanged.
+
+The upstream decides how `tool_search` and deferred tools pair. In Full serving
+mode it rejects a deferred function without a `tool_search` tool, a
+`tool_search` without a deferred tool, and a client-executed search without a
+description, and Codex Pooler returns that rejection with the upstream's
+parameter path. Codex Pooler does not apply these rules itself.
+
+In Full serving mode a server-executed search returns a `tool_search_call` item
+(the searched `paths` in `arguments`), a `tool_search_output` item (the loaded
+`tools`) and then the `function_call` for the loaded function, which carries a
+`namespace`. Codex Pooler relays these items in JSON, SSE and websocket
+responses. A client-executed search returns the `tool_search_call`, and the
+client answers it with a `tool_search_output` of its own.
+
+In Lite serving mode the tools travel in the leading `additional_tools` item.
+The upstream still validates `tool_search` there but performs no search: the
+model sees deferred functions directly and calls them without `tool_search_call`
+or `tool_search_output` items.
+
+A client that sends `response.output` back as the history of its next
+stateless request can include these items in `input`, in either serving mode.
+Codex Pooler admits them the way upstream validates them:
+
+- `tool_search_call` takes `type` and `arguments` (an object), and
+  `tool_search_output` takes `type` and `tools` (a list). Both may add `id`,
+  `call_id`, `execution` and `status`, and no other key.
+- `id`, `call_id` and `status` may be `null`. `execution` is `server` or
+  `client`, and `status` is `in_progress`, `completed` or `incomplete`.
+- A remote MCP tool among a `tool_search_output` item's `tools` is rejected, as
+  everywhere in `/v1/responses`.
+
+Any other shape is rejected before dispatch with `400 invalid_request` on
+`input`. Upstream checks the item ids it issued, and its rejection of another id
+is returned with the item's path. Neither `tool_search` nor a deferred tool can
+be a member of an `allowed_tools` choice.
+
 ## Tool-output preservation
 
 Accepted tool-output text on `POST /v1/responses`, `POST /v1/chat/completions` and the supported Responses websocket route reaches the upstream without gateway minification or summarization. Protocol adapters may change the surrounding request or split text into ordered parts; the output text itself is preserved. Full/Lite tool handling and strict-schema normalization remain in effect.
@@ -865,7 +911,7 @@ These `/v1` routes are unsupported and may return deterministic OpenAI-shaped un
 
 `GET /v1/responses` is narrow Responses websocket compatibility, not `/v1/realtime` support. OpenAI Realtime SDK websocket and session routes are not supported.
 
-Within `POST /v1/responses`, OpenAI Responses remote MCP tool definitions are unsupported. A top-level `tools` entry with `type: "mcp"`, or an `input` item with `type: "additional_tools"` whose `tools` list contains `type: "mcp"`, is rejected before upstream dispatch with an OpenAI-shaped `invalid_request` error.
+Within `POST /v1/responses`, OpenAI Responses remote MCP tool definitions are unsupported. A top-level `tools` entry with `type: "mcp"`, or an `input` item with `type: "additional_tools"` or `type: "tool_search_output"` whose `tools` list contains `type: "mcp"`, is rejected before upstream dispatch with an OpenAI-shaped `invalid_request` error.
 
 ### Beta Agents API
 

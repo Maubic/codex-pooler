@@ -5431,21 +5431,35 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     assert Repo.aggregate(Attempt, :count) == 0
   end
 
-  test "POST /v1/responses rejects nested tool_search before dispatch", %{conn: conn} do
-    upstream = start_upstream(FakeUpstream.json_response(%{"id" => "should_not_dispatch"}))
+  # findings#313: a client-sent manifest's `tool_search` is forwarded for the provider to validate, like the manifest's
+  # other tools; the provider takes it beside a deferred tool in either serving mode.
+  test "POST /v1/responses forwards a nested tool_search for the provider to validate", %{conn: conn} do
+    upstream =
+      start_upstream(
+        FakeUpstream.sse_stream([
+          {"response.completed",
+           %{
+             "type" => "response.completed",
+             "response" => %{"id" => "resp_nested_tool_search", "object" => "response", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 2, "output_tokens" => 1, "total_tokens" => 3}}
+           }}
+        ])
+      )
+
     setup = gateway_setup(upstream)
-    counts = durable_accounting_counts()
 
     supported_tool = %{
       "type" => "function",
       "name" => "lookup_nested_tool_search",
-      "parameters" => %{"type" => "object", "properties" => %{}}
+      "parameters" => %{"type" => "object", "properties" => %{}},
+      "defer_loading" => true
     }
 
     for {position, stream} <- [{0, false}, {1, false}, {2, true}] do
       tools =
         [supported_tool, supported_tool]
         |> List.insert_at(position, %{"type" => "tool_search"})
+
+      manifest = %{"type" => "additional_tools", "role" => "developer", "tools" => tools}
 
       response =
         conn
@@ -5454,29 +5468,14 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
         |> post("/v1/responses", %{
           "model" => setup.model.exposed_model_id,
           "stream" => stream,
-          "input" => [
-            %{"role" => "user", "content" => "synthetic nested tool search"},
-            %{
-              "type" => "additional_tools",
-              "role" => "developer",
-              "tools" => tools
-            }
-          ]
+          "input" => [%{"role" => "user", "content" => "synthetic nested tool search"}, manifest]
         })
 
-      assert %{
-               "error" => %{
-                 "type" => "invalid_request_error",
-                 "code" => "invalid_request",
-                 "message" => "tool_search tools are not supported",
-                 "param" => "input"
-               }
-             } = json_response(response, 400)
-
-      assert FakeUpstream.count(upstream) == 0
-      assert durable_accounting_counts() == counts
-      assert %{items: [], total: 0} = RequestLogs.list(setup.pool)
+      assert response.status == 200
+      assert manifest in List.last(FakeUpstream.requests(upstream)).json["input"]
     end
+
+    assert FakeUpstream.count(upstream) == 3
   end
 
   test "POST /v1/responses rejects malformed instruction-role content before dispatch", %{

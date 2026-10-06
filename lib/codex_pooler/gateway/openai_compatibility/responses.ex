@@ -29,6 +29,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
   @web_search_user_location_keys ~w(type country region city timezone)
   @web_search_context_sizes ~w(low medium high)
   @web_search_content_types ~w(text image)
+  @tool_search_keys ~w(type execution description parameters)
+  @tool_search_executions ~w(server client)
 
   @endpoint "/backend-api/codex/responses"
 
@@ -647,8 +649,35 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
   defp validate_tool(%{"type" => "image_generation"} = tool),
     do: validate_exact_builtin_tool(tool, ["type"])
 
+  # The provider's `tool_search` tool, which loads deferred tools (`defer_loading: true`) on demand (findings#313,
+  # direct probe on `gpt-6-luna`, Codex backend, Full shape and Lite manifest): `execution` is `server` (the provider
+  # searches) or `client` (the client does, described by its own `description` and `parameters`); any other key is
+  # refused `unknown_parameter` and any other `execution` `invalid_value`, so both are refused here before dispatch.
+  # The pairing rules (a deferred tool needs a `tool_search`, a `tool_search` needs a deferred tool, a client-executed
+  # search needs a description) are the provider's own: Full refuses them with the param the relay names, and a Lite
+  # manifest, where the search does not run, does not enforce them, so they are not repeated here.
+  defp validate_tool(%{"type" => "tool_search"} = tool) do
+    with :ok <- validate_exact_builtin_tool(tool, @tool_search_keys),
+         :ok <- validate_optional_tool_search_execution(tool),
+         :ok <- validate_optional_nullable_tool_field(tool, "description", &is_binary/1) do
+      validate_optional_nullable_tool_field(tool, "parameters", &is_map/1)
+    end
+  end
+
   defp validate_tool(_tool),
     do: {:error, Error.invalid_request("tool shape is not translatable", "tools")}
+
+  defp validate_optional_tool_search_execution(%{"execution" => execution}) when execution in @tool_search_executions, do: :ok
+  defp validate_optional_tool_search_execution(%{"execution" => _execution}), do: {:error, Error.invalid_request("tool shape is not translatable", "tools")}
+  defp validate_optional_tool_search_execution(_tool), do: :ok
+
+  defp validate_optional_nullable_tool_field(tool, field, valid?) do
+    case Map.fetch(tool, field) do
+      :error -> :ok
+      {:ok, nil} -> :ok
+      {:ok, value} -> if valid?.(value), do: :ok, else: {:error, Error.invalid_request("tool shape is not translatable", "tools")}
+    end
+  end
 
   defp validate_image_mask(%{"input_image_mask" => %{"image_url" => url} = mask})
        when is_binary(url) and byte_size(url) > 0 and map_size(mask) == 1,

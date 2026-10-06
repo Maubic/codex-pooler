@@ -5,6 +5,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.AgentMessage
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Audio
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.HostedShell
+  alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.ToolSearch
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.WebSearchCall
   alias CodexPooler.Gateway.Payloads.ToolResultShape
 
@@ -59,6 +60,9 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
 
   defp validate_input_item(%{"type" => "web_search_call"} = item, _payload),
     do: WebSearchCall.validate_item(item)
+
+  defp validate_input_item(%{"type" => type} = item, _payload) when type in ["tool_search_call", "tool_search_output"],
+    do: ToolSearch.validate_item(item)
 
   defp validate_input_item(%{"role" => "assistant"} = item, _payload),
     do: validate_assistant_replay_item(item)
@@ -151,11 +155,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
   defp validate_additional_tools_tools(_tools),
     do: {:error, Error.invalid_request("input item shape is not translatable", "input")}
 
+  # A client-sent manifest is forwarded for the provider to validate (its `tool_search` too, findings#313), except a
+  # remote MCP tool.
   defp validate_additional_tool(%{"type" => "mcp"}),
     do: {:error, Error.invalid_request("remote MCP tools are not supported", "input")}
-
-  defp validate_additional_tool(%{"type" => "tool_search"}),
-    do: {:error, Error.invalid_request("tool_search tools are not supported", "input")}
 
   defp validate_additional_tool(_tool), do: :ok
 

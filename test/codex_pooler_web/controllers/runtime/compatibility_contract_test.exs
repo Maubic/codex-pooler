@@ -1562,7 +1562,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
 
       assert fixture.implemented_runtime_outcomes.public_v1 == %{
                unknown_typed_input: "reject_before_dispatch",
-               nested_tool_search: "reject_before_dispatch",
+               nested_tool_search: "forward_for_provider_validation",
                encrypted_function_args: "validated_and_round_tripped"
              }
 
@@ -1831,12 +1831,12 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
         executable: false,
         merges_into_tools: false,
         satisfies_tool_choice: false,
-        unsupported_nested_tool_types: ["mcp", "tool_search"]
+        unsupported_nested_tool_types: ["mcp"]
       }
 
       expected_remote_mcp_tools = %{
         supported: false,
-        locations: ["tools", "input.additional_tools.tools"],
+        locations: ["tools", "input.additional_tools.tools", "input.tool_search_output.tools"],
         error_code: "invalid_request",
         dispatch: false
       }
@@ -1901,6 +1901,29 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
             pooler_contract: "validation_and_unchanged_forwarding",
             availability_and_enforcement: "selected_model_and_account_dependent",
             blocked_domains: "hosted_codex_enforcement_not_locally_proven",
+            broad_parity_claim: false
+          }
+        },
+        tool_search: %{
+          accepted_required: ["type"],
+          accepted_optional: ["execution", "description", "parameters"],
+          execution_values: ["server", "client"],
+          nullable_optional: ["description", "parameters"],
+          companion: "deferred_function_custom_or_namespace_child_with_defer_loading_true",
+          pairing_rules: "provider_enforced_full_refusal_relayed_lite_manifest_not_enforced",
+          lite: "forwarded_in_manifest_validated_search_not_performed",
+          output_items: ["tool_search_call", "tool_search_output", "function_call_with_namespace"],
+          replay_items: %{
+            tool_search_call: %{required: ["type", "arguments"], optional: ["id", "call_id", "execution", "status"], arguments: "object"},
+            tool_search_output: %{required: ["type", "tools"], optional: ["id", "call_id", "execution", "status"], tools: "list_remote_mcp_refused_rest_provider_validated"},
+            nullable: ["id", "call_id", "status"],
+            status_values: ["in_progress", "completed", "incomplete"],
+            provider_named_id_prefixes: "not_second_guessed_provider_refusal_relayed"
+          },
+          allowed_tools_entry: "excluded",
+          upstream_confidence: %{
+            pooler_contract: "validation_and_unchanged_forwarding",
+            probed: "gpt-6-luna_codex_backend_full_and_lite",
             broad_parity_claim: false
           }
         },

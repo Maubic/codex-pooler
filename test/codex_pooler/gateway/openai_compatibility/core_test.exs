@@ -400,8 +400,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
       refute Map.has_key?(result.payload, "tool_choice")
     end
 
+    # findings#313: the provider's `tool_search` tool is accepted with exactly its own keys (direct probe, Codex backend,
+    # Full and Lite manifest) and forwarded unchanged; an unknown key or another `execution` is refused before dispatch.
     @tag :responses_coercion
-    test "Responses retains top-level tool_search rejection while preserving supported additional tools" do
+    test "Responses admits a top-level tool_search with the provider's keys while preserving supported additional tools" do
       supported_additional_tool =
         flat_function_tool(
           "lookup_additional_tool_search_pin",
@@ -414,19 +416,38 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
         "name" => "custom_additional_tool_search_pin"
       }
 
-      assert {:error, reason} =
-               Responses.coerce(%{
-                 "model" => "gpt-fixture-text",
-                 "input" => "synthetic input",
-                 "tools" => [%{"type" => "tool_search"}]
-               })
+      deferred_tool = Map.put(supported_additional_tool, "defer_loading", true)
 
-      assert reason == %{
-               status: 400,
-               code: "invalid_request",
-               message: "tool shape is not translatable",
-               param: "tools"
-             }
+      for tool_search <- [
+            %{"type" => "tool_search"},
+            %{"type" => "tool_search", "execution" => "server"},
+            %{"type" => "tool_search", "execution" => "client", "description" => "synthetic search", "parameters" => %{"type" => "object", "properties" => %{}}}
+          ] do
+        assert {:ok, result} =
+                 Responses.coerce(%{
+                   "model" => "gpt-fixture-text",
+                   "input" => "synthetic input",
+                   "tools" => [tool_search, deferred_tool]
+                 })
+
+        assert result.payload["tools"] == [tool_search, deferred_tool]
+      end
+
+      for tool_search <- [%{"type" => "tool_search", "zz_unknown" => true}, %{"type" => "tool_search", "execution" => "bogus"}] do
+        assert {:error, reason} =
+                 Responses.coerce(%{
+                   "model" => "gpt-fixture-text",
+                   "input" => "synthetic input",
+                   "tools" => [tool_search, deferred_tool]
+                 })
+
+        assert reason == %{
+                 status: 400,
+                 code: "invalid_request",
+                 message: "tool shape is not translatable",
+                 param: "tools"
+               }
+      end
 
       additional_tools_item = %{
         "type" => "additional_tools",
@@ -443,8 +464,9 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
       assert result.payload["input"] == [additional_tools_item]
     end
 
+    # A client-sent manifest is forwarded for the provider to validate, its `tool_search` included (findings#313).
     @tag :unsupported_fields
-    test "Responses rejects tool_search nested in additional_tools before coercion" do
+    test "Responses forwards a tool_search nested in additional_tools for the provider to validate" do
       supported_tool =
         flat_function_tool(
           "lookup_additional_tool_search",
@@ -458,25 +480,15 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
           |> List.delete_at(1)
           |> List.insert_at(position, %{"type" => "tool_search"})
 
-        assert {:error, reason} =
+        manifest = %{"type" => "additional_tools", "role" => "developer", "tools" => tools}
+
+        assert {:ok, result} =
                  Responses.coerce(%{
                    "model" => "gpt-fixture-text",
-                   "input" => [
-                     %{"role" => "user", "content" => "synthetic input"},
-                     %{
-                       "type" => "additional_tools",
-                       "role" => "developer",
-                       "tools" => tools
-                     }
-                   ]
+                   "input" => [%{"role" => "user", "content" => "synthetic input"}, manifest]
                  })
 
-        assert reason == %{
-                 status: 400,
-                 code: "invalid_request",
-                 message: "tool_search tools are not supported",
-                 param: "input"
-               }
+        assert manifest in result.payload["input"]
       end
 
       similarly_named_tool = %{"type" => "tool_search_preview"}

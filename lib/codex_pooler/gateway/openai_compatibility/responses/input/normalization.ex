@@ -26,6 +26,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
     item_reference
     shell_call
     shell_call_output
+    tool_search_call
+    tool_search_output
   )
 
   @call_id_named_item_types ~w(function_call custom_tool_call shell_call shell_call_output)
@@ -355,6 +357,9 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
 
   # A replayed hosted web search; `Input.WebSearchCall` owns its exact shape.
   defp normalize_input_item(%{"type" => "web_search_call"} = item), do: {:ok, item}
+
+  # A replayed tool search call or output (findings#313); `Input.ToolSearch` owns their exact shape.
+  defp normalize_input_item(%{"type" => type} = item) when type in ["tool_search_call", "tool_search_output"], do: {:ok, item}
 
   defp normalize_input_item(%{"type" => type}) when type not in @known_input_item_types,
     do: {:error, Error.invalid_request("input item shape is not translatable", "input")}
