@@ -349,24 +349,40 @@ defmodule CodexPoolerWeb.Runtime.PartitionHeldBackQuotaRefusalTest do
   describe "native websocket compaction, then the client's HTTPS compaction" do
     # The reporter's sequence: the thread's turns run on the one plus seat that
     # still reads routable, the post-turn compaction is anchored on that seat's
-    # upstream connection, the provider refuses it with its usage limit, and
-    # the client sends the compaction again over HTTPS two seconds later.
-    test "control: with a quota-fresh pro seat the HTTPS compaction moves to the pro partition" do
+    # upstream connection, and the provider refuses it with its usage limit.
+    # The compaction can run only on that connection, so the refusal speaks
+    # for the capacity of the whole Pool before the connection pin, both
+    # partitions (findings#305 row 498-5): with a seat that can serve or has
+    # no known return it is the retryable `503 pinned_continuation_unavailable`
+    # an anchored continuation gets, otherwise the Pool's usage limit with the
+    # earliest return. Before, the compaction result adapter answered every
+    # such refusal `502 invalid_compaction_response`, "upstream compact
+    # response was not valid JSON".
+    #
+    # The released client (0.160.1) retries the 503: the failed request used
+    # up the connection's last response, so its resend on the socket carries
+    # the full history without the anchor, and the resend is refused
+    # `409 duplicate_turn` before dispatch (no row, no provider request; the
+    # client retries that too). Once its stream retries are spent it sends the
+    # compaction over HTTPS, two seconds later in the report, and that request
+    # can move to the held-back partition (`PartitionFallback.before_dispatch/3`).
+    test "with a quota-fresh pro seat the refusal is retryable and the HTTPS compaction moves to the pro partition" do
       timeline = websocket_compaction_timeline!(:fresh)
 
       assert timeline.turn_partition == {2, 3, 1, false}, inspect(timeline, limit: :infinity)
-      assert timeline.compaction_attempts == [{"failed", 200, :plus1}], inspect(timeline, limit: :infinity)
+      assert_retryable_compaction_refusal!(timeline)
       assert timeline.compaction_skip_reason == "connection_bound_compaction"
       assert timeline.http.status == 200, inspect(timeline, limit: :infinity)
       assert timeline.http_attempts == [{"succeeded", 200, :pro}]
       assert timeline.http_partition == {2, 1, 3, true}
     end
 
-    test "with a stale pro seat the HTTPS compaction re-reads it and moves to the pro partition" do
+    test "with a stale pro seat the refusal is retryable and the HTTPS compaction re-reads the seat and moves to the pro partition" do
       timeline = websocket_compaction_timeline!(:stale_idle)
 
       assert timeline.turn_partition == {2, 3, 1, false}, inspect(timeline, limit: :infinity)
-      assert timeline.compaction_attempts == [{"failed", 200, :plus1}], inspect(timeline, limit: :infinity)
+      # A held-back seat with stale evidence has no known return.
+      assert_retryable_compaction_refusal!(timeline)
       assert timeline.compaction_skip_reason == "connection_bound_compaction"
       assert timeline.pro_websocket_connections == 0
 
@@ -377,10 +393,67 @@ defmodule CodexPoolerWeb.Runtime.PartitionHeldBackQuotaRefusalTest do
       assert timeline.http_partition == {2, 3, 1, false}
       assert %{"held_back_fallback" => "pre_dispatch", "held_back_fallback_outcome" => "admitted"} = timeline.http_summary
     end
+
+    # Every seat is exhausted; the held-back pro seat returns first, ten
+    # minutes before any plus seat. The client stops on the terminal answer,
+    # so no resend and no HTTPS compaction follow.
+    test "with every seat exhausted the refusal is the Pool's usage limit with the held-back seat's return, as the Codex Desktop app reads it" do
+      timeline = websocket_compaction_timeline!({:exhausted, 600}, follow_up: :none)
+
+      assert %{"type" => "error", "status" => 400, "error" => %{"code" => "invalid_prompt", "type" => "invalid_request_error", "resets_in_seconds" => seconds} = error} = timeline.compaction_terminal
+      assert seconds in 590..600, inspect(timeline, limit: :infinity)
+      assert error["message"] =~ "The Pool's usage limit is reached. Try again at "
+      assert_terminal_compaction_refusal!(timeline, seconds, 400)
+    end
+
+    test "with every seat exhausted the refusal is the Pool's usage limit with the held-back seat's return, as the Codex CLI reads it" do
+      timeline = websocket_compaction_timeline!({:exhausted, 600}, follow_up: :none, originator: "codex_cli_rs")
+
+      assert %{"type" => "error", "status" => 429, "error" => %{"type" => "usage_limit_reached", "resets_in_seconds" => seconds}} = timeline.compaction_terminal
+      assert seconds in 590..600, inspect(timeline, limit: :infinity)
+      assert_terminal_compaction_refusal!(timeline, seconds, 429)
+    end
   end
 
-  defp websocket_compaction_timeline!(pro_state) do
+  # The row and the attempt record the provider's refusal as a 429 on the
+  # session's plus seat; the attempt keeps no Pool advice; the resend met the
+  # recorded turn before dispatch.
+  defp assert_retryable_compaction_refusal!(timeline) do
+    assert %{"type" => "response.failed", "status" => 503, "error" => %{"code" => "pinned_continuation_unavailable", "type" => "server_error"} = error} = timeline.compaction_terminal,
+           inspect(timeline, limit: :infinity)
+
+    refute Map.has_key?(error, "resets_at")
+    refute Map.has_key?(timeline.compaction_terminal, "headers")
+    assert timeline.compaction_row == {@compact_endpoint, "websocket", "failed", 429, "usage_limit_reached"}
+    assert timeline.compaction_attempts == [{"failed", 429, :plus1}]
+    refute Map.has_key?(timeline.compaction_attempt_metadata, "usage_limit")
+    assert [line] = timeline.usage_limit_lines
+    assert line =~ "status=429 error_code=usage_limit_reached advice=withheld answered_status=503"
+
+    assert %{"type" => "error", "status" => 409, "error" => %{"code" => "duplicate_turn"}} = timeline.resend_terminal
+    assert timeline.rows_before_https == 2
+    assert timeline.plus1_websocket_requests == 2
+  end
+
+  # The attempt records the advice when the refusal is answered; the socket
+  # renders the client's countdown a moment later, so the two can differ by a
+  # second.
+  defp assert_terminal_compaction_refusal!(timeline, client_seconds, answered_status) do
+    assert timeline.compaction_row == {@compact_endpoint, "websocket", "failed", 429, "usage_limit_reached"}
+    assert timeline.compaction_attempts == [{"failed", 429, :plus1}]
+    assert %{"resets_at" => resets_at, "resets_in_seconds" => seconds} = timeline.compaction_attempt_metadata["usage_limit"]
+    assert_in_delta resets_at, DateTime.to_unix(timeline.pro_reset_at), 1
+    assert_in_delta seconds, client_seconds, 1
+    assert [line] = timeline.usage_limit_lines
+    assert line =~ "status=429 error_code=usage_limit_reached advice=pool resets_at=#{resets_at} resets_in_seconds=#{seconds} answered_status=#{answered_status}"
+  end
+
+  # `follow_up: :client_retries` (default) sends what the released client
+  # sends after a retryable answer: the compaction again on the socket, full
+  # history and no anchor, then over HTTPS. `:none` stops after the refusal.
+  defp websocket_compaction_timeline!(pro_state, opts \\ []) do
     put_owner_forwarding!(false)
+    follow_up = Keyword.get(opts, :follow_up, :client_retries)
     ids = new_ids()
     anchor_response_id = "resp_astra_turn_#{System.unique_integer([:positive])}"
     refusal_reset = reset_in(hd(@plus_reset_offsets))
@@ -388,22 +461,64 @@ defmodule CodexPoolerWeb.Runtime.PartitionHeldBackQuotaRefusalTest do
     pool = astra_pool!(pro_state, plus1: :fresh, plus1_mode: refusing_session_seat_mode(anchor_response_id, refusal_reset))
     {_server, port} = start_public_endpoint_with_server!()
 
-    {turn_terminal, compaction_terminal} =
-      websocket_session!(port, pool, ids, fn conn, websocket, ref ->
-        turn = websocket_frame(ids, native_text_input("synthetic turn prompt"), :turn)
-        {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(turn))
-        {conn, websocket, turn_terminal} = receive_terminal!(conn, websocket, ref)
-        await_settled_rows!(pool, 1)
-
-        compaction = ids |> websocket_frame([%{"type" => "compaction_trigger"}], :post_turn_compaction) |> Map.put("previous_response_id", anchor_response_id)
-        {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(compaction))
-        {_conn, _websocket, compaction_terminal} = receive_terminal!(conn, websocket, ref)
-        {turn_terminal, compaction_terminal}
+    {{turn_terminal, compaction_terminal, resend_terminal}, log} =
+      with_info_log(fn ->
+        websocket_session!(port, pool, ids, Keyword.get(opts, :originator, @desktop), &compaction_scenario!(&1, &2, &3, pool, ids, anchor_response_id, follow_up))
       end)
 
     [turn_row, compaction_row] = await_settled_rows!(pool, 2)
     await_exhausted!(hd(pool.plus).identity)
+    plus1_websocket_requests = pool.plus |> hd() |> Map.fetch!(:upstream) |> FakeUpstream.requests() |> Enum.count(&(&1.method == "WEBSOCKET"))
 
+    timeline = %{
+      turn_terminal_type: turn_terminal["type"],
+      compaction_terminal: compaction_terminal,
+      resend_terminal: resend_terminal,
+      rows_before_https: length(rows!(pool)),
+      plus1_websocket_requests: plus1_websocket_requests,
+      usage_limit_lines: log |> String.split("\n") |> Enum.filter(&(&1 =~ "websocket usage limit answered")),
+      pro_reset_at: pro_reset_at(pool, pro_state),
+      turn_partition: partition(turn_row),
+      turn_attempts: attempts!(turn_row, pool),
+      compaction_row: {compaction_row.endpoint, compaction_row.transport, compaction_row.status, compaction_row.response_status_code, compaction_row.last_error_code},
+      compaction_partition: partition(compaction_row),
+      compaction_skip_reason: summary(compaction_row)["held_back_skip_reason"],
+      compaction_attempts: attempts!(compaction_row, pool),
+      compaction_attempt_metadata: only_attempt!(compaction_row).response_metadata,
+      pro_websocket_connections: FakeUpstream.websocket_connection_count(pool.pro.upstream)
+    }
+
+    timeline = if follow_up == :client_retries, do: Map.merge(timeline, https_compaction!(pool, ids, turn_row, compaction_row)), else: timeline
+    CodexPooler.TestDiagnostics.puts(fn -> "partition held-back websocket timeline #{inspect(pro_state)}: " <> inspect(timeline, limit: :infinity) end)
+    timeline
+  end
+
+  # The ordinary turn, the compaction anchored on it, then what the client
+  # sends on the socket after the refusal.
+  defp compaction_scenario!(conn, websocket, ref, pool, ids, anchor_response_id, follow_up) do
+    turn = websocket_frame(ids, native_text_input("synthetic turn prompt"), :turn)
+    {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(turn))
+    {conn, websocket, turn_terminal} = receive_terminal!(conn, websocket, ref)
+    await_settled_rows!(pool, 1)
+
+    compaction = ids |> websocket_frame([%{"type" => "compaction_trigger"}], :post_turn_compaction) |> Map.put("previous_response_id", anchor_response_id)
+    {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(compaction))
+    {conn, websocket, compaction_terminal} = receive_terminal!(conn, websocket, ref)
+    await_settled_rows!(pool, 2)
+
+    {turn_terminal, compaction_terminal, client_resend!(conn, websocket, ref, ids, follow_up)}
+  end
+
+  defp client_resend!(_conn, _websocket, _ref, _ids, :none), do: nil
+
+  defp client_resend!(conn, websocket, ref, ids, :client_retries) do
+    resend = websocket_frame(ids, native_text_input("synthetic turn prompt") ++ [%{"type" => "compaction_trigger"}], :post_turn_compaction)
+    {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(resend))
+    {_conn, _websocket, resend_terminal} = receive_terminal!(conn, websocket, ref)
+    resend_terminal
+  end
+
+  defp https_compaction!(pool, ids, turn_row, compaction_row) do
     http =
       post_native(pool, ids.session, @turn_endpoint, %{
         "model" => @model,
@@ -416,16 +531,7 @@ defmodule CodexPoolerWeb.Runtime.PartitionHeldBackQuotaRefusalTest do
     assert [%{id: turn_id}, %{id: compaction_id}, http_row] = rows!(pool)
     assert {turn_id, compaction_id} == {turn_row.id, compaction_row.id}
 
-    timeline = %{
-      turn_terminal_type: turn_terminal["type"],
-      compaction_terminal: compaction_terminal,
-      turn_partition: partition(turn_row),
-      turn_attempts: attempts!(turn_row, pool),
-      compaction_row: {compaction_row.endpoint, compaction_row.transport, compaction_row.status, compaction_row.response_status_code, compaction_row.last_error_code},
-      compaction_partition: partition(compaction_row),
-      compaction_skip_reason: summary(compaction_row)["held_back_skip_reason"],
-      compaction_attempts: attempts!(compaction_row, pool),
-      pro_websocket_connections: FakeUpstream.websocket_connection_count(pool.pro.upstream),
+    %{
       http: %{status: http.status, body: String.slice(http.resp_body, 0, 320)},
       http_row: {http_row.endpoint, http_row.transport, http_row.status, http_row.response_status_code, http_row.last_error_code},
       http_partition: partition(http_row),
@@ -434,21 +540,33 @@ defmodule CodexPoolerWeb.Runtime.PartitionHeldBackQuotaRefusalTest do
       http_attempts: attempts!(http_row, pool),
       pro_usage_reads: usage_reads(pool.pro.upstream)
     }
-
-    CodexPooler.TestDiagnostics.puts(fn -> "partition held-back websocket timeline #{inspect(pro_state)}: " <> inspect(timeline, limit: :infinity) end)
-    timeline
   end
 
-  # One public websocket session as the released Desktop client opens it; the
-  # connection is closed whatever the scenario does.
-  defp websocket_session!(port, pool, ids, scenario) do
+  defp only_attempt!(row) do
+    assert [attempt] = Repo.all(from(a in Attempt, where: a.request_id == ^row.id))
+    attempt
+  end
+
+  defp pro_reset_at(pool, {:exhausted, _seconds}) do
+    pool.pro.identity
+    |> QuotaWindows.list_quota_windows()
+    |> Enum.find(&(&1.quota_scope == "account" and &1.window_kind == "primary"))
+    |> Map.fetch!(:reset_at)
+  end
+
+  defp pro_reset_at(_pool, _pro_state), do: nil
+
+  # One public websocket session as the released client opens it, with the
+  # client's own `originator`; the connection is closed whatever the scenario
+  # does.
+  defp websocket_session!(port, pool, ids, originator \\ @desktop, scenario) do
     {conn, websocket, ref, _headers} =
       public_websocket_connect_with_request_headers!(port, pool.setup, "astra-ws-#{ids.session}", @turn_endpoint, [
         {"session-id", ids.session},
         {"thread-id", ids.session},
         {"x-client-request-id", ids.session},
         {"x-codex-window-id", "#{ids.session}:0"},
-        {"originator", @desktop}
+        {"originator", originator}
       ])
 
     try do

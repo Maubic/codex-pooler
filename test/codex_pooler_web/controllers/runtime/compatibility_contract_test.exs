@@ -2368,7 +2368,19 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                      compact_saturation: "server_is_overloaded",
                      invalid_result: "invalid_compaction_response",
                      oversized_result: "invalid_compaction_response",
-                     provider_terminal: "canonical_provider_terminal"
+                     provider_terminal: "canonical_provider_terminal",
+                     provider_usage_limit: %{
+                       delivery: "single_dispatch_result_message",
+                       native: %{
+                         capacity: "usage_limit_capacity_before_connection_pin_every_partition",
+                         seat_can_serve_or_return_unknown: "retryable_503_pinned_continuation_unavailable",
+                         every_seat_exhausted: "pool_usage_limit_terminal_earliest_return",
+                         client_resend: "409_duplicate_turn_before_dispatch",
+                         client_fallback: "https_compaction_routed_over_every_partition"
+                       },
+                       public: "anchor_account_usage_limit_429_with_retry_after",
+                       recorded_status: 429
+                     }
                    },
                    socket_reuse: "ordinary_follow_up_same_downstream_socket",
                    collector_retry: "one_client_full_history_successor_when_codex_retryable",

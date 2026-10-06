@@ -434,14 +434,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
          response,
          failure
        ) do
-    delivered =
-      deliver_retry_exhausted_websocket_failure(
-        dispatch_request,
-        response,
-        &quota_refusal_frame(&1, context)
-      )
+    {answered, result_messages} = answer_retry_exhausted_websocket_failure(context, dispatch_request, response)
 
-    answer = delivered |> List.last() |> usage_limit_answer(RequestOptions.native_originator(context.request_options))
+    answer = answered |> List.last() |> usage_limit_answer(RequestOptions.native_originator(context.request_options))
     log_usage_limit_answer(answer, dispatch_request, failure)
 
     response_context = context |> retryable_websocket_response_context(response) |> record_usage_limit_answer(answer)
@@ -451,10 +446,33 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
            failure,
            response_context
          ) do
-      {:ok, _finalized} -> {:ok, %{status: 200, headers: [], websocket_messages: []}}
+      {:ok, _finalized} -> {:ok, %{status: 200, headers: [], websocket_messages: if(answer, do: result_messages, else: [])}}
       {:error, _reason} = error -> error
     end
   end
+
+  # The refused frames as the client gets them, and the messages the dispatch
+  # result carries. A turn with a writer gets its frames written, and its
+  # result carries none. A collected connection-bound compaction has no
+  # writer: its client reads the dispatch result, which the compaction result
+  # adapter turned into `502 invalid_compaction_response` when it carried
+  # nothing (findings#305 row 498-5). Its refusal frame is the result's one
+  # message instead (`Service.maybe_adapt_websocket_result/2` passes a single
+  # error through), which the socket renders like a written one; the caller
+  # keeps it only for a usage-limit answer, so every other refusal of a
+  # collected compaction keeps that answer.
+  defp answer_retry_exhausted_websocket_failure(context, %DispatchRequest{writer: writer} = dispatch_request, response)
+       when not is_function(writer, 1) do
+    if RequestOptions.connection_bound_compaction?(context.request_options) do
+      frames = project_retry_exhausted_websocket_failure(dispatch_request, response, &quota_refusal_frame(&1, context))
+      {frames, frames |> Enum.take(-1) |> Enum.map(&CodexPooler.JSON.decode!/1)}
+    else
+      {[], []}
+    end
+  end
+
+  defp answer_retry_exhausted_websocket_failure(context, dispatch_request, response),
+    do: {deliver_retry_exhausted_websocket_failure(dispatch_request, response, &quota_refusal_frame(&1, context)), []}
 
   defp handle_assignment_model_unavailable_first_event(
          %{allow_retry?: true} = context,
@@ -736,21 +754,26 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
 
   # Delivers the refused turn's frames and returns them as the client got them.
   defp deliver_retry_exhausted_websocket_failure(
-         %DispatchRequest{accounting_request: %{id: request_id}, writer: writer},
+         %DispatchRequest{writer: writer} = dispatch_request,
          upstream_response,
          project
        )
        when is_function(writer, 1) do
-    request_id
-    |> WebsocketCodec.stream_messages(Map.get(upstream_response, :body, ""))
-    |> Enum.map(fn frame ->
-      projected = frame |> sanitize_retry_terminal() |> project.()
+    dispatch_request
+    |> project_retry_exhausted_websocket_failure(upstream_response, project)
+    |> Enum.map(fn projected ->
       writer.(projected)
       projected
     end)
   end
 
   defp deliver_retry_exhausted_websocket_failure(_dispatch_request, _upstream_response, _project), do: []
+
+  defp project_retry_exhausted_websocket_failure(%DispatchRequest{accounting_request: %{id: request_id}}, upstream_response, project) do
+    request_id
+    |> WebsocketCodec.stream_messages(Map.get(upstream_response, :body, ""))
+    |> Enum.map(&(&1 |> sanitize_retry_terminal() |> project.()))
+  end
 
   # What the socket answers a pre-output usage-limit refusal with, read the way
   # the socket projects the delivered frame (`ProviderUsageLimit.frame_projection/2`):
@@ -828,7 +851,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
     others = fn -> other_candidates_return(context) end
     circuit = fn -> other_candidates_circuit_seconds(context) end
 
-    if native_anchored_continuation?(context) and
+    if native_connection_pinned?(context) and
          ProviderUsageLimit.frame_projection(CodexPooler.JSON.decode!(frame)) != :canonical do
       anchored_quota_refusal_frame(frame, others.(), circuit)
     else
@@ -839,14 +862,29 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
   defp anchored_quota_refusal_frame(frame, :unknown, _circuit), do: ProviderUsageLimit.retryable_continuation_frame(frame)
   defp anchored_quota_refusal_frame(frame, known, circuit), do: ProviderUsageLimit.pool_frame(frame, fn -> known end, circuit)
 
+  # A native request that cannot leave its upstream connection: a continuation
+  # anchored on `previous_response_id` (findings#270) or a connection-bound
+  # compaction (findings#305 row 498-5). Its usage-limit refusal speaks for the
+  # Pool's capacity before the connection pin (`RouteState.usage_limit_capacity/1`,
+  # every canonical partition), the capacity the client's unpinned follow-up
+  # can reach: the full-history continuation, or the compaction's HTTPS
+  # fallback. With a seat that can serve or has no known return the answer is
+  # the retryable `503 pinned_continuation_unavailable`, otherwise the Pool's
+  # terminal usage limit with the earliest return.
+  defp native_connection_pinned?(%{request_options: options} = context),
+    do: native_anchored_continuation?(context) or native_connection_bound_compaction?(options)
+
   defp native_anchored_continuation?(%{request_options: options}) do
     is_binary(options.continuity.previous_response_id) and
       not OpenAICompatibility.translated_responses_surface?(options.openai_compatibility) and
       not RequestOptions.connection_bound_compaction?(options)
   end
 
+  defp native_connection_bound_compaction?(options),
+    do: RequestOptions.connection_bound_compaction?(options) and not OpenAICompatibility.translated_responses_surface?(options.openai_compatibility)
+
   defp other_candidates_return(%{model: model, route_state: route_state, assignment: assignment} = context) do
-    candidates = if native_anchored_continuation?(context), do: RouteState.usage_limit_capacity(route_state), else: RouteState.route_filter_candidates(route_state)
+    candidates = if native_connection_pinned?(context), do: RouteState.usage_limit_capacity(route_state), else: RouteState.route_filter_candidates(route_state)
     PoolReturn.others(model, candidates, assignment.id, DateTime.utc_now(), context.request_options)
   end
 
