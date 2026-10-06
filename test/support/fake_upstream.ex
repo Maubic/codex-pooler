@@ -1384,13 +1384,29 @@ defmodule CodexPooler.FakeUpstream do
 
   defp validate_mode!({:expect_request, expectations, respond}) do
     if Keyword.get(expectations, :method) == "WEBSOCKET" and not native_websocket_mode?(respond) do
-      raise ArgumentError, "native websocket expectation requires websocket_text_frames"
+      raise ArgumentError, "native websocket expectation requires one of #{Enum.join(native_websocket_constructors(), ", ")}"
     end
 
     validate_mode!(respond)
   end
 
   defp validate_mode!(_mode), do: :ok
+
+  # The constructors of the modes `native_websocket_mode?/1` accepts, in the order of its clauses. The refusal above
+  # names them, so a mode added to one list belongs in the other.
+  defp native_websocket_constructors do
+    ~w(
+      websocket_text_frames/1
+      websocket_text_frames_then_abrupt_close/1
+      barrier_websocket_frames/2
+      interruptible_websocket_frames/2
+      websocket_sse_then_close/2
+      websocket_terminal_then_close_barrier/2
+      websocket_connection_limit_terminal_barrier/1
+      websocket_close_without_terminal_barrier/1
+      websocket_upgrade_error/2
+    )
+  end
 
   defp native_websocket_mode?({:websocket_text, _messages}), do: true
   defp native_websocket_mode?({:websocket_text_then_abrupt_close, _messages}), do: true
