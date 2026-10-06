@@ -9,7 +9,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
 
   import Ecto.Query
   alias CodexPooler.Accounting
-  alias CodexPooler.Accounting.{Attempt, Metadata, ModelObservation, Request}
+  alias CodexPooler.Accounting.{Attempt, Metadata, ModelObservation, PreAttemptRelease, Request}
   alias CodexPooler.Accounting.FailureResponse
   alias CodexPooler.Gateway.Contracts
   alias CodexPooler.Gateway.Persistence.CodexTurn
@@ -167,6 +167,27 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement do
 
   defp blank_to_nil(value) when value in [nil, ""], do: nil
   defp blank_to_nil(value), do: value
+
+  @doc """
+  Finalizes a request routing refused (route filtering refused the remaining
+  candidates, a circuit refused the next one, the held-back partition refused
+  every candidate), its reservation released in full. The release is a
+  pre-attempt `routing_rejected` one only while the request has no attempt.
+  After an earlier candidate's attempt it carries the latest attempt and no
+  phase, with usage unknown, as every release written after an attempt does
+  (findings#221): these refusals used to record a pre-attempt release then
+  (findings#321).
+  """
+  @spec finalize_routing_refusal(Request.t(), attrs()) :: settlement_result()
+  def finalize_routing_refusal(%Request{} = request, attrs) do
+    release =
+      case Repo.one(from attempt in Attempt, where: attempt.request_id == ^request.id, order_by: [desc: attempt.attempt_number], limit: 1) do
+        %Attempt{} = attempt -> %{usage_status: "usage_unknown", released_after_attempt: attempt}
+        nil -> %{usage_status: "not_applicable", pre_attempt_phase: PreAttemptRelease.routing_rejected()}
+      end
+
+    finalize_reservation_failure(request, attrs |> Map.new() |> Map.drop([:usage_status, :pre_attempt_phase, :released_after_attempt]) |> Map.merge(release))
+  end
 
   @spec finalize_reservation_failure(Request.t(), attrs()) :: settlement_result()
   def finalize_reservation_failure(request, attrs) do

@@ -175,8 +175,10 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch do
   defp capacity_retry_tier("unknown_legacy"), do: 2
   defp capacity_retry_tier(_non_credit), do: 0
 
+  # The refused cohort follows an earlier candidate's attempt of this request,
+  # so the release carries that attempt (findings#321).
   defp finalize_retry_refusal(context, %{status: status, code: code} = error) do
-    case AttemptSettlement.finalize_reservation_failure(context.reserved.request, %{response_status_code: status, last_error_code: to_string(code), usage_status: "not_applicable", pre_attempt_phase: PreAttemptRelease.routing_rejected()}) do
+    case AttemptSettlement.finalize_routing_refusal(context.reserved.request, %{response_status_code: status, last_error_code: to_string(code)}) do
       {:ok, _finalized} -> {:error, Map.delete(error, :accounting_disposition)}
       {:error, gateway_error} -> {:error, gateway_error}
     end
@@ -591,15 +593,15 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch do
     }
   end
 
+  # The refused candidate can follow an earlier candidate's attempt of this
+  # request; the release then carries that attempt (findings#321).
   defp handle_unavailable_routing_circuit(%SelectedCandidateContext{} = context, reason) do
     if context.allow_retry? do
       {:retry, reason}
     else
-      case AttemptSettlement.finalize_reservation_failure(context.reserved.request, %{
+      case AttemptSettlement.finalize_routing_refusal(context.reserved.request, %{
              response_status_code: 503,
-             last_error_code: "no_eligible_backend",
-             usage_status: "not_applicable",
-             pre_attempt_phase: PreAttemptRelease.routing_rejected()
+             last_error_code: "no_eligible_backend"
            }) do
         # A circuit refused the candidate after route filtering admitted it:
         # the same retry advice as the filter's refusal (findings#206 row

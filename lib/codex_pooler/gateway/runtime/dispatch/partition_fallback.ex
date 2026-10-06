@@ -31,7 +31,6 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback do
   upstream connection that holds its anchor.
   """
 
-  alias CodexPooler.Accounting.PreAttemptRelease
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Routing.CandidateEligibility
   alias CodexPooler.Gateway.Routing.CandidateEligibility.PoolReturn
@@ -212,13 +211,12 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback do
   defp put_summary(%RequestOptions{} = request_options, _fields), do: request_options
 
   # The held-back candidates stopped being routable between the refusal's
-  # check and this filtering: the request ends on that refusal.
+  # check and this filtering: the request ends on that refusal, after the
+  # selected candidate's attempt, which the release carries (findings#321).
   defp finalize_refusal(context, error, status, code) do
-    case AttemptSettlement.finalize_reservation_failure(context.reserved.request, %{
+    case AttemptSettlement.finalize_routing_refusal(context.reserved.request, %{
            response_status_code: status,
-           last_error_code: to_string(code),
-           usage_status: "not_applicable",
-           pre_attempt_phase: PreAttemptRelease.routing_rejected()
+           last_error_code: to_string(code)
          }) do
       {:ok, _finalized} -> {:error, Map.delete(error, :accounting_disposition)}
       {:error, gateway_error} -> {:error, gateway_error}
