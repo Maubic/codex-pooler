@@ -23,8 +23,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.HttpAuthRefresh do
   alias CodexPooler.Gateway.Runtime.Routing.DispatchLifecycle
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes
 
-  @exhausted_status 503
-  @exhausted_message "upstream authentication failed; retry the request"
+  @exhausted_status ErrorCodes.upstream_unauthorized_status()
+  @exhausted_message ErrorCodes.upstream_unauthorized_message()
   @compact_endpoint "/backend-api/codex/responses/compact"
   @error_kind "http_auth_refresh"
 

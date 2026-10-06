@@ -21,6 +21,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
   alias CodexPooler.Gateway.Websocket.Adapter
   alias CodexPooler.Pools
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams.Lifecycle.IdentityLifecycle
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
@@ -165,6 +166,51 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
       %{"type" => type} ->
         receive_public_websocket_until_terminal(conn, websocket, ref, [type | seen_types])
     end
+  end
+
+  # The provider refresh a scenario expects after a 401, if the refresh reaches
+  # the provider at all: a `{:provider, status, body}` answer, or none when the
+  # identity state decides the refresh (`put_refresh_state!/2`).
+  def provider_refresh({:provider, status, body}),
+    do: [FakeUpstream.expect_request(method: "POST", path: "/oauth/token", respond: FakeUpstream.json_response(body, status))]
+
+  def provider_refresh(_identity_state), do: []
+
+  # The refresh reads the identity as it is when the 401 lands: paused, it is
+  # a no-op; marked refreshing by another caller, this request is a follower.
+  def put_refresh_state!(_identity, {:provider, _status, _body}), do: :ok
+
+  def put_refresh_state!(identity, :identity_paused) do
+    assert {:ok, _identity} = IdentityLifecycle.update_upstream_identity(identity, %{status: "paused"})
+    :ok
+  end
+
+  def put_refresh_state!(identity, :identity_refreshing) do
+    metadata = Map.put(identity.metadata || %{}, "token_refresh", active_token_refresh_metadata())
+    assert {:ok, _identity} = IdentityLifecycle.update_upstream_identity(identity, %{status: "refreshing", metadata: metadata})
+    :ok
+  end
+
+  # Another caller's refresh in flight on the identity, as `TokenRefresh`
+  # records it.
+  def active_token_refresh_metadata(opts \\ []) do
+    %{
+      "status" => "refreshing",
+      "attempt_id" => Ecto.UUID.generate(),
+      "generation" => Keyword.get(opts, :generation, 1),
+      "started_at" => DateTime.utc_now() |> DateTime.truncate(:microsecond) |> DateTime.to_iso8601(),
+      "trigger_kind" => "test",
+      "receive_timeout_ms" => Keyword.get(opts, :receive_timeout_ms, 30_000),
+      "stale_after_ms" => Keyword.get(opts, :stale_after_ms, 60_000)
+    }
+  end
+
+  # The account reconciliation jobs enqueued for an upstream identity: exhausted
+  # upstream auth queues one so the operator sees the account's auth state.
+  def account_reconciliation_jobs(identity_id) do
+    [repo: Repo, worker: CodexPooler.Jobs.AccountReconciliationWorker]
+    |> Oban.Testing.all_enqueued()
+    |> Enum.filter(&(&1.args["upstream_identity_id"] == identity_id))
   end
 
   # A half-open `proxy_websocket` circuit on the assignment with its probe slot

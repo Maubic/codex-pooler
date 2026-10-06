@@ -688,6 +688,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.AuthRefreshTest do
       assert request.request_metadata["auth_refresh"]["status"] == refresh_status
       assert request.request_metadata["auth_refresh"]["trigger_kind"] == "websocket_terminal_auth_failure"
       assert route_circuit_failures(setup.assignment.id) == expected_route_failures(refresh_status)
+      assert length(account_reconciliation_jobs(setup.identity.id)) == expected_reconciliations(refresh_status)
 
       assert :ok = FakeUpstream.verify!(first_upstream)
       assert :ok = FakeUpstream.verify!(second_upstream)
@@ -698,11 +699,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.AuthRefreshTest do
   # The same handshake 401 on the last candidate has nowhere to fail over: the
   # settlement replaces the attempt's retryable record and releases the
   # reservation, so nothing is left for the stale-reservation sweep
-  # (findings#325).
+  # (findings#325). It settles as HTTP's exhausted auth does (row 325-7):
+  # `503 upstream_unauthorized`, the route failure and an account
+  # reconciliation, or, under another caller's refresh, a neutral completion
+  # and no reconciliation.
   for mode <- ["full", "lite"],
       {refresh_status, refresh} <- [
         {"reauth_required", {:provider, 400, %{"error" => "invalid_grant"}}},
-        {"noop", :identity_paused}
+        {"refresh_failed", {:provider, 503, %{"error" => "temporary"}}},
+        {"noop", :identity_paused},
+        {"refresh_in_progress", :identity_refreshing}
       ] do
     @mode mode
     @refresh_status refresh_status
@@ -748,17 +754,17 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.AuthRefreshTest do
       :ok = put_refresh_state!(setup.identity, @refresh)
       send(upstream_pid, {:fake_upstream_release_timeout, release_ref})
 
-      assert {:error, %{status: 502, code: "upstream_request_failed"}} = Task.await(client, @detection_timeout_ms)
+      assert {:error, %{status: 503, code: "upstream_unauthorized", message: "upstream authentication failed; retry the request"}} = Task.await(client, @detection_timeout_ms)
 
       assert [attempt] = Repo.all(from(a in Attempt))
       assert {attempt.status, attempt.network_error_code} == {"failed", "upstream_unauthorized"}
 
       assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
-      assert {request.status, request.last_error_code} == {"failed", "upstream_unauthorized"}
+      assert {request.status, request.last_error_code, request.response_status_code} == {"failed", "upstream_unauthorized", 503}
       assert request.completed_at
       assert request.request_metadata["routing"]["model_serving_mode"] == @mode
       assert request.request_metadata["auth_refresh"]["status"] == refresh_status
-      assert route_circuit_failures(setup.assignment.id) == [{"upstream_unauthorized", 1}]
+      assert_exhausted_auth_health!(setup, refresh_status)
       assert :ok = FakeUpstream.verify!(upstream)
     end
   end
@@ -1132,36 +1138,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.AuthRefreshTest do
     FakeUpstream.expect_request(method: "POST", path: "/oauth/token", respond: respond)
   end
 
-  defp provider_refresh({:provider, status, body}), do: [strict_oauth_refresh(FakeUpstream.json_response(body, status))]
-  defp provider_refresh(_identity_state), do: []
-
-  # The refresh reads the identity as it is when the 401 lands: paused, it is
-  # a no-op; marked refreshing by another caller, this request is a follower.
-  defp put_refresh_state!(_identity, {:provider, _status, _body}), do: :ok
-
-  defp put_refresh_state!(identity, :identity_paused) do
-    assert {:ok, _identity} = IdentityLifecycle.update_upstream_identity(identity, %{status: "paused"})
-    :ok
-  end
-
-  defp put_refresh_state!(identity, :identity_refreshing) do
-    metadata = Map.put(identity.metadata || %{}, "token_refresh", active_token_refresh_metadata())
-    assert {:ok, _identity} = IdentityLifecycle.update_upstream_identity(identity, %{status: "refreshing", metadata: metadata})
-    :ok
-  end
-
   defp expected_route_failures("refresh_in_progress"), do: []
   defp expected_route_failures(_refresh_status), do: [{"upstream_unauthorized", 1}]
 
-  defp active_token_refresh_metadata(opts \\ []) do
-    %{
-      "status" => "refreshing",
-      "attempt_id" => Ecto.UUID.generate(),
-      "generation" => Keyword.get(opts, :generation, 1),
-      "started_at" => DateTime.utc_now() |> DateTime.truncate(:microsecond) |> DateTime.to_iso8601(),
-      "trigger_kind" => "test",
-      "receive_timeout_ms" => Keyword.get(opts, :receive_timeout_ms, 30_000),
-      "stale_after_ms" => Keyword.get(opts, :stale_after_ms, 60_000)
-    }
+  # Another caller's refresh is not the account's fault: no reconciliation, as
+  # HTTP's refresh follower does none.
+  defp expected_reconciliations("refresh_in_progress"), do: 0
+  defp expected_reconciliations(_refresh_status), do: 1
+
+  defp assert_exhausted_auth_health!(setup, refresh_status) do
+    assert route_circuit_failures(setup.assignment.id) == expected_route_failures(refresh_status)
+    assert length(account_reconciliation_jobs(setup.identity.id)) == expected_reconciliations(refresh_status)
   end
 end

@@ -201,7 +201,11 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
          started
        ) do
     if attempted? == true or retry_suppressed?(context) do
-      finalize_exhausted_auth_refresh(context, dispatch_request, response, failure, started)
+      # A second rejection after the refreshed retry is exhausted auth; a
+      # suppressed refresh (bound reset probe, connection-bound compaction,
+      # client retry dispatch) never tried one.
+      kind = if attempted? == true, do: :exhausted, else: :suppressed
+      finalize_exhausted_auth_refresh(context, dispatch_request, response, failure, started, kind)
     else
       case retry_after_websocket_auth_refresh(
              prepared_context,
@@ -587,11 +591,17 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
           dispatch_request,
           response,
           failure,
-          started
+          started,
+          auth_exhaustion(refresh_metadata)
         )
       end
     end
   end
+
+  # Another caller's refresh in flight makes this request its follower, as on
+  # HTTP (`HttpAuthRefresh.finish_refresh_follower/2`): not the account's fault.
+  defp auth_exhaustion(%{"status" => "refresh_in_progress"}), do: :follower
+  defp auth_exhaustion(_refresh_metadata), do: :exhausted
 
   # The attempt was recorded retryable before the refresh ran, and only a
   # settlement may replace that record. The failed-websocket finalization
@@ -611,7 +621,12 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
     with :ok <- DispatchLifecycle.neutral_completion(context), do: {:retry, "upstream_unauthorized"}
   end
 
+  # Exhausted auth also queues the account's reconciliation, as HTTP's
+  # `mark_identity_unauthorized/1` does, so the operator sees its auth state
+  # (findings#325 row 325-7).
   defp failover_after_recorded_auth_failure(context, _refresh_metadata) do
+    SideEffects.maybe_enqueue_gateway_reconciliation(context.reserved.request.pool_id, context.assignment)
+
     case DispatchLifecycle.failure(context, "upstream_unauthorized") do
       {:ok, _demotion_reason} -> {:retry, "upstream_unauthorized"}
       {:error, _gateway_error} = error -> error
@@ -653,13 +668,20 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
   defp websocket_terminal_outcome("response.completed", _body), do: {:ok, %{kind: :completed}}
   defp websocket_terminal_outcome(_terminal, body), do: StreamProtocol.terminal_outcome(body)
 
-  defp finalize_exhausted_auth_refresh(context, dispatch_request, response, failure, started) do
+  # A refusal the client was shown nothing of settles as HTTP's exhausted auth
+  # (`Finalization.Websocket` reads `auth_exhaustion`): `503
+  # upstream_unauthorized`, the route failure and the account's reconciliation,
+  # or a neutral completion for a refresh follower (findings#325 row 325-7). A
+  # suppressed refresh keeps its ordinary answer, as HTTP's ineligible 401
+  # does.
+  defp finalize_exhausted_auth_refresh(context, dispatch_request, response, failure, started, kind) do
     if pre_visible_transport_websocket_failure?(response) do
       Finalization.finalize_failed_websocket_response(
         context,
         response
         |> Map.put(:reason, :upstream_unauthorized)
         |> Map.put(:started, started)
+        |> put_auth_exhaustion(kind)
       )
     else
       deliver_retry_exhausted_websocket_failure(dispatch_request, response)
@@ -674,6 +696,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
       )
     end
   end
+
+  defp put_auth_exhaustion(finalization, kind) when kind in [:exhausted, :follower], do: Map.put(finalization, :auth_exhaustion, kind)
+  defp put_auth_exhaustion(finalization, :suppressed), do: finalization
 
   defp auth_refresh_websocket_response_context(context, response) do
     %ResponseContext{
