@@ -1348,6 +1348,12 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
         metadata
       )
     else
+      # The failed candidate's route health is recorded here as on the last
+      # candidate below and on HTTP (`Finalization`'s
+      # `finalize_dispatch_error_after_route_failure/5`): without it a connect
+      # failure that failed over left a half-open probe this attempt claimed
+      # counted in flight until the staleness self-heal, and a closed circuit
+      # never counted the failure (findings#325 row 325-4).
       case AttemptSettlement.record_retryable_failure(reserved.request, attempt, %{
              usage: response_usage(finalization, ""),
              last_error_code: code,
@@ -1356,6 +1362,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
              attempt_metadata: metadata,
              before_finalize: fn ->
                SideEffects.observe_websocket_response(context, finalization)
+               record_failed_health(context, reason, code)
              end
            }) do
         {:stale_generation, finalized} -> {:ok, finalized}

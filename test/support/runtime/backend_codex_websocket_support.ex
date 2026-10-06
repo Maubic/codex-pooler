@@ -151,6 +151,74 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
     )
   end
 
+  # A half-open `proxy_websocket` circuit on the assignment with its probe slot
+  # free, so the next websocket turn routed to it claims the probe.
+  def half_open_websocket_circuit!(setup, assignment) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    %RoutingCircuitState{
+      pool_id: setup.pool.id,
+      pool_upstream_assignment_id: assignment.id,
+      upstream_identity_id: assignment.upstream_identity_id,
+      model_identifier: setup.model.exposed_model_id,
+      route_class: "proxy_websocket",
+      status: "half_open",
+      reason_code: "test_probe",
+      failure_count: 1,
+      success_count: 0,
+      opened_at: DateTime.add(now, -120, :second),
+      half_opened_at: now,
+      metadata: %{"probe_in_flight_count" => 0},
+      created_at: now,
+      updated_at: now
+    }
+    |> Repo.insert!()
+  end
+
+  # A port nothing listens on: bound once to learn its number, closed again,
+  # then probed to prove the kernel refuses it before the test relies on that.
+  # Binding and closing alone has a TOCTOU window in which a concurrent
+  # partition can take the freed port, which would turn a refused-connect test
+  # into a hang or an unrelated failure (findings#208). The probe does not
+  # close the window, it bounds it: a port that no longer refuses is discarded
+  # and a fresh one is drawn, and exhausting the attempts fails loudly with the
+  # real cause instead of leaving a mystery timeout.
+  @closed_port_attempts 10
+  @closed_port_probe_timeout_ms 200
+
+  def reserve_closed_port!(attempts \\ @closed_port_attempts) do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, reuseaddr: true])
+    {:ok, port} = :inet.port(listener)
+    :ok = :gen_tcp.close(listener)
+
+    case :gen_tcp.connect(
+           {127, 0, 0, 1},
+           port,
+           [:binary, active: false],
+           @closed_port_probe_timeout_ms
+         ) do
+      {:error, :econnrefused} ->
+        port
+
+      {:ok, socket} ->
+        :ok = :gen_tcp.close(socket)
+        retry_closed_port!(attempts, port, :accepted)
+
+      {:error, reason} ->
+        retry_closed_port!(attempts, port, reason)
+    end
+  end
+
+  defp retry_closed_port!(attempts, _port, _reason) when attempts > 1,
+    do: reserve_closed_port!(attempts - 1)
+
+  defp retry_closed_port!(_attempts, port, reason) do
+    flunk(
+      "no refusing loopback port after #{@closed_port_attempts} attempts; " <>
+        "last port #{port} answered #{inspect(reason)}"
+    )
+  end
+
   def synthetic_access_token(residency) do
     header = Base.url_encode64(CodexPooler.JSON.encode!(%{"alg" => "none"}), padding: false)
 
