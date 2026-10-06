@@ -657,6 +657,12 @@ defmodule CodexPooler.Dev.SeedsTest do
     assert logs |> Enum.map(& &1.requested_model) |> Enum.uniq() |> length() >= 3
     assert Enum.all?(logs, &(&1.token_counts.cached_input_tokens / &1.token_counts.input_tokens >= 0.95))
     assert Enum.any?(logs, &(&1.transport == "websocket"))
+    # The rotation follows recency, not the clock: in an hour's first seconds
+    # the current-hour cap reorders the newest rows, and the page must still
+    # open on the websocket client followed by the five /v1 clients.
+    screenshot_logs = Enum.filter(logs, &String.starts_with?(&1.correlation_id, "docs-"))
+    assert [%{transport: "websocket"} | translated_clients] = Enum.take(screenshot_logs, 6)
+    assert Enum.all?(translated_clients, &get_in(&1.metadata, ["openai_compatibility", "source_endpoint"]))
     translated = Enum.filter(logs, &get_in(&1.metadata, ["openai_compatibility", "source_endpoint"]))
     assert translated != []
     assert Enum.all?(translated, &(get_in(&1.metadata, ["openai_compatibility", "translated_endpoint"]) == &1.endpoint))

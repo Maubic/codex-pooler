@@ -32,6 +32,12 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
       result.pools
       |> Enum.with_index()
       |> Enum.flat_map(fn {pool, index} -> pool_rows(result, pool, index, timestamp) end)
+      # Clients rotate by recency rank, newest first, so any six consecutive
+      # request-log rows show every client. Rotating by Pool and sequence let the
+      # current-hour cap reorder the newest rows during an hour's first seconds,
+      # which pushed the websocket client off the first page.
+      |> Enum.sort_by(&started_at/1, {:desc, DateTime})
+      |> Enum.with_index(fn spec, rank -> traffic_row(spec, Enum.at(@clients, rem(rank, length(@clients)))) end)
 
     Repo.insert_all(Request, Enum.map(rows, & &1.request))
     Repo.insert_all(Attempt, Enum.map(rows, & &1.attempt))
@@ -56,7 +62,7 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
       assignment = Enum.at(assignments, rem(hour + sequence, length(assignments)))
       identity = Enum.find(result.upstream_identities, &(&1.id == assignment.upstream_identity_id))
       model = Enum.at(models, rem(index + hour + sequence, length(models)))
-      traffic_row(pool, key, model, assignment, identity, {index, hour, sequence, occurred_at})
+      {pool, key, model, assignment, identity, {index, hour, sequence, occurred_at}}
     end
   end
 
@@ -66,19 +72,25 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
     timestamp |> DateTime.add(-timestamp.minute * 60 - timestamp.second, :second) |> DateTime.add(-hour * 3600 + 900 + sequence * 40, :second)
   end
 
-  defp traffic_row(pool, key, model, assignment, identity, {index, hour, sequence, occurred_at}) do
+  defp started_at({_pool, _key, _model, _assignment, _identity, {index, hour, sequence, occurred_at}}),
+    do: DateTime.add(occurred_at, -latency_ms(index, output_tokens(index, hour, sequence)), :millisecond)
+
+  defp output_tokens(index, hour, sequence), do: 600 + rem(hour * 61 + index * 181 + sequence * 79, 1600)
+
+  defp latency_ms(index, output), do: 4500 + div(output * 1000, 65 + index * 5)
+
+  defp traffic_row({pool, key, model, assignment, identity, {index, hour, sequence, occurred_at}}, {user_agent, transport, source_endpoint}) do
     request_id = Ecto.UUID.generate()
     attempt_id = Ecto.UUID.generate()
     shape = traffic_shape(index, hour)
     input = round(40_000 + index * 8000 + shape * 650 + 2200 * :math.sin(sequence * 1.7 + hour * 0.4))
-    output = 600 + rem(hour * 61 + index * 181 + sequence * 79, 1600)
+    output = output_tokens(index, hour, sequence)
     cached = div(input * Enum.at(@cache_hit_rates, rem(hour + index + sequence, length(@cache_hit_rates))), 10_000)
     total = input + output
     cost = Decimal.new((input - cached) * 2 + cached + output * 8)
-    latency = 4500 + div(output * 1000, 65 + index * 5)
+    latency = latency_ms(index, output)
     started_at = DateTime.add(occurred_at, -latency, :millisecond)
     metadata = %{"dev_seed" => "codex_pooler_dev_seed", "docs_screenshot" => true}
-    {user_agent, transport, source_endpoint} = Enum.at(@clients, rem(index + sequence, length(@clients)))
 
     request_metadata =
       if source_endpoint do
