@@ -22,6 +22,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
       windows
       |> Enum.filter(&window_in_model_scope?(&1, opts))
       |> reject_dropped_meter_windows(timestamp)
+      |> reject_unrefreshable_stale_meter_windows(timestamp)
       |> reject_superseded_primary_windows(timestamp)
       |> WindowSelector.logical_windows(timestamp)
       |> select_current_account_primary_variant(timestamp)
@@ -414,6 +415,46 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
         windows
     end
   end
+
+  @doc """
+  Rejects the windows of a stale meter that only responses report and whose
+  reading in its running cycle is below its limit.
+
+  The provider's usage read lists no such meter: the rate-limit headers of a
+  response, its `codex.rate_limits` event or a rate-limit error carry it, so
+  only traffic on the account refreshes it. Once its rows are older than the
+  freshness TTL the request's quota refresh reads the account's usage and
+  cannot make them fresh, and while the meter blocked no response could
+  either: the account stayed out of routing until the meter's reset, for its
+  model, or for every model when the meter is unnamed (findings#305 row
+  498-9). A meter group with no fresh row, no row from the usage read and no
+  exhausted row in a cycle still running is ignored by routing; when the
+  meter has run out since, the provider's usage-limit refusal says so and its
+  evidence blocks as usual. An exhausted reading keeps blocking until its
+  reset, and a meter the usage read reports is still refreshed by it. Its rows
+  stay for every read surface that lists evidence.
+  """
+  @spec reject_unrefreshable_stale_meter_windows([Quota.AccountQuotaWindow.t()], DateTime.t()) ::
+          [Quota.AccountQuotaWindow.t()]
+  def reject_unrefreshable_stale_meter_windows(windows, timestamp \\ now()) when is_list(windows) do
+    unrefreshable =
+      windows
+      |> Enum.filter(&meter_window?/1)
+      |> Enum.group_by(&quota_group_key/1)
+      |> Enum.filter(fn {_group, rows} -> unrefreshable_stale_meter?(rows, timestamp) end)
+      |> MapSet.new(fn {group, _rows} -> group end)
+
+    Enum.reject(windows, &(meter_window?(&1) and MapSet.member?(unrefreshable, quota_group_key(&1))))
+  end
+
+  defp unrefreshable_stale_meter?(rows, timestamp) do
+    Enum.all?(rows, &(&1.source != "codex_usage_api" and not fresh_window?(&1, timestamp))) and
+      not Enum.any?(rows, &(meter_reading_exhausted?(&1) and not Evidence.expired?(&1, timestamp)))
+  end
+
+  # A reading at its limit, or one a usage-limit refusal recorded.
+  defp meter_reading_exhausted?(%Quota.AccountQuotaWindow{metadata: metadata} = window),
+    do: exhausted?(window) or (is_map(metadata) and Map.has_key?(metadata, "rate_limit_error_code"))
 
   defp meter_window?(%Quota.AccountQuotaWindow{quota_scope: scope}), do: scope in ["model", "upstream_model", "feature"]
 
