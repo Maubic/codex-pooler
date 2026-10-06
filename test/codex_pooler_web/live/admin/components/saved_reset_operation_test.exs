@@ -222,6 +222,15 @@ defmodule CodexPoolerWeb.Admin.SavedResetOperationTest do
     refute idle_text =~ "The reset continues"
   end
 
+  @tag :receipt_state_rendering
+  test "the connection notice keeps its type scale and takes a container gutter only from its caller" do
+    gutter = "border-b border-base-300 px-5 py-3"
+    classes = fn assigns -> render_component(&Components.saved_reset_connection_notice/1, Map.put(assigns, :id, "saved-reset-connection-sample")) |> LazyHTML.from_fragment() |> LazyHTML.query("#saved-reset-connection-sample[data-saved-reset-connection-notice][hidden]") |> LazyHTML.attribute("class") |> List.first() |> String.split() end
+
+    assert classes.(%{}) == ["text-xs", "leading-5", "text-base-content/70"]
+    assert classes.(%{class: gutter}) == ["text-xs", "leading-5", "text-base-content/70" | String.split(gutter)]
+  end
+
   @tag :receipt_ambiguity_and_no_fake_success
   test "queued-only request shows pause and disconnect observations without an account receipt" do
     for observation <- [%{view_paused?: true}, %{view_connected?: false}, %{usage_poll_pause: :unavailable}] do

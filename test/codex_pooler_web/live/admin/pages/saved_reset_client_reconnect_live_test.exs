@@ -71,6 +71,19 @@ defmodule CodexPoolerWeb.Admin.SavedResetClientReconnectLiveTest do
     assert_notices(conn, identity, fn view, selector -> refute has_element?(view, selector, continues) end)
   end
 
+  test "the bank dialog's disconnect notice sits inside the panel's side gutter", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "reconnect-gutter", name: "Reconnect gutter"})
+    %{identity: identity} = upstream_assignment_fixture(pool)
+    {:ok, list, _html} = live(conn, ~p"/admin/upstreams")
+    render_click(list, "open_saved_reset_policy", %{"id" => identity.id})
+    # The dialog panel has no padding of its own, so a direct child brings the gutter its header and form blocks use.
+    assert has_element?(list, "#saved-reset-policy-dialog-panel > #saved-reset-connection-bank[data-saved-reset-connection-notice].border-b.px-5.py-3")
+    # The page notices sit in the page column and add no gutter of their own.
+    refute has_element?(list, "#saved-reset-connection-list.px-5")
+    {:ok, cockpit, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+    refute has_element?(cockpit, "#saved-reset-connection-cockpit.px-5")
+  end
+
   test "malformed reconnect draft is ignored and both page roots expose native connection hook", %{conn: conn, scope: scope} do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "reconnect-malformed", name: "Reconnect malformed"})
     %{identity: identity} = upstream_assignment_fixture(pool)

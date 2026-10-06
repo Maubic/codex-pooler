@@ -700,7 +700,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
           </p>
         </div>
 
-        <AdminComponents.saved_reset_connection_notice id="saved-reset-connection-bank" in_flight={saved_reset_open?(@account)} />
+        <AdminComponents.saved_reset_connection_notice id="saved-reset-connection-bank" class="border-b border-base-300 px-5 py-3" in_flight={saved_reset_open?(@account)} />
         <.form
           id="saved-reset-policy-form"
           data-saved-reset-form

@@ -150,15 +150,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetOperation do
 
   attr :id, :string, required: true
   attr :in_flight, :boolean, default: false
+  attr :class, :any, default: nil
 
   # Shown by the SavedResetConnection hook while the socket is down. It repeats the receipt's disconnected copy, and
-  # says the reset continues only when the page shows an operation that is still open (`open?`).
+  # says the reset continues only when the page shows an operation that is still open (`open?`). A surface whose
+  # container has no padding of its own (the bank dialog's panel) passes the gutter it needs in `class`.
   @spec saved_reset_connection_notice(map()) :: Phoenix.LiveView.Rendered.t()
   def saved_reset_connection_notice(assigns) do
     assigns = assign(assigns, :text, if(assigns.in_flight, do: @in_flight_notice, else: @idle_notice))
 
     ~H"""
-    <p id={@id} data-saved-reset-connection-notice hidden role="status" aria-live="polite" class="text-xs leading-5 text-base-content/70">{@text}</p>
+    <p id={@id} data-saved-reset-connection-notice hidden role="status" aria-live="polite" class={["text-xs leading-5 text-base-content/70", @class]}>{@text}</p>
     """
   end
 

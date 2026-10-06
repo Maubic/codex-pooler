@@ -12,6 +12,7 @@ defmodule CodexPoolerWeb.Admin.Components do
 
   attr :id, :string, required: true
   attr :in_flight, :boolean, default: false
+  attr :class, :any, default: nil
 
   @spec saved_reset_connection_notice(map()) :: Phoenix.LiveView.Rendered.t()
   def saved_reset_connection_notice(assigns), do: SavedResetOperation.saved_reset_connection_notice(assigns)
