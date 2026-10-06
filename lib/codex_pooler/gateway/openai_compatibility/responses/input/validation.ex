@@ -314,8 +314,14 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
   defp validate_url_citation_annotation(_annotation),
     do: {:error, Error.invalid_request("input item shape is not translatable", "input")}
 
+  # The assistant message phases of the Codex Responses model: interim `commentary`, `partial_answer` (stable answer
+  # text that may be followed by more output or tools; Codex 8b6bb1c77) and the terminal `final_answer`. The provider
+  # accepted `partial_answer` on a stateless assistant input item in both the Full and Lite request shapes (direct
+  # probe, 2026-10-06; its own unknown-phase message still lists only the other two), so it is forwarded unchanged.
+  @assistant_phases ["commentary", "partial_answer", "final_answer"]
+
   defp validate_optional_assistant_phase(%{"phase" => phase})
-       when phase in ["commentary", "final_answer"],
+       when phase in @assistant_phases,
        do: :ok
 
   defp validate_optional_assistant_phase(%{"phase" => nil}), do: :ok

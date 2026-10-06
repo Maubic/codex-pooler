@@ -7,13 +7,15 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
 
   @max_mailbox_runs 16
   @max_completed_items 4
+  @preemptible_message_phases ["commentary", "partial_answer"]
   @lite_marker "ws_request_header_x_openai_internal_codex_responses_lite"
 
-  # Mailbox delivery can stop the client after a reasoning/commentary item and
-  # append new input before its next request. Keep the original turn claim:
-  # a separate key would bypass old pods during a rolling deployment. Instead
-  # seal the candidate prefix, delivered output and mailbox boundary for the
-  # accounting chain to verify against its actual predecessor and successor.
+  # Mailbox delivery can stop the client after a reasoning, commentary or
+  # partial-answer item and append new input before its next request. Keep
+  # the original turn claim: a separate key would bypass old pods during a
+  # rolling deployment. Instead seal the candidate prefix, delivered output
+  # and mailbox boundary for the accounting chain to verify against its
+  # actual predecessor and successor.
   @spec attach(OriginalWitness.t(), <<_::256>>, map(), RequestOptions.t()) :: OriginalWitness.t()
   def attach(%OriginalWitness{} = witness, semantic_key, payload, options) do
     %{witness | mailbox: candidates(semantic_key, payload, options), mailbox_intent?: mailbox_intent?(payload)}
@@ -139,8 +141,11 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuation do
   defp mailbox_content?(%{"type" => "encrypted_content", "encrypted_content" => value}), do: is_binary(value) and byte_size(value) > 0
   defp mailbox_content?(_part), do: false
 
+  # Output the client can be stopped after: reasoning and the nonterminal assistant phases. Codex treats
+  # `partial_answer` like `commentary` here (989c01a41 / 822e58cc3: mailbox preemption and open delivery); only
+  # `final_answer` and an unphased message are terminal answers and never qualify.
   defp preemptible_output?(%{"type" => "reasoning"}), do: true
-  defp preemptible_output?(%{"type" => "message", "role" => "assistant", "phase" => "commentary"}), do: true
+  defp preemptible_output?(%{"type" => "message", "role" => "assistant", "phase" => phase}) when phase in @preemptible_message_phases, do: true
   defp preemptible_output?(_item), do: false
 
   defp witnesses_at(semantic_key, payload, count, cache) do

@@ -190,7 +190,33 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuationTest do
     assert length(witness(append(ordinary, Enum.map(1..5, &reasoning(Integer.to_string(&1))) ++ [mailbox("incoming")])).mailbox) == 4
   end
 
-  for {call_type, result_type} <- [{"function_call", "function_call_output"}, {"custom_tool_call", "custom_tool_call_output"}], output_kind <- ["reasoning", "commentary"] do
+  # Codex 989c01a41 / 822e58cc3: a `partial_answer` message is nonterminal like commentary, so mailbox mail can
+  # preempt it; only `final_answer` (and an unphased message) is a terminal answer (findings#307).
+  test "a completed partial answer can precede incoming mail like commentary, a final answer cannot" do
+    ordinary = Map.update!(payload(), "input", &Enum.take(&1, 1))
+    commentary = %{"type" => "message", "id" => "msg_commentary", "role" => "assistant", "phase" => "commentary", "content" => [%{"type" => "output_text", "text" => "synthetic commentary"}]}
+    partial = %{"type" => "message", "id" => "msg_partial", "role" => "assistant", "phase" => "partial_answer", "content" => [%{"type" => "output_text", "text" => "synthetic partial answer"}]}
+    {:ok, partial_digest} = WebsocketTurnIdentity.completed_item_digest(partial)
+
+    assert [candidate] = witness(append(ordinary, [partial, mailbox("incoming")])).mailbox
+    assert candidate.current?
+    assert candidate.items == [partial_digest]
+
+    assert length(witness(append(ordinary, [reasoning("first"), commentary, partial, mailbox("incoming")])).mailbox) == 3
+    assert length(witness(append(ordinary, [partial, commentary, mailbox("incoming")])).mailbox) == 2
+
+    for terminal <- [Map.put(partial, "phase", "final_answer"), Map.delete(partial, "phase")] do
+      assert witness(append(ordinary, [terminal, mailbox("incoming")])).mailbox == []
+      assert witness(append(ordinary, [partial, terminal, mailbox("incoming")])).mailbox == []
+      assert witness(append(ordinary, [reasoning("first"), partial, terminal, mailbox("incoming")])).mailbox == []
+    end
+
+    for gap <- [%{"type" => "message", "role" => "user", "content" => "synthetic"}, %{"type" => "function_call_output", "call_id" => "synthetic-call", "output" => "synthetic"}] do
+      assert witness(append(ordinary, [partial, gap, mailbox("incoming")])).mailbox == []
+    end
+  end
+
+  for {call_type, result_type} <- [{"function_call", "function_call_output"}, {"custom_tool_call", "custom_tool_call_output"}], output_kind <- ["reasoning", "commentary", "partial_answer"] do
     @tag mailbox_tool_drain_regression: true
     test "#{call_type}/#{output_kind}: a fulfilled native in-flight call before incoming mail retains its ordered server output proof" do
       original = payload()
@@ -273,6 +299,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeMailboxContinuationTest do
 
   defp drained_output("reasoning"), do: reasoning("preemptible")
   defp drained_output("commentary"), do: %{"type" => "message", "id" => "msg_sample_preemptible", "role" => "assistant", "phase" => "commentary", "content" => [%{"type" => "output_text", "text" => "synthetic commentary"}]}
+  defp drained_output("partial_answer"), do: %{"type" => "message", "id" => "msg_sample_preemptible", "role" => "assistant", "phase" => "partial_answer", "content" => [%{"type" => "output_text", "text" => "synthetic partial answer"}]}
   defp drained_call("function_call"), do: %{"type" => "function_call", "id" => "fc_sample_inflight", "call_id" => "sample-inflight-call", "name" => "sample_tool", "arguments" => "{}"}
   defp drained_call("custom_tool_call"), do: %{"type" => "custom_tool_call", "id" => "ct_sample_inflight", "call_id" => "sample-inflight-call", "name" => "sample_tool", "input" => "synthetic input"}
   defp drained_result(type), do: %{"type" => type, "call_id" => "sample-inflight-call", "output" => "synthetic tool completion"}

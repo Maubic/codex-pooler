@@ -47,6 +47,11 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
   @replay_tail_suffix_limit 256
   @http_resume_input_domain "native_http_resume_input_v1"
   @completed_item_domain "native_websocket_completed_item_v1"
+  # The nonterminal assistant phases whose completed messages the client resends from its typed message model
+  # (findings#306): commentary (observed with Codex 0.160.0) and `partial_answer` (Codex 8b6bb1c77, the same model
+  # and fields; source-derived, no released client sends it yet). `final_answer` and an unphased message keep the
+  # generic identity, which retains provider-only fields.
+  @client_resend_message_phases ["commentary", "partial_answer"]
   # How many trailing items of an unanchored request are tried as the completed
   # items a cut predecessor pushed before its client left (findings#232 row
   # 232-232). The released client appends what it recorded from
@@ -587,10 +592,13 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
   `status`, a content part's `annotations` and `logprobs`, and null fields.
   Reasoning items use the client's fields, with summary/content parts projected
   to `type` and `text`; content survives only if it contains `reasoning_text`
-  (Codex 0.158.0). Assistant commentary with a binary id and nonempty valid
-  `output_text` content keeps only `type`, `id`, `role`, `phase`, and ordered
-  `type`/`text` parts, matching observed Codex 0.160.0 serialization. Other
-  message/content shapes retain the generic identity. The identity binds those fields under a keyed digest, the
+  (Codex 0.158.0). Assistant commentary and partial-answer messages with a
+  binary id and nonempty valid `output_text` content keep only `type`, `id`,
+  `role`, `phase`, and ordered `type`/`text` parts, matching observed Codex
+  0.160.0 commentary serialization (`partial_answer`, Codex 8b6bb1c77, uses
+  the same typed message model; no released client sends it yet). Final
+  answers, unphased messages and other message/content shapes retain the
+  generic identity. The identity binds those fields under a keyed digest, the
   house 12-character shape, so a receipt can carry it without carrying content.
   `:error` for anything that is not an item map.
   """
@@ -707,8 +715,9 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
     |> without_nulls()
   end
 
-  defp completed_item_identity(%{"type" => "message", "role" => "assistant", "phase" => "commentary", "id" => id, "content" => [_part | _parts] = parts} = item) when is_binary(id) do
-    if Enum.all?(parts, &commentary_output_text?/1) do
+  defp completed_item_identity(%{"type" => "message", "role" => "assistant", "phase" => phase, "id" => id, "content" => [_part | _parts] = parts} = item)
+       when phase in @client_resend_message_phases and is_binary(id) do
+    if Enum.all?(parts, &output_text_part?/1) do
       item
       |> Map.take(["type", "id", "role", "phase", "content"])
       |> Map.put("content", Enum.map(parts, &Map.take(&1, ["type", "text"])))
@@ -720,8 +729,8 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
 
   defp completed_item_identity(item), do: generic_completed_item_identity(item)
 
-  defp commentary_output_text?(%{"type" => "output_text", "text" => text}) when is_binary(text), do: true
-  defp commentary_output_text?(_part), do: false
+  defp output_text_part?(%{"type" => "output_text", "text" => text}) when is_binary(text), do: true
+  defp output_text_part?(_part), do: false
 
   defp generic_completed_item_identity(item) do
     item
