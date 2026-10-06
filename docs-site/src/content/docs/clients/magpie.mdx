@@ -9,6 +9,12 @@ description: Use Magpie's local gateway between Codex and Codex Pooler through t
 
 Codex CLI and Codex Desktop can also use Codex Pooler directly, and [Codex CLI / Desktop on Codex Pooler](/clients/codex-cli-desktop/) remains the primary setup for them. This guide covers the Magpie recipe that keeps Codex's requests closest to what Codex sends, and the limits that come with Magpie in the path.
 
+:::note[At a glance]
+- **Works:** single-agent Codex sessions (prompts, tools and hosted web search) through the [Codex backend alias recipe](#add-the-provider) with `search=yes`.
+- **Does not work:** Codex multi-agent subagents. Magpie refuses to forward a subagent's sealed task to a provider that has no ChatGPT account of its own ([`400 sealed subagent task`](#troubleshooting)).
+- **Costs of the extra hop:** HTTP only, without websocket continuity; compaction done by Codex instead of the Pool; failing turns retried by both Codex and Magpie; and the prompt cache key dropped after some errors until Magpie restarts. If you don't need Magpie's model switcher, [connect Codex directly](/clients/codex-cli-desktop/).
+:::
+
 ## Before you start
 
 - Install [Magpie](https://usemagpie.ai) and [Codex CLI](https://developers.openai.com/codex/cli/) or [Codex Desktop](https://developers.openai.com/codex/app/) using their official instructions for your operating system.
