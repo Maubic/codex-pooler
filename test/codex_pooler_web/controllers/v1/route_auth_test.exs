@@ -404,6 +404,22 @@ defmodule CodexPoolerWeb.V1.RouteAuthTest do
       assert UnsupportedRoutes.unsupported?(cached)
     end
 
+    test "agents family matching uses the canonical path view with direct fallback" do
+      direct = Plug.Test.conn(:get, "/v1/%61gents/sessions/session_fixture/events")
+
+      cached =
+        direct
+        |> IngressPath.populate()
+        |> Map.put(:path_info, ["unrelated"])
+
+      assert UnsupportedRoutes.agents_family?(direct)
+      assert UnsupportedRoutes.agents_family?(cached)
+      assert UnsupportedRoutes.agents_family?(Plug.Test.conn(:delete, "/v1/vaults"))
+      refute UnsupportedRoutes.agents_family?(Plug.Test.conn(:get, "/v1/agentsx"))
+      refute UnsupportedRoutes.agents_family?(Plug.Test.conn(:get, "/v1/models"))
+      refute UnsupportedRoutes.agents_family?(Plug.Test.conn(:post, "/backend-api/codex/agents/sessions"))
+    end
+
     test "encoded unsupported route spelling returns the deterministic OpenAI error", %{
       conn: conn
     } do

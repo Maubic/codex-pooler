@@ -739,7 +739,7 @@ These `POST /v1/responses` request shapes return OpenAI-shaped `invalid_request`
 
 ### Routed but unsupported `/v1` endpoints
 
-These routes are deliberately present so clients receive deterministic OpenAI-shaped unsupported endpoint errors before gateway admission or upstream dispatch.
+These routes are deliberately answered so clients receive deterministic OpenAI-shaped unsupported endpoint errors before gateway admission or upstream dispatch.
 
 <table>
   <thead>
@@ -821,6 +821,20 @@ These routes are deliberately present so clients receive deterministic OpenAI-sh
       <td>No</td>
       <td>Unsupported</td>
       <td>Response deletion by id is not part of the public compatibility surface.</td>
+    </tr>
+    <tr>
+      <td><code>/v1/agents</code> and every path below it, any method</td>
+      <td>None</td>
+      <td>No</td>
+      <td>Unsupported</td>
+      <td>The beta Agents API (sessions, session events and tool results, environments and their files, result artifacts) is not served: the Codex backend has no Agents route. Every request answers <code>404 unsupported_endpoint</code> naming the beta Agents API, after the Pool API key and <code>/v1</code> compatibility checks and before the body is read. Function tools and tool results go through <code>POST /v1/responses</code>.</td>
+    </tr>
+    <tr>
+      <td><code>/v1/vaults</code> and every path below it, any method</td>
+      <td>None</td>
+      <td>No</td>
+      <td>Unsupported</td>
+      <td>The credential vaults of the beta Agents API are answered like <code>/v1/agents</code>.</td>
     </tr>
   </tbody>
 </table>

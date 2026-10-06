@@ -1126,6 +1126,16 @@ defmodule CodexPooler.CompatibilityMatrix do
       future_routes: [],
       fixture: :v1_unsupported_public_surface,
       contract: "unsupported OpenAI public routes are explicitly routed only to return deterministic OpenAI-shaped 404 errors before gateway admission or upstream dispatch"
+    },
+    %{
+      slug: :v1_unsupported_agents_surface,
+      status: :supported,
+      current: :openai_shaped_unsupported_agents_family,
+      categories: [:route, :auth, :error],
+      routes: [],
+      future_routes: [],
+      fixture: :v1_unsupported_agents_surface,
+      contract: "the OpenAI beta Agents API is not a Codex Pooler surface because the Codex backend behind the gateway serves no such route: every method and depth under /v1/agents and under the credential vaults at /v1/vaults, matched on the decoded path and only at a whole segment, answers one OpenAI-shaped 404 unsupported_endpoint naming the beta Agents API, after the runtime firewall, the shared bearer API-key check and the Pool /v1 compatibility gate, and before body parsing, decompression, admission, upstream dispatch, reservation or accounting; no Agents session, event, tool-result, environment-file, artifact or vault request is translated, relayed or executed, and the generic /v1/files route the SDK helpers upload to first, Responses function tool definitions and function_call_output content keep their own contracts without enabling the family"
     }
   ]
 
@@ -4384,6 +4394,30 @@ defmodule CodexPooler.CompatibilityMatrix do
       ],
       status: 404,
       error_code: "unsupported_endpoint"
+    },
+    v1_unsupported_agents_surface: %{
+      families: [
+        %{prefix: "/v1/agents", methods: :any, depth: :any},
+        %{prefix: "/v1/vaults", methods: :any, depth: :any}
+      ],
+      sdk_routes: [
+        %{method: :post, path: "/v1/agents/sessions"},
+        %{method: :post, path: "/v1/agents/sessions/session_fixture/events"},
+        %{method: :post, path: "/v1/agents/environments/env_fixture/files"},
+        %{method: :get, path: "/v1/agents/sessions/session_fixture/artifacts/artifact_fixture/content"},
+        %{method: :post, path: "/v1/vaults"}
+      ],
+      status: 404,
+      error_code: "unsupported_endpoint",
+      error_type: "invalid_request_error",
+      error_message: "Unsupported OpenAI /v1 endpoint: the beta Agents API is not supported",
+      order: [:runtime_firewall, :bearer_api_key, :v1_compatibility, :refusal],
+      body_read: false,
+      decompression: false,
+      upstream_dispatch: false,
+      reservation: false,
+      accounting: false,
+      generic_files_route: :unchanged
     }
   }
 

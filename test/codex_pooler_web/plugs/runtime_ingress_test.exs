@@ -212,6 +212,35 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
       end
     end
 
+    test "the beta Agents and vault families are classified on the decoded path and stop at the segment boundary", %{conn: conn} do
+      setup_runtime_ingress(%OperationalSettings{})
+      setup = active_api_key_fixture()
+
+      for {method, path} <- [
+            {:post, "/v1/%61gents/sessions"},
+            {:get, "/v1/agents/sessions/session_fixture/events"},
+            {:post, "/v1/%76aults/vault_fixture/credentials"},
+            {:get, "/v1/agents/"}
+          ] do
+        conn = conn |> recycle() |> auth(setup) |> dispatch(method, path)
+
+        assert json_response(conn, 404) == %{
+                 "error" => %{
+                   "message" => "Unsupported OpenAI /v1 endpoint: the beta Agents API is not supported",
+                   "type" => "invalid_request_error",
+                   "code" => "unsupported_endpoint",
+                   "param" => nil
+                 }
+               }
+      end
+
+      for path <- ["/v1/agent/sessions", "/v1/agentsx", "/v1/vault", "/v1/sessions/agents"] do
+        conn = conn |> recycle() |> auth(setup) |> get(path)
+
+        assert html_response(conn, 404) =~ "Not Found"
+      end
+    end
+
     test "unsafe runtime candidates return only the fixed invalid-path envelope", %{conn: conn} do
       setup_runtime_ingress(%OperationalSettings{firewall_allowlist: ["203.0.113.10"]})
 
@@ -717,6 +746,28 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
                  "type" => "invalid_request_error"
                }
              } = json_response(conn, 403)
+    end
+
+    @tag :capture_log
+    test "denies the beta Agents and vault families before authentication", %{conn: conn} do
+      setup_runtime_ingress(%OperationalSettings{firewall_allowlist: ["203.0.113.10"]})
+
+      for path <- ["/v1/agents/sessions", "/v1/agents/sessions/session_fixture/events", "/v1/vaults/vault_fixture/credentials"] do
+        conn =
+          conn
+          |> recycle()
+          |> remote_ip({198, 51, 100, 20})
+          |> compressed_post(path, "gzip", "not a gzip body")
+
+        assert %{
+                 "error" => %{
+                   "code" => "access_denied",
+                   "message" => "client IP is not allowed",
+                   "param" => nil,
+                   "type" => "invalid_request_error"
+                 }
+               } = json_response(conn, 403)
+      end
     end
 
     @tag :capture_log
@@ -1432,6 +1483,29 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
                  "type" => "invalid_request_error"
                }
              } = json_response(conn, 404)
+
+      assert FakeUpstream.requests(upstream) == []
+      assert Repo.aggregate(Request, :count) == 0
+      assert Repo.aggregate(Attempt, :count) == 0
+    end
+
+    test "rejects the beta Agents family before gzip decompression, body parsing and dispatch", %{conn: conn} do
+      setup_runtime_ingress(%OperationalSettings{max_compressed_body_bytes: 1})
+      upstream = start_upstream(FakeUpstream.json_response(%{"id" => "should_not_dispatch"}))
+      setup = gateway_setup(upstream)
+
+      for path <- ["/v1/agents/sessions", "/v1/agents/sessions/session_fixture/events", "/v1/vaults"] do
+        conn = conn |> recycle() |> auth(setup) |> compressed_post(path, "gzip", "not a gzip body")
+
+        assert %{
+                 "error" => %{
+                   "code" => "unsupported_endpoint",
+                   "message" => "Unsupported OpenAI /v1 endpoint: the beta Agents API is not supported",
+                   "param" => nil,
+                   "type" => "invalid_request_error"
+                 }
+               } = json_response(conn, 404)
+      end
 
       assert FakeUpstream.requests(upstream) == []
       assert Repo.aggregate(Request, :count) == 0

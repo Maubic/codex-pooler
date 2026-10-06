@@ -6,7 +6,7 @@ head:
     attrs:
       type: application/ld+json
     content: |
-      {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Can I use the official OpenAI SDK with Codex Pooler?","acceptedAnswer":{"@type":"Answer","text":"Yes, for selected SDK routes. Set the SDK base_url or baseURL to https://codex-pooler.example.com/v1, use a Pool API key as the bearer credential, and keep requests on supported route shapes such as responses, chat completions, models, usage, files, audio transcription, and image generation or edits."}},{"@type":"Question","name":"Should Codex backend clients use /v1?","acceptedAnswer":{"@type":"Answer","text":"No. Codex backend-compatible clients should use /backend-api/codex. The /v1 surface is for selected OpenAI SDK-compatible clients and translates supported requests into Codex-compatible work."}},{"@type":"Question","name":"Does /v1 support OpenAI Realtime?","acceptedAnswer":{"@type":"Answer","text":"No. /v1/realtime and OpenAI Realtime SDK websocket or session routes are unsupported. GET /v1/responses is narrow Responses websocket compatibility only, not OpenAI Realtime support."}},{"@type":"Question","name":"Does /v1/responses/compact work?","acceptedAnswer":{"@type":"Answer","text":"No. POST /v1/responses/compact returns a deterministic unsupported_endpoint error. Explicit compaction is supported on normal /v1/responses requests when a client appends exactly one final compaction_trigger after visible input."}},{"@type":"Question","name":"Can I use the same key for /v1 and /mcp?","acceptedAnswer":{"@type":"Answer","text":"No. /v1 uses Pool API keys for runtime work. /mcp uses operator-owned MCP bearer tokens for metadata-only lookup. Keep those credentials separate in client configuration and storage."}}]}
+      {"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Can I use the official OpenAI SDK with Codex Pooler?","acceptedAnswer":{"@type":"Answer","text":"Yes, for selected SDK routes. Set the SDK base_url or baseURL to https://codex-pooler.example.com/v1, use a Pool API key as the bearer credential, and keep requests on supported route shapes such as responses, chat completions, models, usage, files, audio transcription, and image generation or edits."}},{"@type":"Question","name":"Should Codex backend clients use /v1?","acceptedAnswer":{"@type":"Answer","text":"No. Codex backend-compatible clients should use /backend-api/codex. The /v1 surface is for selected OpenAI SDK-compatible clients and translates supported requests into Codex-compatible work. A Codex client pointed at /v1 also behaves differently from one on the backend alias in two ways: Codex's own post-turn compaction is a bare compaction_trigger, and /v1 refuses it with 400 invalid_request because visible input is required before the trigger, so only a mid-turn compaction reaches the provider through /v1; and when the provider refuses a connection-bound compaction with its usage limit, /v1 answers the 429 of the account that holds the conversation's anchor, which is the documented /v1 contract for SDK clients, and Codex stops, while the backend alias answers 503 pinned_continuation_unavailable when another account can serve and Codex then falls back to a compaction served by another account."}},{"@type":"Question","name":"Does /v1 support OpenAI Realtime?","acceptedAnswer":{"@type":"Answer","text":"No. /v1/realtime and OpenAI Realtime SDK websocket or session routes are unsupported. GET /v1/responses is narrow Responses websocket compatibility only, not OpenAI Realtime support."}},{"@type":"Question","name":"Do the OpenAI Agents helpers work with Codex Pooler?","acceptedAnswer":{"@type":"Answer","text":"No. The beta Agents API under /v1/agents and /v1/vaults is unsupported, so the OpenAI Node client.beta.agents helpers, such as sessions.stream, functionTool, typed final results, environment file preparation and artifact download, receive a 404 with the error code unsupported_endpoint. Use POST /v1/responses with function tools instead; a tool result goes back as a function_call_output item in the next request."}},{"@type":"Question","name":"Does /v1/responses/compact work?","acceptedAnswer":{"@type":"Answer","text":"No. POST /v1/responses/compact returns a deterministic unsupported_endpoint error. Explicit compaction is supported on normal /v1/responses requests when a client appends exactly one final compaction_trigger after visible input."}},{"@type":"Question","name":"Can I use the same key for /v1 and /mcp?","acceptedAnswer":{"@type":"Answer","text":"No. /v1 uses Pool API keys for runtime work. /mcp uses operator-owned MCP bearer tokens for metadata-only lookup. Keep those credentials separate in client configuration and storage."}}]}
 ---
 
 Use Codex Pooler in your own applications with the OpenAI Python and Node SDKs or the Vercel AI SDK. This guide covers the supported ways to generate text, use tools, work with images and transcribe audio with a Pool API key, along with examples you can adapt to your application.
@@ -17,7 +17,7 @@ For a short citable summary, see [OpenAI-compatible Codex gateway](/discovery/op
 
 ## What OpenAI-Compatible Means Here
 
-OpenAI-compatible means selected SDK request shapes can use a `/v1` base URL and a Pool API key. Codex Pooler still routes the request through Codex account Pools, not through a separate OpenAI engine. Unsupported OpenAI API areas remain unsupported, including embeddings, batches, fine-tuning, moderation, response retrieve/cancel/delete, image variations, OpenAI Responses remote MCP tool definitions, and OpenAI Realtime SDK routes.
+OpenAI-compatible means selected SDK request shapes can use a `/v1` base URL and a Pool API key. Codex Pooler still routes the request through Codex account Pools, not through a separate OpenAI engine. Unsupported OpenAI API areas remain unsupported, including embeddings, batches, fine-tuning, moderation, response retrieve/cancel/delete, image variations, the beta Agents API, OpenAI Responses remote MCP tool definitions, and OpenAI Realtime SDK routes.
 
 ## Base URL and authentication
 
@@ -859,11 +859,21 @@ These `/v1` routes are unsupported and may return deterministic OpenAI-shaped un
 - `GET /v1/responses/:response_id`
 - `POST /v1/responses/:response_id/cancel`
 - `DELETE /v1/responses/:response_id`
+- `/v1/agents` and every path below it, for every method: the beta Agents API
+- `/v1/vaults` and every path below it, for every method: the credential vaults of the beta Agents API
 - `/v1/realtime` and OpenAI Realtime SDK websocket or session routes
 
 `GET /v1/responses` is narrow Responses websocket compatibility, not `/v1/realtime` support. OpenAI Realtime SDK websocket and session routes are not supported.
 
 Within `POST /v1/responses`, OpenAI Responses remote MCP tool definitions are unsupported. A top-level `tools` entry with `type: "mcp"`, or an `input` item with `type: "additional_tools"` whose `tools` list contains `type: "mcp"`, is rejected before upstream dispatch with an OpenAI-shaped `invalid_request` error.
+
+### Beta Agents API
+
+Every method and every path under `/v1/agents` and `/v1/vaults` answers `404` with the OpenAI-shaped error code `unsupported_endpoint` and the message `Unsupported OpenAI /v1 endpoint: the beta Agents API is not supported`. The answer follows the Pool API key and `/v1` compatibility checks and comes before the request body is read, so nothing is dispatched upstream, reserved or recorded. The Codex backend behind Codex Pooler serves no Agents route, so there is nothing to relay, and Codex Pooler does not run tools itself.
+
+The OpenAI Node SDK helpers under `client.beta.agents` call those routes and do not work against a Codex Pooler base URL: `sessions.create` and `sessions.stream` with their `toolHandlers` and `functionTool` results (sent as `agent.session.input.tool_result` events), typed final results such as `finalResult()` with `zodAgentTextFormat`, `environments.files.prepare` and `upload`, and `artifacts.forResult(...).download`. `environments.files.prepare` first uploads each file with `POST /v1/files`. That upload is an ordinary Files upload and keeps working, but no Agents environment can use it through Codex Pooler.
+
+To use tools through Codex Pooler, send `POST /v1/responses`. A function definition with the `type`, `name`, `description` and `parameters` that an Agents tool carries is an ordinary Responses function tool in Full and Lite serving modes, and the tool result goes back in the next request as a `function_call_output` item. The SDK's `client.responses` helpers send those requests.
 
 ## MCP stays separate
 
@@ -891,11 +901,18 @@ Yes, for selected SDK routes. Set the SDK `base_url` or `baseURL` to `https://co
 
 ### Should Codex backend clients use `/v1`?
 
-No. Codex backend-compatible clients should use `/backend-api/codex`. The `/v1` surface is for selected OpenAI SDK-compatible clients and translates supported requests into Codex-compatible work.
+No. Codex backend-compatible clients should use `/backend-api/codex`. The `/v1` surface is for selected OpenAI SDK-compatible clients and translates supported requests into Codex-compatible work. A Codex client pointed at `/v1` also behaves differently from one on the backend alias in two ways:
+
+- Codex's own post-turn compaction is a bare `compaction_trigger`, and `/v1` refuses it with `400 invalid_request` because visible input is required before the trigger. Only a mid-turn compaction reaches the provider through `/v1`.
+- When the provider refuses a connection-bound compaction with its usage limit, `/v1` answers the `429` of the account that holds the conversation's anchor, which is the documented `/v1` contract for SDK clients, and Codex stops. The backend alias answers `503 pinned_continuation_unavailable` when another account can serve, and Codex then falls back to a compaction served by another account.
 
 ### Does `/v1` support OpenAI Realtime?
 
 No. `/v1/realtime` and OpenAI Realtime SDK websocket or session routes are unsupported. `GET /v1/responses` is narrow Responses websocket compatibility only, not OpenAI Realtime support.
+
+### Do the OpenAI Agents helpers work with Codex Pooler?
+
+No. The beta Agents API under `/v1/agents` and `/v1/vaults` is unsupported, so the OpenAI Node `client.beta.agents` helpers, such as `sessions.stream`, `functionTool`, typed final results, environment file preparation and artifact download, receive a `404` with the error code `unsupported_endpoint`. Use `POST /v1/responses` with function tools instead; a tool result goes back as a `function_call_output` item in the next request.
 
 ### Does `/v1/responses/compact` work?
 

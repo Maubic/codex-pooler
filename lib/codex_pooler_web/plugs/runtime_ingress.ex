@@ -299,10 +299,10 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
   defp reject_unsupported_v1_request(%Plug.Conn{halted: true} = conn), do: conn
 
   defp reject_unsupported_v1_request(conn) do
-    if UnsupportedRoutes.unsupported?(conn) do
-      send_runtime_error(conn, unsupported_v1_error())
-    else
-      conn
+    cond do
+      UnsupportedRoutes.unsupported?(conn) -> send_runtime_error(conn, unsupported_v1_error())
+      UnsupportedRoutes.agents_family?(conn) -> send_runtime_error(conn, unsupported_agents_error())
+      true -> conn
     end
   end
 
@@ -450,6 +450,14 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
       status: 404,
       code: "unsupported_endpoint",
       message: "Unsupported OpenAI /v1 endpoint"
+    }
+  end
+
+  defp unsupported_agents_error do
+    %{
+      status: 404,
+      code: "unsupported_endpoint",
+      message: "Unsupported OpenAI /v1 endpoint: the beta Agents API is not supported"
     }
   end
 

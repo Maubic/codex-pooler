@@ -91,7 +91,8 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     function_tool_schema_lowering: [:route, :auth, :error, :streaming, :ownership],
     direct_responses_strict_schema_repair: [:route, :auth, :error, :streaming, :ownership],
     v1_supported_surface: [:route, :auth, :error, :multipart, :streaming, :ownership],
-    v1_unsupported_public_surface: [:route, :auth, :error]
+    v1_unsupported_public_surface: [:route, :auth, :error],
+    v1_unsupported_agents_surface: [:route, :auth, :error]
   ]
   @expected_features Keyword.keys(@expected_feature_categories)
 
@@ -3227,6 +3228,55 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                %{method: :post, path: "/v1/responses/resp_fixture/cancel"},
                %{method: :delete, path: "/v1/responses/resp_fixture"}
              ]
+    end
+
+    test "documents the unsupported beta Agents family and answers it as the fixture states", %{conn: conn} do
+      feature = CompatibilityMatrix.by_slug!(:v1_unsupported_agents_surface)
+      fixture = CompatibilityMatrix.fixture!(:v1_unsupported_agents_surface)
+
+      assert feature.status == :supported
+      assert feature.current == :openai_shaped_unsupported_agents_family
+      assert feature.categories == [:route, :auth, :error]
+      assert feature.routes == []
+      assert feature.future_routes == []
+      assert feature.contract =~ "the Codex backend behind the gateway serves no such route"
+      assert feature.contract =~ "before body parsing, decompression, admission, upstream dispatch, reservation or accounting"
+      assert feature.contract =~ "keep their own contracts without enabling the family"
+
+      assert fixture.families == [
+               %{prefix: "/v1/agents", methods: :any, depth: :any},
+               %{prefix: "/v1/vaults", methods: :any, depth: :any}
+             ]
+
+      assert fixture.order == [:runtime_firewall, :bearer_api_key, :v1_compatibility, :refusal]
+
+      assert Map.take(fixture, [:body_read, :decompression, :upstream_dispatch, :reservation, :accounting, :generic_files_route]) == %{
+               body_read: false,
+               decompression: false,
+               upstream_dispatch: false,
+               reservation: false,
+               accounting: false,
+               generic_files_route: :unchanged
+             }
+
+      setup = active_api_key_fixture()
+
+      for %{method: method, path: path} <- fixture.sdk_routes do
+        conn = conn |> recycle() |> auth(setup) |> put_req_header("accept", "application/json")
+        conn = if method == :get, do: get(conn, path), else: post(conn, path, %{})
+
+        assert json_response(conn, fixture.status) == %{
+                 "error" => %{
+                   "message" => fixture.error_message,
+                   "type" => fixture.error_type,
+                   "code" => fixture.error_code,
+                   "param" => nil
+                 }
+               }
+      end
+
+      assert Repo.aggregate(Request, :count) == 0
+      assert Repo.aggregate(Attempt, :count) == 0
     end
 
     test "documents backend v1 alias surface as explicit authenticated backend aliases" do

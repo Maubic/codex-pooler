@@ -78,6 +78,12 @@ defmodule CodexPoolerWeb.V1.UnsupportedRoutes do
     }
   ]
 
+  # The beta Agents API (sessions and their events, environments and their files, result artifacts) and the credential vaults
+  # it uses. The Codex backend behind the gateway serves none of it, so nothing could be translated or relayed: the whole
+  # prefix is refused, whatever the method or depth, instead of leaving the SDK's session, tool-result, environment-file
+  # and artifact calls a router miss. The generic /v1/files route the helpers upload through first is a separate surface.
+  @agents_prefixes [["v1", "agents"], ["v1", "vaults"]]
+
   @spec router_routes() :: [{atom(), String.t(), atom()}]
   def router_routes do
     Enum.map(@routes, &{&1.router_method, &1.router_path, &1.action})
@@ -91,6 +97,13 @@ defmodule CodexPoolerWeb.V1.UnsupportedRoutes do
   @spec unsupported?(Plug.Conn.t()) :: boolean()
   def unsupported?(%Plug.Conn{method: method} = conn) do
     Enum.any?(@routes, &matches?(&1, method, Path.decoded_segments(conn)))
+  end
+
+  @spec agents_family?(Plug.Conn.t()) :: boolean()
+  def agents_family?(%Plug.Conn{} = conn) do
+    path_info = Path.decoded_segments(conn)
+
+    Enum.any?(@agents_prefixes, &List.starts_with?(path_info, &1))
   end
 
   defp matches?(%{method: method, path_info: pattern}, method, path_info) do
