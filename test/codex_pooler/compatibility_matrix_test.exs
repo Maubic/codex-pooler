@@ -471,6 +471,17 @@ defmodule CodexPooler.CompatibilityMatrixTest do
              }
     end
 
+    test "states that a streamed terminal the provider sent with an empty output lists the delivered items" do
+      feature = CompatibilityMatrix.by_slug!(:v1_supported_surface)
+      fixture = CompatibilityMatrix.fixture!(:v1_supported_surface)
+
+      assert feature.contract =~ "whose output the provider sent empty or absent carries the items the stream delivered in response.output_item.done, ordered by output_index"
+      assert feature.contract =~ "a non-empty terminal output is relayed as sent"
+      assert feature.contract =~ "the native backend routes relay the provider's terminal unchanged"
+      assert fixture.streamed_terminal_output.terminals == ["response.completed", "response.incomplete"]
+      assert fixture.streamed_terminal_output.serving_modes == ["full", "lite"]
+    end
+
     @tag :hosted_shell_history
     test "makes hosted shell history replay boundaries machine-readable" do
       feature = CompatibilityMatrix.by_slug!(:responses_chat)

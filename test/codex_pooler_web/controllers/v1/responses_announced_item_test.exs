@@ -15,9 +15,9 @@ defmodule CodexPoolerWeb.V1.ResponsesAnnouncedItemTest do
   Every transport family of `/v1` that aggregates or relays items is pinned here, with the completed output listing the
   closed items and with it empty: the non-streaming JSON response of Responses and of Chat Completions (from the
   completed output, or from the done items when it is empty), the SSE stream and the public websocket (the announcement
-  is relayed as the provider sent it, the done event closes it with the closed ciphertext and the completed output is
-  relayed as the provider sent it), and the compaction bridge (the item the client gets, and the id derived from its
-  ciphertext, come from the done item).
+  is relayed as the provider sent it, the done event closes it with the closed ciphertext, and the completed output
+  lists the closed items: as the provider sent them, or from the done items when it sent none, findings#335), and the
+  compaction bridge (the item the client gets, and the id derived from its ciphertext, come from the done item).
 
   Topology: the real `/v1` endpoint, FakeUpstream streaming the measured event order with synthetic ciphertexts of the
   measured lengths, the Pool's default serving mode, HTTP SSE upstream (and the public websocket).
@@ -184,17 +184,13 @@ defmodule CodexPoolerWeb.V1.ResponsesAnnouncedItemTest do
   end
 
   # The announcement is relayed as the provider sent it, the done event closes the item with the closed ciphertext, and
-  # the completed output is relayed as the provider sent it: the closed items, or nothing. A client that folds the item
-  # events by output index the way the SDK stream helpers do (append on `added`, replace on `done`) ends with the
-  # closed items either way.
-  defp assert_closed_by_done!(events, completed_output) do
+  # the completed output lists the closed items either way: the provider's own, or the done items when the provider sent
+  # it empty (findings#335), never the announcement. A client that folds the item events by output index the way the
+  # SDK stream helpers do (append on `added`, replace on `done`) ends with the same closed items.
+  defp assert_closed_by_done!(events, _completed_output) do
     assert reasoning_cipher(events, "response.output_item.added") == @announced_cipher
     assert reasoning_cipher(events, "response.output_item.done") == @closed_cipher
-
-    case completed_output do
-      :closed_items -> assert [%{"encrypted_content" => @closed_cipher}, %{"type" => "message"}] = completed_output(events)
-      :empty -> assert completed_output(events) == []
-    end
+    assert [%{"encrypted_content" => @closed_cipher}, %{"type" => "message", "status" => "completed"}] = completed_output(events)
 
     assert [%{"encrypted_content" => @closed_cipher}, %{"type" => "message", "status" => "completed"}] = folded_output(events)
   end

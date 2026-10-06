@@ -1118,6 +1118,7 @@ defmodule CodexPooler.CompatibilityMatrix do
       fixture: :v1_supported_surface,
       contract:
         "Public Responses SSE and direct or owner-forwarded websockets require real source-correlated output_item.done for every announced function/custom tool before success; argument/input done and terminal snapshots cannot discharge an open obligation. Invalid correlation or pending tools yield one canonical server_error, private upstream_stream_error settlement with observed provider usage once, preserved prior deltas, no fabricated done, no postvisible replay and no successful invalid alias. Valid terminal-only snapshots retain accepted omitted IDs/statuses; native and collected non-streaming contracts remain unchanged. Prior successful aliases remain durable but retired producing generations refuse anchored continuation before fresh acquisition or dispatch; a fresh unanchored turn can recover on the same downstream socket. " <>
+          "A streamed response.completed or response.incomplete whose output the provider sent empty or absent carries the items the stream delivered in response.output_item.done, ordered by output_index with the ids the done events carried, on POST /v1/responses SSE (upstream HTTP SSE or bridged onto the upstream websocket) and on the GET /v1/responses websocket (direct or owner-forwarded), in Full and Lite; a non-empty terminal output is relayed as sent, an item is never taken from response.output_item.added, and the native backend routes relay the provider's terminal unchanged. " <>
           "Images accepts gpt-image-2.5-flare and gpt-image-2.5-sunburst alongside legacy identifiers, sends basic generation and edits to native Codex Images with the requested image model, routes masked edits through eligible Full Responses hosts with an explicit image tool choice and rejects masks before dispatch/accounting when no Full host is available, accepts GPT Image 2.5 dated snapshots, xhigh/max quality and bounded custom dimensions without promising provider adherence, and restricts configurable input_fidelity to gpt-image-1/1.5; " <>
           "Native Images preserve available aggregate usage but resolve prices only for the requested image model, never the account/routing carrier; separate standard/batch text/image rates remain validated non-snapshot metadata and do not enable the Batch API; " <>
           "Audio transcription accepts gpt-transcribe only as a caller alias for canonical gpt-4o-transcribe, accepts decoded keywords and languages as ordered non-empty string lists with duplicates preserved, omits empty lists, forwards exact repeated keywords[] and languages[] names, rejects malformed lists by field, removes detected languages from public output, stores no raw audio or decoded list values after auth-before-multipart, and makes no alias catalog, model-discovery, detected-language-output, or full OpenAI Audio parity claim; " <>
@@ -3632,6 +3633,17 @@ defmodule CodexPooler.CompatibilityMatrix do
         dropped_keys: ["headers", "response.headers"],
         scope: "every_relayed_event",
         native_websocket_with_snapshot: "projected_native_controls_only"
+      },
+      streamed_terminal_output: %{
+        surfaces: [
+          %{method: :post, path: "/v1/responses", transport: "http_sse", upstream: ["http_sse", "websocket_bridge"]},
+          %{method: :get, path: "/v1/responses", transport: "responses_websocket", upstream: ["direct", "owner_forwarded"]}
+        ],
+        serving_modes: ["full", "lite"],
+        terminals: ["response.completed", "response.incomplete"],
+        empty_output: "output_item_done_items_by_output_index",
+        nonempty_output: "relayed_as_sent",
+        native_routes: "relayed_as_sent"
       },
       audio_transcription: %{
         path: "/v1/audio/transcriptions",
