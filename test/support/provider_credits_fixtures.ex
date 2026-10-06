@@ -375,7 +375,7 @@ defmodule CodexPooler.ProviderCreditsFixtures do
   defp window_descriptors(:absent), do: []
 
   defp start_peer!(fixture, suffix) do
-    name = String.to_atom("provider_credits_peer_#{suffix}")
+    name = PeerRegistry.unique_node_name("provider_credits_peer_#{suffix}")
     {:ok, pid, peer_node} = :peer.start_link(%{name: name, args: [~c"+S", ~c"2:2", ~c"-kernel", ~c"prevent_overlapping_partitions", ~c"false"]})
     Process.unlink(pid)
     boot_id = Ecto.UUID.generate()

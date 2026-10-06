@@ -16,6 +16,19 @@ defmodule CodexPooler.PeerRegistryTest do
   # sub-second test. The property under test is real elapsed time, so it cannot be faked out.
   @flip_after_ms 150
 
+  # Every BEAM on the host shares one epmd, and `System.unique_integer/1` repeats across VMs, so a
+  # shared helper's node name must also carry the VM's OS pid (Drone 1824: `nodistribution`).
+  test "a unique node name carries the prefix and the OS pid and differs on every call" do
+    first = PeerRegistry.unique_node_name("probe_owner")
+    second = PeerRegistry.unique_node_name("probe_owner")
+
+    prefix = "probe_owner_#{System.pid()}_"
+
+    assert first != second
+    assert ^prefix <> integer = Atom.to_string(first)
+    assert {_value, ""} = Integer.parse(integer)
+  end
+
   test "returns as soon as the name leaves epmd instead of waiting out the budget" do
     names = replies([@registered, @registered, @absent])
 

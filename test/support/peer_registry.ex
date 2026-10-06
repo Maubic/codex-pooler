@@ -109,6 +109,19 @@ defmodule CodexPooler.PeerRegistry do
   end
 
   @doc """
+  An epmd node name for a test node or peer, unique across every BEAM on this host.
+
+  `System.unique_integer/1` is unique only inside one VM, while the test-fast partitions and
+  concurrent focused runs share one epmd. A `prefix_<integer>` name built in shared support can
+  therefore already be registered by another VM, and `:net_kernel.start/1` or `:peer.start_link/1`
+  then fails with `{:EXIT, :nodistribution}` ("the name ... seems to be in use by another Erlang
+  node", Drone 1824). The OS pid keeps the VMs apart.
+  """
+  @spec unique_node_name(String.t()) :: atom()
+  def unique_node_name(prefix) when is_binary(prefix),
+    do: String.to_atom("#{prefix}_#{System.pid()}_#{System.unique_integer([:positive])}")
+
+  @doc """
   `await_epmd_ready/1`, failing the calling test once the budget is spent.
 
   Takes the same options and returns the `detail` of the successful wait.

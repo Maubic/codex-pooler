@@ -307,7 +307,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
   # The peer VM with the owner runtime (and, with `repo: :real`, the real Repo),
   # stopped by `on_exit` of the calling test or `setup_all`.
   defp boot_bridge_peer!(release, opts) do
-    peer_name = String.to_atom("public_owner_#{release}_#{System.unique_integer([:positive])}")
+    peer_name = PeerRegistry.unique_node_name("public_owner_#{release}")
 
     assert {:ok, peer_pid, peer_node} =
              :peer.start_link(%{
@@ -579,7 +579,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
   defp start_test_distribution!(:nonode@nohost) do
     previous_partition_guard = Application.fetch_env(:kernel, :prevent_overlapping_partitions)
     Application.put_env(:kernel, :prevent_overlapping_partitions, false)
-    node_name = String.to_atom("controller_owner_test_#{System.unique_integer([:positive])}")
+    node_name = PeerRegistry.unique_node_name("controller_owner_test")
     assert {:ok, net_kernel_pid} = :net_kernel.start([node_name, :shortnames])
 
     on_exit(fn ->

@@ -308,7 +308,7 @@ defmodule CodexPooler.InstancePresencePeer do
       Application.put_env(:kernel, :prevent_overlapping_partitions, false)
 
       {:ok, _} =
-        :net_kernel.start([:"lease_observer_#{System.unique_integer([:positive])}", :shortnames])
+        :net_kernel.start([CodexPooler.PeerRegistry.unique_node_name("lease_observer"), :shortnames])
     end
 
     parent = self()

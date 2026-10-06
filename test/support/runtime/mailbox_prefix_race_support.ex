@@ -166,7 +166,7 @@ defmodule CodexPoolerWeb.Runtime.MailboxPrefixRaceSupport do
   @spec start_http_peer!() :: node()
   def start_http_peer! do
     BackendCodexWebsocketOwnerForwardingSupport.ensure_test_distribution_started!()
-    name = String.to_atom("mailbox_http_#{System.unique_integer([:positive])}")
+    name = PeerRegistry.unique_node_name("mailbox_http")
     peer_key = {__MODULE__, name}
     relay_owner_key = {peer_key, :relay_owner}
 

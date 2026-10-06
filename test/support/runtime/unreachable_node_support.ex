@@ -37,7 +37,7 @@ defmodule CodexPoolerWeb.Runtime.UnreachableNodeSupport do
 
   @spec boot_tcp_owner_peer!() :: {pid(), node()}
   def boot_tcp_owner_peer! do
-    name = :"unreachable_owner_#{System.unique_integer([:positive])}"
+    name = CodexPooler.PeerRegistry.unique_node_name("unreachable_owner")
     {:ok, peer, peer_node} = :peer.start_link(%{name: name, connection: 0, args: [~c"-kernel", ~c"prevent_overlapping_partitions", ~c"false"]})
     Process.unlink(peer)
     on_exit(fn -> if Process.alive?(peer), do: :peer.stop(peer) end)
@@ -60,7 +60,7 @@ defmodule CodexPoolerWeb.Runtime.UnreachableNodeSupport do
   # so the socket releases the lease before the second check can handle it.
   @spec start_lease_check_probe!(pid() | nil, pid(), keyword()) :: atom()
   def start_lease_check_probe!(peer, owner, opts \\ []) do
-    name = :"unreachable_lease_probe_#{System.unique_integer([:positive])}"
+    name = CodexPooler.PeerRegistry.unique_node_name("unreachable_lease_probe")
     release = make_ref()
 
     on_exit(fn -> call_lease_probe(peer, :stop_lease_check_probe, [name, owner, release]) end)
@@ -152,7 +152,7 @@ defmodule CodexPoolerWeb.Runtime.UnreachableNodeSupport do
 
   @spec boot_app_peer!() :: %{peer: pid(), node: node(), port: :inet.port_number()}
   def boot_app_peer! do
-    name = :"unreachable_app_#{System.unique_integer([:positive])}"
+    name = CodexPooler.PeerRegistry.unique_node_name("unreachable_app")
     {:ok, peer, peer_node} = :peer.start_link(%{name: name, args: [~c"-kernel", ~c"prevent_overlapping_partitions", ~c"false"]})
     Process.unlink(peer)
     on_exit(fn -> if Process.alive?(peer), do: :peer.stop(peer) end)
