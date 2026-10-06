@@ -77,6 +77,7 @@ defmodule CodexPooler.Upstreams.SavedResets do
           required(:expires_reported?) => boolean(),
           required(:in_progress?) => boolean(),
           required(:redemption_stale?) => boolean(),
+          required(:redemption_blocked?) => boolean(),
           required(:last_redemption) => map() | nil
         }
   @type auto_policy_projection :: %{
@@ -255,6 +256,10 @@ defmodule CodexPooler.Upstreams.SavedResets do
       expires_reported?: next_expires_at != nil,
       in_progress?: redemption_state == :in_progress,
       redemption_stale?: redemption_state == :stale,
+      # The claim's own guard, so a reader never offers a redemption the
+      # claim would refuse (an applied reblock, an expired window, an
+      # unrecognized phase).
+      redemption_blocked?: RedemptionLifecycle.blocks_new_redemption?(redemption, timestamp),
       last_redemption: redemption_or_nil(redemption)
     }
   end

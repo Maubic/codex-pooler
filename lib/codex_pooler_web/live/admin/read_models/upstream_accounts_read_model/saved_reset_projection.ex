@@ -173,19 +173,39 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjection do
       account.assignments == [] ->
         action(false, "saved reset redemption requires a Pool assignment")
 
-      account.saved_resets.reported? == false ->
+      true ->
+        bank_redemption_action(account.saved_resets)
+    end
+  end
+
+  defp bank_redemption_action(saved_resets) do
+    cond do
+      saved_resets.reported? == false ->
         action(false, "saved reset count is not reported")
 
-      account.saved_resets.available? == false ->
+      saved_resets.available? == false ->
         action(false, "no saved resets are available")
 
-      account.saved_resets.in_progress? == true ->
+      saved_resets.in_progress? == true ->
         action(false, "saved reset redemption is already in progress")
+
+      Map.get(saved_resets, :redemption_blocked?) == true ->
+        action(false, blocked_redemption_reason(get_in(saved_resets, [:reset_lifecycle, :phase])))
 
       true ->
         action(true, nil)
     end
   end
+
+  # The claim refuses these records too, so offering the action would only
+  # queue a request that stops before reaching the provider.
+  defp blocked_redemption_reason("reblocked"),
+    do: "the last saved reset was applied and quota is still blocked; another redemption waits until a usage report shows quota recovered"
+
+  defp blocked_redemption_reason("expired"),
+    do: "the last saved reset was not confirmed in time; another redemption waits until a usage report shows quota recovered"
+
+  defp blocked_redemption_reason(_phase), do: "the last saved reset is unresolved; another redemption waits until it resolves"
 
   defp next_expires_label(%{next_expires_at: expires_at}, datetime_preferences) do
     case Formatting.parse_datetime(expires_at) do

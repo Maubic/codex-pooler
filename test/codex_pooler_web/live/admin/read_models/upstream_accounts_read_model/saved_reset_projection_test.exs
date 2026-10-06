@@ -30,6 +30,36 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.SavedResetProjectionTes
     end
   end
 
+  # The action follows the claim's own guard (`RedemptionLifecycle.blocks_new_redemption?/2`) through the
+  # domain snapshot, so the bank never offers a redemption the claim refuses before the provider.
+  test "a redemption the claim would refuse is not offered" do
+    account = fn redemption_metadata ->
+      %{
+        identity: %{status: "active"},
+        reauth_required?: false,
+        refresh_status: "imported",
+        secret_status: :present,
+        assignments: [%{id: "trusted-assignment"}],
+        saved_resets: SavedResetProjection.snapshot(Map.put(redemption_metadata, "saved_resets", %{"status" => "reported", "available_count" => 1}), @prefs)
+      }
+    end
+
+    assert %{available?: false, reason: "the last saved reset was applied and quota is still blocked; another redemption waits until a usage report shows quota recovered"} =
+             SavedResetProjection.redemption_action(account.(metadata("reblocked")))
+
+    assert %{available?: false, reason: "the last saved reset was not confirmed in time; another redemption waits until a usage report shows quota recovered"} =
+             SavedResetProjection.redemption_action(account.(metadata("expired")))
+
+    assert %{available?: false, reason: "the last saved reset is unresolved; another redemption waits until it resolves"} =
+             SavedResetProjection.redemption_action(account.(metadata("phase-from-a-newer-release")))
+
+    # A reblock that consumed nothing, a confirmed reset and a legacy record without a phase stay redeemable.
+    not_applied = metadata("reblocked", %{"result" => %{"code" => "no_credit", "applied" => false}, "consumed_at" => nil})
+    assert SavedResetProjection.redemption_action(account.(not_applied)) == %{available?: true, reason: nil}
+    assert SavedResetProjection.redemption_action(account.(metadata("confirmed_by_quota"))) == %{available?: true, reason: nil}
+    assert SavedResetProjection.redemption_action(account.(%{"saved_reset_redemption" => %{"status" => "completed"}})) == %{available?: true, reason: nil}
+  end
+
   defp metadata(phase, extra \\ %{}) do
     consumed_at = ~U[2026-07-14 03:20:00.000000Z]
 
