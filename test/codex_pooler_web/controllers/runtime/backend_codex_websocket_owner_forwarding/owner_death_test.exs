@@ -337,8 +337,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
 
         assert owner_response_id(recovered_frame) == "resp_owner_mode_kill_recovered"
 
-        assert {:ok, recovered_remote_state} =
-                 receive_owner_socket_complete(recovered_remote_state)
+        # The recovered response reaches the client once: the frame above, then nothing but the turn's completion. The helper that
+        # waits for the completion used to drop every frame it met on the way, so a duplicate of the recovered frame passed
+        # (findings#303 row 303-13); the owner's messages arrive in order, so this list is complete once `:complete` came.
+        assert {{:ok, recovered_remote_state}, frames_after_recovered} =
+                 receive_owner_socket_complete_frames(recovered_remote_state)
+
+        assert frames_after_recovered == []
 
         active_correlation_id = active_downstream.correlation_id
         active_epoch = active_downstream.epoch
