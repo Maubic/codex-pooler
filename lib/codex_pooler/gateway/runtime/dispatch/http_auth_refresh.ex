@@ -12,6 +12,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.HttpAuthRefresh do
   alias CodexPooler.Accounting
   alias CodexPooler.Accounting.FailureResponse
   alias CodexPooler.Gateway.Runtime.Dispatch.AuthRefresh
+  alias CodexPooler.Gateway.Runtime.Dispatch.ContentFilterBindingRefusal
   alias CodexPooler.Gateway.Runtime.Dispatch.PreparedContext
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
   alias CodexPooler.Gateway.Runtime.Finalization
@@ -275,6 +276,11 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.HttpAuthRefresh do
            code: "request_already_finalized",
            message: "request lifecycle completed before upstream dispatch"
          }}
+
+      # A content-filter retry binding the retry can no longer honour
+      # (`ContentFilterBindingRefusal`, findings#316).
+      {:error, %{code: :invalid_content_filter_retry_binding}} ->
+        ContentFilterBindingRefusal.finalize_retry(context)
 
       {:error, reason} ->
         FailureResponse.accounting_failure(

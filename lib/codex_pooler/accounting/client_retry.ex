@@ -1780,7 +1780,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
   end
 
   defp validate_retry_lifecycle_for_policy(turn, request, attempt, _input, {:grown, candidates}) do
-    if verified_completed_item_resend?(turn, request, attempt, candidates),
+    if verified_completed_item_resend?(turn, request, attempt, candidates) and not NativeContentFilterRetry.content_filter_predecessor?(attempt),
       do: :ok,
       else: {:error, :terminal_predecessor}
   end
@@ -1942,14 +1942,25 @@ defmodule CodexPooler.Accounting.ClientRetry do
   defp compaction_lifecycle_shape(_turn, _request, _attempt),
     do: {:error, :terminal_predecessor}
 
+  # A turn that ended on a content-filter terminal admits only its verified
+  # guided retry, which the content-filter preflight admits on its own: dispatch
+  # requires that retry's binding for every successor linked to the turn, so any
+  # other resend shape linked here was refused at dispatch with 500
+  # `gateway_accounting_failed` and left its request `in_progress`
+  # (findings#316).
   defp validate_retry_lifecycle(turn, request, %Attempt{} = attempt) do
-    if verified_retry_shape?(turn, request, attempt) do
-      :ok
-    else
-      with :ok <- validate_terminal_lifecycle(turn, request, attempt),
-           :ok <- validate_observation(attempt.response_metadata) do
-        validate_close_evidence(attempt.response_metadata)
-      end
+    cond do
+      NativeContentFilterRetry.content_filter_predecessor?(attempt) ->
+        {:error, :terminal_predecessor}
+
+      verified_retry_shape?(turn, request, attempt) ->
+        :ok
+
+      true ->
+        with :ok <- validate_terminal_lifecycle(turn, request, attempt),
+             :ok <- validate_observation(attempt.response_metadata) do
+          validate_close_evidence(attempt.response_metadata)
+        end
     end
   end
 

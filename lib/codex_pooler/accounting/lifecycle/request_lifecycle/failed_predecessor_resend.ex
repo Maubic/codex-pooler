@@ -637,6 +637,15 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
       content_filter_retry?(request, scope) ->
         admit_content_filter_predecessor(request, scope, now)
 
+      # A turn that ended on a content-filter terminal admits only that verified
+      # guided retry: dispatch requires its binding for every successor linked
+      # here, so an identical, completed-item or mailbox resend of it was linked
+      # and then refused at dispatch with 500 `gateway_accounting_failed`, its
+      # request left `in_progress` (findings#316). The released client resends
+      # such a turn identically only when it never read the terminal.
+      NativeContentFilterRetry.content_filter_predecessor?(request.id) ->
+        {:error, :terminal_predecessor}
+
       mailbox_continuation?(request, scope) ->
         admit_mailbox_predecessor(request, scope, now)
 

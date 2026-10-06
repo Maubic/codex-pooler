@@ -15,6 +15,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch do
   alias CodexPooler.Gateway.Routing.{CandidateEligibility, CircuitRetryAfter, ModelMetadata, RouteFiltering, RouteLifecycle, RoutingSelection}
   alias CodexPooler.Gateway.Routing.CandidateEligibility.Quota
   alias CodexPooler.Gateway.Routing.ProviderCredits
+  alias CodexPooler.Gateway.Runtime.Dispatch.ContentFilterBindingRefusal
   alias CodexPooler.Gateway.Runtime.Dispatch.Context
   alias CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback
   alias CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation
@@ -524,6 +525,17 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch do
            "a request with the same turn identity already exists",
            "request"
          )}
+
+      # A content-filter retry binding this candidate cannot honour
+      # (`ContentFilterBindingRefusal`, findings#316).
+      {:error, %{code: :invalid_content_filter_retry_binding}} ->
+        release_unstarted_attempt_circuit(
+          context,
+          selection,
+          "release_refused_content_filter_retry_circuit_probe"
+        )
+
+        ContentFilterBindingRefusal.finalize_unstarted(context)
 
       {:error, reason} ->
         release_unstarted_attempt_circuit(

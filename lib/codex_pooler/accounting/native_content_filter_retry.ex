@@ -118,11 +118,29 @@ defmodule CodexPooler.Accounting.NativeContentFilterRetry do
 
   @spec binding(Request.t()) :: map()
   def binding(%Request{id: id}) do
-    case Repo.one(from t in CodexTurn, join: a in Attempt, on: a.id == t.final_attempt_id, where: t.request_id == ^id, select: a.response_metadata) do
+    case final_attempt_metadata(id) do
       %{} = metadata -> sanitize_source(metadata["native_content_filter_source"])
       _missing -> %{}
     end
   end
+
+  @doc """
+  Whether the turn's final attempt recorded a content-filter terminal (given
+  that attempt, or the predecessor request's id). Such a predecessor admits
+  only its verified guided retry: dispatch requires that retry's binding for
+  every successor linked to it (`dispatch_allowed?/2`), so admission refuses
+  every other resend of it before linking, as a resend of a finished turn
+  (findings#316). The marker's presence decides, as it does at dispatch.
+  """
+  @spec content_filter_predecessor?(Attempt.t() | Ecto.UUID.t() | nil) :: boolean()
+  def content_filter_predecessor?(%Attempt{response_metadata: metadata}), do: content_filter_metadata?(metadata)
+  def content_filter_predecessor?(request_id) when is_binary(request_id), do: request_id |> final_attempt_metadata() |> content_filter_metadata?()
+  def content_filter_predecessor?(_attempt), do: false
+
+  defp final_attempt_metadata(request_id), do: Repo.one(from t in CodexTurn, join: a in Attempt, on: a.id == t.final_attempt_id, where: t.request_id == ^request_id, select: a.response_metadata)
+
+  defp content_filter_metadata?(%{} = metadata), do: Map.has_key?(metadata, "native_content_filter_terminal")
+  defp content_filter_metadata?(_metadata), do: false
 
   @spec dispatch_allowed?(Request.t(), map()) :: boolean()
   def dispatch_allowed?(%Request{request_metadata: metadata} = request, scope) do
@@ -141,7 +159,7 @@ defmodule CodexPooler.Accounting.NativeContentFilterRetry do
     end
   end
 
-  defp binding_required?(metadata, predecessor), do: get_in(metadata || %{}, ["client_resend", "predecessor_shape"]) == "content_filter_retry" or (is_map(predecessor) and Map.has_key?(predecessor, "native_content_filter_terminal"))
+  defp binding_required?(metadata, predecessor), do: get_in(metadata || %{}, ["client_resend", "predecessor_shape"]) == "content_filter_retry" or content_filter_metadata?(predecessor)
 
   defp binding_scope_matches?(binding, request, scope) do
     expected = %{"assignment_id" => scope.assignment_id, "identity_id" => scope.identity_id, "credential_epoch" => scope.credential_epoch, "serving_mode" => scope.serving_mode, "requested_model" => request.requested_model, "effective_model" => scope.effective_model, "upstream_model" => scope.upstream_model}
