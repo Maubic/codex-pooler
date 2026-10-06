@@ -1241,7 +1241,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
             :recoverable_generation_zero
 
           open_turn?(turn) and open_request?(request) and live_generation_zero_attempt?(attempt) ->
-            {:active_generation_zero, active_snapshot(turn, request, attempt)}
+            {:active_generation_zero, turn |> active_snapshot(request, attempt) |> put_matched_replay_claim(active_matched_replay_claim(request, input))}
 
           true ->
             close_orphaned_lifecycle_or_conflict(lifecycle)
@@ -1579,6 +1579,26 @@ defmodule CodexPooler.Accounting.RequestReplay do
 
       true ->
         {:error, :replay_claim_mismatch}
+    end
+  end
+
+  # A generation-zero turn whose socket died without its cleanup keeps running
+  # in its owner for a resend to reattach to, and the owner matches the
+  # reattach on the exact replay claim of the request it runs. The released
+  # client fills `workspaces` in its turn metadata after a turn's first request
+  # can already have gone out, so the resend can be that request with the field
+  # added (findings#319 row 1): one of the resend's transient witness
+  # alternates is then the request's stored witness, which for an unanchored
+  # request is its replay claim, and the socket rebinds the frame to it before
+  # the owner checks it. An anchored request stored the anchor-free digest of
+  # its items, never its replay claim, so a match there leaves the owner's
+  # verdict as it was. A resend already carrying the request's claim, or none
+  # of its alternates, keeps its own claim.
+  defp active_matched_replay_claim(%Request{native_client_retry_digest: stored}, input) do
+    cond do
+      secure_digest_match?(stored, input.replay_claim_digest) -> nil
+      Enum.any?(Map.get(input, :replay_claim_alternates, []), &secure_digest_match?(stored, &1)) -> stored
+      true -> nil
     end
   end
 

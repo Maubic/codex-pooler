@@ -324,6 +324,39 @@ defmodule CodexPooler.Accounting.RequestReplayTest do
              RequestReplay.preflight_snapshot(fixture.preflight)
   end
 
+  # findings#319 row 1: a resend of a running generation-zero request that
+  # differs from it only by the turn metadata the client fills late carries the
+  # request's stored witness among its alternates. Only then, and only after
+  # the semantic and authorization checks passed, does the active snapshot name
+  # the stored witness for the socket to rebind the frame to.
+  test "active preflight names the stored witness only when one of the resend's alternates is it" do
+    fixture = replay_fixture()
+    stored = <<3::256>>
+    other = <<7::256>>
+    fixture.request |> Ecto.Changeset.change(%{native_client_retry_digest: stored}) |> Repo.update!()
+    before_counts = counts()
+
+    assert {:active_generation_zero, rebound} = RequestReplay.preflight_snapshot(Map.put(fixture.preflight, :replay_claim_alternates, [other, stored]))
+    assert rebound.matched_replay_claim_digest == stored
+    assert rebound.request_id == fixture.request.id
+
+    # The resend already carries the request's claim: nothing to rebind.
+    assert {:active_generation_zero, exact} = RequestReplay.preflight_snapshot(Map.put(%{fixture.preflight | replay_claim_digest: stored}, :replay_claim_alternates, [stored]))
+    refute Map.has_key?(exact, :matched_replay_claim_digest)
+
+    # A different request, or a resend without alternates, keeps its own claim.
+    for unmatched <- [Map.put(fixture.preflight, :replay_claim_alternates, [other]), fixture.preflight] do
+      assert {:active_generation_zero, snapshot} = RequestReplay.preflight_snapshot(unmatched)
+      refute Map.has_key?(snapshot, :matched_replay_claim_digest)
+    end
+
+    # The rebind is never reached before the turn's own checks pass.
+    with_stored = Map.put(fixture.preflight, :replay_claim_alternates, [stored])
+    assert RequestReplay.preflight_snapshot(%{with_stored | semantic_turn_digest: <<9::256>>}) == :none
+    assert {:error, :authorization_binding_mismatch} = RequestReplay.preflight_snapshot(%{with_stored | api_key_runtime_epoch: 1})
+    assert counts() == before_counts
+  end
+
   test "armed preflight rejects expired and incoherent durable lifecycle" do
     expired = replay_fixture()
 

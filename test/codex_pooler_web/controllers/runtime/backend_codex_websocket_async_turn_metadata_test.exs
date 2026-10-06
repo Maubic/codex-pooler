@@ -177,52 +177,87 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketAsyncTurnMetadataTest do
     end
   end
 
-  # Known gap, pinned: a socket that dies without running its cleanup leaves
-  # its turn running in the owner for an identical resend to reattach to, and
-  # the owner matches the reattach on the exact replay claim. A resend that
-  # gained `workspaces` is answered `owner_busy` while that turn runs; the turn
-  # then ends `owner_unavailable` with no downstream, the next websocket resend
-  # is refused `terminal_predecessor`, and the HTTPS fallback the released
-  # client turns to is served, the native HTTP walk stepping over the failed
-  # request.
-  test "forwarding on: the resend of a lost turn that gained the async workspaces does not reattach, and the HTTPS fallback serves the turn" do
+  # Forwarding on, a turn whose socket died without its cleanup before any
+  # output: the owner keeps it running for a resend to reattach to and matches
+  # the reattach on the exact replay claim of the request it runs. When the
+  # resend gained `workspaces`, the socket node's replay preflight finds the
+  # lost request's stored witness among the resend's alternates and rebinds
+  # the frame to it (findings#319 row 1), so the running generation answers it
+  # once and nothing is dispatched again.
+  for mode <- ["full", "lite"] do
+    test "forwarding on, #{mode}: the resend of a lost turn that gained the async workspaces reattaches to the running generation" do
+      result = lost_turn!(unquote(mode), :first_turn, %{}, @filled, :reattached)
+
+      assert %{"type" => "response.completed", "response" => %{"id" => "resp_async_cut_turn"}} = result.outcome, "the resend was refused: #{inspect(result.outcome)} #{result.logs}"
+      assert result.logs =~ "reconnect_disposition=same_turn_replay"
+      assert [%Request{status: "succeeded"} = served] = await_all_settled!(result.setup)
+      assert served.id == result.original.id
+      assert Repo.all(from(a in Attempt, where: a.request_id == ^served.id, select: {a.replay_generation, a.status})) == [{0, "succeeded"}]
+      assert FakeUpstream.count(result.upstream) == 1
+    end
+  end
+
+  # The rebind is to the lost request's own stored witness and only through
+  # the fields the client fills late: a resend with another document field
+  # changed, or one that dropped the `workspaces` its request carried, is a
+  # different request and the owner refuses it as before.
+  for {label, original, resend} <- [{"another document field changed", %{}, @changed}, {"the workspaces the lost request carried dropped", @filled, %{}}] do
+    test "forwarding on: the resend of a lost turn with #{label} is not rebound and is refused owner_busy" do
+      result = lost_turn!("full", :first_turn, unquote(Macro.escape(original)), unquote(Macro.escape(resend)), :refused)
+
+      assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = result.outcome
+      assert result.logs =~ "reason_code=owner_busy"
+      assert FakeUpstream.count(result.upstream) == 1
+    end
+  end
+
+  # Known gap, pinned (not part of findings#319 row 1): an anchored request
+  # stores the anchor-free digest of its items, while the owner matches the
+  # reattach on the anchored frame's replay claim, so the full-history resend
+  # of an anchored lost turn is refused `owner_busy` even when nothing else
+  # changed.
+  test "forwarding on: the identical full-history resend of an anchored lost turn is refused owner_busy (known gap)" do
+    result = lost_turn!("full", :anchored_turn, %{}, %{}, :refused)
+
+    assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = result.outcome
+    assert result.logs =~ "reason_code=owner_busy"
+  end
+
+  # The lost turn: the socket process dies without running its cleanup while
+  # the provider holds the request before its first frame. The resend goes out
+  # on a new socket; a reattached resend is answered by the running generation
+  # once the provider is released, a refused one before it.
+  defp lost_turn!(mode, position, original_document, resend_document, expect) do
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
     release_ref = make_ref()
-
-    upstream =
-      start_upstream(
-        # provenance: synthetic_adversarial; the cut request held before its first frame, then the HTTPS fallback's completion
-        FakeUpstream.strict_sequence([
-          native_request(1, [forbidden: ["previous_response_id"]], FakeUpstream.barrier_websocket_frames(completed_frames("resp_async_cut_turn", []), notify: self(), release_ref: release_ref)),
-          FakeUpstream.expect_request(method: "POST", path: @path, respond: FakeUpstream.sse_stream(Enum.map(completed_events("resp_async_fallback", []), &{&1["type"], &1})))
-        ])
-      )
-
+    upstream = start_upstream(upstream_script(:lost, position, :none, release_ref))
     setup = gateway_setup(upstream)
     on_exit(fn -> for id <- Repo.all(from(s in CodexSession, where: s.pool_id == ^setup.pool.id, select: s.id)), do: stop_websocket_owner_session(id) end)
-    _revision = set_model_serving_mode!(model_serving_scope(), setup, "full")
-    client = %{port: start_public_endpoint!(), setup: setup, thread: Ecto.UUID.generate(), turn_id: Ecto.UUID.generate(), mode: "full"}
-    input = native_text_input("synthetic cut turn")
+    _revision = set_model_serving_mode!(model_serving_scope(), setup, mode)
+    client = %{port: start_public_endpoint!(), setup: setup, thread: Ecto.UUID.generate(), turn_id: Ecto.UUID.generate(), mode: mode}
     {conn, websocket, ref} = public_websocket_connect!(client.port, setup, client.thread)
-    {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, frame(setup, client.thread, client.turn_id, input, %{}, %{}))
+    {conn, websocket, cut_frame, full_history, _earlier} = open_turn!(position, client, {conn, websocket, ref}, original_document)
+    {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, cut_frame)
     original = cut!(:lost, :on, conn, websocket, ref, setup, upstream, release_ref)
-    resend = frame(setup, client.thread, client.turn_id, input, @filled, %{})
+    owner = owner!(setup)
+    resend = frame(setup, client.thread, client.turn_id, full_history, resend_document, %{})
+    {outcome, logs} = with_info_log(fn -> reattach!(client, resend, owner, upstream, release_ref, expect) end)
+    %{original: original, outcome: outcome, logs: logs, setup: setup, upstream: upstream}
+  end
 
-    {busy, busy_logs} = with_info_log(fn -> resend!(:websocket, client, resend) end)
-    assert %{"type" => "error"} = busy
-    assert busy_logs =~ "reason_code=owner_busy"
+  defp reattach!(client, resend, owner, upstream, release_ref, expect) do
+    {conn, websocket, ref} = public_websocket_connect!(client.port, client.setup, client.thread)
+    {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, resend)
 
-    :ok = FakeUpstream.release_remaining_frames(upstream, release_ref)
-    assert [%Request{status: "failed", last_error_code: "owner_unavailable"} = settled] = await_all_settled!(setup)
-    assert settled.id == original.id
+    if expect == :reattached do
+      await_owner!(owner, &match?(%{active_turn: %{descriptor: %{downstream_status: :attached}}}, &1), "the resend never reattached to the running generation")
+      :ok = FakeUpstream.release_remaining_frames(upstream, release_ref)
+    end
 
-    {refused, refused_logs} = with_info_log(fn -> resend!(:websocket, client, resend) end)
-    assert %{"type" => "error", "error" => %{"code" => "duplicate_turn"}} = refused
-    assert refused_logs =~ "reason_code=terminal_predecessor"
-
-    assert %{"type" => "response.completed"} = resend!(:https, client, resend)
-    assert [_original, %Request{status: "succeeded", transport: "http_sse"}] = await_all_settled!(setup)
-    assert FakeUpstream.count(upstream) == 2
+    {conn, _websocket, outcome} = receive_terminal!(conn, websocket, ref)
+    _closed = Mint.HTTP.close(conn)
+    if expect == :refused, do: :ok = FakeUpstream.release_remaining_frames(upstream, release_ref)
+    outcome
   end
 
   # The resend policy (the turn claim's chain) records the predecessor on the
@@ -266,7 +301,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketAsyncTurnMetadataTest do
     original = cut!(cut, forwarding, conn, websocket, ref, setup, upstream, release_ref)
     resend = frame(setup, client.thread, client.turn_id, full_history ++ appended_items(cut, Map.get(arm, :appended, :pushed)), resend_document, %{})
     {outcome, logs} = with_info_log(fn -> resend!(transport, client, resend) end)
-    if cut == :lost, do: :ok = FakeUpstream.release_remaining_frames(upstream, release_ref)
     requests = if forwarding == :on and cut == :previsible and outcome["type"] == "error", do: all_requests(setup), else: await_all_settled!(setup)
     %{original: original, outcome: outcome, logs: logs, requests: requests, earlier: earlier, upstream: upstream, client: client, resend: resend}
   end
@@ -302,23 +336,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketAsyncTurnMetadataTest do
     previous = if position == :anchored_turn, do: [native_request(1, [forbidden: ["previous_response_id"]], FakeUpstream.websocket_text_frames(completed_frames("resp_async_first_turn", [provider_message("msg_async_first_turn")])))], else: []
     anchor = if position == :anchored_turn, do: [equals: %{"previous_response_id" => "resp_async_first_turn"}], else: [forbidden: ["previous_response_id"]]
 
-    held =
-      case cut do
-        :previsible -> FakeUpstream.websocket_close_without_terminal_barrier(notify: self(), release_ref: release_ref, code: 1001, reason: "synthetic pre-visible downstream loss")
-        :delta -> FakeUpstream.barrier_websocket_frames(stream_frames("resp_async_cut_turn"), notify: self(), release_ref: release_ref)
-        :lost -> FakeUpstream.barrier_websocket_frames(completed_frames("resp_async_cut_turn", []), notify: self(), release_ref: release_ref)
-        :item_done -> FakeUpstream.barrier_websocket_frames(item_frames("resp_async_cut_turn"), notify: self(), release_ref: release_ref)
-      end
-
-    after_cut =
-      case transport do
-        :websocket -> FakeUpstream.expect_request(method: "WEBSOCKET", path: @path, json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]], respond: FakeUpstream.websocket_text_frames(completed_frames("resp_async_resend", [])))
-        :https -> FakeUpstream.expect_request(method: "POST", path: @path, respond: FakeUpstream.sse_stream(Enum.map(completed_events("resp_async_resend", []), &{&1["type"], &1})))
-      end
-
     # provenance: synthetic_adversarial; the previous turn's completion, the cut request held by its barrier, then the completion of what is dispatched after the cut
-    FakeUpstream.strict_sequence(previous ++ [native_request(1, anchor, held), after_cut])
+    FakeUpstream.strict_sequence(previous ++ [native_request(1, anchor, held_response(cut, release_ref)) | after_cut(transport)])
   end
+
+  defp held_response(:previsible, release_ref), do: FakeUpstream.websocket_close_without_terminal_barrier(notify: self(), release_ref: release_ref, code: 1001, reason: "synthetic pre-visible downstream loss")
+  defp held_response(:delta, release_ref), do: FakeUpstream.barrier_websocket_frames(stream_frames("resp_async_cut_turn"), notify: self(), release_ref: release_ref)
+  defp held_response(:lost, release_ref), do: FakeUpstream.barrier_websocket_frames(completed_frames("resp_async_cut_turn", []), notify: self(), release_ref: release_ref)
+  defp held_response(:item_done, release_ref), do: FakeUpstream.barrier_websocket_frames(item_frames("resp_async_cut_turn"), notify: self(), release_ref: release_ref)
+
+  # A lost turn's resend reattaches to the held request or is refused, so
+  # nothing is dispatched after the cut.
+  defp after_cut(:websocket), do: [FakeUpstream.expect_request(method: "WEBSOCKET", path: @path, json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]], respond: FakeUpstream.websocket_text_frames(completed_frames("resp_async_resend", [])))]
+  defp after_cut(:https), do: [FakeUpstream.expect_request(method: "POST", path: @path, respond: FakeUpstream.sse_stream(Enum.map(completed_events("resp_async_resend", []), &{&1["type"], &1})))]
+  defp after_cut(:none), do: []
 
   # Forwarding off, the client closes its socket and the closing cleanup stops
   # the turn; forwarding on, the owner suspends a turn cut before any output.
