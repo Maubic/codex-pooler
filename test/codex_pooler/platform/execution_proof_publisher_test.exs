@@ -95,7 +95,7 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
         assert %{failed: true} = :sys.get_state(publisher)
       end)
 
-    assert log =~ "execution terminal proof publication unavailable; pending proofs retained"
+    assert log =~ "execution terminal proof publication unavailable; pending proofs retained: 1\n"
 
     execution = start_execution!(registry)
     monitor = Process.monitor(execution.pid)
@@ -123,8 +123,21 @@ defmodule CodexPooler.Platform.ExecutionProofPublisherTest do
         :ok = await_published!(older.identity)
       end)
 
-    assert log =~ "execution terminal proof publication unavailable; pending proofs retained"
+    assert log =~ "execution terminal proof publication unavailable; pending proofs retained: 2\n"
     assert ExecutionRegistry.pending_proofs([id], registry) != []
+  end
+
+  # The warning claims only what the registry holds: a publisher that cannot reach its registry cannot say, so it names no
+  # retained proofs. The registry named here is never started; the Repo is up, so the failure is the registry's alone.
+  test "a publisher that cannot reach its registry warns without claiming retained proofs" do
+    log =
+      capture_log(fn ->
+        publisher = start_supervised!({ExecutionProofPublisher, enabled: true, name: nil, registry: :execution_proof_publisher_test_absent_registry, interval_ms: @tick_ms})
+        assert %{failed: true} = :sys.get_state(publisher)
+      end)
+
+    assert log =~ "execution terminal proof publication unavailable\n"
+    refute log =~ "retained"
   end
 
   # The publisher renews its subscription at every publication, so a registry

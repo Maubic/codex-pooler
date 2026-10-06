@@ -172,10 +172,18 @@ defmodule CodexPooler.Platform.ExecutionProofPublisher do
   defp note_result(state, result) do
     failed? = result != :ok
 
-    if failed? and not state.failed,
-      do: Logger.warning("execution terminal proof publication unavailable; pending proofs retained")
+    if failed? and not state.failed, do: Logger.warning(unavailable_message(state.registry))
 
     %{state | failed: failed?}
+  end
+
+  # The warning claims only what the registry holds when publication first fails: a publisher whose Repo is gone while nothing is
+  # pending retains nothing, and one that cannot reach its registry cannot say. It reports the count, never an id.
+  defp unavailable_message(registry) do
+    case ExecutionRegistry.pending(@pending_limit, registry) do
+      [_ | _] = pending -> "execution terminal proof publication unavailable; pending proofs retained: #{length(pending)}"
+      _none_or_unknown -> "execution terminal proof publication unavailable"
+    end
   end
 
   defp publish_proofs(registry, proofs, isolate? \\ false) do
