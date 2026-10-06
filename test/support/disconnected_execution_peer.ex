@@ -78,10 +78,11 @@ defmodule CodexPooler.DisconnectedExecutionPeer do
 
   @spec finish_without_database(pid(), struct()) :: map()
   def finish_without_database(pid, attempt) do
-    Supervisor.stop(CodexPooler.Repo)
-
+    # The capture opens before the database goes away: the publisher warns once, at the first publication that finds no
+    # Repo, and that can be its own tick rather than the `:publish` below (findings#317).
     logs =
       ExUnit.CaptureLog.capture_log(fn ->
+        Supervisor.stop(CodexPooler.Repo)
         end_process(pid, attempt)
         publisher = CodexPooler.Platform.ExecutionProofPublisher
         send(publisher, :publish)
@@ -93,6 +94,49 @@ defmodule CodexPooler.DisconnectedExecutionPeer do
       warned: String.contains?(logs, "publication unavailable"),
       publisher_alive: Process.alive?(Process.whereis(CodexPooler.Platform.ExecutionProofPublisher))
     }
+  end
+
+  # findings#317. The publisher warns once per outage, at its first publication that finds no Repo, and its own tick can be that
+  # publication. A capture opened after the database went away missed a warning that had already been printed: opening it loads
+  # modules and waits on ExUnit's capture server, a few to some tens of milliseconds against a tick every second. This holds the
+  # capture's install while a publication lands, the interleaving that used to depend on load, so `warned` shows the capture
+  # covers the outage from its first moment.
+  @spec finish_without_database_with_capture_held(pid(), struct()) :: map()
+  def finish_without_database_with_capture_held(pid, attempt) do
+    publisher = ExecutionProofPublisher
+    :ok = :sys.suspend(ExUnit.CaptureServer)
+
+    try do
+      finish = Task.async(fn -> finish_without_database(pid, attempt) end)
+      await_capture_requested(System.monotonic_time(:millisecond) + 15_000)
+      send(publisher, :publish)
+      %{} = :sys.get_state(publisher)
+      :ok = :sys.resume(ExUnit.CaptureServer)
+      Task.await(finish, 15_000)
+    after
+      :sys.resume(ExUnit.CaptureServer)
+    end
+  end
+
+  # The capture's install is a call to ExUnit's capture server, so while that server is suspended the request waits in its mailbox.
+  defp await_capture_requested(deadline) do
+    {:message_queue_len, requests} = Process.info(Process.whereis(ExUnit.CaptureServer), :message_queue_len)
+
+    cond do
+      requests > 0 ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        raise "log capture install was not requested"
+
+      true ->
+        receive do
+        after
+          10 -> :ok
+        end
+
+        await_capture_requested(deadline)
+    end
   end
 
   @spec restore_database(struct()) :: :ok

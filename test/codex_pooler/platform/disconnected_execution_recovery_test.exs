@@ -114,8 +114,11 @@ defmodule CodexPooler.Platform.DisconnectedExecutionRecoveryTest do
                UnboxedFixture.run_unboxed(fn -> DeadExecutionRecovery.recover(now) end)
 
       if unquote(database) == :unavailable do
+        # The publisher warns once per outage, at its first publication that finds no Repo, and its own tick can be that
+        # publication. The peer holds its log capture's install while one lands, so a helper that opens the capture after the
+        # database went away fails here on every run, not only on a loaded one (findings#317).
         assert %{queued: 1, warned: true, publisher_alive: true} =
-                 :peer.call(peer, CodexPooler.DisconnectedExecutionPeer, :finish_without_database, [worker, attempt], @peer_call_budget_ms)
+                 :peer.call(peer, CodexPooler.DisconnectedExecutionPeer, :finish_without_database_with_capture_held, [worker, attempt], @peer_call_budget_ms)
 
         assert {:ok, %{dead_execution_attempts_recovered: 0}} =
                  UnboxedFixture.run_unboxed(fn -> DeadExecutionRecovery.recover(now) end)
