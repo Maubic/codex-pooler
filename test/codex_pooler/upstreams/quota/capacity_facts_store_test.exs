@@ -275,10 +275,46 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStoreTest do
     denial = workspace_denial()
     repeated = %{denial | observed_at: DateTime.add(@now, 2 * 3_600), account_windows: [window("primary", 300, 6 * 3_600, "100"), window("secondary", 10_080, 6 * 86_400, "30")]}
     metadata = %{} |> CapacityFactsStore.transition(denial, 1) |> CapacityFactsStore.transition(repeated, 1)
-    assert {:ok, %{observations: [^denial]}} = CapacityFactsStore.load_blockers(metadata)
+    assert {:ok, %{observations: [^denial, ^repeated]}} = CapacityFactsStore.load_blockers(metadata)
     assert {:ok, ^repeated} = CapacityFactsStore.load(metadata)
     refute CapacityFactsStore.hard_denial_lapsed?(repeated, DateTime.add(@now, 6 * 3_600 - 1))
     assert CapacityFactsStore.hard_denial_lapsed?(repeated, DateTime.add(@now, 6 * 3_600))
+  end
+
+  # A newer denial of a retained binding keeps its own end: a reading that
+  # releases only the earlier witness's exhausted window cannot release it.
+  for {name, primary} <- [{"an exhausted window in a later cycle", "100"}, {"no exhausted window", "0"}] do
+    @tag credits_negative: true
+    test "a newer workspace denial with #{name} survives a reading that releases the earlier witness" do
+      denial = workspace_denial()
+      newer = %{denial | observed_at: DateTime.add(@now, 1_800), account_windows: [window("primary", 300, 6 * 3_600, unquote(primary)), window("secondary", 10_080, 6 * 86_400, "16")]}
+      released = CapacityFacts.revoke(%{denial | observed_at: DateTime.add(@now, 2 * 3_600), account_windows: [window("primary", 300, 6 * 3_600, "20"), window("secondary", 10_080, 6 * 86_400, "20")]}, :malformed)
+      metadata = Enum.reduce([denial, newer, released], %{}, &CapacityFactsStore.transition(&2, &1, 1))
+      assert {:ok, %{observations: [^newer, %{denial_category: :malformed}], overflowed?: false}} = CapacityFactsStore.load_blockers(metadata)
+      refute CapacityFactsStore.hard_denial_lapsed?(newer, DateTime.add(@now, 6 * 3_600 - 1))
+      assert CapacityFactsStore.hard_denial_lapsed?(newer, DateTime.add(@now, 6 * 3_600)) == (unquote(primary) == "100")
+    end
+  end
+
+  @tag credits_negative: true
+  test "a newer model denial keeps its own reset beside a stronger workspace witness" do
+    denial = workspace_denial()
+    model = %{denial | observed_at: DateTime.add(@now, 1_800), denial_category: :model_limit, account_windows: [window("primary", 300, 6 * 3_600, "100"), window("secondary", 10_080, 6 * 86_400, "16")]}
+    metadata = %{} |> CapacityFactsStore.transition(denial, 1) |> CapacityFactsStore.transition(model, 1)
+    assert {:ok, %{observations: [^denial, ^model], overflowed?: false}} = CapacityFactsStore.load_blockers(metadata)
+  end
+
+  @tag credits_negative: true
+  test "a denial repeated through many cycles keeps its first and newest witness, and a same-cycle repeat adds none" do
+    denial = workspace_denial()
+    repeats = for cycle <- 1..20, do: %{denial | observed_at: DateTime.add(@now, cycle * 18_000), account_windows: [window("primary", 300, cycle * 18_000 + 3_600, "100"), window("secondary", 10_080, 6 * 86_400, "16")]}
+    metadata = Enum.reduce([denial | repeats], %{}, &CapacityFactsStore.transition(&2, &1, 1))
+    newest = List.last(repeats)
+    assert {:ok, %{observations: [^denial, ^newest], overflowed?: false}} = CapacityFactsStore.load_blockers(metadata)
+
+    jittered = for seconds <- 1..5, do: %{denial | observed_at: DateTime.add(@now, seconds * 60), account_windows: [window("primary", 300, 3_600 + seconds, "100"), window("secondary", 10_080, 6 * 86_400, "16")]}
+    metadata = Enum.reduce([denial | jittered], %{}, &CapacityFactsStore.transition(&2, &1, 1))
+    assert {:ok, %{observations: [^denial], overflowed?: false}} = CapacityFactsStore.load_blockers(metadata)
   end
 
   test "a hard denial lapses only once every exhausted window it recorded has reset" do

@@ -489,6 +489,31 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
     assert "provider_denied" in decision.reason_codes
   end
 
+  # The provider denies again after the first denial's window reset: the newer
+  # denial keeps its own end after an allowed receipt without permission (a
+  # malformed balance) releases the earlier witness's exhausted window.
+  for {name, primary, type} <- [{"an exhausted window in a later cycle", 100, "workspace_member_usage_limit_reached"}, {"no exhausted window", 0, "workspace_owner_credits_depleted"}] do
+    @tag credits_negative: true
+    test "a newer workspace denial with #{name} keeps denying after a malformed allowed receipt releases the earlier one" do
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+      {first_at, newer_at, newer_reset, weekly_reset} = {DateTime.add(now, -6 * 3_600), DateTime.add(now, -1_800), DateTime.add(now, 4 * 3_600), DateTime.add(now, 6 * 86_400)}
+      allowed = put_in(team_receipt(now, {20, newer_reset}, {20, weekly_reset}, nil), ["credits", "balance"], "not-a-number")
+      {_fake, identity, assignment} = setup_upstream(routes_for(:wham_usage, allowed))
+
+      identity =
+        identity
+        |> recorded_reading!(team_denial(first_at, primary: {100, DateTime.add(now, -3_600)}, secondary: {16, weekly_reset}), first_at)
+        |> recorded_reading!(team_denial(newer_at, primary: {unquote(primary), newer_reset}, secondary: {16, weekly_reset}, type: unquote(type)), newer_at)
+
+      assert {:ok, identity} = refresh_at(identity, assignment, now)
+      assert {:ok, %{denial_category: :malformed}} = CapacityFactsStore.load(identity.metadata)
+      decision = public_decision(identity, now)
+      refute decision.eligible?
+      assert "provider_denied" in decision.reason_codes
+      assert "provider_denied" in public_decision(identity, DateTime.add(newer_reset, 1)).reason_codes == (unquote(primary) == 0)
+    end
+  end
+
   defp setup_upstream(routes) do
     name = :"capacity_facts_fake_#{System.unique_integer([:positive])}"
 

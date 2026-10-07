@@ -203,17 +203,45 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
     end
   end
 
+  # A denial is left out only when a retained witness already covers it. Otherwise
+  # it is retained beside the first witness of its binding, which stays so the
+  # denial remains visible from its earliest observation, and replaces the other
+  # witnesses it covers, so a denial repeated through many cycles keeps two.
   @spec retain_blocking_observation(blockers(), CapacityFacts.t()) :: blockers()
   defp retain_blocking_observation(blockers, observation) do
-    if Enum.any?(blockers.observations, &(same_blocker_binding?(&1, observation) or strengthens_blocker?(&1, observation))) do
+    if Enum.any?(blockers.observations, &covers_blocker?(&1, observation)) do
       blockers
     else
-      retained = Enum.reject(blockers.observations, &strengthens_blocker?(observation, &1))
+      first = Enum.find(blockers.observations, &same_blocker_binding?(&1, observation))
+      retained = Enum.reject(blockers.observations, &(&1 != first and covers_blocker?(observation, &1)))
 
       if length(retained) < @max_blockers,
         do: %{blockers | observations: retained ++ [observation]},
         else: %{blockers | overflowed?: true}
     end
+  end
+
+  defp covers_blocker?(witness, observation) do
+    (same_blocker_binding?(witness, observation) or strengthens_blocker?(witness, observation)) and
+      covers_clearance?(witness, observation)
+  end
+
+  # Every way the witness ends must also end the observation's denial. Permission
+  # ends both. A hard witness that recorded exhausted windows also ends with their
+  # cycle, so the observation must have recorded exhausted windows too, each one
+  # the witness recorded exhausted and resetting no later, within reset rounding.
+  defp covers_clearance?(%{denial_category: category} = witness, observation) when category in @hard_denials,
+    do: covers_exhausted_windows?(exhausted_windows(witness), exhausted_windows(observation))
+
+  defp covers_clearance?(_witness, _observation), do: true
+
+  defp covers_exhausted_windows?([], _exhausted), do: true
+  defp covers_exhausted_windows?(_witnessed, []), do: false
+  defp covers_exhausted_windows?(witnessed, exhausted), do: Enum.all?(exhausted, fn window -> Enum.any?(witnessed, &resets_by?(window, &1)) end)
+
+  defp resets_by?(window, witnessed) do
+    window.window_kind == witnessed.window_kind and window.window_minutes == witnessed.window_minutes and
+      DateTime.diff(window.reset_at, witnessed.reset_at, :second) <= @reset_rounding_seconds
   end
 
   defp same_blocker_binding?(left, right) do
@@ -278,11 +306,13 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
   def hard_denial_lapsed?(_facts, _as_of), do: false
 
   defp exhausted_windows_released?(facts, released?) do
-    case Enum.filter(facts.account_windows, &exhausted_window?/1) do
+    case exhausted_windows(facts) do
       [] -> false
       exhausted -> Enum.all?(exhausted, released?)
     end
   end
+
+  defp exhausted_windows(facts), do: Enum.filter(facts.account_windows, &exhausted_window?/1)
 
   defp exhausted_window?(window), do: Decimal.compare(Decimal.new(window.used_percent), 100) != :lt
 
