@@ -51,6 +51,12 @@ defmodule CodexPooler.Platform.OutboundHTTP do
   `finch:` pool option tuple; the optional proxy and any caller-specific
   connect timeout therefore join the live idle bound in the pool key.
 
+  Allowed redirects use Req's status-specific method policy: 301 and 302
+  change POST to GET; 303 changes methods other than GET and HEAD to GET,
+  dropping the body, body options, and content headers when the method changes.
+  307 and 308 preserve the method and body. Presigned file uploads disable
+  redirects, so neither their signed destination nor their PUT method is rewritten.
+
   `pool_max_idle_time` stays unset, so no instance is ever stopped: stopping an
   idle per-origin pool can race a request that has just looked it up, and stale
   connections are already dropped at checkout. Req refuses `finch:` together
