@@ -116,7 +116,7 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
         case DateTime.compare(observation.observed_at, current.observed_at) do
           :lt -> metadata
           :eq -> equal_transition(metadata, current, observation, epoch)
-          :gt -> write_observation(metadata, observation, epoch)
+          :gt -> metadata |> retain_replaced(current, epoch) |> write_observation(observation, epoch)
         end
 
       _other ->
@@ -175,12 +175,25 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
     |> write_blockers(observation, epoch)
   end
 
+  # A blocking current reading denies while it is current. Before a newer reading
+  # replaces it, it is retained unless a witness covers it, as on its own write,
+  # so a denial an earlier release recorded only as the current reading does not
+  # leave with it.
+  defp retain_replaced(metadata, current, epoch) do
+    if blocking_observation?(current),
+      do: put_blockers(metadata, retain_blocking_observation(retained_blockers(metadata, epoch), current), epoch),
+      else: metadata
+  end
+
   defp write_blockers(metadata, observation, epoch) do
     blockers = retained_blockers(metadata, epoch)
     retained = Enum.reject(blockers.observations, &supersedes_blocker?(observation, &1))
     blockers = %{blockers | observations: retained}
     blockers = if blocking_observation?(observation), do: retain_blocking_observation(blockers, observation), else: blockers
+    put_blockers(metadata, blockers, epoch)
+  end
 
+  defp put_blockers(metadata, blockers, epoch) do
     if blockers.observations == [] and not blockers.overflowed? do
       Map.delete(metadata, @blocker_key)
     else
@@ -205,8 +218,9 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
 
   # A denial is left out only when a retained witness already covers it. Otherwise
   # it is retained beside the first witness of its binding, which stays so the
-  # denial remains visible from its earliest observation, and replaces the other
-  # witnesses it covers, so a denial repeated through many cycles keeps two.
+  # binding remains denied from its earliest observation, and replaces the later
+  # witnesses it covers: a denial repeated through many cycles keeps the first
+  # witness and the newest one for each set of exhausted windows.
   @spec retain_blocking_observation(blockers(), CapacityFacts.t()) :: blockers()
   defp retain_blocking_observation(blockers, observation) do
     if Enum.any?(blockers.observations, &covers_blocker?(&1, observation)) do
@@ -229,7 +243,9 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
   # Every way the witness ends must also end the observation's denial. Permission
   # ends both. A hard witness that recorded exhausted windows also ends with their
   # cycle, so the observation must have recorded exhausted windows too, each one
-  # the witness recorded exhausted and resetting no later, within reset rounding.
+  # the witness recorded exhausted and resetting no later. No reset rounding here:
+  # the witness's release and lapse are measured from its own reset, so a denial
+  # resetting even a second later would outlast it.
   defp covers_clearance?(%{denial_category: category} = witness, observation) when category in @hard_denials,
     do: covers_exhausted_windows?(exhausted_windows(witness), exhausted_windows(observation))
 
@@ -241,7 +257,7 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
 
   defp resets_by?(window, witnessed) do
     window.window_kind == witnessed.window_kind and window.window_minutes == witnessed.window_minutes and
-      DateTime.diff(window.reset_at, witnessed.reset_at, :second) <= @reset_rounding_seconds
+      DateTime.compare(window.reset_at, witnessed.reset_at) != :gt
   end
 
   defp same_blocker_binding?(left, right) do

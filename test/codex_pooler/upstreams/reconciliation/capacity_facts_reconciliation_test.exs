@@ -514,6 +514,48 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
     end
   end
 
+  @tag credits_negative: true
+  test "a newer workspace denial resetting seconds after the first keeps denying through polls that release only the first" do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+    {first_at, newer_at, reset, weekly_reset} = {DateTime.add(now, -1_800), DateTime.add(now, -600), DateTime.add(now, 3_600), DateTime.add(now, 6 * 86_400)}
+    allowed = fn at -> put_in(team_receipt(at, {20, DateTime.add(reset, 8)}, {20, weekly_reset}, nil), ["credits", "balance"], "not-a-number") end
+    {fake, identity, assignment} = setup_upstream(routes_for(:wham_usage, allowed.(now)))
+
+    identity =
+      identity
+      |> recorded_reading!(team_denial(first_at, primary: {100, reset}, secondary: {16, weekly_reset}), first_at)
+      |> recorded_reading!(team_denial(newer_at, primary: {100, DateTime.add(reset, 5)}, secondary: {16, weekly_reset}), newer_at)
+
+    assert {:ok, identity} = refresh_at(identity, assignment, now)
+    FakeUpstream.set_mode(fake, {:path_json, routes_for(:wham_usage, allowed.(DateTime.add(now, 240)))})
+    assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 240))
+
+    for as_of <- [DateTime.add(now, 241), DateTime.add(reset, 4)] do
+      decision = public_decision(identity, as_of)
+      refute decision.eligible?
+      assert "provider_denied" in decision.reason_codes
+    end
+  end
+
+  @tag credits_negative: true
+  test "a newer workspace denial an earlier release kept only as the current reading keeps denying after the next usage poll" do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+    {first_at, newer_at, newer_reset, weekly_reset} = {DateTime.add(now, -6 * 3_600), DateTime.add(now, -1_800), DateTime.add(now, 4 * 3_600), DateTime.add(now, 6 * 86_400)}
+    allowed = put_in(team_receipt(now, {20, newer_reset}, {20, weekly_reset}, nil), ["credits", "balance"], "not-a-number")
+    {_fake, identity, assignment} = setup_upstream(routes_for(:wham_usage, allowed))
+
+    identity =
+      identity
+      |> recorded_reading!(team_denial(first_at, primary: {100, DateTime.add(now, -3_600)}, secondary: {16, weekly_reset}), first_at)
+      |> current_reading_only!(team_denial(newer_at, primary: {100, newer_reset}, secondary: {16, weekly_reset}), newer_at)
+
+    assert {:ok, %{observations: [%{observed_at: ^first_at}]}} = CapacityFactsStore.load_blockers(identity.metadata)
+    assert {:ok, identity} = refresh_at(identity, assignment, now)
+    decision = public_decision(identity, now)
+    refute decision.eligible?
+    assert "provider_denied" in decision.reason_codes
+  end
+
   defp setup_upstream(routes) do
     name = :"capacity_facts_fake_#{System.unique_integer([:positive])}"
 
@@ -648,6 +690,17 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
       |> Map.put("quota_capacity_facts", encoded)
       |> Map.put("quota_capacity_blocker", blockers)
 
+    Repo.update!(Ecto.Changeset.change(identity, metadata: metadata))
+  end
+
+  # What an earlier release persisted for a denial its retention left out: the
+  # windows and availability, and the reading only as the current capacity facts.
+  defp current_reading_only!(identity, payload, at) do
+    identity = Repo.reload!(identity)
+    result = record_windows!(identity, payload, at)
+    epoch = CredentialFencing.credential_epoch(identity)
+    encoded = CapacityFactsStore.encode!(%{result.capacity_facts | source_kind: :wham_usage}, epoch)
+    metadata = identity.metadata |> AccountAvailabilityStore.transition(result.account_availability, at, epoch) |> Map.put("quota_capacity_facts", encoded)
     Repo.update!(Ecto.Changeset.change(identity, metadata: metadata))
   end
 
