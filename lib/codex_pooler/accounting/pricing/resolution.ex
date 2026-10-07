@@ -1016,10 +1016,14 @@ defmodule CodexPooler.Accounting.PricingResolution do
   end
 
   defp payload_reasoning_effort(payload) do
-    attr(payload, :reasoning_effort) ||
-      get_in(payload, ["reasoning", "effort"]) ||
-      get_in(payload, [:reasoning, :effort])
+    attr(payload, :reasoning_effort) || nested_reasoning_effort(payload)
   end
+
+  # The payload is the client's, read before dispatch: only an object `reasoning` states an effort. Any other shape
+  # (a string, a list) is the provider's to refuse at validation, and the request must still reach it (findings#339).
+  defp nested_reasoning_effort(%{"reasoning" => %{"effort" => effort}}), do: effort
+  defp nested_reasoning_effort(%{reasoning: %{effort: effort}}), do: effort
+  defp nested_reasoning_effort(_payload), do: nil
 
   defp pricing_metadata_value(request_metadata, key) do
     get_in(request_metadata, ["pricing", key])
@@ -1033,7 +1037,10 @@ defmodule CodexPooler.Accounting.PricingResolution do
     |> blank_to_nil()
   end
 
-  defp normalize_snapshot_value(value), do: value |> to_string() |> normalize_snapshot_value()
+  defp normalize_snapshot_value(value) when is_atom(value) or is_number(value), do: value |> to_string() |> normalize_snapshot_value()
+
+  # An effort the client sent as an object or a list states no effort to record.
+  defp normalize_snapshot_value(_value), do: nil
 
   defp metadata_pricing_value(%Request{request_metadata: metadata}, key) do
     get_in(metadata || %{}, ["pricing", key])

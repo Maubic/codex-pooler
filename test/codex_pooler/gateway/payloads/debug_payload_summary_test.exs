@@ -63,6 +63,28 @@ defmodule CodexPooler.Gateway.Payloads.DebugPayloadSummaryTest do
     refute log =~ "resp_abcdefghijkl"
   end
 
+  test "summarizes the reasoning effort of an object reasoning and nothing for any other shape (findings#339)", context do
+    enable_gateway_debug(context.previous_config)
+
+    for {reasoning, expected} <- [
+          {%{"effort" => "high"}, "high"},
+          {"high", nil},
+          {["high"], nil},
+          {%{"effort" => %{"level" => "high"}}, nil},
+          {nil, nil}
+        ] do
+      payload = %{"model" => "gpt-fixture-text", "input" => "synthetic", "reasoning" => reasoning}
+
+      {summary, _log} =
+        with_log([level: :info], fn ->
+          DebugPayloadSummary.record("/backend-api/codex/responses", payload, payload, %{request_id: "req_reasoning_shape"}, "http")
+        end)
+
+      assert get_in(summary, ["shape", "client", "routing", "reasoning_effort"]) == expected, inspect(reasoning)
+      assert get_in(summary, ["shape", "upstream", "routing", "reasoning_effort"]) == expected, inspect(reasoning)
+    end
+  end
+
   defp record_with_log(response_id) do
     with_log([level: :info], fn ->
       payload = %{
