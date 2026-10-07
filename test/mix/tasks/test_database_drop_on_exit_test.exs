@@ -273,7 +273,9 @@ defmodule CodexPooler.MixTasks.TestDatabaseDropOnExitTest do
           {"CODEX_POOLER_TEST_RUN_NAMESPACE", namespace},
           {"MIX_TEST_PARTITION", "1"},
           {"DATABASE_URL", nil},
-          {"CODEX_POOLER_WEBSOCKET_DRAIN_TIMEOUT_MS", nil}
+          {"CODEX_POOLER_WEBSOCKET_DRAIN_TIMEOUT_MS", nil},
+          # The nested run loads the same test_helper.exs: it must not write the partition's file durations export
+          {"CODEX_POOLER_TEST_FILE_DURATIONS", nil}
         ],
         stderr_to_stdout: true
       )

@@ -77,6 +77,9 @@ local helmVersion = 'v4.3.0';
           POSTGRES_TEST_DB: 'codex_pooler_test',
           POSTGRES_USER: 'postgres',
           POSTGRES_PASSWORD: 'postgres',
+          // Both `make test-fast` runs print each partition's per-file wall times after they pass, so the step log carries
+          // the duration of every test file.
+          TEST_FAST_PRINT_FILE_DURATIONS: '1',
         },
       },
       {

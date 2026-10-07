@@ -26,6 +26,8 @@ mix test.tooling
 
 To partition the tooling profile with the same scheduler and database isolation as product tests, run `TEST_FAST_COMMAND="mix test.tooling --warnings-as-errors" make test-fast N=4`. CI runs the two four-partition profiles sequentially, so it never doubles the configured CPU budget. The static checks of `mix quality` run in CI too: the format check, xref, Sobelow and Credo before the suites in the quality step, and Dialyzer in a parallel `dialyzer` step held to four schedulers, one partition's share beside the suites.
 
+Every run can record how long each test file took. With `CODEX_POOLER_TEST_FILE_DURATIONS` naming a file in an existing directory, ExUnit writes a header with its `max_cases` and one tab-separated line per test file (`path`, `sync_ms`, `async_ms`): the wall time of the file's modules, with `setup_all` and `on_exit` included, split by the module's `async` option. `make test-fast` gives each partition its own file and, with `TEST_FAST_PRINT_FILE_DURATIONS=1`, prints them after a passing run. The CI pipeline sets it, so each build's log carries the duration of every test file.
+
 Use `mix test.unix` to run just the Unix subset. These commands select files before loading them; `mix test --only unix_integration` remains valid but loads the entire test tree before applying tags. `CodexPooler.TestProfiles` owns the profile inventory. The normal suite rejects a Unix-tagged test in an application file not covered by the tooling inventory, so newly added Unix cases cannot silently disappear from CI.
 
 `mix test.tooling` owns its profile filters; for custom tag/name filters, pass explicit file paths or use the ordinary `mix test` command. Execution options such as `--seed` and `--warnings-as-errors` remain available.
