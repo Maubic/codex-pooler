@@ -52,8 +52,9 @@ defmodule CodexPooler.FakeUpstreamProviderRefusalTest do
       {conn, websocket, [frame]} = receive_frames!(conn, websocket, ref)
       assert CodexPooler.JSON.decode!(frame) == CodexPooler.JSON.decode!(FakeUpstream.provider_refusal_frame("Unsupported parameter: metadata"))
 
-      assert %{"type" => "error", "status" => 400, "error" => %{"type" => "invalid_request_error", "code" => nil, "param" => nil, "message" => "Unsupported parameter: metadata"}} =
-               CodexPooler.JSON.decode!(frame)
+      # provenance: observed findings#336 direct websocket probe (the detail refusals' frame has `message` and `type`
+      # only, no `code` and no `param` key)
+      assert CodexPooler.JSON.decode!(frame) == %{"type" => "error", "status" => 400, "error" => %{"type" => "invalid_request_error", "message" => "Unsupported parameter: metadata"}}
 
       # The next request on the refused connection is recorded, never answered, and the connection drops without a Close frame.
       {conn, _websocket} = send!(conn, websocket, ref, %{"type" => "response.create", "input" => []})

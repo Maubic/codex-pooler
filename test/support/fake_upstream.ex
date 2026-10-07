@@ -1109,7 +1109,7 @@ defmodule CodexPooler.FakeUpstream do
   # object included) and a top-level `tools` entry of type `programmatic_tool_calling` or `web_search_preview` (the
   # Full shape; a Lite `additional_tools` manifest accepts `programmatic_tool_calling`). Over HTTP the answer is
   # `400 {"detail": "Unsupported parameter: metadata"}` or `400 {"detail": "Unsupported tool type: <type>"}`; on the
-  # websocket it is the codeless wrapped error frame with the same text (`provider_refusal_frame/1`), after which the
+  # websocket it is the wrapped error frame with the same text and no code (`provider_refusal_frame/1`), after which the
   # provider answers nothing more on that connection and drops it, without a Close frame, about 3 s later. The fake
   # answers both transports the same way, so no test can certify a request the provider refuses: the refused request
   # is captured and no scripted response is consumed.
@@ -1129,15 +1129,18 @@ defmodule CodexPooler.FakeUpstream do
   def provider_refusal_message(_json), do: nil
 
   @doc """
-  The codeless wrapped error frame the Codex backend's websocket answers to a request it refuses before generating
-  (direct probe 2026-10-06, findings#333): the HTTP refusal's text in `error.message`, `code` and `param` null.
+  The wrapped error frame the Codex backend's websocket answers to a request it refuses before generating, for the
+  refusals whose HTTP answer is a `{"detail": ...}` body (direct probes 2026-10-06 and 2026-10-07, findings#333 and
+  findings#336): the HTTP detail's text in `error.message` and `error.type`, and no `code` and no `param` key at all.
+  The frames of the validators that answer HTTP with a coded error carry `code` and `param` as null and the message in
+  one of two wordings; the tests that need them script the captured frame text with `websocket_text_frames/1`.
   """
   @spec provider_refusal_frame(String.t()) :: String.t()
   def provider_refusal_frame(message) when is_binary(message) do
     CodexPooler.JSON.encode!(%{
       "type" => "error",
       "status" => 400,
-      "error" => %{"type" => "invalid_request_error", "code" => nil, "message" => message, "param" => nil}
+      "error" => %{"type" => "invalid_request_error", "message" => message}
     })
   end
 

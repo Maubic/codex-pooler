@@ -4,6 +4,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
   alias CodexPooler.Accounting.Metadata, as: AccountingMetadata
   alias CodexPooler.Gateway.Payloads.DebugPayloadSummary
   alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.Gateway.Runtime.Finalization.ProviderRefusalMessage
   alias CodexPooler.Gateway.Runtime.Streaming.DownstreamStream
   alias CodexPooler.Gateway.Runtime.Streaming.StreamTiming
   alias CodexPooler.Gateway.Transports.BoundedResponseBody
@@ -22,7 +23,6 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
   @rejection_token_max_bytes 80
   @rejection_token_pattern ~r/\A[A-Za-z0-9_.-]+\z/
   @rejection_detail_classes %{"Stream must be set to true" => "stream_must_be_true"}
-  @unsupported_parameter_detail_prefix "Unsupported parameter: "
   @unsupported_parameter_code "unsupported_parameter"
   @invalid_request_error_type "invalid_request_error"
   @previous_response_not_found_code "previous_response_not_found"
@@ -269,15 +269,15 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
        when is_binary(body) and byte_size(body) <= @rejection_body_max_bytes do
     case CodexPooler.JSON.decode(body) do
       {:ok, %{"error" => error}} when is_map(error) ->
+        reading = message_reading(error)
+
         %{}
         |> maybe_put_rejection_value("rejection_error_code", valid_rejection_token(error["code"]))
         |> maybe_put_rejection_value("rejection_error_type", valid_rejection_token(error["type"]))
-        |> maybe_put_rejection_value(
-          "rejection_error_param",
-          valid_rejection_param(error["param"]) || unsupported_parameter_message_param(error)
-        )
+        |> maybe_put_rejection_value("rejection_error_param", valid_rejection_param(error["param"]) || reading_field(reading, :param))
         |> put_rejection_message_metadata(error["message"])
-        |> maybe_put_rejection_value("rejection_message_class", rejection_message_class(error["message"]))
+        |> maybe_put_rejection_value("rejection_message_class", rejection_message_class(error["message"]) || reading_field(reading, :class))
+        |> maybe_put_rejection_value("rejection_message_value", reading_field(reading, :value))
 
       {:ok, %{"detail" => detail}} ->
         detail_rejection_metadata(detail)
@@ -294,9 +294,15 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
   # 12-character fingerprint is recorded, next to the bounded message size.
   defp detail_rejection_metadata(detail) when is_binary(detail) do
     metadata =
-      case unsupported_parameter_detail(detail) do
-        {:ok, param} -> %{"rejection_detail_class" => @unsupported_parameter_code, "rejection_error_param" => param}
-        :error -> %{"rejection_detail_class" => rejection_detail_class(detail)}
+      case ProviderRefusalMessage.read_detail(detail) do
+        {:ok, %{class: @unsupported_parameter_code, param: param}} ->
+          %{"rejection_detail_class" => @unsupported_parameter_code, "rejection_error_param" => param}
+
+        {:ok, %{class: class, value: value}} ->
+          maybe_put_rejection_value(%{"rejection_detail_class" => class}, "rejection_message_value", value)
+
+        :error ->
+          %{"rejection_detail_class" => rejection_detail_class(detail)}
       end
 
     put_rejection_message_metadata(metadata, detail)
@@ -319,15 +325,15 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
        when is_binary(body) and byte_size(body) <= @rejection_body_max_bytes do
     case CodexPooler.JSON.decode(body) do
       {:ok, %{"error" => error}} when is_map(error) ->
-        case unsupported_parameter_message_param(error) do
-          nil ->
+        case message_reading(error) do
+          %{code: code, param: param} when is_binary(code) ->
+            maybe_put_rejection_value(%{code: code, type: @invalid_request_error_type}, :param, param)
+
+          _unread ->
             %{}
             |> maybe_put_rejection_value(:code, valid_rejection_token(error["code"]))
             |> maybe_put_rejection_value(:type, valid_rejection_token(error["type"]))
             |> maybe_put_rejection_value(:param, valid_rejection_param(error["param"]))
-
-          param ->
-            %{code: @unsupported_parameter_code, type: @invalid_request_error_type, param: param}
         end
 
       {:ok, %{"detail" => detail}} when is_binary(detail) ->
@@ -352,37 +358,38 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
   # that prefix and a bounded field path is read as that code and param. Only
   # the field path is taken from the provider text; any other detail keeps the
   # fixed-class or fingerprint projection and relays nothing.
-  defp unsupported_parameter_detail(@unsupported_parameter_detail_prefix <> param) do
-    case valid_rejection_param(param) do
-      nil -> :error
-      param -> {:ok, param}
+  defp unsupported_parameter_detail(detail) do
+    case ProviderRefusalMessage.read_detail(detail) do
+      {:ok, %{class: @unsupported_parameter_code, param: param}} -> {:ok, param}
+      _other -> :error
     end
   end
 
-  defp unsupported_parameter_detail(_detail), do: :error
-
-  # The Codex backend's websocket refuses an unsupported top-level parameter
-  # with the HTTP detail's exact text in a codeless wrapped error object
-  # (`{"type": "error", "status": 400, "error": {"type":
-  # "invalid_request_error", "code": null, "param": null, "message":
-  # "Unsupported parameter: metadata"}}`, direct probe 2026-10-06, findings#333,
-  # Full and Lite). The same template is read as the same code and param, so
-  # the websocket relays the refusal the HTTP answer of the same request
-  # relays, instead of the redacted `upstream_status`. Only a codeless,
-  # paramless `invalid_request_error` qualifies, so a provider code or param
-  # is never overridden.
-  defp unsupported_parameter_message_param(%{"type" => @invalid_request_error_type, "message" => message} = error)
-       when is_binary(message) do
+  # The Codex backend's websocket carries a refusal it answers over HTTP with a
+  # coded error object as a wrapped error object that has the HTTP message as
+  # text and no code and no param (`{"type": "error", "status": 400, "error":
+  # {"type": "invalid_request_error", "code": null, "param": null, "message":
+  # "..."}}`; direct probes 2026-10-06 and 2026-10-07, findings#333 and #336,
+  # Full and Lite). `ProviderRefusalMessage` reads the code, and the field path
+  # where the text names one, from the templates it was measured on, so the
+  # websocket relays and records the refusal the HTTP answer of the same fault
+  # does, instead of the redacted `upstream_status`. Only a codeless, paramless
+  # `invalid_request_error` qualifies, so a provider code or param is never
+  # overridden.
+  defp message_reading(%{"type" => @invalid_request_error_type, "message" => message} = error) when is_binary(message) do
     with nil <- error["code"],
          nil <- error["param"],
-         {:ok, param} <- unsupported_parameter_detail(message) do
-      param
+         {:ok, reading} <- ProviderRefusalMessage.read(message) do
+      reading
     else
       _other -> nil
     end
   end
 
-  defp unsupported_parameter_message_param(_error), do: nil
+  defp message_reading(_error), do: nil
+
+  defp reading_field(nil, _field), do: nil
+  defp reading_field(reading, field), do: Map.fetch!(reading, field)
 
   defp maybe_put_rejection_value(metadata, _key, nil), do: metadata
   defp maybe_put_rejection_value(metadata, key, value), do: Map.put(metadata, key, value)

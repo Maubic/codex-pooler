@@ -770,6 +770,17 @@ message names that same Chat field; other paths name the upstream Responses
 field. Other statuses, types, and codes keep
 the generic redaction.
 
+The same refusals reach the `GET /v1/responses` websocket as its `error` event
+with the same error object, and a streaming `POST /v1/responses` request that
+Codex Pooler carries over the backend's websocket gets it as the same `400`. The
+backend's websocket sends them without a code and without a `param`, with the
+HTTP message as text, so Codex Pooler reads the code and the field path from that
+text: the event carries the `code` and `param` the HTTP answer of the same fault
+carries, except that an `Invalid value` refusal names no field in the frame and
+has a `null` `param`, and that the websocket leaves an `input[N]` index out (`input[].content`).
+A text it does not read keeps the generic redaction. See
+[upstream parameter validation rejections](/reference/runtime-routes/#upstream-parameter-validation-rejections).
+
 Schema-strict clients that enforce the platform enum cannot accept every relayed Codex-backend code. In
 `openai-python`, leave `_strict_response_validation` at its default `false` when using this compatibility surface.
 

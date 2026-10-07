@@ -267,7 +267,7 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
   end
 
   defp native_400_refusal_frame(canonical, status, error) do
-    response = %Req.Response{status: status, body: CodexPooler.JSON.encode!(%{"error" => error})}
+    response = %Req.Response{status: status, body: CodexPooler.JSON.encode!(%{"error" => without_derived_code(error)})}
 
     case ValidationRejection.fetch_ordinary_route(response) do
       %{} = rejection ->
@@ -316,7 +316,7 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
 
   def recorded_final_refusal_error(%{"rejection_upstream_status" => status} = metadata) when is_integer(status) do
     error =
-      %{"code" => metadata["rejection_error_code"], "type" => metadata["rejection_error_type"], "param" => metadata["rejection_error_param"]}
+      %{"code" => recorded_code(metadata), "type" => metadata["rejection_error_type"], "param" => metadata["rejection_error_param"]}
       |> Map.reject(fn {_key, value} -> is_nil(value) end)
 
     case recorded_refusal_projection(status, error, metadata) do
@@ -326,6 +326,16 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
   end
 
   def recorded_final_refusal_error(_metadata), do: :none
+
+  # The provider's own code; a websocket refusal frame carries none, and its attempt records the code its text reads as
+  # (`ProviderRefusalMessage`, a relayable code) as the message class, which is what the first answer relayed.
+  defp recorded_code(%{"rejection_error_code" => code}) when is_binary(code), do: code
+
+  defp recorded_code(%{"rejection_message_class" => class}) when is_binary(class) do
+    if class in ValidationRejection.relayable_codes(), do: class
+  end
+
+  defp recorded_code(_metadata), do: nil
 
   defp recorded_refusal_projection(400 = status, error, metadata) do
     cond do
@@ -431,14 +441,15 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
   # chosen, as `Finalization.Websocket` drops it from the attempt's rejection
   # fields (findings#254 row 254-60).
   defp provider_rejection_error(status, error) do
-    error =
-      case error do
-        %{"code" => code, "type" => code} -> Map.delete(error, "code")
-        %{"code" => "upstream_terminal_failure"} -> Map.delete(error, "code")
-        error -> error
-      end
+    Metadata.rejection_error(%Req.Response{status: status, body: CodexPooler.JSON.encode!(%{"error" => without_derived_code(error)})})
+  end
 
-    Metadata.rejection_error(%Req.Response{status: status, body: CodexPooler.JSON.encode!(%{"error" => error})})
+  defp without_derived_code(error) do
+    case error do
+      %{"code" => code, "type" => code} -> Map.delete(error, "code")
+      %{"code" => "upstream_terminal_failure"} -> Map.delete(error, "code")
+      error -> error
+    end
   end
 
   defp wrapped_refusal(status, error), do: CodexPooler.JSON.encode!(%{"type" => "error", "status" => status, "error" => error})

@@ -647,17 +647,38 @@ A native `/backend-api/codex/responses` websocket turn receives the same error
 object in one wrapped error event, `{"type":"error","status":400,"error":{...}}`,
 so the Codex client reports it as an invalid request instead of retrying it, as
 it does for the HTTP answer. The public `GET /v1/responses` websocket sends the
-same error object in its `error` event. Both websocket events leave an
-`input[N]` index out, because the socket does not know how the turn's input was
-rewritten.
+same error object in its `error` event, and a streaming `POST /v1/responses`
+request that Codex Pooler carries over the backend's websocket gets it as the
+HTTP `400`. Both websocket events leave an `input[N]` index out, because the
+socket does not know how the turn's input was rewritten.
 
-Any other `400` refusal of a native websocket turn, including the usual one
-that carries no code, also reaches the client as one wrapped error event, so the
-Codex client stops instead of resending the turn and then retrying it over
-HTTPS. Codex Pooler writes its error object from the refusal's sanitized type,
-code and param only: `code` is the upstream code, or `invalid_request` when
-upstream sent none, `param` follows the websocket rule above, and the message
-reads `upstream rejected the request (<code>)` or names the param. The provider
+The Codex backend's websocket sends the refusals it answers over HTTP with a code
+as an error object that holds the HTTP message as text and has no code and no
+param. Codex Pooler reads that text and relays the code and the field path the
+HTTP answer of the same fault carries. The backend words the text in one of two
+ways, chosen per connection: `Invalid response.create payload: <message>`, and
+`[<Schema>] [<path>] [<kind>] <message>`, where the kind `invalid_enum_value` is
+read as `invalid_value` and `invalid_type`, `unknown_parameter`,
+`missing_required_parameter` and `string_above_max_length` as themselves. The
+bracket wording names the field path. The payload wording repeats the HTTP
+message, which names the field for a type, a missing parameter, an unknown
+parameter or a string length, and names none for `Invalid value`: that refusal
+relays `invalid_value` and the supported values with a `null` `param`, and the
+HTTP answer's `param` is not in the frame. A message outside these templates is
+not read, a code or param the frame carries is never replaced, and the provider
+text is never forwarded. `Unsupported parameter: <name>` is read the same way as
+the HTTP detail body above. `Unsupported tool type: <type>` is not relayed on
+either transport: its answer stays the generic refusal below, and the failed
+attempt keeps the type only as a bounded identifier.
+
+Any other `400` refusal of a native websocket turn, including one that carries
+no code and whose text Codex Pooler does not read, also reaches the client as one
+wrapped error event, so the Codex client stops instead of resending the turn and
+then retrying it over HTTPS. Codex Pooler writes its error object from the
+refusal's sanitized type, code and param only: `code` is the upstream code, the
+code its text reads as, or `invalid_request` when neither exists, `param`
+follows the websocket rule above, and the message reads
+`upstream rejected the request (<code>)` or names the param. The provider
 message is not forwarded. A refusal naming a code the Codex client classifies
 itself keeps its `response.failed` event, so the client still compacts on
 `context_length_exceeded`, stops on the quota codes (`insufficient_quota`,

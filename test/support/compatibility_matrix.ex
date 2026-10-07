@@ -296,11 +296,13 @@ defmodule CodexPooler.CompatibilityMatrix do
         %{method: :post, path: "/backend-api/codex/v1/responses"},
         %{method: :post, path: "/backend-api/codex/v1/chat/completions"},
         %{method: :post, path: "/v1/responses"},
-        %{method: :post, path: "/v1/chat/completions"}
+        %{method: :post, path: "/v1/chat/completions"},
+        %{method: :get, path: "/backend-api/codex/responses", transport: "websocket"},
+        %{method: :get, path: "/v1/responses", transport: "websocket"}
       ],
       future_routes: [],
       fixture: :upstream_validation_rejection_relay,
-      contract: "an ordinary Responses or Chat HTTP request whose upstream answers HTTP 400 with a direct error object of type invalid_request_error and an allowlisted parameter-validation code, or with a detail body that is exactly `Unsupported parameter: ` followed by a bounded field path (read as unsupported_parameter with that param, which is how the Codex backend refuses previous_response_id on HTTP), relays type, code, a bounded field-path param or null, and a Pooler-authored message built from code and param, never the provider message, which for unsupported_value and invalid_value may append at most 12 identifier-shaped supported values taken only from a strictly shaped trailing provider list with every earlier quoted value, including the rejected value, excluded; translated Chat Completions map the param back to the Chat field the client sent only for renames the adapter performs and the Pooler-authored message names that same Chat field under Lite and Full alike; a native streaming request receives that native JSON error envelope, served as application/json even when the upstream 400 carried no content-type, instead of an empty body while a materialized native body keeps its existing passthrough, and public /v1 Responses and Chat Completions receive the same OpenAI error object; Auto, Lite, Full relay the same bounded supported-values list from persisted attempt metadata. Any other native HTTP 400 on an ordinary Responses route (no code, another code or type, any other detail body) answers, streaming or not, the Pooler-authored error built from the sanitized code, param and type only, with the upstream code or invalid_request, instead of an empty streaming body or the provider body. A native HTTP refusal with another final 4xx on an ordinary Responses route (402 to 499 except 408 and 429; a credential 403 is refreshed before it) answers that error with status 400 under every serving mode, its message naming the upstream status, because the Codex client retries every other status; the request and attempt keep the upstream status. Every other status, compact routes, model-unavailability and misalignment projections, and websocket frames keep their existing behavior, while accounting codes, retries, routing health, and metrics are unchanged"
+      contract: "an ordinary Responses or Chat HTTP request whose upstream answers HTTP 400 with a direct error object of type invalid_request_error and an allowlisted parameter-validation code, or with a detail body that is exactly `Unsupported parameter: ` followed by a bounded field path (read as unsupported_parameter with that param, which is how the Codex backend refuses previous_response_id on HTTP), relays type, code, a bounded field-path param or null, and a Pooler-authored message built from code and param, never the provider message, which for unsupported_value and invalid_value may append at most 12 identifier-shaped supported values taken only from a strictly shaped trailing provider list with every earlier quoted value, including the rejected value, excluded; translated Chat Completions map the param back to the Chat field the client sent only for renames the adapter performs and the Pooler-authored message names that same Chat field under Lite and Full alike; a native streaming request receives that native JSON error envelope, served as application/json even when the upstream 400 carried no content-type, instead of an empty body while a materialized native body keeps its existing passthrough, and public /v1 Responses and Chat Completions receive the same OpenAI error object; Auto, Lite, Full relay the same bounded supported-values list from persisted attempt metadata. Any other native HTTP 400 on an ordinary Responses route (no code, another code or type, any other detail body) answers, streaming or not, the Pooler-authored error built from the sanitized code, param and type only, with the upstream code or invalid_request, instead of an empty streaming body or the provider body. A native HTTP refusal with another final 4xx on an ordinary Responses route (402 to 499 except 408 and 429; a credential 403 is refreshed before it) answers that error with status 400 under every serving mode, its message naming the upstream status, because the Codex client retries every other status; the request and attempt keep the upstream status. A wrapped websocket error frame of the same refusal (4xx, no code and no param, the HTTP message as text) is read for that code and field when its type is invalid_request_error: the text `Invalid response.create payload: <message>` or `[<Schema>] [<path>] [<kind>] <message>` reads as invalid_value (kind invalid_enum_value), invalid_type, unknown_parameter, missing_required_parameter or string_above_max_length with the field path the text names (an `Invalid value` message names none, so its param is null), `Unsupported parameter: <path>` reads as unsupported_parameter, a provider code or param on the frame is never replaced, and the relay (public /v1 websocket and bridged HTTP, native websocket) and the failed attempt record the same code and param the HTTP answer of the same fault carries, without the provider text. `Unsupported tool type: <type>` is not relayed on either transport and the attempt keeps its type as a bounded diagnostic identifier. Every other status, compact routes, model-unavailability and misalignment projections, and websocket text outside those templates keep their existing behavior, while accounting codes, retries, routing health, and metrics are unchanged"
     },
     %{
       slug: :pooler_authored_error_type,
@@ -1566,6 +1568,36 @@ defmodule CodexPooler.CompatibilityMatrix do
         persisted_detail_class: "unsupported_parameter",
         observed_for: "previous_response_id_on_http"
       },
+      websocket_frame_reading: %{
+        frame: "wrapped_error_with_no_code_and_no_param_and_the_http_message_as_text",
+        applies_to: "invalid_request_error_object_without_provider_code_or_param",
+        wordings: [
+          "Invalid response.create payload: <http message>",
+          "[<Schema>] [<field path>] [<kind>] <http message>"
+        ],
+        bracket_kind_codes: %{
+          "invalid_enum_value" => "invalid_value",
+          "invalid_type" => "invalid_type",
+          "unknown_parameter" => "unknown_parameter",
+          "missing_required_parameter" => "missing_required_parameter",
+          "string_above_max_length" => "string_above_max_length"
+        },
+        payload_message_codes: %{
+          "Invalid value: '<value>'. Supported values are: ..." => %{code: "invalid_value", param: "null_the_message_names_no_field"},
+          "Invalid type for '<path>': ..." => %{code: "invalid_type", param: "path_from_text"},
+          "Missing required parameter: '<path>'." => %{code: "missing_required_parameter", param: "path_from_text"},
+          "Unknown parameter: '<path>'." => %{code: "unknown_parameter", param: "path_from_text"},
+          "Invalid '<path>': string too long. ..." => %{code: "string_above_max_length", param: "path_from_text"}
+        },
+        detail_texts: %{"Unsupported parameter: <path>" => "unsupported_parameter", "Unsupported tool type: <type>" => "not_relayed"},
+        param: "bounded_field_path_named_by_the_text_else_null",
+        provider_code_or_param_on_frame: "never_replaced",
+        provider_message_forwarded: false,
+        persisted_message_class: "the_code_the_text_reads_as",
+        persisted_provider_code: "absent_when_the_frame_has_none",
+        unsupported_tool_type: %{relayed: false, persisted_message_class: "unsupported_tool_type", persisted_message_value: "bounded_identifier_or_sha256_12_fingerprint"},
+        surfaces: ["public_v1_websocket", "native_websocket", "bridged_v1_http"]
+      },
       unchanged_scopes: [
         :non_400_status,
         :non_allowlisted_code,
@@ -1574,7 +1606,7 @@ defmodule CodexPooler.CompatibilityMatrix do
         :compact_routes,
         :model_unavailable,
         :misalignment_policy_violation,
-        :websocket_frames
+        :websocket_text_outside_the_read_templates
       ],
       accounting_error_code: "upstream_status",
       retry: false,

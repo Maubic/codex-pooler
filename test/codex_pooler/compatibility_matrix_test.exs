@@ -944,7 +944,19 @@ defmodule CodexPooler.CompatibilityMatrixTest do
       assert fixture.unsupported_parameter_detail.other_detail_text == "not_relayed"
       assert :detail_body in fixture.unchanged_scopes
       refute :explicit_full_override in fixture.unchanged_scopes
-      assert :websocket_frames in fixture.unchanged_scopes
+      # The Codex backend's websocket sends the refusals it answers over HTTP with a code as a wrapped error with the
+      # HTTP message as text and no code and no param; the text is read for the code and field (findings#336).
+      assert :websocket_text_outside_the_read_templates in fixture.unchanged_scopes
+      refute :websocket_frames in fixture.unchanged_scopes
+
+      reading = fixture.websocket_frame_reading
+      assert reading.provider_message_forwarded == false
+      assert reading.provider_code_or_param_on_frame == "never_replaced"
+      assert Map.values(reading.bracket_kind_codes) -- ValidationRejection.relayable_codes() == []
+      assert for({_template, %{code: code}} <- reading.payload_message_codes, do: code) -- ValidationRejection.relayable_codes() == []
+      assert reading.detail_texts["Unsupported parameter: <path>"] in ValidationRejection.relayable_codes()
+      assert reading.unsupported_tool_type.relayed == false
+      assert CompatibilityMatrix.by_slug!(:upstream_validation_rejection_relay).contract =~ "A wrapped websocket error frame of the same refusal"
       assert fixture.accounting_error_code == "upstream_status"
       assert fixture.retry == false
       assert fixture.routing_health == :unchanged
