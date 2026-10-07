@@ -17,7 +17,9 @@ defmodule CodexPooler.TestFileDurations do
   `max_cases`; a sync module runs alone and its share is its whole time.
 
   `make test-fast` gives every partition its own file and, with `TEST_FAST_PRINT_FILE_DURATIONS=1` (the CI pipeline sets it), prints
-  them after a passing run, so a saved CI log carries the durations of the whole suite and no local full run is needed. Without the
+  them after a passing run, so a saved CI log carries the durations of the whole suite and no local full run is needed:
+  `mix test.partition_weights` reads that log, or these files, and writes the weights the partitions are dealt by
+  (`CodexPooler.TestPartitionWeights`). Without the
   variable the formatter is not registered. The variable must name a file inside an existing directory: anything else raises from
   `start!/0`, before the suite starts, instead of after a run that cannot deliver its measurement. A run that cannot write the file
   at its end reports that on stderr and keeps its own result. A nested `mix test` that must not touch the caller's file clears the

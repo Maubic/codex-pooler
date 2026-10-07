@@ -32,6 +32,7 @@ defmodule CodexPooler.MixProject do
   def cli do
     [
       preferred_envs: [
+        "test.partition_weights": :test,
         "test.product": :test,
         "test.tooling": :test,
         "test.unix": :test,

@@ -117,6 +117,11 @@ defmodule CodexPooler.TestFileDurationsTest do
       assert async_only >= 55
 
       refute File.exists?(export <> ".partial")
+
+      # the partition weights task reads this very file
+      assert [sample] = CodexPooler.TestPartitionWeights.parse(File.read!(export))
+      assert %{partition: nil, max_cases: 4, run_ms: ^run_ms, async_ms: ^async_ms} = sample
+      assert sample.files == parsed
     end
 
     test "registers nothing and writes nothing when the variable is unset", %{tmp_dir: dir} do

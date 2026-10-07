@@ -78,7 +78,8 @@ local helmVersion = 'v4.3.0';
           POSTGRES_USER: 'postgres',
           POSTGRES_PASSWORD: 'postgres',
           // Both `make test-fast` runs print each partition's per-file wall times after they pass, so the step log carries
-          // the duration of every test file.
+          // the duration of every test file; `mix test.partition_weights <saved log>` turns it into the weights the
+          // partitions are dealt by (test/partition_weights.tsv).
           TEST_FAST_PRINT_FILE_DURATIONS: '1',
         },
       },

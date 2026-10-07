@@ -149,6 +149,17 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
            ]
   end
 
+  test "the printed file durations are what the partition weights task reads back" do
+    fixture = start_fixture!()
+
+    assert {output, 0} = run_make(fixture, 2, TEST_FAST_RELEASE: "1", TEST_FAST_WRITE_FILE_DURATIONS: "1 2", TEST_FAST_PRINT_FILE_DURATIONS: "1")
+
+    assert CodexPooler.TestPartitionWeights.parse(output) == [
+             %{partition: {1, 2}, max_cases: 8, run_ms: 100, async_ms: 10, files: %{"test/p1_sync_test.exs" => {1250, 0}, "test/p1_async_test.exs" => {0, 175}}},
+             %{partition: {2, 2}, max_cases: 8, run_ms: 200, async_ms: 20, files: %{"test/p2_sync_test.exs" => {2250, 0}, "test/p2_async_test.exs" => {0, 275}}}
+           ]
+  end
+
   test "a partition that wrote no export is reported when the durations are printed and does not fail the run" do
     fixture = start_fixture!()
 

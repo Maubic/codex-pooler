@@ -99,7 +99,8 @@ test-db-prune:
 
 # Each partition writes the wall time of every test file it ran to its own file (CodexPooler.TestFileDurations).
 # With TEST_FAST_PRINT_FILE_DURATIONS=1 a passing run prints those files after the partition results, which is how
-# a saved CI log carries the duration of every test file.
+# a saved CI log carries the duration of every test file: mix test.partition_weights turns such a log into the
+# weights mix test.product and mix test.tooling deal their partitions by (test/partition_weights.tsv).
 test-fast:
 	@partitions="$(N)"; \
 	if [[ ! "$$partitions" =~ ^[0-9]+$$ ]] || (( 10#$$partitions < 1 || 10#$$partitions > 4 )); then \
