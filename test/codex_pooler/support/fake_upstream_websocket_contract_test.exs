@@ -7,9 +7,9 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
 
   @timeouts %{connect_timeout_ms: 1_000, receive_timeout_ms: 1_000}
 
-  # The refusal names the constructors of the nine modes the fake accepts for a native websocket expectation; the
-  # `FakeUpstream` bullet of test/support/AGENTS.md lists the same nine.
-  @native_websocket_refusal "native websocket expectation requires one of websocket_text_frames/1, websocket_text_frames_then_abrupt_close/1, barrier_websocket_frames/2, interruptible_websocket_frames/2, websocket_sse_then_close/2, websocket_terminal_then_close_barrier/2, websocket_connection_limit_terminal_barrier/1, websocket_close_without_terminal_barrier/1, websocket_upgrade_error/2"
+  # The refusal names the constructors of the ten modes the fake accepts for a native websocket expectation; the
+  # `FakeUpstream` bullet of test/support/AGENTS.md lists the same ten.
+  @native_websocket_refusal "native websocket expectation requires one of websocket_text_frames/1, websocket_text_frames_then_abrupt_close/1, barrier_websocket_frames/2, interruptible_websocket_frames/2, websocket_sse_then_close/2, websocket_terminal_then_close_barrier/2, websocket_connection_limit_terminal_barrier/1, websocket_close_without_terminal_barrier/1, websocket_upgrade_error/2, provider_refusal/1"
 
   @tag :fake_upstream_strict_contract
   test "strict websocket expectations validate discriminator and connection ordinal" do
@@ -55,7 +55,7 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
   end
 
   @tag :fake_upstream_strict_contract
-  test "the native websocket refusal names the nine constructors whose modes the fake accepts" do
+  test "the native websocket refusal names the ten constructors whose modes the fake accepts" do
     {:ok, fake} = FakeUpstream.start_link(FakeUpstream.json_response(%{}))
     on_exit(fn -> FakeUpstream.stop(fake) end)
 
@@ -72,7 +72,8 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
       {"websocket_terminal_then_close_barrier/2", FakeUpstream.websocket_terminal_then_close_barrier(%{"type" => "response.completed"}, notify: notify, release_ref: release_ref)},
       {"websocket_connection_limit_terminal_barrier/1", FakeUpstream.websocket_connection_limit_terminal_barrier(shape: :top_level, notify: notify, release_ref: release_ref)},
       {"websocket_close_without_terminal_barrier/1", FakeUpstream.websocket_close_without_terminal_barrier(notify: notify, release_ref: release_ref)},
-      {"websocket_upgrade_error/2", FakeUpstream.websocket_upgrade_error(%{"error" => "denied"})}
+      {"websocket_upgrade_error/2", FakeUpstream.websocket_upgrade_error(%{"error" => "denied"})},
+      {"provider_refusal/1", FakeUpstream.provider_refusal("Unsupported parameter: metadata")}
     ]
 
     # Every constructor the message names exists and builds a mode the fake accepts, through both validation paths.
@@ -83,7 +84,7 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
       assert :ok = FakeUpstream.set_mode(fake, FakeUpstream.repeat_last([native_expectation(mode)])), "set_mode/2 accepts #{constructor} in repeat_last/1"
     end
 
-    # The message names those nine, in that order.
+    # The message names those ten, in that order.
     assert @native_websocket_refusal == "native websocket expectation requires one of " <> Enum.map_join(accepted, ", ", &elem(&1, 0))
 
     # Everything else is refused with that message, on both paths, whatever wraps it.
