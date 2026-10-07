@@ -17,10 +17,13 @@ defmodule CodexPoolerWeb.Runtime.SettlementTransactionHold do
   # same match holds that second transaction with the request already
   # committed.
   #
-  # `after_commit!/1` holds the first process that commits a transaction in
+  # `after_commit!/2` holds the first process that commits a transaction in
   # which it wrote the given request's terminal status, right after that commit
   # and outside any transaction, and reports whether the same transaction wrote
-  # a turn's completion.
+  # a turn's completion. With `connection: true` the held process checks a
+  # connection out first and keeps it until it is released, as a response task
+  # does to publish what it settled (the interleaving of Drone 1865,
+  # `OwnerCrashAfterSendScenario.kill_with_task_holding_connection!/5`).
   #
   # `after_rollback!/0` holds the first process that rolls back a transaction
   # in which it inserted a settlement ledger entry, right after that rollback
@@ -36,8 +39,9 @@ defmodule CodexPoolerWeb.Runtime.SettlementTransactionHold do
   @spec inside_transaction!() :: reference()
   def inside_transaction!, do: attach!(%{mode: :inside_transaction})
 
-  @spec after_commit!(Ecto.UUID.t()) :: reference()
-  def after_commit!(request_id), do: attach!(%{mode: :after_commit, request_id: Ecto.UUID.dump!(request_id)})
+  @spec after_commit!(Ecto.UUID.t(), keyword()) :: reference()
+  def after_commit!(request_id, opts \\ []),
+    do: attach!(%{mode: :after_commit, request_id: Ecto.UUID.dump!(request_id), connection?: Keyword.get(opts, :connection, false)})
 
   @spec after_rollback!() :: reference()
   def after_rollback!, do: attach!(%{mode: :after_rollback})
@@ -136,18 +140,23 @@ defmodule CodexPoolerWeb.Runtime.SettlementTransactionHold do
       else: :ok
   end
 
-  defp hold_once(_key, facts, %{hold: hold, test: test, claimed: claimed}) do
-    if :atomics.add_get(claimed, 1, 1) == 1 do
-      send(test, {hold, :held, self(), facts})
-
-      receive do
-        {^hold, :release} -> :ok
-      after
-        @detection_timeout_ms -> :ok
-      end
-    end
-
+  defp hold_once(_key, facts, %{hold: hold, test: test, claimed: claimed} = config) do
+    if :atomics.add_get(claimed, 1, 1) == 1, do: held(config, fn -> await_release(hold, test, facts) end)
     :ok
+  end
+
+  # A `connection: true` hold waits with a connection checked out.
+  defp held(%{connection?: true}, await), do: Repo.checkout(await)
+  defp held(_config, await), do: await.()
+
+  defp await_release(hold, test, facts) do
+    send(test, {hold, :held, self(), facts})
+
+    receive do
+      {^hold, :release} -> :ok
+    after
+      @detection_timeout_ms -> :ok
+    end
   end
 
   # The request's own terminal write: its id and a terminal status.

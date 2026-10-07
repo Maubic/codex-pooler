@@ -20,7 +20,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteOwne
   # Pool's serving mode forced to Full or Lite, FakeUpstream on this node, the
   # released client's native frames and a public `/v1` SDK request. The socket
   # and its response task meet the owner's exit in the order the schedulers
-  # give, or the socket is held so the task meets it first.
+  # give, or the socket is held so the task meets it first, or the task also
+  # holds a database connection after its settlement while the socket handles
+  # the crash.
   use CodexPoolerWeb.ConnCase, async: false
 
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
@@ -72,10 +74,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteOwne
       assert List.last(Crash.close_client!(client)) == @crashed_close
     end
 
-    for order <- [:natural, :task_first] do
+    for order <- [:natural, :task_first, :task_holds_connection] do
       @tag route: route, mode: mode, order: order
       test "#{route} #{mode} (#{order}): a turn whose payload never left settles owner_crashed when its remote owner is killed, and the client's resend is its one send", ctx do
-        :ok = Crash.start_proof_publisher!(:committed)
+        publisher = Crash.start_proof_publisher!(:committed)
         release_ref = make_ref()
         upstream = Crash.upstream!(:before_write, "resp_remote_owner_unsent", release_ref)
         %{setup: setup, client: client, peer_owner: peer_owner, port: port, window: window} = connect!(upstream, ctx)
@@ -88,7 +90,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteOwne
         request_id = Crash.turn_request_id!(setup)
 
         :ok = PeerLogRelay.attach!(ctx.peer_node, Crash.fence_line_prefixes())
-        assert List.last(kill_and_close!(ctx.order, client, peer_owner, upstream, request_id)) == @crashed_close
+        assert List.last(kill_and_close!(ctx, client, peer_owner, upstream, request_id)) == @crashed_close
+        assert Process.alive?(publisher)
         # The submission runs on the owner's node, in the erpc worker of the
         # proxy's call, so it decides even when the proxy cancels its task.
         log = Crash.await_peer_lines!(ctx.peer_node, 1)
@@ -205,21 +208,26 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteOwne
     end
   end
 
-  # Kills the remote owner, in the order the schedulers give or with the socket
-  # held so its response task meets the exit first, and returns the frames the
-  # client read until its socket's Close.
-  defp kill_and_close!(:natural, client, peer_owner, _upstream, _request_id) do
+  # Kills the remote owner, in the order the schedulers give, with the socket
+  # held so its response task meets the exit first, or also with the task
+  # holding a database connection after its settlement while the socket
+  # handles the crash, and returns the frames the client read until its
+  # socket's Close.
+  defp kill_and_close!(%{order: :natural}, client, peer_owner, _upstream, _request_id) do
     :ok = Crash.kill_owner!(peer_owner.owner_pid)
     Crash.await_close!(client)
   end
 
-  defp kill_and_close!(:task_first, client, peer_owner, upstream, request_id) do
+  defp kill_and_close!(%{order: :task_first}, client, peer_owner, upstream, request_id) do
     :ok = Crash.hold_socket!(client.socket)
     :ok = Crash.kill_owner!(peer_owner.owner_pid)
     assert Crash.await_outcome!(upstream, request_id, 0) == :settled
     :ok = Crash.assert_settled_on_crash!(request_id, peer_owner.session.id)
     Crash.close_client!(client)
   end
+
+  defp kill_and_close!(%{order: :task_holds_connection, route: route}, client, peer_owner, _upstream, request_id),
+    do: Crash.kill_with_task_holding_connection!(client, peer_owner.owner_pid, route, request_id, peer_owner.session.id)
 
   defp connect!(upstream, ctx) do
     setup = gateway_setup(upstream)

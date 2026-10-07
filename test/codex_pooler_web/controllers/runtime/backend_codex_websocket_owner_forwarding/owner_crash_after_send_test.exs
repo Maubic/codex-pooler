@@ -20,9 +20,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
   # forced to Full or Lite, FakeUpstream over a real websocket, the released
   # client's native frames or a public `/v1` SDK request. The socket and its
   # response task meet the owner's exit in the order the schedulers give, or
-  # the socket is held so the task meets it first
+  # the socket is held so the task meets it first, or the task then also holds
+  # a database connection while the socket handles the crash
   # (`OwnerCrashAfterSendScenario`); the peer family is
-  # `remote_owner_crash_after_send_test.exs`.
+  # `remote_owner_crash_after_send_test.exs`. The `/v1` arms and that third
+  # order give every process its own connection, as production does
+  # (`per_process_connections?/1`).
   use CodexPoolerWeb.ConnCase, async: false
 
   import Ecto.Query
@@ -42,9 +45,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
   @crashed_close {:close, 1011, "websocket owner crashed"}
   @detection_timeout_ms 15_000
 
-  setup do
+  setup ctx do
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
     Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
+    if per_process_connections?(ctx), do: Crash.per_process_connections!()
     :ok
   end
 
@@ -76,10 +80,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
       assert List.last(Crash.close_client!(client)) == @crashed_close
     end
 
-    for order <- [:natural, :task_first] do
+    for order <- [:natural, :task_first, :task_holds_connection] do
       @tag route: route, mode: mode, order: order
       test "#{route} #{mode} (#{order}): a turn whose payload never left settles owner_crashed when its owner is killed, and the client's resend is its one send", ctx do
-        :ok = Crash.start_proof_publisher!(:sandboxed)
+        publisher = Crash.start_proof_publisher!(if per_process_connections?(ctx), do: :committed, else: :sandboxed)
         release_ref = make_ref()
         upstream = Crash.upstream!(:before_write, "resp_owner_unsent", release_ref)
         %{setup: setup, client: client, port: port, window: window} = connect!(upstream, ctx)
@@ -91,8 +95,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
         %{owner: owner, session_id: session_id, request_id: request_id} = turn!(client, setup)
         :ok = Crash.stop_session_owner_on_exit(node(), session_id)
 
-        {frames, log} = with_info_log(fn -> kill_and_close!(ctx.order, client, owner, upstream, request_id, session_id) end)
+        {frames, log} = with_info_log(fn -> kill_and_close!(ctx, client, owner, upstream, request_id, session_id) end)
         assert List.last(frames) == @crashed_close
+        assert Process.alive?(publisher)
         :ok = assert_socket_turn_fence!(log, ctx, Crash.turn_correlators(request_id, session_id))
         {served, _answers} = Crash.resend_like_released_client!(port, setup, ctx.route, window, frame)
         assert %{"type" => "response.completed", "response" => %{"id" => "resp_owner_unsent_first_send"}} = served
@@ -312,21 +317,38 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
     assert Decimal.gt?(settled_cost(successor_id), 0)
   end
 
-  # Kills the owner, in the order the schedulers give or with the socket held
-  # so its response task meets the exit first, and returns the frames the
-  # client read until its socket's Close.
-  defp kill_and_close!(:natural, client, owner, _upstream, _request_id, _session_id) do
+  # Kills the owner, in the order the schedulers give, with the socket held so
+  # its response task meets the exit first, or also with the task then
+  # holding a database connection while the socket handles the crash (the
+  # interleaving of Drone 1865), and returns the frames the client read until
+  # its socket's Close.
+  defp kill_and_close!(%{order: :natural}, client, owner, _upstream, _request_id, _session_id) do
     :ok = Crash.kill_owner!(owner)
     Crash.await_close!(client)
   end
 
-  defp kill_and_close!(:task_first, client, owner, upstream, request_id, session_id) do
+  defp kill_and_close!(%{order: :task_first}, client, owner, upstream, request_id, session_id) do
     :ok = Crash.hold_socket!(client.socket)
     :ok = Crash.kill_owner!(owner)
     assert Crash.await_outcome!(upstream, request_id, 0) == :settled
     :ok = Crash.assert_settled_on_crash!(request_id, session_id)
     Crash.close_client!(client)
   end
+
+  defp kill_and_close!(%{order: :task_holds_connection, route: route}, client, owner, _upstream, request_id, session_id),
+    do: Crash.kill_with_task_holding_connection!(client, owner, route, request_id, session_id)
+
+  # A public `/v1` socket cancels its turn's response task when it handles its
+  # owner's crash, while the task may still be settling the turn or publishing
+  # what it settled, and the third order holds the task on the database while
+  # the socket handles it. On the one connection the sandbox shares, the
+  # cancellation took every other process's connection down (Drone 1865) and
+  # the hold blocks the socket's own cleanup, so those arms give every process
+  # its own connection, as production does. A native socket waits for its task
+  # and its other arms keep the shared connection.
+  defp per_process_connections?(%{route: "/v1/responses"}), do: true
+  defp per_process_connections?(%{order: :task_holds_connection}), do: true
+  defp per_process_connections?(_ctx), do: false
 
   # A public `/v1` socket cancels its turn's response task when it handles its
   # owner's crash first (`maybe_abort_public_owner_turn/2`), so in the natural
@@ -351,6 +373,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerCrash
 
   defp connect!(upstream, ctx) do
     setup = gateway_setup(upstream)
+    if per_process_connections?(ctx), do: register_unboxed_pool_cleanup!(setup)
     :ok = Crash.serve!(setup, ctx.mode)
     {_server, port} = start_public_endpoint_with_server!()
     window = Scenario.window()

@@ -18,10 +18,17 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
   #
   # The order the socket and its response task meet the owner's exit in is
   # either left to the schedulers, as in production, or forced: a held socket
-  # (`hold_socket!/1`) lets the response task meet it first; the socket closes
-  # `1011` on its owner's crash whenever it handles the DOWN. The client then
-  # resends as the released Codex client does (`resend_like_released_client!/5`,
-  # findings#328).
+  # (`hold_socket!/1`) lets the response task meet it first, and
+  # `kill_with_task_holding_connection!/5` also makes the task hold a database
+  # connection after its settlement while the socket handles the DOWN. The
+  # socket closes `1011` on its owner's crash whenever it handles the DOWN. The
+  # client then resends as the released Codex client does
+  # (`resend_like_released_client!/5`, findings#328).
+  #
+  # An arm in which a process may end, or be held, while it uses the database
+  # that another process then needs gives every process a connection of its
+  # own, as production does (`per_process_connections!/0`; the peer topology
+  # always does).
 
   import ExUnit.Assertions
   import ExUnit.Callbacks, only: [on_exit: 1]
@@ -29,7 +36,7 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
 
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport,
-    only: [completed_response_frames: 4, receive_frames_until_close!: 3, receive_native_terminal!: 3, released_client_frame: 2]
+    only: [completed_response_frames: 4, receive_frames_until_close!: 3, receive_native_terminal!: 3, released_client_frame: 2, socket_connection_state!: 1, with_info_log: 1]
 
   alias CodexPooler.Access
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink}
@@ -43,7 +50,9 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
   alias CodexPooler.Repo
   alias CodexPooler.UnboxedFixture
   alias CodexPoolerWeb.Runtime.OwnerLossScenario, as: Scenario
+  alias CodexPoolerWeb.Runtime.SettlementTransactionHold
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
+  alias Ecto.Adapters.SQL.Sandbox
 
   @native_route "/backend-api/codex/responses"
   @detection_timeout_ms 15_000
@@ -54,6 +63,29 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
   # the owner's node, and a session's write refused after a claim.
   @fence_line "websocket owner exit fence "
   @write_refused_line "upstream websocket payload write refused "
+
+  defmodule TaskRelease do
+    @moduledoc false
+
+    # The `:logger` handler of `kill_with_task_holding_connection!/5`, run in
+    # the process that logs: once the held task's socket has handled its
+    # owner's crash, it releases the task's connection and tells the test.
+
+    alias CodexPoolerWeb.Runtime.SettlementTransactionHold
+    alias CodexPoolerWeb.WebsocketConnectionLogger
+
+    @spec log(:logger.log_event(), :logger.handler_config()) :: :ok
+    def log(%{msg: {:string, chardata}}, %{config: %{socket: socket, task: task, hold: hold, test: test}}) do
+      if self() == socket and String.starts_with?(IO.chardata_to_string(chardata), WebsocketConnectionLogger.downstream_closed_after_owner_exit_message()) do
+        :ok = SettlementTransactionHold.release(hold, task)
+        send(test, {:task_released_on_owner_exit_close, hold})
+      end
+
+      :ok
+    end
+
+    def log(_event, _config), do: :ok
+  end
 
   @doc "The provider for `kill_point`, notifying the calling test process."
   def upstream!(:after_receipt, prefix, release_ref) do
@@ -91,19 +123,44 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
   end
 
   @doc """
+  Gives every process of the test a database connection of its own, as
+  production does: the sandbox's `:auto` mode, so writes commit and the test
+  registers `register_unboxed_pool_cleanup!/1` for its Pool right after
+  `gateway_setup/2`. An arm needs it when a process may end, or be held,
+  while it uses the database another process then needs. A public `/v1`
+  socket cancels its turn's response task when it handles its owner's crash
+  (`maybe_abort_public_owner_turn/2`), and the task may still be settling the
+  turn or publishing what it settled: on the one connection the sandbox shares
+  between processes, that cancellation took every other process's connection
+  down (Drone 1865). The socket's own crash cleanup then exited in its
+  checkout and the socket closed `1011 websocket control unavailable`, the
+  execution proof publisher crashed on `DBConnection.OwnershipError`, and
+  nothing after it could read the database. A native socket waits for its
+  task instead. The peer topology always runs this way
+  (`enter_peer_owner_topology!/0`).
+  """
+  @spec per_process_connections!() :: :ok
+  def per_process_connections! do
+    assert :ok = Sandbox.mode(Repo, :auto)
+    on_exit(fn -> assert :ok = Sandbox.mode(Repo, :manual) end)
+    :ok
+  end
+
+  @doc """
   Runs the execution proof publisher as production does, so the duplicate-turn
   fence admits the client's resend of a turn settled `owner_crashed` once its
-  executor's end is proven. Under the peer topology the sandbox commits, and
-  the proofs published during the test are removed at its end (`:committed`).
+  executor's end is proven, and returns it. When the test's writes commit
+  (`per_process_connections!/0`, the peer topology), the proofs published
+  during the test are removed at its end (`:committed`).
   """
+  @spec start_proof_publisher!(:sandboxed | :committed) :: pid()
   def start_proof_publisher!(sandbox) when sandbox in [:sandboxed, :committed] do
     if sandbox == :committed do
       before = Repo.all(from(proof in ExecutionTerminalProof, select: proof.execution_id))
       UnboxedFixture.register_unboxed_cleanup!(fn -> Repo.delete_all(from(proof in ExecutionTerminalProof, where: proof.execution_id not in ^before)) end)
     end
 
-    _publisher = CodexPooler.ExecutionProofSupport.start_publisher!()
-    :ok
+    CodexPooler.ExecutionProofSupport.start_publisher!()
   end
 
   @doc "The turn's internal correlators, as the fence lines carry them."
@@ -272,6 +329,47 @@ defmodule CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario do
     Mint.HTTP.close(conn)
     :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(client.socket, @detection_timeout_ms)
     frames
+  end
+
+  @doc """
+  The interleaving of Drone 1865, forced. Kills `owner_pid` (local or on a
+  peer) with `client`'s socket held and lets the turn's response task settle
+  the turn, then holds the task right after its settlement's commit with a
+  database connection checked out, as it holds one to publish what it settled
+  (`SettlementTransactionHold.after_commit!/2`), and only then resumes the
+  socket, which handles its owner's crash while the task holds that
+  connection. A public `/v1` socket cancels the task inside it
+  (`maybe_abort_public_owner_turn/2`); a native socket leaves its task
+  running and closes, and its `websocket downstream closed after owner exit`
+  line releases the task, so the socket runs at the info level whatever its
+  caller's. Checks the close, how the task ended and that its settlement
+  stands; returns the frames the client read until the Close.
+  """
+  def kill_with_task_holding_connection!(client, owner_pid, route, request_id, session_id) do
+    [task] = client.socket |> socket_connection_state!() |> Map.fetch!(:tasks) |> MapSet.to_list()
+    hold = SettlementTransactionHold.after_commit!(request_id, connection: true)
+    :ok = release_task_on_owner_exit_close!(client.socket, task, hold)
+    :ok = hold_socket!(client.socket)
+    :ok = kill_owner!(owner_pid)
+    assert {^task, _facts} = SettlementTransactionHold.await_held!(hold)
+
+    # `:sys.resume/1` in `close_client!/1` sends this monitor's request to the
+    # held task before anything can end it (`CodexPooler.TestProcess`).
+    task_monitor = Process.monitor(task)
+    {frames, _log} = with_info_log(fn -> close_client!(client) end)
+
+    assert List.last(frames) == {:close, 1011, "websocket owner crashed"}
+    assert_receive {:task_released_on_owner_exit_close, ^hold}, @detection_timeout_ms
+    assert_receive {:DOWN, ^task_monitor, :process, ^task, task_exit}, @detection_timeout_ms
+    assert task_exit == if(route == @native_route, do: :normal, else: {:shutdown, :owner_monitor_down})
+    :ok = assert_settled_on_crash!(request_id, session_id)
+    frames
+  end
+
+  defp release_task_on_owner_exit_close!(socket, task, hold) do
+    handler_id = :"owner_crash_task_release_#{System.unique_integer([:positive])}"
+    on_exit(fn -> :logger.remove_handler(handler_id) end)
+    :logger.add_handler(handler_id, TaskRelease, %{level: :info, config: %{socket: socket, task: task, hold: hold, test: self()}})
   end
 
   @doc """

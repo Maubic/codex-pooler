@@ -1042,6 +1042,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
 
     assert_receive {:first_public_owner_submit_started, first_worker, ^release_ref}
 
+    # The submitter tells this downstream the recovered runtime before it logs
+    # the takeover (`take_over_turn/4` logs the decision once it is final), so
+    # the capture ends on the result the submitter sends after both: a capture
+    # that ended on the notification missed the line (Drone 1867).
     {recovered_stable, log} =
       with_info_log(fn ->
         first_owner_ref = Process.monitor(first_owner)
@@ -1050,6 +1054,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
         send(first_worker, {:release_first_public_owner_submit, release_ref})
 
         assert_receive {:websocket_owner_runtime_recovered, "corr-exit-after-submit", 1, %{websocket_owner_downstream: recovered_stable}}
+        assert_receive {:public_owner_retry_result, ^submitter, {:ok, %{terminal: "response.completed", status: 200}}}
         recovered_stable
       end)
 
@@ -1068,8 +1073,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     assert_receive {:websocket_owner_frame, "corr-exit-after-submit", 1, ^submitter, {:data, ^terminal_frame}}
 
     assert_receive {:websocket_owner_frame, "corr-exit-after-submit", 1, ^submitter, :complete}
-
-    assert_receive {:public_owner_retry_result, ^submitter, {:ok, %{terminal: "response.completed", status: 200}}}
 
     assert {:ok, recovered_owner} = WebsocketOwnerSession.lookup(session.id)
     recovered_owner_state = :sys.get_state(recovered_owner)
