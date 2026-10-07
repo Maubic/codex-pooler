@@ -173,16 +173,20 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesToolCompletionTest do
     assert_invalid([added, item("done", "function_call", 0, "item-a"), payload("delta", "function_call", 0, "item-a")])
   end
 
-  for status <- ["in_progress", "incomplete", "failed", nil, 42, " completed "] do
-    test "explicit malformed or unsuccessful done status #{inspect(status)} poisons" do
-      done = item("done", "function_call", 0, "item-a") |> put_in(["item", "status"], unquote(status))
-      assert_invalid([item("added", "function_call", 0, "item-a"), done])
+  # The provider schema gives these client-run tools only in_progress, completed and incomplete; `failed` and unknown
+  # values are rejected with the rest, because a tool the client fails or cancels never arrives as a done status.
+  for kind <- ["function_call", "custom_tool_call"], status <- ["in_progress", "incomplete", "failed", "cancelled", nil, 42, " completed "] do
+    test "#{kind} explicit malformed or unsuccessful done status #{inspect(status)} poisons" do
+      done = item("done", unquote(kind), 0, "item-a") |> put_in(["item", "status"], unquote(status))
+      assert_invalid([item("added", unquote(kind), 0, "item-a"), done])
     end
   end
 
-  test "omitted and completed done status discharge" do
-    for done <- [item("done", "function_call", 0, "item-a"), put_in(item("done", "function_call", 0, "item-a"), ["item", "status"], "completed")] do
-      assert Completion.completion_verdict(observe([item("added", "function_call", 0, "item-a"), done])) == :ok
+  for kind <- ["function_call", "custom_tool_call"] do
+    test "#{kind} omitted and completed done status discharge" do
+      for done <- [item("done", unquote(kind), 0, "item-a"), put_in(item("done", unquote(kind), 0, "item-a"), ["item", "status"], "completed")] do
+        assert Completion.completion_verdict(observe([item("added", unquote(kind), 0, "item-a"), done])) == :ok
+      end
     end
   end
 

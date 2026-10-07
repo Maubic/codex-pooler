@@ -142,6 +142,50 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
     end
   end
 
+  # A done status other than `completed` leaves the call unfinished: a following `response.completed` becomes the
+  # sanitized `server_error` event, while the provider's own `response.incomplete` keeps its outcome.
+  for topology <- [:direct, :local_owner], kind <- ["function_call", "custom_tool_call"], {status, terminal_type} <- [{"failed", "response.completed"}, {"incomplete", "response.completed"}, {"incomplete", "response.incomplete"}] do
+    @tag topology: topology
+    @tag kind: kind
+    test "#{topology} #{kind} done status #{status} before #{terminal_type}", %{topology: topology, kind: kind} do
+      CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
+      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology != :direct)
+      frames = Enum.map(status_events(kind, unquote(status), unquote(terminal_type)), &CodexPooler.JSON.encode!/1)
+      # provenance: synthetic_adversarial for the failed status, which the provider schema does not give a function or custom tool call; the incomplete status before an incomplete terminal follows the openai-node ResponseFunctionToolCall status enum, with invented ids and usage.
+      upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.websocket_text_frames(frames)]))
+      setup = gateway_setup(upstream)
+      assert :ok = Events.subscribe_pool(setup.pool)
+      port = start_public_endpoint!()
+      {conn, websocket, ref} = connect!(port, setup, "tool-status-#{System.unique_integer([:positive])}")
+
+      try do
+        payload = %{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => [%{"type" => "message", "role" => "user", "content" => [%{"type" => "input_text", "text" => "synthetic tool status turn"}]}], "stream" => true}
+        {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(payload))
+        {conn, _websocket, types, terminal} = receive_terminal!(conn, websocket, ref, [])
+        assert_receive {Events, %{reason: "request_finalized", payload: %{"status" => finalized}}}, @timeout
+        assert "response.output_item.done" in types
+        request = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id)
+
+        if unquote(terminal_type) == "response.completed" do
+          assert List.last(types) == "error"
+          assert terminal["error"]["code"] == "server_error"
+          refute "response.completed" in types
+          assert {finalized, request.status, request.last_error_code} == {"failed", "failed", "upstream_stream_error"}
+        else
+          assert List.last(types) == "response.incomplete"
+          assert terminal["response"]["incomplete_details"] == %{"reason" => "max_output_tokens"}
+          refute "error" in types
+          assert {finalized, request.status, request.last_error_code} == {"succeeded", "succeeded", nil}
+        end
+
+        assert :ok = FakeUpstream.verify!(upstream)
+        conn
+      after
+        Mint.HTTP.close(conn)
+      end
+    end
+  end
+
   for kind <- ["function_call", "custom_tool_call"], defect <- [:missing_done, :wrong_id] do
     test "bridged SSE rejects #{kind} #{defect} legacy completion and preserves healthy legacy", %{conn: conn} do
       CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
@@ -233,6 +277,20 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
       end
 
     events ++ [terminal_shape(%{"type" => "response.completed", "response" => %{"id" => "resp_invalid_tool_fixture", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 5457, "input_tokens_details" => %{"cached_tokens" => 0, "cache_write_tokens" => 5454}, "output_tokens" => 2, "total_tokens" => 5459}}}, terminal_shape)]
+  end
+
+  defp status_events(kind, status, terminal_type) do
+    item = %{"type" => kind, "id" => "tool_fixture", "call_id" => "call_fixture", "name" => "fixture", "status" => "in_progress"}
+    delta_type = if kind == "function_call", do: "response.function_call_arguments.delta", else: "response.custom_tool_call_input.delta"
+    response = %{"id" => "resp_status_tool_fixture", "status" => String.replace_prefix(terminal_type, "response.", ""), "output" => [], "usage" => %{"input_tokens" => 5457, "input_tokens_details" => %{"cached_tokens" => 0, "cache_write_tokens" => 5454}, "output_tokens" => 2, "total_tokens" => 5459}}
+    response = if terminal_type == "response.incomplete", do: Map.put(response, "incomplete_details", %{"reason" => "max_output_tokens"}), else: response
+
+    [
+      %{"type" => "response.output_item.added", "output_index" => 0, "item" => item},
+      %{"type" => delta_type, "item_id" => "tool_fixture", "output_index" => 0, "delta" => "synthetic"},
+      %{"type" => "response.output_item.done", "output_index" => 0, "item" => %{item | "status" => status}},
+      %{"type" => terminal_type, "response" => response}
+    ]
   end
 
   defp terminal_shape(%{"response" => response}, :legacy), do: Map.drop(response, ["status", "output"])
