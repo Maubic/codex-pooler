@@ -11,17 +11,17 @@ defmodule CodexPooler.Gateway.Metadata.CatalogRepresentationTest do
 
   describe "version table" do
     test "clients whose every build prefers the instructions template get the template-only entry" do
-      for version <- ["0.148.0", "0.153.4", "0.160.2", "0.161.0", "0.161.0-alpha.1", "0.200.0", "1.0.0", "0.148.0-alpha.1"] do
+      for version <- ["0.148.0", "0.153.4", "0.161.1", "0.162.0", "0.162.0-alpha.1", "0.200.0", "1.0.0", "0.148.0-alpha.1"] do
         assert CatalogRepresentation.for_user_agent(codex(version)) == :instructions_template, version
       end
     end
 
     # findings#258 row 258-34: the clients whose catalog decode contract
-    # CodexModelDecodeContract mirrors (0.154.0 through 0.160.1) also lose the
+    # CodexModelDecodeContract mirrors (0.154.0 through 0.161.0) also lose the
     # entries they would fail to decode; the representation is otherwise the
     # template-only one.
     test "clients inside the verified decode window get the decode-checked template-only entry" do
-      for version <- ["0.154.0", "0.154.0-alpha.6.2", "0.155.0", "0.155.1", "0.156.0", "0.156.0-alpha.18", "0.156.1", "0.157.0", "0.157.0-alpha.1", "0.157.0-alpha.11.1", "0.157.1", "0.158.0", "0.158.0-alpha.1", "0.158.0-alpha.15.4", "0.159.0", "0.159.0-alpha.13", "0.159.3", "0.160.0", "0.160.0-alpha.4", "0.160.1"] do
+      for version <- ["0.154.0", "0.154.0-alpha.6.2", "0.155.0", "0.155.1", "0.156.0", "0.156.0-alpha.18", "0.156.1", "0.157.0", "0.157.0-alpha.1", "0.157.0-alpha.11.1", "0.157.1", "0.158.0", "0.158.0-alpha.1", "0.158.0-alpha.15.4", "0.159.0", "0.159.0-alpha.13", "0.159.3", "0.160.0", "0.160.0-alpha.4", "0.160.1", "0.161.0", "0.161.0-alpha.1"] do
         assert CatalogRepresentation.for_user_agent(codex(version)) == :decode_checked, version
       end
     end
@@ -48,12 +48,13 @@ defmodule CodexPooler.Gateway.Metadata.CatalogRepresentationTest do
             "codex_exec/0.157.0 (Linux; aarch64)",
             "codex_exec/0.157.1 (Linux; aarch64)",
             "codex_exec/0.158.0 (Linux; aarch64)",
-            "codex_exec/0.160.1 (Linux; aarch64)"
+            "codex_exec/0.160.1 (Linux; aarch64)",
+            "codex_exec/0.161.0 (Linux; aarch64)"
           ] do
         assert CatalogRepresentation.for_user_agent(user_agent) == :decode_checked, user_agent
       end
 
-      for user_agent <- ["codex_cli_rs/0.148.0", "codex_cli_rs/0.153.4 (Linux; x86_64)", "codex_exec/0.160.2 (Linux; aarch64)"] do
+      for user_agent <- ["codex_cli_rs/0.148.0", "codex_cli_rs/0.153.4 (Linux; x86_64)", "codex_exec/0.161.1 (Linux; aarch64)"] do
         assert CatalogRepresentation.for_user_agent(user_agent) == :instructions_template, user_agent
       end
     end

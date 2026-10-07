@@ -4,7 +4,7 @@ defmodule CodexPooler.Gateway.Metadata.CodexModelDecodeContractTest do
   # every entry. Every body the catalog builders serve must satisfy the
   # client's `ModelInfo` decode, and for a client inside the verified window an
   # entry that does not is left out instead of served. The vectors' verdicts
-  # were checked against the released 0.156.1, 0.157.0, 0.157.1, 0.158.0, 0.159.0, 0.159.3, 0.160.0 and 0.160.1 decoders (`codex debug
+  # were checked against the released 0.156.1, 0.157.0, 0.157.1, 0.158.0, 0.159.0, 0.159.3, 0.160.0, 0.160.1 and 0.161.0 decoders (`codex debug
   # models` with `model_catalog_json`, the same serde path as the network
   # fetch): every vector the contract rejects the client rejects, and every
   # tolerated vector and served body the client decodes.
@@ -87,13 +87,13 @@ defmodule CodexPooler.Gateway.Metadata.CodexModelDecodeContractTest do
     end
 
     test "states the verified client window" do
-      assert CodexModelDecodeContract.verified_range() == {{0, 154, 0}, {0, 160, 1}}
+      assert CodexModelDecodeContract.verified_range() == {{0, 154, 0}, {0, 161, 0}}
 
-      for version <- [{0, 154, 0}, {0, 155, 1}, {0, 156, 0}, {0, 156, 1}, {0, 157, 0}, {0, 157, 1}, {0, 158, 0}, {0, 159, 0}, {0, 159, 3}, {0, 160, 0}, {0, 160, 1}] do
+      for version <- [{0, 154, 0}, {0, 155, 1}, {0, 156, 0}, {0, 156, 1}, {0, 157, 0}, {0, 157, 1}, {0, 158, 0}, {0, 159, 0}, {0, 159, 3}, {0, 160, 0}, {0, 160, 1}, {0, 161, 0}] do
         assert CodexModelDecodeContract.verified_version?(version), inspect(version)
       end
 
-      for version <- [{0, 153, 4}, {0, 160, 2}, {0, 161, 0}, {1, 0, 0}] do
+      for version <- [{0, 153, 4}, {0, 161, 1}, {0, 162, 0}, {1, 0, 0}] do
         refute CodexModelDecodeContract.verified_version?(version), inspect(version)
       end
     end
