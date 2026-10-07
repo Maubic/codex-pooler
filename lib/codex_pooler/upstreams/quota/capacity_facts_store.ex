@@ -13,6 +13,8 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
   @window_keys ~w(window_kind window_minutes reset_at used_percent)
   @blocker_keys ~w(version credential_epoch overflowed observations)
   @max_blockers 16
+  @hard_denials [:workspace_limit, :model_limit]
+  @reset_rounding_seconds 5
 
   @type blockers :: %{credential_epoch: pos_integer(), observations: [CapacityFacts.t()], overflowed?: boolean()}
 
@@ -240,9 +242,49 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
   defp supersedes_blocker?(observation, blocker) do
     compatible_blocker_resources?(observation, blocker) and
       DateTime.compare(observation.observed_at, blocker.observed_at) == :gt and
-      observation.denial_category in [:none, :included_limit] and
-      superseding_permission?(observation, blocker)
+      (permission_supersedes?(observation, blocker) or later_cycle_supersedes?(observation, blocker))
   end
+
+  defp permission_supersedes?(observation, blocker),
+    do: observation.denial_category in [:none, :included_limit] and superseding_permission?(observation, blocker)
+
+  # A workspace or model denial recorded while an account window was exhausted
+  # ends with that window's cycle. A newer reading that no longer reports a hard
+  # denial and shows every such window in a later cycle below its limit (a
+  # natural roll-over or a provider-side reset) releases it, whatever else that
+  # reading leaves unknown. Without an exhausted window only permission clears it.
+  defp later_cycle_supersedes?(observation, %{denial_category: category} = blocker) when category in @hard_denials,
+    do: observation.denial_category not in @hard_denials and exhausted_windows_released?(blocker, &later_cycle_window?(observation, &1))
+
+  defp later_cycle_supersedes?(_observation, _blocker), do: false
+
+  defp later_cycle_window?(observation, exhausted) do
+    Enum.any?(observation.account_windows, fn current ->
+      current.window_kind == exhausted.window_kind and current.window_minutes == exhausted.window_minutes and
+        DateTime.diff(current.reset_at, exhausted.reset_at, :second) > @reset_rounding_seconds and
+        not exhausted_window?(current)
+    end)
+  end
+
+  @doc """
+  True when a workspace or model denial was recorded with at least one exhausted
+  account window and every one of them has reached its reset by `as_of`: the
+  denial ended with those windows' cycle, so it no longer denies the account.
+  """
+  @spec hard_denial_lapsed?(CapacityFacts.t(), DateTime.t()) :: boolean()
+  def hard_denial_lapsed?(%CapacityFacts{denial_category: category} = facts, %DateTime{} = as_of) when category in @hard_denials,
+    do: exhausted_windows_released?(facts, &(DateTime.compare(&1.reset_at, as_of) != :gt))
+
+  def hard_denial_lapsed?(_facts, _as_of), do: false
+
+  defp exhausted_windows_released?(facts, released?) do
+    case Enum.filter(facts.account_windows, &exhausted_window?/1) do
+      [] -> false
+      exhausted -> Enum.all?(exhausted, released?)
+    end
+  end
+
+  defp exhausted_window?(window), do: Decimal.compare(Decimal.new(window.used_percent), 100) != :lt
 
   defp compatible_blocker_resources?(observation, blocker) do
     observation.source_kind == blocker.source_kind and

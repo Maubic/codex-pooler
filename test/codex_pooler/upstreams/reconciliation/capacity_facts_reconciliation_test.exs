@@ -4,8 +4,10 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
   import CodexPooler.PoolerFixtures
 
   alias CodexPooler.{FakeUpstream, Repo, Upstreams}
+  alias CodexPooler.Quotas.{CapacityFacts, Evidence}
   alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
-  alias CodexPooler.Upstreams.Quota.{CapacityFactsStore, RoutingQuotaSnapshot}
+  alias CodexPooler.Upstreams.Quota.{AccountAvailabilityStore, CapacityFactsStore, RoutingQuotaSnapshot}
+  alias CodexPooler.Upstreams.Quota.Windows.EvidenceStore
   alias CodexPooler.Upstreams.Reconciliation.{PoolReconciliation, UsageProbe}
 
   @paths ["/backend-api/wham/usage", "/backend-api/codex/usage"]
@@ -399,6 +401,94 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
     end
   end
 
+  # Team member receipts below follow the provider's current usage receipt key
+  # for key with synthetic values: a null credit balance, a 5-hour and a weekly
+  # account window, and a workspace reached type while the member is denied.
+  # Readings older than a usage poll are written through the same stores the
+  # reconciliation writes, at their own observation time.
+  @tag credits_negative: true
+  test "an allowed receipt after a provider-side reset releases a retained workspace denial on the next usage poll" do
+    now = DateTime.utc_now() |> DateTime.add(-600) |> DateTime.truncate(:second)
+    denied_at = DateTime.add(now, -58 * 3_600)
+    {fake, identity, assignment} = setup_upstream(routes_for(:wham_usage, team_allowed(now)))
+    identity = recorded_reading!(identity, team_denial(denied_at), denied_at)
+    assert {:ok, %{observations: [%{denial_category: :workspace_limit}]}} = CapacityFactsStore.load_blockers(identity.metadata)
+    assert public_decision(identity, denied_at).reason_codes == ["provider_denied", "provider_credit_capacity_unverified"]
+
+    assert {:ok, identity} = refresh_at(identity, assignment, now)
+    assert {:ok, facts} = CapacityFactsStore.load(identity.metadata)
+    assert {facts.denial_category, facts.included_permission, facts.credit_permission} == {:none, :available, :unknown}
+    assert CapacityFactsStore.load_blockers(identity.metadata) == :error
+    refute "provider_denied" in public_decision(identity, now).reason_codes
+
+    # A poll at least three minutes later confirms the weekly window's provider-side zero.
+    confirmed_at = DateTime.add(now, 240)
+    FakeUpstream.set_mode(fake, {:path_json, routes_for(:wham_usage, team_allowed(now, confirmed_at))})
+    assert {:ok, identity} = refresh_at(identity, assignment, confirmed_at)
+    decision = public_decision(identity, confirmed_at)
+    assert decision.eligible?
+    assert decision.capacity_basis == :included_window
+    assert decision.reason_codes == []
+  end
+
+  @tag credits_negative: true
+  test "a workspace denial the previous release kept past its exhausted window's reset stops denying before the next usage poll" do
+    now = DateTime.utc_now() |> DateTime.add(-300) |> DateTime.truncate(:second)
+    denied_at = DateTime.add(now, -58 * 3_600)
+    reset_issued_at = DateTime.add(now, -240)
+    {_fake, identity, assignment} = setup_upstream(routes_for(:wham_usage, team_allowed(reset_issued_at, DateTime.add(now, 60))))
+
+    identity =
+      identity
+      |> previous_release_reading!(DateTime.add(denied_at, -14 * 3_600))
+      |> recorded_reading!(team_denial(denied_at), denied_at)
+      |> previous_release_reading!(reset_issued_at)
+      |> previous_release_reading!(now, reset_issued_at)
+
+    assert {:ok, %{denial_category: :malformed}} = CapacityFactsStore.load(identity.metadata)
+    assert {:ok, %{observations: [%{denial_category: :malformed}, %{denial_category: :workspace_limit}], overflowed?: false}} = CapacityFactsStore.load_blockers(identity.metadata)
+
+    decision = public_decision(identity, now)
+    assert decision.eligible?
+    assert decision.capacity_basis == :included_window
+    assert decision.reason_codes == []
+
+    assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, 60))
+    assert {:ok, %{observations: [%{denial_category: :malformed}], overflowed?: false}} = CapacityFactsStore.load_blockers(identity.metadata)
+    assert public_decision(identity, DateTime.add(now, 60)).eligible?
+  end
+
+  @tag credits_negative: true
+  test "a workspace denial the provider still reports keeps denying until its exhausted window resets" do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+    reset_at = DateTime.add(now, 60)
+    windows = [primary: {100, reset_at}, secondary: {40, DateTime.add(now, 3 * 86_400)}]
+    {fake, identity, assignment} = setup_upstream(routes_for(:wham_usage, team_denial(DateTime.add(now, -5), windows)))
+    assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, -5))
+    FakeUpstream.set_mode(fake, {:path_json, routes_for(:wham_usage, team_denial(now, windows))})
+    assert {:ok, identity} = refresh_at(identity, assignment, now)
+    assert {:ok, %{denial_category: :workspace_limit}} = CapacityFactsStore.load(identity.metadata)
+
+    for as_of <- [now, DateTime.add(reset_at, -1)] do
+      decision = public_decision(identity, as_of)
+      refute decision.eligible?
+      assert "provider_denied" in decision.reason_codes
+    end
+
+    refute "provider_denied" in public_decision(identity, reset_at).reason_codes
+  end
+
+  @tag credits_negative: true
+  test "a workspace denial recorded without an exhausted window does not end with a window reset" do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+    denial = team_denial(DateTime.add(now, -5), primary: {0, DateTime.add(now, 60)}, type: "workspace_owner_credits_depleted")
+    {_fake, identity, assignment} = setup_upstream(routes_for(:wham_usage, denial))
+    assert {:ok, identity} = refresh_at(identity, assignment, DateTime.add(now, -5))
+    decision = public_decision(identity, DateTime.add(now, 2 * 3_600))
+    refute decision.eligible?
+    assert "provider_denied" in decision.reason_codes
+  end
+
   defp setup_upstream(routes) do
     name = :"capacity_facts_fake_#{System.unique_integer([:positive])}"
 
@@ -468,6 +558,82 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
 
   defp credit_payload do
     %{"plan_type" => "synthetic", "rate_limit" => %{"allowed" => false, "limit_reached" => true}, "credits" => %{"balance" => "0.12500", "has_credits" => true, "unlimited" => false}, "spend_control" => %{"reached" => false}}
+  end
+
+  defp team_denial(at, opts \\ []) do
+    primary = Keyword.get(opts, :primary, {100, DateTime.add(at, 17_160)})
+    secondary = Keyword.get(opts, :secondary, {16, DateTime.add(at, 604_800 - 840)})
+    team_receipt(at, primary, secondary, %{"type" => Keyword.get(opts, :type, "workspace_member_usage_limit_reached")})
+  end
+
+  # The same provider-side reset read at `at`: its windows started at `issued_at`.
+  defp team_allowed(issued_at, at \\ nil), do: team_receipt(at || issued_at, {0, DateTime.add(issued_at, 18_000)}, {0, DateTime.add(issued_at, 604_800)}, nil)
+
+  defp team_receipt(at, primary, secondary, reached_type) do
+    %{
+      "user_id" => "user-synthetic-0340",
+      "account_id" => "00000000-0000-4000-8000-000000000340",
+      "email" => "member@example.test",
+      "plan_type" => "team",
+      "rate_limit" => %{"allowed" => is_nil(reached_type), "limit_reached" => not is_nil(reached_type), "primary_window" => team_window(at, 18_000, primary), "secondary_window" => team_window(at, 604_800, secondary)},
+      "code_review_rate_limit" => nil,
+      "additional_rate_limits" => nil,
+      "credits" => %{"has_credits" => false, "unlimited" => false, "overage_limit_reached" => false, "balance" => nil, "approx_local_messages" => [0, 0], "approx_cloud_messages" => [0, 0]},
+      "spend_control" => %{"reached" => false, "individual_limit" => nil},
+      "rate_limit_reached_type" => reached_type,
+      "rate_limit_reset_credits" => %{"available_count" => 0, "applicable_available_count" => 0},
+      "model_usage" => %{},
+      "promo" => nil
+    }
+  end
+
+  defp team_window(at, seconds, {percent, reset_at}),
+    do: %{"used_percent" => percent, "limit_window_seconds" => seconds, "reset_after_seconds" => DateTime.diff(reset_at, at), "reset_at" => DateTime.to_unix(reset_at)}
+
+  # What the reconciliation persists for a receipt, written at its own observation time.
+  defp recorded_reading!(identity, payload, at) do
+    identity = Repo.reload!(identity)
+    result = record_windows!(identity, payload, at)
+    epoch = CredentialFencing.credential_epoch(identity)
+    facts = %{result.capacity_facts | source_kind: :wham_usage}
+
+    metadata =
+      identity.metadata
+      |> AccountAvailabilityStore.transition(result.account_availability, at, epoch)
+      |> CapacityFactsStore.transition(facts, epoch)
+      |> CapacityFactsStore.record_observations([facts], epoch)
+
+    Repo.update!(Ecto.Changeset.change(identity, metadata: metadata))
+  end
+
+  # What the previous release persisted for an allowed Team member receipt: its
+  # windows and availability, the capacity reading revoked as malformed (a null
+  # credit balance), retained as a credit witness when none was, and no
+  # supersession of a retained denial.
+  defp previous_release_reading!(identity, at, issued_at \\ nil) do
+    identity = Repo.reload!(identity)
+    result = record_windows!(identity, team_allowed(issued_at || at, at), at)
+    epoch = CredentialFencing.credential_epoch(identity)
+    encoded = CapacityFactsStore.encode!(%{CapacityFacts.revoke(result.capacity_facts, :malformed) | source_kind: :wham_usage}, epoch)
+    blockers = identity.metadata["quota_capacity_blocker"] || %{"version" => 1, "credential_epoch" => epoch, "overflowed" => false, "observations" => [encoded]}
+
+    metadata =
+      identity.metadata
+      |> AccountAvailabilityStore.transition(result.account_availability, at, epoch)
+      |> Map.put("quota_capacity_facts", encoded)
+      |> Map.put("quota_capacity_blocker", blockers)
+
+    Repo.update!(Ecto.Changeset.change(identity, metadata: metadata))
+  end
+
+  defp record_windows!(identity, payload, at) do
+    assert {:ok, result} = Evidence.CodexParsers.parse_codex_usage_result(payload, at)
+
+    for evidence <- result.windows do
+      assert {:ok, _} = EvidenceStore.record_evidence(identity, Evidence.to_window_attrs(evidence), at, at)
+    end
+
+    result
   end
 
   defp requested_paths(fake), do: Enum.map(FakeUpstream.requests(fake), & &1.path)

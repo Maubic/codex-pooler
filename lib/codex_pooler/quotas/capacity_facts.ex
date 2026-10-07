@@ -138,8 +138,12 @@ defmodule CodexPooler.Quotas.CapacityFacts do
   defp included_signal(:error), do: :unknown
   defp included_signal(_malformed), do: :malformed
 
+  # The provider's usage schema makes `spend_control`, `credits` and
+  # `credits.balance` nullable: a null reads as the field being absent, as it
+  # does for account availability, never as a malformed receipt.
   defp spend_signal({:ok, %{"reached" => false}}), do: :clear
   defp spend_signal({:ok, %{"reached" => true}}), do: :reached
+  defp spend_signal({:ok, nil}), do: :absent
   defp spend_signal(:error), do: :absent
   defp spend_signal(_malformed), do: :malformed
 
@@ -157,14 +161,14 @@ defmodule CodexPooler.Quotas.CapacityFacts do
   defp reached_signal(_malformed), do: :malformed
 
   defp credits_signal(:error), do: {:unknown, nil, nil, nil}
-  defp credits_signal({:ok, nil}), do: {:malformed, nil, nil, nil}
+  defp credits_signal({:ok, nil}), do: {:unknown, nil, nil, nil}
 
   defp credits_signal({:ok, %{"has_credits" => has_credits, "unlimited" => unlimited} = credits})
        when is_boolean(has_credits) and is_boolean(unlimited) do
-    case Map.fetch(credits, "balance") do
-      {:ok, value} -> credits_with_balance(normalize_balance(value), has_credits, unlimited)
-      :error when unlimited -> {:available, nil, has_credits, unlimited}
-      :error -> {:unknown, nil, has_credits, unlimited}
+    case Map.get(credits, "balance") do
+      nil when unlimited -> {:available, nil, has_credits, unlimited}
+      nil -> {:unknown, nil, has_credits, unlimited}
+      value -> credits_with_balance(normalize_balance(value), has_credits, unlimited)
     end
   end
 

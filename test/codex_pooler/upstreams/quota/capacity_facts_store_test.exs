@@ -247,6 +247,61 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStoreTest do
     end
   end
 
+  # A Team member's workspace denial recorded while its 5-hour window was
+  # exhausted, as the reconciliation persists it.
+  @tag credits_negative: true
+  test "a newer receipt with each exhausted window in a later cycle releases a retained workspace denial whatever it leaves unknown" do
+    denial = workspace_denial()
+    later_cycle = [window("primary", 300, 14 * 3_600, "0"), window("secondary", 10_080, 7 * 86_400 + 9 * 3_600, "0")]
+    released = CapacityFacts.revoke(%{denial | observed_at: DateTime.add(@now, 9 * 3_600), account_windows: later_cycle}, :malformed)
+    metadata = %{} |> CapacityFactsStore.transition(denial, 1) |> CapacityFactsStore.transition(released, 1)
+    assert {:ok, %{denial_category: :malformed}} = CapacityFactsStore.load(metadata)
+    assert {:ok, %{observations: [%{denial_category: :malformed}], overflowed?: false}} = CapacityFactsStore.load_blockers(metadata)
+  end
+
+  for {name, primary} <- [{"the same cycle", {3_600, "100"}}, {"a later cycle exhausted again", {6 * 3_600, "100"}}, {"a cycle within reset rounding", {3_605, "0"}}] do
+    @tag credits_negative: true
+    test "a newer unknown receipt with the exhausted window in #{name} keeps the workspace denial" do
+      denial = workspace_denial()
+      {reset_in, used} = unquote(primary)
+      newer = CapacityFacts.revoke(%{denial | observed_at: DateTime.add(@now, 60), account_windows: [window("primary", 300, reset_in, used), window("secondary", 10_080, 6 * 86_400, "16")]}, :malformed)
+      metadata = %{} |> CapacityFactsStore.transition(denial, 1) |> CapacityFactsStore.transition(newer, 1)
+      assert {:ok, %{observations: [^denial | _]}} = CapacityFactsStore.load_blockers(metadata)
+    end
+  end
+
+  @tag credits_negative: true
+  test "a newer receipt that still reports the workspace denial in a later cycle keeps denying" do
+    denial = workspace_denial()
+    repeated = %{denial | observed_at: DateTime.add(@now, 2 * 3_600), account_windows: [window("primary", 300, 6 * 3_600, "100"), window("secondary", 10_080, 6 * 86_400, "30")]}
+    metadata = %{} |> CapacityFactsStore.transition(denial, 1) |> CapacityFactsStore.transition(repeated, 1)
+    assert {:ok, %{observations: [^denial]}} = CapacityFactsStore.load_blockers(metadata)
+    assert {:ok, ^repeated} = CapacityFactsStore.load(metadata)
+    refute CapacityFactsStore.hard_denial_lapsed?(repeated, DateTime.add(@now, 6 * 3_600 - 1))
+    assert CapacityFactsStore.hard_denial_lapsed?(repeated, DateTime.add(@now, 6 * 3_600))
+  end
+
+  test "a hard denial lapses only once every exhausted window it recorded has reset" do
+    denial = workspace_denial()
+    refute CapacityFactsStore.hard_denial_lapsed?(denial, DateTime.add(@now, 3_599))
+    assert CapacityFactsStore.hard_denial_lapsed?(denial, DateTime.add(@now, 3_600))
+
+    both = %{denial | account_windows: [window("primary", 300, 3_600, "100"), window("secondary", 10_080, 6 * 86_400, "100")]}
+    refute CapacityFactsStore.hard_denial_lapsed?(both, DateTime.add(@now, 6 * 86_400 - 1))
+    assert CapacityFactsStore.hard_denial_lapsed?(both, DateTime.add(@now, 6 * 86_400))
+
+    unexhausted = %{denial | account_windows: [window("primary", 300, 3_600, "0"), window("secondary", 10_080, 6 * 86_400, "16")]}
+    refute CapacityFactsStore.hard_denial_lapsed?(unexhausted, DateTime.add(@now, 30 * 86_400))
+    refute CapacityFactsStore.hard_denial_lapsed?(%{denial | account_windows: []}, DateTime.add(@now, 30 * 86_400))
+    refute CapacityFactsStore.hard_denial_lapsed?(%{denial | denial_category: :spend_limit}, DateTime.add(@now, 30 * 86_400))
+  end
+
+  defp workspace_denial do
+    %{credit() | credential_epoch: 1, included_permission: :unknown, credit_permission: :unavailable, denial_category: :workspace_limit, source_kind: :wham_usage, balance: nil, has_credits: false, account_windows: [window("primary", 300, 3_600, "100"), window("secondary", 10_080, 6 * 86_400, "16")]}
+  end
+
+  defp window(kind, minutes, reset_in, used), do: %{window_kind: kind, window_minutes: minutes, reset_at: DateTime.add(@now, reset_in), used_percent: used}
+
   defp fill_blockers(count) do
     observations = for index <- 1..count, do: %{credit() | observed_at: DateTime.add(@now, index), credit_permission: :unavailable, denial_category: :workspace_limit, source_kind: :codex_usage, account_windows: [descriptor("primary", index)]}
     {Enum.reduce(observations, %{}, &CapacityFactsStore.transition(&2, &1, 1)), observations}

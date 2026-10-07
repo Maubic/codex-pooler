@@ -176,7 +176,7 @@ defmodule CodexPooler.Upstreams.Quota.CapacityAssessment do
     snapshot.capacity_blockers_overflowed? or
       Enum.any?([snapshot.capacity_facts | snapshot.capacity_blockers], fn
         %CapacityFacts{denial_category: category} = facts when category in [:workspace_limit, :model_limit] ->
-          CapacityFactsStore.current?(facts, snapshot.credential_epoch, snapshot.as_of)
+          CapacityFactsStore.current?(facts, snapshot.credential_epoch, snapshot.as_of) and not CapacityFactsStore.hard_denial_lapsed?(facts, snapshot.as_of)
 
         _other ->
           false
