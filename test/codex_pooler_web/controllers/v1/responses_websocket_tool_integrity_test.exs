@@ -20,6 +20,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.{BridgeSessionAlias, CodexTurn}
   alias CodexPooler.Repo
+  alias CodexPooler.TestDiagnostics
 
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport,
     only: [enter_peer_owner_topology!: 0, start_peer_session_owner!: 2]
@@ -74,7 +75,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
         assert_receive {Events, %{reason: "request_finalized", payload: %{"status" => status}}}, @timeout
         observed = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id and r.id != ^prior_attempt.request_id)
         observed_settlement = Repo.one!(from l in LedgerEntry, where: l.request_id == ^observed.id and l.entry_kind == "settlement")
-        IO.puts("F4_LEGACY topology=#{topology} kind=#{kind} defect=#{defect} shape=#{terminal_shape} terminal=#{List.last(types)} status=#{status} request_id=#{observed.id} input=#{observed_settlement.input_tokens} output=#{observed_settlement.output_tokens} cache_write=#{observed_settlement.cache_write_tokens} provider_requests=#{length(FakeUpstream.requests(upstream))} invalid_alias=#{Repo.exists?(response_alias_query(setup, "resp_invalid_tool_fixture"))}")
+        TestDiagnostics.puts("F4_LEGACY topology=#{topology} kind=#{kind} defect=#{defect} shape=#{terminal_shape} terminal=#{List.last(types)} status=#{status} request_id=#{observed.id} input=#{observed_settlement.input_tokens} output=#{observed_settlement.output_tokens} cache_write=#{observed_settlement.cache_write_tokens} provider_requests=#{length(FakeUpstream.requests(upstream))} invalid_alias=#{Repo.exists?(response_alias_query(setup, "resp_invalid_tool_fixture"))}")
         assert status == "failed"
         assert List.last(types) == "error"
         assert terminal["error"]["code"] == "server_error"
@@ -132,7 +133,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
           assert node(peer.owner_pid) != node()
           assert %{upstream_pid: pid} = :sys.get_state(peer.owner_pid)
           assert node(pid) == peer.node
-          IO.puts("TASK3_REMOTE shape=#{terminal_shape} kind=#{kind} defect=#{defect} request_id=#{request.id} socket_node=#{node()} owner_node=#{peer.node} upstream_node=#{node(pid)} usage_input=5457 usage_output=2 cache_write=5454 provider_requests=3")
+          TestDiagnostics.puts("TASK3_REMOTE shape=#{terminal_shape} kind=#{kind} defect=#{defect} request_id=#{request.id} socket_node=#{node()} owner_node=#{peer.node} upstream_node=#{node(pid)} usage_input=5457 usage_output=2 cache_write=5454 provider_requests=3")
         end
 
         conn
@@ -229,7 +230,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketToolIntegrityTest do
       assert length(FakeUpstream.requests(upstream)) == 2
       assert Enum.all?(FakeUpstream.requests(upstream), &(&1.method == "WEBSOCKET"))
       assert :ok = FakeUpstream.verify!(upstream)
-      IO.puts("F4_BRIDGE request_id=#{request.id} terminal=error settlement=failed input=5457 output=2 cache_write=5454 release=1 provider_requests=2 healthy_legacy=completed")
+      TestDiagnostics.puts("F4_BRIDGE request_id=#{request.id} terminal=error settlement=failed input=5457 output=2 cache_write=5454 release=1 provider_requests=2 healthy_legacy=completed")
     end
   end
 
