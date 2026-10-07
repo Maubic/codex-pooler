@@ -72,46 +72,52 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
     :ok
   end
 
+  # A comprehension expands and compiles a test's body once per generated test, so a loop that generates more than a few tests keeps
+  # the scenario in a private function below it and each generated test is one call.
   for {shape, mode, topology} <- @arms do
     @tag shape: shape, serving_mode: mode, topology: topology
     test "#{shape} #{mode} #{topology}: a turn cut on a socket keyed by an older window is served on the reconnect's first websocket send",
          %{shape: shape, serving_mode: mode, topology: topology} do
-      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology in [:forwarded, :peer])
-      release_ref = make_ref()
-      upstream = start_upstream(FakeUpstream.strict_sequence(upstream_sequence(shape, release_ref)))
-      setup = topology_setup!(topology, upstream)
-      if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
-      ctx = %{shape: shape, mode: mode, topology: topology, setup: setup}
-      port = start_public_endpoint!()
-
-      {cut_socket, cut_frame} = open_cut_socket!(ctx, port)
-      outcomes = cut_and_reconnect!(ctx, port, cut_socket, cut_frame, release_ref)
-      rows = settled_rows(setup.pool.id)
-
-      measured = %{
-        outcomes: outcomes,
-        rows: Enum.map(rows, &{&1.transport, &1.status, &1.last_error_code}),
-        entitlements: entitlement_statuses(setup.pool.id),
-        sessions: session_count(setup.pool.id),
-        upstream: FakeUpstream.count(upstream)
-      }
-
-      CodexPooler.TestDiagnostics.puts(fn -> "P115 #{shape} #{mode} #{topology}: #{inspect(measured)}" end)
-      release_held_turn!(upstream, release_ref, shape)
-
-      # Served on the reconnect's first websocket send: no refusal, no HTTPS.
-      assert outcomes == [:served], inspect(measured)
-      assert Enum.all?(rows, &(&1.transport == "websocket"))
-      refute Enum.any?(rows, &(&1.status in ["accepted", "in_progress"]))
-      refute "armed" in measured.entitlements
-      # One generation per turn the client sent, plus the cut turn's single
-      # re-dispatch: never a second generation of the served turn.
-      assert measured.upstream == length(upstream_sequence(shape, release_ref))
-
-      for %Request{status: "succeeded"} = request <- rows, do: assert(charges(request) == 1)
-      assert Enum.count(rows, &(&1.status == "succeeded")) == length(upstream_sequence(shape, release_ref)) - 1
-      assert :ok = FakeUpstream.verify!(upstream)
+      assert_cut_turn_served_on_reconnects_first_send!(shape, mode, topology)
     end
+  end
+
+  defp assert_cut_turn_served_on_reconnects_first_send!(shape, mode, topology) do
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology in [:forwarded, :peer])
+    release_ref = make_ref()
+    upstream = start_upstream(FakeUpstream.strict_sequence(upstream_sequence(shape, release_ref)))
+    setup = topology_setup!(topology, upstream)
+    if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    ctx = %{shape: shape, mode: mode, topology: topology, setup: setup}
+    port = start_public_endpoint!()
+
+    {cut_socket, cut_frame} = open_cut_socket!(ctx, port)
+    outcomes = cut_and_reconnect!(ctx, port, cut_socket, cut_frame, release_ref)
+    rows = settled_rows(setup.pool.id)
+
+    measured = %{
+      outcomes: outcomes,
+      rows: Enum.map(rows, &{&1.transport, &1.status, &1.last_error_code}),
+      entitlements: entitlement_statuses(setup.pool.id),
+      sessions: session_count(setup.pool.id),
+      upstream: FakeUpstream.count(upstream)
+    }
+
+    CodexPooler.TestDiagnostics.puts(fn -> "P115 #{shape} #{mode} #{topology}: #{inspect(measured)}" end)
+    release_held_turn!(upstream, release_ref, shape)
+
+    # Served on the reconnect's first websocket send: no refusal, no HTTPS.
+    assert outcomes == [:served], inspect(measured)
+    assert Enum.all?(rows, &(&1.transport == "websocket"))
+    refute Enum.any?(rows, &(&1.status in ["accepted", "in_progress"]))
+    refute "armed" in measured.entitlements
+    # One generation per turn the client sent, plus the cut turn's single
+    # re-dispatch: never a second generation of the served turn.
+    assert measured.upstream == length(upstream_sequence(shape, release_ref))
+
+    for %Request{status: "succeeded"} = request <- rows, do: assert(charges(request) == 1)
+    assert Enum.count(rows, &(&1.status == "succeeded")) == length(upstream_sequence(shape, release_ref)) - 1
+    assert :ok = FakeUpstream.verify!(upstream)
   end
 
   # The reconnect upgrade overlaps an admitted window-1 turn on the still
@@ -124,104 +130,110 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
     @tag overlap_window: true, serving_mode: mode, topology: topology, cut: cut
     test "#{mode} #{topology} #{cut}: a reconnect upgrade joins the committed frame window while its predecessor is live",
          %{serving_mode: mode, topology: topology, cut: cut} do
-      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology in [:forwarded, :peer])
-      release_ref = make_ref()
-      upstream = start_upstream(FakeUpstream.strict_sequence(upstream_sequence(:post_turn, release_ref)))
+      assert_reconnect_upgrade_joins_committed_window!(mode, topology, cut)
+    end
+  end
 
-      if topology != :peer do
-        :ok = Sandbox.mode(Repo, :auto)
-        on_exit(fn -> :ok = Sandbox.mode(Repo, :manual) end)
+  # Reason: the body of a generated test; its branches select the matrix case.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp assert_reconnect_upgrade_joins_committed_window!(mode, topology, cut) do
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology in [:forwarded, :peer])
+    release_ref = make_ref()
+    upstream = start_upstream(FakeUpstream.strict_sequence(upstream_sequence(:post_turn, release_ref)))
+
+    if topology != :peer do
+      :ok = Sandbox.mode(Repo, :auto)
+      on_exit(fn -> :ok = Sandbox.mode(Repo, :manual) end)
+    end
+
+    setup = topology_setup!(topology, upstream)
+    if topology != :peer, do: register_unboxed_pool_cleanup!(setup)
+    if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    ctx = %{shape: :post_turn, mode: mode, topology: topology, setup: setup}
+    port = start_public_endpoint!()
+    {original, frame} = open_cut_socket!(ctx, port)
+    original = send_frame!(original, frame)
+    assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^release_ref}, @detection_timeout_ms
+    predecessor = latest_request(setup.pool.id)
+    assert predecessor.status == "in_progress"
+    session_id = request_session_id(predecessor.id)
+    assert window_alias_session_id(setup, @window_1) == session_id
+    assert Process.alive?(original.cleanup_socket)
+
+    cleanup = if cut == :cleanup_held, do: hold_original_cleanup!(original)
+    assert Repo.get!(Request, predecessor.id).status == "in_progress"
+
+    replacement =
+      if cut == :alias_held do
+        holder = hold_alias_row!(window_alias!(setup, @window_1).id)
+        watcher = watch_alias_row_waiters!(holder)
+
+        try do
+          replacement = connect!(port, setup, @window_1)
+          assert socket_connection_state!(replacement.cleanup_socket).codex_session.id == session_id
+          waited = stop_watcher!(watcher)
+          assert Enum.any?(waited, &match?([_pid, "Lock"], &1))
+          replacement
+        after
+          release_alias_row!(holder)
+        end
+      else
+        connect!(port, setup, @window_1)
       end
 
-      setup = topology_setup!(topology, upstream)
-      if topology != :peer, do: register_unboxed_pool_cleanup!(setup)
-      if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
-      ctx = %{shape: :post_turn, mode: mode, topology: topology, setup: setup}
-      port = start_public_endpoint!()
-      {original, frame} = open_cut_socket!(ctx, port)
-      original = send_frame!(original, frame)
-      assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^release_ref}, @detection_timeout_ms
-      predecessor = latest_request(setup.pool.id)
-      assert predecessor.status == "in_progress"
-      session_id = request_session_id(predecessor.id)
-      assert window_alias_session_id(setup, @window_1) == session_id
-      assert Process.alive?(original.cleanup_socket)
+    replacement_state = socket_connection_state!(replacement.cleanup_socket)
+    assert replacement_state.codex_session.id == session_id
+    assert session_count(setup.pool.id) == 1
 
-      cleanup = if cut == :cleanup_held, do: hold_original_cleanup!(original)
-      assert Repo.get!(Request, predecessor.id).status == "in_progress"
+    if topology == :forwarded do
+      assert {:ok, owner} = WebsocketOwnerSession.lookup(session_id)
+      assert node(owner) == node()
+    end
 
-      replacement =
-        if cut == :alias_held do
-          holder = hold_alias_row!(window_alias!(setup, @window_1).id)
-          watcher = watch_alias_row_waiters!(holder)
+    if topology == :peer do
+      assert node(setup.peer_owner.owner_pid) != node()
+      assert replacement_state.codex_session.owner_instance_id == Repo.get!(CodexSession, session_id).owner_instance_id
+    end
 
-          try do
-            replacement = connect!(port, setup, @window_1)
-            assert socket_connection_state!(replacement.cleanup_socket).codex_session.id == session_id
-            waited = stop_watcher!(watcher)
-            assert Enum.any?(waited, &match?([_pid, "Lock"], &1))
-            replacement
-          after
-            release_alias_row!(holder)
-          end
+    if cleanup do
+      :ok = :sys.resume(cleanup)
+      :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(original.cleanup_socket)
+    else
+      close!(original)
+    end
+
+    if topology == :direct,
+      do: await!(fn -> Repo.get!(Request, predecessor.id).status == "failed" end, "the overlapped predecessor never settled"),
+      else: await!(fn -> entitlement_status(predecessor.id) == "armed" end, "the overlapped predecessor never armed")
+
+    replacement = replacement |> send_frame!(frame) |> completed!()
+
+    if topology in [:forwarded, :peer] do
+      owner =
+        if topology == :peer do
+          setup.peer_owner.owner_pid
         else
-          connect!(port, setup, @window_1)
+          {:ok, owner} = WebsocketOwnerSession.lookup(session_id)
+          owner
         end
 
-      replacement_state = socket_connection_state!(replacement.cleanup_socket)
-      assert replacement_state.codex_session.id == session_id
-      assert session_count(setup.pool.id) == 1
-
-      if topology == :forwarded do
-        assert {:ok, owner} = WebsocketOwnerSession.lookup(session_id)
-        assert node(owner) == node()
-      end
-
-      if topology == :peer do
-        assert node(setup.peer_owner.owner_pid) != node()
-        assert replacement_state.codex_session.owner_instance_id == Repo.get!(CodexSession, session_id).owner_instance_id
-      end
-
-      if cleanup do
-        :ok = :sys.resume(cleanup)
-        :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(original.cleanup_socket)
-      else
-        close!(original)
-      end
-
-      if topology == :direct,
-        do: await!(fn -> Repo.get!(Request, predecessor.id).status == "failed" end, "the overlapped predecessor never settled"),
-        else: await!(fn -> entitlement_status(predecessor.id) == "armed" end, "the overlapped predecessor never armed")
-
-      replacement = replacement |> send_frame!(frame) |> completed!()
-
-      if topology in [:forwarded, :peer] do
-        owner =
-          if topology == :peer do
-            setup.peer_owner.owner_pid
-          else
-            {:ok, owner} = WebsocketOwnerSession.lookup(session_id)
-            owner
-          end
-
-        assert :sys.get_state(owner).downstream.pid == replacement.cleanup_socket
-      end
-
-      close!(replacement)
-      release_held_turn!(upstream, release_ref, :post_turn)
-      rows = settled_rows(setup.pool.id)
-      assert request_session_id(List.last(rows).id) == session_id
-      assert session_count(setup.pool.id) == 1
-      assert Enum.all?(rows, &(&1.transport == "websocket"))
-      assert Enum.all?(rows, &(&1.status in ["succeeded", "failed"]))
-      assert Enum.count(rows, &(&1.status == "succeeded")) == 3
-      assert length(rows) == if(topology == :direct, do: 4, else: 3)
-      assert entitlement_status(predecessor.id) == if(topology == :direct, do: nil, else: "consumed")
-      retry_links = Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^predecessor.id, select: link.successor_request_id))
-      assert retry_links == if(topology == :direct, do: [List.last(rows).id], else: [])
-      for %Request{status: "succeeded"} = request <- rows, do: assert(charges(request) == 1)
-      assert :ok = FakeUpstream.verify!(upstream)
+      assert :sys.get_state(owner).downstream.pid == replacement.cleanup_socket
     end
+
+    close!(replacement)
+    release_held_turn!(upstream, release_ref, :post_turn)
+    rows = settled_rows(setup.pool.id)
+    assert request_session_id(List.last(rows).id) == session_id
+    assert session_count(setup.pool.id) == 1
+    assert Enum.all?(rows, &(&1.transport == "websocket"))
+    assert Enum.all?(rows, &(&1.status in ["succeeded", "failed"]))
+    assert Enum.count(rows, &(&1.status == "succeeded")) == 3
+    assert length(rows) == if(topology == :direct, do: 4, else: 3)
+    assert entitlement_status(predecessor.id) == if(topology == :direct, do: nil, else: "consumed")
+    retry_links = Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^predecessor.id, select: link.successor_request_id))
+    assert retry_links == if(topology == :direct, do: [List.last(rows).id], else: [])
+    for %Request{status: "succeeded"} = request <- rows, do: assert(charges(request) == 1)
+    assert :ok = FakeUpstream.verify!(upstream)
   end
 
   # The provider completed and the socket wrote its terminal, but the
@@ -231,76 +243,80 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
     @tag delivered_window_overlap: true, serving_mode: mode, topology: topology, sticky: sticky
     test "#{mode} #{topology} sticky=#{sticky}: a delivered window advance admits one retained-prefix mailbox successor after an overlapping upgrade",
          %{serving_mode: mode, topology: topology, sticky: sticky} do
-      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology in [:forwarded, :peer])
-      release_ref = make_ref()
-      output = [reasoning_item(), answer()]
-      held = FakeUpstream.expect_request(method: "WEBSOCKET", respond: FakeUpstream.barrier_websocket_frames(completed_messages(@cut, output), notify: self(), release_ref: release_ref))
-      upstream = start_upstream(FakeUpstream.strict_sequence([turn_1_upstream(), compaction_upstream(), held, served_upstream()]))
-
-      if topology != :peer do
-        :ok = Sandbox.mode(Repo, :auto)
-        on_exit(fn -> :ok = Sandbox.mode(Repo, :manual) end)
-      end
-
-      setup = topology_setup!(topology, upstream)
-      if topology != :peer, do: register_unboxed_pool_cleanup!(setup)
-      if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
-      ctx = %{shape: :post_turn, mode: mode, topology: topology, setup: setup}
-      port = start_public_endpoint!()
-      {original, frame} = open_cut_socket!(ctx, port)
-      frame = maybe_sticky_frame(frame, original.turn_state, sticky)
-      original = send_frame!(original, frame)
-      assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^release_ref}, @detection_timeout_ms
-      predecessor = latest_request(setup.pool.id)
-      session_id = request_session_id(predecessor.id)
-      assert window_alias_session_id(setup, @window_1) == session_id
-      state = await_socket_connection_state!(original.cleanup_socket, &(MapSet.size(&1.tasks) == 1))
-      [task] = MapSet.to_list(state.tasks)
-      on_exit(fn -> if Process.alive?(task), do: :erlang.resume_process(task) end)
-      true = :erlang.suspend_process(task)
-
-      for ordinal <- 0..1 do
-        if ordinal > 0, do: assert_receive({:fake_upstream_frame_barrier, ^ordinal, _handler, ^release_ref}, @detection_timeout_ms)
-        :ok = FakeUpstream.release_frame(upstream, release_ref)
-      end
-
-      {original, created} = receive_frame!(original)
-      {original, retained} = receive_frame!(original)
-      assert created["type"] == "response.created"
-      assert retained["type"] == "response.output_item.done"
-      :ok = FakeUpstream.release_remaining_frames(upstream, release_ref)
-      _delivered = await_socket_connection_state!(original.cleanup_socket, &(get_in(&1, [:downstream_delivery_evidence, task, :terminal_class]) == "response.completed"))
-      assert Repo.get!(Request, predecessor.id).status == "in_progress"
-
-      # No terminal is consumed from the old Mint client. Its socket remains
-      # open while the new socket resolves window 1 against committed aliases.
-      replacement = connect!(port, setup, @window_1)
-      assert socket_connection_state!(replacement.cleanup_socket).codex_session.id == session_id
-      assert session_count(setup.pool.id) == 1
-      true = :erlang.resume_process(task)
-      await!(fn -> Repo.get!(Request, predecessor.id).status == "succeeded" end, "the delivered predecessor never settled")
-      await!(fn -> match?(%{"terminal_class" => "response.completed"}, delivery_receipt(predecessor.id)) end, "the delivered predecessor never recorded its receipt")
-      assert %{"completed_items" => 2, "terminal_class" => "response.completed"} = delivery_receipt(predecessor.id)
-      close!(original)
-
-      resend = window_1_frame(ctx, @turn_2, window_1_history(ctx, 2) ++ [reasoning_item(), mailbox_item()])
-
-      resend = maybe_sticky_frame(resend, original.turn_state, sticky)
-
-      replacement = replacement |> send_frame!(resend) |> completed!()
-      assert socket_connection_state!(replacement.cleanup_socket).codex_session.id == session_id
-      close!(replacement)
-      rows = settled_rows(setup.pool.id)
-      assert length(rows) == 4
-      assert Enum.all?(rows, &(&1.status == "succeeded" and &1.transport == "websocket"))
-      successor = List.last(rows)
-      assert request_session_id(successor.id) == session_id
-      assert session_count(setup.pool.id) == 1
-      assert Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^predecessor.id, select: link.successor_request_id)) == [successor.id]
-      for request <- rows, do: assert(charges(request) == 1)
-      assert FakeUpstream.count(upstream) == 4
-      assert :ok = FakeUpstream.verify!(upstream)
+      assert_window_advance_admits_retained_prefix_successor!(mode, topology, sticky)
     end
+  end
+
+  defp assert_window_advance_admits_retained_prefix_successor!(mode, topology, sticky) do
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology in [:forwarded, :peer])
+    release_ref = make_ref()
+    output = [reasoning_item(), answer()]
+    held = FakeUpstream.expect_request(method: "WEBSOCKET", respond: FakeUpstream.barrier_websocket_frames(completed_messages(@cut, output), notify: self(), release_ref: release_ref))
+    upstream = start_upstream(FakeUpstream.strict_sequence([turn_1_upstream(), compaction_upstream(), held, served_upstream()]))
+
+    if topology != :peer do
+      :ok = Sandbox.mode(Repo, :auto)
+      on_exit(fn -> :ok = Sandbox.mode(Repo, :manual) end)
+    end
+
+    setup = topology_setup!(topology, upstream)
+    if topology != :peer, do: register_unboxed_pool_cleanup!(setup)
+    if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    ctx = %{shape: :post_turn, mode: mode, topology: topology, setup: setup}
+    port = start_public_endpoint!()
+    {original, frame} = open_cut_socket!(ctx, port)
+    frame = maybe_sticky_frame(frame, original.turn_state, sticky)
+    original = send_frame!(original, frame)
+    assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^release_ref}, @detection_timeout_ms
+    predecessor = latest_request(setup.pool.id)
+    session_id = request_session_id(predecessor.id)
+    assert window_alias_session_id(setup, @window_1) == session_id
+    state = await_socket_connection_state!(original.cleanup_socket, &(MapSet.size(&1.tasks) == 1))
+    [task] = MapSet.to_list(state.tasks)
+    on_exit(fn -> if Process.alive?(task), do: :erlang.resume_process(task) end)
+    true = :erlang.suspend_process(task)
+
+    for ordinal <- 0..1 do
+      if ordinal > 0, do: assert_receive({:fake_upstream_frame_barrier, ^ordinal, _handler, ^release_ref}, @detection_timeout_ms)
+      :ok = FakeUpstream.release_frame(upstream, release_ref)
+    end
+
+    {original, created} = receive_frame!(original)
+    {original, retained} = receive_frame!(original)
+    assert created["type"] == "response.created"
+    assert retained["type"] == "response.output_item.done"
+    :ok = FakeUpstream.release_remaining_frames(upstream, release_ref)
+    _delivered = await_socket_connection_state!(original.cleanup_socket, &(get_in(&1, [:downstream_delivery_evidence, task, :terminal_class]) == "response.completed"))
+    assert Repo.get!(Request, predecessor.id).status == "in_progress"
+
+    # No terminal is consumed from the old Mint client. Its socket remains
+    # open while the new socket resolves window 1 against committed aliases.
+    replacement = connect!(port, setup, @window_1)
+    assert socket_connection_state!(replacement.cleanup_socket).codex_session.id == session_id
+    assert session_count(setup.pool.id) == 1
+    true = :erlang.resume_process(task)
+    await!(fn -> Repo.get!(Request, predecessor.id).status == "succeeded" end, "the delivered predecessor never settled")
+    await!(fn -> match?(%{"terminal_class" => "response.completed"}, delivery_receipt(predecessor.id)) end, "the delivered predecessor never recorded its receipt")
+    assert %{"completed_items" => 2, "terminal_class" => "response.completed"} = delivery_receipt(predecessor.id)
+    close!(original)
+
+    resend = window_1_frame(ctx, @turn_2, window_1_history(ctx, 2) ++ [reasoning_item(), mailbox_item()])
+
+    resend = maybe_sticky_frame(resend, original.turn_state, sticky)
+
+    replacement = replacement |> send_frame!(resend) |> completed!()
+    assert socket_connection_state!(replacement.cleanup_socket).codex_session.id == session_id
+    close!(replacement)
+    rows = settled_rows(setup.pool.id)
+    assert length(rows) == 4
+    assert Enum.all?(rows, &(&1.status == "succeeded" and &1.transport == "websocket"))
+    successor = List.last(rows)
+    assert request_session_id(successor.id) == session_id
+    assert session_count(setup.pool.id) == 1
+    assert Repo.all(from(link in RequestClientRetryLink, where: link.predecessor_request_id == ^predecessor.id, select: link.successor_request_id)) == [successor.id]
+    for request <- rows, do: assert(charges(request) == 1)
+    assert FakeUpstream.count(upstream) == 4
+    assert :ok = FakeUpstream.verify!(upstream)
   end
 
   defp maybe_sticky_frame(frame, _turn_state, false), do: frame
@@ -345,96 +361,102 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
     @tag shape: shape, serving_mode: mode, topology: topology, later: later
     test "#{shape} #{mode} #{topology} #{later}: after the cut the window leads to a coherent live session",
          %{shape: shape, serving_mode: mode, topology: topology, later: later} do
-      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology in [:forwarded, :peer])
-      release_ref = make_ref()
-      sequence = upstream_sequence(shape, release_ref) ++ later_upstream(later, topology)
-      upstream = start_upstream(FakeUpstream.strict_sequence(sequence))
-      setup = topology_setup!(topology, upstream)
-      if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
-      ctx = %{shape: shape, mode: mode, topology: topology, setup: setup}
-      port = start_public_endpoint!()
-
-      {cut_socket, cut_frame, open} = open_cut_socket_keeping!(ctx, port, later)
-      assert cut_and_reconnect!(ctx, port, cut_socket, cut_frame, release_ref) == [:served]
-      release_held_turn!(upstream, release_ref, shape)
-      %Request{id: cut_request_id} = cut_request(setup.pool.id, shape)
-      cut_session_id = request_session_id(cut_request_id)
-      sessions = session_count(setup.pool.id)
-      assert window_alias_session_id(setup, @window_1) == cut_session_id
-
-      if later == :owner_expired, do: stop_owner!(ctx, cut_session_id)
-
-      later_request =
-        case later do
-          :foreign_anchor ->
-            client = connect!(port, setup, @window_1)
-            {client, frames} = client |> send_frame!(anchored_frame(ctx, @turn_4)) |> receive_until_terminal([])
-            close!(client)
-            expected = if topology == :direct, do: native_previous_response_retry_event(), else: "response.completed"
-            assert List.last(frames) == expected or List.last(frames)["type"] == expected, inspect(List.last(frames))
-            latest_request(setup.pool.id)
-
-          :session_open ->
-            # The window's own session's still-open connection continues its
-            # own turn, anchored on the response it produced there.
-            open |> send_frame!(anchored_frame(ctx, @turn_2)) |> completed!() |> close!()
-            latest_request(setup.pool.id)
-
-          _process ->
-            client = connect!(port, setup, @window_1)
-            client |> send_frame!(window_1_frame(ctx, @turn_4, later_history(ctx))) |> completed!() |> close!()
-            latest_request(setup.pool.id)
-        end
-
-      later_session_id = request_session_id(later_request.id)
-      later_session = Repo.get!(CodexSession, later_session_id)
-
-      CodexPooler.TestDiagnostics.puts(fn ->
-        "P115 after #{shape} #{mode} #{topology} #{later}: #{inspect(%{cut_session: short(cut_session_id), later_session: short(later_session_id), sessions: {sessions, session_count(setup.pool.id)}, later: later_request.status})}"
-      end)
-
-      assert later_request.transport == "websocket"
-
-      case later do
-        :foreign_anchor when topology == :direct ->
-          assert {later_request.status, later_request.last_error_code} == {"failed", "stream_incomplete"}
-          refute Enum.any?(FakeUpstream.requests(upstream), &(&1.json["previous_response_id"] == @resumed))
-
-        :foreign_anchor ->
-          assert later_request.status == "succeeded"
-          refute later_session_id == cut_session_id
-
-        _served ->
-          assert later_request.status == "succeeded"
-      end
-
-      case later do
-        :owner_live ->
-          # Joined the session the window leads to, the one that served the cut
-          # turn, and no other session was opened.
-          assert later_session_id == cut_session_id
-          assert session_count(setup.pool.id) == sessions
-
-        :owner_expired ->
-          # Never the session whose owner is gone.
-          refute later_session_id == cut_session_id
-
-        later when later == :session_open or (later == :foreign_anchor and topology != :direct) ->
-          assert later_session_id != cut_session_id
-          [resumed, anchored] = upstream |> FakeUpstream.requests() |> Enum.filter(&(&1.json["previous_response_id"] == @resumed or List.last(&1.json["input"] || []) == prompt("second")))
-          assert anchored.websocket_connection_id == resumed.websocket_connection_id
-
-        _refused ->
-          :ok
-      end
-
-      if later != :foreign_anchor or topology != :direct do
-        assert later_session.status == "active"
-        assert DateTime.compare(later_session.owner_lease_expires_at, DateTime.utc_now()) == :gt
-      end
-
-      unless later == :foreign_anchor and topology == :direct, do: assert(:ok = FakeUpstream.verify!(upstream))
+      assert_window_leads_to_coherent_live_session!(shape, mode, topology, later)
     end
+  end
+
+  # Reason: the body of a generated test; its branches select the matrix case.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp assert_window_leads_to_coherent_live_session!(shape, mode, topology, later) do
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology in [:forwarded, :peer])
+    release_ref = make_ref()
+    sequence = upstream_sequence(shape, release_ref) ++ later_upstream(later, topology)
+    upstream = start_upstream(FakeUpstream.strict_sequence(sequence))
+    setup = topology_setup!(topology, upstream)
+    if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    ctx = %{shape: shape, mode: mode, topology: topology, setup: setup}
+    port = start_public_endpoint!()
+
+    {cut_socket, cut_frame, open} = open_cut_socket_keeping!(ctx, port, later)
+    assert cut_and_reconnect!(ctx, port, cut_socket, cut_frame, release_ref) == [:served]
+    release_held_turn!(upstream, release_ref, shape)
+    %Request{id: cut_request_id} = cut_request(setup.pool.id, shape)
+    cut_session_id = request_session_id(cut_request_id)
+    sessions = session_count(setup.pool.id)
+    assert window_alias_session_id(setup, @window_1) == cut_session_id
+
+    if later == :owner_expired, do: stop_owner!(ctx, cut_session_id)
+
+    later_request =
+      case later do
+        :foreign_anchor ->
+          client = connect!(port, setup, @window_1)
+          {client, frames} = client |> send_frame!(anchored_frame(ctx, @turn_4)) |> receive_until_terminal([])
+          close!(client)
+          expected = if topology == :direct, do: native_previous_response_retry_event(), else: "response.completed"
+          assert List.last(frames) == expected or List.last(frames)["type"] == expected, inspect(List.last(frames))
+          latest_request(setup.pool.id)
+
+        :session_open ->
+          # The window's own session's still-open connection continues its
+          # own turn, anchored on the response it produced there.
+          open |> send_frame!(anchored_frame(ctx, @turn_2)) |> completed!() |> close!()
+          latest_request(setup.pool.id)
+
+        _process ->
+          client = connect!(port, setup, @window_1)
+          client |> send_frame!(window_1_frame(ctx, @turn_4, later_history(ctx))) |> completed!() |> close!()
+          latest_request(setup.pool.id)
+      end
+
+    later_session_id = request_session_id(later_request.id)
+    later_session = Repo.get!(CodexSession, later_session_id)
+
+    CodexPooler.TestDiagnostics.puts(fn ->
+      "P115 after #{shape} #{mode} #{topology} #{later}: #{inspect(%{cut_session: short(cut_session_id), later_session: short(later_session_id), sessions: {sessions, session_count(setup.pool.id)}, later: later_request.status})}"
+    end)
+
+    assert later_request.transport == "websocket"
+
+    case later do
+      :foreign_anchor when topology == :direct ->
+        assert {later_request.status, later_request.last_error_code} == {"failed", "stream_incomplete"}
+        refute Enum.any?(FakeUpstream.requests(upstream), &(&1.json["previous_response_id"] == @resumed))
+
+      :foreign_anchor ->
+        assert later_request.status == "succeeded"
+        refute later_session_id == cut_session_id
+
+      _served ->
+        assert later_request.status == "succeeded"
+    end
+
+    case later do
+      :owner_live ->
+        # Joined the session the window leads to, the one that served the cut
+        # turn, and no other session was opened.
+        assert later_session_id == cut_session_id
+        assert session_count(setup.pool.id) == sessions
+
+      :owner_expired ->
+        # Never the session whose owner is gone.
+        refute later_session_id == cut_session_id
+
+      later when later == :session_open or (later == :foreign_anchor and topology != :direct) ->
+        assert later_session_id != cut_session_id
+        [resumed, anchored] = upstream |> FakeUpstream.requests() |> Enum.filter(&(&1.json["previous_response_id"] == @resumed or List.last(&1.json["input"] || []) == prompt("second")))
+        assert anchored.websocket_connection_id == resumed.websocket_connection_id
+
+      _refused ->
+        :ok
+    end
+
+    if later != :foreign_anchor or topology != :direct do
+      assert later_session.status == "active"
+      assert DateTime.compare(later_session.owner_lease_expires_at, DateTime.utc_now()) == :gt
+    end
+
+    unless later == :foreign_anchor and topology == :direct, do: assert(:ok = FakeUpstream.verify!(upstream))
   end
 
   # A process that compacts on its socket (a manual `thread/compact`, or the
@@ -463,41 +485,45 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
     @tag shape: shape, serving_mode: mode, topology: topology
     test "#{shape} #{mode} #{topology}: after a compaction and a lost socket the next window's session prefers the thread's assignment",
          %{shape: shape, serving_mode: mode, topology: topology} do
-      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology in [:forwarded, :peer])
-      upstream = start_upstream(FakeUpstream.strict_sequence([turn_1_upstream(), compaction_upstream(), served_upstream()]))
-      other_upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_window_advance_other_unused"}))
-      setup = topology_setup!(topology, upstream)
-      if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
-      ctx = %{shape: shape, mode: mode, topology: topology, setup: setup}
-      port = start_public_endpoint!()
-
-      session_id = compact_and_lose_socket!(ctx, port)
-      before = Repo.get!(CodexSession, session_id)
-      assert before.pool_upstream_assignment_id == setup.assignment.id
-      other = add_least_recently_used_account!(setup, other_upstream)
-
-      {rows, logs} = next_window_turn!(ctx, port)
-      next_request = List.last(rows)
-      next_session_id = request_session_id(next_request.id)
-
-      CodexPooler.TestDiagnostics.puts(fn ->
-        "270-283 #{shape} #{mode} #{topology}: #{inspect(%{rows: Enum.map(rows, &{&1.status, short(request_session_id(&1.id))}), preference: routing_preference(next_request), next_assignment: short(Repo.get!(CodexSession, next_session_id).pool_upstream_assignment_id), thread_assignment: short(setup.assignment.id), other: short(other.assignment.id)})}"
-      end)
-
-      assert Enum.map(rows, & &1.status) == ["succeeded", "succeeded", "succeeded"]
-      assert Enum.all?(rows, &(&1.transport == "websocket"))
-      # A session of its own, and the previous window's session left as it was.
-      refute next_session_id == session_id
-      assert session_count(setup.pool.id) == 2
-      assert window_alias_session_id(setup, @window_1) == next_session_id
-      assert Map.take(Repo.get!(CodexSession, session_id), [:status, :owner_lease_token, :pool_upstream_assignment_id]) == Map.take(before, [:status, :owner_lease_token, :pool_upstream_assignment_id])
-      # Its first turn preferred the thread's assignment, and was served there.
-      assert routing_preference(next_request) == {"previous_window", "applied"}
-      assert Repo.get!(CodexSession, next_session_id).pool_upstream_assignment_id == setup.assignment.id
-      assert FakeUpstream.count(other_upstream) == 0
-      assert logs =~ "websocket upgrade window preference previous_codex_session_id=#{session_id} alias_preview=#{window_preview(@window_1)} disposition=preferred"
-      assert :ok = FakeUpstream.verify!(upstream)
+      assert_next_window_prefers_threads_assignment!(shape, mode, topology)
     end
+  end
+
+  defp assert_next_window_prefers_threads_assignment!(shape, mode, topology) do
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology in [:forwarded, :peer])
+    upstream = start_upstream(FakeUpstream.strict_sequence([turn_1_upstream(), compaction_upstream(), served_upstream()]))
+    other_upstream = start_upstream(FakeUpstream.json_response(%{"id" => "resp_window_advance_other_unused"}))
+    setup = topology_setup!(topology, upstream)
+    if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    ctx = %{shape: shape, mode: mode, topology: topology, setup: setup}
+    port = start_public_endpoint!()
+
+    session_id = compact_and_lose_socket!(ctx, port)
+    before = Repo.get!(CodexSession, session_id)
+    assert before.pool_upstream_assignment_id == setup.assignment.id
+    other = add_least_recently_used_account!(setup, other_upstream)
+
+    {rows, logs} = next_window_turn!(ctx, port)
+    next_request = List.last(rows)
+    next_session_id = request_session_id(next_request.id)
+
+    CodexPooler.TestDiagnostics.puts(fn ->
+      "270-283 #{shape} #{mode} #{topology}: #{inspect(%{rows: Enum.map(rows, &{&1.status, short(request_session_id(&1.id))}), preference: routing_preference(next_request), next_assignment: short(Repo.get!(CodexSession, next_session_id).pool_upstream_assignment_id), thread_assignment: short(setup.assignment.id), other: short(other.assignment.id)})}"
+    end)
+
+    assert Enum.map(rows, & &1.status) == ["succeeded", "succeeded", "succeeded"]
+    assert Enum.all?(rows, &(&1.transport == "websocket"))
+    # A session of its own, and the previous window's session left as it was.
+    refute next_session_id == session_id
+    assert session_count(setup.pool.id) == 2
+    assert window_alias_session_id(setup, @window_1) == next_session_id
+    assert Map.take(Repo.get!(CodexSession, session_id), [:status, :owner_lease_token, :pool_upstream_assignment_id]) == Map.take(before, [:status, :owner_lease_token, :pool_upstream_assignment_id])
+    # Its first turn preferred the thread's assignment, and was served there.
+    assert routing_preference(next_request) == {"previous_window", "applied"}
+    assert Repo.get!(CodexSession, next_session_id).pool_upstream_assignment_id == setup.assignment.id
+    assert FakeUpstream.count(other_upstream) == 0
+    assert logs =~ "websocket upgrade window preference previous_codex_session_id=#{session_id} alias_preview=#{window_preview(@window_1)} disposition=preferred"
+    assert :ok = FakeUpstream.verify!(upstream)
   end
 
   # The previous window's session is no usable preference: its lease lapsed
@@ -507,44 +533,48 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
   for unusable <- [:lease_expired, :account_paused] do
     @tag unusable: unusable
     test "manual full forwarded #{unusable}: the next window's session without a usable preference is routed as any other", %{unusable: unusable} do
-      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
-      upstream = start_upstream(FakeUpstream.strict_sequence([turn_1_upstream(), compaction_upstream()]))
-      other_upstream = start_upstream(FakeUpstream.strict_sequence([served_upstream()]))
-      setup = topology_setup!(:forwarded, upstream)
-      ctx = %{shape: :manual, mode: "full", topology: :forwarded, setup: setup}
-      port = start_public_endpoint!()
-
-      session_id = compact_and_lose_socket!(ctx, port)
-      other = add_least_recently_used_account!(setup, other_upstream)
-
-      case unusable do
-        :lease_expired ->
-          stop_owner!(ctx, session_id)
-
-        :account_paused ->
-          {1, _rows} = Repo.update_all(from(assignment in PoolUpstreamAssignment, where: assignment.id == ^setup.assignment.id), set: [status: "paused"])
-      end
-
-      {rows, logs} = next_window_turn!(ctx, port)
-      next_request = List.last(rows)
-      next_session_id = request_session_id(next_request.id)
-
-      assert Enum.map(rows, & &1.status) == ["succeeded", "succeeded", "succeeded"]
-      refute next_session_id == session_id
-      assert Repo.get!(CodexSession, next_session_id).pool_upstream_assignment_id == other.assignment.id
-
-      case unusable do
-        :lease_expired ->
-          assert routing_preference(next_request) == {nil, nil}
-          refute logs =~ "websocket upgrade window preference"
-
-        :account_paused ->
-          assert routing_preference(next_request) == {"previous_window", "candidate_unavailable"}
-      end
-
-      assert :ok = FakeUpstream.verify!(upstream)
-      assert :ok = FakeUpstream.verify!(other_upstream)
+      assert_next_window_routed_without_usable_preference!(unusable)
     end
+  end
+
+  defp assert_next_window_routed_without_usable_preference!(unusable) do
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
+    upstream = start_upstream(FakeUpstream.strict_sequence([turn_1_upstream(), compaction_upstream()]))
+    other_upstream = start_upstream(FakeUpstream.strict_sequence([served_upstream()]))
+    setup = topology_setup!(:forwarded, upstream)
+    ctx = %{shape: :manual, mode: "full", topology: :forwarded, setup: setup}
+    port = start_public_endpoint!()
+
+    session_id = compact_and_lose_socket!(ctx, port)
+    other = add_least_recently_used_account!(setup, other_upstream)
+
+    case unusable do
+      :lease_expired ->
+        stop_owner!(ctx, session_id)
+
+      :account_paused ->
+        {1, _rows} = Repo.update_all(from(assignment in PoolUpstreamAssignment, where: assignment.id == ^setup.assignment.id), set: [status: "paused"])
+    end
+
+    {rows, logs} = next_window_turn!(ctx, port)
+    next_request = List.last(rows)
+    next_session_id = request_session_id(next_request.id)
+
+    assert Enum.map(rows, & &1.status) == ["succeeded", "succeeded", "succeeded"]
+    refute next_session_id == session_id
+    assert Repo.get!(CodexSession, next_session_id).pool_upstream_assignment_id == other.assignment.id
+
+    case unusable do
+      :lease_expired ->
+        assert routing_preference(next_request) == {nil, nil}
+        refute logs =~ "websocket upgrade window preference"
+
+      :account_paused ->
+        assert routing_preference(next_request) == {"previous_window", "candidate_unavailable"}
+    end
+
+    assert :ok = FakeUpstream.verify!(upstream)
+    assert :ok = FakeUpstream.verify!(other_upstream)
   end
 
   # Two live processes on one thread (findings#206 row 206-501; the client
@@ -561,96 +591,103 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
     @tag serving_mode: mode, topology: topology, holder: holder
     test "#{mode} #{topology} #{holder}: a frame naming a window whose holder has a turn in progress leaves the window with its holder",
          %{serving_mode: mode, topology: topology, holder: holder} do
-      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology == :forwarded)
-      release_ref = make_ref()
-      sequence = [turn_1_upstream(), compaction_upstream(), held_upstream(release_ref), served_upstream()] ++ if(holder == :holder_cut, do: [served_upstream()], else: [])
-      upstream = start_upstream(FakeUpstream.strict_sequence(sequence))
-      setup = topology_setup!(topology, upstream)
-      if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
-      ctx = %{shape: :post_turn, mode: mode, topology: topology, setup: setup}
-      port = start_public_endpoint!()
+      assert_busy_holder_keeps_its_window!(mode, topology, holder)
+    end
+  end
 
-      # The window-0 process answers a turn and compacts on its socket; its
-      # frames now carry window 1.
-      older = connect!(port, setup, @window_0)
-      older = older |> send_frame!(turn_1_frame(ctx)) |> completed!()
-      older = older |> send_frame!(compaction_frame(ctx, :post_turn)) |> completed!()
-      older_session_id = setup.pool.id |> pool_requests() |> hd() |> Map.fetch!(:id) |> request_session_id()
+  # Reason: the body of a generated test; its branches select the matrix case.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp assert_busy_holder_keeps_its_window!(mode, topology, holder) do
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology == :forwarded)
+    release_ref = make_ref()
+    sequence = [turn_1_upstream(), compaction_upstream(), held_upstream(release_ref), served_upstream()] ++ if(holder == :holder_cut, do: [served_upstream()], else: [])
+    upstream = start_upstream(FakeUpstream.strict_sequence(sequence))
+    setup = topology_setup!(topology, upstream)
+    if mode == "lite", do: set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    ctx = %{shape: :post_turn, mode: mode, topology: topology, setup: setup}
+    port = start_public_endpoint!()
 
-      # The window-1 process's turn is in progress at the provider.
-      holder_frame = window_1_frame(ctx, @turn_2, window_1_history(ctx, 2))
-      holder_socket = connect!(port, setup, @window_1) |> send_frame!(holder_frame)
-      assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^release_ref}, @detection_timeout_ms
-      assert %Request{id: holder_request_id, status: "in_progress"} = latest_request(setup.pool.id)
-      holder_session_id = request_session_id(holder_request_id)
-      refute holder_session_id == older_session_id
-      assert window_alias_session_id(setup, @window_1) == holder_session_id
+    # The window-0 process answers a turn and compacts on its socket; its
+    # frames now carry window 1.
+    older = connect!(port, setup, @window_0)
+    older = older |> send_frame!(turn_1_frame(ctx)) |> completed!()
+    older = older |> send_frame!(compaction_frame(ctx, :post_turn)) |> completed!()
+    older_session_id = setup.pool.id |> pool_requests() |> hd() |> Map.fetch!(:id) |> request_session_id()
 
-      {older, logs} = with_info_log(fn -> older |> send_frame!(window_1_frame(ctx, @turn_3, window_1_history(ctx, 3))) |> completed!() end)
-      older_request = latest_request(setup.pool.id)
-      await!(fn -> Repo.get!(Request, older_request.id).status == "succeeded" end, "the window-0 socket's turn never settled")
-      older_request = Repo.get!(Request, older_request.id)
+    # The window-1 process's turn is in progress at the provider.
+    holder_frame = window_1_frame(ctx, @turn_2, window_1_history(ctx, 2))
+    holder_socket = connect!(port, setup, @window_1) |> send_frame!(holder_frame)
+    assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^release_ref}, @detection_timeout_ms
+    assert %Request{id: holder_request_id, status: "in_progress"} = latest_request(setup.pool.id)
+    holder_session_id = request_session_id(holder_request_id)
+    refute holder_session_id == older_session_id
+    assert window_alias_session_id(setup, @window_1) == holder_session_id
 
-      window_after_frame = window_alias_session_id(setup, @window_1)
-      assert {older_request.status, request_session_id(older_request.id)} == {"succeeded", older_session_id}
-      assert Repo.get!(Request, holder_request_id).status == "in_progress"
-      assert Repo.one!(from(turn in CodexTurn, where: turn.request_id == ^holder_request_id, select: turn.status)) == "in_progress"
+    {older, logs} = with_info_log(fn -> older |> send_frame!(window_1_frame(ctx, @turn_3, window_1_history(ctx, 3))) |> completed!() end)
+    older_request = latest_request(setup.pool.id)
+    await!(fn -> Repo.get!(Request, older_request.id).status == "succeeded" end, "the window-0 socket's turn never settled")
+    older_request = Repo.get!(Request, older_request.id)
 
-      outcomes =
-        case holder do
-          :undisturbed ->
-            release_held_turn!(upstream, release_ref, sequence)
-            holder_socket |> completed!() |> close!()
-            []
+    window_after_frame = window_alias_session_id(setup, @window_1)
+    assert {older_request.status, request_session_id(older_request.id)} == {"succeeded", older_session_id}
+    assert Repo.get!(Request, holder_request_id).status == "in_progress"
+    assert Repo.one!(from(turn in CodexTurn, where: turn.request_id == ^holder_request_id, select: turn.status)) == "in_progress"
 
-          :holder_cut ->
-            close!(holder_socket)
-
-            if topology == :direct,
-              do: await!(fn -> Repo.get!(Request, holder_request_id).status == "failed" end, "the holder's cut turn never settled"),
-              else: await!(fn -> entitlement_status(holder_request_id) == "armed" end, "the holder's closing socket never armed its replay")
-
-            outcomes = websocket_retries!(ctx, port, holder_frame, @websocket_retries, [])
-            release_held_turn!(upstream, release_ref, sequence)
-            outcomes
-        end
-
-      close!(older)
-      rows = settled_rows(setup.pool.id)
-
-      measured = %{outcomes: outcomes, rows: Enum.map(rows, &{&1.transport, &1.status, &1.last_error_code}), entitlements: entitlement_statuses(setup.pool.id), window_after_frame: short(window_after_frame), holder: short(holder_session_id)}
-      CodexPooler.TestDiagnostics.puts(fn -> "P121 guard #{mode} #{topology} #{holder}: #{inspect(measured)}" end)
-
+    outcomes =
       case holder do
         :undisturbed ->
-          assert {Repo.get!(Request, holder_request_id).status, request_session_id(holder_request_id)} == {"succeeded", holder_session_id}
-
-        :holder_cut when topology == :direct ->
-          # The holder's reconnect on window 1 is served on its first send, on
-          # the holder's session, after its settled cut.
-          assert outcomes == [:served], inspect(measured)
-          assert {Repo.get!(Request, holder_request_id).status, length(rows)} == {"failed", 5}
-          assert {List.last(rows).status, request_session_id(List.last(rows).id)} == {"succeeded", holder_session_id}
+          release_held_turn!(upstream, release_ref, sequence)
+          holder_socket |> completed!() |> close!()
+          []
 
         :holder_cut ->
-          # The holder's reconnect on window 1 redeems the replay its owner
-          # holds on its first send.
-          assert outcomes == [:served], inspect(measured)
-          assert {Repo.get!(Request, holder_request_id).status, length(rows)} == {"succeeded", 4}
-          assert entitlement_status(holder_request_id) == "consumed"
+          close!(holder_socket)
+
+          if topology == :direct,
+            do: await!(fn -> Repo.get!(Request, holder_request_id).status == "failed" end, "the holder's cut turn never settled"),
+            # credo:disable-for-next-line Credo.Check.Refactor.Nesting
+            else: await!(fn -> entitlement_status(holder_request_id) == "armed" end, "the holder's closing socket never armed its replay")
+
+          outcomes = websocket_retries!(ctx, port, holder_frame, @websocket_retries, [])
+          release_held_turn!(upstream, release_ref, sequence)
+          outcomes
       end
 
-      assert Enum.all?(rows, &(&1.transport == "websocket"))
-      refute Enum.any?(rows, &(&1.status in ["accepted", "in_progress"]))
-      refute "armed" in measured.entitlements
-      assert FakeUpstream.count(upstream) == length(sequence)
-      for %Request{status: "succeeded"} = request <- rows, do: assert(charges(request) == 1)
-      assert :ok = FakeUpstream.verify!(upstream)
+    close!(older)
+    rows = settled_rows(setup.pool.id)
 
-      # The window stayed with its holder while the holder's turn ran.
-      assert window_after_frame == holder_session_id
-      assert logs =~ "websocket frame window alias codex_session_id=#{older_session_id} alias_preview=#{window_preview(@window_1)} disposition=kept"
+    measured = %{outcomes: outcomes, rows: Enum.map(rows, &{&1.transport, &1.status, &1.last_error_code}), entitlements: entitlement_statuses(setup.pool.id), window_after_frame: short(window_after_frame), holder: short(holder_session_id)}
+    CodexPooler.TestDiagnostics.puts(fn -> "P121 guard #{mode} #{topology} #{holder}: #{inspect(measured)}" end)
+
+    case holder do
+      :undisturbed ->
+        assert {Repo.get!(Request, holder_request_id).status, request_session_id(holder_request_id)} == {"succeeded", holder_session_id}
+
+      :holder_cut when topology == :direct ->
+        # The holder's reconnect on window 1 is served on its first send, on
+        # the holder's session, after its settled cut.
+        assert outcomes == [:served], inspect(measured)
+        assert {Repo.get!(Request, holder_request_id).status, length(rows)} == {"failed", 5}
+        assert {List.last(rows).status, request_session_id(List.last(rows).id)} == {"succeeded", holder_session_id}
+
+      :holder_cut ->
+        # The holder's reconnect on window 1 redeems the replay its owner
+        # holds on its first send.
+        assert outcomes == [:served], inspect(measured)
+        assert {Repo.get!(Request, holder_request_id).status, length(rows)} == {"succeeded", 4}
+        assert entitlement_status(holder_request_id) == "consumed"
     end
+
+    assert Enum.all?(rows, &(&1.transport == "websocket"))
+    refute Enum.any?(rows, &(&1.status in ["accepted", "in_progress"]))
+    refute "armed" in measured.entitlements
+    assert FakeUpstream.count(upstream) == length(sequence)
+    for %Request{status: "succeeded"} = request <- rows, do: assert(charges(request) == 1)
+    assert :ok = FakeUpstream.verify!(upstream)
+
+    # The window stayed with its holder while the holder's turn ran.
+    assert window_after_frame == holder_session_id
+    assert logs =~ "websocket frame window alias codex_session_id=#{older_session_id} alias_preview=#{window_preview(@window_1)} disposition=kept"
   end
 
   # The frame's reservation never waits on the window's alias row (findings#206
@@ -663,56 +700,60 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
     @tag topology: topology
     test "full #{topology} held_alias_row: a frame whose window alias row another transaction holds is served without waiting and leaves the alias",
          %{topology: topology} do
-      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology == :forwarded)
-      upstream = start_upstream(FakeUpstream.strict_sequence([turn_1_upstream(), compaction_upstream(), resumed_upstream(), served_upstream(), served_upstream()]))
-      :ok = Sandbox.mode(Repo, :auto)
-      on_exit(fn -> :ok = Sandbox.mode(Repo, :manual) end)
-      setup = gateway_setup(upstream, compact?: true)
-      register_unboxed_pool_cleanup!(setup)
-      ctx = %{shape: :stale_resume, mode: "full", topology: topology, setup: setup}
-      port = start_public_endpoint!()
-
-      older = connect!(port, setup, @window_0)
-      older = older |> send_frame!(turn_1_frame(ctx)) |> completed!()
-      older = older |> send_frame!(compaction_frame(ctx, :post_turn)) |> completed!()
-      older_session_id = setup.pool.id |> pool_requests() |> hd() |> Map.fetch!(:id) |> request_session_id()
-
-      # Window 1's own session answered a turn and its socket closed: nothing
-      # in progress, so without the held row the window would move.
-      connect!(port, setup, @window_1) |> send_frame!(window_1_frame(ctx, @turn_2, window_1_history(ctx, 2))) |> completed!() |> close!()
-      window_session_id = request_session_id(latest_request(setup.pool.id).id)
-      refute window_session_id == older_session_id
-      before = window_alias!(setup, @window_1)
-      assert before.codex_session_id == window_session_id
-
-      holder = hold_alias_row!(before.id)
-      watcher = watch_alias_row_waiters!(holder)
-
-      {older, logs} =
-        try do
-          with_info_log(fn -> older |> send_frame!(window_1_frame(ctx, @turn_3, window_1_history(ctx, 3))) |> completed!() end)
-        after
-          waited = stop_watcher!(watcher)
-          release_alias_row!(holder)
-          assert waited == [], "the reservation waited on the held alias row: #{inspect(waited)}"
-        end
-
-      assert logs =~ "websocket frame window alias codex_session_id=#{older_session_id} alias_preview=#{window_preview(@window_1)} disposition=busy"
-      %Request{id: busy_request_id} = latest_request(setup.pool.id)
-      await!(fn -> Repo.get!(Request, busy_request_id).status == "succeeded" end, "the turn whose window alias row was held never settled")
-      assert request_session_id(busy_request_id) == older_session_id
-      assert Map.take(window_alias!(setup, @window_1), [:id, :codex_session_id, :expires_at, :last_seen_at, :metadata]) == Map.take(before, [:id, :codex_session_id, :expires_at, :last_seen_at, :metadata])
-
-      # The next turn frame points the window once the row is free.
-      {older, logs} = with_info_log(fn -> older |> send_frame!(window_1_frame(ctx, @turn_4, later_history(ctx))) |> completed!() end)
-      assert logs =~ "alias_preview=#{window_preview(@window_1)} disposition=moved"
-      assert window_alias_session_id(setup, @window_1) == older_session_id
-      close!(older)
-
-      rows = settled_rows(setup.pool.id)
-      assert Enum.map(rows, & &1.status) == List.duplicate("succeeded", 5)
-      assert :ok = FakeUpstream.verify!(upstream)
+      assert_held_alias_row_frame_served_without_waiting!(topology)
     end
+  end
+
+  defp assert_held_alias_row_frame_served_without_waiting!(topology) do
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology == :forwarded)
+    upstream = start_upstream(FakeUpstream.strict_sequence([turn_1_upstream(), compaction_upstream(), resumed_upstream(), served_upstream(), served_upstream()]))
+    :ok = Sandbox.mode(Repo, :auto)
+    on_exit(fn -> :ok = Sandbox.mode(Repo, :manual) end)
+    setup = gateway_setup(upstream, compact?: true)
+    register_unboxed_pool_cleanup!(setup)
+    ctx = %{shape: :stale_resume, mode: "full", topology: topology, setup: setup}
+    port = start_public_endpoint!()
+
+    older = connect!(port, setup, @window_0)
+    older = older |> send_frame!(turn_1_frame(ctx)) |> completed!()
+    older = older |> send_frame!(compaction_frame(ctx, :post_turn)) |> completed!()
+    older_session_id = setup.pool.id |> pool_requests() |> hd() |> Map.fetch!(:id) |> request_session_id()
+
+    # Window 1's own session answered a turn and its socket closed: nothing
+    # in progress, so without the held row the window would move.
+    connect!(port, setup, @window_1) |> send_frame!(window_1_frame(ctx, @turn_2, window_1_history(ctx, 2))) |> completed!() |> close!()
+    window_session_id = request_session_id(latest_request(setup.pool.id).id)
+    refute window_session_id == older_session_id
+    before = window_alias!(setup, @window_1)
+    assert before.codex_session_id == window_session_id
+
+    holder = hold_alias_row!(before.id)
+    watcher = watch_alias_row_waiters!(holder)
+
+    {older, logs} =
+      try do
+        with_info_log(fn -> older |> send_frame!(window_1_frame(ctx, @turn_3, window_1_history(ctx, 3))) |> completed!() end)
+      after
+        waited = stop_watcher!(watcher)
+        release_alias_row!(holder)
+        assert waited == [], "the reservation waited on the held alias row: #{inspect(waited)}"
+      end
+
+    assert logs =~ "websocket frame window alias codex_session_id=#{older_session_id} alias_preview=#{window_preview(@window_1)} disposition=busy"
+    %Request{id: busy_request_id} = latest_request(setup.pool.id)
+    await!(fn -> Repo.get!(Request, busy_request_id).status == "succeeded" end, "the turn whose window alias row was held never settled")
+    assert request_session_id(busy_request_id) == older_session_id
+    assert Map.take(window_alias!(setup, @window_1), [:id, :codex_session_id, :expires_at, :last_seen_at, :metadata]) == Map.take(before, [:id, :codex_session_id, :expires_at, :last_seen_at, :metadata])
+
+    # The next turn frame points the window once the row is free.
+    {older, logs} = with_info_log(fn -> older |> send_frame!(window_1_frame(ctx, @turn_4, later_history(ctx))) |> completed!() end)
+    assert logs =~ "alias_preview=#{window_preview(@window_1)} disposition=moved"
+    assert window_alias_session_id(setup, @window_1) == older_session_id
+    close!(older)
+
+    rows = settled_rows(setup.pool.id)
+    assert Enum.map(rows, & &1.status) == List.duplicate("succeeded", 5)
+    assert :ok = FakeUpstream.verify!(upstream)
   end
 
   # Pause the listener before the TCP close so its terminate/cleanup has

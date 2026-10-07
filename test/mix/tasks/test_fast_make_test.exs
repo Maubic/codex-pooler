@@ -46,7 +46,7 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
       contents = File.read!(Path.join(fixture.directory, receipt))
 
       assert contents =~ "schedulers=3"
-      assert contents =~ "erl_flags=+sbwt none +S 3:3"
+      assert contents =~ "erl_flags=+hmbs 1000000 +sbwt none +S 3:3"
       assert contents =~ ~r/candidates=\S+\/duration-[1-4]\.tsv/
     end)
 
@@ -108,7 +108,7 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
     [namespace] = started |> Enum.map(&(&1 |> String.split("-") |> Enum.at(1))) |> Enum.uniq()
 
     assert confirm_rounds(fixture, namespace) == [
-             "namespace=#{namespace} partition=1 erl_flags=+S 2:2 candidates=set args=test/a_test.exs:3 test/b_test.exs:9"
+             "namespace=#{namespace} partition=1 erl_flags=+hmbs 1000000 +S 2:2 candidates=set args=test/a_test.exs:3 test/b_test.exs:9"
            ]
 
     dropped = await_receipts!(fixture.directory, "drop-", 2)

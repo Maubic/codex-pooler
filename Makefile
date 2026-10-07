@@ -97,6 +97,10 @@ precommit:
 test-db-prune:
 	@MIX_ENV=test $(MIX) codex_pooler.test.prune_databases
 
+# Every partition VM starts with `+hmbs 1000000`, a minimum binary virtual heap of one million words (the VM default is 46,422), and
+# the caller's ERL_FLAGS follow it, so they can override it. With the default, the compile of a large test file (the 17 KB file that
+# expands one body 72 times, a 12,500-line controller test) spends most of its time in garbage collections forced by the virtual
+# binary heap: the compile cycle of the partitions that hold such files is 27-41% shorter with the flag. Test VMs only.
 # Each partition writes the wall time of every test file it ran to its own file (CodexPooler.TestFileDurations).
 # With TEST_FAST_PRINT_FILE_DURATIONS=1 a passing run prints those files after the partition results, which is how
 # a saved CI log carries the duration of every test file: mix test.partition_weights turns such a log into the
@@ -130,7 +134,7 @@ test-fast:
 	logical_cpus=$$((10#$$logical_cpus)); \
 	schedulers_per_partition=$$((logical_cpus / partitions)); \
 	if [ "$$schedulers_per_partition" -lt 1 ]; then schedulers_per_partition=1; fi; \
-	partition_erl_flags="$${ERL_FLAGS:+$${ERL_FLAGS} }+S $$schedulers_per_partition:$$schedulers_per_partition"; \
+	partition_erl_flags="+hmbs 1000000 $${ERL_FLAGS:+$${ERL_FLAGS} }+S $$schedulers_per_partition:$$schedulers_per_partition"; \
 	echo "test-fast: scheduler budget $$logical_cpus logical CPUs, $$schedulers_per_partition per partition"; \
 	run_namespace=$$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n'); \
 	if [[ ! "$$run_namespace" =~ ^[0-9a-f]{16}$$ ]]; then \
