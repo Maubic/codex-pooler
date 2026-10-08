@@ -29,6 +29,10 @@
   <strong>English</strong>
   ·
   <a href="README.zh-CN.md">简体中文</a>
+  ·
+  <a href="README.es.md">Español</a>
+  ·
+  <a href="README.ja.md">日本語</a>
 </p>
 
 <p align="center">

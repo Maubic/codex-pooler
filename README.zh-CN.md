@@ -29,6 +29,10 @@
   <a href="README.md">English</a>
   ·
   <strong>简体中文</strong>
+  ·
+  <a href="README.es.md">Español</a>
+  ·
+  <a href="README.ja.md">日本語</a>
 </p>
 
 <p align="center">
@@ -1248,6 +1252,8 @@ console.log(text);
 ![Claude Code on Codex Pooler](.github/assets/codex-pooler-claude.png)
 
 </details>
+
+<a id="quick-start-with-docker-compose"></a>
 
 ## 使用 Docker Compose 快速开始
 
