@@ -1021,6 +1021,8 @@ be a member of an `allowed_tools` choice.
 
 Accepted tool-output text on `POST /v1/responses`, `POST /v1/chat/completions` and the supported Responses websocket route reaches the upstream without gateway minification or summarization. Protocol adapters may change the surrounding request or split text into ordered parts; the output text itself is preserved. Full/Lite tool handling and strict-schema normalization remain in effect.
 
+SVG image data URLs are rejected with `400 unsupported_input_image_format` on `input`, including typed `input_image` parts in `function_call_output` and `custom_tool_call_output`. This applies in Full and Lite, on native and public Responses and on translated Chat tool images, before upstream dispatch. Render SVG as a supported raster image in the client, or send its source explicitly as text. SVG source inside ordinary tool text or JSON remains ordinary output; remote image URLs are not fetched or inspected by this validation.
+
 There is no Pool compression switch or savings display. Raw outputs are not stored. Public `/v1/responses/compact` remains unsupported, while provider and client compaction keep their separate contracts.
 
 ## Routed but unsupported boundaries
