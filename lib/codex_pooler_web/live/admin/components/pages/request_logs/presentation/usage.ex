@@ -11,8 +11,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Usage do
       format_token_totals: 1,
       format_total_cost: 1,
       format_usage_cost: 1,
-      speed_tier_label: 1,
-      speed_tier_mode: 1,
       token_totals_title: 1,
       usage_cached_line_title: 1,
       usage_cost_line_title: 1,
@@ -151,23 +149,5 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation.Usage do
       {amount, suffix} when suffix in ["k", "M", "B"] -> {amount, suffix}
       _plain -> {label, nil}
     end
-  end
-
-  attr :request_log, :map, required: true
-
-  def speed_tier_indicator(assigns) do
-    assigns = assign(assigns, :mode, speed_tier_mode(assigns.request_log))
-
-    ~H"""
-    <span
-      :if={@mode}
-      data-role="fast-mode-indicator"
-      data-speed-tier={@mode}
-      class="ml-1 inline-flex items-center"
-    >
-      <.icon name="hero-bolt" class="size-3.5" />
-      <span class="sr-only">{speed_tier_label(@request_log)}</span>
-    </span>
-    """
   end
 end

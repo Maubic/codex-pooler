@@ -20,15 +20,15 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
       format_model_name: 1,
       format_model_reasoning: 1,
       format_model_reasoning_slot: 1,
-      format_model_service_tier: 1,
       format_record_id: 1,
-      format_requested_tier_detail: 1,
       format_requested_reasoning_detail: 1,
       format_route_latency: 1,
       format_route_metadata: 1,
       format_total: 1,
       format_upstream_account_label: 1,
       model_default_reasoning?: 1,
+      speed_level: 1,
+      speed_level_title: 1,
       route_paths: 1,
       protocol_badge_class: 1,
       protocol_label: 1,
@@ -116,7 +116,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
             <thead>
               <tr>
                 <th scope="col" class="whitespace-nowrap">Time · Status</th>
-                <th scope="col" class="whitespace-nowrap">Model · Effort · Tier</th>
+                <th scope="col" class="whitespace-nowrap">Model · Effort · Speed</th>
                 <th scope="col" class="whitespace-nowrap">Upstream · Pool · Key</th>
                 <th scope="col" class="whitespace-nowrap">Endpoint · Transport · Client</th>
                 <th :if={@has_issues?} id="request-log-issues-heading" scope="col" class="whitespace-nowrap">Errors · Warnings</th>
@@ -376,27 +376,14 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
         </span>
       </span>
       <span :if={@model_known?} data-role="model-context-line" class="min-w-0 truncate whitespace-nowrap pl-3.5 text-[11px] text-base-content/55">
+        <span data-role="model-speed" data-speed-level={speed_level(@request_log)} class="-ml-3.5 mr-1 inline-flex items-center gap-px align-middle text-warning" title={speed_level_title(@request_log)}>
+          <.icon :for={n <- 1..3} name={if n <= speed_level(@request_log), do: "hero-bolt-solid", else: "hero-bolt"} class={["size-3", n > speed_level(@request_log) && "opacity-30"]} />
+          <span class="sr-only">{speed_level_title(@request_log)}</span>
+        </span>
         <span
           :if={detail = format_requested_reasoning_detail(@request_log)}
           id={"#{@prefix}-#{@request_log.id}-requested-reasoning"}
           data-role="requested-reasoning"
-        >
-          {detail}
-        </span>
-        <span
-          :if={tier = format_model_service_tier(@request_log)}
-          data-role="model-service-tier"
-          class="text-base-content/45"
-          title="Service tier"
-        >
-          <span :if={format_requested_reasoning_detail(@request_log)} aria-hidden="true">·</span> tier {tier}
-        </span>
-        <span
-          :if={detail = format_requested_tier_detail(@request_log)}
-          id={"#{@prefix}-#{@request_log.id}-requested-tier"}
-          data-role="requested-service-tier"
-          class="text-base-content/45"
-          title="Service tier the request asked for; the upstream reported the tier shown before it"
         >
           {detail}
         </span>
@@ -417,7 +404,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
       title={protocol_title(@request_log)}
     >
       {protocol_label(@request_log.transport)}
-      <Usage.speed_tier_indicator request_log={@request_log} />
     </span>
     """
   end

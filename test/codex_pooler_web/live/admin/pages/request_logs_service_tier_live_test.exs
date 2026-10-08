@@ -61,44 +61,26 @@ defmodule CodexPoolerWeb.Admin.RequestLogsServiceTierLiveTest do
     for request <- [sse_mismatch, websocket_mismatch] do
       model_cell = "#request-log-#{request.id}-model-details"
 
-      assert has_element?(view, "#{model_cell} [data-role='model-service-tier']", "tier default")
+      refute has_element?(view, "#{model_cell} [data-role='model-service-tier']")
+      refute has_element?(view, "#request-log-#{request.id}-requested-tier")
+      refute has_element?(view, "#request-log-#{request.id}-protocol [data-role='fast-mode-indicator']")
 
-      assert has_element?(
-               view,
-               "#request-log-#{request.id}-requested-tier[data-role='requested-service-tier']",
-               "priority requested"
-             )
-
-      assert has_element?(view, "#{model_cell}[title*='tier default priority requested']")
-
-      refute has_element?(
-               view,
-               "#request-log-#{request.id}-protocol [data-role='fast-mode-indicator']"
-             )
+      assert has_element?(view, "#{model_cell} [data-role='model-speed'][data-speed-level='1'][title*='priority requested, not applied']")
+      refute has_element?(view, "#{model_cell} [data-role='model-speed'][data-speed-level='2']")
     end
 
     assert has_element?(view, "#request-log-#{sse_mismatch.id}-protocol", "HTTP SSE")
     assert has_element?(view, "#request-log-#{websocket_mismatch.id}-protocol", "WebSocket")
 
-    assert has_element?(
-             view,
-             "#request-log-#{priority_reported.id}-model-details [data-role='model-service-tier']",
-             "tier priority"
-           )
-
+    refute has_element?(view, "#request-log-#{priority_reported.id}-model-details [data-role='model-service-tier']")
     refute has_element?(view, "#request-log-#{priority_reported.id}-requested-tier")
+    refute has_element?(view, "#request-log-#{priority_reported.id}-protocol [data-role='fast-mode-indicator']")
 
-    assert has_element?(
-             view,
-             "#request-log-#{priority_reported.id}-protocol [data-role='fast-mode-indicator'][data-speed-tier='fast']"
-           )
+    assert has_element?(view, "#request-log-#{priority_reported.id}-model-details [data-role='model-speed'][data-speed-level='2'][title='Fast (priority tier)']")
 
     refute has_element?(view, "#request-log-#{no_tier.id}-requested-tier")
-
-    refute has_element?(
-             view,
-             "#request-log-#{no_tier.id}-protocol [data-role='fast-mode-indicator']"
-           )
+    assert has_element?(view, "#request-log-#{no_tier.id}-model-details [data-role='model-speed'][data-speed-level='1'][title='Normal speed']")
+    refute has_element?(view, "#request-log-#{no_tier.id}-model-details [data-role='model-speed'][data-speed-level='2']")
 
     refute render(view) =~ @sensitive_marker
   end
@@ -202,27 +184,58 @@ defmodule CodexPoolerWeb.Admin.RequestLogsServiceTierLiveTest do
     correlation = Ecto.UUID.generate()
     assert {:ok, %{request: claim}} = CodexPooler.Accounting.claim_websocket_turn(auth, model, %{endpoint: "/backend-api/codex/responses", correlation_id: correlation})
     {:ok, view, _} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}")
-    tier = "#request-log-#{claim.id}-model-details [data-role='model-service-tier']"
+    model_cell = "#request-log-#{claim.id}-model-details"
+    speed = "#{model_cell} [data-role='model-speed']"
     protocol = "#request-log-#{claim.id}-protocol"
-    assert has_element?(view, tier, "tier —")
-    refute has_element?(view, tier, "tier default")
-    refute has_element?(view, "#{protocol} [data-role='fast-mode-indicator']")
+    refute has_element?(view, "#{model_cell} [data-role='model-service-tier']")
+    assert has_element?(view, "#{speed}[data-speed-level='1']")
+    refute has_element?(view, "#{speed}[data-speed-level='2']")
 
     payload = %{"model" => identifier, "service_tier" => "priority", "max_output_tokens" => 1}
     assert {:ok, reserved} = CodexPooler.Accounting.reserve(auth, model, payload, %{endpoint: "/backend-api/codex/responses", transport: "websocket", correlation_id: correlation, turn_claim: claim})
     send(view.pid, :refresh_request_logs_from_events)
     await_request_logs(view)
-    assert has_element?(view, tier, "tier priority")
-    assert has_element?(view, "#{protocol} [data-role='fast-mode-indicator']", "Priority tier")
-    refute render(element(view, protocol)) =~ "Priced at priority tier"
+    assert has_element?(view, "#{speed}[data-speed-level='2'][title='Fast (priority tier)']")
+    refute has_element?(view, "#{protocol} [data-role='fast-mode-indicator']")
 
     assert {:ok, attempt} = CodexPooler.Accounting.create_attempt(reserved.request, assignment)
     assert {:ok, _} = CodexPooler.Accounting.finalize_success(reserved.request, attempt, %{status: "usage_known", input_tokens: 2, output_tokens: 1, total_tokens: 3}, %{response_status_code: 200, attempt_metadata: %{"service_tier" => "default"}})
     send(view.pid, :refresh_request_logs_from_events)
     await_request_logs(view)
-    assert has_element?(view, tier, "tier default")
-    assert has_element?(view, "#request-log-#{claim.id}-requested-tier", "priority requested")
-    assert has_element?(view, "#{protocol} [data-role='fast-mode-indicator']", "Priced at priority tier")
+    refute has_element?(view, "#{model_cell} [data-role='model-service-tier']")
+    refute has_element?(view, "#request-log-#{claim.id}-requested-tier")
+    assert has_element?(view, "#{speed}[data-speed-level='2'][title='Fast (priority tier)']")
+  end
+
+  test "a row with the ultrafast tier renders speed level 3, priced or not", %{conn: conn, scope: scope} do
+    pool = create_pool!(scope, "tier-ultrafast")
+
+    %{request: priced} =
+      request_log_fixture(pool, %{
+        correlation_id: "req-tier-ultrafast-priced",
+        transport: "websocket",
+        requested_service_tier: "ultrafast",
+        actual_service_tier: "ultrafast",
+        service_tier: "ultrafast",
+        settlement_details: %{"pricing_status" => "priced"}
+      })
+
+    %{request: unpriced} =
+      request_log_fixture(pool, %{
+        correlation_id: "req-tier-ultrafast-unpriced",
+        transport: "http_sse",
+        requested_service_tier: "ultrafast",
+        actual_service_tier: "ultrafast",
+        settlement_details: %{"pricing_status" => "unpriced_missing_model"}
+      })
+
+    {:ok, view, _html} = live_request_logs(conn, ~p"/admin/request-logs?pool_id=#{pool.id}")
+
+    for request <- [priced, unpriced] do
+      speed = "#request-log-#{request.id}-model-details [data-role='model-speed']"
+      assert has_element?(view, "#{speed}[data-speed-level='3'][title='Ultrafast']")
+      refute has_element?(view, "#{speed}[data-speed-level='2']")
+    end
   end
 
   defp create_pool!(scope, slug) do

@@ -15,6 +15,14 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
     {"goose/1.0.0", "http_sse", "/v1/chat/completions"}
   ]
   @cache_hit_rates [9580, 9730, 9860, 9920, 9670, 9810, 9950]
+  # Speed mix for the request-log Speed column. `ultrafast` is a literal tier of
+  # its own, priced only for gpt-6-astra, never an alias of `priority`. Tiers are
+  # dealt per model in recency order so the first rows of every page show normal,
+  # fast and ultrafast requests, and cost follows the catalog ratio of each tier.
+  @ultrafast_model "gpt-6-astra"
+  @ultrafast_cycle ["ultrafast", "default", "priority", "default"]
+  @priority_cycle ["default", "priority", "default", "default"]
+  @tier_cost_multipliers %{"default" => 1, "priority" => 2, "ultrafast" => 6}
   @demand_profiles [
     {4, [{8.0, 3.4, 13}, {18.0, 3.1, 8}]},
     {3, [{11.0, 4.4, 15}, {20.0, 2.8, 5}]},
@@ -37,7 +45,8 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
       # current-hour cap reorder the newest rows during an hour's first seconds,
       # which pushed the websocket client off the first page.
       |> Enum.sort_by(&started_at/1, {:desc, DateTime})
-      |> Enum.with_index(fn spec, rank -> traffic_row(spec, Enum.at(@clients, rem(rank, length(@clients)))) end)
+      |> then(&Enum.zip(&1, service_tiers(&1)))
+      |> Enum.with_index(fn {spec, tier}, rank -> traffic_row(spec, Enum.at(@clients, rem(rank, length(@clients))), tier) end)
 
     Repo.insert_all(Request, Enum.map(rows, & &1.request))
     Repo.insert_all(Attempt, Enum.map(rows, & &1.attempt))
@@ -79,7 +88,18 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
 
   defp latency_ms(index, output), do: 4500 + div(output * 1000, 65 + index * 5)
 
-  defp traffic_row({pool, key, model, assignment, identity, {index, hour, sequence, occurred_at}}, {user_agent, transport, source_endpoint}) do
+  defp service_tiers(specs) do
+    {tiers, _seen} =
+      Enum.map_reduce(specs, %{}, fn {_pool, _key, model, _assignment, _identity, _slot}, seen ->
+        ordinal = Map.get(seen, model.exposed_model_id, 0)
+        cycle = if model.exposed_model_id == @ultrafast_model, do: @ultrafast_cycle, else: @priority_cycle
+        {Enum.at(cycle, rem(ordinal, length(cycle))), Map.put(seen, model.exposed_model_id, ordinal + 1)}
+      end)
+
+    tiers
+  end
+
+  defp traffic_row({pool, key, model, assignment, identity, {index, hour, sequence, occurred_at}}, {user_agent, transport, source_endpoint}, service_tier) do
     request_id = Ecto.UUID.generate()
     attempt_id = Ecto.UUID.generate()
     shape = traffic_shape(index, hour)
@@ -87,7 +107,7 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
     output = output_tokens(index, hour, sequence)
     cached = div(input * Enum.at(@cache_hit_rates, rem(hour + index + sequence, length(@cache_hit_rates))), 10_000)
     total = input + output
-    cost = Decimal.new((input - cached) * 2 + cached + output * 8)
+    cost = Decimal.new(((input - cached) * 2 + cached + output * 8) * Map.fetch!(@tier_cost_multipliers, service_tier))
     latency = latency_ms(index, output)
     started_at = DateTime.add(occurred_at, -latency, :millisecond)
     metadata = %{"dev_seed" => "codex_pooler_dev_seed", "docs_screenshot" => true}
@@ -120,8 +140,9 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
       upstream_account_plan_family: identity.plan_family,
       upstream_account_plan_label: identity.plan_label,
       reasoning_effort: Enum.at(["medium", "high", "xhigh"], rem(hour + index, 3)),
-      requested_service_tier: "auto",
-      actual_service_tier: "default"
+      service_tier: service_tier,
+      requested_service_tier: if(service_tier == "default", do: "auto", else: service_tier),
+      actual_service_tier: service_tier
     }
 
     attempt = %{
