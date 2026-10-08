@@ -44,11 +44,35 @@ test("publication queues every pending release and recovery steps also run for r
 		step("Require verified revision and select monotonic release aliases"),
 		/sleep |deadline=/,
 	);
-	assert.match(step("Build and push Docker image"), /image_action == 'build'/);
+	assert.match(
+		workflow,
+		/  image:\n    needs: select\n    if: needs\.select\.outputs\.ready == 'true' && needs\.select\.outputs\.image_action == 'build'\n/,
+	);
 	assert.match(
 		step("Recover aliases from the existing immutable image"),
 		/image_action == 'reuse'/,
 	);
+});
+
+test("each platform is built natively and only the publish job tags the merged index", () => {
+	assert.match(workflow, /runner: ubuntu-24\.04-arm/);
+	assert.doesNotMatch(workflow, /setup-qemu-action/);
+	const build = step("Build and push the platform image by digest");
+	assert.match(build, /platforms: \$\{\{ matrix\.platform \}\}/);
+	assert.match(build, /push-by-digest=true,name-canonical=true,push=true/);
+	assert.doesNotMatch(build, /\n\s+tags:/, "a platform image is never tagged");
+	assert.match(workflow, /  publish:\n    needs: \[select, image\]\n/);
+	const publish = workflow.slice(workflow.indexOf("  publish:\n"));
+	assert.match(publish, /group: release-image-publication\n\s+queue: max/);
+	assert.doesNotMatch(
+		workflow.slice(0, workflow.indexOf("  publish:\n")),
+		/imagetools create/,
+		"only the publish job may tag",
+	);
+	const merge = step("Publish the multi-architecture image");
+	assert.match(merge, /image_action == 'build'/);
+	assert.match(merge, /Expected one digest per platform/);
+	assert.match(merge, /imagetools create/);
 });
 
 test("waking the chart repository follows the image and never blocks publication", () => {
