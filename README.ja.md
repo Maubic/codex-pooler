@@ -155,7 +155,7 @@ $env:CODEX_POOLER_API_KEY = "<pool-api-key>"
 | macOS / Linux | `~/.codex/config.toml` |
 | Windows | `%USERPROFILE%\.codex\config.toml` |
 
-使用する OS のパスにある `config.toml` を開き、以下を追加してください。`CODEX_HOME` を設定している場合は、そのフォルダー内のファイルを使用します。すでに `[features]` セクションがある場合は、そのセクションに設定を追加してください。
+使用する OS のパスにある `config.toml` を開き、以下を追加してください。`CODEX_HOME` を設定している場合は、そのフォルダー内のファイルを使用します。Codex のネイティブ機能を維持するため、`name = "OpenAI"` はそのままにしてください。モデルカタログの検出はデフォルトで有効です。`model_catalog_url` で使用する Pool を指定します。
 
 ```toml
 model = "gpt-6.1-sol"
@@ -169,14 +169,11 @@ env_key = "CODEX_POOLER_API_KEY"
 wire_api = "responses"
 supports_websockets = true
 requires_openai_auth = true
-
-[features]
-api_key_model_discovery = true
 ```
 
 Codex を再起動し、Pool で利用できるモデルを選択してください。Codex Desktop を使用する場合は、詳細ガイドに従ってアプリから API キーを利用できるようにしてください。
 
-**[詳しい設定と追加機能](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/)** — デスクトップのセットアップ、アカウント設定、既存の会話。
+**[詳しい設定と追加機能](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/)** — デスクトップのセットアップ、アカウント設定、既存の会話、任意のカスタムプロバイダー名とその制限事項。
 
 </details>
 

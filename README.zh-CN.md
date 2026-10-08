@@ -189,7 +189,8 @@ Codex CLI 和 Desktop 会自动读取 Pool 提供的上下文大小。
 | Windows | `%USERPROFILE%\.codex\config.toml` |
 
 打开对应系统路径下的 `config.toml`，添加以下配置。如果设置了 `CODEX_HOME`，
-请使用该文件夹中的文件。如果已有 `[features]` 节，请将设置添加到现有节中。
+请使用该文件夹中的文件。保留 `name = "OpenAI"`，以使用 Codex 的原生功能。
+模型目录发现默认启用；`model_catalog_url` 将其指向你的 Pool。
 
 ```toml
 model = "gpt-6.1-sol"
@@ -203,16 +204,13 @@ env_key = "CODEX_POOLER_API_KEY"
 wire_api = "responses"
 supports_websockets = true
 requires_openai_auth = true
-
-[features]
-api_key_model_discovery = true
 ```
 
 重启 Codex，选择你的 Pool 提供的模型。
 使用 Codex Desktop 时，
 请按完整指南设置 API 密钥，使应用能够读取它。
 
-**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/)** — 桌面应用配置、账户设置和现有会话。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/)** — 桌面应用配置、账户设置、现有会话，以及可选的自定义提供商名称及其限制。
 
 </details>
 

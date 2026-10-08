@@ -207,8 +207,9 @@ operadores es opcional y usa un token independiente; consulta
 | Windows | `%USERPROFILE%\.codex\config.toml` |
 
 Abre `config.toml` en la ruta correspondiente a tu sistema y añade lo siguiente.
-Si has definido `CODEX_HOME`, usa el archivo de esa carpeta. Si el archivo ya
-tiene una sección `[features]`, añade el ajuste a esa sección.
+Si has definido `CODEX_HOME`, usa el archivo de esa carpeta. Conserva
+`name = "OpenAI"` para mantener las funciones nativas de Codex. El descubrimiento
+del catálogo está habilitado por defecto; `model_catalog_url` lo dirige a tu Pool.
 
 ```toml
 model = "gpt-6.1-sol"
@@ -222,16 +223,13 @@ env_key = "CODEX_POOLER_API_KEY"
 wire_api = "responses"
 supports_websockets = true
 requires_openai_auth = true
-
-[features]
-api_key_model_discovery = true
 ```
 
 Reinicia Codex y elige un modelo disponible para tu Pool.
 Si usas Codex Desktop,
 sigue la guía completa para que la aplicación pueda acceder a tu clave API.
 
-**[Configuración completa y opciones adicionales](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/)** — configuración de escritorio, ajustes de cuenta y conversaciones existentes.
+**[Configuración completa y opciones adicionales](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/)** — configuración de escritorio, ajustes de cuenta, conversaciones existentes y el nombre de proveedor personalizado opcional con sus limitaciones.
 
 </details>
 
