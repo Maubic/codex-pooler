@@ -679,7 +679,11 @@ defmodule CodexPooler.Accounting.ClientRetry do
   def admission_linked_session_ids(%Request{} = request, scope) do
     ancestry = discover_admission_ancestry(request, scope, 0)
     original = hd(ancestry)
-    Enum.flat_map(tl(ancestry), &admission_request_session_ids(&1.id)) ++ discover_linked_sessions(original, original, scope, 0)
+    # Discovery needs the same session set, not one round trip per ancestor.
+    # Admission still locks and revalidates the current rows after discovery.
+    ancestor_ids = Enum.map(tl(ancestry), & &1.id)
+    ancestor_sessions = if ancestor_ids == [], do: [], else: Repo.all(from turn in CodexTurn, where: turn.request_id in ^ancestor_ids, select: turn.codex_session_id)
+    ancestor_sessions ++ discover_linked_sessions(original, original, scope, 0)
   end
 
   defp discover_admission_ancestry(request, _scope, depth) when depth >= @max_chain_depth, do: [request]
@@ -723,11 +727,13 @@ defmodule CodexPooler.Accounting.ClientRetry do
   end
 
   defp admission_link_claim?(original, previous, successor, scope) do
-    admission_client_retry_claim?(original, previous, successor, scope) or
-      deterministic_failed_predecessor_claim(previous.correlation_id, previous.id) == {:ok, successor.correlation_id}
+    deterministic_failed_predecessor_claim(previous.correlation_id, previous.id) == {:ok, successor.correlation_id} or
+      admission_client_retry_claim?(original, previous, successor, scope)
   end
 
-  defp admission_client_retry_claim?(original, previous, successor, scope) do
+  # Both successor emitters use this namespace. Other claims cannot match,
+  # so they need no turn read to check the compaction variant.
+  defp admission_client_retry_claim?(original, previous, %{correlation_id: @successor_prefix <> _suffix} = successor, scope) do
     claims = [deterministic_successor_claim(original, previous.id)]
 
     claims =
@@ -741,6 +747,8 @@ defmodule CodexPooler.Accounting.ClientRetry do
       _invalid -> false
     end)
   end
+
+  defp admission_client_retry_claim?(_original, _previous, _successor, _scope), do: false
 
   defp admission_requests(scope) do
     from request in Request,

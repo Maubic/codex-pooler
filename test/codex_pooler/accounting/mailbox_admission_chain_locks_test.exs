@@ -522,6 +522,45 @@ defmodule CodexPooler.Accounting.MailboxAdmissionChainLocksTest do
     end)
   end
 
+  @tag mailbox_admission_query_cost: true
+  test "sixteen failed-claim edges discover every session with bounded reads" do
+    fixture = committed_fixture()
+
+    Sandbox.unboxed_run(Repo, fn ->
+      sessions = Enum.map(1..16, fn _ -> insert_session(fixture.auth, Ecto.UUID.generate()) end)
+      tail = Enum.reduce(sessions, fixture.original, &append_edge(fixture, &2, &1))
+      opts = %{fixture.opts | correlation_id: tail.correlation_id}
+      expected = MapSet.new([fixture.session.id | Enum.map(sessions, & &1.id)])
+      counter = :atomics.new(1, [])
+      handler = {__MODULE__, :discovery_reads, make_ref()}
+      actor = self()
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:codex_pooler, :repo, :query],
+          fn _event, _measurements, metadata, {actor, counter} ->
+            if self() == actor and metadata[:repo] == Repo and String.starts_with?(metadata[:query] || "", "SELECT"), do: :atomics.add(counter, 1, 1)
+          end,
+          {actor, counter}
+        )
+
+      try do
+        ids = Reservation.mailbox_admission_session_ids(fixture.auth, fixture.model, opts)
+        assert MapSet.new(ids) == expected
+        reads = :atomics.get(counter, 1)
+        assert reads > 0
+        # The bound allows both fresh discovery walks and their exact session
+        # sets, without a query for every ancestor's turn and session per hop.
+        assert reads <= 48
+        emit_receipt(%{scenario: "sixteen_edge_discovery_cost", distinct_sessions: MapSet.size(expected), select_queries: reads})
+      after
+        :telemetry.detach(handler)
+      end
+    end)
+  end
+
   defp committed_fixture do
     %{user: owner} = committed_bootstrap_owner_fixture!()
 
