@@ -13,6 +13,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.SessionContinuity
   alias CodexPooler.Gateway.Runtime.DuplicateTurnTelemetry
+  alias CodexPooler.Gateway.Runtime.NativeResponseSteering
   alias CodexPooler.Gateway.Runtime.Service
   alias CodexPooler.Gateway.Transports.Streaming.PreparedWebsocketFrame
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
@@ -25,6 +26,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionTrace
   alias CodexPooler.Gateway.Transports.Websocket.RemoteReconnectControlV2
   alias CodexPooler.Gateway.Transports.Websocket.ResponseInterrupt
+  alias CodexPooler.Gateway.Transports.Websocket.ResponseSteer
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.CloseDiagnostics
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerAdmissionControlV1
@@ -48,6 +50,8 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   alias CodexPoolerWeb.WebsocketResponseTaskFailureDiagnostics
 
   require Logger
+
+  @typep downstream_delivery_key :: pid() | {pid(), Ecto.UUID.t()}
 
   @response_task_exception_reason "owner_task_exception"
 
@@ -98,6 +102,12 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     state
     |> Map.get(:downstream_delivery_evidence, %{})
     |> Map.new(fn {task, evidence} -> {task, Map.get(evidence, :frames, 0)} end)
+    |> then(fn frames ->
+      case Map.get(state, :native_response_steering_active) do
+        %{evidence: evidence} -> Map.put(frames, state.native_response_steering, evidence.frames)
+        _none -> frames
+      end
+    end)
   end
 
   defp progressed_tasks(delivered_frames, previous_frames),
@@ -183,7 +193,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       })
 
     case native_response_interrupt(payload, state) do
-      :not_interrupt -> prepare_and_dispatch_response(payload, state)
+      :not_interrupt -> dispatch_native_response_steer(payload, state)
       interrupt -> {:ok, relay_response_interrupt(interrupt, state)}
     end
   end
@@ -254,6 +264,69 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   defp response_interrupt_topology(state), do: if(owner_forwarded_socket?(state), do: :owner, else: :direct)
+
+  defp dispatch_native_response_steer(payload, state) do
+    parsed =
+      with false <- Adapter.public_responses_stream?(state),
+           {:ok, decoded} <- WebsocketCodec.decode_payload(payload) do
+        ResponseSteer.parse(decoded)
+      else
+        _public_or_invalid -> :not_steer
+      end
+
+    case parsed do
+      :not_steer ->
+        prepare_and_dispatch_response(payload, state)
+
+      :malformed ->
+        :ok = ResponseSteer.log(:malformed, response_interrupt_topology(state))
+        {:push, {:text, CodexPooler.JSON.encode!(client_error_event(%{status: 400, code: "invalid_request", message: "response.steer requires a provider previous_response_id and an input list", param: "input"}, state))}, state}
+
+      {:ok, steer} ->
+        relay_response_steer(steer, state)
+        {:ok, state}
+    end
+  end
+
+  defp relay_response_steer(steer, state) do
+    cond do
+      owner_forwarded_socket?(state) ->
+        socket = self()
+
+        relay = fn -> relay_owner_response_steer(steer, state, socket) end
+
+        case Task.Supervisor.start_child(WebsocketOwnerSession.TaskSupervisor, relay) do
+          {:ok, _pid} ->
+            :ok
+
+          {:error, _reason} ->
+            ResponseSteer.log(:owner_unavailable, :owner)
+            send(self(), {:native_response_steering_unavailable, :owner_unavailable})
+        end
+
+      is_pid(Map.get(state, :upstream_websocket_session)) ->
+        UpstreamWebsocketSession.steer(state.upstream_websocket_session, steer)
+
+      true ->
+        ResponseSteer.log(:session_unavailable, :direct)
+        send(self(), {:native_response_steering_unavailable, :session_unavailable})
+    end
+  end
+
+  defp relay_owner_response_steer(steer, state, socket) do
+    case Websocket.steer_websocket_owner_turn(Map.get(state, :codex_session), Map.get(state, :websocket_owner_lease_token), Map.get(state, :websocket_owner_downstream), steer, Map.get(state, :opts, %{})) do
+      :ok ->
+        :ok
+
+      {:error, :remote_steer_v1_unsupported} ->
+        ResponseSteer.log(:owner_protocol_unsupported, :owner)
+        send(socket, {:native_response_steering_unavailable, :owner_protocol_unsupported})
+
+      {:error, _reason} ->
+        ResponseSteer.log(:owner_unavailable, :owner)
+        send(socket, {:native_response_steering_unavailable, :owner_unavailable})
+    end
+  end
 
   @impl WebSock
   def handle_info(_message, %{socket_stopped?: true} = state), do: {:ok, state}
@@ -452,6 +525,76 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     {:ok, state}
   end
 
+  defp handle_socket_info({:native_response_steering_prepare, caller, ref, context, callbacks}, state) do
+    lane = Map.get(state, :native_response_steering)
+    {:ok, lane} = if is_pid(lane) and Process.alive?(lane), do: {:ok, lane}, else: NativeResponseSteering.start(self())
+
+    case NativeResponseSteering.set_context(lane, context, callbacks, caller) do
+      :ok ->
+        send(caller, {:native_response_steering_prepared, ref, lane})
+        {:ok, Map.put(state, :native_response_steering, lane)}
+
+      {:error, reason} ->
+        send(caller, {:native_response_steering_prepare_failed, ref, reason})
+        {:ok, state}
+    end
+  end
+
+  defp handle_socket_info({:native_response_steering_open, lane, identity}, %{native_response_steering: lane} = state) do
+    entry = %{identity: identity, evidence: new_downstream_delivery_evidence()}
+    {:ok, Map.put(state, :native_response_steering_active, entry)}
+  end
+
+  defp handle_socket_info({:native_response_steering_frame, lane, identity, data}, %{native_response_steering: lane, native_response_steering_active: %{identity: identity}} = state) do
+    case Adapter.native_downstream_response_chunk(data, fn -> false end, usage_limit_originator(state)) do
+      :drop ->
+        {:ok, state}
+
+      frame when is_binary(frame) ->
+        evidence = state.native_response_steering_active.evidence
+        class = DeliveryReceipt.frame_class(frame)
+        evidence = if StreamProtocol.internal_control_event?(frame), do: evidence, else: evidence |> Map.update!(:frames, &(&1 + 1)) |> Map.put(:highest_class, DeliveryReceipt.higher_frame_class(Map.get(evidence, :highest_class), class)) |> maybe_count_completed_item(class, frame)
+
+        evidence =
+          case {evidence.terminal_class, StreamProtocol.terminal_outcome(frame)} do
+            {nil, {:ok, outcome}} -> evidence |> Map.put(:terminal_class, DeliveryReceipt.terminal_class_from_outcome(outcome)) |> Map.put(:pushed_at, DateTime.utc_now()) |> Map.put(:incomplete_reason, Map.get(outcome, :incomplete_reason)) |> Map.put(:end_turn, Map.get(outcome, :end_turn))
+            _nonterminal_or_already_pushed -> evidence
+          end
+
+        state = put_in(state.native_response_steering_active.evidence, evidence)
+        native_push(frame, state)
+    end
+  end
+
+  defp handle_socket_info({:native_response_steering_done, lane, identity, result}, %{native_response_steering: lane, native_response_steering_active: %{identity: identity}} = state) do
+    key = {lane, identity.request_id}
+    pushed = state.native_response_steering_active.evidence
+    outcome = native_terminal_delivery_outcome(key, pushed)
+    evidence = written_delivery_evidence(key, pushed)
+    _recorded = record_downstream_delivery_receipt(identity, evidence, state, outcome)
+    NativeResponseSteering.delivery_complete(lane, identity, outcome)
+    state = Map.delete(state, :native_response_steering_active)
+
+    native_response_steering_completion_result(result, pushed, state)
+    |> close_if_revoked_idle()
+  end
+
+  defp handle_socket_info({:native_response_steering_close, lane, code, reason}, %{native_response_steering: lane} = state) when code in 1000..4999 and is_binary(reason) do
+    {:stop, :normal, {code, reason}, state}
+  end
+
+  defp handle_socket_info({:native_response_steering_control, lane, data}, %{native_response_steering: lane} = state), do: native_push(Adapter.native_downstream_response_chunk(data, fn -> false end, usage_limit_originator(state)), state)
+
+  defp handle_socket_info({:native_response_steering_open, _lane, _identity}, state), do: {:ok, state}
+  defp handle_socket_info({:native_response_steering_frame, _lane, _identity, _data}, state), do: {:ok, state}
+  defp handle_socket_info({:native_response_steering_done, _lane, _identity, _result}, state), do: {:ok, state}
+  defp handle_socket_info({:native_response_steering_close, _lane, _code, _reason}, state), do: {:ok, state}
+  defp handle_socket_info({:native_response_steering_control, _lane, _data}, state), do: {:ok, state}
+
+  defp handle_socket_info({:native_response_steering_unavailable, _reason}, state) do
+    {:stop, :normal, {1011, "native response steering unavailable"}, state}
+  end
+
   defp handle_socket_info({:direct_request_cleanup, pid, ref, receipt}, state) do
     {:ok, accept_direct_cleanup(state, pid, ref, receipt)}
   end
@@ -604,6 +747,35 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   defp handle_socket_info(_message, state), do: {:ok, state}
 
+  # The successor has its own finalized result, not its predecessor's task
+  # result or an owner acknowledgement command. Receipt and ACK happen before
+  # clearing its generation; a failed turn with no terminal must also release
+  # the client's outstanding response promise. A pushed provider terminal keeps
+  # its bytes and any provider Close that follows, without another payload.
+  defp native_response_steering_completion_result({:error, reason}, evidence, state) do
+    if pushed_terminal_evidence?(evidence) do
+      {:ok, maybe_start_queued_response_after_steering(state)}
+    else
+      {:stop, :normal, native_response_steering_failure_close_detail(reason), state}
+    end
+  end
+
+  defp native_response_steering_completion_result({:ok, _result}, _evidence, state),
+    do: {:ok, maybe_start_queued_response_after_steering(state)}
+
+  defp native_response_steering_completion_result(_unfinalized, _evidence, state), do: {:ok, state}
+
+  defp maybe_start_queued_response_after_steering(%{websocket_owner_drain_observed?: true} = state),
+    do: state
+
+  defp maybe_start_queued_response_after_steering(state), do: maybe_start_queued_response_task(state)
+
+  defp native_response_steering_failure_close_detail(%{code: code})
+       when code in ["upstream_request_failed", "upstream_stream_error", "stream_idle_timeout"],
+       do: Adapter.close_detail(:upstream_connection_closed)
+
+  defp native_response_steering_failure_close_detail(reason), do: Adapter.close_detail(reason)
+
   defp handle_response_done(pid, result, state) do
     case api_key_revocation_disposition(result) do
       {:revoked, disabling_epoch} ->
@@ -699,6 +871,18 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     # carries; a detach with the old token is a silent no-op, so take the
     # replacement runtime from any unprocessed notification first.
     state = absorb_recovered_owner_runtime(state)
+
+    if lane = Map.get(state, :native_response_steering) do
+      if entry = Map.get(state, :native_response_steering_active) do
+        key = {lane, entry.identity.request_id}
+        outcome = native_terminal_delivery_outcome(key, entry.evidence)
+        evidence = written_delivery_evidence(key, entry.evidence)
+        _recorded = record_downstream_delivery_receipt(entry.identity, evidence, state, outcome)
+        NativeResponseSteering.delivery_complete(lane, entry.identity, outcome)
+      end
+
+      NativeResponseSteering.cancel(lane, :client_disconnected)
+    end
 
     WebsocketControlPath.cleanup(fn -> cleanup_websocket_session(reason, state) end)
 
@@ -1698,6 +1882,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     tasks = Map.get(state, :tasks, MapSet.new())
 
     cond do
+      is_map(Map.get(state, :native_response_steering_active)) -> :busy
       queued_request_outlives_close?(state) -> :queued
       not MapSet.subset?(tasks, Map.get(state, :response_task_terminals_accepted, MapSet.new())) -> :busy
       not is_map(Map.get(state, :last_completed_native_response)) -> :no_completed_response
@@ -3910,7 +4095,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # the closed connection's response and waits for the close to take its
   # place (`cancel_upstream_close/2`, findings#270 row 270-302).
   defp maybe_start_queued_response_task(state) do
-    if Map.get(state, :firewall_revoked?, false) or active_response_task?(state) or
+    if socket_revoked?(state) or active_response_task?(state) or
          public_turn_open?(state) or is_map(Map.get(state, :upstream_close_pending)) do
       state
     else
@@ -4511,7 +4696,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     end
   end
 
-  defp active_response_task?(state), do: MapSet.size(Map.get(state, :tasks, MapSet.new())) > 0
+  defp active_response_task?(state), do: MapSet.size(Map.get(state, :tasks, MapSet.new())) > 0 or is_map(Map.get(state, :native_response_steering_active))
 
   defp tracked_response_task?(state, pid) when is_pid(pid) do
     MapSet.member?(Map.get(state, :tasks, MapSet.new()), pid)
@@ -4821,8 +5006,17 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # pushed, so while no write has failed the evidence at a callback's entry is
   # evidence of frames that reached the connection
   # (`WebsocketDownstreamWriteWatch`, findings#232 row 232-256).
-  defp confirm_written_delivery_evidence(state),
-    do: WebsocketDownstreamWriteWatch.confirm(Map.get(state, :downstream_delivery_evidence, %{}))
+  defp confirm_written_delivery_evidence(state) do
+    evidence = Map.get(state, :downstream_delivery_evidence, %{})
+
+    evidence =
+      case Map.get(state, :native_response_steering_active) do
+        %{identity: identity, evidence: receipt} -> Map.put(evidence, {state.native_response_steering, identity.request_id}, receipt)
+        _none -> evidence
+      end
+
+    WebsocketDownstreamWriteWatch.confirm(evidence)
+  end
 
   # Once a write failed, a receipt records what was written before it: the
   # task's evidence as last confirmed, with the failure's class unless that
@@ -5103,19 +5297,43 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # A terminating socket acknowledges a task whose result it never saw
   # `:aborted` (it cannot certify a settlement it did not observe, findings#225
   # row 225-105). The delivery receipt records what the client received
-  # instead: when the socket already pushed and accepted the turn's completed
-  # terminal, or a public turn's terminal of any class, the receipt is
-  # `delivered` even though the acknowledgement is not (findings#225 rows
-  # 225-130 and 225-240, findings#206 row 206-598). Only the receipt changes.
+  # instead: an accepted completed terminal, a public terminal, or a written
+  # content-filter terminal keeps the ordinary delivered-receipt contract.
+  # Native steering additionally preserves a confirmed steered incomplete;
+  # successors use their own exact request-bound write evidence and ACK.
   defp termination_receipt_outcome(state, pid, :aborted) do
+    native_steering = match?(%{incomplete_reason: "steered"}, downstream_delivery_evidence(state, pid)) or Map.get(downstream_delivery_evidence(state, pid), :native_steering_error?, false)
+
     if MapSet.member?(Map.get(state, :response_task_completed_terminals, MapSet.new()), pid) or
          MapSet.member?(Map.get(state, :public_pushed_terminals, MapSet.new()), pid) or
-         written_content_filter_terminal?(state, pid),
+         written_content_filter_terminal?(state, pid) or
+         (native_steering and native_terminal_delivery_outcome(pid, downstream_delivery_evidence(state, pid)) == :delivered),
        do: :delivered,
        else: :aborted
   end
 
   defp termination_receipt_outcome(_state, _pid, outcome), do: outcome
+
+  # The write watch confirms evidence at the next WebSock callback only after
+  # Bandit wrote the preceding push and its driver queue drained. The exact
+  # task or successor key is the authority, not another turn's terminal, its
+  # provider outcome, or the task's cleanup result. A later failed write keeps
+  # an already confirmed terminal; a failed/skipped terminal never qualifies.
+  @spec native_terminal_delivery_outcome(downstream_delivery_key(), map()) :: :delivered | :aborted
+  defp native_terminal_delivery_outcome(key, evidence) do
+    confirmed = WebsocketDownstreamWriteWatch.confirmed()
+
+    written? =
+      case confirmed_task_evidence(confirmed, key) do
+        %{terminal_class: class, pushed_at: %DateTime{}, skipped?: false} when is_binary(class) ->
+          pushed_terminal_evidence?(written_delivery_evidence(key, evidence))
+
+        _unconfirmed ->
+          content_filter_terminal_written_before_close?(confirmed, key, evidence)
+      end
+
+    if written?, do: :delivered, else: :aborted
+  end
 
   # Codex closes immediately after reading a content-filter terminal, before
   # settlement acknowledgement. That changes cleanup, not the written facts.
@@ -5268,6 +5486,10 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       {tasks, state}
     else
       receive do
+        {:native_response_steering_prepare, caller, _ref, _context, _callbacks} = message when is_map_key(monitors, caller) ->
+          {:ok, state} = handle_socket_info(message, state)
+          await_response_task_cleanup_results(state, tasks, monitors, activities, deadline)
+
         {:websocket_response_activity, pid, token}
         when is_map_key(monitors, pid) and is_reference(token) ->
           activities = Map.put(activities, pid, token)
@@ -5435,9 +5657,20 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       |> record_completed_native_response(pid, data)
       |> record_downstream_terminal(pid, DeliveryReceipt.terminal_class_from_outcome(outcome))
       |> record_downstream_incomplete_reason(pid, outcome)
+      |> maybe_mark_native_steering_error_terminal(pid, data)
       |> record_downstream_end_turn(pid, outcome)
     else
       _not_terminal -> state
+    end
+  end
+
+  defp maybe_mark_native_steering_error_terminal(state, pid, data) do
+    with lane when is_pid(lane) <- Map.get(state, :native_response_steering),
+         {:ok, decoded} <- CodexPooler.JSON.decode(data),
+         true <- ResponseSteer.native_lane_error?(decoded) do
+      update_downstream_delivery_evidence(state, pid, &Map.put(&1, :native_steering_error?, true))
+    else
+      _ordinary -> state
     end
   end
 
@@ -6190,7 +6423,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     killed = Enum.filter(killed_tasks, &terminal_pushed_direct_task?(state, &1))
 
     # Such a task never handed its result to a drain and was never pending a
-    # termination receipt, so its single aborted receipt is recorded here.
+    # termination receipt, so its ordinary aborted receipt is recorded here.
     for pid <- killed, not receipt_recorded_at_termination?(state, pid), do: record_downstream_delivery_receipt(state, pid, :aborted)
 
     if killed != [] and not Map.get(state, :websocket_owner_replay_armed_before_drain?, false),
@@ -6604,6 +6837,10 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       timeout = response_task_wait_timeout(deadline)
 
       receive do
+        {:native_response_steering_prepare, caller, _ref, _context, _callbacks} = message when is_map_key(monitors, caller) ->
+          {:ok, state} = handle_socket_info(message, state)
+          do_await_response_tasks(state, reason, tasks, monitors, deadline)
+
         {:websocket_response_activity, pid, token}
         when is_map_key(monitors, pid) and is_reference(token) ->
           state = put_drained_response_task_activity(state, pid, token)

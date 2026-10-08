@@ -42,7 +42,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.TerminateD
 
     payload = turn_payload(setup, "ws-owner-terminate-receipt-turn", "a turn still running at close")
     assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
-    _worker = assert_blocking_owner_upstream_received!(release_ref)
+    {state, _worker} = assert_blocking_owner_upstream_received!(state, release_ref)
 
     {:ok, owner_pid} = WebsocketOwnerSession.lookup(state.codex_session.id)
     Sandbox.allow(Repo, self(), owner_pid)

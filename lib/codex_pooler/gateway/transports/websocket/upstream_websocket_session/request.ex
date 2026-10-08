@@ -33,11 +33,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Requ
     :attempt_id,
     :native_client_retry_observation,
     :client_retry_dispatch_authority,
+    :native_response_steering,
     assignment_advertised?: false,
     connection_bound_continuation?: false,
     websocket_delivery_mode: :relay,
     forward_error_body?: true
   ]
+
+  # Direct requests carry the lane; owner-forwarded requests bind its owner
+  # before submission. Neither value is part of the provider payload.
+  @type native_response_steering :: pid() | {pid(), pid()} | nil
 
   @type writer ::
           (binary() -> any())
@@ -86,6 +91,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Requ
           attempt_id: Ecto.UUID.t() | nil,
           native_client_retry_observation: CodexPooler.Accounting.ClientRetry.Observation.t() | nil,
           client_retry_dispatch_authority: CodexPooler.Accounting.ClientRetry.DispatchAuthority.t() | nil,
+          native_response_steering: native_response_steering(),
           assignment_advertised?: boolean(),
           connection_bound_continuation?: boolean(),
           websocket_delivery_mode: delivery_mode(),

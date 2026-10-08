@@ -19,6 +19,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV6
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV7
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV9
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
@@ -82,11 +83,22 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks do
           | WebsocketOwnerRequestV6.t()
           | WebsocketOwnerRequestV7.t()
           | WebsocketOwnerRequestV8.t()
+          | WebsocketOwnerRequestV9.t()
           | WebsocketOwnerRequestV5.t()
           | map(),
           writer()
         ) ::
           {:ok, Request.t()} | {:error, materialize_error()}
+  def materialize(%WebsocketOwnerRequestV9{} = envelope, writer) do
+    with :ok <- WebsocketOwnerRequestV9.validate(envelope),
+         {:ok, request} <- materialize(envelope.request, writer) do
+      {:ok, %{request | native_response_steering: envelope.native_response_steering}}
+    else
+      {:error, {:invalid_field, _field} = reason} -> {:error, {:invalid_owner_request, reason}}
+      {:error, _reason} = error -> error
+    end
+  end
+
   def materialize(%WebsocketOwnerRequestV8{} = envelope, writer) do
     with :ok <- WebsocketOwnerRequestV8.validate(envelope),
          {:ok, request} <- materialize(envelope.request, writer) do

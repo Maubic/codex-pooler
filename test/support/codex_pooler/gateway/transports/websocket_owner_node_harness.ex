@@ -493,7 +493,7 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness do
   # remote_attach_downstream/2 but not /3 and has no versioned request entrypoint.
   defp dispatch_call_mode(:old_release, _node, module, function, args) do
     if (function == :remote_attach_downstream and length(args) == 3) or
-         (function == :remote_submit_request_v8 and length(args) == 3) or
+         (function in [:remote_submit_request_v8, :remote_submit_request_v9] and length(args) == 3) or
          (function == :remote_cancel_downstream_v1 and length(args) == 3) do
       {:error, {:exception, :undef, [{module, function, args, []}]}}
     else
@@ -582,13 +582,14 @@ defmodule CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness do
          function,
          [codex_session_id, downstream, _request]
        )
-       when function == :remote_submit_request_v8 do
+       when function in [:remote_submit_request_v8, :remote_submit_request_v9] do
     %{codex_session_id: codex_session_id, downstream: downstream}
   end
 
   defp request_call_metadata(_function, _args), do: %{}
 
-  defp send_request_observation(:remote_submit_request_v8, [_session_id, _downstream, request]) do
+  defp send_request_observation(function, [_session_id, _downstream, request])
+       when function in [:remote_submit_request_v8, :remote_submit_request_v9] do
     case current_node_client_state() |> Map.get(:capture_request_to) do
       pid when is_pid(pid) -> send(pid, {:websocket_owner_harness_request, request})
       _not_configured -> :ok

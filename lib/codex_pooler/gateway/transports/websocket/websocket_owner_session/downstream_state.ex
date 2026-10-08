@@ -1,6 +1,8 @@
 defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.DownstreamState do
   @moduledoc false
 
+  alias CodexPooler.Gateway.Runtime.NativeResponseSteering
+
   @spec downstream_status(map() | nil, map()) :: :active | {:error, atom()}
   def downstream_status(nil, _downstream), do: {:error, :stale_downstream}
 
@@ -30,7 +32,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Downstr
   @spec clear_active_turn_monitors(map() | nil) :: :ok
   def clear_active_turn_monitors(active_turn) when is_map(active_turn) do
     active_turn
-    |> Map.take([:task_ref, :submitter_monitor])
+    |> Map.take([:task_ref, :native_steering_monitor, :submitter_monitor])
     |> Map.values()
     |> Enum.each(fn
       ref when is_reference(ref) -> Process.demonitor(ref, [:flush])
@@ -68,7 +70,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Downstr
       when is_map(active_turn) and is_map(downstream) and is_atom(reason) do
     case cancellation_downstream_status(Map.get(active_turn, :downstream), downstream) do
       :active ->
-        cancel_active_turn_task(active_turn)
+        cancel_active_turn_task(active_turn, reason)
 
         %{
           state
@@ -99,8 +101,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Downstr
 
   def cancellation_status(_state, _requested), do: {:error, :stale_downstream}
 
-  @spec cancel_active_turn_task(map()) :: :ok
-  def cancel_active_turn_task(%{task_pid: task_pid}) when is_pid(task_pid) do
+  @spec cancel_active_turn_task(map() | nil) :: :ok
+  def cancel_active_turn_task(active_turn), do: cancel_active_turn_task(active_turn, :client_disconnected)
+
+  @spec cancel_active_turn_task(map() | nil, atom()) :: :ok
+  def cancel_active_turn_task(%{native_response_steering: lane}, reason) when is_pid(lane) do
+    NativeResponseSteering.cancel(lane, if(reason == :owner_drained, do: :owner_drained, else: :client_disconnected))
+  end
+
+  def cancel_active_turn_task(%{task_pid: task_pid}, _reason) when is_pid(task_pid) do
     if Process.alive?(task_pid) do
       Process.exit(task_pid, :shutdown)
     end
@@ -108,7 +117,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Downstr
     :ok
   end
 
-  def cancel_active_turn_task(_active_turn), do: :ok
+  def cancel_active_turn_task(_active_turn, _reason), do: :ok
 
   @spec stale_or_busy(map() | nil, map()) :: {:error, atom()}
   def stale_or_busy(current_downstream, downstream) do

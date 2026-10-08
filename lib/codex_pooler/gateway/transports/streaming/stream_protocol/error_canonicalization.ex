@@ -125,6 +125,9 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCanonical
   @spec canonicalize_native_codex_responses_json_message(binary()) :: binary()
   def canonicalize_native_codex_responses_json_message(data) when is_binary(data) do
     case CodexPooler.JSON.decode(data) do
+      {:ok, %{"type" => "error", "error" => %{"code" => "unsupported_native_inflight_message"}}} ->
+        data
+
       {:ok,
        %{
          "type" => "error",
@@ -146,6 +149,9 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCanonical
   def canonicalize_native_codex_responses_json_message(data, decoded)
       when is_binary(data) and is_map(decoded) do
     case decoded do
+      %{"type" => "error", "error" => %{"code" => "unsupported_native_inflight_message"}} ->
+        {data, decoded}
+
       %{
         "type" => "error",
         "error" => %{"code" => "previous_response_not_found"}

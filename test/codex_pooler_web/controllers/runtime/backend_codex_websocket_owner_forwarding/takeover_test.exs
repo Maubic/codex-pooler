@@ -54,6 +54,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.TakeoverTe
       })
 
     stale_state = state
+    socket_state_key = make_ref()
+    Process.put(socket_state_key, stale_state)
     takeover_token = Ecto.UUID.generate()
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
@@ -71,7 +73,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.TakeoverTe
       assert {:ok, stale_state} =
                CodexResponsesSocket.handle_in({payload, [opcode: :text]}, stale_state)
 
-      assert {:push, {:text, error_frame}, _state} = receive_socket_done(stale_state)
+      Process.put(socket_state_key, stale_state)
+      stale_state = receive_native_response_steering_prepared!(stale_state)
+      Process.put(socket_state_key, stale_state)
+
+      assert {:push, {:text, error_frame}, stale_state} = receive_socket_done(stale_state)
+      Process.put(socket_state_key, stale_state)
 
       assert %{"error" => %{"code" => "stale_owner", "message" => message}} =
                CodexPooler.JSON.decode!(error_frame)
@@ -81,7 +88,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.TakeoverTe
     after
       CodexResponsesSocket.terminate(
         :closed,
-        Map.delete(stale_state, :websocket_owner_downstream)
+        Map.delete(Process.delete(socket_state_key), :websocket_owner_downstream)
       )
     end
 

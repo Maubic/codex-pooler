@@ -1575,18 +1575,30 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
     end
   end
 
+  @spec receive_socket_push(map()) :: tuple()
   def receive_socket_push(state) do
-    receive do
-      {:codex_response_chunk, task_pid, frame} ->
-        result = CodexResponsesSocket.handle_info({:codex_response_chunk, task_pid, frame}, state)
+    await_socket_push(state, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+  end
 
-        if internal_control_frame?(frame) do
-          receive_socket_push(state)
-        else
-          result
+  defp await_socket_push(state, deadline) do
+    receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_socket_push(state, deadline)
+
+      {:codex_response_chunk, _task_pid, frame} = message ->
+        case CodexResponsesSocket.handle_info(message, state) do
+          {:push, _push, state} = result ->
+            if internal_control_frame?(frame), do: await_socket_push(state, deadline), else: result
+
+          {:ok, state} ->
+            await_socket_push(state, deadline)
+
+          result ->
+            result
         end
     after
-      @detection_timeout_ms -> flunk("expected websocket response chunk")
+      max(deadline - System.monotonic_time(:millisecond), 0) -> flunk("expected websocket response chunk")
     end
   end
 
@@ -1612,20 +1624,31 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
   # the delivery completion the socket schedules for itself while handling the
   # result is processed, so the task receives its delivery acknowledgement and
   # exits. The turn must have pushed its terminal first, as on a real socket.
+  @spec receive_socket_turn_done(map(), non_neg_integer()) :: tuple()
   def receive_socket_turn_done(state, timeout_ms \\ @detection_timeout_ms) do
-    receive do
-      {:websocket_response_activity, pid, token} ->
-        {:ok, state} =
-          CodexResponsesSocket.handle_info({:websocket_response_activity, pid, token}, state)
+    await_socket_turn_done(state, System.monotonic_time(:millisecond) + timeout_ms)
+  end
 
-        receive_socket_turn_done(state, timeout_ms)
+  defp await_socket_turn_done(state, deadline) do
+    receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_socket_turn_done(state, deadline)
+
+      {:websocket_response_activity, _pid, _token} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_socket_turn_done(state, deadline)
+
+      {:direct_request_cleanup, _pid, _ref, _receipt} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_socket_turn_done(state, deadline)
 
       {:codex_response_done, pid, result} ->
         {:codex_response_done, pid, result}
         |> CodexResponsesSocket.handle_info(state)
         |> complete_scheduled_socket_delivery(pid)
     after
-      timeout_ms -> flunk("expected websocket response completion")
+      max(deadline - System.monotonic_time(:millisecond), 0) -> flunk("expected websocket response completion")
     end
   end
 

@@ -4,6 +4,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   alias CodexPooler.Gateway.OpenAICompatibility.Error
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Audio
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.InstructionLifter
+  alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation
   alias CodexPooler.Gateway.Payloads.CompactionTrigger
   alias CodexPooler.Gateway.Payloads.ToolResultShape
 
@@ -12,6 +13,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
     additional_tools
     agent_message
     web_search_call
+    configuration_update
     message
     reasoning
     compaction
@@ -221,7 +223,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   end
 
   defp normalize_input_items(input) do
-    with :ok <- validate_input_image_details(input) do
+    with :ok <- Validation.validate_input_updates(input),
+         :ok <- validate_input_image_details(input) do
       normalize_valid_input_items(input)
     end
   end
@@ -354,6 +357,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   # the generic `content` clauses below would rewrite it into a user message.
   # `Input.AgentMessage` owns its exact shape and refuses every other form.
   defp normalize_input_item(%{"type" => "agent_message"} = item), do: {:ok, item}
+
+  # Keep the measured item untouched, including malformed `content: ""` shapes, so its validator names the missing
+  # reasoning field instead of silently turning it into a message.
+  defp normalize_input_item(%{"type" => "configuration_update"} = item), do: {:ok, item}
 
   # A replayed hosted web search; `Input.WebSearchCall` owns its exact shape.
   defp normalize_input_item(%{"type" => "web_search_call"} = item), do: {:ok, item}

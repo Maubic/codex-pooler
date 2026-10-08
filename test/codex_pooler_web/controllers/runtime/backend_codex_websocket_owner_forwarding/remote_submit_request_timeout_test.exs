@@ -53,7 +53,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
 
     # The switch lives in the application env and is read by the response
     # task that sends the submission.
-    def arm(owner_pid, function \\ :remote_submit_request_v8) when is_pid(owner_pid) do
+    def arm(owner_pid, function \\ :remote_submit_request_v9) when is_pid(owner_pid) do
       put_config(:armed_function, function)
       put_config(:armed_owner, owner_pid)
     end
@@ -136,7 +136,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
     defdelegate app_node?(node), to: ReplayRemoteNodeClient
 
     @impl true
-    def call_owner(remote_node, module, :remote_submit_request_v8 = function, args, timeout) do
+    def call_owner(remote_node, module, :remote_submit_request_v9 = function, args, timeout) do
       notify = :persistent_term.get({ReplayRemoteNodeClient, :state}).notify
 
       if Application.get_env(:codex_pooler, __MODULE__) == :armed do
@@ -202,7 +202,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
     defdelegate app_node?(node), to: ReplayRemoteNodeClient
 
     @impl true
-    def call_owner(remote_node, module, :remote_submit_request_v8 = function, args, timeout) do
+    def call_owner(remote_node, module, :remote_submit_request_v9 = function, args, timeout) do
       notify = :persistent_term.get({ReplayRemoteNodeClient, :state}).notify
 
       case Application.get_env(:codex_pooler, __MODULE__) do
@@ -264,7 +264,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
     defdelegate app_node?(node), to: ReplayRemoteNodeClient
 
     @impl true
-    def call_owner(remote_node, module, :remote_submit_request_v8 = function, args, timeout) do
+    def call_owner(remote_node, module, :remote_submit_request_v9 = function, args, timeout) do
       notify = :persistent_term.get({ReplayRemoteNodeClient, :state}).notify
 
       case Application.get_env(:codex_pooler, __MODULE__) do
@@ -401,7 +401,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
       refute_received {:websocket_owner_frame, _correlation, _epoch, ^second_task, _payload}
 
       # The owner took the queued turn first and then stopped exactly that turn.
-      assert_received {:short_turn_remote_result, ^remote_node, :remote_submit_request_v8, {:error, :owner_forward_timeout}}
+      assert_received {:short_turn_remote_result, ^remote_node, :remote_submit_request_v9, {:error, :owner_forward_timeout}}
       assert_received {:short_turn_remote_result, ^remote_node, :remote_abandon_turn_v1, :ok}
       refute_received {:short_turn_remote_call, ^remote_node, :remote_cancel_downstream_v1, _budget}
 
@@ -432,6 +432,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
 
     LateSubmissionNodeClient.arm()
     assert {:ok, state} = CodexResponsesSocket.handle_in({websocket_payload(setup, "late submission second"), [opcode: :text]}, state)
+    state = receive_native_response_steering_prepared!(state)
     assert_receive {:late_submission_held, late}, @detection_timeout_ms
     {pushes, late_task, state} = drive_until_done(state)
     assert [error_frame] = pushes
@@ -503,7 +504,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
     test "an owner node without the turn abandon stops a released-client turn after its forward timeout and the client gets the error (#{turn_kind})" do
       %{state: state, owner_pid: owner_pid, remote_node: remote_node, frame: frame} = released_client_socket(unquote(turn_kind))
       ShortTurnBudgetNodeClient.emulate_old_release()
-      {pushes, task, _state} = time_out_turn(frame, state, owner_pid, remote_node, :remote_submit_request_v8)
+      {pushes, task, _state} = time_out_turn(frame, state, owner_pid, remote_node, :remote_submit_request_v9)
       assert [error_frame] = pushes
       assert %{"type" => "error"} = CodexPooler.JSON.decode!(error_frame)
 
@@ -522,7 +523,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
   # stopped the same way, and the socket keeps its downstream.
   test "a released-client turn the remote owner takes after its forward budget is stopped without a replay" do
     %{setup: setup, state: state, owner_pid: owner_pid, remote_node: remote_node, attached: attached, frame: frame} = released_client_socket(:fresh_turn)
-    {pushes, task, state} = time_out_turn(frame, state, owner_pid, remote_node, :remote_submit_request_v8)
+    {pushes, task, state} = time_out_turn(frame, state, owner_pid, remote_node, :remote_submit_request_v9)
     assert [error_frame] = pushes
     assert %{"type" => "error"} = CodexPooler.JSON.decode!(error_frame)
 
@@ -552,6 +553,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
     LateSubmissionNodeClient.emulate_old_release()
     LateSubmissionNodeClient.arm()
     assert {:ok, state} = CodexResponsesSocket.handle_in({websocket_payload(setup, "late old-release second"), [opcode: :text]}, state)
+    state = receive_native_response_steering_prepared!(state)
     assert_receive {:late_submission_held, late}, @detection_timeout_ms
     {pushes, late_task, _state} = drive_until_done(state)
     assert [error_frame] = pushes
@@ -581,6 +583,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
 
     OwnerGoneNodeClient.arm(owner_pid)
     assert {:ok, state} = CodexResponsesSocket.handle_in({websocket_payload(setup, "owner gone second"), [opcode: :text]}, state)
+    state = receive_native_response_steering_prepared!(state)
     assert_receive {:owner_gone_late_held, late}, @detection_timeout_ms
     {pushes, late_task, state} = drive_until_done(state)
     assert [error_frame] = pushes
@@ -622,7 +625,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
     test "a client-retry turn the remote owner takes after its forward budget is stopped without detaching the connected socket (#{mode})" do
       %{setup: setup, state: state, owner_pid: owner_pid, remote_node: remote_node, attached: attached, frame: frame, upstream: upstream} = remote_socket_after_failed_turn(unquote(mode))
       assert_served_in_mode!(upstream, unquote(mode))
-      {pushes, retry_task, state} = time_out_turn(frame, state, owner_pid, remote_node, :remote_submit_request_v8)
+      {pushes, retry_task, state} = time_out_turn(frame, state, owner_pid, remote_node, :remote_submit_request_v9)
       assert [error_frame] = pushes
       assert %{"type" => "error"} = CodexPooler.JSON.decode!(error_frame)
 
@@ -631,7 +634,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
       assert %{downstream: ^attached, active_turn: nil} = :sys.get_state(owner_pid)
       refute_received {:websocket_owner_frame, _correlation, _epoch, ^retry_task, _payload}
 
-      assert_received {:short_turn_remote_result, ^remote_node, :remote_submit_request_v8, {:error, :owner_forward_timeout}}
+      assert_received {:short_turn_remote_result, ^remote_node, :remote_submit_request_v9, {:error, :owner_forward_timeout}}
       assert_received {:short_turn_remote_result, ^remote_node, :remote_abandon_turn_v1, :ok}
       refute_received {:short_turn_remote_call, ^remote_node, :remote_cancel_downstream_v1, _budget}
 
@@ -673,8 +676,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
     assert Enum.any?(pushes, &match?(%{"type" => "response.failed"}, CodexPooler.JSON.decode!(&1)))
 
     assert {:ok, state} = CodexResponsesSocket.handle_in({frame, [opcode: :text]}, state)
+    state = receive_native_response_steering_prepared!(state)
     assert_receive {:fake_upstream_websocket_barrier, :before_close, upstream_pid, ^release_ref}, @detection_timeout_ms
-    assert_received {:short_turn_remote_call, ^remote_node, :remote_submit_request_v8, _budget}
+    assert_received {:short_turn_remote_call, ^remote_node, :remote_submit_request_v9, _budget}
     [retry_task] = MapSet.to_list(state.tasks)
     monitor = Process.monitor(retry_task)
 
@@ -689,7 +693,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
     {pushes, _resend_task, resend_state} = drive_until_done(resend_state)
     assert Enum.count(pushes, &(CodexPooler.JSON.decode!(&1)["id"] == "resp_remote_retry_close")) == 1
     refute Enum.any?(pushes, &(CodexPooler.JSON.decode!(&1)["type"] == "error"))
-    assert_received {:short_turn_remote_call, ^remote_node, :remote_submit_request_v8, _budget}
+    assert_received {:short_turn_remote_call, ^remote_node, :remote_submit_request_v9, _budget}
 
     assert %Request{status: "succeeded"} = Repo.get!(Request, retry_request_id)
     assert [{0, "retryable_failed"}, {1, "succeeded"}] = Repo.all(from(attempt in Attempt, where: attempt.request_id == ^retry_request_id, order_by: [asc: attempt.attempt_number], select: {attempt.replay_generation, attempt.status}))
@@ -726,6 +730,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
     assert Enum.any?(pushes, &match?(%{"type" => "response.failed"}, CodexPooler.JSON.decode!(&1)))
 
     assert {:ok, state} = CodexResponsesSocket.handle_in({frame, [opcode: :text]}, state)
+    state = receive_native_response_steering_prepared!(state)
 
     for ordinal <- [0, 1] do
       assert_receive {:fake_upstream_frame_barrier, ^ordinal, _handler, ^release_ref}, @detection_timeout_ms
@@ -733,7 +738,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
     end
 
     assert_receive {:fake_upstream_frame_barrier, 2, _handler, ^release_ref}, @detection_timeout_ms
-    assert_received {:short_turn_remote_call, ^remote_node, :remote_submit_request_v8, _budget}
+    assert_received {:short_turn_remote_call, ^remote_node, :remote_submit_request_v9, _budget}
     {pushes, state} = deliver_frames(state, 3)
     assert Enum.map(pushes, &CodexPooler.JSON.decode!(&1)["type"]) == ["codex.response.metadata", "response.created", "response.output_text.delta"]
     [retry_task] = MapSet.to_list(state.tasks)
@@ -772,6 +777,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
 
     OwnerDiesUnderAbandonNodeClient.arm(owner_pid)
     assert {:ok, state} = CodexResponsesSocket.handle_in({websocket_payload(setup, "dying owner second"), [opcode: :text]}, state)
+    state = receive_native_response_steering_prepared!(state)
     assert_receive {:dying_owner_late_held, late}, @detection_timeout_ms
     # The abandon's call reached the held owner; the owner dies under it.
     assert_receive {:dying_owner_abandon_in_mailbox, ^owner_pid}, @detection_timeout_ms
@@ -823,6 +829,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
     LookupPause.arm(self(), session.id, :remote_abandon_turn_v1)
     OwnerGoneNodeClient.arm(owner_pid)
     assert {:ok, state} = CodexResponsesSocket.handle_in({websocket_payload(setup, "between lookups second"), [opcode: :text]}, state)
+    state = receive_native_response_steering_prepared!(state)
     assert_receive {:owner_gone_late_held, late}, @detection_timeout_ms
     assert_receive {:lookup_paused, abandon}, @detection_timeout_ms
 
@@ -1009,12 +1016,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
   # submission and whatever the forwarder sends after the timeout wait in its
   # mailbox, in that order, before it runs again.
   defp time_out_second_turn(setup, state, owner_pid, remote_node) do
-    time_out_turn(websocket_payload(setup, "remote turn timeout second"), state, owner_pid, remote_node, :remote_submit_request_v8)
+    time_out_turn(websocket_payload(setup, "remote turn timeout second"), state, owner_pid, remote_node, :remote_submit_request_v9)
   end
 
   defp time_out_turn(frame, state, owner_pid, remote_node, submit_function) do
     ShortTurnBudgetNodeClient.arm(owner_pid, submit_function)
     assert {:ok, state} = CodexResponsesSocket.handle_in({frame, [opcode: :text]}, state)
+    state = receive_native_response_steering_prepared!(state)
     assert_receive {:short_turn_owner_suspended, ^owner_pid}, @detection_timeout_ms
 
     try do
@@ -1098,6 +1106,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteSubm
       message
       when is_tuple(message) and
              elem(message, 0) in [
+               :native_response_steering_prepare,
                :websocket_owner_frame,
                :websocket_owner_cleanup_witness,
                :websocket_owner_output_commit_probe,

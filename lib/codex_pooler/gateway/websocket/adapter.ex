@@ -165,6 +165,10 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
     end
   end
 
+  # This native steering refusal closes the provider connection. OMP uses its
+  # exact code to stop steering and recover; it is not a parameter projection.
+  defp native_client_frame(data, %{"type" => "error", "error" => %{"code" => "unsupported_native_inflight_message"}}, _sole_account?, _originator), do: data
+
   defp native_client_frame(data, decoded, sole_account?, originator) do
     {canonical, canonical_decoded} = StreamProtocol.canonicalize_native_codex_responses_json_message(data, decoded)
     native_refusal_frame(canonical, canonical_decoded, sole_account?, originator)

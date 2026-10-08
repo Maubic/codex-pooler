@@ -613,6 +613,14 @@ defmodule CodexPooler.Gateway.Payloads.StrictSchema do
     end)
   end
 
+  # Strict nullable properties may declare their types only in anyOf branches.
+  # The native root still requires type; validation_steps validates every branch.
+  defp validate_type(%{"anyOf" => [_ | _]} = schema, path) when not is_map_key(schema, "type") do
+    if strict_target_root?(path),
+      do: {:error, invalid_schema(path <> ".type", "type must be a string or a non-empty array of strings")},
+      else: :ok
+  end
+
   defp validate_type(schema, path) do
     case Map.get(schema, "type") do
       type when is_binary(type) and type != "" ->
@@ -631,6 +639,17 @@ defmodule CodexPooler.Gateway.Payloads.StrictSchema do
 
       _other ->
         {:error, invalid_schema(path <> ".type", "type must be a string or a non-empty array of strings")}
+    end
+  end
+
+  defp strict_target_root?(path) do
+    case String.split(path, ".") do
+      ["text", "format", "schema"] -> true
+      ["response_format", "json_schema", "schema"] -> true
+      ["tools", _index, "parameters"] -> true
+      ["tools", _index, "function", "parameters"] -> true
+      ["tools", _index, "tools", _child_index, "parameters"] -> true
+      _nested -> false
     end
   end
 

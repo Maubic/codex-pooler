@@ -4,12 +4,29 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
   alias CodexPooler.Gateway.OpenAICompatibility.Error
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.AgentMessage
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Audio
+  alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.ConfigurationUpdate
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.HostedShell
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.ToolSearch
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.WebSearchCall
+  alias CodexPooler.Gateway.OpenAICompatibility.Validation, as: BoundaryValidation
   alias CodexPooler.Gateway.Payloads.ToolResultShape
 
   @metadata_passthrough_key "internal_chat_message_metadata_passthrough"
+
+  @spec validate_input_updates([term()]) :: :ok | {:error, Error.reason()}
+  def validate_input_updates(input), do: BoundaryValidation.validate_indexed(input, "input", &validate_input_item_updates/2)
+
+  @spec validate_input_item_updates(term(), String.t()) :: :ok | {:error, Error.reason()}
+  defp validate_input_item_updates(%{"type" => "configuration_update"} = item, param), do: ConfigurationUpdate.validate_item(item, param)
+
+  defp validate_input_item_updates(%{"type" => type} = item, param) when type in ["function_call", "custom_tool_call"],
+    do: BoundaryValidation.validate_optional_boolean(item, "async", param <> ".async")
+
+  defp validate_input_item_updates(%{"type" => type, "tools" => tools}, param)
+       when type in ["additional_tools", "tool_search_output"] and is_list(tools),
+       do: BoundaryValidation.validate_indexed(tools, param <> ".tools", &BoundaryValidation.validate_tool_async/2)
+
+  defp validate_input_item_updates(_item, _param), do: :ok
 
   def validate_input(payload),
     do: validate_input(payload, payload |> Map.get("input") |> ToolResultShape.any?())
@@ -18,7 +35,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
 
   def validate_input(%{"input" => input} = payload, has_tool_result?)
       when is_list(input) and input != [] do
-    validate_each(input, &validate_input_item_with_reservations(&1, payload, has_tool_result?))
+    BoundaryValidation.validate_indexed(input, "input", &validate_input_item_with_reservations(&1, payload, has_tool_result?, &2))
   end
 
   def validate_input(%{"input" => input}, _has_tool_result?) when is_list(input),
@@ -29,8 +46,12 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
 
   def validate_input(_payload, _has_tool_result?), do: :ok
 
-  defp validate_input_item_with_reservations(item, payload, has_tool_result?) do
-    with :ok <- validate_reserved_metadata(item) do
+  defp validate_input_item_with_reservations(%{"type" => "configuration_update"} = item, _payload, _has_tool_result?, param),
+    do: ConfigurationUpdate.validate_item(item, param)
+
+  defp validate_input_item_with_reservations(item, payload, has_tool_result?, param) do
+    with :ok <- validate_input_item_updates(item, param),
+         :ok <- validate_reserved_metadata(item) do
       validate_input_item(item, payload, has_tool_result?)
     end
   end
@@ -518,6 +539,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
              "id",
              "namespace",
              "caller",
+             "async",
              "metadata",
              "encrypted_function_args",
              @metadata_passthrough_key
@@ -565,6 +587,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
              "id",
              "status",
              "namespace",
+             "async",
              "metadata",
              @metadata_passthrough_key
            ]),

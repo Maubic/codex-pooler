@@ -193,6 +193,7 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputMarkTransientDatabaseTest do
     holder = hold_gate!(gate)
     payload = websocket_input_payload(setup, native_text_input("synthetic peer visible mark"), %{"client_metadata" => %{"x-codex-turn-metadata" => CodexPooler.JSON.encode!(%{"session_id" => thread, "thread_id" => thread, "turn_id" => Ecto.UUID.generate(), "request_kind" => "turn"})}})
     assert {:ok, socket} = CodexPoolerWeb.CodexResponsesSocket.handle_in({payload, [opcode: :text]}, socket)
+    socket = receive_native_response_steering_prepared!(socket)
     waiter = await_gate_waiter!(observer, gate, holder, 1)
     assert %{active_turn: %{visible_output?: false} = active} = :erpc.call(peer, :sys, :get_state, [owner, 1_000])
     authority = Map.take(active.descriptor, [:request_id, :attempt_id, :replay_generation])
@@ -590,6 +591,7 @@ defmodule CodexPoolerWeb.Runtime.VisibleOutputLifecycleContentionTest do
     {:ok, socket} = owner_socket(auth, "synthetic-lifecycle-contention", Ecto.UUID.generate(), session_header: thread, session_header_source: "x-session-id", websocket_owner_forwarder_opts: [node_client: ERPCNodeClient, app_node_names: [Atom.to_string(peer)]])
     payload = websocket_input_payload(setup, native_text_input("synthetic lifecycle contention"), %{"client_metadata" => %{"x-codex-turn-metadata" => CodexPooler.JSON.encode!(%{"session_id" => thread, "thread_id" => thread, "turn_id" => Ecto.UUID.generate(), "request_kind" => "turn"})}})
     assert {:ok, socket} = CodexPoolerWeb.CodexResponsesSocket.handle_in({payload, [opcode: :text]}, socket)
+    socket = receive_native_response_steering_prepared!(socket)
     assert_receive {:fake_upstream_websocket_barrier, :before_init, server, ^release}, @detection_timeout_ms
     FakeUpstream.set_mode(provider, FakeUpstream.websocket_text_frames(frames))
     assert %{upstream_pid: upstream, active_turn: %{ref: active_ref, descriptor: %{request_id: request, attempt_id: _} = authority}} = :erpc.call(peer, :sys, :get_state, [owner, 1_000])

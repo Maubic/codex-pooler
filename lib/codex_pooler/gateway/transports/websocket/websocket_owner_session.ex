@@ -14,6 +14,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
   alias CodexPooler.Gateway.Runtime.Finalization.SettlementRetry
+  alias CodexPooler.Gateway.Runtime.NativeResponseSteering
   alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
   alias CodexPooler.Gateway.Transports.Streaming.RuntimeAdmissionProof
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
@@ -30,6 +31,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   alias CodexPooler.Gateway.Transports.Websocket.OrdinarySuccessResult
   alias CodexPooler.Gateway.Transports.Websocket.RemoteReconnectControlV2
   alias CodexPooler.Gateway.Transports.Websocket.ResponseInterrupt
+  alias CodexPooler.Gateway.Transports.Websocket.ResponseSteer
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator
 
@@ -121,6 +123,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     :drain_settlement,
     :drain_replies,
     :forwarded_terminal_request_id,
+    :native_response_steering,
     owner_registry: @registry,
     terminal_delivery_timeout_ms: @terminal_delivery_timeout_ms,
     provisional_issuances: [],
@@ -558,6 +561,21 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       when is_pid(pid) and is_integer(epoch) and epoch > 0 and is_binary(correlation_id) and is_binary(response_id) and is_binary(mode) do
     GenServer.call(owner, {:interrupt_turn, pid, epoch, correlation_id, interrupt}, owner_call_timeout())
   end
+
+  @spec steer_turn(GenServer.server(), downstream(), ResponseSteer.t()) :: :ok
+  def steer_turn(owner, %{pid: pid, epoch: epoch, correlation_id: correlation_id}, steer), do: GenServer.call(owner, {:steer_turn, pid, epoch, correlation_id, steer}, owner_call_timeout())
+
+  @spec begin_steering_successor(GenServer.server(), pid(), pid(), NativeResponseSteering.identity(), Ecto.UUID.t()) :: :ok | {:error, :owner_busy | :owner_unavailable}
+  def begin_steering_successor(owner, lane, socket, identity, turn_id), do: GenServer.call(owner, {:begin_steering_successor, lane, socket, identity, turn_id}, owner_call_timeout())
+
+  @spec relay_steering_frame(GenServer.server(), pid(), NativeResponseSteering.identity(), binary(), TerminalDiscriminator.t()) :: :ok | {:error, term()}
+  def relay_steering_frame(owner, lane, identity, data, discriminator), do: GenServer.call(owner, {:relay_steering_frame, lane, identity, data, discriminator}, owner_call_timeout())
+
+  @spec complete_steering_successor(GenServer.server(), pid(), NativeResponseSteering.identity(), term()) :: :ok
+  def complete_steering_successor(owner, lane, identity, result), do: GenServer.call(owner, {:complete_steering_successor, lane, identity, result}, owner_call_timeout())
+
+  @spec complete_steering_original(GenServer.server(), Ecto.UUID.t(), map()) :: :ok
+  def complete_steering_original(owner, request_id, result), do: GenServer.call(owner, {:complete_steering_original, request_id, result}, owner_call_timeout())
 
   @type reconnect_preflight_result ::
           {:ok, :dispatch | :same_turn_replay}
@@ -1868,8 +1886,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       abandoned_attach?(state, pid, correlation_id) ->
         {:reply, {:error, :stale_downstream}, state}
 
-      Keyword.get(opts, :reject_if_busy, false) and owner_occupied?(state) and
-          not suspended_replay_attachable?(state.suspended_replay) ->
+      # Provider-created successors belong to the original socket's lane and
+      # cannot inherit a replacement downstream through the ordinary attach.
+      ordinary_attach_busy?(state, opts) ->
         {:reply, {:error, :owner_busy}, state}
 
       replay_active?(state, state.downstream) or native_collection_active?(state) ->
@@ -2062,6 +2081,65 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     {:reply, :ok, state}
   end
 
+  def handle_call({:steer_turn, pid, epoch, correlation_id, steer}, _from, state) do
+    requested = %{pid: pid, epoch: epoch, correlation_id: correlation_id}
+
+    cond do
+      DownstreamState.downstream_status(state.downstream, requested) != :active -> ResponseSteer.log(:owner_not_downstream, :owner)
+      is_map(state.active_turn) and state.active_turn.collect? -> ResponseSteer.log(:owner_turn_not_relay, :owner)
+      true -> UpstreamWebsocketSession.steer(state.upstream_pid, steer)
+    end
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:complete_steering_original, request_id, result}, _from, %{active_turn: %{admission_request_id: request_id}} = state) do
+    {reply, state} = retain_ordinary_success_result({:ok, result}, state)
+    state = settle_active_turn(state, reply)
+    state = apply_native_steering_owner_success(state, Map.get(result, :native_response_steering_finalized))
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:complete_steering_original, _request_id, _result}, _from, state), do: {:reply, :ok, state}
+
+  def handle_call({:begin_steering_successor, lane, socket, identity, turn_id}, _from, %{native_response_steering: lane, downstream: %{pid: socket} = downstream, active_turn: nil, draining?: false} = state) do
+    cleanup = OwnerCleanup.capture(state, identity, downstream, identity.replay_generation)
+    # Provider-created generations have no client replay payload or replay
+    # entitlement. The tagged descriptor keeps identity/lease cleanup but is
+    # deliberately excluded from inherited-turn and replay controls.
+    descriptor = Map.merge(identity, %{kind: :native_response_steering, codex_turn_id: turn_id, downstream_status: :attached, visible_output?: false})
+    descriptor = Map.merge(descriptor, %{semantic_turn_key: nil, semantic_turn_digest: nil, replay_claim_digest: nil, authorization_snapshot: nil, model_id: nil, endpoint: "/backend-api/codex/responses"})
+    active = %{ref: make_ref(), writer_capability: make_ref(), task_pid: lane, task_ref: nil, native_steering_monitor: Process.monitor(lane), submitter_monitor: nil, reply_to: nil, downstream: downstream, terminal_forwarded?: false, pending_result: nil, terminal_delivery_timeout: nil, terminal_delivery_timer_ref: nil, output_commit_probe: nil, collect?: false, submission_observed?: false, descriptor: descriptor, cleanup_witness: cleanup, visible_output?: false, upstream_pid: state.upstream_pid, admission_phase: nil, admission_request_id: identity.request_id, admission_attempt_id: identity.attempt_id, first_compact_request_identity: nil, ordinary_request_identity: nil, task_settled?: false, submitter_exited?: false, reply_sent?: false, native_response_steering: lane}
+    state.callbacks.downstream_sender.(socket, {:native_response_steering_open, lane, identity})
+    {:reply, :ok, %{state | active_turn: active}}
+  end
+
+  def handle_call({:begin_steering_successor, _lane, _socket, _identity, _turn}, _from, state), do: {:reply, {:error, :owner_busy}, state}
+
+  def handle_call({:relay_steering_frame, lane, identity, data, discriminator}, _from, %{active_turn: %{native_response_steering: lane, descriptor: descriptor, downstream: downstream}} = state) do
+    if Map.take(descriptor, [:request_id, :attempt_id, :replay_generation]) == identity and DownstreamState.downstream_status(state.downstream, downstream) == :active do
+      result = state.callbacks.downstream_sender.(downstream.pid, {:native_response_steering_frame, lane, identity, data})
+      state = if TerminalDiscriminator.terminal?(discriminator), do: put_in(state.active_turn.terminal_forwarded?, true), else: state
+      {:reply, result, state}
+    else
+      {:reply, {:error, :stale_generation}, state}
+    end
+  end
+
+  def handle_call({:relay_steering_frame, _lane, _identity, _data, _discriminator}, _from, state), do: {:reply, {:error, :stale_generation}, state}
+
+  def handle_call({:complete_steering_successor, lane, identity, result}, _from, %{active_turn: %{native_response_steering: lane, descriptor: descriptor}} = state) do
+    if Map.take(descriptor, [:request_id, :attempt_id, :replay_generation]) == identity do
+      if downstream = state.active_turn.downstream, do: state.callbacks.downstream_sender.(downstream.pid, {:native_response_steering_done, lane, identity, result})
+      state = %{state | termination_cleanup_witness: state.active_turn.cleanup_witness, forwarded_terminal_request_id: identity.request_id}
+      {:reply, :ok, state |> clear_active_turn() |> apply_native_steering_owner_success(result)}
+    else
+      {:reply, :ok, state}
+    end
+  end
+
+  def handle_call({:complete_steering_successor, _lane, _identity, _result}, _from, state), do: {:reply, :ok, state}
+
   def handle_call({:submit_upstream, _downstream, _payload}, _from, %{draining?: true} = state) do
     {:reply, {:error, :owner_drained}, state}
   end
@@ -2115,6 +2193,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
          submission_notification?
        ) do
     submitted_payload = upstream_payload
+    state = if is_struct(upstream_payload, UpstreamWebsocketSession.Request) and is_pid(upstream_payload.native_response_steering), do: %{state | native_response_steering: upstream_payload.native_response_steering}, else: state
 
     with {:ok, active_turn_downstream} <- active_turn_downstream(state.downstream, downstream),
          {:ok, upstream_payload, state, admission_phase} <-
@@ -2657,6 +2736,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
   def handle_info({:EXIT, upstream_pid, reason}, %{upstream_pid: upstream_pid} = state) do
     retire_current_upstream(clear_native_compaction_admission(state, :upstream_exited), reason)
+  end
+
+  # The successor's executor is the socket-node lane, not an owner-side Task.
+  # Its own completion clears this monitor; only a DOWN for this exact active
+  # generation can compensate a lane that cannot return that completion.
+  def handle_info(
+        {:DOWN, monitor, :process, lane, reason},
+        %{active_turn: %{native_response_steering: lane, native_steering_monitor: monitor}} = state
+      ) do
+    state
+    |> retire_lost_native_steering_lane(reason)
+    |> continue_or_retire()
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{active_turn: %{task_ref: ref}} = state) do
@@ -3292,6 +3383,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
          upstream_payload
        ) do
     writer = owner_writer(collect?, owner, ref, writer_capability, descriptor)
+    upstream_payload = bind_native_steering_owner(upstream_payload, owner)
 
     case sender.(upstream_pid, upstream_payload, writer) do
       {:error, response} when is_map(response) ->
@@ -3300,6 +3392,17 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       result ->
         result
     end
+  end
+
+  defp bind_native_steering_owner(%UpstreamWebsocketSession.Request{native_response_steering: lane} = request, owner) when is_pid(lane),
+    do: %{request | native_response_steering: {lane, owner}}
+
+  defp bind_native_steering_owner(request, _owner), do: request
+
+  defp ordinary_attach_busy?(state, opts) do
+    match?(%{descriptor: %{kind: :native_response_steering}}, state.active_turn) or
+      (Keyword.get(opts, :reject_if_busy, false) and owner_occupied?(state) and
+         not suspended_replay_attachable?(state.suspended_replay))
   end
 
   defp owner_writer(true, _owner, _ref, _capability, _descriptor), do: nil
@@ -3778,7 +3881,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   end
 
   defp reply_active_turn(%{active_turn: %{reply_to: reply_to}}, result) do
-    GenServer.reply(reply_to, result)
+    if is_nil(reply_to), do: :ok, else: GenServer.reply(reply_to, result)
   end
 
   defp owner_occupied?(state) do
@@ -3916,9 +4019,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       end
 
     state
+    |> apply_native_steering_owner_success(native_steering_finalized_result(result))
     |> complete_terminal_winner_detach()
     |> apply_deferred_upstream_close(deferred_upstream_close)
   end
+
+  defp native_steering_finalized_result({:ok, result}) when is_map(result), do: Map.get(result, :native_response_steering_finalized)
+  defp native_steering_finalized_result(_result), do: nil
 
   defp clear_terminal_replay_state(
          %{active_turn: %{descriptor: %{replay_generation: 1}}} = state,
@@ -3996,6 +4103,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   end
 
   defp retain_first_compact_result(result, state), do: {result, state}
+
+  # The lane has already settled this result and owns its success
+  # acknowledgement. Never mint another ordinary witness from transport
+  # success when settlement failed or this generation was superseded.
+  defp retain_ordinary_success_result({:ok, %{native_response_steering_finalized: _finalized} = result}, state),
+    do: {{:ok, Map.delete(result, :ordinary_success_result)}, state}
+
+  defp retain_ordinary_success_result({:ok, %{native_response_steering_terminal_failure: _reason} = result}, state),
+    do: {{:ok, Map.delete(result, :ordinary_success_result)}, state}
 
   defp retain_ordinary_success_result(
          {:ok, %{ordinary_success_result: %OrdinarySuccessResult{} = receipt} = result},
@@ -4415,6 +4531,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
 
   defp clear_pending_handoff(state), do: state
 
+  defp terminate_predecessor_task(%{native_response_steering: lane}) when is_pid(lane), do: NativeResponseSteering.cancel(lane, :owner_drained)
+
   defp terminate_predecessor_task(%{task_pid: task_pid}) when is_pid(task_pid) do
     if Process.alive?(task_pid), do: Process.exit(task_pid, :kill)
     :ok
@@ -4425,6 +4543,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   # A killed process cannot trap the exit, so its DOWN follows at once; the
   # bound only keeps a lost signal from wedging the owner.
   @predecessor_exit_budget_ms 5_000
+
+  defp terminate_predecessor_task_and_await(%{native_response_steering: lane}) when is_pid(lane), do: NativeResponseSteering.cancel(lane, :owner_drained)
 
   defp terminate_predecessor_task_and_await(%{task_pid: task_pid}) when is_pid(task_pid) do
     monitor = Process.monitor(task_pid)
@@ -5243,6 +5363,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
        when not is_map_key(descriptor, :authorization_snapshot),
        do: false
 
+  defp replay_descriptor_match?(%{kind: :native_response_steering}, _control), do: false
+
   defp replay_descriptor_match?(descriptor, control),
     do:
       descriptor.authorization_snapshot == control.authorization_binding and
@@ -5688,6 +5810,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
     end
   end
 
+  defp handle_monitored_downstream_loss(%{active_turn: %{native_response_steering: lane}} = state, _reason) when is_pid(lane) do
+    reason = native_steering_loss_reason(state.active_turn, state.draining?)
+    state = DownstreamState.cancel_active_turn_downstream(state, state.downstream, reason)
+    state |> DownstreamState.demonitor_downstream() |> Map.put(:downstream, nil)
+  end
+
   defp handle_monitored_downstream_loss(state, reason) do
     cond do
       replay_active?(state, state.downstream) ->
@@ -5705,6 +5833,38 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
         suspend_or_detach_downstream(state)
     end
   end
+
+  defp retire_lost_native_steering_lane(%{active_turn: active_turn} = state, loss_reason) do
+    lane = active_turn.native_response_steering
+    reason = native_steering_loss_reason(active_turn, state.draining?)
+
+    # A disconnected lane cannot revoke its producing connection. Use the
+    # same request/attempt-bound cancellation it would send, then close the
+    # owner's upstream connection before making it available for another turn.
+    send(state.upstream_pid, {:upstream_websocket_cancel_steering, lane, {active_turn.admission_request_id, active_turn.admission_attempt_id}, reason})
+    _result = invalidate_upstream(state)
+
+    if loss_reason == :noconnection and node(lane) != node(),
+      do: record_generation_end(state, "unreachable_downstream_cancelled")
+
+    # The surviving owner holds the admitted tuple and its lease witness. The
+    # ordinary owner interruption applies its provenance and idempotency gates;
+    # no lane result, delivery receipt or native acknowledgement is invented.
+    _result = Persistence.interrupt_codex_session(state, reason)
+
+    if downstream = active_turn.downstream,
+      do: state.callbacks.downstream_sender.(downstream.pid, {:native_response_steering_close, lane, 1011, "native response steering unavailable"})
+
+    state
+    |> Map.put(:termination_cleanup_witness, active_turn.cleanup_witness)
+    |> Map.put(:native_response_steering, nil)
+    |> clear_native_compaction_admission(:downstream_cancelled)
+    |> clear_active_turn()
+  end
+
+  defp native_steering_loss_reason(%{canceled_result: {:error, :owner_drained}}, _draining?), do: :owner_drained
+  defp native_steering_loss_reason(_active_turn, true), do: :owner_drained
+  defp native_steering_loss_reason(_active_turn, false), do: :client_disconnected
 
   # The downstream's node became unreachable (a partition, or its VM died)
   # while the turn it asked for was still generating, and no resend can
@@ -6516,4 +6676,22 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       _absent_or_invalid -> @terminal_delivery_timeout_ms
     end
   end
+
+  defp apply_native_steering_owner_success(state, {:ok, %{native_response_steering_acknowledgement: {:ok, binding, %OrdinarySuccessResult{} = receipt}}}) do
+    if receipt.owner == state.upstream_pid and is_nil(state.active_turn) and is_map(state.downstream) do
+      topology = WebsocketOwnerAdmissionControlV1.forwarded_topology(state.owner_instance_id, state.owner_lease_token, state.downstream.epoch)
+      binding = %{binding | topology: topology}
+
+      with {:ok, admission} <- NativeCompactionAdmission.ordinary_success(binding),
+           {:ok, admission} <- NativeCompactionAdmission.arm_compact(admission, System.system_time(:millisecond) + NativeCompactionAdmission.reservation_ttl_ms()) do
+        %{put_admission(state, admission) | ordinary_success_result: nil, native_compaction_admission_downstream: stable_downstream(state.downstream)}
+      else
+        _invalid -> state
+      end
+    else
+      state
+    end
+  end
+
+  defp apply_native_steering_owner_success(state, _result), do: state
 end

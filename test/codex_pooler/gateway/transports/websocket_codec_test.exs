@@ -237,7 +237,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodecTest do
       parent = self()
       preparation_detection_budget_ms = 15_000
 
-      for type <- ["response.steer", "unsupported", "", nil, true, 123, [], %{}],
+      for type <- ["unsupported", "", nil, true, 123, [], %{}],
           generate <- [true, false],
           mode <- [:native, :public] do
         payload = %{
@@ -279,6 +279,29 @@ defmodule CodexPooler.Gateway.Transports.Streaming.WebsocketCodecTest do
 
         refute_received :unsupported_frame_prepared
         refute_received :unsupported_frame_pushed
+      end
+    end
+
+    test "public response.steer remains refused rather than prewarming or creating a request" do
+      parent = self()
+
+      for generate <- [true, false] do
+        payload = %{
+          "type" => "response.steer",
+          "previous_response_id" => "resp_synthetic_native_steering",
+          "input" => [%{"type" => "message", "role" => "user", "content" => [%{"type" => "input_text", "text" => "synthetic steering input"}]}],
+          "generate" => generate
+        }
+
+        options = public_responses_options(payload)
+        observer = fn -> send(parent, :public_steer_prepared) end
+        options = %{options | extra: Map.put(options.extra, :websocket_preparation_observer, observer)}
+
+        assert {:error, %{status: 400, code: "invalid_request", param: "type"}} =
+                 WebsocketCodec.prepare_frame(CodexPooler.JSON.encode!(payload), options, fn _frame -> send(parent, :public_steer_pushed) end)
+
+        refute_received :public_steer_prepared
+        refute_received :public_steer_pushed
       end
     end
 

@@ -50,7 +50,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.ReplayRefu
 
     assert {:ok, first_state} = CodexResponsesSocket.handle_in({first_payload, [opcode: :text]}, first_state)
 
-    owner_worker_pid = assert_blocking_owner_upstream_received!(release_ref)
+    {first_state, owner_worker_pid} = assert_blocking_owner_upstream_received!(first_state, release_ref)
     [response_task_pid] = MapSet.to_list(first_state.tasks)
 
     # The client lost the first socket and reconnects while the owner still runs

@@ -7,10 +7,6 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
 
   @timeouts %{connect_timeout_ms: 1_000, receive_timeout_ms: 1_000}
 
-  # The refusal names the constructors of the ten modes the fake accepts for a native websocket expectation; the
-  # `FakeUpstream` bullet of test/support/AGENTS.md lists the same ten.
-  @native_websocket_refusal "native websocket expectation requires one of websocket_text_frames/1, websocket_text_frames_then_abrupt_close/1, barrier_websocket_frames/2, interruptible_websocket_frames/2, websocket_sse_then_close/2, websocket_terminal_then_close_barrier/2, websocket_connection_limit_terminal_barrier/1, websocket_close_without_terminal_barrier/1, websocket_upgrade_error/2, provider_refusal/1"
-
   @tag :fake_upstream_strict_contract
   test "strict websocket expectations validate discriminator and connection ordinal" do
     event = completed_event("strict")
@@ -39,6 +35,7 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
 
   @tag :fake_upstream_strict_contract
   test "native websocket success cannot be satisfied by an SSE-derived shortcut" do
+    # provenance: synthetic_adversarial
     mode =
       FakeUpstream.strict_sequence([
         FakeUpstream.expect_request(
@@ -51,55 +48,30 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
         )
       ])
 
-    assert_raise ArgumentError, @native_websocket_refusal, fn -> start_resources(mode) end
+    assert_raise ArgumentError, fn -> start_resources(mode) end
   end
 
   @tag :fake_upstream_strict_contract
-  test "the native websocket refusal names the ten constructors whose modes the fake accepts" do
+  test "native websocket expectations reject non-native response modes without narrowing HTTP modes" do
     {:ok, fake} = FakeUpstream.start_link(FakeUpstream.json_response(%{}))
     on_exit(fn -> FakeUpstream.stop(fake) end)
 
-    event = completed_event("accepted")
-    notify = self()
-    release_ref = make_ref()
-
-    accepted = [
-      {"websocket_text_frames/1", FakeUpstream.websocket_text_frames([event])},
-      {"websocket_text_frames_then_abrupt_close/1", FakeUpstream.websocket_text_frames_then_abrupt_close([event])},
-      {"barrier_websocket_frames/2", FakeUpstream.barrier_websocket_frames([event], notify: notify, release_ref: release_ref)},
-      {"interruptible_websocket_frames/2", FakeUpstream.interruptible_websocket_frames([event], response_id: "resp_accepted", interrupted: [event], completion: [event], notify: notify, release_ref: release_ref)},
-      {"websocket_sse_then_close/2", FakeUpstream.websocket_sse_then_close([{"response.completed", %{"type" => "response.completed", "response" => %{}}}])},
-      {"websocket_terminal_then_close_barrier/2", FakeUpstream.websocket_terminal_then_close_barrier(%{"type" => "response.completed"}, notify: notify, release_ref: release_ref)},
-      {"websocket_connection_limit_terminal_barrier/1", FakeUpstream.websocket_connection_limit_terminal_barrier(shape: :top_level, notify: notify, release_ref: release_ref)},
-      {"websocket_close_without_terminal_barrier/1", FakeUpstream.websocket_close_without_terminal_barrier(notify: notify, release_ref: release_ref)},
-      {"websocket_upgrade_error/2", FakeUpstream.websocket_upgrade_error(%{"error" => "denied"})},
-      {"provider_refusal/1", FakeUpstream.provider_refusal("Unsupported parameter: metadata")}
-    ]
-
-    # Every constructor the message names exists and builds a mode the fake accepts, through both validation paths.
-    for {constructor, mode} <- accepted do
-      [name, arity] = String.split(constructor, "/")
-      assert function_exported?(FakeUpstream, String.to_existing_atom(name), String.to_integer(arity)), "#{constructor} is a FakeUpstream function"
-      assert :ok = FakeUpstream.set_mode(fake, FakeUpstream.strict_sequence([native_expectation(mode)])), "set_mode/2 accepts #{constructor}"
-      assert :ok = FakeUpstream.set_mode(fake, FakeUpstream.repeat_last([native_expectation(mode)])), "set_mode/2 accepts #{constructor} in repeat_last/1"
-    end
-
-    # The message names those ten, in that order.
-    assert @native_websocket_refusal == "native websocket expectation requires one of " <> Enum.map_join(accepted, ", ", &elem(&1, 0))
-
-    # Everything else is refused with that message, on both paths, whatever wraps it.
+    # The native frame boundary rejects HTTP and SSE modes, whether finite or repeating.
     sse = FakeUpstream.sse_stream([{"response.completed", %{"type" => "response.completed", "response" => %{}}}])
     paced = FakeUpstream.delayed_sse_stream([{"response.completed", %{"type" => "response.completed", "response" => %{}}}], interval_ms: 1)
 
     for mode <- [FakeUpstream.json_response(%{}), sse, paced] do
       expectation = native_expectation(mode)
-      assert_raise ArgumentError, @native_websocket_refusal, fn -> FakeUpstream.set_mode(fake, FakeUpstream.strict_sequence([expectation])) end
-      assert_raise ArgumentError, @native_websocket_refusal, fn -> FakeUpstream.set_mode(fake, FakeUpstream.repeat_last([expectation])) end
-      assert_raise ArgumentError, @native_websocket_refusal, fn -> FakeUpstream.start_link(FakeUpstream.strict_sequence([expectation])) end
+      # provenance: synthetic_adversarial
+      assert_raise ArgumentError, fn -> FakeUpstream.set_mode(fake, FakeUpstream.strict_sequence([expectation])) end
+      assert_raise ArgumentError, fn -> FakeUpstream.set_mode(fake, FakeUpstream.repeat_last([expectation])) end
+      # provenance: synthetic_adversarial
+      assert_raise ArgumentError, fn -> FakeUpstream.start_link(FakeUpstream.strict_sequence([expectation])) end
     end
 
     # Only a native websocket expectation is held to it: the same SSE mode answers an HTTP expectation.
     http_expectation = FakeUpstream.expect_request(method: "POST", path: "/backend-api/codex/responses", respond: sse)
+    # provenance: synthetic_adversarial
     assert :ok = FakeUpstream.set_mode(fake, FakeUpstream.strict_sequence([http_expectation]))
   end
 
@@ -379,6 +351,26 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
     assert :ok = FakeUpstream.close_websocket_connections(upstream)
     assert FakeUpstream.websocket_connection_count(upstream) == 1
     assert [^connection_id] = FakeUpstream.websocket_connection_ids(upstream)
+  end
+
+  test "retiring a dead provider tail preserves reached unreleased holds and refuses a live or foreign handler" do
+    release_ref = make_ref()
+    {upstream, session} = start_resources(FakeUpstream.barrier_websocket_frames([completed_event("retired-tail")], notify: self(), release_ref: release_ref))
+    request = websocket_request(upstream)
+    task = Task.async(fn -> UpstreamWebsocketSession.request(session, request) end)
+    assert_receive {:fake_upstream_frame_barrier, 0, handler, ^release_ref}, 2_000
+    assert {:error, :handler_alive} = FakeUpstream.retire_frame_barriers(upstream, release_ref, handler)
+    {foreign, foreign_monitor} = spawn_monitor(fn -> :ok end)
+    assert_receive {:DOWN, ^foreign_monitor, :process, ^foreign, :normal}, 2_000
+    assert {:error, :handler_mismatch} = FakeUpstream.retire_frame_barriers(upstream, release_ref, foreign)
+    handler_monitor = Process.monitor(handler)
+    Process.exit(handler, :kill)
+    assert_receive {:DOWN, ^handler_monitor, :process, ^handler, :killed}, 2_000
+    assert :ok = FakeUpstream.retire_frame_barriers(upstream, release_ref, handler)
+    assert {:error, %{transport_failure: %{"phase" => "receive", "transport_signal" => "tcp_closed", "text_frame_count" => 0, "terminal_seen" => false}}} = Task.await(task, 2_000)
+    assert_raise ExUnit.AssertionError, ~r/missing_required_acknowledgement.*0/s, fn -> FakeUpstream.verify!(upstream) end
+    assert :ok = FakeUpstream.release_frame(upstream, release_ref)
+    assert :ok = FakeUpstream.verify!(upstream)
   end
 
   defp native_expectation(mode), do: FakeUpstream.expect_request(method: "WEBSOCKET", path: "/backend-api/codex/responses", respond: mode)

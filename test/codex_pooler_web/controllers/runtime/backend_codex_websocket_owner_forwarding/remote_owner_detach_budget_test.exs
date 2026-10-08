@@ -145,6 +145,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteOwne
       )
 
     assert {:ok, remote_state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, remote_state)
+    remote_state = receive_native_response_steering_prepared!(remote_state)
 
     assert_receive {:fake_upstream_websocket_barrier, :before_close, upstream_pid, ^release_ref}, @handoff_detection_timeout_ms
     assert %{active_turn: %{descriptor: %{replay_generation: 0}}} = :sys.get_state(owner_pid)

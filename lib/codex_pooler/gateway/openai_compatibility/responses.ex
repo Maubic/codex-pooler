@@ -586,10 +586,9 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
   defp validate_tools(_payload), do: :ok
 
   defp validate_each_tool(tools) do
-    Enum.reduce_while(tools, :ok, fn tool, _acc ->
-      case validate_tool(tool) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
+    Validation.validate_indexed(tools, "tools", fn tool, param ->
+      with :ok <- Validation.validate_tool_async(tool, param) do
+        validate_tool(tool)
       end
     end)
   end
@@ -768,7 +767,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
              "strict",
              "defer_loading",
              "allowed_callers",
-             "output_schema"
+             "output_schema",
+             "async"
            ]),
          :ok <-
            validate_nonblank_tool_field(tool, "name", "function tool requires a non-empty name"),
@@ -790,7 +790,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
              "description",
              "defer_loading",
              "allowed_callers",
-             "format"
+             "format",
+             "async"
            ]),
          :ok <-
            validate_nonblank_tool_field(tool, "name", "custom tool requires a non-empty name"),

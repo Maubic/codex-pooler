@@ -437,6 +437,27 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
 
   defp acknowledge_native_ordinary_success(_context, _request_options, _finalization), do: :ok
 
+  @spec native_response_steering_acknowledgement(SelectedCandidateContext.t(), map(), {:ok, map()} | {:error, map()}) :: {:ok, NativeCompactionAdmission.Binding.t(), OrdinarySuccessResult.t()} | :none
+  def native_response_steering_acknowledgement(_context, _finalization, {:ok, %{stale_generation?: true}}), do: :none
+
+  def native_response_steering_acknowledgement(context, %{terminal: terminal, response_id: response_id, upstream_websocket_connection: connection, ordinary_success_result: %OrdinarySuccessResult{} = receipt}, {:ok, %{}}) when terminal in ["response.completed", "response.done", "response.incomplete"] do
+    options = context.request_options
+
+    with %NativeCodexTurnMetadata{request_kind: :turn} = metadata <- options.payload_context.native_codex_turn_metadata,
+         {:ok, lifecycle} <- connection_lifecycle(connection),
+         true <- receipt.request_id == context.reserved.request.id and receipt.attempt_id == context.attempt.id,
+         true <- receipt.model_digest == NativeCompactionAdmission.FirstCompactResult.model_digest(context.model.upstream_model_id),
+         {:ok, topology, _owner} <- admission_owner(options) do
+      {:ok, ordinary_success_binding(options, metadata, response_id, lifecycle, topology), receipt}
+    else
+      _unavailable -> :none
+    end
+  end
+
+  def native_response_steering_acknowledgement(_context, _finalization, _result), do: :none
+
+  defp acknowledge_native_completed_success(_context, _request_options, %{native_response_steering_terminal?: true}), do: :ok
+
   defp acknowledge_native_completed_success(context, request_options, finalization) do
     case request_options.payload_context.compaction_result_mode do
       :native_websocket ->
@@ -808,6 +829,33 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
   end
 
   @spec finalize_terminal(SelectedCandidateContext.t(), map()) :: {:ok, map()} | {:error, map()}
+  def finalize_terminal(context, %{upstream_error_code: "unsupported_native_inflight_message"} = finalization) do
+    code = "unsupported_native_inflight_message"
+    metadata = terminal_failure_metadata(context, finalization.headers, Map.get(finalization, :websocket_frame_headers, %{}), Map.get(finalization, :upstream_websocket_connection), code, code, nil, %{})
+    metadata = Map.merge(metadata, provider_rejection_metadata(finalization.body, context.request_options))
+
+    attrs =
+      SettlementAttrs.partial_stream_failure(context, 400, code, "native inflight control is unsupported by the provider", metadata,
+        started: finalization.started,
+        before_finalize: fn ->
+          SideEffects.observe_websocket_response(context, finalization)
+          DispatchLifecycle.neutral_completion(context)
+        end
+      )
+
+    case AttemptSettlement.finalize_partial_stream_failure(context.reserved.request, context.attempt, response_usage(finalization, finalization.body), attrs, context.request_options.runtime.session_owner_witness) do
+      {:ok, _settled} = result ->
+        emit_settlement_outcome(result, "failed", resolved_transports(context))
+        {:ok, %{status: 200, headers: [], websocket_messages: []}}
+
+      {:stale_generation, finalized} ->
+        {:ok, finalized}
+
+      {:error, _error} = error ->
+        error
+    end
+  end
+
   def finalize_terminal(context, finalization) do
     %{body: body, terminal: terminal} = finalization
 
@@ -910,7 +958,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Websocket do
   # row 232-278).
   defp provider_rejection_metadata(body, request_options) do
     with {:ok, %{"type" => type, "error" => %{} = error} = frame} when type in ["error", "response.failed"] <- last_terminal_frame(body),
-         status = Map.get(frame, "status", Map.get(frame, "status_code")),
+         status = Map.get(frame, "status", Map.get(frame, "status_code")) || if(Map.get(error, "code") == "unsupported_native_inflight_message", do: 400),
          true <- Metadata.rejection_metadata_status?(status) do
       error = if type == "response.failed", do: drop_derived_code(error), else: drop_previous_response_miss_code(error)
       response = %Req.Response{status: status, body: CodexPooler.JSON.encode!(%{"error" => error})}

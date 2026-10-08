@@ -11,6 +11,43 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Validation do
     Responses
   }
 
+  @type validation_result :: :ok | {:error, Error.reason()}
+
+  @spec validate_indexed([term()], String.t(), (term(), String.t() -> validation_result())) :: validation_result()
+  def validate_indexed(items, param, validator) when is_list(items) and is_function(validator, 2) do
+    items
+    |> Enum.with_index()
+    |> Enum.reduce_while(:ok, fn {item, index}, :ok ->
+      case validator.(item, "#{param}[#{index}]") do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  @spec validate_optional_boolean(map(), String.t(), String.t()) :: validation_result()
+  def validate_optional_boolean(map, key, param) do
+    case Map.fetch(map, key) do
+      :error -> :ok
+      {:ok, value} when is_boolean(value) -> :ok
+      {:ok, _value} -> {:error, Error.reason(400, "invalid_type", "invalid type for parameter #{param} (invalid_type); expected a boolean", param)}
+    end
+  end
+
+  @spec validate_tool_async(term(), String.t()) :: validation_result()
+  def validate_tool_async(%{"type" => "namespace", "async" => _async}, param) do
+    param = param <> ".async"
+    {:error, Error.reason(400, "unknown_parameter", "unknown parameter #{param} (unknown_parameter)", param)}
+  end
+
+  def validate_tool_async(%{"type" => "namespace", "tools" => tools}, param) when is_list(tools),
+    do: validate_indexed(tools, param <> ".tools", &validate_tool_async/2)
+
+  def validate_tool_async(%{"type" => type} = tool, param) when type in ["function", "custom"],
+    do: validate_optional_boolean(tool, "async", param <> ".async")
+
+  def validate_tool_async(_tool, _param), do: :ok
+
   @spec validate_shell(atom(), term()) :: :ok | {:error, Error.reason()}
   def validate_shell(adapter, payload) when is_atom(adapter) and is_map(payload) do
     case adapter do

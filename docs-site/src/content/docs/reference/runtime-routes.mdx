@@ -125,7 +125,7 @@ These endpoints keep Codex backend semantics and do not translate through the pu
       <td>Persistent upstream Codex websocket response session</td>
       <td>No HTTP adapter translation</td>
       <td>Supported</td>
-      <td>Narrow backend websocket response-stream compatibility for Codex-compatible clients, including native backend compaction support.</td>
+      <td>Narrow backend websocket response-stream compatibility for Codex-compatible clients, including native backend compaction and <a href="#native-websocket-live-steering"><code>response.steer</code></a>.</td>
     </tr>
     <tr>
       <td><code>POST /backend-api/codex/responses/compact</code></td>
@@ -185,7 +185,7 @@ Some Codex clients use `/backend-api/codex/v1` as their base URL. Codex Pooler e
       <td>Backend websocket response session</td>
       <td>No</td>
       <td>Supported</td>
-      <td>Alias for the backend websocket response-stream compatibility route, including native backend compaction support.</td>
+      <td>Alias for the backend websocket response-stream compatibility route, including native backend compaction and <code>response.steer</code>.</td>
     </tr>
     <tr>
       <td><code>POST /backend-api/codex/v1/responses/compact</code></td>
@@ -203,6 +203,47 @@ Some Codex clients use `/backend-api/codex/v1` as their base URL. Codex Pooler e
     </tr>
   </tbody>
 </table>
+
+### Native websocket live steering
+
+Native `GET /backend-api/codex/responses` and its
+`/backend-api/codex/v1/responses` alias support `response.steer`. The control
+carries `type`, a provider `previous_response_id`, and an `input` list. It targets
+the response on the upstream websocket connection that already holds it, with
+owner forwarding disabled or through the local or remote session owner. It
+does not reconnect, reroute, or make the response identifier portable to
+another connection.
+
+Codex Pooler relays `response.steer.accepted`, including the provider's
+`steer.id`, and `response.steer.failed`, including `response_not_found` and
+`invalid_input` outcomes. It never synthesizes acceptance. A provider native-lane
+refusal with `unsupported_native_inflight_message` and its subsequent Close
+reach the client as provider outcomes rather than a Pooler-authored unsupported
+message error. Full and Lite mode use the same relay contract; the provider
+decides whether the control is supported on that connection and at that moment.
+
+Acceptance does not guarantee an immediate successor. The original response
+can end with `response.incomplete` and reason `steered`, or complete normally
+before a successor starts. A real unsolicited successor `response.created`
+keeps the same provider connection while opening an independent reservation,
+request, attempt, provider-usage settlement, and downstream delivery receipt.
+The `steered` incomplete is a successfully served request, not a failure or
+retry, and each observed response settles its own usage once. An acceptance
+event alone is not another generation or request.
+
+Tools always run in the client. If a tool result is pending, the client can need
+to send that result in a later explicit `response.create` instead of receiving
+an immediate server-started successor. For accepted steering, OMP omits the
+already accepted input from that create; the provider prepends its accepted
+queue when sampling resumes. Native
+`response.steer` is distinct from the Codex client's HTTP steered continuation,
+which submits new input in another request, and from `response.interrupt`,
+which stops the named running response without itself supplying new input.
+
+Narrow public `GET /v1/responses` still refuses `response.steer` with
+`400 invalid_request` on `type` before upstream dispatch. Native relay support
+does not establish a public SDK caller contract, OpenAI Realtime parity, or
+gateway-owned tool execution.
 
 ## Backend app-server helper routes
 
@@ -400,6 +441,49 @@ For explicit remote compaction on the narrow public surface, the request must co
 
 The returned replay item has `type: "compaction"`, nonblank opaque `encrypted_content`, and a string `id`: the upstream id when it sent a nonblank one, otherwise a derived `cmp_` id that Codex Pooler removes again when the item is replayed. Start the next request as a new chain without `previous_response_id`, put the compaction item first, and append new visible input after it. When an accepted narrow Responses websocket compaction continuation carries an explicit opaque response anchor, Codex Pooler preserves it only on the current live upstream websocket connection with the same generation and effective Full/Lite mode. That incremental compact collects provider output before validation, settlement, and adaptation; it never reconnects, retries, switches assignment, or falls back to HTTP. If that connection or mode is unavailable, the request returns the existing `previous_response_not_found` recovery result and the client can submit a separate no-anchor full-history request. When no anchor is present, Codex Pooler sends the supplied full history through the existing HTTP compact path. Unknown replay fields and malformed values reject before upstream dispatch. Malformed upstream compact JSON or missing encrypted content returns sanitized `502 invalid_compaction_response`. Direct `POST /v1/responses/compact` remains unsupported.
 
+### Responses configuration updates and asynchronous tools
+
+Direct `POST /v1/responses` JSON/SSE and narrow public websocket
+`response.create` accept ordered `configuration_update` items in Full and Lite.
+An item has exactly `type: "configuration_update"` and `reasoning`, whose only
+field is a string `effort`; it has no `content` field. Missing fields return
+`missing_required_parameter`, wrong types return `invalid_type`, and unknown
+keys return `unknown_parameter` before dispatch, naming the original indexed
+client path. The item survives history and otherwise-valid continuation replay
+without being lifted into instructions or having its effort rewritten through
+request-level aliases.
+
+The provider owns effort enum and model eligibility, consecutive-update rules,
+and compaction restrictions. Its effort enum is `none`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, `max`; Pooler accepts a string rather than duplicating
+that enum. An unknown effort can receive provider `invalid_value` on
+`input[N].reasoning.effort`, and consecutive updates can receive provider
+`unsupported_value` on `input[N].type`. The sanitized HTTP relay maps recoverable
+positions to the client's input; websocket provider refusals use `input[]` when
+the socket has no per-turn map. Local validation errors remain indexed. A
+usable downstream socket does not guarantee retention of the refused upstream
+connection, so continuation anchors still require their producing connection.
+Shape acceptance is not proof of model behavior, cache behavior, or compact
+eligibility. Vercel's empty system-message `content: ""` is a client API
+requirement, not a wire field; see
+[mid-conversation reasoning effort](/clients/openai-compatible/#mid-conversation-reasoning-effort)
+for `reasoningEffortUpdate` and `allowSystemInMessages` usage.
+
+An optional boolean `async` is accepted on otherwise-valid flat `function` and
+`custom` declarations, accepted namespace members, and replayed `function_call`
+or `custom_tool_call` items. These declarations can also appear inside accepted
+client-sent `additional_tools` and `tool_search_output` manifests. A non-boolean
+returns `invalid_type` at the indexed `async` path; `async` on a namespace wrapper
+returns `unknown_parameter`. Omission remains absent, while `true` and `false`
+retain their exact values through Full/Lite normalization, continuation replay,
+and JSON/SSE or websocket call output.
+
+Lite has no local `async` special case. A provider refusal can be intermittent
+and carries `unsupported_value` on `tools` through the existing
+[sanitized validation-error relay](#upstream-parameter-validation-rejections).
+Neither this flag nor configuration updates add a gateway tool scheduler;
+execution and tool results remain client-owned.
+
 ### Pool image permission
 
 One Pool setting, `allow_image_generation`, controls exactly four authenticated
@@ -420,7 +504,7 @@ The Pool setting `allow_audio_transcription` controls `POST /backend-api/transcr
 or non-string context values fail before dispatch with
 `param: "reasoning.context"`.
 
-Reasoning effort values can come from the client request or API-key policy. The
+Request-level reasoning effort values can come from the client request or API-key policy. The
 policy is derived from its configured fields:
 
 1. **Unrestricted** preserves the current route behavior. Omission stays
@@ -493,7 +577,7 @@ namespace. `functions` is the
 canonical Codex namespace example, not a restriction: any nonblank valid
 namespace accepts the same flat `function` and exact `custom` children. A custom
 tool requires `type: "custom"` and a nonblank `name`. It may include a
-description, boolean `defer_loading`, nullable `allowed_callers` using `direct`
+description, boolean `defer_loading` or `async`, nullable `allowed_callers` using `direct`
 or `programmatic`, and omitted, unconstrained text, or a `lark`/`regex` grammar
 format. Hosted, MCP, nested-namespace, malformed, and duplicate
 executable-name shapes are rejected, and so is a `tool_search` tool inside a
@@ -551,9 +635,14 @@ strict compatibility repair is not non-strict schema lowering.
 Strict structured output and function parameters on the narrow public
 OpenAI-compatible surface require a direct concrete `object` root. A root
 `$ref` or root `anyOf` is rejected. Supported nested constructs, including
-local refs, remain valid below that root. Non-strict requests and native backend
-Responses behavior are unchanged. `POST /backend-api/codex/v1/chat/completions`
-uses translated Chat semantics, so it follows this public strict-root contract.
+local refs, remain valid below that root. A nested nonempty `anyOf` may declare
+its types solely in its branches, including nullable tool parameters; every
+branch still undergoes strict validation. Empty/untyped branches, malformed
+explicit types and typeless root unions remain rejected. Non-strict requests
+retain their separate lowering contract. Native strict tool parameters accept
+the same nested nullable union shape without rewriting it.
+`POST /backend-api/codex/v1/chat/completions` uses translated Chat semantics,
+so it follows the public concrete-object root contract.
 Invalid strict structured output returns HTTP `400` with
 `invalid_json_schema` at its root schema parameter, such as
 `text.format.schema` or `response_format.json_schema.schema`. Invalid strict

@@ -32,9 +32,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.OrdinarySuccessResult do
         }
 
   @spec from_response(map(), term(), map()) :: {:ok, t()} | :error
-  def from_response(request, {:ok, %{response_id: id, terminal: terminal}}, lifecycle)
-      when is_binary(id) and terminal in ["response.completed", "response.done"] do
+  def from_response(request, {:ok, %{response_id: id, terminal: terminal} = result}, lifecycle)
+      when is_binary(id) and terminal in ["response.completed", "response.done", "response.incomplete"] do
     with :relay <- request.websocket_delivery_mode,
+         true <- terminal != "response.incomplete" or Map.get(result, :upstream_error_code) == "steered",
          {:ok, request_id} <- Ecto.UUID.cast(request.request_id),
          {:ok, attempt_id} <- Ecto.UUID.cast(request.attempt_id),
          {:ok, %{"model" => model}} when is_binary(model) <-

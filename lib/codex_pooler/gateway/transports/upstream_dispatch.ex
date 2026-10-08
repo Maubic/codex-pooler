@@ -40,6 +40,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV6
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV7
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV9
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks
   alias CodexPooler.Gateway.Websocket.DirectCleanup
   alias CodexPooler.Platform.OutboundHTTP
@@ -99,7 +100,8 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
           required(:expected_connection_lifecycle) => map() | nil,
           required(:forward_error_body?) => boolean(),
           required(:native_client_retry_observation) => ClientRetry.Observation.t() | nil,
-          required(:client_retry_dispatch_authority) => ClientRetry.DispatchAuthority.t() | nil
+          required(:client_retry_dispatch_authority) => ClientRetry.DispatchAuthority.t() | nil,
+          optional(:native_response_steering) => pid() | nil
         }
 
   defmodule Request do
@@ -127,7 +129,8 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       :assignment_advertised?,
       :native_codex_response_control,
       :request_options,
-      :client_retry_dispatch_authority
+      :client_retry_dispatch_authority,
+      :native_response_steering
     ]
 
     @type t :: %__MODULE__{
@@ -144,7 +147,8 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
             assignment_advertised?: boolean(),
             native_codex_response_control: TurnSnapshot.t() | nil,
             request_options: RequestOptions.t(),
-            client_retry_dispatch_authority: ClientRetry.DispatchAuthority.t() | nil
+            client_retry_dispatch_authority: ClientRetry.DispatchAuthority.t() | nil,
+            native_response_steering: pid() | nil
           }
   end
 
@@ -545,7 +549,8 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
         assignment_advertised?: assignment_advertised?,
         native_codex_response_control: native_codex_response_control,
         request_options: %RequestOptions{} = request_options,
-        client_retry_dispatch_authority: client_retry_dispatch_authority
+        client_retry_dispatch_authority: client_retry_dispatch_authority,
+        native_response_steering: native_response_steering
       }) do
     # The final upstream body is read twice on a websocket handshake — for the
     # routing hint and for the `/v1` derived provider session id — so decode it
@@ -598,7 +603,8 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       expected_connection_lifecycle: native_compaction_lifecycle(request_options),
       forward_error_body?: false,
       native_client_retry_observation: native_client_retry_observation(request_options),
-      client_retry_dispatch_authority: client_retry_dispatch_authority
+      client_retry_dispatch_authority: client_retry_dispatch_authority,
+      native_response_steering: native_response_steering
     }
 
     with :ok <- validate_client_retry_dispatch(request_data) do
@@ -910,14 +916,20 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
           submission_notification?: is_function(request_options.transport.websocket_owner_submission_observer, 0)
         }
 
-        with {:ok, request} <- owner_request_envelope(attrs, request_data, request_options) do
-          WebsocketOwnerRequestV8.new(%{version: 8, request: request, provider_credits_context: request_data.provider_credits_context})
+        with {:ok, request} <- owner_request_envelope(attrs, request_data, request_options),
+             {:ok, envelope} <- WebsocketOwnerRequestV8.new(%{version: 8, request: request, provider_credits_context: request_data.provider_credits_context}) do
+          owner_native_steering_envelope(envelope, Map.get(request_data, :native_response_steering))
         end
 
       _invalid_identity ->
         {:error, {:invalid_field, :upstream_identity_id}}
     end
   end
+
+  defp owner_native_steering_envelope(envelope, lane) when is_pid(lane),
+    do: WebsocketOwnerRequestV9.new(%{version: 9, request: envelope, native_response_steering: lane})
+
+  defp owner_native_steering_envelope(envelope, nil), do: {:ok, envelope}
 
   defp owner_request_envelope(attrs, request_data, request_options) do
     admission = RequestOptions.native_compaction_admission(request_options)
@@ -1426,6 +1438,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   defp observe_owner_request_submission(result, %RequestOptions{}, _owner_request), do: result
 
   defp owner_completion_follows?(%WebsocketOwnerRequestV8{request: request}), do: owner_completion_follows?(request)
+  defp owner_completion_follows?(%WebsocketOwnerRequestV9{request: request}), do: owner_completion_follows?(request)
 
   defp owner_completion_follows?(owner_request),
     do: Map.get(owner_request, :websocket_delivery_mode, :relay) == :relay

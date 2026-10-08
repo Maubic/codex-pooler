@@ -21,6 +21,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
   alias CodexPooler.Gateway.Runtime.Finalization.{AttemptSettlement, Metadata, ProviderUsageLimit}
   alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup
   alias CodexPooler.Gateway.Runtime.Finalization.SideEffects
+  alias CodexPooler.Gateway.Runtime.NativeResponseSteering
   alias CodexPooler.Gateway.Runtime.Routing.DispatchLifecycle
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl
   alias CodexPooler.Gateway.Transports.ProviderCreditsAdmission
@@ -58,7 +59,19 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
         callbacks
       ) do
     started = System.monotonic_time(:millisecond)
-    dispatch_result(prepared_context, dispatch_request, callbacks, started)
+
+    case NativeResponseSteering.prepare(prepared_context.context, callbacks) do
+      {:error, reason} ->
+        Finalization.finalize_failed_websocket_response(%{prepared_context.context | allow_retry?: false}, %{reason: reason, body: "", headers: [], started: started})
+
+      lane ->
+        try do
+          dispatch_result(prepared_context, %{dispatch_request | native_response_steering: lane}, callbacks, started)
+        after
+          context = prepared_context.context
+          NativeResponseSteering.dispatch_complete(lane, {context.reserved.request.id, context.attempt.id})
+        end
+    end
   end
 
   defp dispatch_result(prepared_context, dispatch_request, callbacks, started) do
@@ -128,6 +141,12 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
     context = prepared_context.context
 
     case result do
+      {:ok, %{native_response_steering_finalized: finalized}} ->
+        finalized
+
+      {:error, %{native_response_steering_finalized: finalized}} ->
+        finalized
+
       {:error, %{reason: {:auth_refresh_first_event, failure}} = response} ->
         handle_auth_refresh_websocket_failure(
           prepared_context,
@@ -168,18 +187,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
         )
 
       {:ok, %{terminal: terminal} = response} ->
-        finalization =
-          response
-          |> Map.put(:started, started)
-          |> maybe_put_websocket_callbacks(callbacks)
-
-        case websocket_terminal_outcome(terminal, Map.get(response, :body, "")) do
-          {:ok, %{kind: kind}} when kind in [:completed, :incomplete] ->
-            Finalization.finalize_completed_websocket_response(context, finalization)
-
-          _outcome ->
-            Finalization.finalize_terminal_websocket_response(context, finalization)
-        end
+        finalize_terminal_dispatch(context, dispatch_request, callbacks, response, terminal, started)
 
       {:error, response} ->
         # A connect-phase failure keeps HEAD's policy: candidate failover while
@@ -190,6 +198,27 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
           Map.put(response, :started, started)
         )
     end
+  end
+
+  defp finalize_terminal_dispatch(context, dispatch_request, callbacks, response, terminal, started) do
+    finalization =
+      response
+      |> Map.put(:started, started)
+      |> maybe_put_websocket_callbacks(callbacks)
+
+    outcome = websocket_terminal_outcome(terminal, Map.get(response, :body, ""))
+
+    result =
+      case outcome do
+        {:ok, %{kind: kind}} when kind in [:completed, :incomplete] ->
+          Finalization.finalize_completed_websocket_response(context, finalization)
+
+        _outcome ->
+          Finalization.finalize_terminal_websocket_response(context, finalization)
+      end
+
+    NativeResponseSteering.original_result(dispatch_request.native_response_steering, {context.reserved.request.id, context.attempt.id}, result)
+    result
   end
 
   defp handle_auth_refresh_websocket_failure(

@@ -479,6 +479,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetargetTe
     {:ok, origin_state} =
       owner_socket(origin_auth, "ws-owner-cross-scope-origin", "cross-scope-origin")
 
+    socket_state_key = make_ref()
+    Process.put(socket_state_key, origin_state)
+
     origin_session = origin_state.codex_session
     origin_lease_token = origin_state.websocket_owner_lease_token
     origin_downstream = origin_state.websocket_owner_downstream
@@ -495,11 +498,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetargetTe
           assert {:ok, retarget_admitted_state} =
                    CodexResponsesSocket.handle_in({payload, [opcode: :text]}, origin_state)
 
+          Process.put(socket_state_key, retarget_admitted_state)
+          retarget_admitted_state = receive_native_response_steering_prepared!(retarget_admitted_state)
+          Process.put(socket_state_key, retarget_admitted_state)
+
           assert retarget_admitted_state.codex_session.id == origin_session.id
           assert retarget_admitted_state.websocket_owner_lease_token == origin_lease_token
           assert retarget_admitted_state.websocket_owner_downstream == origin_downstream
 
           assert {:ok, retarget_admitted_state} = receive_socket_done(retarget_admitted_state)
+          Process.put(socket_state_key, retarget_admitted_state)
 
           retarget_admitted_state
         end)
@@ -532,7 +540,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetargetTe
       assert_no_leak_in_persistence!(origin_setup.pool.id)
       assert_no_leak_in_persistence!(target_setup.pool.id)
     after
-      CodexResponsesSocket.terminate(:closed, origin_state)
+      CodexResponsesSocket.terminate(:closed, Process.delete(socket_state_key))
     end
   end
 
@@ -543,6 +551,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetargetTe
 
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
     {:ok, state} = owner_socket(auth, "ws-owner-stale-alias", "stale-alias-origin")
+    socket_state_key = make_ref()
+    Process.put(socket_state_key, state)
     session = state.codex_session
     lease_token = state.websocket_owner_lease_token
     downstream = state.websocket_owner_downstream
@@ -570,11 +580,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetargetTe
           assert {:ok, retarget_admitted_state} =
                    CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
 
+          Process.put(socket_state_key, retarget_admitted_state)
+          retarget_admitted_state = receive_native_response_steering_prepared!(retarget_admitted_state)
+          Process.put(socket_state_key, retarget_admitted_state)
+
           assert retarget_admitted_state.codex_session.id == session.id
           assert retarget_admitted_state.websocket_owner_lease_token == lease_token
           assert retarget_admitted_state.websocket_owner_downstream == downstream
 
           assert {:ok, retarget_admitted_state} = receive_socket_done(retarget_admitted_state)
+          Process.put(socket_state_key, retarget_admitted_state)
 
           retarget_admitted_state
         end)
@@ -600,7 +615,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RetargetTe
 
       assert_no_leak_in_persistence!(setup.pool.id)
     after
-      CodexResponsesSocket.terminate(:closed, state)
+      CodexResponsesSocket.terminate(:closed, Process.delete(socket_state_key))
     end
   end
 

@@ -30,13 +30,15 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketProviderValidationRelayTest do
       gateway_setup: 1,
       mint_websocket_new!: 4,
       native_text_input: 1,
+      public_websocket_connect_with_request_headers!: 5,
+      public_websocket_receive_text!: 3,
       public_websocket_send_text!: 4,
       start_public_endpoint!: 0,
       start_upstream: 1
     ]
 
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport,
-    only: [assert_single_native_turn_terminal!: 2, collect_native_turn_frames!: 1]
+    only: [assert_single_native_turn_terminal!: 2, await_socket_connection_state!: 2, collect_native_turn_frames!: 1, socket_transport_barrier!: 3]
 
   alias CodexPooler.Access
   alias CodexPooler.Accounting.Attempt
@@ -47,6 +49,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketProviderValidationRelayTest do
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario
   alias CodexPoolerWeb.Runtime.V1BridgedAnchorSupport
+  alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
 
   @frame_timeout_ms 15_000
   @effort_values "Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'."
@@ -309,6 +312,66 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketProviderValidationRelayTest do
       after
         CodexResponsesSocket.terminate(:closed, state)
       end
+    end
+  end
+
+  for topology <- [:direct, :local_owner] do
+    @tag topology: topology
+    test "the #{topology} public socket treats a steering-reserved provider code without a steer as an ordinary failed terminal", %{topology: topology} do
+      assert_public_unsteered_native_lane_refusal!(topology)
+    end
+  end
+
+  defp assert_public_unsteered_native_lane_refusal!(topology) do
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, topology == :local_owner)
+    hold = make_ref()
+    # Synthetic adversarial provider: ordinary public creates have no native
+    # lane even if the provider returns the native control's reserved code.
+    error = %{"type" => "error", "status" => 400, "error" => %{"type" => "invalid_request_error", "code" => "unsupported_native_inflight_message", "message" => "synthetic reserved provider failure sentinel"}}
+    response = FakeUpstream.websocket_terminal_then_close_barrier(error, notify: self(), release_ref: hold, code: 1000, reason: "")
+    # provenance: synthetic_adversarial
+    upstream = start_upstream(FakeUpstream.strict_sequence([FakeUpstream.expect_request(method: "WEBSOCKET", path: "/backend-api/codex/responses", websocket_connection_ordinal: 1, json: [valid: true, equals: %{"type" => "response.create"}], respond: response)]))
+    setup = serve!(gateway_setup(upstream), "full")
+    port = start_public_endpoint!()
+    before = WebsocketCleanupFence.listener_sockets()
+    headers = [{"openai-beta", "responses_websockets=2026-02-06"}]
+    {conn, websocket, ref, _headers} = public_websocket_connect_with_request_headers!(port, setup, Ecto.UUID.generate(), "/v1/responses", headers)
+    socket = WebsocketCleanupFence.await_new_listener_socket!(before)
+    client = send_create!(%{conn: conn, websocket: websocket, ref: ref}, setup, "ordinary-reserved-code")
+
+    try do
+      assert_receive {:fake_upstream_websocket_barrier, :before_terminal, handler, ^hold}, @frame_timeout_ms
+      handler_monitor = Process.monitor(handler)
+      active = await_socket_connection_state!(socket, &is_pid(Map.get(&1, :public_response_task_pid)))
+      refute is_pid(Map.get(active, :native_response_steering))
+      send(handler, {:fake_upstream_release_websocket, hold})
+      assert_receive {:fake_upstream_websocket_barrier, :before_close, ^handler, ^hold}, @frame_timeout_ms
+      send(handler, {:fake_upstream_release_websocket, hold})
+      {conn, websocket, text} = public_websocket_receive_text!(client.conn, client.websocket, client.ref)
+      assert %{"type" => "error", "status" => 400, "stream_id" => "ordinary-reserved-code", "error" => %{"type" => "invalid_request_error", "code" => "upstream_status", "message" => "upstream request failed"}} = CodexPooler.JSON.decode!(text)
+      refute text =~ "unsupported_native_inflight_message"
+      refute text =~ "synthetic reserved provider failure sentinel"
+      assert [request] = OwnerCrashAfterSendScenario.await_settled!(setup, 1)
+      assert request.status == "failed"
+      assert request.retry_count == 0
+      assert request.usage_status == "usage_unknown"
+      assert request.completed_at != nil
+      assert %Attempt{status: "failed", completed_at: completed_at, response_metadata: metadata} = Repo.one!(from(attempt in Attempt, where: attempt.request_id == ^request.id))
+      assert completed_at != nil
+      assert metadata["rejection_error_code"] == "unsupported_native_inflight_message"
+      idle = await_socket_connection_state!(socket, &(is_nil(Map.get(&1, :public_response_task_pid)) and MapSet.size(&1.tasks) == 0))
+      refute is_pid(Map.get(idle, :native_response_steering))
+      {_conn, _websocket} = socket_transport_barrier!(conn, websocket, client.ref)
+      assert_receive {:DOWN, ^handler_monitor, :process, ^handler, _reason}, @frame_timeout_ms
+      assert [%{websocket_connection_id: 1, json: %{"type" => "response.create"}}] = FakeUpstream.requests(upstream)
+      assert FakeUpstream.physical_counts(upstream).websocket_generation == 1
+      assert FakeUpstream.physical_counts(upstream).http_generation == 0
+      assert FakeUpstream.websocket_steers(upstream) == []
+      assert :ok = FakeUpstream.verify!(upstream)
+    after
+      Mint.HTTP.close(client.conn)
+      assert :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(socket)
     end
   end
 

@@ -42,6 +42,43 @@ defmodule CodexPooler.FakeUpstream do
           required(:reason) => :closed | :enotconn | :einval | :econnaborted | :econnreset | :epipe
         }
 
+  @type provider_validation_error :: %{
+          required(String.t()) => String.t()
+        }
+
+  @type provider_validation_option ::
+          {:lite, boolean()} | {:refuse_lite_async_tools, boolean()}
+
+  @type steerable_outcome ::
+          :accepted | :response_not_found | :invalid_input | :native_lane_error | :post_terminal_close
+
+  @type websocket_steerable_settings :: %{
+          response_id: String.t(),
+          terminal_frames: [String.t()],
+          successor_frames: [String.t()],
+          notify: pid(),
+          ref: reference(),
+          outcome: steerable_outcome(),
+          steer_id: String.t(),
+          batches: :coalesced | :separate
+        }
+
+  @type websocket_steerable_option ::
+          {:response_id, String.t()}
+          | {:terminal_frames, [iodata()]}
+          | {:successor_frames, [iodata()]}
+          | {:notify, pid()}
+          | {:ref, reference()}
+          | {:outcome, steerable_outcome()}
+          | {:steer_id, String.t()}
+          | {:batches, :coalesced | :separate}
+
+  @type websocket_steer_capture :: %{
+          websocket_connection_id: pos_integer(),
+          body: binary(),
+          json: map()
+        }
+
   @type mode ::
           {:json, non_neg_integer(), map()}
           | {:json_headers, non_neg_integer(), map(), [{String.t(), String.t()}]}
@@ -71,6 +108,7 @@ defmodule CodexPooler.FakeUpstream do
           | {:websocket_init_barrier, mode(), pid(), reference()}
           | {:websocket_frame_barrier, [String.t()], pid(), reference()}
           | {:websocket_interruptible, [String.t()], map()}
+          | {:websocket_steerable, [String.t()], websocket_steerable_settings()}
           | {:sequence, [mode()]}
           | {:strict_sequence, [mode()]}
           | {:repeat_last, [mode()]}
@@ -134,7 +172,7 @@ defmodule CodexPooler.FakeUpstream do
   @doc "Returns the base URL for the fake upstream."
   def url(%__MODULE__{url: url}), do: url
 
-  @doc "Returns captured requests in request order."
+  @doc "Returns captured HTTP and websocket request frames in order; steering controls are separate in websocket_steers/1."
   def requests(%__MODULE__{pid: pid}) do
     Agent.get(pid, fn state -> Enum.reverse(state.requests) end)
   end
@@ -152,7 +190,7 @@ defmodule CodexPooler.FakeUpstream do
           identity_fingerprint: String.t() | nil
         }
 
-  @doc "Returns ordered metadata-only receipts for physical HTTP requests and websocket generation frames."
+  @doc "Returns ordered metadata-only receipts for physical HTTP requests and websocket generation/control frames."
   @spec physical_receipts(t()) :: [physical_receipt()]
   def physical_receipts(%__MODULE__{pid: pid}) do
     Agent.get(pid, fn state -> Enum.reverse(state.physical_receipts) end)
@@ -499,6 +537,32 @@ defmodule CodexPooler.FakeUpstream do
     release_frame_barrier(pid, release_ref, true)
   end
 
+  @doc "Retires only unreached future barriers after the exact provider handler died; reached holds still require release."
+  @spec retire_frame_barriers(t(), reference(), pid()) :: :ok | {:error, :handler_alive | :handler_mismatch}
+  def retire_frame_barriers(%__MODULE__{pid: pid}, release_ref, handler) when is_reference(release_ref) and is_pid(handler) do
+    if Process.alive?(handler) do
+      {:error, :handler_alive}
+    else
+      Agent.get_and_update(pid, &retire_unreached_frame_barriers(&1, release_ref, handler))
+    end
+  end
+
+  defp retire_unreached_frame_barriers(state, release_ref, handler) do
+    case Map.get(state.frame_barrier_progress, release_ref) do
+      {^handler, reached} ->
+        required =
+          MapSet.reject(state.required_acknowledgements, fn
+            {:frame_barrier, ^release_ref, ordinal} -> ordinal > reached
+            _other -> false
+          end)
+
+        {:ok, %{state | required_acknowledgements: required}}
+
+      _foreign ->
+        {{:error, :handler_mismatch}, state}
+    end
+  end
+
   @doc """
   A native response the provider stops when its client interrupts it (Codex
   0.159.0 `response.interrupt`, findings#270 row 270-272). Pushes `opening`,
@@ -549,6 +613,117 @@ defmodule CodexPooler.FakeUpstream do
   @spec websocket_interrupts(t()) :: [%{websocket_connection_id: pos_integer(), json: map() | nil}]
   def websocket_interrupts(%__MODULE__{pid: pid}) do
     Agent.get(pid, fn state -> state |> Map.get(:websocket_interrupts, []) |> Enum.reverse() end)
+  end
+
+  @doc """
+  Holds a native response open for a measured `response.steer` outcome (findings#342).
+
+  Required options are `:notify`, `:ref`, `:response_id`, `:terminal_frames` and
+  `:successor_frames`. `:outcome` defaults to `:accepted`; the refusal arms are
+  `:response_not_found`, `:invalid_input` and `:native_lane_error`. The explicit
+  `:post_terminal_close` arm models the Full provider's silent Close 1000 after
+  the original terminal. No arm is chosen from the request's serving shape.
+
+  `:steer_id` defaults to `"steer_synthetic_342"`. `:batches` is `:coalesced` by
+  default (acceptance, original terminal and unsolicited successor in one push),
+  or `:separate`, which uses `barrier_websocket_frames/2`'s ordinal-zero and
+  trailing barriers for that tail. Release those with `release_frame/2` or
+  `release_remaining_frames/2`; neither opening frames nor refusal frames wait
+  on a frame barrier.
+
+  After writing `opening`, the handler sends `{:fake_upstream_steerable_open,
+  handler, ref}`. A written acceptance sends `{:fake_upstream_steered, handler,
+  ref}`. `release_steerable/2` writes the original terminal when no steering was
+  accepted (including after a failed steer), then sends
+  `{:fake_upstream_steerable_released, handler, ref}`. The released target stays
+  available on this connection: a late accepted steer writes no second copy of
+  the original terminal.
+
+  Steering is captured verbatim by `websocket_steers/1`, records a physical
+  control receipt, and consumes no scripted generation response. An empty
+  successor list models accepted input waiting for the next explicit
+  `response.create`; client-owned tools remain outside the fake.
+  """
+  @spec websocket_steerable([iodata()], [websocket_steerable_option()]) :: mode()
+  def websocket_steerable(opening, opts) when is_list(opening) and is_list(opts) do
+    settings = %{
+      response_id: Keyword.fetch!(opts, :response_id),
+      terminal_frames: Enum.map(Keyword.fetch!(opts, :terminal_frames), &IO.iodata_to_binary/1),
+      successor_frames: Enum.map(Keyword.fetch!(opts, :successor_frames), &IO.iodata_to_binary/1),
+      notify: Keyword.fetch!(opts, :notify),
+      ref: Keyword.fetch!(opts, :ref),
+      outcome: Keyword.get(opts, :outcome, :accepted),
+      steer_id: Keyword.get(opts, :steer_id, "steer_synthetic_342"),
+      batches: Keyword.get(opts, :batches, :coalesced)
+    }
+
+    validate_steerable_settings!(settings)
+    {:websocket_steerable, Enum.map(opening, &IO.iodata_to_binary/1), settings}
+  end
+
+  @spec validate_steerable_settings!(websocket_steerable_settings()) :: :ok
+  defp validate_steerable_settings!(settings) do
+    unless valid_steerable_owner?(settings) and valid_steerable_ids?(settings) and valid_steerable_controls?(settings) do
+      raise ArgumentError, "steerable websocket requires a notify PID, ref, response/steer IDs, a measured outcome and coalesced or separate batches"
+    end
+
+    :ok
+  end
+
+  defp valid_steerable_owner?(settings), do: is_pid(settings.notify) and is_reference(settings.ref)
+
+  defp valid_steerable_ids?(settings) do
+    is_binary(settings.response_id) and byte_size(settings.response_id) > 0 and
+      is_binary(settings.steer_id) and String.starts_with?(settings.steer_id, "steer_") and byte_size(settings.steer_id) > 6
+  end
+
+  defp valid_steerable_controls?(settings) do
+    settings.outcome in [:accepted, :response_not_found, :invalid_input, :native_lane_error, :post_terminal_close] and
+      settings.batches in [:coalesced, :separate]
+  end
+
+  @doc "Writes the original terminal of the steerable response held for `ref`."
+  @spec release_steerable(t(), reference()) :: :ok | {:error, :no_steerable_response}
+  def release_steerable(%__MODULE__{pid: pid}, ref) when is_reference(ref) do
+    case Agent.get_and_update(pid, &claim_steerable_release(&1, ref)) do
+      {:ok, handler} ->
+        send(handler, {:fake_upstream_release_steerable, ref})
+        :ok
+
+      error ->
+        error
+    end
+  end
+
+  defp claim_steerable_release(state, ref) do
+    case Map.get(state.steerable_handlers, ref) do
+      %{handler: handler, phase: :open} = held ->
+        {{:ok, handler},
+         %{
+           state
+           | steerable_handlers: Map.put(state.steerable_handlers, ref, %{held | phase: :releasing}),
+             required_acknowledgements: MapSet.put(state.required_acknowledgements, {:steerable_release, ref})
+         }}
+
+      _not_open ->
+        {{:error, :no_steerable_response}, state}
+    end
+  end
+
+  @doc "Exact transient `response.steer` wire frames in receipt order, with their connection."
+  @spec websocket_steers(t()) :: [websocket_steer_capture()]
+  def websocket_steers(%__MODULE__{pid: pid}) do
+    Agent.get(pid, fn state -> Enum.reverse(state.websocket_steers) end)
+  end
+
+  @doc false
+  @spec record_websocket_steer(pid(), map()) :: :ok
+  def record_websocket_steer(pid, request) when is_pid(pid) and is_map(request) do
+    Agent.update(pid, fn state ->
+      capture = %{websocket_connection_id: request.websocket_connection_id, body: request.body, json: request.json}
+      state = record_physical_receipt(state, request)
+      %{state | websocket_steers: [capture | state.websocket_steers]}
+    end)
   end
 
   defp release_frame_barrier(pid, release_ref, remaining?) do
@@ -603,6 +778,8 @@ defmodule CodexPooler.FakeUpstream do
   @spec reach_frame_barrier(pid(), reference(), non_neg_integer(), pid()) :: boolean()
   def reach_frame_barrier(pid, release_ref, ordinal, handler) do
     Agent.get_and_update(pid, fn state ->
+      state = %{state | frame_barrier_progress: Map.put(state.frame_barrier_progress, release_ref, {handler, ordinal})}
+
       if MapSet.member?(state.frame_barrier_auto_release, release_ref) do
         {true,
          %{
@@ -922,6 +1099,9 @@ defmodule CodexPooler.FakeUpstream do
       websocket_pids_by_connection: %{},
       websocket_control_notify: nil,
       websocket_control_frames: [],
+      websocket_steers: [],
+      steerable_handlers: %{},
+      refuse_lite_async_tools?: false,
       strict_total: strict_entry_count(mode),
       strict_consumed: 0,
       scenario_failures: [],
@@ -929,6 +1109,7 @@ defmodule CodexPooler.FakeUpstream do
       required_acknowledgements: MapSet.new(),
       acknowledged: MapSet.new(),
       frame_barriers_waiting: %{},
+      frame_barrier_progress: %{},
       frame_barrier_auto_release: MapSet.new()
     }
   end
@@ -1077,6 +1258,10 @@ defmodule CodexPooler.FakeUpstream do
         record_rejected_request(pid, request)
         respond_provider_refusal(conn, refusal)
 
+      error = provider_validation_rejection(pid, request) ->
+        record_rejected_request(pid, request)
+        respond_provider_validation_rejection(conn, error)
+
       true ->
         mode = take_response_mode(pid, request)
 
@@ -1165,6 +1350,206 @@ defmodule CodexPooler.FakeUpstream do
     |> Plug.Conn.send_resp(400, CodexPooler.JSON.encode!(%{"detail" => message}))
   end
 
+  @provider_reasoning_efforts ~w(none minimal low medium high xhigh max)
+  @lite_async_refusal_message "X-OpenAI-Internal-Codex-Responses-Lite does not support async tools because they inject acknowledgments and resume sampling."
+
+  @doc """
+  Opts this fake into the provider's intermittent Lite `async: true` refusal
+  (findings#343). The default remains acceptance; Full and `async: false`
+  requests are unaffected. The refusal is coded `unsupported_value` at `tools`
+  on both HTTP and websocket, and consumes no scripted response.
+  """
+  @spec refuse_lite_async_tools(t()) :: :ok
+  def refuse_lite_async_tools(%__MODULE__{pid: pid}) do
+    Agent.update(pid, &%{&1 | refuse_lite_async_tools?: true})
+  end
+
+  @doc "Measured #343 provider validation error, with the physical request's indexed parameter path."
+  @spec provider_validation_error(term(), [provider_validation_option()]) :: provider_validation_error() | nil
+  def provider_validation_error(json, opts \\ [])
+
+  def provider_validation_error(%{} = json, opts) when is_list(opts) do
+    configuration_update_error(Map.get(json, "input", [])) ||
+      async_tool_error(json, opts)
+  end
+
+  def provider_validation_error(_json, _opts), do: nil
+
+  @doc false
+  @spec provider_validation_rejection(pid(), map()) :: provider_validation_error() | nil
+  def provider_validation_rejection(pid, %{method: method, path: path, json: json, headers: headers})
+      when method in ["POST", "WEBSOCKET"] do
+    if String.ends_with?(path, "/codex/responses") do
+      refuse_async? = Agent.get(pid, & &1.refuse_lite_async_tools?)
+      provider_validation_error(json, lite: lite_request?(json, headers), refuse_lite_async_tools: refuse_async?)
+    end
+  end
+
+  def provider_validation_rejection(_pid, _request), do: nil
+
+  @doc "The coded websocket error frame for the measured #343 refusal arm; the connection remains usable."
+  @spec provider_validation_error_frame(provider_validation_error()) :: String.t()
+  def provider_validation_error_frame(error) when is_map(error) do
+    CodexPooler.JSON.encode!(%{"type" => "error", "status" => 400, "error" => error})
+  end
+
+  @spec respond_provider_validation_rejection(Plug.Conn.t(), provider_validation_error()) :: Plug.Conn.t()
+  defp respond_provider_validation_rejection(conn, error) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(400, CodexPooler.JSON.encode!(%{"error" => error}))
+  end
+
+  @spec lite_request?(term(), [{String.t(), String.t()}]) :: boolean()
+  defp lite_request?(json, headers) do
+    header_lite? =
+      Enum.any?(headers, fn {name, value} ->
+        String.downcase(name) == "x-openai-internal-codex-responses-lite" and value == "true"
+      end)
+
+    marker_lite? =
+      case json do
+        %{"client_metadata" => %{"ws_request_header_x_openai_internal_codex_responses_lite" => marker}} -> marker in [true, "true"]
+        _other -> false
+      end
+
+    header_lite? or marker_lite?
+  end
+
+  @spec configuration_update_error(term()) :: provider_validation_error() | nil
+  defp configuration_update_error(input) when is_list(input) do
+    input
+    |> Enum.with_index()
+    |> Enum.reduce_while(nil, &reduce_configuration_update/2)
+    |> case do
+      %{} = error -> error
+      _last_type -> nil
+    end
+  end
+
+  defp configuration_update_error(_input), do: nil
+
+  defp reduce_configuration_update({%{"type" => "configuration_update"} = item, index}, previous_type) do
+    error =
+      if previous_type == "configuration_update" do
+        validation_error("unsupported_value", "input[#{index}].type", "Consecutive 'configuration_update' items are not allowed.")
+      else
+        configuration_update_reasoning_error(item, "input[#{index}].reasoning")
+      end
+
+    if error, do: {:halt, error}, else: {:cont, "configuration_update"}
+  end
+
+  defp reduce_configuration_update(_item, _previous_type), do: {:cont, nil}
+
+  @spec configuration_update_reasoning_error(map(), String.t()) :: provider_validation_error() | nil
+  defp configuration_update_reasoning_error(item, path) do
+    case Map.fetch(item, "reasoning") do
+      :error ->
+        validation_error("missing_required_parameter", path, "Missing required parameter: '#{path}'.")
+
+      {:ok, %{} = reasoning} ->
+        unknown = reasoning |> Map.keys() |> Enum.sort() |> Enum.find(&(&1 != "effort"))
+
+        if unknown do
+          validation_error("unknown_parameter", path <> "." <> unknown, "Unknown parameter: '#{path}.#{unknown}'.")
+        else
+          configuration_update_effort_error(reasoning, path <> ".effort")
+        end
+
+      {:ok, _not_object} ->
+        validation_error("invalid_type", path, "Invalid type for '#{path}': expected an object.")
+    end
+  end
+
+  @spec configuration_update_effort_error(map(), String.t()) :: provider_validation_error() | nil
+  defp configuration_update_effort_error(reasoning, path) do
+    case Map.fetch(reasoning, "effort") do
+      :error ->
+        validation_error("missing_required_parameter", path, "Missing required parameter: '#{path}'.")
+
+      {:ok, effort} when effort in @provider_reasoning_efforts ->
+        nil
+
+      {:ok, effort} when is_binary(effort) ->
+        validation_error("invalid_value", path, "Invalid reasoning effort. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'.")
+
+      {:ok, _not_string} ->
+        validation_error("invalid_type", path, "Invalid type for '#{path}': expected a string.")
+    end
+  end
+
+  @spec async_tool_error(map(), [provider_validation_option()]) :: provider_validation_error() | nil
+  defp async_tool_error(json, opts) do
+    groups = tools_with_paths(json)
+
+    Enum.find_value(groups, fn {tools, path} -> async_tool_shape_error(tools, path) end) ||
+      if Keyword.get(opts, :lite, false) and Keyword.get(opts, :refuse_lite_async_tools, false) and
+           Enum.any?(groups, fn {tools, _path} -> async_tools?(tools) end) do
+        validation_error("unsupported_value", "tools", @lite_async_refusal_message)
+      end
+  end
+
+  @spec tools_with_paths(map()) :: [{list(), String.t()}]
+  defp tools_with_paths(json) do
+    full = if is_list(json["tools"]), do: [{json["tools"], "tools"}], else: []
+
+    manifest =
+      case json["input"] do
+        input when is_list(input) ->
+          input
+          |> Enum.with_index()
+          |> Enum.flat_map(fn
+            {%{"type" => "additional_tools", "tools" => tools}, index} when is_list(tools) -> [{tools, "input[#{index}].tools"}]
+            _item -> []
+          end)
+
+        _not_list ->
+          []
+      end
+
+    full ++ manifest
+  end
+
+  @spec async_tool_shape_error(list(), String.t()) :: provider_validation_error() | nil
+  defp async_tool_shape_error(tools, path) do
+    tools
+    |> Enum.with_index()
+    |> Enum.find_value(fn
+      {%{"type" => "namespace"} = tool, index} ->
+        if Map.has_key?(tool, "async") do
+          param = "#{path}[#{index}].async"
+          validation_error("unknown_parameter", param, "Unknown parameter: '#{param}'.")
+        else
+          namespace_async_tool_shape_error(tool, "#{path}[#{index}].tools")
+        end
+
+      {%{"type" => type, "async" => async}, index} when type in ["function", "custom"] and not is_boolean(async) ->
+        param = "#{path}[#{index}].async"
+        validation_error("invalid_type", param, "Invalid type for '#{param}': expected a boolean.")
+
+      _tool ->
+        nil
+    end)
+  end
+
+  defp namespace_async_tool_shape_error(%{"tools" => tools}, path) when is_list(tools), do: async_tool_shape_error(tools, path)
+  defp namespace_async_tool_shape_error(_tool, _path), do: nil
+
+  @spec async_tools?(list()) :: boolean()
+  defp async_tools?(tools) do
+    Enum.any?(tools, fn
+      %{"type" => type, "async" => true} when type in ["function", "custom"] -> true
+      %{"type" => "namespace", "tools" => members} when is_list(members) -> async_tools?(members)
+      _tool -> false
+    end)
+  end
+
+  @spec validation_error(String.t(), String.t(), String.t()) :: provider_validation_error()
+  defp validation_error(code, param, message) do
+    %{"type" => "invalid_request_error", "code" => code, "param" => param, "message" => message}
+  end
+
   @doc """
   Makes the fake refuse `model` on `POST .../codex/responses` the way the
   Codex backend refuses a model the ChatGPT account cannot serve: `400`
@@ -1206,6 +1591,12 @@ defmodule CodexPooler.FakeUpstream do
   def record_unanswered_request(pid, request) when is_pid(pid) and is_map(request), do: record_rejected_request(pid, request)
 
   defp record_physical_request(state, request) do
+    state
+    |> record_physical_receipt(request)
+    |> Map.update!(:requests, &[request | &1])
+  end
+
+  defp record_physical_receipt(state, request) do
     ordinal = state.physical_ordinal + 1
     transport = if request.method == "WEBSOCKET", do: :websocket, else: :http
     json = if is_map(request.json), do: request.json, else: %{}
@@ -1221,11 +1612,11 @@ defmodule CodexPooler.FakeUpstream do
       identity_fingerprint: physical_fingerprint(headers["chatgpt-account-id"])
     }
 
-    %{state | requests: [request | state.requests], physical_receipts: [receipt | state.physical_receipts], physical_ordinal: ordinal}
+    %{state | physical_receipts: [receipt | state.physical_receipts], physical_ordinal: ordinal}
   end
 
   defp physical_request_kind(%{method: "WEBSOCKET"}, %{"type" => type})
-       when type in ["response.create", "response.compact", "response.steer"], do: :generation
+       when type in ["response.create", "response.compact"], do: :generation
 
   defp physical_request_kind(%{method: "WEBSOCKET"}, _json), do: :other
 
@@ -1454,7 +1845,7 @@ defmodule CodexPooler.FakeUpstream do
 
   defp validate_mode!({:expect_request, expectations, respond}) do
     if Keyword.get(expectations, :method) == "WEBSOCKET" and not native_websocket_mode?(respond) do
-      raise ArgumentError, "native websocket expectation requires one of #{Enum.join(native_websocket_constructors(), ", ")}"
+      raise ArgumentError, "native websocket expectation requires a native websocket response mode"
     end
 
     validate_mode!(respond)
@@ -1462,27 +1853,11 @@ defmodule CodexPooler.FakeUpstream do
 
   defp validate_mode!(_mode), do: :ok
 
-  # The constructors of the modes `native_websocket_mode?/1` accepts, in the order of its clauses. The refusal above
-  # names them, so a mode added to one list belongs in the other.
-  defp native_websocket_constructors do
-    ~w(
-      websocket_text_frames/1
-      websocket_text_frames_then_abrupt_close/1
-      barrier_websocket_frames/2
-      interruptible_websocket_frames/2
-      websocket_sse_then_close/2
-      websocket_terminal_then_close_barrier/2
-      websocket_connection_limit_terminal_barrier/1
-      websocket_close_without_terminal_barrier/1
-      websocket_upgrade_error/2
-      provider_refusal/1
-    )
-  end
-
   defp native_websocket_mode?({:websocket_text, _messages}), do: true
   defp native_websocket_mode?({:websocket_text_then_abrupt_close, _messages}), do: true
   defp native_websocket_mode?({:websocket_frame_barrier, _, _, _}), do: true
   defp native_websocket_mode?({:websocket_interruptible, _opening, _spec}), do: true
+  defp native_websocket_mode?({:websocket_steerable, _opening, _settings}), do: true
   defp native_websocket_mode?({:websocket_sse_then_close, _chunks, _code, _reason}), do: true
   defp native_websocket_mode?({:websocket_terminal_then_close_barrier, _, _, _, _, _}), do: true
   defp native_websocket_mode?({:websocket_connection_limit_terminal_barrier, _, _, _}), do: true
@@ -2301,6 +2676,33 @@ defmodule CodexPooler.FakeUpstream do
       {:push, Enum.map(completion, &{:text, &1}), Map.delete(state, :interruptible)}
     end
 
+    def handle_info({:fake_upstream_steerable_opened, notify, ref}, state) do
+      send(notify, {:fake_upstream_steerable_open, self(), ref})
+      {:ok, state}
+    end
+
+    def handle_info({:fake_upstream_release_steerable, ref}, %{steerable: %{ref: ref} = settings} = state) do
+      send(self(), {:fake_upstream_steerable_released, settings.notify, ref})
+
+      if settings.released? do
+        {:ok, state}
+      else
+        {:push, Enum.map(settings.terminal_frames, &{:text, &1}), Map.put(state, :steerable, %{settings | released?: true})}
+      end
+    end
+
+    def handle_info({:fake_upstream_steerable_released, notify, ref}, state) do
+      finish_steerable(state, ref, :released)
+      send(notify, {:fake_upstream_steerable_released, self(), ref})
+      {:ok, state}
+    end
+
+    def handle_info({:fake_upstream_steerable_accepted, notify, ref}, state) do
+      finish_steerable(state, ref, :accepted)
+      send(notify, {:fake_upstream_steered, self(), ref})
+      {:ok, state}
+    end
+
     def handle_info(_message, state), do: {:ok, state}
 
     @impl WebSock
@@ -2315,7 +2717,8 @@ defmodule CodexPooler.FakeUpstream do
               Map.delete(
                 Map.get(agent_state, :websocket_pids_by_connection, %{}),
                 state.connection_id
-              )
+              ),
+            steerable_handlers: Map.reject(agent_state.steerable_handlers, fn {_ref, held} -> held.handler == websocket_pid end)
         }
       end)
 
@@ -2368,11 +2771,152 @@ defmodule CodexPooler.FakeUpstream do
     def handle_in({payload, [opcode: :text]}, state) do
       case decode_json(payload) do
         %{"type" => "response.interrupt"} = interrupt -> handle_interrupt(interrupt, state)
+        %{"type" => "response.steer"} = steer -> handle_steer(payload, steer, state)
         _request -> handle_request_frame(payload, state)
       end
     end
 
     def handle_in({_payload, [opcode: :binary]}, state), do: {:stop, :unsupported_binary, state}
+
+    @spec handle_steer(binary(), map(), map()) :: WebSock.handle_result()
+    defp handle_steer(payload, steer, %{pid: pid} = state) do
+      request = websocket_request(payload, steer, state)
+      CodexPooler.FakeUpstream.record_websocket_steer(pid, request)
+
+      if Map.get(state, :refused?, false) do
+        send(self(), :fake_upstream_abrupt_close_websocket)
+        {:ok, state}
+      else
+        case Map.get(state, :steerable) do
+          %{} = settings -> handle_steer_outcome(steer, settings, state)
+          nil -> push_steer_failure(steer, :response_not_found, state)
+        end
+      end
+    end
+
+    @spec handle_steer_outcome(map(), map(), map()) :: WebSock.handle_result()
+    defp handle_steer_outcome(steer, settings, state) do
+      cond do
+        unavailable_steer_target?(steer, settings) ->
+          push_steer_failure(steer, :response_not_found, state)
+
+        settings.outcome == :native_lane_error ->
+          finish_steerable(state, settings.ref, :closed)
+          {:stop, :normal, {1000, ""}, {:text, native_lane_error_frame()}, state}
+
+        settings.outcome == :invalid_input or not valid_steer_input?(steer) ->
+          push_steer_failure(steer, :invalid_input, state)
+
+        settings.outcome == :post_terminal_close ->
+          finish_steerable(state, settings.ref, :closed)
+          {:stop, :normal, {1000, ""}, state}
+
+        true ->
+          accept_steer(steer, settings, state)
+      end
+    end
+
+    defp unavailable_steer_target?(steer, settings) do
+      not is_binary(steer["previous_response_id"]) or steer["previous_response_id"] != settings.response_id or
+        settings.outcome == :response_not_found or settings.accepted?
+    end
+
+    @spec valid_steer_input?(map()) :: boolean()
+    defp valid_steer_input?(steer) do
+      Enum.sort(Map.keys(steer)) == ~w(input previous_response_id type) and is_list(steer["input"])
+    end
+
+    @spec accept_steer(map(), map(), map()) :: WebSock.handle_result()
+    defp accept_steer(steer, settings, state) do
+      accepted =
+        CodexPooler.JSON.encode!(%{
+          "type" => "response.steer.accepted",
+          "sequence_number" => 1,
+          "steer" => %{"id" => settings.steer_id, "previous_response_id" => steer["previous_response_id"]}
+        })
+
+      terminal = if settings.released?, do: [], else: settings.terminal_frames
+      frames = [accepted | terminal ++ settings.successor_frames]
+      state = Map.put(state, :steerable, %{settings | released?: true, accepted?: true})
+
+      case settings.batches do
+        :coalesced ->
+          send(self(), {:fake_upstream_steerable_accepted, settings.notify, settings.ref})
+          {:push, Enum.map(frames, &{:text, &1}), state}
+
+        :separate ->
+          CodexPooler.FakeUpstream.register_frame_barriers(state.pid, settings.ref, length(frames))
+
+          continue_frame_barriers(
+            %{frames: frames, pushed: 0, notify: settings.notify, release_ref: settings.ref, steerable_ref: settings.ref},
+            state
+          )
+      end
+    end
+
+    @spec push_steer_failure(map(), :response_not_found | :invalid_input, map()) :: WebSock.handle_result()
+    defp push_steer_failure(steer, outcome, state) do
+      {code, message} =
+        case outcome do
+          :response_not_found -> {"response_not_found", "The target response is not available on this connection."}
+          :invalid_input -> {"invalid_input", "response.steer requires only type, previous_response_id, and input."}
+        end
+
+      failed = %{
+        "type" => "response.steer.failed",
+        "sequence_number" => 1,
+        "steer" => Map.take(steer, ["previous_response_id", "input"]),
+        "error" => %{"type" => "invalid_request_error", "code" => code, "message" => message}
+      }
+
+      {:push, {:text, CodexPooler.JSON.encode!(failed)}, state}
+    end
+
+    @spec native_lane_error_frame() :: String.t()
+    defp native_lane_error_frame do
+      CodexPooler.JSON.encode!(%{
+        "type" => "error",
+        "status" => 400,
+        "error" => %{
+          "type" => "invalid_request_error",
+          "code" => "unsupported_native_inflight_message",
+          "message" => "The experimental native turn lane cannot accept stateful WebSocket messages while a native turn is running. Start a new independent response.create turn instead."
+        }
+      })
+    end
+
+    @spec finish_steerable(map(), reference(), :accepted | :released | :closed) :: :ok
+    defp finish_steerable(%{pid: pid}, ref, phase) do
+      Agent.update(pid, fn agent_state ->
+        handlers =
+          case Map.get(agent_state.steerable_handlers, ref) do
+            nil -> agent_state.steerable_handlers
+            held -> Map.put(agent_state.steerable_handlers, ref, %{held | phase: phase})
+          end
+
+        acknowledged = MapSet.put(agent_state.acknowledged, {:steerable_finished, ref})
+        acknowledged = if phase == :released, do: MapSet.put(acknowledged, {:steerable_release, ref}), else: acknowledged
+
+        %{
+          agent_state
+          | steerable_handlers: handlers,
+            acknowledged: acknowledged
+        }
+      end)
+    end
+
+    @spec websocket_request(binary(), term(), map()) :: map()
+    defp websocket_request(payload, json, state) do
+      %{
+        method: "WEBSOCKET",
+        path: "/backend-api/codex/responses",
+        query_string: "",
+        headers: Map.get(state, :headers, []),
+        websocket_connection_id: state.connection_id,
+        body: payload,
+        json: json
+      }
+    end
 
     # The provider answers an interrupt only on the connection that carries the
     # response it names, and only while that response runs.
@@ -2400,15 +2944,7 @@ defmodule CodexPooler.FakeUpstream do
     end
 
     defp handle_request_frame(payload, %{pid: pid} = state) do
-      request = %{
-        method: "WEBSOCKET",
-        path: "/backend-api/codex/responses",
-        query_string: "",
-        headers: Map.get(state, :headers, []),
-        websocket_connection_id: state.connection_id,
-        body: payload,
-        json: decode_json(payload)
-      }
+      request = websocket_request(payload, decode_json(payload), state)
 
       cond do
         # The provider answers nothing more on a connection it refused a request on and drops it without a Close
@@ -2421,6 +2957,10 @@ defmodule CodexPooler.FakeUpstream do
         message = CodexPooler.FakeUpstream.provider_refusal_message(request.json) ->
           CodexPooler.FakeUpstream.record_unanswered_request(pid, request)
           {:push, {:text, CodexPooler.FakeUpstream.provider_refusal_frame(message)}, Map.put(state, :refused?, true)}
+
+        error = CodexPooler.FakeUpstream.provider_validation_rejection(pid, request) ->
+          CodexPooler.FakeUpstream.record_unanswered_request(pid, request)
+          {:push, {:text, CodexPooler.FakeUpstream.provider_validation_error_frame(error)}, state}
 
         true ->
           mode = CodexPooler.FakeUpstream.take_response_mode(pid, request)
@@ -2504,6 +3044,22 @@ defmodule CodexPooler.FakeUpstream do
 
       send(spec.notify, {:fake_upstream_interruptible_open, self(), spec.release_ref})
       {:push, Enum.map(opening, &{:text, &1}), Map.put(state, :interruptible, spec)}
+    end
+
+    defp handle_websocket_message({:steerable, opening, settings}, %{pid: pid} = state) do
+      handler = self()
+
+      Agent.update(pid, fn agent_state ->
+        %{
+          agent_state
+          | steerable_handlers: Map.put(agent_state.steerable_handlers, settings.ref, %{handler: handler, phase: :open}),
+            required_acknowledgements: MapSet.put(agent_state.required_acknowledgements, {:steerable_finished, settings.ref})
+        }
+      end)
+
+      send(self(), {:fake_upstream_steerable_opened, settings.notify, settings.ref})
+      settings = Map.merge(settings, %{released?: false, accepted?: false})
+      {:push, Enum.map(opening, &{:text, &1}), Map.put(state, :steerable, settings)}
     end
 
     defp handle_websocket_message(messages, state),
@@ -2594,6 +3150,9 @@ defmodule CodexPooler.FakeUpstream do
 
     defp websocket_messages({:websocket_interruptible, opening, spec}, _request),
       do: {:interruptible, opening, spec}
+
+    defp websocket_messages({:websocket_steerable, opening, settings}, _request),
+      do: {:steerable, opening, settings}
 
     defp websocket_messages({:websocket_sse_then_close, chunks, code, reason}, _request) do
       {:push_then_close, messages_from_sse_chunk(Enum.join(chunks)), code, reason}
@@ -2737,6 +3296,15 @@ defmodule CodexPooler.FakeUpstream do
     # re-enters through `handle_info` so the push is on the wire before the
     # following barrier is announced.
     defp continue_frame_barriers(%{frames: frames, pushed: pushed} = barrier, state) do
+      case barrier do
+        %{pushed: 1, steerable_ref: ref, notify: notify} ->
+          finish_steerable(state, ref, :accepted)
+          send(notify, {:fake_upstream_steered, self(), ref})
+
+        _other ->
+          :ok
+      end
+
       await_frame_barrier(state.pid, barrier)
 
       case frames do

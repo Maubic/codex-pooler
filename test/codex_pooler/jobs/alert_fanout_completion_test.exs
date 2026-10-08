@@ -66,10 +66,10 @@ defmodule CodexPooler.Jobs.AlertFanoutCompletionTest do
     alias CodexPooler.UnboxedFixture
     alias Ecto.Adapters.SQL.Sandbox
     %{user: owner} = CodexPooler.AccountsFixtures.committed_bootstrap_owner_fixture!()
+    rule = UnboxedFixture.run_unboxed(fn -> alert_rule_fixture(pool_fixture(%{created_by_user_id: owner.id})) end)
     scheduled_at = DateTime.add(DateTime.utc_now(), 1, :second)
     window_text = scheduled_at |> DateTime.to_unix() |> div(300) |> Kernel.*(300) |> DateTime.from_unix!() |> DateTime.to_iso8601()
     UnboxedFixture.register_unboxed_cleanup!(fn -> Repo.delete_all(from j in Oban.Job, where: fragment("?->>'evaluation_window_started_at'", j.args) == ^window_text) end)
-    rule = UnboxedFixture.run_unboxed(fn -> alert_rule_fixture(pool_fixture(%{created_by_user_id: owner.id})) end)
     parent = self()
 
     tasks =

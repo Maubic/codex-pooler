@@ -249,7 +249,6 @@ test-fast:
 		for round in 1 2 3; do \
 			(ERL_FLAGS="$$partition_erl_flags" CODEX_POOLER_TEST_RUN_NAMESPACE="$$run_namespace" MIX_TEST_PARTITION=1 CODEX_POOLER_TEST_DURATION_CANDIDATES="$$log_dir/confirm-$$round.tsv" $(TEST_FAST_COMMAND) "$${locations[@]}") > "$$log_dir/confirm-$$round.log" 2>&1 & \
 			pids[1]=$$!; \
-			while child_running "$${pids[1]}"; do sleep 0.1; done; \
 			if wait "$${pids[1]}"; then rc=0; else rc=$$?; fi; \
 			pids[1]=""; \
 			if [ "$$rc" -ne 0 ]; then \
@@ -278,7 +277,6 @@ test-fast:
 	failures=0; \
 	for partition in $$(seq 1 "$$partitions"); do \
 		pid=$${pids[$$partition]}; \
-		while child_running "$$pid"; do sleep 0.1; done; \
 		if wait "$$pid"; then \
 			if awk '/^Result: / { result=$$0 } END { exit !(result ~ /^Result: [1-9][0-9]* passed( \([^)]*\))?(, [0-9]+ (skipped|excluded))*$$/) }' "$${logs[$$partition]}"; then \
 				results[$$partition]=0; \

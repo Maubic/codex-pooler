@@ -157,6 +157,7 @@ const pooler = createOpenAI({
 
 const { text } = await generateText({
   model: pooler.responses("gpt-6.1-sol"),
+  allowSystemInMessages: true,
   providerOptions: {
     openai: {
       promptCacheOptions: { mode: "explicit", ttl: "30m" },
@@ -183,6 +184,70 @@ upstream dispatch while preserving `prompt_cache_key` independently from Pool
 routing affinity. GPT-6 model ids are passed through to the Pool catalog and
 assignment policy; naming one here does not guarantee that every Pool has an
 eligible account for that model.
+
+### Mid-conversation reasoning effort
+
+Direct `POST /v1/responses` JSON/SSE and narrow Responses websocket
+`response.create` accept `configuration_update` input items. Each item contains
+exactly `type: "configuration_update"` and `reasoning`; the reasoning object
+contains exactly an `effort` string. The wire item has no `content` field. Codex
+Pooler preserves the item and its position in Full and Lite mode, including
+stateless history replay and otherwise-valid tool-output continuations.
+
+Missing required fields, wrong types, and unknown keys are rejected before
+dispatch with `missing_required_parameter`, `invalid_type`, or
+`unknown_parameter`, respectively. These local errors use the original client input path,
+such as `input[N].reasoning.effort`. Effort values are not normalized or rewritten
+using request-level aliases. The provider validates its enum (`none`, `minimal`,
+`low`, `medium`, `high`, `xhigh`, `max`) and selected-model support. Consecutive
+updates and compaction restrictions also belong to the provider; Codex Pooler
+does not duplicate those restrictions. Provider refusals use the existing
+[sanitized validation-error relay](/reference/runtime-routes/#upstream-parameter-validation-rejections):
+HTTP retains a client input index only when it can map the position, while
+websocket provider refusals use `input[]` when no per-turn map is available.
+The refused upstream connection is not guaranteed reusable, even if the client
+socket remains open; continuation anchors still require their producing
+connection.
+Accepting the item shape does not guarantee a model's effort effect or cache
+behavior.
+
+With Vercel AI SDK, represent a message-level update as an empty system message
+with `providerOptions.openai.reasoningEffortUpdate`. Set
+`allowSystemInMessages: true` for these trusted messages. Keep the request-level
+effort unchanged and retain earlier update messages when replaying history:
+
+```ts
+const result = await generateText({
+  model: pooler.responses("gpt-6.1-sol"),
+  reasoning: "low",
+  allowSystemInMessages: true,
+  providerOptions: { openai: { store: false } },
+  messages: [
+    ...conversationMessages,
+    {
+      role: "system",
+      content: "",
+      providerOptions: { openai: { reasoningEffortUpdate: "high" } },
+    },
+    nextUserMessage,
+  ],
+});
+```
+
+Here `conversationMessages` is your application history and `nextUserMessage` is
+the next user message. The empty `content` is the SDK's message API, not a
+`configuration_update` wire field: the provider adapter serializes only `type`
+and `reasoning`. Without `allowSystemInMessages`, the SDK rejects the prompt
+before dispatch. Use the SDK's supported GPT-6-family configuration: standard
+reasoning mode, no automatic `contextManagement`, and disabled automatic
+truncation. The SDK rejects adjacent updates in the input it serializes; it can
+also reject unsupported configurations before sending them. Its documentation
+recommends the [explicit compaction trigger](#request-an-explicit-compaction-turn)
+rather than automatic compaction or `/v1/responses/compact`, and a fresh update
+after compact-item replay. This is client guidance, not a guarantee that the
+selected provider accepts a history containing updates for compaction. Provider
+compaction eligibility remains authoritative and must be checked independently;
+Codex Pooler does not add a local workaround or rewrite the history.
 
 ### Programmatic tools and stateless replay
 
@@ -226,6 +291,25 @@ named standalone item requires a nonblank `name` and an `output` field, permits
 `null`, or a nonblank string. Blank or non-string values and standalone `result`
 reject before dispatch. Classification and debug summaries remain metadata-only.
 This does not expand general Responses parity or prove provider-live acceptance.
+
+### Asynchronous tool flags
+
+Direct Responses requests accept optional boolean `async` on otherwise-valid
+flat `function` and `custom` tool declarations, including accepted namespace
+members, and on replayed `function_call` and `custom_tool_call` items. The same
+boolean validation applies to those declarations inside client-sent
+`additional_tools` and `tool_search_output` manifests. A namespace wrapper
+cannot carry `async`: it returns `unknown_parameter` at the wrapper's indexed
+`async` path. A non-boolean value returns `invalid_type`, for example on
+`tools[N].async`, `tools[N].tools[M].async`, or `input[N].async`.
+
+Omission remains absent, and both `true` and `false` are preserved through
+Full/Lite normalization, history replay, and HTTP JSON/SSE or websocket call
+output. Codex Pooler does not special-case Lite: the provider can intermittently
+refuse an asynchronous tool with `unsupported_value` on `tools`, and that
+refusal follows the same sanitized validation-error relay. This flag does not
+move tool execution or scheduling into Codex Pooler; your client runs the tools
+and returns their results.
 
 ### Multi-agent mailbox history replay
 
@@ -562,6 +646,22 @@ Streaming `/v1/chat/completions` clients must separately handle a terminal `data
 For public SSE, an absent, blank, or whitespace-only `event:` label is treated as absent before the label is compared with the JSON `type`. A nonblank mismatch is still rejected. Ordinary incomplete `POST /v1/responses` SSE blocks are capped at 8 MiB so single large provider events, such as reasoning items carrying encrypted content, can finish decoding; structurally recognizable terminal candidates may retain up to 64 MiB so a large terminal split across upstream chunks can finish decoding. Crossing the applicable cap sends one bounded sanitized `type: "error"` event, relays none of that source block, and drops later source frames.
 
 On narrow `GET /v1/responses` websocket compatibility, malformed JSON and JSON values that are not objects are ignored without consuming a sequence number or creating a local terminal. Native backend websocket behavior is unchanged.
+
+### Native live steering is a separate contract
+
+`response.steer` is supported only on the native Codex backend websocket routes,
+not on narrow `GET /v1/responses` compatibility. Sending it to the public
+websocket returns `400 invalid_request` with `param: "type"` before upstream
+dispatch. SDK schema definitions for that frame do not establish a supported
+public caller contract.
+
+Native steering targets a response on its existing upstream connection and
+relays the provider's accepted, failed, error, and Close outcomes. An accepted
+steer does not run tools or guarantee an immediate successor: a pending tool
+can require the client to send its result in a later `response.create`. See the
+[native steering contract](/reference/runtime-routes/#native-websocket-live-steering)
+for successor accounting and the distinction from HTTP steered continuations
+and `response.interrupt`.
 
 ### Responses WebSocket stream IDs
 

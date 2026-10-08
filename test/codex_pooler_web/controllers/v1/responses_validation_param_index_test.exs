@@ -146,6 +146,38 @@ defmodule CodexPoolerWeb.V1.ResponsesValidationParamIndexTest do
     end
   end
 
+  for {mode, instructions, provider_index} <- [
+        {"full", false, 2},
+        {"full", true, 2},
+        {"lite", false, 3},
+        {"lite", true, 4}
+      ] do
+    @tag mode: mode, instructions: instructions, provider_index: provider_index
+    test "/v1/responses #{mode}, instructions=#{instructions}: a configuration effort refusal retains the client index and records the physical provider index", %{conn: conn, mode: mode, instructions: instructions, provider_index: provider_index} do
+      upstream = start_upstream(FakeUpstream.sse_stream([]))
+      setup = gateway_setup(upstream)
+      put_mode!(setup, mode)
+      update = %{"type" => "configuration_update", "reasoning" => %{"effort" => "synthetic-provider-effort"}}
+      [first, earlier_answer, last] = client_input()
+      earlier_answer = Map.put(earlier_answer, "id", "msg_configuration_effort_answer")
+      input = [first, earlier_answer, update, last]
+      body = %{"model" => setup.model.exposed_model_id, "input" => input, "stream" => true}
+      body = if instructions, do: Map.put(body, "instructions", "synthetic configuration instruction"), else: body
+
+      response = conn |> auth(setup) |> post("/v1/responses", body)
+      assert %{"type" => "invalid_request_error", "code" => "invalid_value", "param" => "input[2].reasoning.effort", "message" => message} = json_response(response, 400)["error"]
+      assert message =~ "none, minimal, low, medium, high, xhigh, max"
+      refute message =~ "synthetic-provider-effort"
+      assert [captured] = FakeUpstream.requests(upstream)
+      assert captured.method == "POST"
+      assert Enum.at(captured.json["input"], provider_index) == update
+      assert Enum.find_index(captured.json["input"], &(&1 == update)) == provider_index
+      assert attempt_rejection_param!(setup) == "input[#{provider_index}].reasoning.effort"
+      assert FakeUpstream.physical_counts(upstream).http_generation == 1
+      assert :ok = FakeUpstream.verify!(upstream)
+    end
+  end
+
   defp rejecting_setup(provider_param, mode) do
     error = %{"type" => "invalid_request_error", "code" => "invalid_value", "message" => "Invalid '#{provider_param}': '#{@rejected_id}'.", "param" => provider_param}
 

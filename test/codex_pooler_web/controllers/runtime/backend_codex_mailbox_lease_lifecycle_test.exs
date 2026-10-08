@@ -715,9 +715,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxLeaseLifecycleTest do
 
   defp record_fixture_presence_node!(target, slot) do
     :ok = :erpc.call(target, Application, :put_env, [:codex_pooler, :instance_slot_id, slot])
-    assert {:ok, presence} = :erpc.call(target, InstancePresence, :record_heartbeat, [])
-    on_exit(fn -> Repo.delete_all(from i in PresenceInstance, where: i.instance_id == ^presence.instance_id) end)
-    presence
+    identity = :erpc.call(target, InstancePresence, :local_identity, [])
+    on_exit(fn -> Repo.delete_all(from i in PresenceInstance, where: i.instance_id == ^identity.instance_id) end)
+    assert {:ok, _failed_beats} = :erpc.call(target, CodexPooler.InstancePresencePeer, :publish_local_presence, [@budget], @budget + 5_000)
+    Repo.get!(PresenceInstance, identity.instance_id)
   end
 
   defp pause_fixture_executor!(executor) do

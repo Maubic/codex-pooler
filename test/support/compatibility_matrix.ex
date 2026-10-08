@@ -784,6 +784,20 @@ defmodule CodexPooler.CompatibilityMatrix do
       contract: "with owner forwarding off or on, the session's owner on this node or on another, and the Pool serving the model Full or Lite, a native backend websocket hands the released Codex client's response.interrupt (a provider response id and a bounded mode, rebuilt from those two fields alone) to the upstream session that carries the running turn, which writes it only while the response it names runs there as a relayed turn; the provider's answer (response.interrupt.accepted, response.output_item.interrupted for an item it had open, the terminal response.incomplete with reason interrupted) reaches the client unchanged, the interrupted request settles succeeded with the usage it generated and a delivery receipt naming incomplete_reason interrupted, and the follow-up the client anchors on the interrupted response is a later request of its turn on the same connection, in the serving mode the interrupted request was served in; every interrupt the provider cannot apply (a malformed frame, no running turn, another response, a response already ended, a collected compaction, another downstream's turn, an owner node of an earlier release) is dropped with one line naming where and no frame, since an error frame would end the client's turn; a compaction the provider itself ends interrupted is answered with a reason the client retries; the public /v1 websocket keeps refusing the frame type"
     },
     %{
+      slug: :native_websocket_response_steer,
+      status: :supported,
+      current: :connection_bound_steering_with_independent_successors,
+      categories: [:error, :streaming, :ownership],
+      routes: [
+        %{method: :get, path: "/backend-api/codex/responses", transport: :websocket},
+        %{method: :get, path: "/backend-api/codex/v1/responses", transport: :websocket},
+        %{method: :get, path: "/v1/responses", transport: :websocket, behavior: :refused_control}
+      ],
+      future_routes: [],
+      fixture: :native_websocket_response_steer,
+      contract: "native backend websocket response.steer carries type, a provider previous_response_id, and an input list to the same upstream connection that holds the named response, with owner forwarding off or through the local or remote session owner, in Full and Lite; provider response.steer.accepted and response.steer.failed, the unsupported_native_inflight_message error, and its Close are relayed without synthesized acceptance or a serving-mode guess; acceptance alone creates no request or guaranteed immediate successor, and tools remain client-owned; each actual unsolicited successor response.created retains the connection while opening an independent reservation, request, attempt, provider usage settlement, and downstream delivery receipt; response.incomplete with reason steered settles as a successfully served request without retry or failure, and a normally completed predecessor remains independently settled; public /v1/responses steering stays 400 invalid_request on type, and native steering is distinct from HTTP steered continuation and response.interrupt"
+    },
+    %{
       slug: :firewall,
       status: :supported,
       current: :explicit_forwarded_client_policy,
@@ -1013,6 +1027,32 @@ defmodule CodexPooler.CompatibilityMatrix do
       contract: "public Responses HTTP JSON/SSE and websocket response.create preserve access_programs in Full and Lite; its optional cyber key accepts standard, daybreak_blue, or daybreak_red, while malformed objects, unknown keys, and invalid selections fail before dispatch; the provider remains authoritative for account and model entitlement"
     },
     %{
+      slug: :responses_configuration_updates,
+      status: :supported,
+      current: :ordered_configuration_update_forwarding,
+      categories: [:route, :auth, :error, :streaming, :ownership],
+      routes: [
+        %{method: :post, path: "/v1/responses"},
+        %{method: :get, path: "/v1/responses", transport: :websocket}
+      ],
+      future_routes: [],
+      fixture: :responses_configuration_updates,
+      contract: "public Responses HTTP JSON/SSE and websocket response.create accept configuration_update with exactly type and reasoning, where reasoning contains exactly a string effort; preserve the item and its input order through Full/Lite normalization and continuation replay without lifting it into instructions or applying request-level effort aliases; missing fields, wrong types, and unknown keys reject locally with indexed client parameters, while effort enum, selected-model support, consecutive updates, and compaction restrictions remain provider-authoritative and use the existing sanitized validation-rejection relay; Vercel message-level reasoningEffortUpdate uses an empty system message and allowSystemInMessages true at the client API, serializing only type and reasoning rather than a content field; shape acceptance proves neither an effort effect nor cache behavior"
+    },
+    %{
+      slug: :responses_async_tools,
+      status: :supported,
+      current: :boolean_async_tool_and_call_preservation,
+      categories: [:route, :auth, :error, :streaming, :ownership],
+      routes: [
+        %{method: :post, path: "/v1/responses"},
+        %{method: :get, path: "/v1/responses", transport: :websocket}
+      ],
+      future_routes: [],
+      fixture: :responses_async_tools,
+      contract: "public Responses accepts optional boolean async on otherwise-valid flat function/custom declarations, accepted namespace members but not the namespace wrapper, and replayed function_call/custom_tool_call items; true and false retain their exact value and omission stays absent through Full/Lite declarations, client-sent additional_tools/tool_search_output manifests, continuation replay, and HTTP JSON/SSE or websocket call output; a non-boolean rejects locally as invalid_type at its indexed async path and a namespace wrapper rejects as unknown_parameter; Lite has no local async special case, so an intermittent provider unsupported_value refusal on tools follows the existing sanitized rejection relay; admission never executes tools or creates a gateway-owned scheduler"
+    },
+    %{
       slug: :responses_allowed_tools,
       status: :supported,
       current: :declaration_backed_full_mode_choice,
@@ -1037,7 +1077,7 @@ defmodule CodexPooler.CompatibilityMatrix do
       ],
       future_routes: [],
       fixture: :responses_executable_custom_tools,
-      contract: "direct public Responses HTTP and websocket response.create accept executable custom tools with an exact nonblank name, optional description and defer_loading, nullable direct/programmatic allowed_callers, and omitted, text, lark-grammar, or regex-grammar input format; the same exact custom definition is accepted as a child of a nonblank namespace with a nonempty tool list alongside exact flat function children; translated Chat Completions accepts the official nested custom definition with nonblank name and optional description or format plus the official nested named custom choice, flattens both into the Responses request, and projects completed JSON and streamed custom_tool_call input back into the Chat custom shape without parsing free-form input as JSON; an exact typed custom choice resolves only a declared custom tool of the same name and kind, including a namespace child, is preserved in Full mode, and is rejected before upstream dispatch in Lite mode with unsupported_parameter for tool_choice; that Lite rejection is serving-mode driven and covers map-shaped tool_choice other than an exact nonblank named function choice on any lane dispatching to backend Responses; named function choices, including translated Chat choices, and string choices such as auto are preserved in both modes; executable names are collision-free across flat functions, namespace children, and custom tools; malformed and unrelated tool families remain rejected, custom replay is a separate input-item contract, provider execution availability depends on the selected model and upstream account, and no broad OpenAI tool parity is claimed"
+      contract: "direct public Responses HTTP and websocket response.create accept executable custom tools with an exact nonblank name, optional description and boolean defer_loading or async, nullable direct/programmatic allowed_callers, and omitted, text, lark-grammar, or regex-grammar input format; the same exact custom definition is accepted as a child of a nonblank namespace with a nonempty tool list alongside exact flat function children; translated Chat Completions accepts the official nested custom definition with nonblank name and optional description or format plus the official nested named custom choice, flattens both into the Responses request, and projects completed JSON and streamed custom_tool_call input back into the Chat custom shape without parsing free-form input as JSON; an exact typed custom choice resolves only a declared custom tool of the same name and kind, including a namespace child, is preserved in Full mode, and is rejected before upstream dispatch in Lite mode with unsupported_parameter for tool_choice; that Lite rejection is serving-mode driven and covers map-shaped tool_choice other than an exact nonblank named function choice on any lane dispatching to backend Responses; named function choices, including translated Chat choices, and string choices such as auto are preserved in both modes; executable names are collision-free across flat functions, namespace children, and custom tools; malformed and unrelated tool families remain rejected, custom replay is a separate input-item contract, provider execution availability depends on the selected model and upstream account, and no broad OpenAI tool parity is claimed"
     },
     %{
       slug: :backend_agent_v2_handoffs,
@@ -1253,6 +1293,33 @@ defmodule CodexPooler.CompatibilityMatrix do
       public_v1_websocket: :refused_unsupported_type,
       observability: %{line: "native websocket response interrupt outcome=", metric: :none}
     },
+    native_websocket_response_steer: %{
+      topologies: [:owner_forwarding_off, :owner_on_this_node, :owner_on_another_node],
+      serving_modes: ~w(full lite),
+      frame_fields: ~w(type previous_response_id input),
+      previous_response_id: :provider_response_on_the_same_connection,
+      input: :list,
+      provider_answers: ~w(response.steer.accepted response.steer.failed),
+      provider_failures: ~w(response_not_found invalid_input),
+      native_lane_error: %{code: "unsupported_native_inflight_message", frame: :relayed_unchanged, close: :relayed_unchanged},
+      accepted: %{synthesized: false, creates_request: false, immediate_successor: :not_guaranteed},
+      predecessor_terminals: [
+        %{type: "response.incomplete", incomplete_reason: "steered", status: "succeeded", retry: false},
+        %{type: "response.completed", status: "succeeded", retry: false}
+      ],
+      successor: %{
+        starts_on: "response.created",
+        explicit_client_create: false,
+        upstream_connection: :preserved,
+        independent: ~w(reservation request attempt usage_settlement downstream_delivery_receipt),
+        settlement: :once_per_observed_response
+      },
+      tool_execution: :client_owned,
+      pending_client_tool: %{explicit_create: :remaining_tool_output_only, accepted_steering_input: :provider_prepends_queue, duplicate_steering_input: false},
+      public_v1_websocket: %{status: 400, code: "invalid_request", param: "type", upstream_dispatch: false},
+      distinct_from: [:native_http_steered_continuation, :response_interrupt],
+      observability: %{content: :never_persisted, metric: :none}
+    },
     responses_access_programs: %{
       surfaces: ~w(http_json http_sse responses_websocket),
       serving_modes: ~w(full lite),
@@ -1260,6 +1327,56 @@ defmodule CodexPooler.CompatibilityMatrix do
       validation_error: %{status: 400, code: "invalid_request", upstream_dispatch: false},
       forwarding: :unchanged,
       entitlement: :upstream_authoritative
+    },
+    responses_configuration_updates: %{
+      surfaces: ~w(http_json http_sse responses_websocket),
+      serving_modes: ~w(full lite),
+      item: %{"type" => "configuration_update", "reasoning" => %{"effort" => "high"}},
+      exact_item_keys: ~w(type reasoning),
+      exact_reasoning_keys: ~w(effort),
+      effort_type: :string,
+      provider_effort_values: ~w(none minimal low medium high xhigh max),
+      forwarding: %{item: :unchanged, order: :preserved, continuation_replay: :preserved},
+      local_validation: %{
+        missing: "missing_required_parameter",
+        wrong_type: "invalid_type",
+        unknown_key: "unknown_parameter",
+        param: :original_client_input_path,
+        upstream_dispatch: false
+      },
+      provider_validation: %{
+        effort_enum: %{code: "invalid_value", param: "input[N].reasoning.effort"},
+        consecutive: %{code: "unsupported_value", param: "input[N].type"},
+        compaction: :provider_authoritative,
+        client_params: %{http: :original_index_when_recoverable, websocket: :input_index_removed_without_a_turn_map},
+        refused_upstream_connection: :not_guaranteed_reusable,
+        relay: :sanitized_existing_validation_rejection
+      },
+      vercel_message_api: %{role: "system", content: "", option: "reasoningEffortUpdate", allow_system_in_messages: true, wire_content: :absent},
+      model_effect: :not_guaranteed,
+      cache_behavior: :not_guaranteed,
+      observability: %{content: :never_persisted, metric: :none}
+    },
+    responses_async_tools: %{
+      surfaces: ~w(http_json http_sse responses_websocket),
+      serving_modes: ~w(full lite),
+      declaration_types: ~w(function custom),
+      namespace_members: :accepted,
+      namespace_wrapper: :refused,
+      call_types: ~w(function_call custom_tool_call),
+      client_manifest_types: ~w(additional_tools tool_search_output),
+      async_values: [true, false],
+      omitted: :remains_absent,
+      forwarding: %{declarations: :preserved, continuation_replay: :preserved, call_output: :preserved},
+      local_validation: %{
+        non_boolean: %{status: 400, code: "invalid_type", param: :indexed_async_path},
+        namespace_wrapper: %{status: 400, code: "unknown_parameter", param: :indexed_async_path},
+        upstream_dispatch: false
+      },
+      lite: %{local_special_case: false, provider_refusal: %{code: "unsupported_value", param: "tools", occurrence: :intermittent}},
+      provider_refusal_relay: :sanitized_existing_validation_rejection,
+      tool_execution: :client_owned,
+      observability: %{content: :never_persisted, metric: :none}
     },
     file_upload: %{
       json: %{"file_name" => "fixture-upload.txt", "file_size" => 24, "use_case" => "codex"}
@@ -1783,9 +1900,9 @@ defmodule CodexPooler.CompatibilityMatrix do
         required: ["type", "name", "description", "tools"],
         namespace_name: "nonblank",
         nested_tool_types: ["function", "custom"],
-        nested_function_optional: ["strict", "defer_loading"],
+        nested_function_optional: ["strict", "defer_loading", "async"],
         nested_custom_required: ["type", "name"],
-        nested_custom_optional: ["description", "defer_loading", "allowed_callers", "format"],
+        nested_custom_optional: ["description", "defer_loading", "allowed_callers", "format", "async"],
         nested_custom_formats: ["omitted", "text", "grammar_lark", "grammar_regex"],
         nested_custom_allowed_callers: ["direct", "programmatic"],
         nested_custom_allowed_callers_null: true,
@@ -3560,7 +3677,7 @@ defmodule CodexPooler.CompatibilityMatrix do
       scope: "direct_public_responses_and_translated_chat",
       transports: ["http", "sse", "websocket_response_create"],
       required_keys: ["type", "name"],
-      optional_keys: ["description", "defer_loading", "allowed_callers", "format"],
+      optional_keys: ["description", "defer_loading", "allowed_callers", "format", "async"],
       allowed_callers: ["direct", "programmatic"],
       allowed_callers_null: true,
       formats: ["omitted", "text", "grammar_lark", "grammar_regex"],

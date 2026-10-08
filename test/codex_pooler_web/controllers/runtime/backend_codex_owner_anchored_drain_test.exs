@@ -4,6 +4,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexOwnerAnchoredDrainTest do
 
   import Ecto.Query
   import CodexPoolerWeb.Runtime.AnchoredOwnerDrainSupport
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [receive_native_response_steering_prepared!: 1]
 
   alias CodexPooler.Access
   alias CodexPooler.Accounting
@@ -48,6 +49,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexOwnerAnchoredDrainTest do
                {CodexPooler.JSON.encode!(continuation), [opcode: :text]},
                state
              )
+
+    state = receive_native_response_steering_prepared!(state)
 
     assert_receive {:fake_upstream_timeout_barrier, :before_terminal, upstream_pid, ^release_ref},
                    @budget
@@ -159,6 +162,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexOwnerAnchoredDrainTest do
                {CodexPooler.JSON.encode!(unanchored), [opcode: :text]},
                state
              )
+
+    state = receive_native_response_steering_prepared!(state)
 
     assert_receive {:fake_upstream_timeout_barrier, :before_terminal, upstream_pid, ^release_ref},
                    @budget

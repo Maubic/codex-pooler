@@ -292,9 +292,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
         ]
       )
 
+    socket_state_key = make_ref()
+    Process.put(socket_state_key, state)
+
     try do
       payload = websocket_payload(setup, "native proxy predispatch")
       assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
+      Process.put(socket_state_key, state)
+      state = receive_native_response_steering_prepared!(state)
+      Process.put(socket_state_key, state)
+      assert_remote_submit_request_v9!(state, remote_node)
 
       assert_receive {:fake_upstream_websocket_barrier, :before_terminal, barrier_pid, ^release_ref},
                      5_000
@@ -311,20 +318,26 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
       assert {:push, {:text, ^terminal}, state} =
                CodexResponsesSocket.handle_info(terminal_message, state)
 
+      Process.put(socket_state_key, state)
+
       assert_receive {:websocket_owner_frame, ^correlation_id, ^epoch, _owner_turn_id, :complete} =
                        complete_message,
                      5_000
 
       assert {:ok, state} = CodexResponsesSocket.handle_info(complete_message, state)
+      Process.put(socket_state_key, state)
       assert_receive {:websocket_response_activity, ^task_pid, activity_token} = activity_message
       assert {:ok, state} = CodexResponsesSocket.handle_info(activity_message, state)
+      Process.put(socket_state_key, state)
       assert_receive {:codex_response_done, ^task_pid, _result} = done_message
       assert {:ok, state} = CodexResponsesSocket.handle_info(done_message, state)
+      Process.put(socket_state_key, state)
 
       assert_receive {:websocket_response_delivery_complete, ^task_pid, ^activity_token} =
                        delivery_message
 
-      assert {:ok, _state} = CodexResponsesSocket.handle_info(delivery_message, state)
+      assert {:ok, state} = CodexResponsesSocket.handle_info(delivery_message, state)
+      Process.put(socket_state_key, state)
       assert FakeUpstream.count(upstream) == 1
       assert :erpc.call(remote_node, Process, :alive?, [owner_pid])
 
@@ -345,7 +358,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
       assert_receive {:fake_upstream_websocket_barrier, :before_close, close_pid, ^release_ref}
       send(close_pid, {:fake_upstream_release_websocket, release_ref})
     after
-      CodexResponsesSocket.terminate(:closed, state)
+      CodexResponsesSocket.terminate(:closed, Process.delete(socket_state_key))
     end
   end
 
@@ -497,6 +510,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
     ]
 
     remote_state = remote_owner_state(state, remote_node, node_opts)
+    socket_state_key = make_ref()
+    Process.put(socket_state_key, remote_state)
 
     try do
       payload = websocket_payload(setup, "owner turn budget")
@@ -509,9 +524,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
       assert {:ok, remote_state} =
                CodexResponsesSocket.handle_in({payload, [opcode: :text]}, remote_state)
 
+      Process.put(socket_state_key, remote_state)
+      remote_state = receive_native_response_steering_prepared!(remote_state)
+      Process.put(socket_state_key, remote_state)
+
       [task_pid] = MapSet.to_list(remote_state.tasks)
 
-      assert_receive {:turn_budget_remote_call, :remote_submit_request_v8, 1_801_000}
+      assert_receive {:turn_budget_remote_call, :remote_submit_request_v9, 1_801_000}
 
       assert_receive {:websocket_owner_frame, correlation_id, epoch, _owner_turn_id, {:data, ^terminal}} =
                        terminal_message
@@ -519,26 +538,34 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.MultiNodeP
       assert {:push, {:text, ^terminal}, remote_state} =
                CodexResponsesSocket.handle_info(terminal_message, remote_state)
 
+      Process.put(socket_state_key, remote_state)
+
       assert_receive {:websocket_owner_frame, ^correlation_id, ^epoch, _owner_turn_id, :complete} =
                        complete_message
 
       assert {:ok, remote_state} =
                CodexResponsesSocket.handle_info(complete_message, remote_state)
 
+      Process.put(socket_state_key, remote_state)
+
       assert_receive {:websocket_response_activity, ^task_pid, activity_token} = activity_message
 
       assert {:ok, remote_state} =
                CodexResponsesSocket.handle_info(activity_message, remote_state)
 
+      Process.put(socket_state_key, remote_state)
+
       assert_receive {:codex_response_done, ^task_pid, _result} = done_message
       assert {:ok, remote_state} = CodexResponsesSocket.handle_info(done_message, remote_state)
+      Process.put(socket_state_key, remote_state)
 
       assert_receive {:websocket_response_delivery_complete, ^task_pid, ^activity_token} =
                        delivery_message
 
-      assert {:ok, _state} = CodexResponsesSocket.handle_info(delivery_message, remote_state)
+      assert {:ok, remote_state} = CodexResponsesSocket.handle_info(delivery_message, remote_state)
+      Process.put(socket_state_key, remote_state)
     after
-      CodexResponsesSocket.terminate(:closed, remote_state)
+      CodexResponsesSocket.terminate(:closed, Process.delete(socket_state_key))
     end
   end
 

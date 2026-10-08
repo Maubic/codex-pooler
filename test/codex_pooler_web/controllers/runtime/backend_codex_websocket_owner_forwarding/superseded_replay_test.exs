@@ -315,8 +315,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Superseded
       CodexPooler.JSON.encode!(native_turn_payload(thread_id, model, "remote-superseding-turn", 900, [synthetic_user_item("interrupted question"), synthetic_user_item("next question")]))
 
     assert {:ok, remote_state} = CodexResponsesSocket.handle_in({cut_payload, [opcode: :text]}, remote_state)
+    remote_state = receive_native_response_steering_prepared!(remote_state)
     assert_receive {:fake_upstream_websocket_barrier, :before_close, upstream_pid, ^release_ref}, @detection_timeout_ms
-    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v8}, @detection_timeout_ms
+    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v9}, @detection_timeout_ms
 
     assert Gateway.detach_websocket_owner_downstream(session, remote_state.websocket_owner_lease_token, remote_state.websocket_owner_downstream, remote_state.opts) in [
              :suspended,
@@ -333,8 +334,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Superseded
     {:ok, next_state} = owner_socket(auth, "ws-remote-superseding", turn_state, websocket_owner_forwarder_opts: node_client_options)
     assert next_state.websocket_owner_downstream.epoch == 2
     assert {:ok, next_state} = CodexResponsesSocket.handle_in({next_payload, [opcode: :text]}, next_state)
+    next_state = receive_native_response_steering_prepared!(next_state)
     assert_receive {:replay_remote_owner_call, ^remote_node, :remote_reconnect_control_v2}, @detection_timeout_ms
-    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v8}, @detection_timeout_ms
+    assert_receive {:replay_remote_owner_call, ^remote_node, :remote_submit_request_v9}, @detection_timeout_ms
     assert {:push, {:text, frame}, next_state} = receive_owner_socket_push(next_state)
     assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(frame)
     assert {:ok, next_state} = receive_owner_socket_complete(next_state)

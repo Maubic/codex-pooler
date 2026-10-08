@@ -197,34 +197,35 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.QueuedTurnReplayPreflight
   # A turn's outcome: its terminal text frame, or the close frame that ends
   # the socket instead.
   defp receive_outcome!(conn, websocket, ref) do
-    receive do
-      message ->
-        case Mint.WebSocket.stream(conn, message) do
-          :unknown ->
-            receive_outcome!(conn, websocket, ref)
+    receive_outcome!(conn, websocket, ref, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+  end
 
-          {:ok, conn, responses} ->
-            {websocket, frames} =
-              Enum.reduce(responses, {websocket, []}, fn
-                {:data, ^ref, data}, {websocket, frames} ->
-                  {:ok, websocket, decoded} = Mint.WebSocket.decode(websocket, data)
-                  {websocket, frames ++ decoded}
+  defp receive_outcome!(conn, websocket, ref, deadline) do
+    message = receive_mint_socket_message!(conn, max(deadline - System.monotonic_time(:millisecond), 0), "timed out waiting for a turn outcome")
 
-                _response, acc ->
-                  acc
-              end)
+    case Mint.WebSocket.stream(conn, message) do
+      :unknown ->
+        receive_outcome!(conn, websocket, ref, deadline)
 
-            case Enum.find_value(frames, &outcome/1) do
-              nil -> receive_outcome!(conn, websocket, ref)
-              outcome -> {conn, websocket, outcome}
-            end
+      {:ok, conn, responses} ->
+        {websocket, frames} =
+          Enum.reduce(responses, {websocket, []}, fn
+            {:data, ^ref, data}, {websocket, frames} ->
+              {:ok, websocket, decoded} = Mint.WebSocket.decode(websocket, data)
+              {websocket, frames ++ decoded}
 
-          {:error, conn, reason, _responses} ->
-            Mint.HTTP.close(conn)
-            flunk("websocket frame receive failed: #{inspect(reason)}")
+            _response, acc ->
+              acc
+          end)
+
+        case Enum.find_value(frames, &outcome/1) do
+          nil -> receive_outcome!(conn, websocket, ref, deadline)
+          outcome -> {conn, websocket, outcome}
         end
-    after
-      @detection_timeout_ms -> flunk("timed out waiting for a turn outcome")
+
+      {:error, conn, reason, _responses} ->
+        Mint.HTTP.close(conn)
+        flunk("websocket frame receive failed: #{inspect(reason)}")
     end
   end
 
