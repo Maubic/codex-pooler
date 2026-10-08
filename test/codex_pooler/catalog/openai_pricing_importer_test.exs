@@ -288,6 +288,25 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     assert_imported_target_settles("gpt-6-astra", ultrafast: "98400")
   end
 
+  test "the vendored target imports every gpt-6.1-sol ultrafast context bucket including cache writes" do
+    payload = @target |> File.read!() |> CodexPooler.JSON.decode!()
+    assert {:ok, imported} = OpenAIPricingImporter.import_file(@target)
+    rows = Repo.all(from row in PricingSnapshot, where: row.price_version == ^imported.price_version)
+
+    for {bucket, rates} <- [
+          {"default", ["12.0", "0.6", "15.0", "60.0"]},
+          {"short_context", ["12.0", "0.6", "15.0", "60.0"]},
+          {"long_context", ["24.0", "1.2", "30.0", "90.0"]}
+        ] do
+      assert source_rates(payload, "gpt-6.1-sol", "ultrafast", bucket) == Enum.map(rates, &Decimal.new/1)
+      assert_snapshot_rates(rows, "gpt-6.1-sol", "ultrafast", rates, bucket)
+    end
+  end
+
+  test "the vendored target settles gpt-6.1-sol at its served ultrafast rate" do
+    assert_imported_target_settles("gpt-6.1-sol", ultrafast: "19440")
+  end
+
   test "malformed image batch rates reject the whole catalog without snapshot writes" do
     payload = @target |> File.read!() |> CodexPooler.JSON.decode!()
     count = Repo.aggregate(PricingSnapshot, :count)
