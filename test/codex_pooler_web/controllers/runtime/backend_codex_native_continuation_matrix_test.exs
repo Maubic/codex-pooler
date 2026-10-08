@@ -293,6 +293,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexNativeContinuationMatrixTest do
   for runs <- [15, 16, 17] do
     @tag native_continuation_matrix_negative: true
     @tag mailbox_runs: runs
+    # Each HTTP turn has its own detection budget. The outer test must allow
+    # the full sequential chain to finish under partition contention; the
+    # duration guard still remeasures the unchanged six-second limit.
+    @tag timeout: (runs + 1) * @budget
     @tag slow: "executes and settles fifteen to sixteen real controller/SSE ancestry links to test the fixed sixteen-run bound"
     test "mailbox run and ancestry depth boundary #{runs}", %{mailbox_runs: runs} do
       {setup, upstream, port, thread, original, [output]} = http_scenario!(1)
@@ -721,14 +725,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexNativeContinuationMatrixTest do
 
     try do
       {:ok, conn, ref} = Mint.HTTP.request(conn, "POST", @path, headers, CodexPooler.JSON.encode!(body))
-      receive_http!(conn, ref, nil, "")
+      receive_http!(conn, ref, nil, "", System.monotonic_time(:millisecond) + @budget)
     after
       Mint.HTTP.close(conn)
     end
   end
 
-  defp receive_http!(conn, ref, status, body) do
-    assert {:ok, conn, responses} = Mint.HTTP.recv(conn, 0, @budget)
+  defp receive_http!(conn, ref, status, body, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+    assert remaining > 0, "matrix HTTP request exceeded its detection budget"
+    assert {:ok, conn, responses} = Mint.HTTP.recv(conn, 0, remaining)
 
     {status, body, done} =
       Enum.reduce(responses, {status, body, false}, fn
@@ -738,7 +744,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexNativeContinuationMatrixTest do
         _, acc -> acc
       end)
 
-    if done, do: {status, body}, else: receive_http!(conn, ref, status, body)
+    if done, do: {status, body}, else: receive_http!(conn, ref, status, body, deadline)
   end
 
   defp requests(setup), do: Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id, order_by: [asc: r.admitted_at]))
