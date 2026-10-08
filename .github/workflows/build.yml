@@ -179,7 +179,7 @@ jobs:
           pull: true
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.slug }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.slug }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.slug }},ignore-error=true
           provenance: false
           outputs: type=image,name=ghcr.io/icoretech/codex-pooler,push-by-digest=true,name-canonical=true,push=true
 

@@ -60,6 +60,11 @@ test("each platform is built natively and only the publish job tags the merged i
 	const build = step("Build and push the platform image by digest");
 	assert.match(build, /platforms: \$\{\{ matrix\.platform \}\}/);
 	assert.match(build, /push-by-digest=true,name-canonical=true,push=true/);
+	assert.match(
+		build,
+		/cache-to: type=gha,mode=max,scope=\$\{\{ matrix\.slug \}\},ignore-error=true/,
+		"a cache export failure must not fail a publication",
+	);
 	assert.doesNotMatch(build, /\n\s+tags:/, "a platform image is never tagged");
 	assert.match(workflow, /  publish:\n    needs: \[select, image\]\n/);
 	const publish = workflow.slice(workflow.indexOf("  publish:\n"));
