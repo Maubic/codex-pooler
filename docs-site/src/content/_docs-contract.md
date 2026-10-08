@@ -104,6 +104,8 @@ Allowed public claims:
 - `POST /v1/images/generations`
 - `POST /v1/images/edits`
 
+`POST /v1/decisions` is explicitly unsupported and returns `404 unsupported_endpoint` after the shared API-key and Pool compatibility checks, before body parsing, decompression, admission, dispatch or accounting. The Decisions API requires OpenAI Platform API-key access; Codex subscription credentials cannot serve it. Do not describe Responses classification or generated probabilities as Decisions API compatibility.
+
 OpenAI Responses remote MCP tool definitions are unsupported request shapes inside `POST /v1/responses`, not unsupported routes. This includes top-level `tools[type=mcp]` and nested `input[type=additional_tools].tools[type=mcp]`.
 
 Direct public Responses HTTP and narrow websocket `response.create` accept the

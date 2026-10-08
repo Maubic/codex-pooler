@@ -2982,6 +2982,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       fixture = CompatibilityMatrix.fixture!(:v1_unsupported_public_surface)
 
       expected_routes = [
+        %{method: :post, path: "/v1/decisions"},
         %{method: :post, path: "/v1/images/variations"},
         %{method: :post, path: "/v1/content_provenance_checks"},
         %{method: :post, path: "/v1/embeddings"},
@@ -3005,6 +3006,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       assert fixture.error_code == "unsupported_endpoint"
 
       assert fixture.routes == [
+               %{method: :post, path: "/v1/decisions"},
                %{method: :post, path: "/v1/images/variations"},
                %{method: :post, path: "/v1/content_provenance_checks"},
                %{method: :post, path: "/v1/embeddings"},

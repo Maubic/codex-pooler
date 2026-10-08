@@ -17,7 +17,9 @@ For a short citable summary, see [OpenAI-compatible Codex gateway](/discovery/op
 
 ## What OpenAI-Compatible Means Here
 
-OpenAI-compatible means selected SDK request shapes can use a `/v1` base URL and a Pool API key. Codex Pooler still routes the request through Codex account Pools, not through a separate OpenAI engine. Unsupported OpenAI API areas remain unsupported, including embeddings, batches, fine-tuning, moderation, response retrieve/cancel/delete, image variations, the beta Agents API, OpenAI Responses remote MCP tool definitions, and OpenAI Realtime SDK routes.
+OpenAI-compatible means selected SDK request shapes can use a `/v1` base URL and a Pool API key. Codex Pooler still routes the request through Codex account Pools, not through a separate OpenAI engine. Unsupported OpenAI API areas remain unsupported, including the Decisions API, embeddings, batches, fine-tuning, moderation, response retrieve/cancel/delete, image variations, the beta Agents API, OpenAI Responses remote MCP tool definitions, and OpenAI Realtime SDK routes.
+
+`POST /v1/decisions` returns `404 unsupported_endpoint`. OpenAI's Decisions API requires a Platform API key and is unavailable through Codex subscription credentials. Pi's `openai-decisions` classifier therefore needs a separate direct OpenAI API configuration; a Pool API key cannot enable it.
 
 ## Base URL and authentication
 

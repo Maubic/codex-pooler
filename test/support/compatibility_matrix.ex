@@ -1172,6 +1172,7 @@ defmodule CodexPooler.CompatibilityMatrix do
       current: :openai_shaped_unsupported_route_contract,
       categories: [:route, :auth, :error],
       routes: [
+        %{method: :post, path: "/v1/decisions"},
         %{method: :post, path: "/v1/images/variations"},
         %{method: :post, path: "/v1/content_provenance_checks"},
         %{method: :post, path: "/v1/embeddings"},
@@ -4615,6 +4616,7 @@ defmodule CodexPooler.CompatibilityMatrix do
     },
     v1_unsupported_public_surface: %{
       routes: [
+        %{method: :post, path: "/v1/decisions"},
         %{method: :post, path: "/v1/images/variations"},
         %{method: :post, path: "/v1/content_provenance_checks"},
         %{method: :post, path: "/v1/embeddings"},

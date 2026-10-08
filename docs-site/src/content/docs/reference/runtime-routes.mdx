@@ -901,6 +901,13 @@ These routes are deliberately answered so clients receive deterministic OpenAI-s
       <td>Content provenance checks require a Platform API surface that Codex Pooler does not expose.</td>
     </tr>
     <tr>
+      <td><code>POST /v1/decisions</code></td>
+      <td>None</td>
+      <td>No</td>
+      <td>Unsupported</td>
+      <td>Returns <code>404 unsupported_endpoint</code> before body parsing, decompression or accounting. Decisions requires OpenAI Platform API-key access and is unavailable through Codex subscription credentials.</td>
+    </tr>
+    <tr>
       <td><code>POST /v1/embeddings</code></td>
       <td>None</td>
       <td>No</td>
