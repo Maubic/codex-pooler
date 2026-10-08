@@ -142,13 +142,13 @@ defmodule CodexPooler.Accounting.ObservatoryContractTest do
              {:error, @unauthorized}
   end
 
-  test "refresh executes four bounded projections and returns at most twelve outcomes" do
+  test "refresh executes four bounded projections and returns at most forty outcomes" do
     pool = pool_fixture()
     api_key = dashboard_api_key_fixture(pool)
     model = model_fixture(pool, %{exposed_model_id: "gpt-observatory-bounded"})
     upper_bound = ~U[2026-07-17 12:00:00Z]
 
-    for offset <- 1..13 do
+    for offset <- 1..41 do
       pool
       |> timed_request(api_key, DateTime.add(upper_bound, -offset), %{
         model_id: model.id,
@@ -169,20 +169,27 @@ defmodule CodexPooler.Accounting.ObservatoryContractTest do
 
     assert length(events) == 3
     assert length(events) <= 8
-    assert projection.totals.requests.total == 13
-    assert length(projection.outcomes) == 12
+    assert projection.totals.requests.total == 41
+    assert length(projection.outcomes) == 40
 
     assert Enum.map(projection.outcomes, &DateTime.to_unix(&1.timestamp)) ==
-             Enum.map(1..12, &(upper_bound |> DateTime.add(-&1) |> DateTime.to_unix()))
+             Enum.map(1..40, &(upper_bound |> DateTime.add(-&1) |> DateTime.to_unix()))
 
     assert Enum.all?(projection.outcomes, fn outcome ->
              Map.keys(outcome) |> Enum.sort() ==
                [
+                 :actual_service_tier,
+                 :cached_input_tokens,
                  :code,
                  :cost,
                  :endpoint_class,
+                 :input_tokens,
                  :model,
+                 :output_tokens,
+                 :reasoning_effort,
+                 :requested_service_tier,
                  :response_status_code,
+                 :service_tier,
                  :status,
                  :timestamp,
                  :total_tokens

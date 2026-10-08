@@ -3,6 +3,7 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
   Builds the bounded, holder-facing render model for the API Key Observatory.
   """
 
+  alias CodexPoolerWeb.Admin.RequestLogsDisplay
   alias CodexPoolerWeb.Observatory.Presentation.Safety
 
   @endpoint_classes ["responses", "chat_completions", "completions", "embeddings"]
@@ -63,14 +64,16 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
           success_detail,
           Safety.trend(get(trends, :success_rate), :percentage_points),
           if(cancelled > 0, do: success_detail, else: "not available")
-        ),
+        )
+        |> with_grade(:success),
       cache_rate:
         rate(
           cached,
           input,
           cache_detail(cached, input),
           Safety.trend(get(trends, :cache_rate), :percentage_points)
-        ),
+        )
+        |> with_grade(:cache),
       cost: %{
         settled: settled,
         estimated: estimated,
@@ -82,6 +85,25 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
         detail: request_detail(total)
       }
     }
+  end
+
+  # Qualitative tiers for the two rate cards. The cut-offs are generic reading
+  # aids, not service levels: a request log that fails one in ten is poor for
+  # anyone, while a low cache rate only says the prompts share little prefix.
+  @success_tiers [{99.0, "Excellent", :success}, {95.0, "Good", :info}, {90.0, "Fair", :warning}]
+  @cache_tiers [{80.0, "Excellent", :success}, {50.0, "Good", :info}, {25.0, "Fair", :warning}]
+
+  defp with_grade(%{percent: percent} = rate, kind), do: Map.put(rate, :grade, grade(kind, percent))
+
+  defp grade(_kind, nil), do: nil
+  defp grade(:success, percent), do: tier(percent, @success_tiers, {"Poor", :error})
+  defp grade(:cache, percent), do: tier(percent, @cache_tiers, {"Low", :neutral})
+
+  defp tier(percent, tiers, {label, tone}) do
+    case Enum.find(tiers, fn {floor, _label, _tone} -> percent >= floor end) do
+      {_floor, label, tone} -> %{label: label, tone: tone}
+      nil -> %{label: label, tone: tone}
+    end
   end
 
   defp request_detail(1), do: "1 request"
@@ -299,24 +321,70 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
   # banked-reset life bars in the upstream cockpit.
   defp shine_delay(index), do: Float.round(rem(index, 6) * 0.4, 2)
 
-  defp outcomes(value) when is_list(value), do: Enum.take(value, 12) |> Enum.map(&outcome/1)
+  defp outcomes(value) when is_list(value), do: Enum.take(value, 40) |> Enum.map(&outcome/1)
   defp outcomes(_value), do: []
 
   defp outcome(value) do
     row = map(value)
     tokens = non_negative(get(row, :total_tokens))
     code = Safety.sanitize_code(get(row, :code))
+    cost = cost(get(row, :cost), ["settled", "estimated"])
 
     %{
       code: code,
-      cost: cost(get(row, :cost), ["settled", "estimated"]),
+      cost: cost,
+      effort: Safety.sanitize_text(get(row, :reasoning_effort), nil),
       endpoint: endpoint(get(row, :endpoint_class)),
       model: Safety.sanitize_text(get(row, :model), "Unknown model"),
+      speed_level: speed_level(row, cost),
       status: status(get(row, :status), code),
       timestamp: outcome_timestamp(get(row, :timestamp)),
-      tokens: %{total: tokens, label: token_label(tokens)}
+      tokens: tokens(row, tokens)
     }
   end
+
+  # The admin request log's speed rule, fed from the same recorded tiers: a
+  # priced request counts at the tier it was priced at, an unpriced one at the
+  # tier the pricing rule would use.
+  defp speed_level(row, cost) do
+    RequestLogsDisplay.speed_level(%{
+      cost: %{pricing_availability: if(cost.status == "settled", do: "priced", else: "unpriced")},
+      service_tier: get(row, :service_tier),
+      requested_service_tier: get(row, :requested_service_tier),
+      actual_service_tier: get(row, :actual_service_tier),
+      metadata: nil
+    })
+  end
+
+  defp tokens(row, total) do
+    input = non_negative(get(row, :input_tokens))
+    cached = non_negative(get(row, :cached_input_tokens))
+    output = non_negative(get(row, :output_tokens))
+    base = %{total: total, label: token_label(total), composition: nil, cached_label: nil}
+
+    if total > 0 and input + output == total and cached <= input do
+      %{
+        base
+        | composition: [
+            %{key: :cached_input, label: "Cached input", count: cached},
+            %{key: :uncached_input, label: "Uncached input", count: input - cached},
+            %{key: :output, label: "Output", count: output}
+          ],
+          cached_label: cached_label(cached, input)
+      }
+    else
+      base
+    end
+  end
+
+  defp cached_label(0, _input), do: "0 cached"
+
+  defp cached_label(cached, input) when input > 0 do
+    rate = Float.round(cached / input * 100, 1)
+    "#{token_label(cached)} cached · #{rate}% of input"
+  end
+
+  defp cached_label(_cached, _input), do: nil
 
   # A client cancellation (`RequestOutcome`) is not a failure: it names no reason.
   defp status("client_cancelled", _code), do: status("client_cancelled")

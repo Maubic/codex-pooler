@@ -199,6 +199,13 @@ defmodule CodexPooler.Accounting.Usage.Observatory.Presentation do
       code: row.code,
       response_status_code: row.response_status_code,
       total_tokens: integer(row.total_tokens),
+      input_tokens: integer(Map.get(row, :input_tokens)),
+      cached_input_tokens: integer(Map.get(row, :cached_input_tokens)),
+      output_tokens: integer(Map.get(row, :output_tokens)),
+      reasoning_effort: Map.get(row, :reasoning_effort),
+      service_tier: Map.get(row, :service_tier),
+      requested_service_tier: Map.get(row, :requested_service_tier),
+      actual_service_tier: Map.get(row, :actual_service_tier),
       cost: cost
     }
   end

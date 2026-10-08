@@ -146,7 +146,7 @@ The authenticated dashboard is read-only and scoped to the one API key used to s
 - success rate, cache rate, cost, and token summaries
 - a model distribution based on settled token totals
 - Traffic buckets with fresh and cached token values, plus interval and cumulative views
-- at most 12 recent outcomes showing time, model, sanitized endpoint class, status, tokens, and cost
+- at most 12 recent outcome rows showing time, model, sanitized endpoint class, status, tokens, and cost, drawn from the latest 40 requests with consecutive requests that have no model and no tokens folded into one row
 
 Cost values are reporting estimates or settled accounting values, not provider invoices. Partial accounting, missing pricing, no activity, paused refresh, disconnection, and temporary read errors are shown as explicit states rather than invented totals.
 

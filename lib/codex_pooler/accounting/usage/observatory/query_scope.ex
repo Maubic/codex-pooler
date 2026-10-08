@@ -269,13 +269,20 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
           ^window.ended_at
         ),
       order_by: [desc: request.admitted_at, desc: request.id],
-      limit: 12,
+      limit: 40,
       select: %{
         timestamp: request.admitted_at,
         model: model_label(model.exposed_model_id),
         endpoint_class: endpoint_class(request.endpoint),
         response_status_code: request.response_status_code,
         total_tokens: known_usage(fact.latest_settlement_usage_status, fact.latest_total_tokens),
+        input_tokens: known_usage(fact.latest_settlement_usage_status, fact.latest_input_tokens),
+        cached_input_tokens: known_usage(fact.latest_settlement_usage_status, fact.latest_cached_input_tokens),
+        output_tokens: known_usage(fact.latest_settlement_usage_status, fact.latest_output_tokens),
+        reasoning_effort: request.reasoning_effort,
+        service_tier: request.service_tier,
+        requested_service_tier: request.requested_service_tier,
+        actual_service_tier: request.actual_service_tier,
         settled_cost_micros:
           settled_cost(
             fact.latest_settlement_usage_status,

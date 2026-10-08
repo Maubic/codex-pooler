@@ -28,7 +28,7 @@ Choose one of the fixed windows: `1h`, `5h`, `24h`, or `7d`. The page can show:
 - model distribution and settled token totals
 - Traffic buckets with fresh and cached token values
 - interval or cumulative chart views
-- at most 12 recent outcomes with time, model, sanitized endpoint class, status, tokens, and cost
+- at most 12 recent outcome rows with time, model, sanitized endpoint class, status, tokens, and cost, drawn from the latest 40 requests; consecutive requests without a model and without tokens fold into one row
 
 A request whose client closed the connection before the response finished, for example a client that interrupts a stream to send its next request, is shown as `Client cancelled` instead of a failure. The success rate leaves these requests out of both its counts, and its detail line says how many there were.
 

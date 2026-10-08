@@ -554,7 +554,7 @@ properties (custom properties cannot be evaluated in media-query conditions):
 
 | Variant | Concrete condition | Role |
 | --- | --- | --- |
-| `observatory-split` | `width >= 1100px` | 4/8 telemetry split and sticky facts rail |
+| `observatory-split` | `width >= 1100px` | 2/1 traffic and model-distribution row |
 | `observatory-toolbar-stacked` | `width <= 45rem` (720px) | Two-row toolbar and compact gutters |
 | `observatory-freshness-compact` | `width <= 26.25rem` (420px) | Smaller freshness label |
 | `observatory-wordmark-compact` | `width <= 23.4375rem` (375px) | Hide only the wordmark suffix |
@@ -2054,35 +2054,24 @@ and [Observatory rules in `app.css`](assets/css/app.css).
 [`Activity.activity`](lib/codex_pooler_web/live/observatory/components/activity.ex),
 and [Observatory rules in `app.css`](assets/css/app.css).
 
-- At 1100px and above (`observatory-split`): a two-column split,
-  `grid-template-columns:
-  minmax(0,4fr) minmax(0,8fr)` with 16px gap. The **left rail is sticky**
-  below the toolbar (`position: sticky; top: 64px`) and stacks two cards; the
-  right column is cardless and stacks the traffic section over the outcome
-  table (an instrument-panel rail beside an open canvas). Below 1100px
-  everything collapses to one column (rail first, static) and charts scroll
-  inside their own `overflow-x-auto` region. No horizontal scroll of primary
-  content at any width (375/768/1280 are the checked breakpoints).
-- **Left rail, card 1 — facts** ([Metric strip and metric card](#metric-strip-and-metric-card) metric-card anatomy, stacked as one
-  card with hairline row dividers, never an equal-tile KPI grid; row weight
-  follows priority):
-  1. *Success rate* (lead row, larger value): value + trend delta, detail
-     line "N succeeded · N failed", and a 4px mini progress bar in success
-     tone.
-  2. *Cache rate*: value + delta, detail "X of Y input tokens served from
-     cache".
-  3. *Cost*: settled value + `settled` neutral micro-chip, detail line for
-     the estimated remainder ("+ $N estimated, awaiting settlement").
-  4. *Throughput*: tok/s value + delta.
-  5. *Latency*: p50 as the value with a smaller p95 beside it, detail "Mean
-     Ns · slowest settled Ns".
-  Values are `tabular-nums`; labels are [Typography](#typography) micro labels; deltas are
-  small tabular figures in success/error ink.
-- **Left rail, card 2 — models**: [Compact and definition lists](#compact-and-definition-lists) ranked compact rows
+- Top to bottom: a KPI row of four separate cards, a main row with the traffic section beside the model
+  distribution, and the recent-outcomes table across the full width. At 1100px and above (`observatory-split`) the
+  main row is `grid-template-columns: minmax(0,2fr) minmax(0,1fr)` with a 24px gap; below it everything is one column
+  and charts scroll inside their own `overflow-x-auto` region. The KPI row is 4 columns from `xl`, 2×2 from `sm` and
+  one column below. No horizontal scroll of primary content at any width (375/768/1280 are the checked breakpoints).
+- **KPI cards** (`.observatory-kpi`, bordered `rounded-box` cards, one fact each): an uppercase micro label with a 28px
+  tinted icon tile, then the value in the sans face at 30px semibold with `tabular-nums` and a muted unit, then a
+  detail line. Success rate (check tile) and Cache rate (circle-stack tile) carry a tiered grade badge at the top
+  right: Excellent (success tone) at 99% / 80%, Good (info) at 95% / 50%, Fair (warning) at 90% / 25%, below that Poor
+  (error) for success and a neutral Low for cache, because a low cache rate is a property of the prompts, not a
+  failure. No badge when the rate has no figure. Cost shows the settled value with a detail line for the estimated
+  remainder, and Tokens the total with the request count. Trend deltas, when the feed supplies one, sit beside the
+  value; an unavailable trend renders nothing.
+- **Model distribution** ([Compact and definition lists](#compact-and-definition-lists) ranked compact rows
   (`name | bar | tokens`), bars relative to the leader, series colors in
   fixed order primary → info → success → muted ink mixes; every row is
-  direct-labeled so identity never rides on color alone.
-- **Right column — traffic** (cardless: a heading with a hairline rule, no
+  direct-labeled so identity never rides on color alone) sits beside the traffic chart in the main row.
+- **Traffic** (cardless: a heading with a hairline rule, no
   bordered wrapper): the window total in the sub-line ("138.2M tokens ·
   $79.62" — total tokens and total cost, echoing the chart), an
   Interval/Cumulative segmented pill ([Segmented pill control](#segmented-pill-control)) beside the heading, and the
@@ -2092,12 +2081,15 @@ and [Observatory rules in `app.css`](assets/css/app.css).
   second (right) axis — the app's shipped "Traffic over time" pattern. Green
   is reserved for the cost line, so the model columns draw from
   primary/info/warning/accent/secondary and never collide with it. ~264px tall.
-- **Right column — recent outcomes** (cardless: heading + hairline rule): a
+- **Recent outcomes** (cardless: heading + hairline rule): a
   zebra table ([Compact and definition lists](#compact-and-definition-lists) idiom, `table-sm` density) inside its own
-  `overflow-x-auto`. Columns: Time (mono, muted, readable "Jul 16, 23:22:23"
-  format) · Model (500 weight, truncated) · Endpoint class (muted) · Status
-  ([Chips](#chips-status-count-metadata-severity-protocol-redacted) micro chips: ok/warn/err/neutral) · Latency · Tokens · Cost (all
-  right-aligned mono). Bounded at 12 rows; only sanitized fields ever appear
+  `overflow-x-auto`. Columns: Time (muted, readable "Jul 16, 23:22:23"
+  format) · Model (name in semibold with the reasoning effort muted beside it, and under it the three speed bolts of
+  the request-log model cell: one filled normal, two fast, three ultrafast) · Endpoint class (muted) · Status
+  ([Chips](#chips-status-count-metadata-severity-protocol-redacted) micro chips: ok/warn/err/neutral) · Tokens (the
+  request-log token cell: a cached / uncached / output composition bar, the total, and "N cached · P% of input" below;
+  total only when the breakdown is incomplete) · Cost, both in the sans face with `tabular-nums`. Below `lg` the rows
+  reflow into labelled cards. Bounded at 12 rows drawn from the 40 most recent requests, with consecutive requests that name no model and move no tokens folded into one muted "— no model · N requests" row; only sanitized fields ever appear
   (timestamp, model, endpoint class, safe status/code, latency, settled
   tokens/cost). No per-row status stripe and no `sanitized` chip — the status
   chip and the section's "metadata only" subtext carry that.

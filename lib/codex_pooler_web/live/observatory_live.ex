@@ -147,30 +147,29 @@ defmodule CodexPoolerWeb.ObservatoryLive do
           :if={@observatory_report && @observatory_state in [:ready, :partial, :stale]}
           id="observatory-widgets"
           class={[
-            "mt-4 grid min-w-0 gap-4 observatory-split:grid-cols-[minmax(0,4fr)_minmax(0,8fr)]",
+            "mt-4 grid min-w-0 gap-6",
             @refreshing && "opacity-40 transition-opacity"
           ]}
           aria-busy={to_string(@refreshing)}
         >
-          <aside
-            id="observatory-left-rail"
-            class="min-w-0 observatory-split:sticky observatory-split:top-16 observatory-split:self-start"
-          >
-            <Telemetry.telemetry
-              overview={@observatory_report.overview}
-              models={@observatory_report.models}
-              window={@observatory_report.window.key}
-            />
-          </aside>
+          <Telemetry.overview_strip overview={@observatory_report.overview} />
 
-          <div id="observatory-right-rail" class="min-w-0 observatory-split:pt-3.5">
-            <Activity.activity
+          <div
+            id="observatory-main-row"
+            class="grid min-w-0 items-start gap-6 observatory-split:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]"
+          >
+            <Activity.traffic_panel
               traffic={@observatory_report.traffic}
-              outcomes={@observatory_report.outcomes}
               traffic_mode={@traffic_mode}
               window={@observatory_report.window.key}
             />
+            <Telemetry.model_distribution
+              models={@observatory_report.models}
+              window={@observatory_report.window.key}
+            />
           </div>
+
+          <Activity.outcomes_panel outcomes={@observatory_report.outcomes} />
         </div>
       </section>
     </Layouts.app>

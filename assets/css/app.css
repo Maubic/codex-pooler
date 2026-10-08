@@ -560,10 +560,6 @@
   --observatory-type-fine-compact-size: 0.65625rem;
   --observatory-type-fact-label-size: 0.625rem;
   --observatory-type-fact-label-tracking: 0.08em;
-  --observatory-type-fact-value-size: 1.3125rem;
-  --observatory-type-fact-value-leading: 1.15;
-  --observatory-type-fact-value-lead-size: 1.6875rem;
-  --observatory-type-fact-unit-size: 0.62em;
   --observatory-focus-ring-width: 2px;
   --observatory-focus-ring-offset: 2px;
   --observatory-motion-control-duration: var(--default-transition-duration);
@@ -2147,19 +2143,18 @@ body {
   font-size: var(--observatory-type-fact-label-size) !important;
 }
 
-.observatory-fact {
-  @apply gap-0.5 px-4 py-3;
+.observatory-kpi {
+  @apply grid min-w-0 content-start gap-1.5 p-4;
 
-  display: grid;
-  min-width: 0;
+  border: 1px solid var(--color-base-300);
+  border-radius: var(--radius-box);
+  background: var(--color-base-100);
 }
 
-.observatory-fact-lead {
-  @apply py-3.5;
-}
+.observatory-kpi-label {
+  @apply flex items-center gap-2;
 
-.observatory-fact-label {
-  color: color-mix(in oklab, var(--color-base-content) 42%, transparent);
+  color: color-mix(in oklab, var(--color-base-content) 55%, transparent);
   font-size: var(--observatory-type-fact-label-size);
   font-weight: var(--font-weight-semibold);
   letter-spacing: var(--observatory-type-fact-label-tracking);
@@ -2167,26 +2162,12 @@ body {
   text-transform: uppercase;
 }
 
-.observatory-fact-value {
-  font-size: var(--observatory-type-fact-value-size);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--observatory-type-fact-value-leading);
+.observatory-kpi-icon {
+  @apply grid size-7 shrink-0 place-items-center rounded-lg;
 }
 
-.observatory-fact-unit {
-  @apply ml-0.5;
-
-  color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
-  font-size: var(--observatory-type-fact-unit-size);
-  font-weight: var(--font-weight-medium);
-}
-
-.observatory-fact-lead .observatory-fact-value {
-  font-size: var(--observatory-type-fact-value-lead-size);
-}
-
-.observatory-fact-value-row {
-  @apply gap-3;
+.observatory-kpi-value-row {
+  @apply mt-1 gap-3;
 
   display: flex;
   min-width: 0;
@@ -2194,25 +2175,33 @@ body {
   justify-content: space-between;
 }
 
+.observatory-kpi-value {
+  @apply tabular-nums;
+
+  font-size: 1.875rem;
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.1;
+}
+
+.observatory-kpi-unit {
+  @apply ml-0.5;
+
+  color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
+  font-size: 0.55em;
+  font-weight: var(--font-weight-medium);
+}
+
+.observatory-kpi-detail {
+  @apply leading-5;
+
+  color: color-mix(in oklab, var(--color-base-content) 55%, transparent);
+  font-size: var(--observatory-type-fine-size);
+}
+
 .observatory-trend {
   flex-shrink: 0;
   font-size: var(--observatory-type-control-size);
   font-weight: var(--font-weight-medium);
-}
-
-.observatory-fact-detail {
-  @apply leading-5;
-
-  color: color-mix(in oklab, var(--color-base-content) 52%, transparent);
-  font-size: var(--observatory-type-fine-size);
-}
-
-.observatory-minibar {
-  @apply mt-1 h-1;
-
-  overflow: hidden;
-  border-radius: var(--observatory-radius-pill);
-  background: color-mix(in oklab, var(--color-base-300) 60%, transparent);
 }
 
 .observatory-chart-scroll,
