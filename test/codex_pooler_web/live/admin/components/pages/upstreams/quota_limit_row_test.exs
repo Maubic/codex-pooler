@@ -233,8 +233,8 @@ defmodule CodexPoolerWeb.Admin.QuotaLimitRowTest do
     refute Enum.empty?(LazyHTML.query(included, "#quota-row-progress[value='0']"))
     refute Enum.empty?(LazyHTML.query(included, "#quota-row-progress[aria-label='Weekly included Codex quota remaining 0%']"))
     assert Enum.empty?(LazyHTML.query(included, ".progress-striped, #quota-row-count"))
-    assert LazyHTML.query(document, "#credits-percent") |> LazyHTML.text() =~ "99.976%"
-    refute Enum.empty?(LazyHTML.query(document, "#credits-progress[value='99.976'][aria-valuetext='99.976% of observed baseline'].progress-striped"))
+    assert LazyHTML.query(document, "#credits-percent") |> LazyHTML.text() =~ "99.9%"
+    refute Enum.empty?(LazyHTML.query(document, "#credits-progress[value='99.9'][aria-valuetext='99.9% of observed baseline'].progress-striped"))
   end
 
   test "qualifies a retained zero-percent measurement pending provider confirmation through the existing compact trigger" do

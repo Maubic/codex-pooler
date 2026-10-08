@@ -4272,8 +4272,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     refute has_element?(view, "#{quota_selector}-count")
 
     assert has_element?(view, "#{credit_selector}-progress[value='0']")
-    assert has_element?(view, "#upstream-account-#{credit_identity.id}-provider-credits-progress[value='83.194'].progress-striped")
-    assert has_element?(view, "#upstream-account-#{credit_identity.id}-provider-credits-percent", "83.194%")
+    assert has_element?(view, "#upstream-account-#{credit_identity.id}-provider-credits-progress[value='83.1'].progress-striped")
+    assert has_element?(view, "#upstream-account-#{credit_identity.id}-provider-credits-percent", "83.1%")
     assert has_element?(view, "#upstream-account-#{credit_identity.id}-provider-credits-balance", "500")
     assert has_element?(view, "#upstream-account-#{credit_identity.id}-provider-credits-baseline", "601")
 
