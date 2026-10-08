@@ -555,16 +555,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpResampleTest do
 
       upstream =
         start_upstream(
-          # provenance: synthetic_adversarial; a commentary message ending response.incomplete
+          # provenance: synthetic_adversarial; usage 3 under cap 16 proves forwarding and the resample fence, not provider enforcement.
           FakeUpstream.strict_sequence([FakeUpstream.sse_stream([{"response.output_item.done", %{"type" => "response.output_item.done", "output_index" => 0, "item" => provider_message("commentary", "msg_p")}}, {"response.incomplete", incomplete}])])
         )
 
       fixture = fixture!(upstream, "full")
       opener = native_text_input("synthetic resample request")
-      capped_request = Map.put(request(fixture, opener), "max_output_tokens", 3)
+      capped_request = Map.put(request(fixture, opener), "max_output_tokens", 16)
       assert post_native(fixture, capped_request).status == 200
       assert [captured] = FakeUpstream.requests(upstream)
-      assert captured.json["max_output_tokens"] == 3
+      assert captured.json["max_output_tokens"] == 16
 
       resample = Map.put(capped_request, "input", opener ++ [client_message("commentary", "msg_p")])
       {refused, logs} = with_info_log(fn -> post_native(fixture, resample) end)
