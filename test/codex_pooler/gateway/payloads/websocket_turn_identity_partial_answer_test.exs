@@ -1,12 +1,11 @@
 defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentityPartialAnswerTest do
   # A completed assistant message tagged `partial_answer` (stable answer text that may be followed by more output or
-  # tools; Codex 8b6bb1c77) is recorded by the client through the same typed `ResponseItem::Message` model as a
+  # tools) is recorded by the client through the same typed `ResponseItem::Message` model as a
   # commentary message and resent with exactly the fields that model keeps: `type`, `id`, `role`, `phase` and the
   # ordered `output_text` parts' `type` and `text`; serde drops every provider-only field. The completed-item
   # identity therefore projects it like commentary, so the item the provider pushed and the item the client resends
-  # name the same receipt digest (findings#306). Provenance: source-derived from codex-rs/protocol/src/models.rs at
-  # 8b6bb1c77 plus the observed 0.160.0 commentary serialization; no released client sends the phase yet, so the
-  # partial-answer shape has not been captured on the wire. Items, ids and text are synthetic.
+  # name the same receipt digest. The partial-answer projection is source-derived and has not been captured
+  # on the wire. Items, ids and text are synthetic.
   use ExUnit.Case, async: true
 
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity

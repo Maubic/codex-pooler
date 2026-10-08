@@ -1,11 +1,9 @@
 defmodule CodexPooler.Gateway.Payloads.NativeMailboxPartialAnswerSerializationTest do
-  # Mailbox mail can stop Codex after a completed `partial_answer` message exactly as after commentary (Codex
-  # 989c01a41 / 822e58cc3: a partial answer is nonterminal and mailbox-preemptible, a `final_answer` or unphased
-  # message stays terminal). The client resends the delivered partial answer from its typed `ResponseItem::Message`
+  # Mailbox mail can stop Codex after a completed `partial_answer` message exactly as after commentary; a
+  # `final_answer` or unphased message stays terminal. The client resends it from its typed `ResponseItem::Message`
   # model, which keeps `id`, `role`, `phase` and the `output_text` parts' `text`, adds internal metadata and drops
-  # every other provider field (findings#306, findings#307). Provenance: source-derived from codex-rs/protocol at
-  # 8b6bb1c77 and the observed 0.160.0 commentary serialization in the sibling characterization test; no released
-  # client sends the phase yet. Ids, text, tools and mail are synthetic.
+  # every other provider field. The partial-answer projection is source-derived; its wire replay remains
+  # unobserved. Ids, text, tools and mail are synthetic.
   use ExUnit.Case, async: true
 
   alias CodexPooler.Accounting.{Attempt, ClientRetry, Request}
