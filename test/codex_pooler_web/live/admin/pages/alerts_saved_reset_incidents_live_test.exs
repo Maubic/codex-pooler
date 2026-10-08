@@ -80,7 +80,7 @@ defmodule CodexPoolerWeb.Admin.AlertsSavedResetIncidentsLiveTest do
 
     assert Regex.scan(~r/data-role="alert-incident-row"/, html) |> length() == 1
     assert html =~ ~s(id="alert-incident-#{incident.id}")
-    assert html =~ ~s(id="alert-incident-card-#{incident.id}")
+    refute html =~ ~s(id="alert-incident-card-#{incident.id}")
 
     assert has_element?(
              view,
@@ -88,7 +88,7 @@ defmodule CodexPoolerWeb.Admin.AlertsSavedResetIncidentsLiveTest do
              "New banked reset evidence"
            )
 
-    for prefix <- ["alert-incident-row", "alert-incident-card"] do
+    for prefix <- ["alert-incident-row"] do
       assert has_element?(
                view,
                "##{prefix}-#{incident.id}-detail",
