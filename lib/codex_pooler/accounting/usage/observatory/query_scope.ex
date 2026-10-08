@@ -245,13 +245,14 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
   end
 
   @doc """
-  The twelve most recent scoped outcomes.
+  The forty most recent scoped outcomes. The page shows twelve rows of them once
+  consecutive requests without a model have been folded into one row.
 
   This is a dedicated query rather than a slice of `scoped_facts/2` so the
-  endpoint/error-code regex classification runs over only the twelve rows the
+  endpoint/error-code regex classification runs over only the forty rows the
   limit keeps, not the whole window. `requests_api_key_pool_admitted_id_idx`
   yields the scoped rows in the requested deterministic order, so the limit
-  stops early and the fact/model joins are twelve primary-key lookups.
+  stops early and the fact/model joins are forty primary-key lookups.
   """
   def recent_outcomes(identity, window) do
     from(request in Request,
