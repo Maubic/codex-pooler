@@ -1535,12 +1535,12 @@ body {
 .admin-request-explorer.table {
   --request-log-half-gap: 0.4375rem;
   --request-log-edge: 0.875rem;
-  --request-log-min-width: 58.4375rem;
+  --request-log-min-width: 57.4375rem;
   table-layout: fixed;
 }
 
 .admin-request-explorer.table[data-has-issues="true"] {
-  --request-log-min-width: 69.8125rem;
+  --request-log-min-width: 67.8125rem;
 }
 
 .admin-request-explorer .request-log-time-column {
@@ -1554,13 +1554,13 @@ body {
 }
 .admin-request-explorer .request-log-issues-column {
   width: calc(
-    11.375rem +
+    10.375rem +
     max(0px, 100cqw - var(--request-log-min-width)) *
     0.25
   );
 }
 .admin-request-explorer .request-log-tokens-column {
-  width: 11rem;
+  width: 10rem;
 }
 .admin-request-explorer .request-log-cost-column {
   width: 4.75rem;
