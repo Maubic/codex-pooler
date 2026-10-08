@@ -88,10 +88,11 @@ defmodule CodexPoolerWeb.Admin.AdminShellOpenAIStatusTest do
     assert has_element?(view, "#admin-openai-status-banner[role='status'][aria-live='polite']")
     assert has_element?(view, "#admin-openai-status-link[href='/admin/incidents']")
     assert has_element?(view, "#admin-openai-status-dismiss")
-    assert html =~ "+1 more"
-    assert html =~ "First outage"
-    assert html =~ "Second outage"
-    assert html =~ "Third outage"
+    assert has_element?(view, "#admin-openai-status-banner", "OpenAI is reporting 4 incidents")
+    assert has_element?(view, "#admin-openai-status-banner", "First outage")
+    assert has_element?(view, "#admin-openai-status-banner", "Second outage")
+    assert has_element?(view, "#admin-openai-status-banner", "+2 more")
+    assert has_element?(view, "#admin-openai-status-banner div[title='First outage · Second outage · Third outage']")
     refute html =~ "Fourth outage"
 
     view |> element("#admin-openai-status-dismiss") |> render_click()

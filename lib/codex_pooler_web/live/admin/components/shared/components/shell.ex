@@ -354,53 +354,71 @@ defmodule CodexPoolerWeb.Admin.Components.Shell do
   attr :aggregate, :map, required: true
 
   defp openai_status_banner(assigns) do
-    titles = assigns.aggregate |> Map.get(:incidents, []) |> Enum.map(& &1.title) |> Enum.take(3)
-    assigns = assign(assigns, :titles, titles)
+    incidents = Map.get(assigns.aggregate, :incidents, [])
+    titles = incidents |> Enum.take(3) |> Enum.map(& &1.title)
+    total = length(incidents)
+    # A single hidden incident is never worth a "+1 more": show three or fewer in full.
+    shown = if total <= 3, do: total, else: 2
+
+    assigns = assign(assigns, shown: Enum.take(titles, shown), titles: titles, total: total, more: total - shown)
 
     ~H"""
     <section
       id="admin-openai-status-banner"
       role="status"
       aria-live="polite"
-      class="grid gap-3 rounded-box border border-warning/40 bg-warning/15 p-4 text-base-content shadow-sm sm:flex sm:items-center sm:justify-between sm:gap-5"
+      class="rounded-box bg-warning/5 px-4 py-3 text-base-content"
     >
-      <div class="min-w-0 grid gap-1">
-        <p class="font-semibold">Incidents reported on the status feed</p>
-        <p class="text-sm leading-5 text-base-content/80">
-          <span :for={{title, index} <- Enum.with_index(@titles)}>
-            {if index > 0, do: ", "}{title}
-          </span><span :if={length(@aggregate.incidents) > 3}> +{length(@aggregate.incidents) - 3} more</span>
-        </p>
-        <p
-          :if={@aggregate.stale? || !Map.get(@aggregate, :polling_enabled?, true)}
-          id="admin-openai-status-stale"
-          class="text-xs text-base-content/70"
-        >
-          {if Map.get(@aggregate, :polling_enabled?, true),
-            do: "The feed may be out of date. Automatic refresh continues every five minutes.",
-            else: "Status polling is disabled in System settings. Showing the last known incidents."}
-        </p>
-      </div>
-      <div class="flex shrink-0 flex-wrap items-center gap-2">
+      <div class="flex items-center gap-3">
+        <span aria-hidden="true" class="grid size-8 shrink-0 place-items-center rounded-lg bg-warning/15 text-warning">
+          <.icon name="hero-exclamation-triangle" class="size-4.5" />
+        </span>
+        <div class="grid min-w-0 flex-1 gap-0.5" title={Enum.join(@titles, " · ")}>
+          <p class="truncate text-sm font-semibold leading-5">
+            OpenAI is reporting {if @total == 1, do: "an incident", else: "#{@total} incidents"}
+          </p>
+          <p class="flex min-w-0 gap-1 text-xs leading-5 text-base-content/60">
+            <span class="truncate">{Enum.join(@shown, " · ")}</span>
+            <span :if={@more > 0} class="shrink-0 text-base-content/45">+{@more} more</span>
+          </p>
+          <p
+            :if={@aggregate.stale? || !Map.get(@aggregate, :polling_enabled?, true)}
+            id="admin-openai-status-stale"
+            class="text-xs leading-5 text-base-content/45"
+          >
+            {if Map.get(@aggregate, :polling_enabled?, true),
+              do: "The feed may be out of date. Automatic refresh continues every five minutes.",
+              else: "Status polling is disabled in System settings. Showing the last known incidents."}
+          </p>
+        </div>
+        <span class="hidden shrink-0 items-center gap-1.5 text-xs text-base-content/50 md:inline-flex" title="Reported on the OpenAI status page, not detected by Codex Pooler">
+          <span aria-hidden="true" class="size-3.5 bg-current" style={openai_mark_style()}></span>status.openai.com
+        </span>
         <.link
           id="admin-openai-status-link"
           navigate={~p"/admin/incidents"}
-          class="btn btn-warning btn-sm"
+          aria-label="View OpenAI incidents"
+          class="inline-flex shrink-0 items-center gap-1 rounded-full border border-warning/30 bg-warning/10 px-3 py-1 text-xs font-semibold text-base-content transition-colors hover:bg-warning/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warning"
         >
-          View incidents
+          View <.icon name="hero-arrow-right" class="size-3.5" />
         </.link>
         <button
           id="admin-openai-status-dismiss"
           type="button"
           phx-click="dismiss_openai_status"
-          class="btn btn-ghost btn-sm text-base-content/75 hover:text-base-content"
+          class="btn btn-ghost btn-xs btn-square shrink-0 text-base-content/60 hover:text-base-content"
           aria-label="Dismiss current status incidents"
         >
-          Dismiss
+          <.icon name="hero-x-mark" class="size-4" />
         </button>
       </div>
     </section>
     """
+  end
+
+  defp openai_mark_style do
+    url = ~p"/images/client-logos/openai.svg"
+    "mask: url(#{url}) center / contain no-repeat; -webkit-mask: url(#{url}) center / contain no-repeat"
   end
 
   defp openai_status_banner_visible?(%{
