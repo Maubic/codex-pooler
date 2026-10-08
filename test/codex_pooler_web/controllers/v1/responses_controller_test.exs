@@ -3305,7 +3305,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
 
     refute Map.has_key?(captured.json, "tools")
     refute Map.has_key?(captured.json, "instructions")
-    refute Map.has_key?(captured.json, "max_output_tokens")
+    assert captured.json["max_output_tokens"] == 64_000
   end
 
   # `/v1/responses` goes through the same payload normalizer as the native route: a Full request that omits `instructions` is sent upstream

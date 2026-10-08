@@ -70,7 +70,7 @@ defmodule CodexPoolerWeb.V1.APIKeyOutputBudgetCharacterizationTest do
       end
 
       assert [captured] = FakeUpstream.requests(upstream)
-      refute Map.has_key?(captured.json, "max_output_tokens")
+      assert captured.json["max_output_tokens"] == 512
 
       assert [request] = Repo.all(from(r in Request, where: r.api_key_id == ^setup.api_key.id))
       assert request.status == "succeeded"

@@ -561,9 +561,13 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpResampleTest do
 
       fixture = fixture!(upstream, "full")
       opener = native_text_input("synthetic resample request")
-      assert post_native(fixture, request(fixture, opener)).status == 200
+      capped_request = Map.put(request(fixture, opener), "max_output_tokens", 3)
+      assert post_native(fixture, capped_request).status == 200
+      assert [captured] = FakeUpstream.requests(upstream)
+      assert captured.json["max_output_tokens"] == 3
 
-      {refused, logs} = with_info_log(fn -> post_native(fixture, request(fixture, opener ++ [client_message("commentary", "msg_p")])) end)
+      resample = Map.put(capped_request, "input", opener ++ [client_message("commentary", "msg_p")])
+      {refused, logs} = with_info_log(fn -> post_native(fixture, resample) end)
       assert %{"error" => %{"code" => "duplicate_turn"}} = json_response(refused, 409)
       assert logs =~ ~r/resample_check=(delivery|settlement)/
       assert FakeUpstream.count(upstream) == 1

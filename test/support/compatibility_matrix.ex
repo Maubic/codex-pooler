@@ -19,6 +19,24 @@ defmodule CodexPooler.CompatibilityMatrix do
 
   @features [
     %{
+      slug: :client_output_limit_forwarding,
+      status: :supported,
+      current: :client_supplied_provider_output_limit,
+      categories: [:route, :error, :streaming, :ownership],
+      routes: [
+        %{method: :post, path: "/backend-api/codex/responses"},
+        %{method: :get, path: "/backend-api/codex/responses"},
+        %{method: :post, path: "/v1/responses"},
+        %{method: :get, path: "/v1/responses"},
+        %{method: :post, path: "/v1/chat/completions"}
+      ],
+      future_routes: [],
+      fixture: :client_output_limit_forwarding,
+      contract: "ordinary native and public Responses requests forward client-supplied max_output_tokens in Full and Lite over HTTP, direct and owner-forwarded websockets, and the public HTTP-to-websocket bridge; Chat converts max_completion_tokens before max_tokens; absent limits stay absent and API-key policy does not inject a provider cap; public positive-integer validation and native provider-validation passthrough remain unchanged; provider incomplete/max_output_tokens terminals retain usage accounting with one attempt and no cancellation or retry; compaction keeps its existing whitelist",
+      implementation: "lib/codex_pooler/gateway/payloads/payload_normalizer.ex",
+      tests: ["test/codex_pooler_web/controllers/v1/output_limit_forwarding_test.exs", "test/codex_pooler_web/controllers/v1/api_key_output_budget_characterization_test.exs"]
+    },
+    %{
       slug: :files,
       status: :supported,
       current: :backend_file_bridge,
@@ -1200,6 +1218,19 @@ defmodule CodexPooler.CompatibilityMatrix do
   ]
 
   @fixtures %{
+    client_output_limit_forwarding: %{
+      client_field: "max_output_tokens",
+      absent: "absent",
+      serving_modes: ["full", "lite"],
+      chat_precedence: ["max_completion_tokens", "max_tokens"],
+      public_validation: "positive_integer",
+      native_validation: "provider",
+      policy_injection: false,
+      compaction: "existing_whitelist_unchanged",
+      terminal: "provider_response.incomplete",
+      usage: "provider_reported",
+      retry_or_cancel: false
+    },
     native_websocket_upstream_close: %{
       topologies: [:owner_forwarding_off, :owner_forwarding_on],
       close: %{code: 1001, reason: "upstream connection closed"},

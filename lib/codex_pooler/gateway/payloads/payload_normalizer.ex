@@ -29,8 +29,9 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
 
   @ultra_rewrite_targets ~w(max xhigh high medium low)
 
-  # Request controls removed on every surface before dispatch. Removal here
-  # does not imply that the Codex backend refuses every control.
+  # Request controls removed on every surface before dispatch. Client-supplied
+  # max_output_tokens is forwarded: the provider enforces it in Full and Lite.
+  # Removal here does not imply that the backend refuses every other control.
   # `metadata` joined on 2026-10-06: the backend now answers it
   # `400 {"detail": "Unsupported parameter: metadata"}` over HTTP and the same
   # text in a codeless error frame on the websocket, an empty object included,
@@ -39,7 +40,6 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
   # backend would refuse whole; `/v1` still validates it with the public API's
   # shape (`Responses.validate_metadata/1`).
   @unsupported_upstream_fields ~w(
-    max_output_tokens
     metadata
     prompt_cache_retention
     safety_identifier
