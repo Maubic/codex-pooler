@@ -251,9 +251,9 @@ Owner forwarding does not change the answer: a resend chained onto an earlier fa
 
 ### Token estimates and budget pressure
 
-Input and output fields are admission estimates, not provider-enforced generation limits. The output reservation has a floor of 512 tokens, or 2,048 for opaque context such as a continuation reference; higher accepted request or policy values can increase that estimate. Opaque input cannot be measured completely from the visible payload. A low configured output limit can therefore reject an estimate rather than reduce the upstream response.
+Input and output fields check admission estimates. In particular, `max_output_tokens_per_request` checks the estimated output tokens before admission; it does not cap provider generation. The output reservation has a floor of 512 tokens, or 2,048 for opaque context such as a continuation reference; higher accepted request or policy values can increase that estimate. Opaque input cannot be measured completely from the visible payload. A low configured output limit can therefore reject an estimate rather than reduce the upstream response.
 
-The upstream may refuse `max_output_tokens`. Neither these fields nor the concurrency limit guarantee an absolute per-response token or spend cap. Actual usage can exceed the reservation and is recorded in full; it is never clipped to make a budget appear satisfied. See [SDK output-budget behavior](/clients/openai-compatible/#output-budgets-and-local-usage).
+Codex Pooler removes the client's `max_output_tokens` before dispatch to the Codex backend in both Full and Lite serving modes. Neither these fields nor the concurrency limit provide an absolute per-response output-token or spend cap. Actual usage can exceed the reservation or remaining token budget and is recorded in full; it is never clipped to make a budget appear satisfied. See [SDK output-budget behavior](/clients/openai-compatible/#output-budgets-and-local-usage).
 
 Daily and weekly admission use three distinct components:
 
