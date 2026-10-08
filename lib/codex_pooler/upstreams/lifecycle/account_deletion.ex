@@ -31,15 +31,15 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountDeletion do
   # Detach BOTH identity and assignment references before deleting the identity: the
   # cascading assignment delete must never race the sibling identity SET NULL actions.
   @detach_steps [
-    {"ledger_entries", "upstream_identity_id", "upstream_identity_id = $1"},
-    {"ledger_entries", "pool_upstream_assignment_id", "pool_upstream_assignment_id IN (SELECT id FROM pool_upstream_assignments WHERE upstream_identity_id = $1)"},
-    {"attempts", "upstream_identity_id", "upstream_identity_id = $1"},
-    {"attempts", "pool_upstream_assignment_id", "pool_upstream_assignment_id IN (SELECT id FROM pool_upstream_assignments WHERE upstream_identity_id = $1)"},
-    {"request_log_facts", "latest_upstream_identity_id", "latest_upstream_identity_id = $1"},
-    {"request_log_facts", "latest_pool_upstream_assignment_id", "latest_pool_upstream_assignment_id IN (SELECT id FROM pool_upstream_assignments WHERE upstream_identity_id = $1)"},
-    {"codex_sessions", "pool_upstream_assignment_id", "pool_upstream_assignment_id IN (SELECT id FROM pool_upstream_assignments WHERE upstream_identity_id = $1)"},
-    {"codex_files", "upstream_identity_id", "upstream_identity_id = $1"},
-    {"codex_files", "pool_upstream_assignment_id", "pool_upstream_assignment_id IN (SELECT id FROM pool_upstream_assignments WHERE upstream_identity_id = $1)"}
+    {"ledger_entries", "upstream_identity_id", :identity},
+    {"ledger_entries", "pool_upstream_assignment_id", :assignments},
+    {"attempts", "upstream_identity_id", :identity},
+    {"attempts", "pool_upstream_assignment_id", :assignments},
+    {"request_log_facts", "latest_upstream_identity_id", :identity},
+    {"request_log_facts", "latest_pool_upstream_assignment_id", :assignments},
+    {"codex_sessions", "pool_upstream_assignment_id", :assignments},
+    {"codex_files", "upstream_identity_id", :identity},
+    {"codex_files", "pool_upstream_assignment_id", :assignments}
   ]
 
   @type state :: :in_progress | :failed
@@ -149,12 +149,13 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountDeletion do
       live_work?(identity.id) ->
         :more
 
-      not small_history?(identity.id) ->
+      not small_history?(identity, assignments) ->
         :more
 
       true ->
-        Enum.each(@detach_steps, fn {table, field, condition} ->
-          Repo.query!("UPDATE #{table} SET #{field} = NULL WHERE #{condition}", [Ecto.UUID.dump!(identity.id)])
+        Enum.each(@detach_steps, fn {table, field, reference} ->
+          ids = reference_ids(reference, identity, assignments)
+          Repo.query!("UPDATE #{table} SET #{field} = NULL WHERE #{field} = ANY($1::uuid[])", [ids])
         end)
 
         delete_identity!(identity, assignments, actor_id)
@@ -179,11 +180,11 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountDeletion do
 
   defp detach_history([], _identity_id, _deadline), do: :done
 
-  defp detach_history([{table, field, condition} | rest] = steps, identity_id, deadline) do
+  defp detach_history([{table, field, reference} | rest] = steps, identity_id, deadline) do
     if DeletionDeadline.remaining(deadline) == 0 do
       :more
     else
-      result = detach_batch(identity_id, table, field, condition)
+      result = detach_batch(identity_id, table, field, reference)
 
       case result do
         {:ok, {:batch, count}} when count < @batch_size -> detach_history(rest, identity_id, deadline)
@@ -194,21 +195,25 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountDeletion do
     end
   end
 
-  defp detach_batch(identity_id, table, field, condition) do
+  defp detach_batch(identity_id, table, field, reference) do
     transaction(
       fn ->
-        with_locked_target(identity_id, fn _identity, _assignments -> detach_idle_batch(identity_id, table, field, condition) end)
+        with_locked_target(identity_id, fn identity, assignments -> detach_idle_batch(identity, assignments, table, field, reference) end)
       end,
       @batch_timeout_ms
     )
   end
 
-  defp detach_idle_batch(identity_id, table, field, condition) do
-    if live_work?(identity_id) do
+  defp detach_idle_batch(identity, assignments, table, field, reference) do
+    if live_work?(identity.id) do
       :more
     else
-      sql = "UPDATE #{table} SET #{field} = NULL WHERE ctid = ANY(ARRAY(SELECT ctid FROM #{table} WHERE #{condition} LIMIT $2))"
-      %{num_rows: count} = Repo.query!(sql, [Ecto.UUID.dump!(identity_id), @batch_size], timeout: @batch_timeout_ms + 1_000)
+      # ANY keeps the field ordering meaningful even for one identity. The existing
+      # reference index can satisfy ORDER BY without scanning unrelated history when
+      # LIMIT and stale/generic estimates would otherwise favor a sequential scan.
+      ids = reference_ids(reference, identity, assignments)
+      sql = "UPDATE #{table} SET #{field} = NULL WHERE ctid = ANY(ARRAY(SELECT ctid FROM #{table} WHERE #{field} = ANY($1::uuid[]) ORDER BY #{field} LIMIT $2))"
+      %{num_rows: count} = Repo.query!(sql, [ids, @batch_size], timeout: @batch_timeout_ms + 1_000)
       {:batch, count}
     end
   end
@@ -260,12 +265,16 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountDeletion do
       )
   end
 
-  defp small_history?(identity_id) do
-    Enum.all?(@detach_steps, fn {table, _field, condition} ->
-      %{rows: [[count]]} = Repo.query!("SELECT count(*) FROM (SELECT 1 FROM #{table} WHERE #{condition} LIMIT $2) bounded", [Ecto.UUID.dump!(identity_id), immediate_row_limit()])
+  defp small_history?(identity, assignments) do
+    Enum.all?(@detach_steps, fn {table, field, reference} ->
+      ids = reference_ids(reference, identity, assignments)
+      %{rows: [[count]]} = Repo.query!("SELECT count(*) FROM (SELECT 1 FROM #{table} WHERE #{field} = ANY($1::uuid[]) ORDER BY #{field} LIMIT $2) bounded", [ids, immediate_row_limit()])
       count < immediate_row_limit()
     end)
   end
+
+  defp reference_ids(:identity, identity, _assignments), do: [Ecto.UUID.dump!(identity.id)]
+  defp reference_ids(:assignments, _identity, assignments), do: Enum.map(assignments, &Ecto.UUID.dump!(&1.id))
 
   defp authorize_assignments(scope, assignments) do
     cond do
