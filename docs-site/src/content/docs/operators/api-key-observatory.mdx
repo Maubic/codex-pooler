@@ -13,6 +13,8 @@ Dashboard access must be enabled for the key by the person who manages that key.
 
 ## Sign in
 
+[![Observatory sign-in page with the masked access key field](/operators/observatory/observatory-login.png)](/operators/observatory/observatory-login.png)
+
 1. Open `GET /observatory/login`.
 2. Enter the access key in the password-style form and choose `Continue`.
 3. A valid eligible key creates a separate browser session and redirects to `GET /observatory`.
@@ -22,13 +24,48 @@ The access key is accepted in the form submission only. Do not place it in a URL
 
 ## What the Observatory shows
 
-Choose one of the fixed windows: `1h`, `5h`, `24h`, or `7d`. The page can show:
+[![Observatory dashboard on the 7d window with summary cards, traffic chart, model distribution and recent outcomes](/operators/observatory/observatory-dashboard.png)](/operators/observatory/observatory-dashboard.png)
 
-- success rate, cache rate, cost, and token summaries
-- model distribution and settled token totals
-- Traffic buckets with fresh and cached token values
-- interval or cumulative chart views
-- at most 12 recent outcome rows with time, model, sanitized endpoint class, status, tokens, and cost, drawn from the latest 40 requests; consecutive requests without a model and without tokens fold into one row
+The toolbar names the key by its display name and holds the window switch, the pause and resume control for refresh, the theme switch, the time since the last update and `Log out`. The window is one of `1h`, `5h`, `24h` (the default) or `7d`, and everything below the toolbar covers that window.
+
+### Summary cards
+
+Four cards open the page:
+
+- **Success rate** is the share of requests that succeeded. Its detail line counts the requests (`N succeeded · N failed`) and adds the requests the client cancelled when there are any.
+- **Cache rate** is the share of input tokens served from cache, with the cached and total input tokens in its detail line.
+- **Cost** is the settled cost of the window. The line under it adds `+ $N.NN estimated, awaiting settlement` for requests whose accounting is still completing and reads `not available` when there is nothing to estimate.
+- **Tokens** is the total token usage of the window, with the number of requests.
+
+The first two cards carry a grade badge and a trend. The trend compares the second half of the window with the first half, in percentage points. The grade places the rate in a tier:
+
+| Card | Excellent | Good | Fair | Lowest tier |
+| --- | --- | --- | --- | --- |
+| Success rate | 99% or more | 95% to under 99% | 90% to under 95% | `Poor`, under 90% |
+| Cache rate | 80% or more | 50% to under 80% | 25% to under 50% | `Low`, under 25% |
+
+The tiers are reading aids, not service levels: a low cache rate only says that the prompts share little prefix.
+
+### Traffic and model distribution
+
+The **Traffic** chart plots tokens per time bucket as stacked columns, one colour per model (the five busiest models, with the rest folded into `Other`), and the cost of each bucket as a line on a second axis. `Interval` shows every bucket on its own and `Cumulative` shows running totals. A bucket spans five minutes on the `1h` window, fifteen minutes on `5h`, one hour on `24h` and six hours on `7d`.
+
+**Model distribution** sits beside the chart. For each model with settled tokens (up to 12) it shows the request count, the share of tokens, the token total and the cost, with a bar in the colour of the model's chart column.
+
+### Recent outcomes
+
+The table lists up to 12 rows drawn from the latest 40 requests of the window, newest first:
+
+| Column | Content |
+| --- | --- |
+| Time | The admission time of the request, in UTC. |
+| Model | The model, then the reasoning effort after a dot, and a speed indicator below: one bolt for normal speed, two for the fast priority tier, three for ultrafast. |
+| Endpoint | A sanitized endpoint class: `responses`, `chat_completions`, `completions`, `embeddings` or `other`. |
+| Status | The outcome: `Succeeded`, `Failed` or `Rejected` with a sanitized reason (`Rate limited`, `Authentication issue`, `Timed out`, `Service unavailable`, `Invalid request` or `Request failed`), `Accepted`, `In progress` or `Client cancelled`. |
+| Tokens | The total, a bar that splits cached input, uncached input and output (output includes reasoning tokens), and the cached share of the input below it. |
+| Cost | The settled or estimated cost, or a dash when none is available. |
+
+Consecutive requests with the same endpoint class and status that name no model and carry no tokens, such as clients listing models, fold into one `— no model · N requests` row that shows the newest time of the group.
 
 A request whose client closed the connection before the response finished, for example a client that interrupts a stream to send its next request, is shown as `Client cancelled` instead of a failure. The success rate leaves these requests out of both its counts, and its detail line says how many there were.
 

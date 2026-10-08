@@ -48,15 +48,31 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
       |> then(&Enum.zip(&1, service_tiers(&1)))
       |> Enum.with_index(fn {spec, tier}, rank -> traffic_row(spec, Enum.at(@clients, rem(rank, length(@clients))), tier) end)
 
-    Repo.insert_all(Request, Enum.map(rows, & &1.request))
-    Repo.insert_all(Attempt, Enum.map(rows, & &1.attempt))
-    Repo.insert_all(LedgerEntry, Enum.map(rows, & &1.entry))
-    Repo.insert_all(RequestLogFact, Enum.map(rows, & &1.fact))
+    insert_rows!(rows)
 
     pool_ids = Enum.map(result.pools, & &1.id)
     identities = Map.new(result.upstream_identities, &{&1.id, &1})
     refresh_legacy_projections!(pool_ids, identities)
     Repo.all(from request in Request, where: request.pool_id in ^pool_ids)
+  end
+
+  @doc false
+  def insert_rows!(rows) do
+    Repo.insert_all(Request, Enum.map(rows, & &1.request))
+    Repo.insert_all(Attempt, Enum.map(rows, & &1.attempt))
+    Repo.insert_all(LedgerEntry, Enum.map(rows, & &1.entry))
+    Repo.insert_all(RequestLogFact, Enum.map(rows, & &1.fact))
+    :ok
+  end
+
+  @doc false
+  def clients, do: @clients
+
+  @doc "The service tier dealt to the `ordinal`-th request of a model, in the cycle the request-log speed mix uses."
+  @spec service_tier(String.t(), non_neg_integer()) :: String.t()
+  def service_tier(exposed_model_id, ordinal) do
+    cycle = if exposed_model_id == @ultrafast_model, do: @ultrafast_cycle, else: @priority_cycle
+    Enum.at(cycle, rem(ordinal, length(cycle)))
   end
 
   defp pool_rows(result, pool, index, timestamp) do
@@ -84,22 +100,24 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
   defp started_at({_pool, _key, _model, _assignment, _identity, {index, hour, sequence, occurred_at}}),
     do: DateTime.add(occurred_at, -latency_ms(index, output_tokens(index, hour, sequence)), :millisecond)
 
-  defp output_tokens(index, hour, sequence), do: 600 + rem(hour * 61 + index * 181 + sequence * 79, 1600)
+  @doc false
+  def output_tokens(index, hour, sequence), do: 600 + rem(hour * 61 + index * 181 + sequence * 79, 1600)
 
-  defp latency_ms(index, output), do: 4500 + div(output * 1000, 65 + index * 5)
+  @doc false
+  def latency_ms(index, output), do: 4500 + div(output * 1000, 65 + index * 5)
 
   defp service_tiers(specs) do
     {tiers, _seen} =
       Enum.map_reduce(specs, %{}, fn {_pool, _key, model, _assignment, _identity, _slot}, seen ->
         ordinal = Map.get(seen, model.exposed_model_id, 0)
-        cycle = if model.exposed_model_id == @ultrafast_model, do: @ultrafast_cycle, else: @priority_cycle
-        {Enum.at(cycle, rem(ordinal, length(cycle))), Map.put(seen, model.exposed_model_id, ordinal + 1)}
+        {service_tier(model.exposed_model_id, ordinal), Map.put(seen, model.exposed_model_id, ordinal + 1)}
       end)
 
     tiers
   end
 
-  defp traffic_row({pool, key, model, assignment, identity, {index, hour, sequence, occurred_at}}, {user_agent, transport, source_endpoint}, service_tier) do
+  @doc false
+  def traffic_row({pool, key, model, assignment, identity, {index, hour, sequence, occurred_at}}, {user_agent, transport, source_endpoint}, service_tier) do
     request_id = Ecto.UUID.generate()
     attempt_id = Ecto.UUID.generate()
     shape = traffic_shape(index, hour)
@@ -222,7 +240,8 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots.Traffic do
     %{request: request, attempt: attempt, entry: entry, fact: fact}
   end
 
-  defp traffic_shape(index, hour) do
+  @doc false
+  def traffic_shape(index, hour) do
     {baseline, peaks} = Enum.at(@demand_profiles, index)
     position = 23 - hour
 
