@@ -18,7 +18,7 @@ Request logs are metadata-only. They do not show prompt text, generated content,
 
 [![Request logs overview](/operators/request-logs/request-logs-overview.png)](/operators/request-logs/request-logs-overview.png)
 
-The screenshots in this guide use synthetic demo data. The overview is a three-row excerpt of the table; no production identifiers or usage totals are shown.
+The screenshots in this guide use synthetic demo data. The overview is a six-row excerpt of the table; no production identifiers or usage totals are shown.
 
 ## API-key usage boundaries
 
@@ -93,8 +93,8 @@ The table shows the latest matching rows, with a hard page size limit.
       <td>Admission date and time in the operator's selected timezone and format, followed by the status icon, outcome and recorded upstream attempt duration. A request the client cancelled shows <code>Client cancelled</code> in amber instead of a red <code>Failed</code>. Open the row to inspect its identifiers and attempts.</td>
     </tr>
     <tr>
-      <td>Model · Effort · Tier</td>
-      <td>Requested or enforced model and effective reasoning effort on the first line, with the reported service tier and requested-versus-effective details below. A successful Responses request without a recorded effort shows <code>model default</code>; the gateway does not observe the backend's chosen effort. Endpoints without reasoning, such as transcription, show only the tier. A missing model appears as a muted <code>— no model</code>.</td>
+      <td>Model · Effort · Speed</td>
+      <td>Requested or enforced model and effective reasoning effort on the first line, with three bolts for the request's speed below: one filled bolt is normal speed, two are fast (the <code>priority</code> tier) and three are <code>ultrafast</code>. A priority request the upstream did not apply keeps one bolt, and the tooltip says so. A successful Responses request without a recorded effort shows <code>model default</code>; the gateway does not observe the backend's chosen effort. Endpoints without reasoning, such as transcription, show only the model and the bolts. A missing model appears as a muted <code>— no model</code>.</td>
     </tr>
     <tr>
       <td>Upstream · Pool · Key</td>
@@ -102,7 +102,7 @@ The table shows the latest matching rows, with a hard page size limit.
     </tr>
     <tr>
       <td>Endpoint · Transport · Client</td>
-      <td>For translated requests, the recorded client path and destination share the first line, separated by the translation icon. Native requests show one path. The second line contains the protocol badge and client name/version. A bolt marks requests priced at the priority tier. Complete paths remain available in tooltips when space is limited.</td>
+      <td>For translated requests, the recorded client path and destination share the first line, separated by the translation icon. Native requests show one path. The second line contains the protocol badge and client name/version. Complete paths remain available in tooltips when space is limited.</td>
     </tr>
     <tr>
       <td>Errors · Warnings</td>
@@ -285,7 +285,7 @@ The request drawer keeps three tier facts apart:
   </tbody>
 </table>
 
-The ChatGPT Codex backend reports <code>service_tier</code> as <code>auto</code> while a response is in progress and <code>default</code> when it completes, including for requests sent with <code>priority</code>. The public OpenAI API reports <code>priority</code> for the same request. Codex Pooler forwards the requested tier and prices the tier the upstream reported, with one exception: a <code>priority</code> request reported as <code>default</code> is priced at <code>priority</code>, because the backend reports <code>default</code> for every priority request while it serves the request in Fast mode, which uses plan usage at a higher rate than standard. Such a request shows <code>tier default priority requested</code> in the list and <code>priority</code> under Priced as. When the upstream reports no tier, or reports <code>auto</code>, the request is priced at its requested tier. Requests settled by earlier releases keep the tier they were priced at.
+The ChatGPT Codex backend reports <code>service_tier</code> as <code>auto</code> while a response is in progress and <code>default</code> when it completes, including for requests sent with <code>priority</code>. The public OpenAI API reports <code>priority</code> for the same request. Codex Pooler forwards the requested tier and prices the tier the upstream reported, with one exception: a <code>priority</code> request reported as <code>default</code> is priced at <code>priority</code>, because the backend reports <code>default</code> for every priority request while it serves the request in Fast mode, which uses plan usage at a higher rate than standard. Such a request shows two bolts in the list and <code>priority</code> under Priced as. When the upstream reports no tier, or reports <code>auto</code>, the request is priced at its requested tier. Requests settled by earlier releases keep the tier they were priced at.
 
 A <code>default</code> report on a <code>priority</code> request is not evidence that priority processing was skipped. To judge whether it was applied, compare latency across requests for the same account, model, and transport.
 
