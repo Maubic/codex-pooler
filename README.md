@@ -9,6 +9,7 @@
   <a href="#hermes-setup" title="Hermes Agent"><img src=".github/assets/hermes-favicon.png" alt="Hermes Agent" width="24" height="24"></a>
   <a href="#pi-setup" title="Pi"><img src=".github/assets/pi-favicon.png" alt="Pi" width="24" height="24"></a>
   <a href="#omp-setup" title="OMP"><img src=".github/assets/omp-favicon.png" alt="OMP" width="24" height="24"></a>
+  <a href="#omo-native-setup" title="OMO Native"><img src=".github/assets/omo-favicon.png" alt="OMO Native" width="24" height="24"></a>
   <a href="#cursor-setup" title="Cursor"><img src=".github/assets/cursor-favicon.png" alt="Cursor" width="24" height="24"></a>
   <a href="#kilo-code-setup" title="Kilo Code"><img src=".github/assets/kilo-favicon.png" alt="Kilo Code" width="24" height="24"></a>
   <a href="#trae-setup" title="Trae"><img src=".github/assets/trae-favicon.png" alt="Trae" width="24" height="24"></a>
@@ -704,6 +705,53 @@ omp
 ```
 
 **[Full setup & extras](https://www.codex-pooler.com/docs/clients/omp/)** — installation, model choices and long conversations.
+
+</details>
+
+<a id="omo-native-setup"></a>
+
+<details>
+<summary><img src=".github/assets/omo-favicon.png" alt="OMO logo" width="16" height="16"> OMO Native <code>models.json</code></summary>
+
+Connect the standalone `omo` client and its bundled Senpi engine to your Pool.
+For OMO inside OpenCode, use the [OpenCode setup](#opencode-setup).
+
+| System | Configuration file |
+| --- | --- |
+| macOS / Linux | `~/.omo/agent/models.json` |
+| Windows | `%USERPROFILE%\.omo\agent\models.json` |
+
+Merge this provider into `models.json`, keeping any existing providers:
+
+```json
+{
+  "providers": {
+    "codex-pooler": {
+      "baseUrl": "https://codex-pooler.example.com/v1",
+      "api": "openai-responses",
+      "apiKey": "$CODEX_POOLER_API_KEY",
+      "authHeader": true,
+      "models": [
+        { "id": "gpt-6.1-sol", "reasoning": true, "defaultThinkingLevel": "medium", "input": ["text"] },
+        { "id": "gpt-6-luna", "reasoning": true, "defaultThinkingLevel": "low", "input": ["text"] },
+        { "id": "gpt-6-astra", "reasoning": true, "defaultThinkingLevel": "high", "input": ["text"] }
+      ]
+    }
+  }
+}
+```
+
+Keep the `$` in the API-key reference and replace the example URL with your
+Pooler's `/v1` URL. Keep only models available to your Pool. Start with Sol:
+
+```bash
+omo --provider codex-pooler --model gpt-6.1-sol --thinking medium
+```
+
+This setup covers text requests. The guide includes saved defaults and a
+no-tool connection check.
+
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/omo-native-senpi/)** — installation, model defaults and connection checks.
 
 </details>
 

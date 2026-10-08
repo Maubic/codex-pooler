@@ -2,7 +2,7 @@
 
 > Codex Pooler is a self-hosted gateway for OpenAI Codex: Pools of Codex accounts behind stable Pool API keys, the Codex backend routes, a narrow OpenAI-compatible /v1 surface, and metadata-only operations. This file indexes its public docs for agents and answer engines.
 
-Last reviewed: 2026-10-06
+Last reviewed: 2026-10-08
 
 Inventory scope: curated primary and discovery pages listed below; this index intentionally excludes other rendered pages.
 
@@ -28,6 +28,7 @@ Pricing and availability: https://www.codex-pooler.com/pricing.md
 - [OpenClaw on Codex Pooler](https://www.codex-pooler.com/docs/clients/openclaw/): Configure OpenClaw with Codex Pooler's narrow OpenAI-compatible /v1 surface, current runtime id, model metadata, and optional operator MCP endpoint.
 - [OpenHands on Codex Pooler](https://www.codex-pooler.com/docs/clients/openhands/): Connect OpenHands Agent Canvas and its Docker backend to Codex Pooler with an OpenAI-compatible LLM profile, a Pool API key, and a backend-reachable /v1 URL.
 - [OMP on Codex Pooler](https://www.codex-pooler.com/docs/clients/omp/): Configure Oh My Pi (OMP) with Codex Pooler's narrow OpenAI-compatible /v1 Responses surface and a Pool API key.
+- [OMO Native on Codex Pooler](https://www.codex-pooler.com/docs/clients/omo-native-senpi/): Connect OMO Native and its Senpi engine to Codex Pooler with a custom Responses provider, an environment-backed Pool API key and a text connection check.
 - [Pi on Codex Pooler](https://www.codex-pooler.com/docs/clients/pi/): Configure Pi coding agent with Codex Pooler's narrow OpenAI-compatible /v1 Responses surface, Pi models/settings file locations, and a Pool API key.
 - [Trae on Codex Pooler](https://www.codex-pooler.com/docs/clients/trae/): Configure Trae or Trae CN with Codex Pooler's narrow OpenAI-compatible /v1 chat-completions surface and a Pool API key.
 - [Hermes Agent on Codex Pooler](https://www.codex-pooler.com/docs/clients/hermes/): Configure Hermes Agent with Codex Pooler's narrow OpenAI-compatible /v1 surface, image generation, speech-to-text, and operator MCP endpoint.
@@ -116,6 +117,7 @@ Codex Pooler is for operators and client integrators who already manage trusted 
 - Use https://www.codex-pooler.com/docs/clients/goose/ when configuring Goose with ~/.config/goose/config.yaml on macOS/Linux or %APPDATA%\Block\goose\config\config.yaml on Windows, GOOSE_PROVIDER=openai, OPENAI_HOST=https://codex-pooler.example.com, OPENAI_BASE_PATH=v1/chat/completions, and a Pool API key in OPENAI_API_KEY or Goose secret storage.
 - Use https://www.codex-pooler.com/docs/clients/kilo-code/ when configuring Kilo Code with ~/.config/kilo/kilo.jsonc, model=codex-pooler/gpt-6.1-sol, provider options apiKey={env:CODEX_POOLER_API_KEY}, baseURL=https://codex-pooler.example.com/v1, model map entries for gpt-6-luna, gpt-6.1-sol, and gpt-6-astra, and Kilo Code's chat-completions route shape.
 - Use https://www.codex-pooler.com/docs/clients/omp/ when configuring Oh My Pi (OMP) with ~/.omp/agent/models.yml, modelRoles in ~/.omp/agent/config.yml, api=openai-responses, authHeader=true, streamIdleTimeoutMs=300000, compaction reserve and mid-turn settings, and a Pool API key in CODEX_POOLER_API_KEY.
+- Use https://www.codex-pooler.com/docs/clients/omo-native-senpi/ for OMO Native's Senpi provider in ~/.omo/agent/models.json, api=openai-responses, baseUrl=https://codex-pooler.example.com/v1 and apiKey=$CODEX_POOLER_API_KEY. This is separate from OMO's OpenCode configuration.
 - Use https://www.codex-pooler.com/docs/clients/pi/ when configuring Pi with ~/.pi/agent/models.json, ~/.pi/agent/settings.json, api=openai-responses, authHeader=true, enabled models for gpt-6-luna, gpt-6.1-sol, and gpt-6-astra, and a Pool API key in CODEX_POOLER_API_KEY.
 - Use https://www.codex-pooler.com/docs/clients/trae/ when configuring Trae or Trae CN custom models with OpenAI Chat Completions, Custom Request URL https://codex-pooler.example.com/v1, Full URL off, model gpt-6.1-sol, and a Pool API key.
 - Use https://www.codex-pooler.com/docs/clients/windmill/ when configuring Windmill AI with a customai resource, base_url=https://codex-pooler.example.com/v1, workspace models gpt-6-luna, gpt-6.1-sol, and gpt-6-astra, default_model gpt-6.1-sol, and a dedicated Pool API key stored as a Windmill secret variable.
@@ -123,7 +125,7 @@ Codex Pooler is for operators and client integrators who already manage trusted 
 - Use https://www.codex-pooler.com/docs/discovery/codex-account-pooling/ for short answers about Pools, upstream accounts, eligibility, and routing.
 - Use https://www.codex-pooler.com/docs/discovery/openai-compatible-codex-gateway/ for short answers about narrow /v1 SDK compatibility over Codex Pools.
 - Use https://www.codex-pooler.com/docs/discovery/codex-pooler-vs-direct-credentials/ for short answers comparing Pool API keys with direct account credentials.
-- Use the client-specific pages for Aider, Continue, Cline, DeepSeek Harness, Goose, Kilo Code, OpenCode, OpenClaw, OpenHands, OMP, Pi, Hermes, Trae, and Windmill snippets.
+- Use the client-specific pages for Aider, Continue, Cline, DeepSeek Harness, Goose, Kilo Code, OpenCode, OpenClaw, OpenHands, OMP, OMO Native, Pi, Hermes, Trae, and Windmill snippets.
 - Use https://www.codex-pooler.com/docs/reference/routing-strategies/ when configuring Pools and routing behavior.
 - Use https://www.codex-pooler.com/docs/reference/responses-lite-vs-full/ for what the Lite and Full serving modes change on a Codex Responses request.
 - Use https://www.codex-pooler.com/answers.md for short, citable answers about scope, routes, credentials, privacy, setup, and deployment.

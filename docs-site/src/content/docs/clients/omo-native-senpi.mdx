@@ -1,0 +1,149 @@
+---
+title: OMO Native on Codex Pooler
+sidebar:
+  label: OMO Native
+description: Connect OMO Native and its Senpi engine to Codex Pooler with a custom Responses provider, an environment-backed Pool API key and a text connection check.
+---
+
+[OMO Native](https://github.com/code-yeongyu/oh-my-openagent) is the standalone `omo` coding agent, powered by the Senpi engine with the OMO extension. Connect it to Codex Pooler to select your Pool's models from the terminal. This guide covers the native client; OMO running inside OpenCode uses the separate [OpenCode configuration](/clients/opencode/).
+
+## Before you start
+
+- Install OMO Native using its [official installation guide](https://github.com/code-yeongyu/oh-my-openagent#installation), with a supported Bun runtime for the native launcher.
+- Have a Codex Pooler URL reachable from the machine running `omo`.
+- Create a [Pool API key](/getting-started/quick-start/) and choose models available to that Pool.
+
+OMO packages its Senpi engine; configure the engine used by `omo` rather than a separate standalone Senpi installation.
+
+## Configure the connection
+
+OMO keeps provider definitions in `models.json` and model defaults in `settings.json`.
+
+**Provider configuration**
+
+| OS | Default config file |
+| --- | --- |
+| macOS | `~/.omo/agent/models.json` |
+| Linux | `~/.omo/agent/models.json` |
+| Windows | `%USERPROFILE%\.omo\agent\models.json` |
+
+**Model defaults**
+
+| OS | Default config file |
+| --- | --- |
+| macOS | `~/.omo/agent/settings.json` |
+| Linux | `~/.omo/agent/settings.json` |
+| Windows | `%USERPROFILE%\.omo\agent\settings.json` |
+
+These are the defaults for OMO's native launcher. An explicit `OMO_CODING_AGENT_DIR` overrides the agent directory, followed by `SENPI_CODING_AGENT_DIR` and `PI_CODING_AGENT_DIR`. A custom `HOME` also changes the default, including on Windows. Use Linux paths and commands for an installation inside WSL.
+
+Set the Pool API key in the terminal that starts OMO. Services and desktop launchers need the same variable in their own environment.
+
+**macOS / Linux / WSL**
+
+```bash
+export CODEX_POOLER_API_KEY="<pool-api-key>"
+```
+
+**Windows PowerShell**
+
+```powershell
+$env:CODEX_POOLER_API_KEY = "<pool-api-key>"
+```
+
+Merge this provider into `models.json`, preserving any other providers:
+
+```json title="models.json" frame="code"
+{
+  "providers": {
+    "codex-pooler": {
+      "baseUrl": "https://codex-pooler.example.com/v1",
+      "api": "openai-responses",
+      "apiKey": "$CODEX_POOLER_API_KEY",
+      "authHeader": true,
+      "models": [
+        {
+          "id": "gpt-6.1-sol",
+          "reasoning": true,
+          "defaultThinkingLevel": "medium",
+          "input": ["text"]
+        },
+        {
+          "id": "gpt-6-luna",
+          "reasoning": true,
+          "defaultThinkingLevel": "low",
+          "input": ["text"]
+        },
+        {
+          "id": "gpt-6-astra",
+          "reasoning": true,
+          "defaultThinkingLevel": "high",
+          "input": ["text"]
+        }
+      ]
+    }
+  }
+}
+```
+
+Keep the `$` in `"$CODEX_POOLER_API_KEY"`: Senpi uses it to resolve an environment variable. A bare variable name is a literal value. The key belongs in the environment, not in this file.
+
+For local setup, change `baseUrl` to `http://localhost:4000/v1`. Keep the `/v1` suffix; the Responses adapter appends `/responses` itself.
+
+## Choose a model
+
+Keep only models exposed by your Pool. Merge the following defaults into `settings.json`:
+
+```json title="settings.json" frame="code"
+{
+  "defaultProvider": "codex-pooler",
+  "defaultModel": "gpt-6.1-sol",
+  "defaultThinkingLevel": "medium",
+  "enabledModels": [
+    "codex-pooler/gpt-6.1-sol",
+    "codex-pooler/gpt-6-luna",
+    "codex-pooler/gpt-6-astra"
+  ]
+}
+```
+
+Select another configured model with `/model` or pass the provider and model explicitly when starting OMO:
+
+```bash
+omo --provider codex-pooler --model gpt-6.1-sol --thinking medium
+```
+
+The model definitions above keep Senpi's default context and output budgets. To set `contextWindow`, use the selected model's `context_length` from authenticated `GET /v1/models`; ask your operator for the supported output budget before increasing `maxTokens`. Do not copy a larger context ceiling from another Pool or account.
+
+OMO's native model profiles and delegated categories can make their own model choices. If you configure them, keep their provider-qualified model IDs under `codex-pooler/`; OpenCode-specific OMO settings do not configure the native provider. See the upstream [OMO configuration reference](https://github.com/code-yeongyu/oh-my-openagent/blob/dev/docs/reference/omo-json.md) for those optional routes.
+
+## Verify the connection
+
+List the configured models first:
+
+```bash
+omo --list-models codex-pooler
+```
+
+Then run a single text request with tools and saved sessions disabled. The same one-line command works in a POSIX shell and PowerShell:
+
+```bash
+omo --provider codex-pooler --model gpt-6.1-sol --thinking medium --mode json --no-session --no-tools --no-skills --no-context-files --omo-senpi-memory-disabled --omo-senpi-onboarding-disabled --no-model-fallback --print -- "Reply with a short greeting."
+```
+
+Keep `--` immediately before the prompt so it is treated as input rather than a value for an extension flag. Expect a completed assistant message, an `agent_end` event and exit status 0; startup output or a zero exit status alone does not prove a model request completed.
+
+In Codex Pooler's request logs, match the time, Pool API key and selected model with a successful HTTP SSE request from `/v1/responses`. The normalized endpoint can appear as `/backend-api/codex/responses`. Check its successful attempt and recorded usage/settlement; a reply alone does not confirm which provider served it.
+
+## Troubleshooting
+
+- **No configured models appear:** check that the environment variable is available to the `omo` process, the `apiKey` reference includes `$`, and you edited the active agent directory.
+- **A different provider is selected:** use explicit `--provider` and `--model` arguments for the connection check, then inspect saved model defaults and OMO native model profiles.
+- **The command exits without a reply:** preserve the `--` separator before the prompt and check for both the terminal assistant message and `agent_end`.
+- **A model is refused:** use an ID from your Pool's authenticated catalog and check the API key's model policy.
+
+## Compatibility notes
+
+This connection uses Codex Pooler's narrow OpenAI-compatible `/v1/responses` surface over HTTP SSE. The setup and connection check cover text requests with no tools. Tool execution, images, multi-turn continuity, retries, cancellation and compaction have separate client/runtime requirements; the text check does not establish those capabilities.
+
+Pool-model settings determine the effective Full or Lite mode. See [Responses Lite and Full](/reference/responses-lite-vs-full/) before enabling additional client features, and [OpenAI-compatible SDKs](/clients/openai-compatible/) for the shared API boundaries. Tool permission settings belong to OMO and are separate from connecting its model provider.

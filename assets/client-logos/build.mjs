@@ -45,6 +45,11 @@ function prepareSvg(name, source) {
 		svg = svg
 			.replaceAll('fill="#CFCECD"', 'fill="currentColor" opacity="0.28"')
 			.replaceAll('fill="#211E1E"', 'fill="currentColor"');
+	} else if (name === "omo") {
+		// The first path is the separate rounded tile; the mascot uses evenodd holes.
+		svg = svg
+			.replace(/<path fill="#F4F4F4" d="[^"]*"\s*\/>/, "")
+			.replaceAll('fill="#041617"', 'fill="currentColor"');
 	} else if (name === "omp") {
 		const body = svg
 			.match(/<svg\b[^>]*>([\s\S]*)<\/svg>/)[1]
