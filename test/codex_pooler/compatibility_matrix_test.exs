@@ -614,6 +614,9 @@ defmodule CodexPooler.CompatibilityMatrixTest do
     test "makes backend model catalog ETag derivation and surface capacity machine-readable" do
       feature = CompatibilityMatrix.by_slug!(:backend_models_etag)
       fixture = CompatibilityMatrix.fixture!(:backend_models_etag)
+      {since, through} = CodexModelDecodeContract.verified_range()
+      version = fn {major, minor, patch} -> "#{major}.#{minor}.#{patch}" end
+      expected_window = {version.(since), version.(through)}
 
       assert feature.current == :policy_visible_body_digest
 
@@ -645,7 +648,7 @@ defmodule CodexPooler.CompatibilityMatrixTest do
                  vary_header: "user-agent",
                  client_version_query: :ignored,
                  decode_checked: %{
-                   window: {"0.154.0", "0.161.0"},
+                   window: expected_window,
                    window_version: "whole_version_prereleases_included",
                    body: "template_only_minus_entries_the_client_cannot_decode",
                    left_out_model: %{advertised: false, routable: true},
@@ -659,11 +662,7 @@ defmodule CodexPooler.CompatibilityMatrixTest do
       assert fixture.instructions_representation.template_only_since ==
                CatalogRepresentation.template_only_since()
 
-      # findings#206 row 206-442: the window the matrix names is the one the
-      # decode contract enforces.
-      {since, through} = CodexModelDecodeContract.verified_range()
-      version = fn {major, minor, patch} -> "#{major}.#{minor}.#{patch}" end
-      assert fixture.instructions_representation.decode_checked.window == {version.(since), version.(through)}
+      assert fixture.instructions_representation.decode_checked.window == expected_window
       assert CatalogRepresentation.for_user_agent("codex_cli_rs/#{version.(since)} (Linux 6.8.0; x86_64) unknown") == :decode_checked
       assert CatalogRepresentation.for_user_agent("codex_cli_rs/#{version.(through)} (Linux 6.8.0; x86_64) unknown") == :decode_checked
       assert feature.contract =~ "receives the decode_checked representation"

@@ -6,26 +6,28 @@ defmodule CodexPooler.Gateway.Metadata.CodexModelDecodeContract do
   Codex decodes the whole `/models` response as one `ModelsResponse`
   (`codex-rs/protocol/src/openai_models.rs`); one entry that fails the
   `ModelInfo` decode discards the whole catalog and the client falls back to
-  its bundled one with only a log line (findings#258 row 258-34).
+  its bundled one with only a log line.
 
   The rules below are only those that make serde fail in every client release
-  from `0.154.0` through `0.161.0` (every tag reporting those whole versions,
-  alphas included): required fields, closed enums, scalar types and the
+  inside `verified_range/0` (every tag reporting those whole versions,
+  prereleases included): required fields, closed enums, scalar types and the
   instructions rule of `deserialize_model_infos_with_legacy_base`. Anything the
   client tolerates stays out: unknown fields, `#[serde(other)]` enums, any
   string in the tolerant selectors (`tool_mode`, `multi_agent_version`) and
   positional (array-encoded) structs are accepted, and fields added inside the window
   (`available_access_programs`, `supports_reasoning_effort_updates`,
   `supports_experimental_context`, `guardian`, and `content_filter_guidance`
-  inside `model_messages` since `0.160.0-alpha.4`) and the nested
-  `model_messages` sub-structures are not checked. The contract is therefore never stricter
+  inside `model_messages`) and the nested `model_messages` sub-structures
+  are not checked. The contract is therefore never stricter
   than a client inside the window; a client outside it is not judged at all
   (`CatalogRepresentation` serves it the unchecked catalog), because a later
   release may relax a rule and an older one lacks fields this contract types.
   """
 
   @verified_since {0, 154, 0}
-  @verified_through {0, 161, 0}
+  # Advance only after released-binary and complete-tag decoder verification,
+  # independently of the managed client version and runtime overrides.
+  @verified_through {0, 162, 0}
 
   @i32_range -2_147_483_648..2_147_483_647
   @i64_range -9_223_372_036_854_775_808..9_223_372_036_854_775_807

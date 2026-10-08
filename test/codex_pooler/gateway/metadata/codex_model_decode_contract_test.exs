@@ -1,10 +1,10 @@
 defmodule CodexPooler.Gateway.Metadata.CodexModelDecodeContractTest do
-  # findings#258 row 258-34: the released Codex client decodes the whole
+  # The released Codex client decodes the whole
   # catalog as one `ModelsResponse`, so one entry it cannot decode discards
   # every entry. Every body the catalog builders serve must satisfy the
   # client's `ModelInfo` decode, and for a client inside the verified window an
   # entry that does not is left out instead of served. The vectors' verdicts
-  # were checked against the released 0.156.1, 0.157.0, 0.157.1, 0.158.0, 0.159.0, 0.159.3, 0.160.0, 0.160.1 and 0.161.0 decoders (`codex debug
+  # are checked against released decoders (`codex debug
   # models` with `model_catalog_json`, the same serde path as the network
   # fetch): every vector the contract rejects the client rejects, and every
   # tolerated vector and served body the client decodes.
@@ -86,15 +86,23 @@ defmodule CodexPooler.Gateway.Metadata.CodexModelDecodeContractTest do
       end
     end
 
-    test "states the verified client window" do
-      assert CodexModelDecodeContract.verified_range() == {{0, 154, 0}, {0, 161, 0}}
+    test "the managed client release stays inside the independently verified window" do
+      samples = CodexCatalogShapes.version_samples()
+      current = Version.parse!(samples.current)
+      assert CodexModelDecodeContract.verified_version?({current.major, current.minor, current.patch}), "qualify the managed Codex release's decoder before extending the verified window"
+    end
 
-      for version <- [{0, 154, 0}, {0, 155, 1}, {0, 156, 0}, {0, 156, 1}, {0, 157, 0}, {0, 157, 1}, {0, 158, 0}, {0, 159, 0}, {0, 159, 3}, {0, 160, 0}, {0, 160, 1}, {0, 161, 0}] do
-        assert CodexModelDecodeContract.verified_version?(version), inspect(version)
+    test "accepts both verified boundaries and refuses versions outside them" do
+      samples = CodexCatalogShapes.version_samples()
+
+      for version <- [samples.since, samples.through] do
+        parsed = Version.parse!(version)
+        assert CodexModelDecodeContract.verified_version?({parsed.major, parsed.minor, parsed.patch}), version
       end
 
-      for version <- [{0, 153, 4}, {0, 161, 1}, {0, 162, 0}, {1, 0, 0}] do
-        refute CodexModelDecodeContract.verified_version?(version), inspect(version)
+      for version <- [samples.before, samples.after, "1.0.0"] do
+        parsed = Version.parse!(version)
+        refute CodexModelDecodeContract.verified_version?({parsed.major, parsed.minor, parsed.patch}), version
       end
     end
   end
