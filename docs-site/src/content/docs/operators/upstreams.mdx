@@ -16,7 +16,7 @@ Use this page when you need to answer:
 
 The page is metadata-only after linking or import. It shows operator labels, workspace and plan badges, safe status labels, quota-window evidence, token counters, assignment counts, sanitized subject references when needed, and links to related logs. It does not show prompts, responses, files, websocket frames, bearer tokens, refresh tokens, provider cookies, OAuth provider payloads, raw OpenAI user subjects, or stored Codex `auth.json` contents.
 
-![Upstreams page overview](/operators/upstreams/upstreams-overview.png)
+[![Upstreams page overview](/operators/upstreams/upstreams-overview.png)](/operators/upstreams/upstreams-overview.png)
 
 ## What an Upstream Controls
 
@@ -37,11 +37,13 @@ Routing still happens at request time. A visible active upstream can be skipped 
 
 The page header exposes the account onboarding actions as separate buttons:
 
-1. `OAuth`, for linking a new upstream account through OpenAI authorization without handling `auth.json`
+[![Upstreams page header with the Link, Invite, and Import actions](/operators/upstreams/upstreams-page-actions-menu.png)](/operators/upstreams/upstreams-page-actions-menu.png)
+
+1. `Link`, for linking a new upstream account through OpenAI authorization without handling `auth.json`. The dialog asks for a Pool, then offers `via OAuth (browser)` or `via Device Code`
 2. `Invite`, for onboarding a person who will provide or operate an account through the browser UI
 3. `Import`, for adding an account from Codex CLI or Codex Desktop `auth.json` credentials
 
-Prefer `OAuth` for new operator-managed upstream accounts when browser authorization is practical. It stores resulting credential material through encrypted upstream secret storage and keeps the admin surface metadata-only.
+Prefer `Link` for new operator-managed upstream accounts when browser authorization is practical. It stores resulting credential material through encrypted upstream secret storage and keeps the admin surface metadata-only.
 
 Invite onboarding and the OAuth device-code fallback use OpenAI's Codex device-code authorization. This setup is only for those device-code paths; browser OAuth linking does not depend on it. Before using an invite or fallback flow, a personal ChatGPT account should have `Enable device code authorization for Codex` enabled in ChatGPT Settings > Security. Workspace-managed accounts may need a workspace admin to enable device-code login for Codex in workspace permissions. If OpenAI blocks device-code approval, the invite or fallback flow may remain pending but the upstream will not become ready.
 
@@ -49,9 +51,9 @@ The search box filters upstream cards by account label or safe metadata. The Poo
 
 ## Account Cards
 
-Each account appears as a card. The header shows the operator label, workspace badge, plan badge, and dotted action menu. Clicking the account label opens the upstream cockpit.
+Each account appears as a card. The header shows the operator label with a workspace chip when the account has a workspace label, the access-token expiry underneath, the plan badge (for example `Pro 200`), and the dotted action menu. Clicking the account label opens the upstream cockpit.
 
-The card body is split into status, token burn, quota windows, and footer metrics.
+The card body is split into status, token burn, quota windows, provider credits, banked resets, and footer metrics.
 
 <table>
   <thead>
@@ -78,15 +80,19 @@ The card body is split into status, token burn, quota windows, and footer metric
       <td>Compact lifecycle-aware runtime routing readiness summary. It separates identity lifecycle, Pool assignment, credential freshness, and quota evidence so operators can see why this account is likely eligible or blocked before request-specific checks.</td>
     </tr>
     <tr>
-      <td>Saved resets</td>
-      <td>Compact reported saved-reset count badge, plus a short status row for active or unresolved recovery. The badge appears only when at least one saved reset is available; an unresolved status can remain after the count reaches zero. <code>View status</code> opens the saved-reset dialog. The card's <code>Saved resets</code> dropdown action also opens that dialog for policy editing and the latest account result.</td>
+      <td>Credits</td>
+      <td>Provider-credit row: the credit balance as a percentage of its observed baseline, the local policy (<code>Enabled</code> or <code>Disabled</code>), and the balance. It appears only for a positive or unlimited balance. Opening the row opens the provider-credit policy dialog. See <a href="#use-provider-credits">Use provider credits</a>.</td>
+    </tr>
+    <tr>
+      <td>Banked resets</td>
+      <td>Five-segment meter of the reported saved resets with an <code>x3</code>-style count, the auto-redeem state (<code>Auto redeem active</code> or <code>inactive</code>), and the next expiry. The meter appears only when at least one saved reset is available; a short status row for active or unresolved recovery can remain after the count reaches zero. <code>View status</code> opens the saved-reset dialog. Opening the meter or the card's <code>Saved resets</code> dropdown action also opens that dialog for policy editing and the latest account result.</td>
     </tr>
     <tr>
       <td>Pools</td>
       <td>How many Pools currently assign this upstream account.</td>
     </tr>
     <tr>
-      <td>5m tokens</td>
+      <td>Tokens/5m</td>
       <td>Recent token volume observed for this upstream over the short rolling window.</td>
     </tr>
   </tbody>
@@ -121,7 +127,7 @@ An accepted banked reset and confirmed included restoration are different events
 
 ## Saved resets
 
-Account cards show a compact saved-reset count badge only when sanitized usage observations report at least one available reset. Common cockpit labels are `N saved resets`, `No saved resets`, `Saved resets unavailable`, and `Saved resets not reported`. When sanitized saved-reset observations include expiration metadata, the badge title, cockpit summary, and saved-reset dialog also show the next expiration time. The count badge and the card dropdown action `Saved resets` open the saved-reset dialog.
+Account cards show the banked-resets meter only when sanitized usage observations report at least one available reset. Common cockpit labels are `N saved resets`, `No saved resets`, `Saved resets unavailable`, and `Saved resets not reported`. When sanitized saved-reset observations include expiration metadata, the badge title, cockpit summary, and saved-reset dialog also show the next expiration time. The meter and the card dropdown action `Saved resets` open the saved-reset dialog.
 
 Click a future expiration countdown in the saved-reset dialog or upstream cockpit, or choose **Download reset calendar** from the cockpit's **Actions**, to download an iCalendar (`.ics`) file containing all reported upcoming banked-reset expirations for that upstream. Each calendar event includes the upstream label, the exact expiration time and a link back to the account. Times are exported in UTC; your calendar displays them in its selected timezone, including daylight-saving changes. Expired and unknown dates are not exported. The file is a snapshot: importing it does not subscribe to updates, and redeeming a reset later does not remove its imported event. The export uses your existing operator access and does not require a Google Calendar or other calendar-provider integration.
 
@@ -267,7 +273,7 @@ An account whose usage reads are paused can look like an account whose evidence 
 
 Click `Import` to open the upstream credentials dialog when an existing Codex `auth.json` is the right source of account credentials.
 
-![Import auth.json dialog](/operators/upstreams/upstreams-import-auth-json-dialog.png)
+[![Import auth.json dialog](/operators/upstreams/upstreams-import-auth-json-dialog.png)](/operators/upstreams/upstreams-import-auth-json-dialog.png)
 
 The import dialog asks for:
 
@@ -286,7 +292,7 @@ The dialog footer keeps docs on the left and the submit actions on the right. `C
 ## OpenAI OAuth Upstream Linking
 
 OpenAI OAuth upstream linking is an authenticated admin workflow. Use
-`OAuth` on `/admin/upstreams` to link a new OpenAI upstream account to a selected Pool. Use
+`Link` on `/admin/upstreams` to link a new OpenAI upstream account to a selected Pool. Use
 `/admin/upstreams/:id` to relink or reconnect the exact upstream identity shown
 in the cockpit. Relink checks the returned account and workspace claims against
 the target identity before replacing encrypted credential material. When OpenAI
@@ -309,7 +315,7 @@ use a separate browser profile, before completing the link or relink.
 The browser manual callback workflow is:
 
 1. open the OAuth link or relink dialog
-2. choose `Browser`
+2. choose `via OAuth (browser)`
 3. open the generated OpenAI authorization URL
 4. complete OpenAI authorization in the browser
 5. paste the resulting returned browser URL back into the admin dialog
@@ -429,7 +435,7 @@ Safe OAuth troubleshooting codes:
 
 Open the dotted menu on an upstream card for account actions.
 
-![Upstream card action menu](/operators/upstreams/upstreams-card-action-menu.png)
+[![Upstream card action menu](/operators/upstreams/upstreams-card-action-menu.png)](/operators/upstreams/upstreams-card-action-menu.png)
 
 The current actions are:
 
@@ -458,6 +464,14 @@ The current actions are:
       <td>Requests a token-refresh job for the account. Use this when freshness evidence is stale or recovery instructions ask for it.</td>
     </tr>
     <tr>
+      <td>Provider credits</td>
+      <td>Opens the provider-credit policy dialog, where the <a href="#use-provider-credits">Use provider credits</a> admission policy is saved for the upstream.</td>
+    </tr>
+    <tr>
+      <td>Saved resets</td>
+      <td>Opens the saved-reset dialog with the bank inventory, auto-redemption policy, and the latest account result.</td>
+    </tr>
+    <tr>
       <td>Replace auth.json</td>
       <td>Appears for recovery states that can accept replacement account credentials.</td>
     </tr>
@@ -480,7 +494,7 @@ Accounts that are marked deleted without a permanent removal request appear unde
 
 `Rename` opens a small account dialog.
 
-![Rename upstream account dialog](/operators/upstreams/upstreams-rename-dialog.png)
+[![Rename upstream account dialog](/operators/upstreams/upstreams-rename-dialog.png)](/operators/upstreams/upstreams-rename-dialog.png)
 
 The label is the operator-facing name used in cards and related metadata. It is not the provider account ID, not a Pool API key, and not secret material. Use labels that make operations clear without embedding private customer or credential details.
 
@@ -488,17 +502,28 @@ The label is the operator-facing name used in cards and related metadata. It is 
 
 Clicking an account label opens the upstream cockpit.
 
-![Upstream cockpit overview](/operators/upstreams/upstreams-cockpit-overview.png)
+[![Upstream cockpit overview](/operators/upstreams/upstreams-cockpit-overview.png)](/operators/upstreams/upstreams-cockpit-overview.png)
 
-The cockpit is the focused detail view for one account. The top summary shows identity state, quota posture, request posture, saved reset status, stored account identifier hash, lifecycle badges, token freshness, and quota freshness. It also exposes `OAuth relink` for reconnecting the selected upstream identity through OpenAI OAuth, `Redeem saved reset` when manual redemption is available, and the saved-reset auto-redemption policy controls.
+The cockpit is the focused detail view for one account, titled `Upstream health`. The left column identifies the account and lists what can be done to it:
+
+1. the identity card shows the label, lifecycle state, plan badge, how the account was linked, the stored account identifier hash, the sanitized subject reference, and the workspace
+2. `Vitals` shows access-token expiry, token refresh state, when authentication was last verified, and the age of the quota refresh and quota evidence
+3. `Actions` lists `Refresh token`, `OAuth relink` for reconnecting the selected upstream identity through OpenAI OAuth, `Replace auth.json`, `Pause` or `Reactivate`, `Redeem saved reset` when manual redemption is available, `Download reset calendar`, `Rename`, `Reinvite account`, and `Delete account`. An action that does not apply to the current state is dimmed and marked `unavailable`
+
+The right column shows how the account serves traffic:
+
+1. `Routing lanes` shows a readiness verdict, then one lane per Pool assignment. Each lane passes assignment, health, quota, and circuit gates, and shows its share of the account's successful requests over seven days
+2. `Quota & banked resets` shows the account's quota windows, the provider-credit row, the banked-reset meter, and the auto-redemption policy
+3. `Request health` shows the request facts and the daily chart described below
+4. `Recent activity` lists failed requests and account changes, with links to Request logs, Audit logs, and Jobs
 
 Saved-reset manual redemption is available from the cockpit and from the account-card saved-reset dialog. The summary metric shows the reported count, the actions area shows `Redeem saved reset` when manual redemption is available, and the saved-reset policy form controls auto redemption, trigger mode, near-limit threshold, natural reset buffer, and resets to keep.
 
 For each current reset expiration, the bank shows `banked` only when the upstream reported a valid grant time. When that time is unavailable, it shows `seen` for Codex Pooler's first discovery of the expiration and uses that discovery only as the display fallback. It never estimates a grant date from the expiration date.
 
-Use it when the card says an account is degraded, stale, exhausted, or needs recovery. The detail page provides more space for assignment posture, quota health, recent events, and related links without exposing raw account secrets.
+Use it when the card says an account is degraded, stale, exhausted, or needs recovery. The detail page provides more space for routing lanes, quota health, recent events, and related links without exposing raw account secrets.
 
-Request health covers the traffic routed through the account over the last seven days. The facts row shows the last 24 hours: requests, failed requests, requests cancelled by the client, and the failure rate. Requests the client cancelled are counted on their own: they are not failures of the account and are not part of the failure rate, which is computed over the other requests. Request posture turns degraded when that rate exceeds 5%, and failed when every request that was not cancelled by the client failed. The daily chart shows succeeded, failed and cancelled requests as separate bars, and the error breakdown lists the five most frequent failure codes without client cancellations. Recent activity lists failed and retried requests; a request the client cancelled appears there only when it was retried. See [Request logs](/operators/request-logs/#client-cancelled) for what counts as a client cancellation.
+Request health covers the traffic routed through the account over the last seven days. The facts row shows the last 24 hours: requests, failed requests, requests cancelled by the client, and the failure rate. Requests the client cancelled are counted on their own: they are not failures of the account and are not part of the failure rate, which is computed over the other requests. The routing verdict reports the request posture: degraded when that rate exceeds 5%, and failed when every request that was not cancelled by the client failed. The daily chart shows succeeded, failed and cancelled requests as separate bars, and the error breakdown lists the five most frequent failure codes without client cancellations. Recent activity lists failed and retried requests; a request the client cancelled appears there only when it was retried. See [Request logs](/operators/request-logs/#client-cancelled) for what counts as a client cancellation.
 
 ## Operational Checklist
 

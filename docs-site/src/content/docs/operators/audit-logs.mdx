@@ -16,9 +16,9 @@ Use this page when you need to answer:
 
 Audit logs are redacted metadata. They do not show raw credentials, raw Pool API keys, passwords, TOTP secrets, upstream `auth.json` contents, prompt text, generated content, request payloads, provider responses, or raw secret settings.
 
-![Audit logs overview](/operators/audit-logs/audit-logs-overview.png)
+[![Audit logs overview](/operators/audit-logs/audit-logs-overview.png)](/operators/audit-logs/audit-logs-overview.png)
 
-The screenshots in this guide redact live row values. The production UI shows safe operator metadata to authorized users, but public docs should not publish production identities or record ids.
+The screenshots in this guide use synthetic example data. The production UI shows safe operator metadata to authorized users for their own instance.
 
 ## Filters
 
@@ -65,37 +65,37 @@ The top filters narrow the table.
 
 Unsupported filters are ignored with a warning. The table is limited to the latest matching rows for fast operator review. The pager counts at most 10,000 events past the current page; past that it shows a lower bound such as `10000+` and the next page stays available.
 
-## Table Columns
+## Event List
 
-The table is designed for scanning.
+The list is designed for scanning. Events are grouped by day, newest first, and every event reads as one sentence, such as "an operator updated the API key Release assistant in the Pool Example Production".
 
 <table>
   <thead>
     <tr>
-      <th>Column</th>
+      <th>Part</th>
       <th>Meaning</th>
     </tr>
   </thead>
   <tbody>
     <tr>
       <td>Event icon</td>
-      <td>Visual category and outcome indicator.</td>
+      <td>Visual category of the action, such as sign-in, operator, Pool, upstream account, API key, invite, or alert.</td>
     </tr>
     <tr>
       <td>Time</td>
-      <td>Event timestamp. Click the timestamp to open the details drawer.</td>
-    </tr>
-    <tr>
-      <td>Event</td>
-      <td>Operator-facing title for the action, such as API key updated or operator signed in.</td>
+      <td>Event time in the signed-in operator's time zone (UTC by default). Click the timestamp to open the details drawer.</td>
     </tr>
     <tr>
       <td>Actor</td>
-      <td>User or system actor that caused the event. Linked actors open related operator records when available.</td>
+      <td>User or system actor that caused the event. Click an actor to filter the list by it.</td>
     </tr>
     <tr>
-      <td>Context</td>
-      <td>Target kind or related record, with a link when the target is still visible.</td>
+      <td>Action and target</td>
+      <td>What was done and to which record, such as an API key label, an upstream account label, or an invited email. A target that belongs to a Pool names the Pool, and clicking the Pool filters the list.</td>
+    </tr>
+    <tr>
+      <td>Failure marker</td>
+      <td>A failed action ends with `failed` and a short sanitized reason. Click it to show only failed events.</td>
     </tr>
   </tbody>
 </table>
@@ -112,7 +112,7 @@ The drawer shows:
 2. outcome
 3. actor
 4. target kind
-5. request or event ids when available
+5. request, correlation, and event ids when available
 6. action name
 7. links to the operator or related record when safe and visible
 8. sanitized details

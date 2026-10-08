@@ -18,7 +18,7 @@ The page is a lifecycle and policy registry, not an analytics page. It shows dis
 
 Use the [API Key Observatory](/operators/api-key-observatory/) for read-only analytics scoped to one API key. Use the admin Stats page for Pool-level aggregate request, token, and cost analytics, and [Request logs](/operators/request-logs/) for request-level investigation, including API key context, outcomes, and available settled usage metadata.
 
-![API keys page overview](/operators/api-keys/api-keys-overview.png)
+[![API keys page overview](/operators/api-keys/api-keys-overview.png)](/operators/api-keys/api-keys-overview.png)
 
 ## What an API Key Controls
 
@@ -52,7 +52,7 @@ Keys are grouped by Pool. Each Pool registry has a compact identity rail and a l
   <tbody>
     <tr>
       <td>Credential</td>
-      <td>Operator display name and safe key prefix. The prefix helps identify a credential without exposing the full bearer token.</td>
+      <td>Operator display name and safe key prefix with a copy button. The prefix helps identify a credential without exposing the full bearer token. A key with Observatory access enabled shows an `Observatory` link under its name.</td>
     </tr>
     <tr>
       <td>Status</td>
@@ -73,13 +73,13 @@ Keys are grouped by Pool. Each Pool registry has a compact identity rail and a l
   </tbody>
 </table>
 
-Operator notes appear behind the small information icon when present. Keep notes operational and sanitized; do not store secrets, customer content, or raw keys in notes.
+Operator notes open from the `Notes` control under the key name when present. Keep notes operational and sanitized; do not store secrets, customer content, or raw keys in notes.
 
 ## Create API Key
 
 Click `Create API key` to open the policy wizard.
 
-![Create API key basics step](/operators/api-keys/api-keys-create-basics-dialog.png)
+[![Create API key basics step](/operators/api-keys/api-keys-create-basics-dialog.png)](/operators/api-keys/api-keys-create-basics-dialog.png)
 
 The wizard has five sections:
 
@@ -126,7 +126,7 @@ Expiry is optional. Use it for temporary automation or time-bounded access. Leav
 
 This capability does not replace runtime API-key permission. Runtime requests still use the key's active status, Pool, model policy, limits, expiry, and the Pool's routing eligibility. It also does not grant an instance-owner or instance-admin browser session, access to `/admin/*`, or visibility into other keys.
 
-Owners can manage the setting for their visible Pools. Instance admins need the existing `pool_api_key.manage` capability for the assigned Pool. The wizard shows the normalized value as `Dashboard access: Enabled` or `Dashboard access: Disabled`, and each key card shows a matching badge. The API-key page remains a lifecycle/policy registry: it does not grow usage totals or charts when dashboard access is enabled.
+Owners can manage the setting for their visible Pools. Instance admins need the existing `pool_api_key.manage` capability for the assigned Pool. The Basics step shows the capability as the `Observatory access` checkbox, the Review step reports it as `Enabled` or `Disabled`, and a key card shows an `Observatory` link when it is enabled. The API-key page remains a lifecycle/policy registry: it does not grow usage totals or charts when dashboard access is enabled.
 
 ## Open the API Key Observatory
 
@@ -154,9 +154,9 @@ Dashboard data is metadata-only. It excludes prompts, completions, file or media
 
 ## Models
 
-The Models step chooses model scope and optional enforced request fields.
+The Models step chooses model scope. The Enforcement step that follows it holds the optional enforced request fields.
 
-![Create API key models step](/operators/api-keys/api-keys-create-models-dialog.png)
+[![Create API key models step](/operators/api-keys/api-keys-create-models-dialog.png)](/operators/api-keys/api-keys-create-models-dialog.png)
 
 Model modes are:
 
@@ -187,7 +187,7 @@ Catalog models are derived from current routable model metadata. Manual model id
 
 A request for a model the key may not use returns `400 model_not_allowed` with `invalid_request_error` and `param: "model"` before reservation or upstream work, on every route and transport. The status is `400`, like the Codex backend's own refusal of a model the account cannot serve, because resending the same request cannot pass: the Codex client ends the turn on a `400`, while it resends a `403` several times and then switches the session from websocket to HTTPS. OpenAI SDKs retry neither status.
 
-Enforced request fields let the key override selected client request values:
+Enforced request fields, set in the Enforcement step, let the key override selected client request values:
 
 1. enforced model
 2. reasoning policy
@@ -217,7 +217,7 @@ Allow up to rejects rather than changes a disallowed request. An effort above th
 
 The Limits step separates key-wide concurrency from the default policy and one optional model override.
 
-![Create API key limits step](/operators/api-keys/api-keys-create-limits-dialog.png)
+[![Create API key limits step](/operators/api-keys/api-keys-create-limits-dialog.png)](/operators/api-keys/api-keys-create-limits-dialog.png)
 
 Default policy fields check:
 
@@ -269,7 +269,7 @@ Requests per minute count each committed execution reservation once at its origi
 
 The Review step shows the normalized effective policy before saving, including the selected Pool name, lifecycle settings, model access, enforced values, and configured limits.
 
-![Create API key review step](/operators/api-keys/api-keys-create-review-dialog.png)
+[![Create API key review step](/operators/api-keys/api-keys-create-review-dialog.png)](/operators/api-keys/api-keys-create-review-dialog.png)
 
 Resolve review errors before saving. The submit button stays disabled when required policy data is missing. The review summary is useful because it shows what the key will actually enforce after normalization, not only what the operator entered on the previous steps.
 
@@ -287,7 +287,7 @@ The Observatory login accepts the raw key only for the form exchange. It creates
 
 Open the dotted menu on a key row for lifecycle actions.
 
-![API key action menu](/operators/api-keys/api-keys-action-menu.png)
+[![API key action menu](/operators/api-keys/api-keys-action-menu.png)](/operators/api-keys/api-keys-action-menu.png)
 
 The current actions are:
 
