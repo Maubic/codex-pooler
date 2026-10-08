@@ -21,17 +21,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisiblePartialResendT
   import Ecto.Query
 
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
-    only: [gateway_setup: 1, public_websocket_connect!: 3, public_websocket_receive_text!: 3, public_websocket_send_text!: 4, start_public_endpoint!: 0, start_upstream: 1]
+    only: [gateway_setup: 1, public_websocket_connect!: 3, public_websocket_receive_text!: 3, public_websocket_send_text!: 4, register_unboxed_pool_cleanup!: 1, start_public_endpoint!: 0, start_upstream: 1]
 
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [model_serving_scope: 0, set_model_serving_mode!: 3]
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestClientRetryLink}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.CodexTurn
-  alias CodexPooler.Platform.ExecutionTerminalProofs
+  alias CodexPooler.Platform.{ExecutionTerminalProof, ExecutionTerminalProofs}
   alias CodexPooler.Repo
+  alias CodexPooler.UnboxedFixture
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.CleanupProofRace
+  alias CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario
 
   @timeout_ms 15_000
   @poll_ms 100
@@ -144,6 +146,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisiblePartialResendT
     @tag transport: transport
     @tag slow: "a real socket cut after a completed item, the stopped task's proof published before the cleanup interrupts, and the resend"
     test "owner forwarding false: the #{transport} resend after a completed item is chained when the stopped task's end is proven before the cleanup interrupts it", %{transport: transport} do
+      # The recovery runner's database deadline must own its connection, as in
+      # production, rather than disconnect every actor's shared transaction.
+      OwnerCrashAfterSendScenario.per_process_connections!()
       start_supervised!({CodexPooler.Accounting.ExecutionRecovery, enabled: true})
 
       %{setup: setup, upstream: upstream, request_id: request_id, resend: resend, proven_attempt_id: attempt_id} =
@@ -177,8 +182,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisiblePartialResendT
         ])
       )
 
+    scope = model_serving_scope()
     setup = gateway_setup(upstream)
-    _revision = set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    if Keyword.get(opts, :proof_before_cleanup, false), do: register_unboxed_pool_cleanup!(setup)
+    _revision = set_model_serving_mode!(scope, setup, "lite")
     turn_state = Ecto.UUID.generate()
     raw_payload = CodexPooler.JSON.encode!(native_turn_payload(Ecto.UUID.generate(), setup.model.exposed_model_id))
     port = start_public_endpoint!()
@@ -196,6 +203,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.PostvisiblePartialResendT
     assert_receive {:fake_upstream_frame_barrier, ^hold_at, _handler, ^release_ref}, @timeout_ms
     conn = receive_until!(conn, websocket, ref, last)
     assert [%Request{id: request_id}] = pool_requests(setup.pool.id)
+
+    if Keyword.get(opts, :proof_before_cleanup, false) do
+      proofs_before = Repo.all(from(proof in ExecutionTerminalProof, select: proof.execution_id))
+      # CleanupProofRace registers the publisher's stop afterwards, so it runs
+      # before deleting any proofs the publisher committed during this test.
+      UnboxedFixture.register_unboxed_cleanup!(fn -> Repo.delete_all(from(proof in ExecutionTerminalProof, where: proof.execution_id not in ^proofs_before)) end)
+    end
+
     {receipt, proven_attempt_id} = CleanupProofRace.around_cut(opts, request_id, fn -> close_and_await_receipt!(conn, request_id, cut, provider, upstream, release_ref) end)
     _settled = await_settled!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
 
