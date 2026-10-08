@@ -7,6 +7,54 @@ defmodule CodexPooler.Accounting.UpstreamUsageReadModelTest do
   alias CodexPooler.Upstreams.Quota.AccountAvailabilityStore
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
 
+  test "public usage reset countdowns share the snapshot clock across account and additional windows" do
+    as_of = ~U[2026-09-01 12:00:00.000000Z]
+    pool = pool_fixture()
+    %{identity: identity} = upstream_assignment_fixture(pool)
+
+    windows =
+      for {quota_key, window_kind, window_minutes, reset_after} <- [
+            {"account", "primary", 300, 7_200},
+            {"account", "secondary", 10_080, 86_400},
+            {"sample_feature", "primary", 300, 3_600},
+            {"sample_feature", "secondary", 10_080, 172_800}
+          ] do
+        %{
+          quota_key: quota_key,
+          window_kind: window_kind,
+          window_minutes: window_minutes,
+          used_percent: Decimal.new(25),
+          observed_at: as_of,
+          reset_at: DateTime.add(as_of, reset_after, :second),
+          source: "codex_usage_api",
+          freshness_state: "fresh"
+        }
+      end
+
+    assert {:ok, _} = QuotaWindows.upsert_quota_windows(identity, windows)
+    assert {:ok, usage} = Accounting.build_codex_usage_for_pool(pool, as_of: as_of)
+    assert {:ok, ^usage} = Accounting.build_codex_usage_for_pool(pool, as_of: as_of)
+
+    assert {:ok, ^usage} =
+             Accounting.build_codex_usage_for_upstream_identity(identity, as_of: as_of)
+
+    assert [%{quota_key: "sample_feature", rate_limit: additional}] = usage.additional_rate_limits
+    snapshots = [usage.rate_limit.primary_window, usage.rate_limit.secondary_window, additional.primary_window, additional.secondary_window]
+
+    assert Enum.map(snapshots, & &1.reset_after_seconds) == [7_200, 86_400, 3_600, 172_800]
+    assert Enum.map(snapshots, & &1.reset_at) == Enum.map(windows, &DateTime.to_unix(&1.reset_at))
+    assert Enum.map(snapshots, & &1.limit_window_seconds) == [18_000, 604_800, 18_000, 604_800]
+    assert Enum.map(snapshots, & &1.used_percent) == [25, 25, 25, 25]
+
+    assert {:ok, later_usage} =
+             Accounting.build_codex_usage_for_pool(pool, as_of: DateTime.add(as_of, 61, :second))
+
+    assert [%{rate_limit: later_additional}] = later_usage.additional_rate_limits
+    later_snapshots = [later_usage.rate_limit.primary_window, later_usage.rate_limit.secondary_window, later_additional.primary_window, later_additional.secondary_window]
+
+    assert later_snapshots == Enum.map(snapshots, &Map.update!(&1, :reset_after_seconds, fn seconds -> seconds - 61 end))
+  end
+
   test "upstream usage preserves current permission at rounded weekly exhaustion" do
     as_of = DateTime.utc_now() |> DateTime.truncate(:second)
     pool = pool_fixture()

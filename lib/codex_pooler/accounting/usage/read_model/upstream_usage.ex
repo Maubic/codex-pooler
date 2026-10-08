@@ -119,7 +119,7 @@ defmodule CodexPooler.Accounting.UsageReadModel.UpstreamUsage do
   end
 
   defp build_codex_usage_for_identity(%UpstreamIdentity{} = identity, snapshot, opts) do
-    as_of = Keyword.get(opts, :as_of, now())
+    as_of = Keyword.get(opts, :as_of, snapshot.as_of)
     windows = RoutingQuotaSnapshot.effective_windows(snapshot)
     {primary, secondary} = UsageResponses.account_usage_windows(windows, as_of)
     additional_rate_limits = UsageResponses.additional_codex_rate_limits(windows, as_of)
@@ -247,7 +247,7 @@ defmodule CodexPooler.Accounting.UsageReadModel.UpstreamUsage do
   end
 
   defp account_rate_limit(snapshot, primary, secondary) do
-    rate_limit = UsageResponses.codex_rate_limit(primary, secondary)
+    rate_limit = UsageResponses.codex_rate_limit(primary, secondary, snapshot.as_of)
     routing = QuotaWindows.routing_quota_eligibility_from_snapshot(snapshot, account_only: true)
 
     cond do

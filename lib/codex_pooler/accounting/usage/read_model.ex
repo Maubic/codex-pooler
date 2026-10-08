@@ -125,6 +125,9 @@ defmodule CodexPooler.Accounting.UsageReadModel do
   defdelegate build_codex_usage_for_upstream_identity(identity, opts \\ []), to: UpstreamUsage
 
   defp build_local_codex_usage_for_api_key(pool_or_id, api_key_or_id, opts) do
+    as_of = Keyword.get(opts, :as_of, now())
+    opts = Keyword.put(opts, :as_of, as_of)
+
     with {:ok, usage} <- build_api_key_self_usage(pool_or_id, api_key_or_id, opts) do
       primary =
         Enum.find(
@@ -137,7 +140,7 @@ defmodule CodexPooler.Accounting.UsageReadModel do
       usage =
         %{
           plan_type: "api_key",
-          rate_limit: UsageResponses.codex_rate_limit(primary, nil)
+          rate_limit: UsageResponses.codex_rate_limit(primary, nil, as_of)
         }
 
       {:ok, if(is_nil(credits), do: usage, else: Map.put(usage, :credits, credits))}
