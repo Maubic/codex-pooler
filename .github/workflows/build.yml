@@ -223,3 +223,16 @@ jobs:
             dist/codex-pooler-image-digests-*.txt \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
+
+      - name: Wake the Helm chart update
+        if: steps.publication.outputs.ready == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.HELM_WAKE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "HELM_WAKE_TOKEN is not configured; the chart repository will notice the image on its own schedule." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh workflow run wake-renovate.yml --repo icoretech/helm

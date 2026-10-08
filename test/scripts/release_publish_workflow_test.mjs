@@ -51,6 +51,19 @@ test("publication queues every pending release and recovery steps also run for r
 	);
 });
 
+test("waking the chart repository follows the image and never blocks publication", () => {
+	const wake = step("Wake the Helm chart update");
+	assert.match(wake, /if: steps\.publication\.outputs\.ready == 'true'\n/);
+	assert.match(wake, /continue-on-error: true/);
+	assert.match(wake, /HELM_WAKE_TOKEN/);
+	assert.match(wake, /gh workflow run wake-renovate\.yml --repo icoretech\/helm/);
+	assert.ok(
+		workflow.indexOf("- name: Wake the Helm chart update") >
+			workflow.indexOf("- name: Upload release assets"),
+		"the wake must come after the image and its release assets",
+	);
+});
+
 test("the actual release packaging step produces a readable archive, checksum and digest receipt on recovery", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "release-assets-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
