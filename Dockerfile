@@ -45,6 +45,7 @@ RUN mix local.hex --force && mix local.rebar --force
 
 COPY mix.exs mix.lock ./
 COPY config config
+COPY vendor vendor
 RUN mix deps.get --only prod && mix deps.compile
 RUN for attempt in 1 2 3; do \
     mix tailwind.install && exit 0; \

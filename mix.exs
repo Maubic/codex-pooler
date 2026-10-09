@@ -62,9 +62,9 @@ defmodule CodexPooler.MixProject do
     [
       {:argon2_elixir, "== 4.1.3"},
       {:phoenix, "== 1.8.15"},
-      {:phoenix_ecto, "== 4.7.0"},
+      {:phoenix_ecto, path: "vendor/phoenix_ecto", override: true},
       {:ecto_sql, "== 3.14.0"},
-      {:postgrex, "== 0.22.4"},
+      {:postgrex, path: "vendor/postgrex", override: true},
       {:phoenix_html, "== 4.3.0"},
       {:phoenix_live_reload, "== 1.7.0", only: :dev},
       {:phoenix_live_view, "== 1.2.12"},
@@ -75,7 +75,7 @@ defmodule CodexPooler.MixProject do
       {:tailwind, "== 0.5.1", runtime: Mix.env() == :dev},
       {:heroicons, github: "tailwindlabs/heroicons", tag: "v2.2.0", sparse: "optimized", app: false, compile: false, depth: 1},
       {:swoosh, "== 1.28.1"},
-      {:gen_smtp, "== 1.3.0"},
+      {:gen_smtp, path: "vendor/gen_smtp", override: true},
       {:req, "== 0.7.5"},
       # Finch 0.24 closes an HTTP/1 connection after a request or response error before pooling it.
       # Mint 1.11 no longer closes one after a receive timeout, so an older Finch would pool it with the
@@ -84,7 +84,7 @@ defmodule CodexPooler.MixProject do
       {:mint, "== 1.11.0"},
       {:mint_web_socket, "== 1.0.6"},
       {:telemetry_metrics, "== 1.2.0"},
-      {:telemetry_metrics_prometheus_core, "== 1.2.1"},
+      {:telemetry_metrics_prometheus_core, path: "vendor/telemetry_metrics_prometheus_core", override: true},
       {:telemetry_poller, "== 1.3.0"},
       {:zoneinfo, "== 0.1.9"},
       {:tz, "== 0.28.4"},
@@ -92,7 +92,7 @@ defmodule CodexPooler.MixProject do
       {:dialyxir, "== 1.4.8", only: [:dev, :test], runtime: false},
       {:sobelow, "== 0.16.0", only: [:dev, :test], runtime: false},
       {:six, "== 0.4.2", only: :test},
-      {:gettext, "== 1.0.2"},
+      {:gettext, path: "vendor/gettext", override: true},
       {:dns_cluster, "== 0.3.1"},
       {:websock, "== 0.5.3"},
       {:websock_adapter, "== 0.6.0"},

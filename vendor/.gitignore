@@ -1,0 +1,2 @@
+/gen_smtp/_build/
+/gen_smtp/src/smtp_rfc822_parse.erl

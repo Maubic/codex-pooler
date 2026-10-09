@@ -1,0 +1,240 @@
+{
+  "license_supplement": {
+    "path": "APACHE-2.0.txt",
+    "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  "packages": [
+    {
+      "package": "gettext",
+      "version": "1.0.2",
+      "url": "https://repo.hex.pm/tarballs/gettext-1.0.2.tar",
+      "archive_sha256": "eab805501886802071ad290714515c8c4a17196ea76e5afc9d06ca85fb1bfeb3",
+      "hex_inner_checksum": "5457e1fd3f4abe47b0e13ff85086aabae760497a3497909b8473e0acee57673b",
+      "files": {
+        "CHANGELOG.md": "3b7d348e8a35264c6cbc7cc2d43c79bd5b24d6dfca8fbf111227a517192608e8",
+        "README.md": "d3cf620b3ead5cae048dd70201560a7dd164a5c71ee27bc627704031895376d2",
+        "lib/gettext/application.ex": "07e878257f6d23f1993fc14f754349f111101c61a2c2fd64f0145c1f90838fcf",
+        "lib/gettext/backend.ex": "34d4a8cec25619a8bd633fee35c1ae311ffd61b9c95b9b83591ee79343b7b101",
+        "lib/gettext/compiler.ex": "69d3b6f804b23adfe25458cd099dc4d0e533dd30771fb623531ba8bd7895714c",
+        "lib/gettext/error.ex": "c3caa518c8e2a696efea45f7aa3cec2d7e98206f82118ef45418c401780f16b2",
+        "lib/gettext/extractor.ex": "329dc6f03020496c6e92e043a2ec369b15d2fe79dea90b160ae134413c8c4b03",
+        "lib/gettext/extractor_agent.ex": "16f33c47906f52145515a9a4670b52498107a5349559020a582ea2f6174f4e53",
+        "lib/gettext/fuzzy.ex": "13885895d708ae346d0c82046a4a2e763fb46bb75d4ff600a7420f40ae803936",
+        "lib/gettext/interpolation/default.ex": "bbe0b0db4a9048ce501cedaab677a21e8a3f16f0c9cf67031e03fece9e15c293",
+        "lib/gettext/interpolation.ex": "b9f748ab23788587aebb648e6b2228b3f81f01a47576a4fc1bf62053a12a9b54",
+        "lib/gettext/macros.ex": "20536b5eaad42cc65ee70556888c054f7e79a69b18636ee0794b0955a27e0781",
+        "lib/gettext/merger.ex": "c7b006703ba63981081ae1ea77167b9ee0e6da1bdf15b8e628b74fdb6a98fc5c",
+        "lib/gettext/missing_bindings_error.ex": "2488d74020a748fa810c1ce13e023122588266d70721ded784817a511ded560f",
+        "lib/gettext/plural.ex": "44ef3a30a0dac98f706366b2b642f40b5c9da9953a1981e3257510e1917e312c",
+        "lib/gettext/plural_form_error.ex": "80338d27372f9d881a4b04e951aeea6492695be095265841cae6f3400f62ea78",
+        "lib/gettext.ex": "de0f4cc99615d5d0b22f7db4779fe992b249384245fb32f7bc7d8c26dd39b676",
+        "lib/mix/tasks/compile.gettext.ex": "6dfafa098281afe9021c76b9240febc50d7ac511e1a567107d155759f4dda263",
+        "lib/mix/tasks/gettext.extract.ex": "a97df99d39e834dde5194eac9219d523bd1135ea077f458831ff5c32f54ce276",
+        "lib/mix/tasks/gettext.merge.ex": "4fab750b6e0767df139e0a5a6fa3d84a0a356387e1f9c8256aec7b2e27458259",
+        "mix.exs": "0c99da80f8402b4374825df5e3af4c1a9ef60ae8eb064a49afe99e055b44c988"
+      },
+      "patched_files": {
+        "lib/gettext/compiler.ex": "ffe72baa01b01101e572d4883f68b8b94d6111ef08386b980abf2bd13bc6afc9",
+        "lib/gettext/extractor.ex": "3af681ac04fb13ea4a451499b437bc3d80bbe415ad08be9a029c6bc94ea26bc1",
+        "lib/gettext.ex": "f8bc733f27f63769069b089c511d3c7540fa08b6a85f70fcb6279fb61d21aa5f",
+        "mix.exs": "1172ede28135ed4cc9ddc7b84b8eed59df7ed124c9b48e5bb6d626eb60728b3b"
+      },
+      "patch_origins": [
+        "https://github.com/elixir-gettext/gettext/commit/3163e3cbf6c015d9e37efa08adf42dc3e907f58b"
+      ],
+      "license_notice": "README.md"
+    },
+    {
+      "package": "postgrex",
+      "version": "0.22.4",
+      "url": "https://repo.hex.pm/tarballs/postgrex-0.22.4.tar",
+      "archive_sha256": "4aae45a2d60e35b04eea2602440be152fae332901f1fc7a60fc7cb7f0f9a9c5a",
+      "hex_inner_checksum": "d271f595dfd25230b6398354e19d17bb5e2d20130fd2d9bdca7e15f125d43552",
+      "files": {
+        ".formatter.exs": "26187e4fcbd555ab8f60891da85946b2ff3cccb815fb6334df0ff3d53c1be7f9",
+        "CHANGELOG.md": "d096445bf1974eadb2a4aa098c6b74c4f072ef27192de610b2f5ed2ec6206093",
+        "README.md": "aa0fbc736c59d4a2f647e637d393f3776145ca7e107e6673786b10ec6ec19156",
+        "lib/postgrex/app.ex": "6e5fb68e31613ee19cd14d67c6855b788b3162b66028359ce8f3494de6a40aec",
+        "lib/postgrex/binary_extension.ex": "3f7be27ee5a6de069c49058efcbb5e2a38264ce4981bd517fc91867882364267",
+        "lib/postgrex/binary_utils.ex": "cb6a20991a0051da4483cb4ec8aebaa41d510fac8f79f57b4995c4297c3b6a76",
+        "lib/postgrex/builtins.ex": "2fe8a8d29ffd9cb1013b08b33e527869930c01a4581b8625a04b8f0d476c7547",
+        "lib/postgrex/default_types.ex": "b3e5cc8af25c4283ad3baf70947d16667bb59fb3b793b9f760c56cc8c89f9c5c",
+        "lib/postgrex/errcodes.txt": "7d4680880bc979d6fc95525e0a4721bcc55e0fc4b1218c0ea4e35bcc8519777f",
+        "lib/postgrex/error.ex": "048ebb78b1198abf5d52c36753c59008880a7e959db6390e3222e50c82359206",
+        "lib/postgrex/error_code.ex": "98fc82a7c86b85da3db6d0a6d23e1b9fea6033c1f1c0ebd9222347a5484a8883",
+        "lib/postgrex/extension.ex": "fe4a0bf42b9b642c53a07402c01bd0ad51bb26baa655d64761e12a103ebd96b1",
+        "lib/postgrex/extensions/array.ex": "73e179f2930c70f8f8abf0abe0eb38957c33a7d24de3c9e8cb0ed8e6e1c48187",
+        "lib/postgrex/extensions/bit_string.ex": "b369ca28c568f47507afd3d611715a4b7676297c8507e59fc8adcce25a2b9028",
+        "lib/postgrex/extensions/bool.ex": "4696d6b540efaa0bb77cac17b854f58fd2df52d179fbba3192edc25d4751dcf4",
+        "lib/postgrex/extensions/box.ex": "ff36161d9b09f0d0563203cdca030bde11394d1ef98a10ad7544dd9609d361e4",
+        "lib/postgrex/extensions/circle.ex": "0c8827c27ee538f4c7441400016e54694cc02d9e780acb2fec338460118ac5c2",
+        "lib/postgrex/extensions/date.ex": "e57f684afc34532dcbf5a5c404b702790346e9130f8a74a2efdf8225a9badf9c",
+        "lib/postgrex/extensions/float4.ex": "bc66396f682c9137a1788614b9123114e19e337292e1d4d7266b81d2b68403a0",
+        "lib/postgrex/extensions/float8.ex": "e50ec67015fc36b0e43bbf448a06deedc3edd9bdd96734778780404bb5061b07",
+        "lib/postgrex/extensions/hstore.ex": "5f0e178293c85ee29c658f9c219719d7d9635ca628b09c451d19ffd1efd2280d",
+        "lib/postgrex/extensions/inet.ex": "3e569df8efcdd5860954d8e35591ae56c08b0b78a5b51b442fe61dd9fbc2b585",
+        "lib/postgrex/extensions/int2.ex": "4d8850d6d98a1da244ebc608d12fa6e6c6452f3205ddd32349bf1169255c6636",
+        "lib/postgrex/extensions/int4.ex": "e25090964f306a526b85d700fd927359811365cb5dc3ef7cac6e4e78e006038a",
+        "lib/postgrex/extensions/int8.ex": "a846a9fdcb970bf190d8bd0815ac2f508f4fa34b79b9e6450cb64b038b60fd9b",
+        "lib/postgrex/extensions/interval.ex": "9d93e824717e2b5000530be7a974b6fcb668278683f6696fca1ed73207fe3d73",
+        "lib/postgrex/extensions/json.ex": "0c45f4b5eb92add6f5fa150439b744eda9a204c055701bb1fea5cfde1512f905",
+        "lib/postgrex/extensions/jsonb.ex": "dcab62119f86b6ce60f061af9590e91c8d592968a34d62f59ab432da43d33875",
+        "lib/postgrex/extensions/line.ex": "3a3f818887e01a3a7762d2f434de1284ac98de016afeda5f39b48bd68ee6bd8d",
+        "lib/postgrex/extensions/line_segment.ex": "dc7bb14c1a43988c4da799784fb22ec45992e7c14ed2010b7f1a94992fdd248f",
+        "lib/postgrex/extensions/lquery.ex": "e9838bb36b1867d21f7927df6fff0c1c723d9578363c02a3e5a3e269cb3bc230",
+        "lib/postgrex/extensions/ltree.ex": "c898b51b29074007ee0d2aebf2c992de45f38ac230d38fc1b4220fb4cc80ccec",
+        "lib/postgrex/extensions/ltxtquery.ex": "e6e874d408d745715f99a7e5c55561402993b0bdb3c948d71b537c0ad89fcd82",
+        "lib/postgrex/extensions/macaddr.ex": "f39d846abb0109db3283468f59a45a16b44e9677a65f7307124ca6cf9edb47ef",
+        "lib/postgrex/extensions/multirange.ex": "63328db52be90905f6477f05af9e9bf6284cbe23b8e26e0985144d66a6c5c060",
+        "lib/postgrex/extensions/name.ex": "33e9aa06926025cfc56dd51a7871fed757e6f78d7e574b9bebd2101fec5951dd",
+        "lib/postgrex/extensions/numeric.ex": "94ef119275999007b9f5823b6a33446afa342e01864ce77f29b6541b6f425b14",
+        "lib/postgrex/extensions/oid.ex": "30e4193bcf7b13d3038546a01adc1103f7cc20e2b6281506e65a30c03d607383",
+        "lib/postgrex/extensions/path.ex": "890b17704f203aea03388c642b3e04aaf2e99803fb435165debcbed459be13b0",
+        "lib/postgrex/extensions/point.ex": "4d3506a79aa0242027056d6d69161e63614315b1f073ab05a1d93dedd5a54fc6",
+        "lib/postgrex/extensions/polygon.ex": "63a7af92ac411f960456b29e48b2b13ae6094bd9abb1d9b8ceed287545582db3",
+        "lib/postgrex/extensions/range.ex": "83e211f4fcf847f2761eea4f1f2e57a06a80292b75e8f32ff7e3d944abd5149c",
+        "lib/postgrex/extensions/raw.ex": "0c548d843f72f7481789268c5a1b74375fda50d634656b413f4612f2adae9cfa",
+        "lib/postgrex/extensions/record.ex": "db54eea06eaeee2165531707b9a247163617cb83609e8f2f9eb4ad3f29a4426a",
+        "lib/postgrex/extensions/tid.ex": "128d0de22aef36050d88ba55f056aec0990701ed014bed3b9a55786a521f3c80",
+        "lib/postgrex/extensions/time.ex": "7849ace94aa479ed13dc20a0eca9e711ecc5d0b98a93c1fe732ac4f7cfba8d73",
+        "lib/postgrex/extensions/timestamp.ex": "d89c0b35569b703a567976480d4e095343df7d0dc72264762014f33b6a846cf8",
+        "lib/postgrex/extensions/timestamptz.ex": "9d49cecf1ba41c6512da00c85df59c8cc47f5ab74db050e5d265e7e6eb823c2f",
+        "lib/postgrex/extensions/timetz.ex": "c23430be7b54eff9ccaea21f57b1605b805c8a67553e1c7d3c42c977c5592288",
+        "lib/postgrex/extensions/tsvector.ex": "04514664de1a713bf932c7d9eb2e6e26345324ef256e5dd8b42bc2c631839a5e",
+        "lib/postgrex/extensions/uuid.ex": "3a0ea8ab0e5fc37024f01c0cae5b02ff2dd15234a0408680497a2f2389c747c5",
+        "lib/postgrex/extensions/void_binary.ex": "5c7d37486b657c0ede7294e636c0be23453b75a6a8edf6e0b023cfc6b360164b",
+        "lib/postgrex/extensions/void_text.ex": "659511e87bda59ae0c727745baf9eda361453d125a82d936b83fd4110744ccad",
+        "lib/postgrex/extensions/xid8.ex": "d3a9f0dc43356205f6f3b1a3dd646ff5c4eabf8701b71d9be7d5a58d8d8ae15d",
+        "lib/postgrex/messages.ex": "ee9c0a898d5b14e3439f93502a609344b98be57547d924b415e9e12e44575879",
+        "lib/postgrex/notifications.ex": "e569349b0cae906ad0941b578b94a65aa88c0a2465a40a7b756143d20b318e5b",
+        "lib/postgrex/parameters.ex": "ad950da5c07ec382668ea9af40748bebcbc6fb8eef1d8f52895eb46d388be9d9",
+        "lib/postgrex/protocol.ex": "b9de5d55f6e4928742b6d1f33e1da8f5963c779534ee22f08ffc780a5b9ef8e5",
+        "lib/postgrex/query.ex": "e1129135a6d1f02be7225ca8d869c35f8da0afa53d6a9c15f25fe98cd0d6f4db",
+        "lib/postgrex/replication_connection.ex": "cf4a377ff49a7b0017b9b4de37136b92bda0a8ea8f423a39ad3e85b7ec9638a7",
+        "lib/postgrex/result.ex": "ed637bd589a8f7ceb0aad53c0e549d7be0a8c30de151ec1a4d9302a2f48efc94",
+        "lib/postgrex/scram/locked_cache.ex": "0c49a3859c79139dcf93032c8bd9e3041a329f1aec4a557020df115657e7a307",
+        "lib/postgrex/scram.ex": "9342032983a186988f3bab1d4480ad9e63564ac3980203ad57a2ccbfc1b92cd1",
+        "lib/postgrex/simple_connection.ex": "171a91aaca6764d7bb7cd503a1710273b89d2a148378b84a684b4ef65adf019a",
+        "lib/postgrex/stream.ex": "262db7e94ab809d1c59299ed37fb2c0d55a2fb92392a2fb4ad7e579cd37dc98c",
+        "lib/postgrex/super_extension.ex": "53b0c0e872d02f228e8e5a1faac153bfd2eff4063f70ad9df019366d15cc3e7a",
+        "lib/postgrex/text_query.ex": "a5a5c0a9e10d2621a41f49a09c7c86c92bef66cf03ab91c306f0f4c0b31d2b7e",
+        "lib/postgrex/type_info.ex": "40ed92e482e183ef037cd1b1f2c9c191a4236ef16689b0c4e6f439b09db7a51c",
+        "lib/postgrex/type_module.ex": "ae89436c6e293b0fc1e173422ac081890cee1e7429f9689220f233adb4598a81",
+        "lib/postgrex/type_server.ex": "cfd64f366f98872546f003e27d02e2568c05b1a24bf8b8b8884ec649d4c5eb11",
+        "lib/postgrex/type_supervisor.ex": "a3c10ceafaf45b53276b69066ccfbfb907338412861c83079444c0f08811fc18",
+        "lib/postgrex/types.ex": "a2d27bee6e173ea78521fd5db631e247a2137341228a25dc5e0cbc90cb322ea4",
+        "lib/postgrex/utils.ex": "7301c33c12212c3b3bf52433205c67086fb3d7fa60cb2a22696de3a4b97cf2a5",
+        "lib/postgrex.ex": "9b4c0a85a3fb4c83af7438ba7789ba4db88c6912f5624c52dbac298bef736509",
+        "mix.exs": "63d6f2696a3df8677167f571bbd74da7fb93bc995c17a4aa0f31e16782d5720c"
+      },
+      "patched_files": {
+        "mix.exs": "ef4cbf17ec05c773bb55301b3e9773f2b2514ef6a59f8130d47d7f53ed9514a9"
+      },
+      "patch_origins": [
+        "https://github.com/elixir-ecto/postgrex/commit/4fb0e42d722853c61706a949021f6727fadcfc0b"
+      ],
+      "license_notice": "README.md"
+    },
+    {
+      "package": "phoenix_ecto",
+      "version": "4.7.0",
+      "url": "https://repo.hex.pm/tarballs/phoenix_ecto-4.7.0.tar",
+      "archive_sha256": "1d75011e4254cb4ddf823e81823a9629559a1be93b4321a6a5f11a5306fbf4cc",
+      "hex_inner_checksum": "75c4b9dfb3efdc42aec2bd5f8bccd978aca0651dbcbc7a3f362ea5d9d43153c6",
+      "files": {
+        ".formatter.exs": "adc6460c7e991ab750ff6aaf63db7912f56088c0ae440b131ae2bc927cc9cd35",
+        "CHANGELOG.md": "daa7d14a87e463b549fcb5dc3fc7435b5e1dee914ce9cb76f54162ff0feef50d",
+        "LICENSE": "dcaf5543c243163a31bfcdb83d6a6fe0b1393f4229eb0855c0105aace586bffe",
+        "README.md": "3280eb53fa7cc015f38f69381eb70d2ecb15b21f06ed64e06a94572441efb7c9",
+        "lib/phoenix_ecto/check_repo_status.ex": "c87701d9eaee6715e8be46d329f6d580b990b71c6e5748dc27374a844162659f",
+        "lib/phoenix_ecto/exceptions.ex": "318885db2dd1be440c5e35bd3b2a961fae2077c0366d4b4fc2bb5f86bee23ad1",
+        "lib/phoenix_ecto/html.ex": "63b6ea0d184353c1fea73d18fd70e721a7aab6eeddea17c5851e79529dd51450",
+        "lib/phoenix_ecto/plug.ex": "30aef18e076846082cf0e647fbe3848425e9640712644b807be836e7e298d47c",
+        "lib/phoenix_ecto/sql/sandbox.ex": "bd002565f87a2498241ace32119036118342e52ac8394d30a9c7e0334802bdac",
+        "lib/phoenix_ecto/sql/sandbox_session.ex": "e6672ed2879a79956baca769a020042bb36e80e06706840aae5c1e8007a39a81",
+        "lib/phoenix_ecto.ex": "00171301a03a7cf876b65265491eed867cc83179745454250ac1cc141f972ff4",
+        "mix.exs": "222fc543b1ac17a13464a770a77b8324d36e2040fbbf9fef012731cdb9c3e369"
+      },
+      "patched_files": {
+        "mix.exs": "c811e84c4abe230b4e7e2c6fd5150588d3c99ade8a86a968b5c1356879944df4"
+      },
+      "patch_origins": [
+        "https://github.com/phoenixframework/phoenix_ecto/commit/d0b02063159762791982c0d44beff411b61cc5f7"
+      ],
+      "license_notice": "LICENSE"
+    },
+    {
+      "package": "telemetry_metrics_prometheus_core",
+      "version": "1.2.1",
+      "url": "https://repo.hex.pm/tarballs/telemetry_metrics_prometheus_core-1.2.1.tar",
+      "archive_sha256": "5e2c599da4983c4f88a33e9571f1458bf98b0cf6ba930f1dc3a6e8cf45d5afb6",
+      "hex_inner_checksum": "c9755987d7b959b557084e6990990cb96a50d6482c683fb9622a63837f3cd3d8",
+      "files": {
+        ".formatter.exs": "a46ecd2cb12fd54c0cf0928c72fb10bef329b3f72b49df9bef621c3370734bc5",
+        "CHANGELOG.md": "7aa3416307bae77fbb3fb81722ab65358115b6422e0783bd65ff0f4070183aa8",
+        "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+        "README.md": "409d2db99627d4ed04937610e8ca89237229f0b236c4126d5863b6e903e58f20",
+        "lib/core/aggregator.ex": "2139da55ba62a07d566fbcf5a761365992ab2bd0920c28d1497f8e289b882f5c",
+        "lib/core/counter.ex": "da69518ae06427ea61398553a0ac8e97405650bfd2be4ebb2dc1f28eb27908ae",
+        "lib/core/distribution.ex": "ca1a81f924df568f63cd086c1a4e1dc2768804954e68ce961e61b78d870fe40a",
+        "lib/core/event_handler.ex": "9f333cda8996a82f514adbc7253d8742ee54a639ef0cc1b318e7cac6ff8c447b",
+        "lib/core/exporter.ex": "0cee2108b53f6bd800fa3ecfbbf4cc649a5b91135facf81f7422edd61350967e",
+        "lib/core/last_value.ex": "b31b6ad51095ddf07e1a0f18518013185af1e4175c45e92410a1e5a716eb9857",
+        "lib/core/registry.ex": "8717aba275de49b1f7108ad0866c6ecd35b97819f9144e8b7aa1aacd09a2d963",
+        "lib/core/sum.ex": "efb7e1eee1228ae5f501ab99d37afe67ca9d0dafe3e3e71cd733a16aeabd8c3a",
+        "lib/core.ex": "934011f0d21b5545e0a08e1a5b6c331df1b5356ee199ac3c39f16fd8ced882b2",
+        "mix.exs": "df4a21c23229a3c83309e06b3a1e4a8d751f6acc689013451674b11db05684fa"
+      },
+      "patched_files": {
+        "lib/core/registry.ex": "de88838eb36f344b81892fdec1f3a51ede9aea080de015911e755ea893e6f9c9",
+        "lib/core.ex": "5696d5d477d772200c9fd06e4ebcc2a731e8dd1693cd7f12256c05b2abe4d0cf"
+      },
+      "patch_origins": [
+        "https://github.com/beam-telemetry/telemetry_metrics_prometheus_core/blob/fe82cc5457fb7a769e195ddd3586c492e72072ff/lib/core/registry.ex"
+      ],
+      "license_notice": "LICENSE"
+    },
+    {
+      "package": "gen_smtp",
+      "version": "1.3.0",
+      "url": "https://repo.hex.pm/tarballs/gen_smtp-1.3.0.tar",
+      "archive_sha256": "0b73fbf069864ecbce02fe653b16d3f35fd889d0fdd4e14527675565c39d84e6",
+      "hex_inner_checksum": "62c3d91f0dcf6ce9db71bcb6881d7ad0d1d834c7f38c13fa8e952f4104a8442e",
+      "files": {
+        "LICENSE": "87cff0c8b7a957427363e36976e31606459d136d7908d6b398ecdadaf5f93965",
+        "README.md": "d93743389d465a913549340523e80ead3aae247ac5e32c44d868b75b855e3be4",
+        "rebar.config": "2aaa1821aeb633109523c57ce688813ff5bc9a497f692d3f7b5d7f331077290e",
+        "rebar.lock": "fcf1686885200f45c10e726c8980571f42ecd9fea72a647706c626e05a85c798",
+        "src/binstr.erl": "45ce5c4a3c453314d0b65d4f81edd477147bb8a046af7d2e668727a8da7a021e",
+        "src/gen_smtp.app.src": "816685e0297f1bb62b78cb23b2c730e6d61b254a3f70a75f4973b72258df5c62",
+        "src/gen_smtp_client.erl": "a92c74a1cb3514139ed7544d9effd646bae97e329d7981c6a119a4014e6cfbda",
+        "src/gen_smtp_server.erl": "9ddec4276f5a650c2c68e582f6e4756c661fc707bdb9c0c0b68374ec6e071e07",
+        "src/gen_smtp_server_session.erl": "a91d9ed6334452d95abc08e4dc5938cf3250602453a930fdf34e4fc27df3d7dd",
+        "src/mimemail.erl": "b8b1d85f875003a85854954fdabe03f39abfa70b2912bf964378c648c238a904",
+        "src/smtp_rfc5322_parse.erl": "2389e6a08b873585c2e77c75d9aa03d83baac163cd105287b24e7c03c44d6f3c",
+        "src/smtp_rfc5322_parse.yrl": "61f2f35112fcb00470e6e6aeeeae49022b33222931cc53179234b644219dd1ab",
+        "src/smtp_rfc5322_scan.erl": "440a391904e2ca0fab7338028d0fcfa1cbcded1b3e7dd2fbc932a0d3f5093904",
+        "src/smtp_rfc5322_scan.xrl": "25287a48378ce012eb46ff6db0dddd016083afa24537c4c305a950f9ea82cfc4",
+        "src/smtp_rfc822_parse.yrl": "f193c8779091d09d934eef7c4589c0792def9fbc96aae61c328c28e8d491d26d",
+        "src/smtp_server_example.erl": "757e735f80950d300fc52ef9b232954a571219c9a6d0478357edd19d20df23c0",
+        "src/smtp_socket.erl": "8f7fe45ceb2c43e78e300bb1302ff509e7839b5f9d15c6ce55b67bd36fea3a10",
+        "src/smtp_util.erl": "59a16453aec8e2e055c80eb5c48df9d5c93f1be04555b81d5dc1d04eb3d2c927"
+      },
+      "patched_files": {
+        "src/gen_smtp_client.erl": "392cc0a52486da0774af555e10b2a34d1b0b0c4344a58b2365492b0dad42cf19",
+        "src/gen_smtp_server_session.erl": "1be4ba6f076d01815bdd5b09d40c70770ffaa513b3cf8782ac097ad59fb207fa"
+      },
+      "patch_origins": [
+        "https://www.erlang.org/doc/system/expressions.html#catch-and-throw"
+      ],
+      "license_notice": "LICENSE"
+    }
+  ],
+  "generated_artifacts": {
+    "gen_smtp": [
+      "src/smtp_rfc822_parse.erl",
+      "_build/"
+    ]
+  }
+}
