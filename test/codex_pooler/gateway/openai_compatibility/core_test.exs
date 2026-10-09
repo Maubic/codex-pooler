@@ -153,6 +153,21 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
     end)
   end
 
+  for {shape, item} <- [{"string", "synthetic"}, {"null", nil}, {"number", 1}, {"nested array", []}, {"boolean", true}] do
+    @tag :input_entry_shape
+    test "Responses rejects a #{shape} input array entry" do
+      assert {:error, %{status: 400, code: "invalid_request", param: "input", message: "input item shape is not translatable"}} =
+               Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [unquote(Macro.escape(item))]})
+    end
+  end
+
+  @tag :input_entry_shape
+  test "Responses preserves valid typed input array entries" do
+    input = [%{"type" => "message", "role" => "user", "content" => [%{"type" => "input_text", "text" => "synthetic"}]}]
+    assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => input})
+    assert result.payload["input"] == input
+  end
+
   @tag :responses_coercion
   test "string Responses input coerces to a backend-compatible input_text message" do
     assert {:ok, result} =

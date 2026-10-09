@@ -506,6 +506,9 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
     end
   end
 
+  defp normalize_input_item(_item),
+    do: {:error, Error.invalid_request("input item shape is not translatable", "input")}
+
   defp normalize_assistant_tool_calls(tool_calls, parent_metadata, parent_metadata_passthrough) do
     tool_calls
     |> Enum.reduce_while({:ok, []}, fn tool_call, {:ok, acc} ->

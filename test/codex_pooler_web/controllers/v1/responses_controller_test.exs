@@ -68,6 +68,52 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
   alias CodexPooler.Pools.ModelServingOverride
   alias CodexPooler.Repo
 
+  for mode <- ~w(full lite) do
+    @tag :input_entry_shape
+    test "real HTTP Responses refuses non-object input entries before effects in #{mode}" do
+      upstream = start_upstream(issue_241_completed_response("input_entry_shape"))
+      setup = gateway_setup(upstream)
+      put_public_model_serving_mode!(setup, unquote(mode))
+      port = start_public_endpoint!()
+
+      for item <- ["synthetic", nil, 1, [], true], stream <- [false, true] do
+        {headers, body} = curl_json_request!(port, setup.authorization, %{"model" => setup.model.exposed_model_id, "input" => [item], "stream" => stream}, "/v1/responses")
+        assert String.starts_with?(headers, "HTTP/1.1 400")
+        assert %{"error" => %{"type" => "invalid_request_error", "code" => "invalid_request", "param" => "input", "message" => "input item shape is not translatable"}} = CodexPooler.JSON.decode!(body)
+        assert FakeUpstream.count(upstream) == 0
+        assert Repo.aggregate(Request, :count) == 0
+        assert Repo.aggregate(Attempt, :count) == 0
+        assert Repo.aggregate(LedgerEntry, :count) == 0
+      end
+    end
+
+    @tag :input_entry_shape
+    @tag :v1_websocket
+    test "public Responses websocket refuses non-object input entries before effects in #{mode}" do
+      upstream = start_upstream(issue_241_completed_response("input_entry_shape"))
+      setup = gateway_setup(upstream)
+      put_public_model_serving_mode!(setup, unquote(mode))
+      port = start_public_endpoint!()
+
+      for item <- ["synthetic", nil, 1, [], true] do
+        {conn, websocket, ref, _headers} = public_v1_websocket_connect!(port, setup, "input-entry-#{System.unique_integer([:positive])}", [{"openai-beta", "responses_websockets=2026-02-06"}])
+
+        try do
+          payload = CodexPooler.JSON.encode!(%{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => [item], "stream" => true})
+          {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, payload)
+          {_conn, _websocket, frame} = public_websocket_receive_text!(conn, websocket, ref)
+          assert %{"type" => "error", "status" => 400, "error" => %{"type" => "invalid_request_error", "code" => "invalid_request", "param" => "input", "message" => "input item shape is not translatable"}} = CodexPooler.JSON.decode!(frame)
+          assert FakeUpstream.count(upstream) == 0
+          assert Repo.aggregate(Request, :count) == 0
+          assert Repo.aggregate(Attempt, :count) == 0
+          assert Repo.aggregate(LedgerEntry, :count) == 0
+        after
+          Mint.HTTP.close(conn)
+        end
+      end
+    end
+  end
+
   for mode <- ~w(full lite), stream <- [false, true] do
     @tag :access_programs
     test "POST /v1/responses rejects malformed access programs before effects in #{mode} with stream=#{stream}", %{conn: conn} do
