@@ -42,6 +42,8 @@ defmodule CodexPooler.Release do
             "drain marker path must name the marker file (default source: CODEX_POOLER_DRAIN_MARKER_PATH)"
     end
 
+    preflight_marker!(marker)
+
     :ok =
       RelayRuntime.quiesce(
         Keyword.get(opts, :relay, RelayRuntime),
@@ -59,6 +61,35 @@ defmodule CodexPooler.Release do
       )
 
     drain.(remaining)
+  end
+
+  defp preflight_marker!(marker) do
+    case File.stat(marker, time: :posix) do
+      {:ok, stat} ->
+        # Check timestamp permission without changing the observed mtime or
+        # creating a marker if it disappears. Owners can touch read-only files.
+        unchanged_time = %{stat | atime: :undefined, ctime: :undefined, mode: :undefined, uid: :undefined, gid: :undefined}
+        File.write_stat!(marker, unchanged_time, time: :posix)
+
+      {:error, :enoent} ->
+        preflight_marker_directory!(marker)
+
+      {:error, reason} ->
+        raise File.Error, reason: reason, action: "stat", path: marker
+    end
+  end
+
+  defp preflight_marker_directory!(marker) do
+    # Probe the same filesystem without publishing the readiness marker. The
+    # directory may still change later; never quiesce after a failed preflight.
+    probe = Path.join(Path.dirname(marker), ".codex-pooler-drain-check-#{Ecto.UUID.generate()}")
+    file = File.open!(probe, [:write, :exclusive])
+
+    try do
+      :ok = File.close(file)
+    after
+      File.rm!(probe)
+    end
   end
 
   @doc """
