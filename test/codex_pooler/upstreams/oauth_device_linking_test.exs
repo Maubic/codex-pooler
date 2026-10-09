@@ -14,6 +14,7 @@ defmodule CodexPooler.Upstreams.OAuthDeviceLinkingTest do
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Auth.CodexAuth
+  alias CodexPooler.Upstreams.OAuthFlows
 
   alias CodexPooler.Upstreams.Schemas.{
     EncryptedSecret,
@@ -175,6 +176,35 @@ defmodule CodexPooler.Upstreams.OAuthDeviceLinkingTest do
     assert Enum.map(FakeOpenAIAuthProvider.requests(provider), & &1.path) == ["/api/accounts/deviceauth/usercode", "/api/accounts/deviceauth/token"]
     assert DateTime.compare(Repo.reload!(flow).expires_at, expired_at) == :eq
     assert Repo.aggregate(UpstreamIdentity, :count) == 0
+  end
+
+  test "local device deadline persists expiry and its safe summary without polling the provider" do
+    scope = fixture_owner_scope()
+    pool = pool_fixture()
+    provider = start_provider!(device_routes(%{"/api/accounts/deviceauth/token" => {400, %{"error" => "authorization_pending"}}}))
+    assert {:ok, %{flow: flow}} = Upstreams.start_device_oauth(scope, pool)
+    expired_at = DateTime.utc_now() |> DateTime.add(-1, :second)
+    flow |> Ecto.Changeset.change(expires_at: expired_at) |> Repo.update!()
+
+    assert {:error, %{code: :expired_flow}} = Upstreams.poll_device_oauth(scope, flow.id)
+    expired = Repo.reload!(flow)
+    assert expired.status == "expired"
+    assert expired.error_code == "expired_flow"
+    assert DateTime.compare(expired.expires_at, expired_at) == :eq
+
+    assert [summary] = OAuthFlows.list_visible_oauth_flow_summaries(scope, pool_ids: [pool.id])
+    assert summary.id == flow.id
+    assert summary.status == "expired"
+    assert summary.status_label == "OAuth flow expired"
+    assert summary.error.code == "expired_flow"
+    assert summary.device == nil
+
+    assert {:error, %{code: :expired_flow}} = Upstreams.poll_device_oauth(scope, flow.id)
+    assert Repo.reload!(flow) == expired
+    assert Enum.map(FakeOpenAIAuthProvider.requests(provider), & &1.path) == ["/api/accounts/deviceauth/usercode"]
+    assert Repo.aggregate(UpstreamIdentity, :count) == 0
+    assert Repo.aggregate(PoolUpstreamAssignment, :count) == 0
+    assert Repo.aggregate(EncryptedSecret, :count) == 0
   end
 
   test "post-authorization token exchange transient failure remains terminal" do

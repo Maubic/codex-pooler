@@ -102,7 +102,7 @@ defmodule CodexPooler.Upstreams.OAuthFlows.Completion do
     cond do
       DateTime.compare(flow.expires_at, Lifecycle.now()) != :gt ->
         Lifecycle.expire_locked_flow!(flow)
-        Repo.rollback(OAuthCallback.safe_error(:expired_flow))
+        oauth_error(OAuthCallback.safe_error(:expired_flow))
 
       flow.flow_kind != "device" ->
         Repo.rollback(OAuthCallback.safe_error(:flow_not_pending))
