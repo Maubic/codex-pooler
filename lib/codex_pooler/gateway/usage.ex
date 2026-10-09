@@ -8,9 +8,12 @@ defmodule CodexPooler.Gateway.Usage do
   alias CodexPooler.Gateway.Metadata.Accounting, as: MetadataAccounting
   alias CodexPooler.Gateway.OpenAICompatibility.Error
   alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.Platform.TransientDatabaseError
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
   alias CodexPooler.Upstreams.Secrets
+
+  require Logger
 
   @secret_kind "access_token"
 
@@ -124,6 +127,14 @@ defmodule CodexPooler.Gateway.Usage do
            message: "chatgpt token is invalid for this account"
          }}
     end
+  rescue
+    error in [DBConnection.ConnectionError, Postgrex.Error] ->
+      if TransientDatabaseError.transient?(error) do
+        Logger.warning("runtime request refused before admission stage=authentication reason_class=#{TransientDatabaseError.reason_class(error)}")
+        {:error, Contracts.database_unavailable_error()}
+      else
+        reraise error, __STACKTRACE__
+      end
   end
 
   defp authenticate_chatgpt_account_token(chatgpt_account_id, token) do
