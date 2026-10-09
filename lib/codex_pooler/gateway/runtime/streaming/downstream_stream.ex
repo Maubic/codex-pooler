@@ -137,7 +137,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
     if ChatCompletions.reconciliation_failed?(stream_state), do: {:failed, nil}
   end
 
-  def terminal_outcome(%{native_terminal_outcome: :completed}), do: :completed
+  def terminal_outcome(%{native_terminal_outcome: kind}) when kind in [:completed, :incomplete], do: kind
   def terminal_outcome(_state), do: nil
 
   @spec synthetic_terminal_failure(state(), term()) :: {binary() | nil, state()}
@@ -457,9 +457,16 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
   defp track_native_completion(state, blocks) do
     Enum.reduce(blocks, state, fn block, state ->
       case NativeSSEBlock.outcome(block) do
-        {:ok, %{kind: :incomplete} = outcome} -> Map.put_new(state, :native_content_filter_outcome, {:ok, outcome})
-        {:ok, %{kind: :completed}} -> Map.put(state, :native_terminal_outcome, :completed)
-        _outcome -> state
+        {:ok, %{kind: :incomplete} = outcome} ->
+          state
+          |> Map.put(:native_terminal_outcome, :incomplete)
+          |> Map.put_new(:native_content_filter_outcome, {:ok, outcome})
+
+        {:ok, %{kind: :completed}} ->
+          Map.put(state, :native_terminal_outcome, :completed)
+
+        _outcome ->
+          state
       end
     end)
   end

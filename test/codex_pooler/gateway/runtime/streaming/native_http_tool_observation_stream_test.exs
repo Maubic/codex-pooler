@@ -3,8 +3,8 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.NativeHttpToolObservationStreamT
 
   alias CodexPooler.Accounting.NativeHttpToolObservation
   alias CodexPooler.Gateway.Payloads.RequestOptions
-  alias CodexPooler.Gateway.Runtime.Streaming.DownstreamStream
-  alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
+  alias CodexPooler.Gateway.Runtime.Streaming.{DownstreamStream, StreamUsageObserver}
+  alias CodexPooler.Gateway.Transports.Streaming.{RetainedBody, StreamProtocol}
 
   @endpoint "/backend-api/codex/responses"
 
@@ -60,6 +60,42 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.NativeHttpToolObservationStreamT
       {_output, state} = DownstreamStream.normalize_data(partial_tool_wire(), @endpoint, opts(), state)
       refute eligible?(state)
     end
+  end
+
+  test "nonfailure incomplete remains a terminal and poisons partial-tool recovery" do
+    terminal = "event: response.incomplete\ndata: " <> CodexPooler.JSON.encode!(%{"type" => "response.incomplete", "response" => %{"status" => "incomplete", "incomplete_details" => %{"reason" => "max_output_tokens"}, "usage" => %{"input_tokens" => 4, "output_tokens" => 16, "total_tokens" => 20}}}) <> "\n\n"
+
+    for chunks <- [[partial_tool_wire(), terminal], [partial_tool_wire() <> terminal], [partial_tool_wire() | for(<<byte <- terminal>>, do: <<byte>>)]] do
+      {wire, state} = observe(chunks)
+      assert wire == partial_tool_wire() <> terminal
+      assert DownstreamStream.terminal_outcome(state) == :incomplete
+      refute eligible?(state)
+      assert get_in(DownstreamStream.native_http_tool_metadata(state), ["native_http_partial_tool", "poisoned"]) == true
+    end
+  end
+
+  test "source terminal and usage survive a diagnostic retained tail without its prefix" do
+    terminal = "event: response.incomplete\ndata: " <> CodexPooler.JSON.encode!(%{"type" => "response.incomplete", "response" => %{"status" => "incomplete", "incomplete_details" => %{"reason" => "max_output_tokens"}, "usage" => %{"input_tokens" => 4, "output_tokens" => 16, "total_tokens" => 20}, "padding" => String.duplicate("x", 70_000)}}) <> "\n\n"
+    wire = partial_tool_wire() <> terminal
+    {output, state} = observe([partial_tool_wire(), terminal])
+    assert output == wire
+    assert DownstreamStream.terminal_outcome(state) == :incomplete
+    refute eligible?(state)
+    retained = RetainedBody.empty() |> RetainedBody.append(wire) |> RetainedBody.read()
+    assert byte_size(retained) == RetainedBody.max_bytes()
+    refute String.starts_with?(retained, "event:")
+    assert StreamProtocol.terminal_outcome(retained) == :error
+    usage = StreamUsageObserver.new() |> StreamUsageObserver.observe(wire) |> StreamUsageObserver.usage()
+    assert usage.status == "usage_known"
+    assert usage.input_tokens == 4
+    assert usage.output_tokens == 16
+    assert byte_size(:erlang.term_to_binary(state)) < 16_384
+  end
+
+  test "an incomplete event label without complete data cannot invent a terminal" do
+    {_wire, state} = observe([partial_tool_wire(), "event: response.incomplete\ndata: {"])
+    assert DownstreamStream.terminal_outcome(state) == nil
+    refute eligible?(state)
   end
 
   defp observe(chunks) do
