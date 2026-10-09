@@ -207,10 +207,10 @@ defmodule CodexPooler.Gateway.Metadata do
     canonical_models_by_slug =
       snapshot.body
       |> Map.get("models", [])
-      |> Map.new(&{&1["slug"], &1})
+      |> Map.new(&{String.downcase(&1["slug"]), &1})
 
     Enum.flat_map(snapshot.visible_models, fn model ->
-      case Map.fetch(canonical_models_by_slug, model.exposed_model_id) do
+      case Map.fetch(canonical_models_by_slug, String.downcase(model.exposed_model_id)) do
         {:ok, metadata} -> [openai_model_payload(model, metadata)]
         :error -> []
       end
