@@ -928,6 +928,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "All HTTP requests observed by Phoenix endpoint instrumentation, including /healthz and /readyz probes, /metrics scrapes when enabled, and unmatched endpoint traffic. Successful and failed HTTP responses contribute; this is not a count of successful gateway turns.",
       "fieldConfig": {
         "defaults": {
           "unit": "reqps",
@@ -979,6 +980,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "p95 duration of all HTTP requests observed by Phoenix endpoint instrumentation, including /healthz and /readyz probes, /metrics scrapes when enabled, and unmatched endpoint traffic. Probes and scrapes can dominate a low-traffic pod's sample population; this is not gateway-only latency.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1030,7 +1032,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Top active routes by p95 latency. The active-route filter avoids stale NaN/empty legend rows when a route has no observations in the current interval.",
+      "description": "Top matched routes with router-dispatch stop observations by p95 latency, including /healthz and /readyz probes and /metrics scrapes when enabled. These route series exclude unmatched endpoint requests and differ from endpoint totals. The active-route filter avoids stale NaN/empty legend rows when a route has no observations in the current interval.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1522,7 +1524,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
+      "description": "Repository queries divided by all HTTP requests observed by Phoenix endpoint instrumentation. The denominator includes /healthz and /readyz probes, /metrics scrapes when enabled, and unmatched endpoint traffic, so this is not queries per gateway turn. Probes and scrapes can also issue repository queries. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "short",

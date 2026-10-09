@@ -15,7 +15,7 @@ Application metrics come from Codex Pooler. Container metrics require kubelet/cA
 
 ### HTTP request rate
 
-Requests per second by method and HTTP status class. This describes HTTP responses, not error frames within an already-open WebSocket.
+All HTTP requests observed by Phoenix endpoint instrumentation, per second by method and HTTP status class. This includes `/healthz` and `/readyz` probes, `/metrics` scrapes when enabled, and unmatched endpoint traffic. Successful and failed HTTP responses contribute; this is not a count of successful gateway turns or error frames within an already-open WebSocket.
 
 ```promql
 sum by (method, status_class) (
@@ -25,7 +25,11 @@ sum by (method, status_class) (
 
 ### Endpoint latency p95
 
-Seconds at the 95th percentile for application HTTP requests. Long-lived or streamed requests can have different duration patterns from short endpoints.
+Seconds at the 95th percentile for the same endpoint population, including probes and enabled metrics scrapes. On a low-traffic pod, probes and scrapes can dominate the sample population. Long-lived or streamed requests can have different duration patterns from short endpoints.
+
+The dashboard's **Slowest Routes p95** uses router-dispatch stop observations for matched routes, including `/healthz`, `/readyz`, and enabled `/metrics` scrapes. Unmatched endpoint requests do not enter those route series. Its population and timing boundary differ from the endpoint histogram.
+
+**Queries / Request** divides repository-query rate by the total endpoint-request rate, including probes and enabled scrapes in the denominator. Those requests can also issue repository queries, so the ratio does not mean queries per gateway turn. Repository-query role coverage still applies: see [database timings](#database-timings).
 
 ```promql
 histogram_quantile(0.95,
