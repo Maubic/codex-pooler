@@ -10,6 +10,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   alias CodexPooler.Accounting.NativeContentFilterRetry
 
   alias CodexPooler.Accounting.{
+    Attempt,
     ClientRetry,
     Metadata,
     NativeTurnProgress,
@@ -595,7 +596,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
       %Request{} = predecessor ->
         :ok = retire_forwarded_chain!(predecessor)
 
-        if unfinished_http_mailbox_predecessor?(predecessor, context) or delivered_provider_output?(predecessor) do
+        if unfinished_http_mailbox_predecessor?(predecessor, context) or websocket_resend_predecessor?(predecessor) or delivered_provider_output?(predecessor) do
           resolve_native_turn_resend!(session, context, claim)
         else
           step_over_native_turn_predecessor(session, context, claim, predecessor, depth)
@@ -613,6 +614,19 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   end
 
   defp unfinished_http_mailbox_predecessor?(_predecessor, _context), do: false
+
+  # A live websocket cannot prove zero output; its existing lifecycle fence
+  # must judge the fallback. A retryable terminal uses the verified linked
+  # policy whether it followed model output or only lifecycle/error frames.
+  defp websocket_resend_predecessor?(%Request{transport: "websocket", completed_at: nil}), do: true
+
+  defp websocket_resend_predecessor?(%Request{transport: "websocket", status: "failed", completed_at: %DateTime{}} = request) do
+    turn = Repo.get_by(CodexTurn, request_id: request.id)
+    attempt = if turn && turn.final_attempt_id, do: Repo.get(Attempt, turn.final_attempt_id)
+    ClientRetry.verified_provider_terminal_failure?(turn, request, attempt)
+  end
+
+  defp websocket_resend_predecessor?(_predecessor), do: false
 
   # With owner forwarding on, the owner's client-retry preflight chains a
   # websocket resend onto a request of this turn (`client-retry-v1:`), outside
