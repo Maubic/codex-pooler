@@ -8,6 +8,7 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Pools.Routing, as: PoolRouting
   alias CodexPoolerWeb.GatewayControllerHelpers
+  alias CodexPoolerWeb.Mcp.Authentication
   alias CodexPoolerWeb.Plugs.RuntimeIngress.{CompressedBody, Firewall, Path}
   alias CodexPoolerWeb.Plugs.RuntimeIngress.Firewall.Decision
   alias CodexPoolerWeb.V1.UnsupportedRoutes
@@ -54,6 +55,7 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
     conn
     |> put_json_parser_context(settings, :mcp)
     |> enforce_mcp_firewall(settings)
+    |> authenticate_mcp_request()
     |> admit_mcp_request()
     |> prepare_mcp_body(settings)
   end
@@ -108,6 +110,17 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
         send_mcp_firewall_error(conn, decision)
     end
   end
+
+  defp authenticate_mcp_request(%Plug.Conn{halted: true} = conn), do: conn
+
+  defp authenticate_mcp_request(%Plug.Conn{method: "POST"} = conn) do
+    case Authentication.authenticate(conn) do
+      {:ok, auth} -> put_private(conn, :codex_pooler_mcp_auth, auth)
+      {:error, status, code, message, nil} -> send_mcp_error(conn, status, code, message)
+    end
+  end
+
+  defp authenticate_mcp_request(conn), do: conn
 
   defp admit_mcp_request(%Plug.Conn{halted: true} = conn), do: conn
 

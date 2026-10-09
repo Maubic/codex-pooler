@@ -227,12 +227,112 @@ defmodule CodexPoolerWeb.Plugs.McpIngressTest do
     end
   end
 
-  describe "MCP body parser ingress" do
-    test "encoded MCP spelling reaches the same pre-parser content-type guard", %{conn: conn} do
+  describe "MCP authentication before body parsing" do
+    @tag :auth_before_body
+    test "missing invalid and Pool credentials leave nested JSON unread", %{conn: conn, user: user} do
       setup_runtime_ingress(%OperationalSettings{})
+      enabled_mcp_token!(user)
+      pool_key = CodexPooler.PoolerFixtures.active_api_key_fixture()
+      body = ~s({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"x":) <> String.duplicate("[", 300) <> String.duplicate("]", 300) <> "}}"
+
+      for authorization <- [nil, "Bearer invalid-mcp-token", pool_key.authorization] do
+        request = conn |> recycle() |> json_rpc_conn()
+        request = if authorization, do: put_req_header(request, "authorization", authorization), else: request
+        response = post(request, "/mcp", body)
+        assert json_rpc_error(response, 401)["error"]["message"] == "MCP bearer token is required"
+        body_unfetched? = match?(%Plug.Conn.Unfetched{}, response.body_params)
+        assert body_unfetched?
+        {Plug.Adapters.Test.Conn, adapter} = response.adapter
+        assert byte_size(adapter.req_body) == byte_size(body)
+      end
+    end
+  end
+
+  @tag :auth_before_body
+  test "missing credentials take precedence over malformed and oversized bodies", %{conn: conn} do
+    setup_runtime_ingress(%OperationalSettings{max_decompressed_body_bytes: 8})
+
+    for body <- ["{", String.duplicate("a", 64)] do
+      response = conn |> recycle() |> json_rpc_conn() |> post("/mcp", body)
+      assert json_rpc_error(response, 401)["error"]["message"] == "MCP bearer token is required"
+      body_unfetched? = match?(%Plug.Conn.Unfetched{}, response.body_params)
+      assert body_unfetched?
+      {Plug.Adapters.Test.Conn, adapter} = response.adapter
+      assert byte_size(adapter.req_body) == byte_size(body)
+    end
+  end
+
+  @tag :auth_before_body
+  test "live HTTP refuses invalid credentials with zero body reads and decodes", %{user: user} do
+    setup_runtime_ingress(%OperationalSettings{})
+    raw_token = enabled_mcp_token!(user)
+    pool_key = CodexPooler.PoolerFixtures.active_api_key_fixture()
+    observer = self()
+    traced_calls = [{Plug.Conn, :read_body, 2}, {CodexPooler.JSON, :decode, 2}]
+
+    on_exit(fn ->
+      for mfa <- traced_calls, do: :erlang.trace_pattern(mfa, false, [:local])
+    end)
+
+    for mfa <- traced_calls, do: :erlang.trace_pattern(mfa, true, [:local])
+
+    probe = fn conn, _opts ->
+      :erlang.trace(self(), true, [:call, :arity, {:tracer, observer}])
+
+      try do
+        result = @endpoint.call(conn, @endpoint.init([]))
+        :erlang.trace(self(), false, [:call])
+        delivered = :erlang.trace_delivered(self())
+
+        receive do
+          {:trace_delivered, _tracee, ^delivered} -> :ok
+        after
+          5_000 -> raise "MCP ingress trace barrier timed out"
+        end
+
+        send(observer, {:mcp_body_observed, self(), match?(%Plug.Conn.Unfetched{}, result.body_params)})
+        result
+      after
+        :erlang.trace(self(), false, [:call])
+      end
+    end
+
+    refute @endpoint.config(:debug_errors, false)
+    listener = start_supervised!({Bandit, plug: probe, port: 0, ip: {127, 0, 0, 1}, startup_log: false})
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(listener)
+
+    on_exit(fn ->
+      refute Process.alive?(listener)
+      assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [], 1_000)
+    end)
+
+    for {authorization, expected_status, expected_reads} <- [
+          {nil, 401, 0},
+          {"Bearer invalid-mcp-token", 401, 0},
+          {pool_key.authorization, 401, 0},
+          {"Bearer #{raw_token}", 200, 1}
+        ] do
+      headers = [{"content-type", "application/json"}, {"accept", "application/json, text/event-stream"}, {"mcp-protocol-version", @mcp_version}]
+      headers = if authorization, do: [{"authorization", authorization} | headers], else: headers
+
+      response = Req.post!("http://127.0.0.1:#{port}/mcp", headers: headers, body: CodexPooler.JSON.encode!(initialize_request()), decode_body: false, retry: false)
+      assert response.status == expected_status
+      assert_receive {:mcp_body_observed, request_pid, body_unfetched?}, 5_000
+      calls = drain_mcp_calls(request_pid, %{})
+      assert Map.get(calls, {Plug.Conn, :read_body, 2}, 0) == expected_reads
+      assert Map.get(calls, {CodexPooler.JSON, :decode, 2}, 0) == expected_reads
+      assert body_unfetched? == (expected_reads == 0)
+    end
+  end
+
+  describe "MCP body parser ingress" do
+    test "encoded MCP spelling reaches the same pre-parser content-type guard", %{conn: conn, user: user} do
+      setup_runtime_ingress(%OperationalSettings{})
+      raw_token = enabled_mcp_token!(user)
 
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> put_req_header("content-type", "multipart/form-data; boundary=example")
         |> put_req_header("accept", "application/json, text/event-stream")
         |> put_req_header("mcp-protocol-version", @mcp_version)
@@ -256,22 +356,25 @@ defmodule CodexPoolerWeb.Plugs.McpIngressTest do
              }
     end
 
-    test "oversized bodies are rejected before controller dispatch", %{conn: conn} do
+    test "oversized bodies are rejected before controller dispatch", %{conn: conn, user: user} do
       setup_runtime_ingress(%OperationalSettings{max_decompressed_body_bytes: 8})
+      raw_token = enabled_mcp_token!(user)
 
       conn =
         conn
-        |> json_rpc_conn()
+        |> authenticated_json_rpc_conn(raw_token)
         |> post("/mcp", String.duplicate("a", 64))
 
       assert json_rpc_error(conn, 413)["error"]["message"] == "request body is too large"
     end
 
-    test "multipart bodies are rejected before multipart parsing", %{conn: conn} do
+    test "multipart bodies are rejected before multipart parsing", %{conn: conn, user: user} do
       setup_runtime_ingress(%OperationalSettings{})
+      raw_token = enabled_mcp_token!(user)
 
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> put_req_header("content-type", "multipart/form-data; boundary=example")
         |> put_req_header("accept", "application/json, text/event-stream")
         |> put_req_header("mcp-protocol-version", @mcp_version)
@@ -281,12 +384,13 @@ defmodule CodexPoolerWeb.Plugs.McpIngressTest do
                "content-type must be application/json"
     end
 
-    test "compressed bodies are rejected before decompression", %{conn: conn} do
+    test "compressed bodies are rejected before decompression", %{conn: conn, user: user} do
       setup_runtime_ingress(%OperationalSettings{})
+      raw_token = enabled_mcp_token!(user)
 
       conn =
         conn
-        |> json_rpc_conn()
+        |> authenticated_json_rpc_conn(raw_token)
         |> put_req_header("content-encoding", "gzip")
         |> post("/mcp", :zlib.gzip(CodexPooler.JSON.encode!(initialize_request())))
 
@@ -294,11 +398,13 @@ defmodule CodexPoolerWeb.Plugs.McpIngressTest do
                "compressed MCP request bodies are not supported"
     end
 
-    test "unsupported content types are rejected before controller dispatch", %{conn: conn} do
+    test "unsupported content types are rejected before controller dispatch", %{conn: conn, user: user} do
       setup_runtime_ingress(%OperationalSettings{})
+      raw_token = enabled_mcp_token!(user)
 
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> put_req_header("content-type", "text/plain")
         |> put_req_header("accept", "application/json, text/event-stream")
         |> put_req_header("mcp-protocol-version", @mcp_version)
@@ -309,13 +415,15 @@ defmodule CodexPoolerWeb.Plugs.McpIngressTest do
     end
 
     test "malformed JSON is rejected with sanitized parse error before controller dispatch", %{
-      conn: conn
+      conn: conn,
+      user: user
     } do
       setup_runtime_ingress(%OperationalSettings{})
+      raw_token = enabled_mcp_token!(user)
 
       conn =
         conn
-        |> json_rpc_conn()
+        |> authenticated_json_rpc_conn(raw_token)
         |> post("/mcp", ~s({"jsonrpc":"2.0","id":"bad","method":"initialize"))
 
       error = json_rpc_error(conn, 400)["error"]
@@ -326,18 +434,20 @@ defmodule CodexPoolerWeb.Plugs.McpIngressTest do
   end
 
   describe "MCP admission" do
-    test "MCP uses a dedicated local admission lane before controller dispatch", %{conn: conn} do
+    test "MCP uses a dedicated local admission lane before controller dispatch", %{conn: conn, user: user} do
       setup_runtime_ingress(%OperationalSettings{
         bulkheads:
           OperationalSettings.current().bulkheads
           |> Map.put(RouteClass.mcp(), %{max_concurrency: 1, queue_limit: 0, queue_timeout_ms: 25})
       })
 
+      raw_token = enabled_mcp_token!(user)
+
       assert {:ok, held} = Admission.acquire(RouteClass.mcp(), %{request_id: "held-mcp"})
 
       conn =
         conn
-        |> json_rpc_conn()
+        |> authenticated_json_rpc_conn(raw_token)
         |> post("/mcp", CodexPooler.JSON.encode!(initialize_request()))
 
       error = json_rpc_error(conn, 503)["error"]
@@ -345,6 +455,15 @@ defmodule CodexPoolerWeb.Plugs.McpIngressTest do
       refute inspect(error) =~ "initialize"
 
       Admission.release(held)
+    end
+  end
+
+  defp drain_mcp_calls(request_pid, counts) do
+    receive do
+      {:trace, ^request_pid, :call, mfa} ->
+        drain_mcp_calls(request_pid, Map.update(counts, mfa, 1, &(&1 + 1)))
+    after
+      0 -> counts
     end
   end
 

@@ -69,9 +69,10 @@ defmodule CodexPoolerWeb.McpContractTest do
   end
 
   describe "HTTP and protocol headers" do
-    test "POST requires JSON content type", %{conn: conn} do
+    test "POST requires JSON content type", %{conn: conn, raw_token: raw_token} do
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> put_req_header("content-type", "text/plain")
         |> put_req_header("accept", "application/json, text/event-stream")
         |> put_req_header("mcp-protocol-version", @mcp_version)
@@ -81,9 +82,10 @@ defmodule CodexPoolerWeb.McpContractTest do
                "content-type must be application/json"
     end
 
-    test "POST requires both JSON and SSE in Accept", %{conn: conn} do
+    test "POST requires both JSON and SSE in Accept", %{conn: conn, raw_token: raw_token} do
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> put_req_header("content-type", "application/json")
         |> put_req_header("accept", "application/json")
         |> put_req_header("mcp-protocol-version", @mcp_version)
@@ -93,9 +95,10 @@ defmodule CodexPoolerWeb.McpContractTest do
                "accept must include application/json and text/event-stream"
     end
 
-    test "POST rejects unsupported protocol header versions", %{conn: conn} do
+    test "POST rejects unsupported protocol header versions", %{conn: conn, raw_token: raw_token} do
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> json_rpc_conn()
         |> put_req_header("mcp-protocol-version", "2025-03-26")
         |> post("/mcp", CodexPooler.JSON.encode!(initialize_request()))
@@ -106,9 +109,10 @@ defmodule CodexPoolerWeb.McpContractTest do
       refute inspect(json_response(conn, 400)) =~ "2025-03-26"
     end
 
-    test "POST rejects present untrusted origins", %{conn: conn} do
+    test "POST rejects present untrusted origins", %{conn: conn, raw_token: raw_token} do
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> json_rpc_conn()
         |> put_req_header("mcp-protocol-version", @mcp_version)
         |> put_req_header("origin", "https://untrusted.example")
@@ -341,9 +345,10 @@ defmodule CodexPoolerWeb.McpContractTest do
       assert response(conn, 202) == ""
     end
 
-    test "batch arrays are rejected", %{conn: conn} do
+    test "batch arrays are rejected", %{conn: conn, raw_token: raw_token} do
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> json_rpc_conn()
         |> put_req_header("mcp-protocol-version", @mcp_version)
         |> post("/mcp", CodexPooler.JSON.encode!([initialize_request()]))
@@ -351,9 +356,10 @@ defmodule CodexPoolerWeb.McpContractTest do
       assert json_rpc_error(conn, 400)["error"]["message"] == "batch JSON-RPC is not supported"
     end
 
-    test "malformed JSON is rejected with a sanitized JSON-RPC parse error" do
+    test "malformed JSON is rejected with a sanitized JSON-RPC parse error", %{raw_token: raw_token} do
       conn =
         Plug.Test.conn("POST", "/mcp", ~s({"jsonrpc":"2.0","id":"bad","method":"initialize"))
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> put_req_header("content-type", "application/json")
         |> put_req_header("accept", "application/json, text/event-stream")
         |> put_req_header("mcp-protocol-version", @mcp_version)
@@ -365,11 +371,12 @@ defmodule CodexPoolerWeb.McpContractTest do
       refute inspect(error) =~ "initialize"
     end
 
-    test "invalid null ids are rejected", %{conn: conn} do
+    test "invalid null ids are rejected", %{conn: conn, raw_token: raw_token} do
       request = %{initialize_request() | "id" => nil}
 
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> json_rpc_conn()
         |> put_req_header("mcp-protocol-version", @mcp_version)
         |> post("/mcp", CodexPooler.JSON.encode!(request))
@@ -378,11 +385,12 @@ defmodule CodexPoolerWeb.McpContractTest do
                "request id must be a string or number"
     end
 
-    test "invalid params are rejected", %{conn: conn} do
+    test "invalid params are rejected", %{conn: conn, raw_token: raw_token} do
       request = put_in(initialize_request(), ["params"], [])
 
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> json_rpc_conn()
         |> put_req_header("mcp-protocol-version", @mcp_version)
         |> post("/mcp", CodexPooler.JSON.encode!(request))
@@ -390,9 +398,10 @@ defmodule CodexPoolerWeb.McpContractTest do
       assert json_rpc_error(conn, 400)["error"]["message"] == "params must be an object"
     end
 
-    test "JSON-RPC response objects cannot also be requests", %{conn: conn} do
+    test "JSON-RPC response objects cannot also be requests", %{conn: conn, raw_token: raw_token} do
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> json_rpc_conn()
         |> put_req_header("mcp-protocol-version", @mcp_version)
         |> post(
@@ -437,7 +446,7 @@ defmodule CodexPoolerWeb.McpContractTest do
   end
 
   describe "wrong auth primitives do not bypass the MCP contract" do
-    test "Pool API-key bearer auth does not bypass MCP content negotiation", %{conn: conn} do
+    test "Pool API-key bearer auth does not authenticate MCP", %{conn: conn} do
       setup = active_api_key_fixture()
 
       conn =
@@ -448,11 +457,11 @@ defmodule CodexPoolerWeb.McpContractTest do
         |> put_req_header("mcp-protocol-version", @mcp_version)
         |> post("/mcp", CodexPooler.JSON.encode!(initialize_request()))
 
-      assert json_rpc_error(conn, 406)["error"]["message"] ==
-               "accept must include application/json and text/event-stream"
+      assert json_rpc_error(conn, 401)["error"]["message"] ==
+               "MCP bearer token is required"
     end
 
-    test "browser session cookies do not bypass MCP content negotiation" do
+    test "browser session cookies do not authenticate MCP" do
       %{user: user, token: token} = bootstrap_owner_fixture()
 
       conn =
@@ -463,8 +472,8 @@ defmodule CodexPoolerWeb.McpContractTest do
         |> put_req_header("mcp-protocol-version", @mcp_version)
         |> post("/mcp", CodexPooler.JSON.encode!(initialize_request()))
 
-      assert json_rpc_error(conn, 406)["error"]["message"] ==
-               "accept must include application/json and text/event-stream"
+      assert json_rpc_error(conn, 401)["error"]["message"] ==
+               "MCP bearer token is required"
     end
 
     test "query, basic, custom, invite-like, and upstream-like tokens do not bypass protocol checks",
