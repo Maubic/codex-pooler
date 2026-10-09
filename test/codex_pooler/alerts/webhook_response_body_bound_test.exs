@@ -16,22 +16,8 @@ defmodule CodexPooler.Alerts.WebhookResponseBodyBoundTest do
     TestAppEnv.restore_on_exit(OutboundHTTP)
     Application.put_env(:codex_pooler, OutboundHTTP, proxy_config: %{http: [], https: [], no_proxy: []})
     %{user: user} = bootstrap_owner_fixture()
-    cert = :public_key.pkix_test_data(%{root: [digest: :sha256, key: {:rsa, 2048, 65_537}], peer: [digest: :sha256, key: {:rsa, 2048, 65_537}, extensions: [{:Extension, {2, 5, 29, 17}, false, [{:iPAddress, <<127, 0, 0, 1>>}]}]]})
-    previous = :persistent_term.get(:pubkey_os_cacerts, :absent)
-    dir = Path.join(System.tmp_dir!(), "webhook-response-#{Base.encode16(:crypto.strong_rand_bytes(8))}")
-
-    on_exit(fn ->
-      if previous == :absent, do: :public_key.cacerts_clear(), else: :persistent_term.put(:pubkey_os_cacerts, previous)
-      assert :persistent_term.get(:pubkey_os_cacerts, :absent) == previous
-      File.rm_rf!(dir)
-      refute File.exists?(dir)
-    end)
-
-    File.mkdir!(dir)
-    File.chmod!(dir, 0o700)
-    File.write!(Path.join(dir, "ca.pem"), :public_key.pem_encode(Enum.map(cert[:cacerts], &{:Certificate, &1, :not_encrypted})))
-    :ok = :public_key.cacerts_load(String.to_charlist(Path.join(dir, "ca.pem")))
-    %{cert: cert, scope: Scope.for_user(user, ["instance_owner"])}
+    fixture = CodexPooler.WebhookDestinationFixture.setup!()
+    Map.put(fixture, :scope, Scope.for_user(user, ["instance_owner"]))
   end
 
   test "installed functional Req collector discards real TLS bytes while preserving status and headers", context do
@@ -192,7 +178,7 @@ defmodule CodexPooler.Alerts.WebhookResponseBodyBoundTest do
   end
 
   defp receiver!(context, mode) do
-    {:ok, listener} = :ssl.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}, cert: context.cert[:cert], key: context.cert[:key], alpn_preferred_protocols: ["http/1.1"]])
+    {:ok, listener} = :ssl.listen(0, [:binary, active: false, reuseaddr: true, ip: context.ip, cert: context.cert[:cert], key: context.cert[:key], alpn_preferred_protocols: ["http/1.1"]])
     on_exit(fn -> :ssl.close(listener) end)
     {:ok, {_, port}} = :ssl.sockname(listener)
     parent = self()
@@ -214,7 +200,7 @@ defmodule CodexPooler.Alerts.WebhookResponseBodyBoundTest do
         :closed
       end)
 
-    {"https://127.0.0.1:#{port}/hooks", receiver}
+    {"https://#{context.host}:#{port}/hooks", receiver}
   end
 
   defp read_request(socket, buffer) do

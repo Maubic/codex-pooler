@@ -18,7 +18,8 @@ defmodule CodexPooler.Alerts.Delivery.WebhookRedirectDeliveryTest do
     TestAppEnv.restore_on_exit(OutboundHTTP)
     Application.put_env(:codex_pooler, OutboundHTTP, proxy_config: %{http: [], https: [], no_proxy: []})
     %{user: user} = bootstrap_owner_fixture()
-    certificate = certificate([{:dNSName, ~c"localhost"}, {:iPAddress, <<127, 0, 0, 1>>}])
+    ip = CodexPooler.WebhookDestinationFixture.private_ip!()
+    certificate = certificate([{:dNSName, ~c"localhost"}, {:iPAddress, :erlang.list_to_binary(Tuple.to_list(ip))}])
     trust_test_ca!(certificate[:cacerts])
     %{scope: Scope.for_user(user, ["instance_owner"]), certificate: certificate}
   end
@@ -46,10 +47,10 @@ defmodule CodexPooler.Alerts.Delivery.WebhookRedirectDeliveryTest do
     @destination destination
     test "HTTPS #{@status} to #{@destination} never replays a signed notification", context do
       sink = receiver!(FakeUpstream.raw_response("", status: 200), if(@destination == :http_downgrade, do: nil, else: context.certificate))
-      sink_url = if @destination == :http_downgrade, do: FakeUpstream.url(sink), else: https_url(sink, if(@destination == :other_host, do: "localhost", else: "127.0.0.1"))
+      sink_url = if @destination == :http_downgrade, do: FakeUpstream.url(sink), else: https_url(sink, if(@destination == :other_host, do: "localhost", else: nil))
       # This real unsigned preflight proves the sink is reachable. The completed
       # delivery orders Req's redirect loop before we read the receiver ledger.
-      assert {:ok, %{status: 200}} = OutboundHTTP.get(sink_url <> "/health", retry: false)
+      assert {:ok, %{status: 200}} = OutboundHTTP.get(if(@destination == :http_downgrade, do: FakeUpstream.url(sink), else: https_url(sink)) <> "/health", retry: false)
       assert FakeUpstream.count(sink) == 1
       location = if @destination == :same_origin, do: "/hop", else: sink_url <> "/hop"
 
@@ -162,11 +163,11 @@ defmodule CodexPooler.Alerts.Delivery.WebhookRedirectDeliveryTest do
     end)
 
     opts = if certificate, do: [scheme: :https, thousand_island_options: [transport_options: [cert: certificate[:cert], key: certificate[:key]]]], else: []
-    {:ok, receiver} = FakeUpstream.start_link(mode, Keyword.put(opts, :supervisor_name, supervisor_name))
-    receiver
+    {:ok, receiver} = FakeUpstream.start_link(mode, opts |> Keyword.put(:supervisor_name, supervisor_name) |> Keyword.put(:ip, CodexPooler.WebhookDestinationFixture.private_ip!()))
+    %{receiver | url: "http://#{CodexPooler.WebhookDestinationFixture.private_ip!() |> :inet.ntoa() |> List.to_string()}:#{URI.parse(receiver.url).port}"}
   end
 
-  defp https_url(receiver, host \\ "127.0.0.1"), do: "https://#{host}:#{URI.parse(FakeUpstream.url(receiver)).port}"
+  defp https_url(receiver, host \\ nil), do: "https://#{host || CodexPooler.WebhookDestinationFixture.private_ip!() |> :inet.ntoa() |> List.to_string()}:#{URI.parse(FakeUpstream.url(receiver)).port}"
 
   defp certificate(names) do
     :public_key.pkix_test_data(%{root: [digest: :sha256, key: {:rsa, 2048, 65_537}], peer: [digest: :sha256, key: {:rsa, 2048, 65_537}, extensions: [{:Extension, {2, 5, 29, 17}, false, names}]]})

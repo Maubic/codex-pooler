@@ -58,23 +58,8 @@ defmodule CodexPooler.Alerts.WebhookDeliveryDeadlineTest do
     TestAppEnv.restore_on_exit(OutboundHTTP)
     Application.put_env(:codex_pooler, OutboundHTTP, proxy_config: %{http: [], https: [], no_proxy: []})
     %{user: user} = bootstrap_owner_fixture()
-    cert = :public_key.pkix_test_data(%{root: [digest: :sha256, key: {:rsa, 2048, 65_537}], peer: [digest: :sha256, key: {:rsa, 2048, 65_537}, extensions: [{:Extension, {2, 5, 29, 17}, false, [{:iPAddress, <<127, 0, 0, 1>>}]}]]})
-    previous = :persistent_term.get(:pubkey_os_cacerts, :absent)
-    dir = Path.join(System.tmp_dir!(), "delivery-deadline-#{Base.encode16(:crypto.strong_rand_bytes(8))}")
-
-    on_exit(fn ->
-      if previous == :absent, do: :public_key.cacerts_clear(), else: :persistent_term.put(:pubkey_os_cacerts, previous)
-      restored? = :persistent_term.get(:pubkey_os_cacerts, :absent) == previous
-      assert restored?
-      File.rm_rf!(dir)
-      refute File.exists?(dir)
-    end)
-
-    File.mkdir!(dir)
-    File.chmod!(dir, 0o700)
-    File.write!(Path.join(dir, "ca.pem"), :public_key.pem_encode(Enum.map(cert[:cacerts], &{:Certificate, &1, :not_encrypted})))
-    :ok = :public_key.cacerts_load(String.to_charlist(Path.join(dir, "ca.pem")))
-    %{cert: cert, scope: Scope.for_user(user, ["instance_owner"])}
+    fixture = CodexPooler.WebhookDestinationFixture.setup!()
+    Map.put(fixture, :scope, Scope.for_user(user, ["instance_owner"]))
   end
 
   test "actual worker creates one absolute default budget before preparation and carries it through HTTPS and receipt", context do
@@ -156,11 +141,11 @@ defmodule CodexPooler.Alerts.WebhookDeliveryDeadlineTest do
   end
 
   test "preparation exhausting the same budget returns a deadline receipt without connecting", context do
-    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: context.ip])
     on_exit(fn -> :gen_tcp.close(listener) end)
     {:ok, port} = :inet.port(listener)
     pool = pool_fixture()
-    {:ok, channel} = Alerts.create_channel(context.scope, %{channel_type: "webhook", display_name: "preparation deadline", endpoint_url: "https://127.0.0.1:#{port}/hooks", webhook_signing_secret: "synthetic-deadline-secret"})
+    {:ok, channel} = Alerts.create_channel(context.scope, %{channel_type: "webhook", display_name: "preparation deadline", endpoint_url: "https://#{context.host}:#{port}/hooks", webhook_signing_secret: "synthetic-deadline-secret"})
     incident = alert_incident_fixture(pool: pool)
     execution = %{Execution.new() | deadline: System.monotonic_time(:millisecond) + 300}
     handler = {__MODULE__, self()}
@@ -277,10 +262,10 @@ defmodule CodexPooler.Alerts.WebhookDeliveryDeadlineTest do
   end
 
   defp fixture!(context, mode) do
-    server = start_supervised!({Bandit, plug: {Receiver, {self(), mode}}, scheme: :https, port: 0, ip: {127, 0, 0, 1}, startup_log: false, thousand_island_options: [transport_options: [cert: context.cert[:cert], key: context.cert[:key]]]})
+    server = start_supervised!({Bandit, plug: {Receiver, {self(), mode}}, scheme: :https, port: 0, ip: context.ip, startup_log: false, thousand_island_options: [transport_options: [cert: context.cert[:cert], key: context.cert[:key]]]})
     {:ok, {_, port}} = ThousandIsland.listener_info(server)
     pool = pool_fixture()
-    {:ok, channel} = Alerts.create_channel(context.scope, %{channel_type: "webhook", display_name: "deadline", endpoint_url: "https://127.0.0.1:#{port}/hooks", webhook_signing_secret: "synthetic-deadline-secret"})
+    {:ok, channel} = Alerts.create_channel(context.scope, %{channel_type: "webhook", display_name: "deadline", endpoint_url: "https://#{context.host}:#{port}/hooks", webhook_signing_secret: "synthetic-deadline-secret"})
     incident = alert_incident_fixture(pool: pool)
     queue = "deadline_#{System.unique_integer([:positive])}"
     job = %{"alert_incident_id" => incident.id, "alert_channel_id" => channel.id} |> AlertDeliveryWorker.new(queue: queue) |> Repo.insert!()
@@ -288,6 +273,6 @@ defmodule CodexPooler.Alerts.WebhookDeliveryDeadlineTest do
     {:ok, meta} = Basic.init(conf, queue: queue, limit: 1)
     {:ok, {_meta, [claimed]}} = Basic.fetch_jobs(conf, meta, %{})
     assert claimed.id == job.id
-    %{incident: incident, channel: channel, job: claimed, url: "https://127.0.0.1:#{port}/hooks"}
+    %{incident: incident, channel: channel, job: claimed, url: "https://#{context.host}:#{port}/hooks"}
   end
 end

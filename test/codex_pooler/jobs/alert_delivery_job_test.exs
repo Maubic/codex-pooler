@@ -528,9 +528,8 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
   end
 
   defp start_fake_upstream(mode) do
-    {:ok, fake} = FakeUpstream.start_link(mode)
-    on_exit(fn -> FakeUpstream.stop(fake) end)
-    fake
+    fixture = CodexPooler.WebhookDestinationFixture.setup!()
+    CodexPooler.WebhookDestinationFixture.start_fake!(mode, fixture)
   end
 
   defp encrypt_secret!(value, kind) do

@@ -9,7 +9,7 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
     AlertIncident
   }
 
-  alias CodexPooler.Alerts.Delivery.{AttemptLifecycle, Execution, WebhookPayload, WebhookSigning}
+  alias CodexPooler.Alerts.Delivery.{AttemptLifecycle, Execution, WebhookDestination, WebhookPayload, WebhookSigning, WebhookTransport}
   alias CodexPooler.InstanceSettings.AppSecretCrypto
   alias CodexPooler.Platform.OutboundHTTP
   alias CodexPooler.Repo
@@ -181,8 +181,9 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
 
   defp post_webhook(url, body, headers, execution) do
     remaining = max(Execution.remaining(execution), 1)
+    request = Req.new(url: url, adapter: WebhookTransport) |> Req.Request.put_private(:webhook_execution, execution)
 
-    OutboundHTTP.post(url,
+    OutboundHTTP.post(request,
       body: body,
       headers: headers,
       decode_body: false,
@@ -190,8 +191,7 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
       receive_timeout: min(@receive_timeout_ms, remaining),
       request_timeout: remaining,
       retry: false,
-      redirect: false,
-      finch: Keyword.put(OutboundHTTP.pool_options_for_url(url, timeout: min(5_000, remaining)), :pool_timeout, min(5_000, remaining))
+      redirect: false
     )
   rescue
     exception in [
@@ -249,6 +249,17 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
       response_status_code: status,
       next_retry_at: next_retry_at(timestamp, retry_attempt, retryable),
       response_metadata: response_metadata(incident, channel, event_id, body_bytes, status)
+    )
+  end
+
+  defp record_delivery_result({:error, %WebhookDestination.Error{reason: reason}}, attempt, incident, channel, event_id, body_bytes, {timestamp, retry_attempt}) do
+    retryable = reason == :unresolved and retry_attempt < AlertDeliveryAttempt.fixed_max_attempts()
+    code = "alert_webhook_destination_#{reason}"
+
+    AttemptLifecycle.finalize_failed_attempt(attempt, timestamp, @delivery_adapter, code, "webhook destination is unavailable",
+      retryable: retryable,
+      response_metadata: response_metadata(incident, channel, event_id, body_bytes, nil),
+      next_retry_at: next_retry_at(timestamp, retry_attempt, retryable)
     )
   end
 

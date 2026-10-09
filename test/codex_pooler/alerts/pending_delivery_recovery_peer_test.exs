@@ -56,15 +56,14 @@ defmodule CodexPooler.Alerts.PendingDeliveryRecoveryPeerTest do
 
   @tag slow: "real second-BEAM recovery and owned Producer startup"
   test "surviving real Producer acknowledges killed worker and second-node duplicate recovery cannot overwrite the winner", %{peer: peer} do
+    tls = CodexPooler.WebhookDestinationFixture.setup!()
     suffix = System.unique_integer([:positive])
     fixture = fixture!(suffix)
     oban_name = String.to_atom("recovery_oban_#{suffix}")
     repo_name = String.to_atom("recovery_repo_#{suffix}")
-    server = start_supervised!({Bandit, plug: {Hold, self()}, ip: {127, 0, 0, 1}, port: 0, startup_log: false})
+    server = start_supervised!({Bandit, plug: {Hold, self()}, ip: tls.ip, port: 0, scheme: :https, startup_log: false, thousand_island_options: [transport_options: [cert: tls.cert[:cert], key: tls.cert[:key]]]})
     {:ok, {_, port}} = ThousandIsland.listener_info(server)
-    # The domain recovery contract is transport-independent. Canonical TLS and
-    # exact wall-clock transport proof live in the deadline tests/probe.
-    {:ok, encrypted} = AppSecretCrypto.encrypt("http://127.0.0.1:#{port}/hooks", "alert_webhook_endpoint_url")
+    {:ok, encrypted} = AppSecretCrypto.encrypt("https://#{tls.host}:#{port}/hooks", "alert_webhook_endpoint_url")
 
     database(fn ->
       fixture.channel |> Ecto.Changeset.change(endpoint_url_ciphertext: encrypted.ciphertext, endpoint_url_nonce: encrypted.nonce, endpoint_url_aad: encrypted.aad, endpoint_url_key_version: encrypted.key_version) |> Repo.update!()
@@ -111,6 +110,7 @@ defmodule CodexPooler.Alerts.PendingDeliveryRecoveryPeerTest do
 
   @tag slow: "real owner VM termination and independent Lifeline/recovery actors"
   test "node loss stays unresolved until stock Lifeline revokes executing authority", %{peer: recovery_peer} do
+    tls = CodexPooler.WebhookDestinationFixture.setup!()
     suffix = System.unique_integer([:positive])
     fixture = fixture!(suffix)
     owner = InstancePresencePeer.start_presence_peer!(PeerRegistry.unique_node_name("alert_owner"))
@@ -129,10 +129,11 @@ defmodule CodexPooler.Alerts.PendingDeliveryRecoveryPeerTest do
     :erpc.call(owner.remote, WebsocketOwnerNodeHarness, :start_repo, [Keyword.merge(Repo.config(), pool: DBConnection.ConnectionPool, pool_size: 3, log: false)])
     :erpc.call(owner.remote, ExUnit, :start, [[autorun: false]])
     :erpc.call(owner.remote, Code, :compile_file, [__ENV__.file])
-    server = start_supervised!({Bandit, plug: {Hold, self()}, ip: {127, 0, 0, 1}, port: 0, startup_log: false})
+    server = start_supervised!({Bandit, plug: {Hold, self()}, ip: tls.ip, port: 0, scheme: :https, startup_log: false, thousand_island_options: [transport_options: [cert: tls.cert[:cert], key: tls.cert[:key]]]})
     {:ok, {_, port}} = ThousandIsland.listener_info(server)
-    {:ok, encrypted} = AppSecretCrypto.encrypt("http://127.0.0.1:#{port}/hooks", "alert_webhook_endpoint_url")
+    {:ok, encrypted} = AppSecretCrypto.encrypt("https://#{tls.host}:#{port}/hooks", "alert_webhook_endpoint_url")
     database(fn -> fixture.channel |> Ecto.Changeset.change(endpoint_url_ciphertext: encrypted.ciphertext, endpoint_url_nonce: encrypted.nonce, endpoint_url_aad: encrypted.aad, endpoint_url_key_version: encrypted.key_version) |> Repo.update!() end)
+    :ok = :erpc.call(owner.remote, :persistent_term, :put, [:pubkey_os_cacerts, :persistent_term.get(:pubkey_os_cacerts)])
     :ok = :erpc.call(owner.remote, __MODULE__, :start_owner_worker, [fixture.queue, self()])
     assert_receive {:executor_started, worker, _links}, @budget
     assert node(worker) == owner.remote

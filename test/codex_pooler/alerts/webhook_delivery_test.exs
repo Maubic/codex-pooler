@@ -75,16 +75,16 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDeliveryTest do
     refute inspect(persisted) =~ "https://alerts.example.com"
   end
 
-  test "webhook POSTs carry the outbound connection idle bound from settings", %{scope: scope} do
-    {:ok, receiver} = FakeUpstream.start_link({:path_json, %{"/hooks" => {200, %{}}}})
-    on_exit(fn -> FakeUpstream.stop(receiver) end)
+  test "pinned webhook POSTs make independent private HTTPS requests without a pooled idle checkout", %{scope: scope} do
+    tls = CodexPooler.WebhookDestinationFixture.setup!()
+    receiver = CodexPooler.WebhookDestinationFixture.start_fake!({:path_json, %{"/hooks" => {200, %{}}}}, tls)
     endpoint_url = FakeUpstream.url(receiver) <> "/hooks"
 
     UpstreamConnPoolTelemetry.put_idle_bound!(0)
     UpstreamConnPoolTelemetry.attach!(endpoint_url)
 
-    # Channel validation accepts only HTTPS; the stored endpoint is swapped for
-    # the local plain-HTTP receiver, which delivery accepts once decrypted.
+    # Webhooks own one pinned connection per attempt; generic Finch callers
+    # continue to use the configured pool idle bound.
     deliveries =
       for _index <- 1..2 do
         pool = pool_fixture(%{slug: "webhook-idle-bound-#{unique_suffix()}"})
@@ -96,7 +96,7 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDeliveryTest do
     assert [{:ok, %AlertDeliveryAttempt{}}, {:ok, %AlertDeliveryAttempt{}}] = deliveries
     assert Enum.map(deliveries, fn {:ok, attempt} -> attempt.failure_code end) == [nil, nil]
     assert FakeUpstream.count(receiver) == 2
-    assert UpstreamConnPoolTelemetry.drain_events() == [:conn_max_idle_time_exceeded]
+    assert UpstreamConnPoolTelemetry.drain_events() == []
   end
 
   defp point_endpoint_at!(channel, endpoint_url) do
