@@ -37,7 +37,7 @@ defmodule CodexPoolerWeb.RequestLogger do
     ([
        "request_completed",
        "method=#{safe_token(conn.method)}",
-       "path=#{safe_token(conn.request_path)}",
+       "path=#{safe_token(request_path(conn))}",
        "status=#{safe_status(conn.status)}",
        "duration_ms=#{duration_ms(duration)}",
        "remote_ip=#{safe_token(remote_ip(conn.remote_ip))}"
@@ -108,6 +108,16 @@ defmodule CodexPoolerWeb.RequestLogger do
         []
     end
   end
+
+  defp request_path(%Plug.Conn{path_info: [onboarding, invites, _token | _rest]} = conn) do
+    if URI.decode(onboarding) == "onboarding" and URI.decode(invites) == "invites" do
+      "/onboarding/invites/:invite_token"
+    else
+      conn.request_path
+    end
+  end
+
+  defp request_path(conn), do: conn.request_path
 
   defp safe_token(value) when is_binary(value) do
     value

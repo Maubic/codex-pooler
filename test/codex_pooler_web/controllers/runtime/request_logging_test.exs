@@ -4,15 +4,18 @@ defmodule CodexPoolerWeb.Runtime.RequestLoggingTest do
   import Ecto.Query
   import ExUnit.CaptureLog
 
-  import CodexPooler.AccountsFixtures, only: [reset_bootstrap_state_fixture!: 0]
+  import CodexPooler.AccountsFixtures, only: [bootstrap_owner_fixture: 0, reset_bootstrap_state_fixture!: 0]
 
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
     only: [auth: 2, gateway_setup: 1, start_upstream: 1]
 
+  alias CodexPooler.Access
   alias CodexPooler.Accounting.Request
+  alias CodexPooler.Accounts.Scope
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Repo
+  alias CodexPoolerWeb.RequestLogger
 
   setup do
     reset_bootstrap_state_fixture!()
@@ -21,15 +24,98 @@ defmodule CodexPoolerWeb.Runtime.RequestLoggingTest do
 
     CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
 
-    Logger.configure(level: :info)
-    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
-    CodexPoolerWeb.RequestLogger.attach()
-
     on_exit(fn ->
       Logger.configure(level: previous_level)
     end)
 
+    Logger.configure(level: :info)
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
+    RequestLogger.attach()
+
     :ok
+  end
+
+  @tag :invite_log_redaction
+  @tag capture_log: false
+  test "live invite completion logs redact active expired revoked and unknown credentials with encoded route spellings" do
+    tokens = invite_log_tokens!()
+    port = start_invite_logging_endpoint!()
+
+    observations =
+      for {state, token} <- tokens,
+          {spelling, request_path} <- invite_log_paths(token) do
+        {status, log} =
+          with_log([level: :info], fn ->
+            status = invite_http_status(port, request_path)
+            assert_receive {:invite_http_observed, ^status, true}
+            status
+          end)
+
+        lines = completion_lines(log)
+
+        %{
+          state: state,
+          spelling: spelling,
+          status: status,
+          completions: length(lines),
+          token_matches: Enum.count([token, percent_encode(token)], &String.contains?(log, &1)),
+          placeholder_lines: Enum.count(lines, &String.contains?(&1, "path=/onboarding/invites/:invite_token ")),
+          standard_metadata: Enum.all?(lines, &complete_request_metadata?/1)
+        }
+      end
+
+    assert Enum.all?(observations, fn observed ->
+             observed.status == 200 and observed.completions == 1 and observed.token_matches == 0 and
+               observed.placeholder_lines == 1 and observed.standard_metadata
+           end),
+           inspect(observations)
+
+    {_state, token} = hd(tokens)
+
+    {status, log} =
+      with_log([level: :info], fn ->
+        status = invite_http_status(port, "/login?token=" <> token)
+        assert_receive {:invite_http_observed, ^status, false}
+        status
+      end)
+
+    ordinary = %{
+      status: status,
+      completions: length(completion_lines(log)),
+      ordinary_path_lines: Enum.count(completion_lines(log), &String.contains?(&1, "path=/login ")),
+      token_matches: Enum.count(completion_lines(log), &String.contains?(&1, token)),
+      standard_metadata: Enum.all?(completion_lines(log), &complete_request_metadata?/1)
+    }
+
+    assert ordinary == %{status: 200, completions: 1, ordinary_path_lines: 1, token_matches: 0, standard_metadata: true}
+  end
+
+  @tag :invite_log_redaction
+  @tag capture_log: false
+  test "invite path redaction also covers unmatched suffixes while ordinary paths retain their metadata" do
+    token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+    duration = System.convert_time_unit(15, :millisecond, :native)
+
+    for {_spelling, path} <- invite_log_paths(token) do
+      conn = Plug.Test.conn(:get, path <> "/unmatched/" <> token) |> Map.put(:status, 404)
+      line = RequestLogger.request_log_line(conn, duration)
+
+      observed = %{
+        raw_token_present: String.contains?(line, token),
+        encoded_token_present: String.contains?(line, percent_encode(token)),
+        placeholder: String.contains?(line, "path=/onboarding/invites/:invite_token "),
+        status_retained: String.contains?(line, "status=404"),
+        duration_retained: String.contains?(line, "duration_ms=15")
+      }
+
+      assert observed == %{raw_token_present: false, encoded_token_present: false, placeholder: true, status_retained: true, duration_retained: true}
+    end
+
+    for path <- ["/admin/invites", "/onboarding/invites", "/onboarding/invites-summary/sample", "/v1/models"] do
+      conn = Plug.Test.conn(:get, path) |> Map.put(:status, 200)
+      line = RequestLogger.request_log_line(conn, duration)
+      assert String.contains?(line, "path=#{path} ")
+    end
   end
 
   test "runtime request logging is one-line metadata-only and includes production fields", %{
@@ -187,6 +273,65 @@ defmodule CodexPoolerWeb.Runtime.RequestLoggingTest do
     metadata_text = inspect(request.request_metadata)
     refute metadata_text =~ input_text
     refute metadata_text =~ setup.authorization
+  end
+
+  defp invite_log_tokens! do
+    %{user: owner} = bootstrap_owner_fixture()
+    scope = Scope.for_user(owner, ["instance_owner"])
+    pool = CodexPooler.PoolerFixtures.pool_fixture()
+    {:ok, %{token: active}} = Access.create_invite(scope, pool, %{invited_email: "active@example.com"})
+    {:ok, %{token: expired}} = Access.create_invite(scope, pool, %{invited_email: "expired@example.com", expires_at: DateTime.add(DateTime.utc_now(), -60, :second)})
+    {:ok, %{token: revoked, invite: invite}} = Access.create_invite(scope, pool, %{invited_email: "revoked@example.com"})
+    {:ok, _revoked} = Access.revoke_invite(scope, invite)
+    unknown = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+    [active: active, expired: expired, revoked: revoked, unknown: unknown]
+  end
+
+  defp invite_log_paths(token) do
+    [
+      canonical: "/onboarding/invites/" <> token,
+      encoded_prefix: "/%6Fnboarding/%69nvites/" <> token,
+      encoded_token: "/onboarding/invites/" <> percent_encode(token),
+      encoded_both: "/%6fnboarding/%69nvites/" <> percent_encode(token)
+    ]
+  end
+
+  defp percent_encode(value), do: for(<<byte <- value>>, into: "", do: "%" <> Base.encode16(<<byte>>))
+
+  defp start_invite_logging_endpoint! do
+    observer = self()
+
+    probe = fn conn, _opts ->
+      result = @endpoint.call(conn, @endpoint.init([]))
+      send(observer, {:invite_http_observed, result.status, Map.has_key?(result.path_params, "invite_token")})
+      result
+    end
+
+    refute @endpoint.config(:debug_errors, false)
+    listener = start_supervised!({Bandit, plug: probe, port: 0, ip: {127, 0, 0, 1}, startup_log: false})
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(listener)
+
+    on_exit(fn ->
+      refute Process.alive?(listener)
+      assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [], 1_000)
+    end)
+
+    port
+  end
+
+  defp invite_http_status(port, request_path) do
+    case Req.get("http://127.0.0.1:#{port}" <> request_path, headers: [{"user-agent", "sample-client/1.0"}], decode_body: false, redirect: false, retry: false) do
+      {:ok, response} -> response.status
+      {:error, _reason} -> :request_failed
+    end
+  end
+
+  defp completion_lines(log) do
+    log |> String.split("\n", trim: true) |> Enum.filter(&String.contains?(&1, "request_completed"))
+  end
+
+  defp complete_request_metadata?(line) do
+    Enum.all?(["method=GET", "status=200", "duration_ms=", "remote_ip=", ~s(user_agent="sample-client/1.0")], &String.contains?(line, &1)) and length(Regex.scan(~r/request_id=/, line)) == 1
   end
 
   defp setup_trusted_proxies(trusted_proxies) do
