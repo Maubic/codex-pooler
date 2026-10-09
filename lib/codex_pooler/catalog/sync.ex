@@ -19,6 +19,7 @@ defmodule CodexPooler.Catalog.Sync do
   @assignment_active AssignmentStatus.active_status()
   @assignment_eligible AssignmentStatus.eligible_status()
   @identity_active IdentityStatus.active_status()
+  @identity_model_routable IdentityStatus.model_routable_statuses()
   @secret_active "active"
   @secret_kind "access_token"
   @cancelled "cancelled"
@@ -42,10 +43,10 @@ defmodule CodexPooler.Catalog.Sync do
     trigger_kind = Keyword.get(opts, :trigger_kind, "manual")
     fetcher = Keyword.get(opts, :fetcher, &Discovery.fetch_models_for_assignment/1)
 
-    assignments = list_catalog_sync_assignments(pool_id)
+    assignments = list_catalog_source_assignments(pool_id, @identity_model_routable)
 
     result =
-      if assignments == [] do
+      if Enum.all?(assignments, &(&1.identity.status != @identity_active)) do
         {:ok, %{sync_runs: [], models: [], skipped?: true}}
       else
         run_catalog_sync(pool_id, trigger_kind, assignments, fetcher)
@@ -60,6 +61,10 @@ defmodule CodexPooler.Catalog.Sync do
 
   @spec list_catalog_sync_assignments(pool_ref()) :: [map()]
   def list_catalog_sync_assignments(pool_or_id) do
+    list_catalog_source_assignments(pool_or_id, [@identity_active])
+  end
+
+  defp list_catalog_source_assignments(pool_or_id, identity_statuses) do
     pool_id = pool_id(pool_or_id)
 
     PoolUpstreamAssignment
@@ -73,7 +78,7 @@ defmodule CodexPooler.Catalog.Sync do
       [assignment, identity, _secret],
       assignment.pool_id == ^pool_id and assignment.status == ^@assignment_active and
         assignment.eligibility_status == ^@assignment_eligible and
-        identity.status == ^@identity_active
+        identity.status in ^identity_statuses
     )
     |> order_by([assignment, _identity, _secret], asc: assignment.created_at)
     |> select([assignment, identity, _secret], %{assignment: assignment, identity: identity})
@@ -161,7 +166,11 @@ defmodule CodexPooler.Catalog.Sync do
   defp catalog_sync_in_progress_error({:error, reason}), do: {:error, reason}
 
   defp discover_and_persist_catalog(run, assignments, fetcher) do
-    case Discovery.discover_models(assignments, fetcher) do
+    # Refreshing sources remain authoritative until read successfully. Keep
+    # their prior listings while avoiding catalog I/O during credential rotation.
+    readable_assignments = Enum.filter(assignments, &(&1.identity.status == @identity_active))
+
+    case Discovery.discover_models(readable_assignments, fetcher) do
       {:ok, successful_assignments, failed_sources, discovered} ->
         Persistence.persist_catalog(
           run,

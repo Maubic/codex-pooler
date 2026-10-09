@@ -30,10 +30,10 @@ defmodule CodexPooler.Catalog.Sync.Persistence do
     grouped = aggregate_models(discovered)
     seen_exposed_ids = Map.keys(grouped)
 
-    failed_assignment_ids =
-      Enum.map(failed_sources, fn {source, _reason} -> source.assignment.id end)
+    unread_assignment_ids =
+      Enum.map(assignments, & &1.assignment.id) -- Enum.map(successful_assignments, & &1.assignment.id)
 
-    partial? = failed_assignment_ids != []
+    partial? = unread_assignment_ids != []
 
     Multi.new()
     |> then(fn multi ->
@@ -57,7 +57,7 @@ defmodule CodexPooler.Catalog.Sync.Persistence do
         repo,
         run,
         seen_exposed_ids,
-        failed_assignment_ids,
+        unread_assignment_ids,
         timestamp
       )
     end)
@@ -83,6 +83,7 @@ defmodule CodexPooler.Catalog.Sync.Persistence do
           "source_assignment_count" => length(assignments),
           "successful_source_assignment_count" => length(successful_assignments),
           "failed_source_assignment_count" => length(failed_sources),
+          "skipped_source_assignment_count" => length(unread_assignment_ids) - length(failed_sources),
           "failed_assignments" =>
             Enum.map(failed_sources, fn {source, reason} ->
               %{
@@ -184,7 +185,7 @@ defmodule CodexPooler.Catalog.Sync.Persistence do
          repo,
          run,
          seen_exposed_ids,
-         failed_assignment_ids,
+         unread_assignment_ids,
          timestamp
        ) do
     lower_seen = Enum.map(seen_exposed_ids, &String.downcase/1)
@@ -202,7 +203,7 @@ defmodule CodexPooler.Catalog.Sync.Persistence do
             fragment(
               "NOT (COALESCE(?->'source_assignment_ids', '[]'::jsonb) \\?| ?)",
               model.metadata,
-              type(^failed_assignment_ids, {:array, :string})
+              type(^unread_assignment_ids, {:array, :string})
             )
 
     {count, _rows} =
