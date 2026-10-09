@@ -3,9 +3,12 @@ defmodule CodexPooler.Gateway.Routing.CircuitProbeOwnershipPeerTest do
 
   import CodexPooler.PoolerFixtures
 
-  alias CodexPooler.{CircuitProbePeer, InstancePresencePeer, PeerRegistry, TestDiagnostics, UnboxedFixture}
+  alias CodexPooler.{Access, Accounting, CircuitProbePeer, InstancePresencePeer, PeerRegistry, TestDiagnostics, UnboxedFixture}
+  alias CodexPooler.Accounting.{LedgerEntry, Request}
   alias CodexPooler.Gateway.OperationalSettings
+  alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Routing.{CircuitHealth, CircuitState}
+  alias CodexPooler.Gateway.Runtime.Dispatch.{Context, RouteState}
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
   alias Ecto.Adapters.SQL.Sandbox
@@ -31,6 +34,7 @@ defmodule CodexPooler.Gateway.Routing.CircuitProbeOwnershipPeerTest do
 
           InstancePresencePeer.assert_os_process_stopped!(os_identity)
           UnboxedFixture.run_unboxed(fn -> InstancePresencePeer.purge_peer_state!(boot_id, fn -> :ok end) end, InstancePresencePeer.cleanup_timeout_ms(@budget))
+          TestDiagnostics.puts(Jason.encode!(%{scenario: "peer_cleanup", node: peer.remote, os_process_stopped: true, database_backends_absent: true}))
       end
 
       Agent.stop(cleanup_state)
@@ -42,6 +46,7 @@ defmodule CodexPooler.Gateway.Routing.CircuitProbeOwnershipPeerTest do
     os_identity = InstancePresencePeer.capture_os_process_identity!(:erpc.call(peer.remote, System, :pid, []))
     Agent.update(cleanup_state, fn _ -> %{peer: peer, os_identity: os_identity, boot_id: boot_id} end)
     runtime = :erpc.call(peer.remote, CircuitProbePeer, :bootstrap, [Repo.config(), settings, boot_id])
+    TestDiagnostics.puts(Jason.encode!(%{scenario: "peer_acquired", node: runtime.node, os_pid: runtime.os_pid, backend: runtime.backend}))
     %{peer: peer.remote, peer_runtime: runtime}
   end
 
@@ -56,23 +61,45 @@ defmodule CodexPooler.Gateway.Routing.CircuitProbeOwnershipPeerTest do
 
     UnboxedFixture.register_unboxed_cleanup!(fn ->
       pools = Repo.all(from p in Pool, where: p.slug == ^slug, select: p.id)
+      entry_kinds = Repo.all(from entry in LedgerEntry, where: entry.pool_id in ^pools, select: entry.entry_kind)
       delete_committed_pools!(pools)
       Repo.delete_all(from i in UpstreamIdentity, where: i.account_label == ^slug)
+      refute Repo.exists?(from request in Request, where: request.pool_id in ^pools)
+      refute Repo.exists?(from entry in LedgerEntry, where: entry.pool_id in ^pools)
+      assert Enum.all?(entry_kinds, &(&1 == "reservation"))
+      TestDiagnostics.puts(Jason.encode!(%{scenario: "peer_fixture_cleanup", reservations: length(entry_kinds), settlements: 0, remaining_requests: 0, remaining_ledger_entries: 0}))
     end)
 
     pool = pool_fixture(%{slug: slug})
-    %{api_key: api_key} = active_api_key_fixture(pool)
+    %{raw_key: raw_key} = active_api_key_fixture(pool)
     %{assignment: assignment, identity: identity} = upstream_assignment_fixture(pool, %{account_label: slug})
     model = model_fixture(pool)
-    auth = %{pool: pool, api_key: api_key}
+    assert {:ok, auth} = Access.authenticate_api_key(raw_key)
     assert {:ok, circuit} = CircuitState.record_failure(auth, model, assignment, "proxy_websocket", :upstream_network_error)
     circuit |> Ecto.Changeset.change(next_probe_at: DateTime.add(DateTime.utc_now(), -1)) |> Repo.update!()
     local_runtime = CircuitProbePeer.runtime()
     assert context.peer_runtime.node != node()
     assert context.peer_runtime.backend != local_runtime.backend
     assert context.peer_runtime.beam == local_runtime.beam
-    request = request_fixture(auth, %{model_id: model.id, status: "in_progress", completed_at: nil})
-    %{fixture: %{auth: auth, model: model, assignment: assignment, identity: identity, circuit: circuit, request: request}, local_runtime: local_runtime}
+    endpoint = "/backend-api/codex/responses"
+    payload = %{"model" => model.exposed_model_id, "input" => [], "stream" => true}
+    request_options = RequestOptions.for_websocket(%{}, payload)
+    candidates = [{assignment, identity}]
+    assert {:ok, reserved} = Accounting.reserve(auth, model, payload, %{endpoint: endpoint, transport: "websocket", correlation_id: Ecto.UUID.generate(), request_metadata: %{}})
+
+    assert {:ok, dispatch_context} =
+             Context.new(%{
+               auth: auth,
+               endpoint: endpoint,
+               payload: payload,
+               model: model,
+               reserved: reserved,
+               candidates: candidates,
+               request_options: request_options,
+               route_state: RouteState.new(%{visible_model: model, candidates: candidates})
+             })
+
+    %{fixture: %{auth: auth, model: model, assignment: assignment, identity: identity, circuit: circuit, context: dispatch_context}, local_runtime: local_runtime}
   end
 
   for first_writer <- [:local, :peer], outcome <- [:neutral, :success, :failure] do

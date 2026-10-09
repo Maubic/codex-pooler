@@ -9,6 +9,8 @@ defmodule CodexPooler.CircuitProbePeer do
   alias CodexPooler.InstancePresencePeer
   alias CodexPooler.Repo
 
+  @type fixture :: %{required(:context) => Context.t(), optional(atom()) => term()}
+
   @spec bootstrap(keyword(), OperationalSettings.t(), String.t()) :: map()
   def bootstrap(repo_config, settings, boot_id) do
     {:ok, _} = Application.ensure_all_started(:postgrex)
@@ -25,10 +27,10 @@ defmodule CodexPooler.CircuitProbePeer do
     %{node: node(), backend: backend, os_pid: System.pid(), beam: Base.encode16(CircuitState.module_info(:md5), case: :lower)}
   end
 
-  @spec admit(map()) :: {:ok, RoutingSelection.t()} | {:error, term()}
-  def admit(fixture), do: RoutingSelection.begin_circuit(selection(fixture), fixture.auth, fixture.model)
+  @spec admit(fixture()) :: {:ok, RoutingSelection.t()} | {:error, term()}
+  def admit(fixture), do: RoutingSelection.begin_circuit(selection(fixture), fixture.context.auth, fixture.context.model)
 
-  @spec concurrent_admit(map(), pid(), reference()) :: term()
+  @spec concurrent_admit(fixture(), pid(), reference()) :: term()
   def concurrent_admit(fixture, parent, gate) do
     Repo.checkout(fn ->
       %{rows: [[backend]]} = Repo.query!("SELECT pg_backend_pid()")
@@ -42,9 +44,9 @@ defmodule CodexPooler.CircuitProbePeer do
     end)
   end
 
-  @spec complete(map(), RoutingSelection.t(), atom()) :: term()
+  @spec complete(fixture(), RoutingSelection.t(), atom()) :: term()
   def complete(fixture, admitted, outcome) do
-    context = %Context{auth: fixture.auth, model: fixture.model, route_plan: admitted.route_plan, reserved: %{request: fixture.request}}
+    context = %{fixture.context | route_plan: admitted.route_plan}
     selected = SelectedCandidateContext.from_dispatch_context(context, admitted, false)
 
     case outcome do
@@ -54,8 +56,17 @@ defmodule CodexPooler.CircuitProbePeer do
     end
   end
 
-  @spec selection(map()) :: RoutingSelection.t()
+  @spec selection(fixture()) :: RoutingSelection.t()
   def selection(fixture) do
-    %RoutingSelection{assignment: fixture.assignment, identity: fixture.identity, route_class: "proxy_websocket", route_plan: %{planned_at: DateTime.utc_now(), affinity: %{enabled?: false, key_hash: nil, pool_id: fixture.auth.pool.id, api_key_id: fixture.auth.api_key.id, model_identifier: fixture.model.exposed_model_id}}}
+    context = fixture.context
+    [{assignment, identity}] = context.route_plan.candidates
+
+    RoutingSelection.prepare_candidate(%{
+      assignment: assignment,
+      identity: identity,
+      index: 0,
+      route_class: context.route_class,
+      route_plan: context.route_plan
+    })
   end
 end
