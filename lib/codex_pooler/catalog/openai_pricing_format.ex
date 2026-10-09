@@ -311,7 +311,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingFormat do
 
       descriptor_valid?(bucket, values) ->
         state
-        |> increment(:skipped_price_buckets)
+        |> skip_bucket(identifier, tier, bucket)
         |> add_warning(:unsupported_price_bucket, "complete non-snapshot bucket is skipped", path)
 
       true ->
@@ -337,7 +337,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingFormat do
 
       raw_tier == "standard" and bucket == "default" and exact_numeric_keys?(values, ["input"]) ->
         state
-        |> increment(:skipped_price_buckets)
+        |> skip_bucket(identifier, tier, bucket)
         |> add_warning(
           :incomplete_price_bucket,
           "supported bucket is incomplete and skipped",
@@ -909,6 +909,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingFormat do
       errors: [],
       warnings: [],
       rows: [],
+      skipped_buckets: MapSet.new(),
       summary: %{
         importable_rows: 0,
         priced_rows: 0,
@@ -940,6 +941,14 @@ defmodule CodexPooler.Catalog.OpenAIPricingFormat do
   end
 
   defp add_row(state, row), do: %{state | rows: [row | state.rows]}
+
+  defp skip_bucket(state, identifier, tier, bucket) do
+    skipped_buckets = MapSet.put(state.skipped_buckets, {identifier, tier, bucket})
+
+    %{state | skipped_buckets: skipped_buckets}
+    |> put_in([:summary, :skipped_price_buckets], MapSet.size(skipped_buckets))
+  end
+
   defp increment(state, key), do: update_in(state, [:summary, key], &(&1 + 1))
   defp increment_bucket(state, bucket), do: update_in(state, [:buckets, bucket], &(&1 + 1))
 
