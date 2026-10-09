@@ -356,6 +356,8 @@ spec:
 
 When `app.replicaCount` is `2` or higher, the chart enables websocket owner forwarding automatically. Worker and scheduler cluster participation is optional for dead-execution recovery: keep `clustering.participants.worker` and `clustering.participants.scheduler` disabled as in this example unless another feature needs their BEAM membership. These explicit overrides differ from the chart's participant defaults.
 
+Chart 0.12.0 removes the inert `app.websocketContinuity.allowUnsafeMultiReplica` setting. Remove that field from existing values, even when it is `false`: schema validation now rejects it. It never bypassed the clustering requirements. Multiple app replicas still require `clustering.enabled=true` and `clustering.participants.app=true`, with owner forwarding enabled automatically. This chart version does not publish a new application image; the default image remains `0.11.5` and its startup-gate limitation still applies.
+
 Dead-execution recovery reads exact owner-attested PostgreSQL terminal proofs, so workers do not need an eRPC connection to the app owner. The app publishes those proofs asynchronously in bounded batches; database publication time starts their six-hour retention window. A lost or unpublished proof leaves execution death unknown and cannot authorize settlement. App-to-app clustering for websocket owner forwarding remains required in the multi-replica topology above.
 
 ## Render safely before install

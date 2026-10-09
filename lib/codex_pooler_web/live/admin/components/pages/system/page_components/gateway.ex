@@ -138,7 +138,7 @@ defmodule CodexPoolerWeb.Admin.SystemPageComponents.Gateway do
           eyebrow="Catalog"
           title="Pricing catalog source"
           description="Published OpenAI pricing JSON used by the hourly pricing snapshot refresh."
-          hint="The migration hook and local dev seed still import the vendored JSON file; the scheduler resolves this URL when each pricing import job runs."
+          hint="The release migration Job and local dev seed still import the vendored JSON file; the scheduler resolves this URL when each pricing import job runs."
         >
           <div class="max-w-2xl">
             <.input
