@@ -181,6 +181,7 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
       decode_body: false,
       receive_timeout: @receive_timeout_ms,
       retry: false,
+      redirect: false,
       finch: OutboundHTTP.pool_options_for_url(url)
     )
   rescue
@@ -405,6 +406,9 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
   defp reason_code(_evidence), do: nil
 
   defp retryable_http_status?(status), do: status in @retryable_statuses or status in 500..599
+
+  defp http_failure_message(status) when status in 300..399,
+    do: "webhook endpoint returned a redirect"
 
   defp http_failure_message(status) when status in @permanent_statuses,
     do: "webhook endpoint rejected the alert notification"
