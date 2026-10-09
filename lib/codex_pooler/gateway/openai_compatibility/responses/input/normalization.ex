@@ -373,12 +373,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
 
   defp normalize_input_item(%{"role" => "assistant", "tool_calls" => tool_calls} = item)
        when is_list(tool_calls) do
-    with {:ok, parent_metadata_passthrough} <- optional_metadata_passthrough(item) do
-      normalize_assistant_tool_calls(
-        tool_calls,
-        Map.get(item, "metadata"),
-        parent_metadata_passthrough
-      )
+    with {:ok, parent_metadata_passthrough} <- optional_metadata_passthrough(item),
+         {:ok, tool_calls} <- normalize_assistant_tool_calls(tool_calls, Map.get(item, "metadata"), parent_metadata_passthrough),
+         {:ok, messages} <- normalize_assistant_tool_message(item) do
+      {:ok, messages ++ tool_calls}
     end
   end
 
@@ -508,6 +506,14 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
 
   defp normalize_input_item(_item),
     do: {:error, Error.invalid_request("input item shape is not translatable", "input")}
+
+  defp normalize_assistant_tool_message(%{"content" => content} = item) when content not in [nil, "", []] do
+    with {:ok, message} <- normalize_input_item(Map.delete(item, "tool_calls")) do
+      {:ok, [message]}
+    end
+  end
+
+  defp normalize_assistant_tool_message(_item), do: {:ok, []}
 
   defp normalize_assistant_tool_calls(tool_calls, parent_metadata, parent_metadata_passthrough) do
     tool_calls

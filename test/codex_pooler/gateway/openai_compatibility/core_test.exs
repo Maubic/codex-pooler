@@ -168,6 +168,46 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
     assert result.payload["input"] == input
   end
 
+  for call_count <- [0, 2], content_shape <- [:string, :parts] do
+    @tag :assistant_tool_text
+    test "Responses preserves #{content_shape} assistant text before #{call_count} tool calls" do
+      content = if unquote(content_shape) == :string, do: "synthetic assistant text", else: [%{"type" => "text", "text" => "synthetic assistant text"}]
+      calls = for index <- Enum.take(1..2, unquote(call_count)), do: %{"id" => "call_#{index}", "type" => "function", "function" => %{"name" => "lookup", "arguments" => "{}"}}
+      item = %{"role" => "assistant", "content" => content, "tool_calls" => calls, "phase" => "commentary", "metadata" => %{"turn_id" => "synthetic-turn"}}
+
+      assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [item]})
+      assert [message | function_calls] = result.payload["input"]
+      assert message == %{"type" => "message", "role" => "assistant", "content" => [%{"type" => "output_text", "text" => "synthetic assistant text"}], "phase" => "commentary", "metadata" => item["metadata"]}
+      assert Enum.map(function_calls, & &1["type"]) == List.duplicate("function_call", unquote(call_count))
+      assert Enum.map(function_calls, & &1["call_id"]) == Enum.map(calls, & &1["id"])
+      assert Enum.all?(function_calls, &(&1["metadata"] == item["metadata"]))
+    end
+  end
+
+  @tag :assistant_tool_text
+  test "Responses keeps empty assistant tool-call content and native replay behavior" do
+    call = %{"id" => "call_empty_content", "type" => "function", "function" => %{"name" => "lookup", "arguments" => "{}"}}
+    expected_call = %{"type" => "function_call", "call_id" => call["id"], "name" => "lookup", "arguments" => "{}"}
+
+    for content <- [:absent, nil, "", []] do
+      item = %{"role" => "assistant", "tool_calls" => [call]}
+      item = if content == :absent, do: item, else: Map.put(item, "content", content)
+      assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [item]})
+      assert result.payload["input"] == [expected_call]
+    end
+
+    native = [%{"type" => "message", "role" => "assistant", "content" => [%{"type" => "output_text", "text" => "synthetic native text"}]}, expected_call]
+    assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => native})
+    assert result.payload["input"] == native
+  end
+
+  @tag :assistant_tool_text
+  test "Responses refuses malformed assistant content beside tool calls" do
+    for content <- [1, %{}, [%{"type" => "text", "text" => nil}]] do
+      assert {:error, %{status: 400, code: "invalid_request", param: "input"}} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [%{"role" => "user", "content" => "synthetic"}, %{"role" => "assistant", "content" => content, "tool_calls" => []}]})
+    end
+  end
+
   @tag :responses_coercion
   test "string Responses input coerces to a backend-compatible input_text message" do
     assert {:ok, result} =

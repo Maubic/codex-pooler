@@ -4251,6 +4251,12 @@ defmodule CodexPooler.CompatibilityMatrix do
         translated_type: "function_call",
         id_fields: ["call_id", "id"],
         reasoning_replay_sequence: ["reasoning", "assistant", "function_call", "tool"],
+        tool_call_content: %{
+          nonempty_text: "assistant_output_text_before_function_calls",
+          empty_tool_calls: "preserve_nonempty_assistant_message",
+          absent_null_or_empty: "omit_assistant_message",
+          malformed: "reject_before_dispatch"
+        },
         empty_assistant_content_type: "output_text",
         tool_content_output_field: "output",
         ordinary_replay_status_values: ["completed", "incomplete", "in_progress"],

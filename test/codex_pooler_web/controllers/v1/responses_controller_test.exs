@@ -114,6 +114,45 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     end
   end
 
+  for mode <- ~w(full lite), transport <- [:http, :websocket], call_count <- [0, 2] do
+    @tag :assistant_tool_text
+    test "#{transport} Responses preserves assistant text before #{call_count} calls in #{mode}" do
+      terminal = %{"type" => "response.completed", "response" => %{"id" => "resp_assistant_text", "object" => "response", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 2, "output_tokens" => 1, "total_tokens" => 3}}}
+      upstream_mode = if unquote(transport) == :http, do: FakeUpstream.sse_stream([terminal]), else: FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(terminal)])
+      upstream = start_upstream(upstream_mode)
+      setup = gateway_setup(upstream)
+      put_public_model_serving_mode!(setup, unquote(mode))
+      port = start_public_endpoint!()
+      calls = for index <- Enum.take(1..2, unquote(call_count)), do: %{"id" => "call_#{index}", "type" => "function", "function" => %{"name" => "lookup", "arguments" => "{}"}}
+      outputs = Enum.map(calls, &%{"type" => "function_call_output", "call_id" => &1["id"], "output" => "synthetic result"})
+      input = [%{"role" => "user", "content" => "synthetic question"}, %{"role" => "assistant", "content" => "synthetic assistant text", "tool_calls" => calls}] ++ outputs ++ [%{"role" => "user", "content" => "synthetic followup"}]
+      payload = %{"model" => setup.model.exposed_model_id, "input" => input, "tools" => [%{"type" => "function", "name" => "lookup", "parameters" => %{"type" => "object", "properties" => %{}}}]}
+
+      if unquote(transport) == :http do
+        {headers, body} = curl_json_request!(port, setup.authorization, payload, "/v1/responses")
+        assert String.starts_with?(headers, "HTTP/1.1 200")
+        assert CodexPooler.JSON.decode!(body)["status"] == "completed"
+      else
+        {conn, websocket, ref, _headers} = public_v1_websocket_connect!(port, setup, "assistant-text-#{System.unique_integer([:positive])}", [{"openai-beta", "responses_websockets=2026-02-06"}])
+
+        try do
+          {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(Map.merge(payload, %{"type" => "response.create", "stream" => true})))
+          {_conn, _websocket, frame} = receive_public_websocket_until_completed!(conn, websocket, ref)
+          assert CodexPooler.JSON.decode!(frame)["type"] == "response.completed"
+        after
+          Mint.HTTP.close(conn)
+        end
+      end
+
+      assert [captured] = FakeUpstream.requests(upstream)
+      forwarded = Enum.reject(captured.json["input"], &(&1["type"] == "additional_tools"))
+      assert Enum.map(forwarded, & &1["type"]) == ["message", "message"] ++ List.duplicate("function_call", unquote(call_count)) ++ List.duplicate("function_call_output", unquote(call_count)) ++ ["message"]
+      assert Enum.at(forwarded, 1)["content"] == [%{"type" => "output_text", "text" => "synthetic assistant text"}]
+      assert Enum.at(forwarded, 1)["role"] == "assistant"
+      assert Map.has_key?(captured.json, "tools") == (unquote(mode) == "full")
+    end
+  end
+
   for mode <- ~w(full lite), stream <- [false, true] do
     @tag :access_programs
     test "POST /v1/responses rejects malformed access programs before effects in #{mode} with stream=#{stream}", %{conn: conn} do
