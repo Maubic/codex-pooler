@@ -260,6 +260,9 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollectorTest do
     assert log =~ "param_state=accepted"
     assert log =~ "param=input"
     assert log =~ "elapsed_ms="
+    assert log =~ "compaction_invalid_reason=invalid_after_provider_failure"
+    assert log =~ "provider_terminal_type=response.failed"
+    assert log =~ "upstream_error_code=server_error"
     refute log =~ raw_message
   end
 
@@ -277,7 +280,25 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollectorTest do
 
     assert log =~ "source_stage=collector_invalid"
     assert log =~ "reason_code=compaction_result_too_large"
+    assert log =~ "compaction_invalid_reason=compaction_result_too_large"
+    refute log =~ "provider_terminal_type="
+    refute log =~ "upstream_error_code="
     refute log =~ "reason_code=missing_terminal"
+  end
+
+  test "collector log hashes malformed provider codes without provider text" do
+    code = "synthetic invalid code\nwith-control"
+    body = websocket_body([provider_failure_event("response.failed", code, "input", "private-provider-message")]) <> "data: unfinished"
+
+    log =
+      capture_log(fn ->
+        assert {:error, %{compaction_invalid_reason: "invalid_after_provider_failure"}} = CompactionResultCollector.collect_websocket_body(body)
+      end)
+
+    assert log =~ "provider_terminal_type=response.failed"
+    assert log =~ ~r/upstream_error_code=sha256_[0-9a-f]{12}/
+    refute log =~ code
+    refute log =~ "private-provider-message"
   end
 
   test "the collector reason vocabulary is closed and unlisted terms degrade to the generic value" do

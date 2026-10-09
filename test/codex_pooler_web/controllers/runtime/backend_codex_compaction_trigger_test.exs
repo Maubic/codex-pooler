@@ -2539,6 +2539,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCompactionTriggerTest do
 
     assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
     assert request.endpoint == "/backend-api/codex/responses/compact"
+    assert request.response_status_code == 502
     assert request.transport == "http_compact_json"
     assert request.retry_count == 0
 

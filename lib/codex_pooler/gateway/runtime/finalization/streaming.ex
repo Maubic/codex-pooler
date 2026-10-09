@@ -349,7 +349,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
         (Map.get(websocket_attempt_metadata, :response_usage) || stream_usage(body, stream_state)) |> merge_model_observation(websocket_attempt_metadata),
         SettlementAttrs.partial_stream_failure(
           context,
-          failure_response_status(reason, response.status),
+          response_context.client_response_status || failure_response_status(reason, response.status),
           code,
           terminal_failure_message(code, Metadata.safe_reason(reason)),
           attempt_metadata

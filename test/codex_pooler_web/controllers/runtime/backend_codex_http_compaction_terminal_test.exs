@@ -24,6 +24,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpCompactionTerminalTest do
 
       assert [request] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id)
       assert [attempt] = Repo.all(from a in Attempt, where: a.request_id == ^request.id)
+      assert request.response_status_code == 429
       assert request.status == "failed"
       assert request.last_error_code == "invalid_compaction_response"
       assert request.transport == "http_compact_json"
@@ -64,9 +65,115 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpCompactionTerminalTest do
       assert Enum.any?(events, fn event -> event["type"] == "response.output_item.done" and event["item"] == item end)
       assert Enum.any?(events, fn event -> event["type"] == "response.completed" end)
       assert FakeUpstream.http_request_count(upstream) == 1
-      assert [%{status: "succeeded"}] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id)
+      assert [%{status: "succeeded", response_status_code: 200}] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id)
     end
   end
+
+  for mode <- ["full", "lite"], variant <- [:plain, :preamble, :split] do
+    @tag :compact_client_status
+    test "#{mode} #{variant} compact provider error records client502 and upstream200", %{conn: conn} do
+      assert_compact_error_status(conn, unquote(mode), unquote(variant))
+    end
+  end
+
+  defp assert_compact_error_status(conn, mode, variant) do
+    release = make_ref()
+    upstream = start_upstream(error_stream(variant, release))
+    setup = gateway_setup(upstream, compact?: true)
+    serving_mode!(setup, mode)
+    {response, log} = collect_error_response(conn, setup, variant, release)
+    assert %{"error" => %{"code" => "invalid_compaction_response", "message" => "upstream compact stream was invalid"}} = json_response(response, 502)
+    assert [request] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id)
+    assert request.response_status_code == 502
+    assert request.status == "failed"
+    assert request.last_error_code == "invalid_compaction_response"
+    assert request.usage_status == "usage_unknown"
+    assert request.retry_count == 0
+    assert [attempt] = Repo.all(from a in Attempt, where: a.request_id == ^request.id)
+    assert attempt.upstream_status_code == 200
+    assert attempt.status == "failed"
+    assert attempt.network_error_code == "invalid_compaction_response"
+    refute attempt.retryable
+    assert attempt.response_metadata["compaction_invalid_reason"] == "provider_failure"
+    assert attempt.response_metadata["upstream_error_code"] == "internal_error"
+    assert attempt.response_metadata["stream_terminal_type"] == "error"
+    assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "settlement"), :count) == 1
+    assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "release"), :count) == 1
+    assert FakeUpstream.http_request_count(upstream) == 1
+    refute inspect({request, attempt}) =~ "synthetic private provider text"
+    refute response.resp_body =~ "synthetic private provider text"
+    refute log =~ "synthetic private provider text"
+    assert log =~ "compaction_invalid_reason=provider_failure"
+    assert log =~ "provider_terminal_type=error"
+    assert log =~ "upstream_error_code=internal_error"
+  end
+
+  defp error_stream(:plain, _release), do: {:sse, [internal_error_terminal()]}
+  defp error_stream(:preamble, _release), do: {:sse, [block(%{"type" => "response.created", "response" => %{"status" => "in_progress"}}), internal_error_terminal()]}
+
+  defp error_stream(:split, release) do
+    [label, data] = String.split(internal_error_terminal(), "data: ", parts: 2)
+    FakeUpstream.barrier_sse_stream([label, "data: " <> data], barrier_after: 1, notify: self(), release_ref: release, done: false)
+  end
+
+  defp collect_error_response(conn, setup, :split, release) do
+    mfa = {CompactionResultCollector, :collect_sse_data, 2}
+    on_exit(fn -> :erlang.trace_pattern(mfa, false, [:local]) end)
+    :erlang.trace_pattern(mfa, [{:_, [], [{:message, :collector_chunk}]}], [:local])
+    supervisor = start_supervised!(Task.Supervisor)
+
+    task =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        receive do
+          :start -> with_log(fn -> post_compact(conn, setup) end)
+        end
+      end)
+
+    monitor = Process.monitor(task.pid)
+    :erlang.trace(task.pid, true, [:call, :arity, :set_on_spawn, {:tracer, self()}])
+    send(task.pid, :start)
+    assert_receive {:fake_upstream_chunk_barrier, 1, handler, ^release}, 15_000
+    assert_receive {:trace, _pid, :call, ^mfa, :collector_chunk}, 15_000
+    send(handler, {:fake_upstream_release_chunk, release})
+    result = Task.await(task, 15_000)
+    assert_receive {:DOWN, ^monitor, :process, _, :normal}, 15_000
+    :erlang.trace_pattern(mfa, false, [:local])
+    result
+  end
+
+  defp collect_error_response(conn, setup, _variant, _release), do: with_log(fn -> post_compact(conn, setup) end)
+
+  for mode <- ["full", "lite"] do
+    test "#{mode} ordinary committed SSE keeps client request and upstream200", %{conn: conn} do
+      assert_committed_sse_status(conn, unquote(mode))
+    end
+  end
+
+  defp assert_committed_sse_status(conn, mode) do
+    upstream = start_upstream({:sse, [block(%{"type" => "response.output_text.delta", "delta" => "synthetic-visible"}), internal_error_terminal()]})
+    setup = gateway_setup(upstream)
+    serving_mode!(setup, mode)
+
+    {response, log} =
+      with_log(fn ->
+        conn |> auth(setup) |> post("/backend-api/codex/responses", %{"model" => setup.model.exposed_model_id, "input" => native_text_input("synthetic boundary"), "stream" => true})
+      end)
+
+    assert response(response, 200) =~ "internal_error"
+    assert [request] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id)
+    assert request.response_status_code == 200
+    assert request.status == "failed"
+    assert request.retry_count == 0
+    assert [attempt] = Repo.all(from a in Attempt, where: a.request_id == ^request.id)
+    assert attempt.upstream_status_code == 200
+    assert FakeUpstream.http_request_count(upstream) == 1
+    assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "settlement"), :count) == 1
+    assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "release"), :count) == 1
+    refute inspect({request, attempt}) =~ "synthetic private provider text"
+    refute log =~ "synthetic private provider text"
+  end
+
+  defp internal_error_terminal, do: block(%{"type" => "error", "error" => %{"code" => "internal_error", "message" => "synthetic private provider text"}})
 
   test "malformed oversized and post-terminal quota material cannot project a fatal quota", %{conn: conn} do
     overflow = block(%{"type" => CollectedBody.overflow_event_type()})
