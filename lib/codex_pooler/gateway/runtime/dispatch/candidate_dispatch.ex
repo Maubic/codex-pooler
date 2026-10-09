@@ -413,13 +413,13 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.CandidateDispatch do
           {:error, term()} | {:accounting_failure, atom(), term()}
   def compaction_projection_cleanup_result(settlement_result, neutral_result, merge_reason) do
     case {settlement_result, neutral_result} do
-      {{:ok, _settled}, :ok} ->
+      {{settlement_status, _settled}, :ok} when settlement_status in [:ok, :stale_generation] ->
         {:accounting_failure, :merge_compaction_projection_metadata, merge_reason}
 
       {{:error, settlement_error}, :ok} ->
         {:error, settlement_error}
 
-      {{:ok, _settled}, {:error, neutral_error}} ->
+      {{settlement_status, _settled}, {:error, neutral_error}} when settlement_status in [:ok, :stale_generation] ->
         {:error, neutral_error}
 
       {{:error, settlement_error}, {:error, neutral_error}} ->
