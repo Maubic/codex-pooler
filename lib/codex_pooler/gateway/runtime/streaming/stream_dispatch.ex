@@ -451,6 +451,9 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   # moderation, safety, and turn-state state. Retain them on the downstream
   # connection until this attempt commits. A retry discards the failed
   # candidate's bytes; the successful attempt flushes its own exactly once.
+  # Dedicated retained-candidate metadata budget, independent of event
+  # observation limits. Equality is accepted; admission precedes append/write.
+  @max_native_preamble_bytes 8_388_608
   @withheld_preamble :codex_pooler_withheld_retry_preamble
   # Set when a preamble block is withheld and cleared once a keepalive event
   # has told the client about it (or the preamble is flushed or discarded), so
@@ -463,9 +466,14 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
 
   defp withhold_preamble(%{target: %Plug.Conn{} = target} = state, preamble)
        when is_binary(preamble) and preamble != "" do
+    held = withheld_preamble(state) <> preamble
+    # Keep a native held slice from pinning an oversized parent or append
+    # allocation; the logical admission already happened before this append.
+    held = if Map.has_key?(state, :codex_responses_sse_block_state) and :binary.referenced_byte_size(held) > @max_native_preamble_bytes, do: :binary.copy(held), else: held
+
     target =
       target
-      |> Plug.Conn.put_private(@withheld_preamble, withheld_preamble(state) <> preamble)
+      |> Plug.Conn.put_private(@withheld_preamble, held)
       |> Plug.Conn.put_private(@withheld_preamble_unannounced, true)
 
     %{state | target: target}
@@ -498,20 +506,36 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   # write path first — a structurally complete trailing terminal without a
   # final separator is only recoverable from that buffer.
   defp http_stream_terminal_failure_writer(%ResponseContext{} = response_context) do
-    fn state, reason ->
-      state = mark_http_write_failure(state, reason)
+    fn
+      state, :native_preamble_limit_exceeded ->
+        finalize_native_preamble_failure(state)
 
-      case flush_buffered_first_event(response_context, state) do
-        {:ok, state} ->
-          finalize_http_stream_failure(state, reason)
+      state, reason ->
+        state = mark_http_write_failure(state, reason)
 
-        {:chunk_error, state, _chunk_reason} ->
-          state
-          |> DownstreamDeliveryEvidence.record_write_failure()
-          |> finalize_http_stream_failure(reason)
-      end
+        case flush_buffered_first_event(response_context, state) do
+          {:ok, state} ->
+            finalize_http_stream_failure(state, reason)
+
+          {:local_stream_failure, state, :native_preamble_limit_exceeded} ->
+            finalize_native_preamble_at_eof(state)
+
+          {:chunk_error, state, _chunk_reason} ->
+            state
+            |> DownstreamDeliveryEvidence.record_write_failure()
+            |> finalize_http_stream_failure(reason)
+        end
     end
   end
+
+  defp finalize_native_preamble_failure(%{native_delivered_terminal: %{kind: kind}} = state) when kind in [:completed, :incomplete],
+    do: {:success, clear_withheld_preamble(state), ""}
+
+  defp finalize_native_preamble_failure(%{native_delivered_terminal: %{kind: :failed, failure: failure}} = state),
+    do: {:failure, clear_withheld_preamble(state), "", {:terminal_stream_failure, failure}}
+
+  defp finalize_native_preamble_failure(state),
+    do: {:failure, clear_withheld_preamble(state), "", :native_preamble_limit_exceeded}
 
   defp finalize_http_stream_failure(state, {:chunk, :visible_output_unavailable} = reason) do
     data = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"code\":\"gateway_accounting_failed\",\"message\":\"Visible output authorization unavailable\"}}\n\n"
@@ -523,6 +547,8 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   end
 
   defp finalize_http_stream_failure(state, reason) do
+    state = discard_withheld_preamble(state)
+
     case {DownstreamStream.terminal_outcome(state), reason} do
       {terminal, _reason} when terminal in [:completed, :incomplete] ->
         {:success, state, ""}
@@ -558,6 +584,9 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
         {:ok, state} ->
           finalize_http_stream_success(state)
 
+        {:local_stream_failure, state, :native_preamble_limit_exceeded} ->
+          finalize_native_preamble_at_eof(state)
+
         {:chunk_error, state, reason} ->
           state
           |> DownstreamDeliveryEvidence.record_write_failure()
@@ -566,7 +595,11 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
     end
   end
 
+  defp finalize_native_preamble_at_eof(state), do: {:failure, state, "", :native_preamble_limit_exceeded}
+
   defp finalize_http_stream_success(state) do
+    state = discard_withheld_preamble(state)
+
     case DownstreamStream.terminal_outcome(state) do
       {:failed, %{} = failure} ->
         {:failure, state, "", {:terminal_stream_failure, failure}}
@@ -649,19 +682,27 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
     case write_stream_data_preserving_state(response_context, state, buffer) do
       {:ok, state} -> write_eof_normalized_stream_data(response_context, state)
       {:error, reason, advanced} -> {:chunk_error, restore_failed_flush_delivery(advanced, state), reason}
+      {:local_stream_failure, advanced, reason} -> {:local_stream_failure, advanced, reason}
     end
   end
 
   defp write_eof_normalized_stream_data(
-         %ResponseContext{context: %{payload: payload, request_options: opts}},
+         %ResponseContext{context: %{payload: payload, request_options: opts}} = response_context,
          state
        ) do
     {data, advanced, delivery} =
       DownstreamStream.flush_eof_delivery(DownstreamStream.endpoint(payload, opts), opts, state)
 
-    case write_normalized_stream_data_preserving_state(advanced, data, delivery) do
+    result =
+      case delivery do
+        %{parts: parts} -> write_native_delivery_parts(response_context, advanced, parts)
+        _legacy -> write_normalized_stream_data_preserving_state(advanced, data, delivery)
+      end
+
+    case result do
       {:ok, advanced} -> {:ok, advanced}
       {:error, reason, advanced} -> {:chunk_error, restore_failed_flush_delivery(advanced, state), reason}
+      {:local_stream_failure, advanced, reason} -> {:local_stream_failure, advanced, reason}
     end
   end
 
@@ -750,11 +791,16 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
 
   defp handle_classified_stream_data(
          {:retry, failure},
-         _response_context,
-         _conn,
+         response_context,
+         conn,
          _data
-       ),
-       do: {:retry_first_event, failure}
+       ) do
+    if public_stream_state?(conn) do
+      {:retry_first_event, failure}
+    else
+      admit_native_retry(response_context, conn, failure)
+    end
+  end
 
   defp handle_classified_stream_data(
          {:write, data},
@@ -779,6 +825,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
       {:ok, %{target: target, codex_responses_sse_block_state: %{overflow_count: _}} = conn} when target != :websocket -> {:ok, conn}
       {:ok, conn} -> {:terminal_stream_failure, conn, failure}
       {:error, _reason} = error -> error
+      {:local_stream_failure, _, _} = failure -> failure
     end
   end
 
@@ -789,6 +836,34 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
          _data
        ),
        do: {:ok, conn}
+
+  defp admit_native_retry(response_context, conn, failure) do
+    bytes = Map.get(failure, :withheld_body, "")
+
+    case normalize_stream_data(response_context, conn, bytes, fn _ -> false end) do
+      {_data, observed, %{parts: parts}} ->
+        case admit_retry_preamble(parts, observed, byte_size(withheld_preamble(conn))) do
+          :ok -> {:retry_first_event, failure}
+          refused -> refused
+        end
+
+      _other ->
+        {:retry_first_event, failure}
+    end
+  end
+
+  defp admit_retry_preamble([], _state, _held), do: :ok
+
+  defp admit_retry_preamble([part | rest], state, held) do
+    incoming = byte_size(part.data)
+
+    cond do
+      part.preamble_guard? and incoming > @max_native_preamble_bytes -> native_preamble_failure(state, held, incoming)
+      part.preamble? and incoming > @max_native_preamble_bytes - held -> native_preamble_failure(state, held, incoming)
+      part.preamble? -> admit_retry_preamble(rest, state, held + incoming)
+      true -> admit_retry_preamble(rest, state, held)
+    end
+  end
 
   defp sse_response?(response) do
     response
@@ -801,6 +876,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
     case write_stream_data_preserving_state(response_context, conn, data) do
       {:ok, conn} -> {:ok, conn}
       {:error, reason, _conn} -> {:error, reason}
+      {:local_stream_failure, conn, reason} -> {:local_stream_failure, conn, reason}
     end
   end
 
@@ -813,7 +889,70 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   defp write_stream_data_preserving_state(%ResponseContext{} = response_context, conn, data) do
     case normalize_stream_data(response_context, conn, data, &StreamProtocol.stream_data_client_visible?/1) do
       {:error, reason, conn} -> {:error, reason, conn}
+      {_downstream_data, conn, %{parts: parts}} -> write_native_delivery_parts(response_context, conn, parts)
       {downstream_data, conn, delivery} -> write_normalized_stream_data_preserving_state(conn, downstream_data, delivery)
+    end
+  end
+
+  defp write_native_delivery_parts(response_context, state, parts) do
+    Enum.reduce_while(parts, {:ok, state}, fn part, {:ok, state} ->
+      case write_native_delivery_part(response_context, state, part) do
+        {:ok, state} -> {:cont, {:ok, state}}
+        failure -> {:halt, failure}
+      end
+    end)
+  end
+
+  defp write_native_delivery_part(_context, state, %{preamble_guard?: true, data: preamble}) when byte_size(preamble) > @max_native_preamble_bytes,
+    do: native_preamble_failure(state, byte_size(withheld_preamble(state)), byte_size(preamble))
+
+  defp write_native_delivery_part(_context, state, %{preamble?: true, data: preamble}) do
+    held = byte_size(withheld_preamble(state))
+    incoming = byte_size(preamble)
+
+    if incoming > @max_native_preamble_bytes - held do
+      native_preamble_failure(state, held, incoming)
+    else
+      {:ok, withhold_preamble(state, preamble)}
+    end
+  end
+
+  defp write_native_delivery_part(%ResponseContext{context: context}, state, %{data: data, commits?: commits?, outcome: outcome}) do
+    case maybe_mark_visible_output(state, context, data, &StreamProtocol.stream_data_client_visible?/1) do
+      {:ok, state} ->
+        {preamble, state} = if commits?, do: take_withheld_preamble(state), else: {"", state}
+
+        case write_normalized_chunk_and_commit_progress(state, preamble <> data) do
+          {:ok, state} -> {:ok, remember_delivered_native_terminal(state, outcome)}
+          failure -> failure
+        end
+
+      {:error, :stale_generation, state} ->
+        {:ok, state}
+
+      {:error, reason, state} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp remember_delivered_native_terminal(state, {:ok, outcome}), do: Map.put_new(state, :native_delivered_terminal, outcome)
+  defp remember_delivered_native_terminal(state, _outcome), do: state
+
+  defp native_preamble_failure(state, held, incoming) do
+    state =
+      state
+      |> clear_native_preamble_state()
+      |> Map.put(:native_preamble_limit, %{"buffer" => "native_preamble", "held_bytes" => held, "incoming_bytes" => incoming, "proposed_bytes" => held + incoming, "budget_bytes" => @max_native_preamble_bytes, "reason" => "native_preamble_limit_exceeded"})
+
+    {:local_stream_failure, state, :native_preamble_limit_exceeded}
+  end
+
+  defp clear_native_preamble_state(state) do
+    state = clear_withheld_preamble(state) |> put_first_event_state(StreamAttempt.first_event_state())
+
+    case state do
+      %{codex_responses_sse_block_state: parser} -> %{state | codex_responses_sse_block_state: %{parser | buffer: "", carry: "", discarding?: false}}
+      _state -> state
     end
   end
 
@@ -967,7 +1106,10 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
 
     state = put_usage_state(state, StreamUsageObserver.observe(usage_state(state), data))
 
-    case maybe_mark_visible_output(state, context, data, visible_data?) do
+    native_http? = state.target != :websocket and not public_stream_state?(state) and DownstreamStream.endpoint(payload, opts) in @backend_turn_state_relay_endpoints
+    marked = if native_http?, do: {:ok, state}, else: maybe_mark_visible_output(state, context, data, visible_data?)
+
+    case marked do
       {:ok, state} ->
         DownstreamStream.normalize_delivery(
           data,

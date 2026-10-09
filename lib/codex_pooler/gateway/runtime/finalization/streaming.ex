@@ -514,6 +514,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
   end
 
   @spec error_code(term()) :: String.t()
+  def error_code(:native_preamble_limit_exceeded), do: "upstream_response_too_large"
   def error_code({:chunk, :closed}), do: "client_disconnected"
   def error_code({:chunk, _reason}), do: "downstream_stream_error"
   def error_code({:upstream_idle_timeout, _reason}), do: "stream_idle_timeout"
@@ -595,6 +596,9 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Streaming do
   @spec health_neutral_terminal_failure?(term(), term()) :: boolean()
   def health_neutral_terminal_failure?(code, headers),
     do: do_health_neutral_terminal_failure?(code, headers)
+
+  defp record_stream_failure_health(:native_preamble_limit_exceeded, _code, nil, _headers, context),
+    do: DispatchLifecycle.neutral_completion(context)
 
   # Draining for a rollout must not demote the upstream or open its circuit.
   defp record_stream_failure_health(:owner_drained, _code, nil, _headers, context),

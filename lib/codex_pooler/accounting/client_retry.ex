@@ -32,7 +32,7 @@ defmodule CodexPooler.Accounting.ClientRetry do
   @task_exception_code "owner_task_exception"
   # `post_relay_cut_code?/1`: codes whose failure happened after the relay of
   # the turn's output to the client had begun.
-  @post_relay_cut_codes ~w(owner_drained client_disconnected upstream_stream_error stream_idle_timeout owner_task_exception dead_execution_recovered absent_instance_recovered)
+  @post_relay_cut_codes ~w(owner_drained client_disconnected upstream_stream_error stream_idle_timeout upstream_response_too_large owner_task_exception dead_execution_recovered absent_instance_recovered)
   @pre_attempt_phase_key PreAttemptRelease.detail_key()
   @turn_interrupted_phase PreAttemptRelease.turn_interrupted()
   @stream_error_code "upstream_stream_error"

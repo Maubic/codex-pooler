@@ -11,6 +11,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
   @type stream_write_result ::
           {:ok, relay_state()}
           | {:error, term()}
+          | {:local_stream_failure, relay_state(), :native_preamble_limit_exceeded}
           | {:retry_first_event, StreamProtocol.terminal_failure()}
           | {:terminal_stream_failure, StreamProtocol.terminal_failure()}
           | {:terminal_stream_failure, relay_state(), StreamProtocol.terminal_failure()}
@@ -118,17 +119,21 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
   defp handle_stream_message(message, state, response, chunks, handlers) do
     case source_parse(response, message) do
       {:ok, parts} -> stream_parts(state, response, chunks, parts, handlers)
-      {:error, reason} -> finalize_stream_parse_error(state, chunks, reason, handlers)
+      {:error, reason} -> finalize_stream_parse_error(state, chunks, reason, response, handlers)
       :unknown -> stream_upstream(state, response, chunks, handlers)
     end
   end
 
-  defp finalize_stream_parse_error(state, chunks, reason, handlers) do
+  defp finalize_stream_parse_error(state, chunks, reason, response, handlers) do
     reason = stream_parse_error_reason(reason)
 
     case run_before_finalize_failure_hook(state, chunks, reason, handlers) do
       {:success, state, chunks} ->
         stream_finalization_result(finalize_success(handlers, chunks, state), state)
+
+      {:failure, state, chunks, :native_preamble_limit_exceeded = reason} ->
+        source_cancel(response)
+        finish_stream_parts({:error, state, chunks, reason}, response, handlers)
 
       {:failure, state, chunks, reason} ->
         stream_finalization_result(finalize_failure(handlers, chunks, reason, state), state)
@@ -205,6 +210,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
     {:halt, {:error, state, append_stream_chunk(chunks, data, handlers), reason}}
   end
 
+  defp stream_write_result({:local_stream_failure, state, reason}, _previous_state, chunks, data, response, handlers) do
+    source_cancel(response)
+    {:halt, {:error, state, append_stream_chunk(chunks, data, handlers), reason}}
+  end
+
   defp stream_write_result({:error, reason}, state, chunks, _data, response, _handlers) do
     source_cancel(response)
     {:halt, {:error, state, chunks, {:chunk, reason}}}
@@ -224,10 +234,14 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
   defp finish_stream_parts({:cont, state, chunks}, response, handlers),
     do: stream_upstream(state, response, chunks, handlers)
 
-  defp finish_stream_parts({:done, state, chunks}, _response, handlers) do
+  defp finish_stream_parts({:done, state, chunks}, response, handlers) do
     case run_before_finalize_success_hook(state, chunks, handlers) do
       {:ok, state, chunks} ->
         stream_finalization_result(finalize_success(handlers, chunks, state), state)
+
+      {:failure, state, chunks, :native_preamble_limit_exceeded = reason} ->
+        source_cancel(response)
+        finish_stream_parts({:error, state, chunks, reason}, response, handlers)
 
       {:failure, state, chunks, reason} ->
         stream_finalization_result(finalize_failure(handlers, chunks, reason, state), state)
@@ -238,10 +252,13 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
     handlers.first_event_retry.(state, RetainedBody.read(chunks), failure)
   end
 
-  defp finish_stream_parts({:error, state, chunks, reason}, _response, handlers) do
+  defp finish_stream_parts({:error, state, chunks, reason}, response, handlers) do
     case run_before_finalize_failure_hook(state, chunks, reason, handlers) do
       {:success, state, chunks} ->
         stream_finalization_result(finalize_success(handlers, chunks, state), state)
+
+      {:failure, state, chunks, :native_preamble_limit_exceeded = local_reason} when reason != local_reason ->
+        finish_stream_parts({:error, state, chunks, local_reason}, response, handlers)
 
       {:failure, state, chunks, reason} ->
         stream_finalization_result(finalize_failure(handlers, chunks, reason, state), state)

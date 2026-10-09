@@ -13,6 +13,25 @@ defmodule CodexPoolerWeb.Runtime.HttpFirstEventBoundariesTest do
   @budget 15_000
   @moduletag capture_log: true
 
+  test "listener cleanup is tied to owned socket identity when the numeric port is reused" do
+    {listener, port} = start_public_endpoint_with_server!()
+    monitor = Process.monitor(listener)
+    owned = capture_listener_resources(listener, port)
+    stop_owned_listener(listener, monitor, owned)
+    {:ok, replacement} = :gen_tcp.listen(port, [:binary, active: false, ip: {127, 0, 0, 1}, reuseaddr: true])
+
+    try do
+      result = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000)
+      if match?({:ok, _}, result), do: :gen_tcp.close(elem(result, 1))
+      assert {:ok, _} = result
+      assert :erlang.port_info(owned.socket) == :undefined
+      assert Enum.all?(owned.processes, fn {pid, _ref} -> not Process.alive?(pid) end)
+      record_cleanup("reused-port", owned, true)
+    after
+      :gen_tcp.close(replacement)
+    end
+  end
+
   for surface <- [:native, :public], mode <- ["full", "lite"], boundary <- [:whole, :label, :json, :crlf], type <- ["response.failed", "response.incomplete", "error"] do
     test "#{surface} #{mode} #{type} #{boundary} retryable first event reaches successor" do
       run_scenario(unquote(surface), unquote(mode), unquote(boundary), unquote(type), :none, :retry)
@@ -204,9 +223,54 @@ defmodule CodexPoolerWeb.Runtime.HttpFirstEventBoundariesTest do
 
     assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "settlement"), :count) == 1
     assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "release"), :count) == 1
+    owned = capture_listener_resources(listener, port)
+    stop_owned_listener(listener, listener_monitor, owned)
+    record_cleanup("#{surface}-#{mode}-#{type}-#{boundary}-#{expected}", owned, false)
+  end
+
+  defp capture_listener_resources(listener, port) do
+    {:listener, owner, :worker, _modules} = Enum.find(Supervisor.which_children(listener), &(elem(&1, 0) == :listener))
+    {:links, links} = Process.info(owner, :links)
+    sockets = Enum.filter(links, fn socket -> is_port(socket) and :inet.sockname(socket) == {:ok, {{127, 0, 0, 1}, port}} end)
+    assert [socket] = sockets
+    assert {:connected, ^owner} = :erlang.port_info(socket, :connected)
+    processes = Enum.map(supervision_pids(listener), &{&1, Process.monitor(&1)})
+    %{socket: socket, socket_monitor: :erlang.monitor(:port, socket), processes: processes}
+  end
+
+  defp supervision_pids(supervisor) do
+    children = Supervisor.which_children(supervisor)
+
+    [
+      supervisor
+      | Enum.flat_map(children, fn
+          {_id, pid, :supervisor, _modules} when is_pid(pid) -> supervision_pids(pid)
+          {_id, pid, :worker, _modules} when is_pid(pid) -> [pid]
+          _not_running -> []
+        end)
+    ]
+  catch
+    :exit, {:noproc, _call} -> [supervisor]
+  end
+
+  defp stop_owned_listener(listener, listener_monitor, owned) do
     :ok = ThousandIsland.stop(listener)
     assert_receive {:DOWN, ^listener_monitor, :process, ^listener, _reason}, @budget
-    assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000)
+
+    for {pid, monitor} <- owned.processes do
+      assert_receive {:DOWN, ^monitor, :process, ^pid, _reason}, @budget
+      refute Process.alive?(pid)
+    end
+
+    %{socket: socket, socket_monitor: monitor} = owned
+    assert_receive {:DOWN, ^monitor, :port, ^socket, _reason}, @budget
+    assert :erlang.port_info(socket) == :undefined
+  end
+
+  defp record_cleanup(scenario, owned, reused?) do
+    if directory = System.get_env("FIRST_EVENT_CLEANUP_EVIDENCE") do
+      File.write!(Path.join(directory, "#{scenario}.json"), CodexPooler.JSON.encode!(%{owned_process_count: length(owned.processes), all_owned_processes_down: Enum.all?(owned.processes, fn {pid, _} -> not Process.alive?(pid) end), original_listen_socket_closed: :erlang.port_info(owned.socket) == :undefined, numeric_port_reused_control: reused?}))
+    end
   end
 
   defp assert_success_wire(:retry, :native, body) do

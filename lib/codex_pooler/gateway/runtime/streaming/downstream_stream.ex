@@ -366,7 +366,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
   defp normalize_public_openai_responses_stream_data(data, state), do: {data, state}
 
   defp normalize_codex_responses_stream_data(data, endpoint, opts, state) when is_binary(data) do
-    parser = Map.get(state, :codex_responses_sse_block_state, SSEParser.new_observation_state())
+    parser = Map.get(state, :codex_responses_sse_block_state, SSEParser.new_observation_state(preamble_policy?: state.target != :websocket))
 
     if not Map.has_key?(state, :native_http_tool_observation) and parser.buffer == "" and
          not parser.skip_leading_lf? and not parser.discarding? and parser.carry == "" and
@@ -396,18 +396,25 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
           block = NativeSSEBlock.parse(raw, separator)
           {NativeSSEBlock.normalize(block, private_details?), [block | parsed]}
 
+        {:preamble_unparsed, raw}, parsed ->
+          {{raw, %{NativeSSEBlock.parse("", "") | preamble_guard?: true, preamble_fragment?: true}}, parsed}
+
         {:unparsed, raw}, parsed ->
           {{raw, NativeSSEBlock.parse("", "")}, parsed}
 
         {:passthrough, raw}, parsed ->
           {{raw, NativeSSEBlock.parse("", "")}, parsed}
 
+        {:preamble_overflow, raw, limit}, parsed ->
+          BufferTelemetry.record_oversized_incomplete("codex_responses_sse", IO.iodata_length(raw), limit, request_options: opts, endpoint: endpoint)
+          {{raw, %{NativeSSEBlock.parse("", "") | preamble_guard?: true}}, parsed}
+
         {:overflow, raw, limit}, parsed ->
           BufferTelemetry.record_oversized_incomplete("codex_responses_sse", IO.iodata_length(raw), limit, request_options: opts, endpoint: endpoint)
           {{raw, NativeSSEBlock.parse("", "")}, parsed}
       end)
 
-    oversized? = Enum.any?(parts, &(match?({:overflow, _, _}, &1) or match?({:unparsed, _}, &1)))
+    oversized? = Enum.any?(parts, &(match?({:overflow, _, _}, &1) or match?({:preamble_overflow, _, _}, &1) or match?({:preamble_unparsed, _}, &1) or match?({:unparsed, _}, &1)))
     parsed = Enum.reverse(parsed)
 
     state =

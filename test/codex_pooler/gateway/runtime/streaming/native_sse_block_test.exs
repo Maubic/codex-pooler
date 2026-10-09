@@ -144,7 +144,10 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.NativeSSEBlockTest do
         (StreamProtocol.stream_data_visible?(kept) or
            match?({:ok, _}, StreamProtocol.terminal_outcome(kept)))
 
-    assert delivery == %{preamble: preamble, data: kept, commits?: commits?}
+    assert delivery.parts |> Enum.filter(& &1.preamble?) |> Enum.map(& &1.data) |> IO.iodata_to_binary() == preamble
+    assert delivery.parts |> Enum.reject(& &1.preamble?) |> Enum.map(& &1.data) |> IO.iodata_to_binary() == kept
+    assert Enum.any?(delivery.parts, & &1.commits?) == commits?
+    assert IO.iodata_to_binary(Enum.map(delivery.parts, & &1.data)) == wire
   end
 
   defp blocks do

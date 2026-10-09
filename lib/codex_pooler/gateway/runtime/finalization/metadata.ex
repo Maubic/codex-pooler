@@ -562,6 +562,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
     |> Map.merge(DownstreamStream.native_http_progress_metadata(state))
     |> Map.merge(DownstreamStream.native_http_tool_metadata(state))
     |> Map.merge(DownstreamStream.native_sse_observation_metadata(state))
+    |> Map.merge(native_preamble_metadata(state))
     |> Map.merge(StreamTiming.metadata(state))
   end
 
@@ -626,7 +627,11 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
   @spec json_content?(Req.Response.t()) :: boolean()
   def json_content?(response), do: (header(response, "content-type") || "") =~ "application/json"
 
+  defp native_preamble_metadata(%{native_preamble_limit: diagnostic}), do: %{"native_preamble_limit" => diagnostic}
+  defp native_preamble_metadata(_state), do: %{}
+
   @spec safe_reason(term()) :: String.t()
+  def safe_reason(:native_preamble_limit_exceeded), do: "native stream preamble exceeded maximum allowed size"
   def safe_reason({:chunk, :closed}), do: "client disconnected while writing downstream stream"
   def safe_reason({:chunk, reason}), do: "downstream chunk failed: #{reason_class(reason)}"
   def safe_reason({:upstream_idle_timeout, _reason}), do: "upstream stream idle timeout"

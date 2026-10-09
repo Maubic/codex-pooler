@@ -33,22 +33,24 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser do
 
   @type observation_state :: %{
           buffer: binary(),
+          preamble_policy?: boolean(),
           skip_leading_lf?: boolean(),
           skip_lf_passthrough?: boolean(),
           discarding?: boolean(),
           carry: binary(),
-          event_kind: :ordinary | :candidate | nil,
+          event_kind: :ordinary | :candidate | :preamble | nil,
           overflow_count: non_neg_integer(),
           last_limit_bytes: pos_integer() | nil
         }
-  @type observed_part :: {:block, binary(), binary()} | {:passthrough, iodata()} | {:overflow, iodata(), pos_integer()} | {:unparsed, iodata()}
+  @type observed_part :: {:block, binary(), binary()} | {:passthrough, iodata()} | {:overflow, iodata(), pos_integer()} | {:unparsed, iodata()} | {:preamble_overflow, iodata(), pos_integer()} | {:preamble_unparsed, iodata()}
 
   # Native observation is opt-in. These are observation budgets, not wire
   # rejection limits. The overflow counter saturates at 65535; discard carry
   # holds at most one CRLF so suffixes cannot become invented new events.
   @spec new_observation_state() :: observation_state()
-  def new_observation_state do
-    %{buffer: "", skip_leading_lf?: false, skip_lf_passthrough?: false, discarding?: false, carry: "", event_kind: nil, overflow_count: 0, last_limit_bytes: nil}
+  @spec new_observation_state(keyword()) :: observation_state()
+  def new_observation_state(opts \\ []) do
+    %{preamble_policy?: Keyword.get(opts, :preamble_policy?, false), buffer: "", skip_leading_lf?: false, skip_lf_passthrough?: false, discarding?: false, carry: "", event_kind: nil, overflow_count: 0, last_limit_bytes: nil}
   end
 
   @spec observe_blocks(observation_state(), binary()) :: {[observed_part()], observation_state()}
@@ -66,9 +68,18 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser do
     canonical = canonicalize_line_endings(buffer)
     payload = sse_field(canonical, "data") || canonical
     separator = if match?({:ok, %{}}, CodexPooler.JSON.decode(payload)), do: eof_separator(state.carry), else: ""
-    part = if separator == "", do: {:unparsed, buffer <> state.carry}, else: {:block, buffer, separator}
+    part = eof_observation_part(state, buffer, separator)
     {[part], reset_observation(state, false)}
   end
+
+  defp eof_observation_part(%{preamble_policy?: true} = state, buffer, "") do
+    if state.event_kind == :preamble or sse_field(buffer, "event") in ["response.created", "response.in_progress", "response.metadata"],
+      do: {:preamble_unparsed, buffer <> state.carry},
+      else: {:unparsed, buffer <> state.carry}
+  end
+
+  defp eof_observation_part(state, buffer, ""), do: {:unparsed, buffer <> state.carry}
+  defp eof_observation_part(_state, buffer, separator), do: {:block, buffer, separator}
 
   @spec observation_metadata(observation_state()) :: map()
   def observation_metadata(state) do
@@ -101,7 +112,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser do
 
   defp observe_native(state, data, parts) do
     combined = if state.carry == "", do: state.buffer <> data, else: state.buffer <> state.carry <> data
-    delimiter = if state.carry == "" and appendable_without_scan?(state, data), do: nil, else: observation_delimiter(combined, 0)
+    delimiter = appended_observation_delimiter(state, data, combined)
 
     case delimiter do
       nil ->
@@ -111,27 +122,31 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser do
         block = binary_part(combined, 0, start)
         separator = binary_part(combined, start, after_separator - start)
         rest = binary_part(combined, after_separator, byte_size(combined) - after_separator)
-        limit = observation_limit(state.event_kind || observation_kind(block))
+        limit = observation_limit(state.event_kind || observation_kind(state, block))
 
         {part, state} =
           if byte_size(block) > limit,
-            do: {{:overflow, [block, separator], limit}, overflowed(state, limit)},
+            do: {overflow_part(state.event_kind || observation_kind(state, block), [block, separator], limit), overflowed(state, limit)},
             else: {{:block, block, separator}, state}
 
-        next = %{reset_observation(state, skip?) | skip_lf_passthrough?: skip? and match?({:overflow, _, _}, part)}
+        next = %{reset_observation(state, skip?) | skip_lf_passthrough?: skip? and raw_overflow_part?(part)}
         observe_native(next, rest, [part | parts])
     end
   end
 
+  defp appended_observation_delimiter(state, data, combined) do
+    if state.carry == "" and appendable_without_scan?(state, data), do: nil, else: observation_delimiter(combined, 0)
+  end
+
   defp retain_observation_prefix(state, combined, parts) do
-    kind = state.event_kind || observation_kind(combined)
+    kind = state.event_kind || observation_kind(state, combined)
     limit = observation_limit(kind)
     carry = observation_carry(combined)
     content_size = byte_size(combined) - byte_size(carry)
 
     if content_size > limit do
       next = %{overflowed(state, limit) | buffer: "", discarding?: true, carry: observation_carry(combined), event_kind: nil}
-      {[{:overflow, combined, limit} | parts], next}
+      {[overflow_part(kind, combined, limit) | parts], next}
     else
       content = if carry == "", do: combined, else: binary_part(combined, 0, content_size)
       # Appended binaries can reserve a parent larger than their visible prefix.
@@ -141,14 +156,36 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser do
     end
   end
 
+  defp raw_overflow_part?({kind, _, _}) when kind in [:overflow, :preamble_overflow], do: true
+  defp raw_overflow_part?(_part), do: false
+
+  # A known label is potential preamble for local resource admission only;
+  # it proves neither JSON validity/type agreement nor a provider terminal.
+  defp overflow_part(:preamble, raw, limit), do: {:preamble_overflow, raw, limit}
+  defp overflow_part(_kind, raw, limit), do: {:overflow, raw, limit}
+
   defp reset_observation(state, skip?),
     do: %{state | buffer: "", skip_leading_lf?: skip?, skip_lf_passthrough?: false, discarding?: false, carry: "", event_kind: nil}
 
   defp overflowed(state, limit),
     do: %{state | overflow_count: min(state.overflow_count + 1, 65_535), last_limit_bytes: limit}
 
+  defp observation_limit(:preamble), do: @max_incomplete_sse_block_bytes
   defp observation_limit(:ordinary), do: @max_incomplete_sse_block_bytes
   defp observation_limit(_potential_terminal), do: @max_incomplete_terminal_sse_block_bytes
+
+  defp observation_kind(%{preamble_policy?: true}, buffer) do
+    if potential_preamble_label?(buffer), do: :preamble, else: observation_kind(buffer)
+  end
+
+  defp observation_kind(_state, buffer), do: observation_kind(buffer)
+
+  defp potential_preamble_label?(buffer) do
+    case :binary.match(buffer, ["\r", "\n"]) do
+      :nomatch -> false
+      {index, _} -> sse_field(binary_part(buffer, 0, index), "event") in ["response.created", "response.in_progress", "response.metadata"]
+    end
+  end
 
   # Explicit nonterminal labels retain the ordinary budget. A data-only frame,
   # direct JSON or a label not yet complete remains a potential terminal: JSON
