@@ -1658,7 +1658,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.EvidenceStoreModelWeeklyRestartTes
     assert DateTime.compare(row.reset_at, floating.reset_at) == :eq
   end
 
-  test "missing malformed and derived-only exact duration cannot immediately anchor" do
+  test "raw missing malformed and derived-only duration is rejected without changing stored evidence" do
     t0 = ~U[2026-07-25 08:00:00Z]
 
     for {case_name, invalid_payload} <- [
@@ -1695,19 +1695,66 @@ defmodule CodexPooler.Upstreams.Quota.Windows.EvidenceStoreModelWeeklyRestartTes
           DateTime.to_iso8601(initial.reset_at)
         )
 
-      record_spark_payload!(identity, invalid_payload, observed_at)
+      baseline = full_row_snapshot(identity)
 
-      row = model_weekly_row(identity)
-
-      assert row.metadata["reset_state"] == initial.metadata["reset_state"],
+      assert {:error, %{code: :upstream_quota_unusable}} =
+               Windows.codex_usage_quota_windows_from_payload(invalid_payload, observed_at),
              "case=#{case_name}"
 
-      assert DateTime.compare(row.reset_at, initial.reset_at) == :eq
-      assert DateTime.compare(row.observed_at, initial.observed_at) == :eq
-      assert DateTime.compare(row.last_sync_at, initial.last_sync_at) == :eq
+      assert {:error, %{code: :upstream_quota_unusable}} =
+               Windows.upsert_quota_windows_from_codex_usage_payload(identity, invalid_payload, observed_at),
+             "case=#{case_name}"
 
-      assert row.metadata["__quota_relative_liveness_v1"] ==
-               initial.metadata["__quota_relative_liveness_v1"]
+      assert_full_row_snapshot_unchanged!(identity, baseline)
+    end
+  end
+
+  test "normalized missing malformed and derived-only exact duration cannot immediately anchor" do
+    t0 = ~U[2026-07-25 08:00:00Z]
+
+    for baseline <- [:floating, :unknown], case_name <- [:missing, :malformed, :derived_only] do
+      identity = identity!()
+
+      case baseline do
+        :unknown -> record_spark_payload!(identity, spark_weekly_payload(0, DateTime.add(t0, @window_seconds, :second)), t0)
+        :floating -> parsed_floating_model!(identity, t0)
+      end
+
+      initial = model_weekly_row(identity)
+      observed_at = DateTime.add(initial.observed_at, 104, :second)
+
+      assert {:ok, [parsed]} =
+               Windows.codex_usage_quota_windows_from_payload(spark_weekly_payload(0, initial.reset_at, @window_seconds - 104), observed_at)
+
+      assert parsed.window_minutes == 10_080
+      assert parsed.metadata["limit_window_seconds"] == @window_seconds
+
+      metadata =
+        case case_name do
+          :missing -> Map.drop(parsed.metadata, ["limit_window_seconds", "reset_after_seconds"])
+          :malformed -> Map.put(parsed.metadata, "limit_window_seconds", "invalid")
+          :derived_only -> Map.delete(parsed.metadata, "limit_window_seconds")
+        end
+
+      assert {:ok, _row} = EvidenceStore.record_evidence(identity, %{parsed | metadata: metadata}, observed_at, observed_at)
+      row = model_weekly_row(identity)
+
+      assert row.metadata["reset_state"] == initial.metadata["reset_state"], "baseline=#{baseline} case=#{case_name} reset_state=#{inspect(row.metadata["reset_state"])}"
+
+      # A valid countdown can refresh a confirmed floating window without
+      # proving an anchor. Candidate bookkeeping is separate from quota values.
+      canonical_fields = AccountQuotaWindow.__schema__(:fields) -- [:metadata, :updated_at, :observed_at, :last_sync_at]
+      assert Map.take(row, canonical_fields) == Map.take(initial, canonical_fields)
+
+      if baseline == :floating and case_name != :missing do
+        assert row.observed_at == observed_at
+        assert row.last_sync_at == observed_at
+        assert row.metadata["__quota_relative_liveness_v1"] == provider_iso8601(observed_at)
+      else
+        assert row.observed_at == initial.observed_at
+        assert row.last_sync_at == initial.last_sync_at
+        assert row.metadata["__quota_relative_liveness_v1"] == initial.metadata["__quota_relative_liveness_v1"]
+      end
     end
   end
 
