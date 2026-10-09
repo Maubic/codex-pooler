@@ -682,7 +682,7 @@ defmodule CodexPooler.Gateway.Routing.CircuitState do
 
   defp open_after_failure?(state, failure_count, settings) do
     failure_count >= settings.circuit_failure_threshold or
-      match?(%RoutingCircuitState{status: @half_open_status}, state)
+      match?(%RoutingCircuitState{status: status} when status in [@open_status, @half_open_status], state)
   end
 
   defp latest(auth, model, assignment, route_class) do

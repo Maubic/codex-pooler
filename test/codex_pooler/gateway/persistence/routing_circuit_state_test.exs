@@ -244,6 +244,145 @@ defmodule CodexPooler.Gateway.Persistence.RoutingCircuitStateTest do
     assert %DateTime{} = opened.next_probe_at
   end
 
+  for threshold <- [5, 3, 2], admission <- [:normal, :none] do
+    @tag :open_failure_threshold
+    test "an open circuit stays open after #{admission} failure with threshold #{threshold}" do
+      {auth, model, assignment} = routing_fixture()
+      update_circuit_settings(%{"circuit_failure_threshold" => 3})
+      opened = fail_to_open!(auth, model, assignment)
+      assert opened.failure_count == 3
+
+      update_circuit_settings(%{"circuit_failure_threshold" => unquote(threshold)})
+      assert {:ok, updated} = CircuitState.record_failure(auth, model, assignment, "proxy_websocket", :late_failure, unquote(admission))
+      persisted = Repo.reload!(updated)
+
+      assert persisted.status == "open"
+      assert persisted.failure_count == 4
+      assert persisted.success_count == 0
+      assert persisted.reason_code == "late_failure"
+      assert persisted.closed_at == nil
+      assert persisted.half_opened_at == nil
+      assert persisted.opened_at == persisted.last_failure_at
+      assert DateTime.compare(persisted.next_probe_at, opened.next_probe_at) in [:eq, :gt]
+      assert DateTime.diff(persisted.next_probe_at, persisted.last_failure_at, :second) == 60
+      assert persisted.metadata == opened.metadata
+      assert CircuitHealth.blocked?(persisted, OperationalSettings.current(), now())
+      assert CircuitHealth.blocked_reason(persisted, OperationalSettings.current(), now()) == "open_cooldown"
+      refute CircuitState.eligible?(auth, model, assignment, "proxy_websocket")
+      refute circuit_snapshot(auth, model, assignment).eligible?
+      assert {:error, :routing_circuit_open} = CircuitState.begin_attempt(auth, model, assignment, "proxy_websocket")
+
+      persisted |> Ecto.Changeset.change(next_probe_at: DateTime.add(now(), -1, :second)) |> Repo.update!()
+      assert {:ok, %{admission: :probe, state: probe}} = CircuitState.begin_attempt(auth, model, assignment, "proxy_websocket")
+      assert probe.status == "half_open"
+      assert probe.failure_count == 4
+      assert probe.metadata["probe_in_flight_count"] == 1
+      assert probe.metadata["saved_reset_recovery"] == opened.metadata["saved_reset_recovery"]
+      assert {:error, :routing_circuit_probe_in_flight} = CircuitState.begin_attempt(auth, model, assignment, "proxy_websocket")
+    end
+  end
+
+  @tag :open_failure_threshold
+  test "raising the threshold keeps a still-closed circuit eligible until the new threshold" do
+    {auth, model, assignment} = routing_fixture()
+    update_circuit_settings(%{"circuit_failure_threshold" => 3})
+    assert {:ok, %{status: "closed", failure_count: 1}} = CircuitState.record_failure(auth, model, assignment, "proxy_websocket", :first_failure)
+    update_circuit_settings(%{"circuit_failure_threshold" => 5})
+
+    for count <- 2..4 do
+      assert {:ok, state} = CircuitState.record_failure(auth, model, assignment, "proxy_websocket", :continued_failure)
+      assert state.status == "closed"
+      assert state.failure_count == count
+      assert state.next_probe_at == nil
+      assert CircuitState.eligible?(auth, model, assignment, "proxy_websocket")
+    end
+
+    assert {:ok, %{status: "open", failure_count: 5}} = CircuitState.record_failure(auth, model, assignment, "proxy_websocket", :threshold_failure)
+    refute CircuitState.eligible?(auth, model, assignment, "proxy_websocket")
+  end
+
+  @tag :open_failure_threshold
+  test "a previously admitted failure observes the circuit opened by an independent writer" do
+    slug = "circuit-late-failure-#{System.unique_integer([:positive])}"
+
+    CodexPooler.UnboxedFixture.register_unboxed_cleanup!(fn ->
+      pool_ids = Repo.all(from pool in CodexPooler.Pools.Pool, where: pool.slug == ^slug, select: pool.id)
+      delete_committed_pools!(pool_ids)
+      Repo.delete_all(from identity in UpstreamIdentity, where: identity.account_label == ^slug)
+    end)
+
+    {auth, model, assignment} =
+      CodexPooler.UnboxedFixture.run_unboxed(fn ->
+        pool = pool_fixture(%{slug: slug})
+        %{api_key: api_key} = active_api_key_fixture(pool)
+        %{assignment: assignment} = upstream_assignment_fixture(pool, %{account_label: slug})
+        {%{pool: pool, api_key: api_key}, model_fixture(pool), assignment}
+      end)
+
+    update_circuit_settings(%{"circuit_failure_threshold" => 3})
+
+    CodexPooler.UnboxedFixture.run_unboxed(fn ->
+      assert {:ok, %{status: "closed", failure_count: 1}} = CircuitState.record_failure(auth, model, assignment, "proxy_websocket", :first_failure)
+    end)
+
+    parent = self()
+    release = make_ref()
+
+    late_writer =
+      Task.async(fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          backend = backend_pid!()
+          {:ok, %{admission: :normal}} = CircuitState.begin_attempt(auth, model, assignment, "proxy_websocket")
+          send(parent, {:late_failure_admitted, release, backend})
+
+          receive do
+            {:complete_late_failure, ^release} -> :ok
+          after
+            15_000 -> raise "late failure completion was not released"
+          end
+
+          CircuitState.record_failure(auth, model, assignment, "proxy_websocket", :late_failure, :normal)
+        end)
+      end)
+
+    monitor = Process.monitor(late_writer.pid)
+
+    on_exit(fn ->
+      cleanup_monitor = Process.monitor(late_writer.pid)
+      Process.exit(late_writer.pid, :kill)
+      assert_receive {:DOWN, ^cleanup_monitor, :process, _, _}, 15_000
+    end)
+
+    assert_receive {:late_failure_admitted, ^release, late_backend}, 15_000
+
+    {opening_backend, opened} =
+      CodexPooler.UnboxedFixture.run_unboxed(fn ->
+        backend = backend_pid!()
+        assert {:ok, %{status: "closed", failure_count: 2}} = CircuitState.record_failure(auth, model, assignment, "proxy_websocket", :second_failure)
+        assert {:ok, %{status: "open", failure_count: 3} = opened} = CircuitState.record_failure(auth, model, assignment, "proxy_websocket", :opening_failure)
+        {backend, opened}
+      end)
+
+    refute late_backend == opening_backend
+    update_circuit_settings(%{"circuit_failure_threshold" => 5})
+    send(late_writer.pid, {:complete_late_failure, release})
+    assert {:ok, result} = Task.await(late_writer, 15_000)
+    assert_receive {:DOWN, ^monitor, :process, _, :normal}, 15_000
+    assert result.status == "open"
+    assert result.failure_count == 4
+
+    {persisted, eligible, admission} =
+      CodexPooler.UnboxedFixture.run_unboxed(fn ->
+        {Repo.get!(RoutingCircuitState, opened.id), CircuitState.eligible?(auth, model, assignment, "proxy_websocket"), CircuitState.begin_attempt(auth, model, assignment, "proxy_websocket")}
+      end)
+
+    assert persisted.status == "open"
+    assert persisted.failure_count == 4
+    assert persisted.metadata == opened.metadata
+    refute eligible
+    assert admission == {:error, :routing_circuit_open}
+  end
+
   test "closed-to-open recovery marker uses the current last-success stamp" do
     {auth, model, assignment} = routing_fixture()
     update_circuit_settings(%{"circuit_failure_threshold" => 1})
@@ -1056,6 +1195,15 @@ defmodule CodexPooler.Gateway.Persistence.RoutingCircuitStateTest do
       send(probe_holder.pid, {barrier, :release_probe})
       Enum.each([probe_holder, old_failure], &finish_task/1)
     end
+  end
+
+  defp fail_to_open!(auth, model, assignment) do
+    Enum.reduce(1..3, nil, fn count, _state ->
+      assert {:ok, state} = CircuitState.record_failure(auth, model, assignment, "proxy_websocket", :opening_failure)
+      assert state.failure_count == count
+      assert state.status == if(count == 3, do: "open", else: "closed")
+      state
+    end)
   end
 
   defp open_circuit!(auth, model, assignment, attrs) do
