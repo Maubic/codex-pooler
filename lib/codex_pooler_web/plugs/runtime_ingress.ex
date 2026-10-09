@@ -62,27 +62,22 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
   end
 
   defp route_request(conn, path) do
-    cond do
-      path.scope == :runtime ->
-        settings = operational_settings(conn)
+    if path.scope == :runtime do
+      settings = operational_settings(conn)
 
-        conn
-        |> put_json_parser_context(settings, json_parse_error_scope(conn))
-        |> enforce_firewall(settings)
-        |> reject_pruned_runtime_helper()
-        |> authenticate_v1_request()
-        |> reject_unsupported_v1_request()
-        |> authenticate_protected_backend_json_request()
-        |> enforce_image_generation_permission()
-        |> enforce_audio_transcription_permission()
-        |> BackendFilesMultipartGuard.call([])
-        |> maybe_decode_compressed_body(settings)
-
-      json_request?(conn) ->
-        put_json_parser_context(conn, operational_settings(conn), :passthrough)
-
-      true ->
-        conn
+      conn
+      |> put_json_parser_context(settings, json_parse_error_scope(conn))
+      |> enforce_firewall(settings)
+      |> reject_pruned_runtime_helper()
+      |> authenticate_v1_request()
+      |> reject_unsupported_v1_request()
+      |> authenticate_protected_backend_json_request()
+      |> enforce_image_generation_permission()
+      |> enforce_audio_transcription_permission()
+      |> BackendFilesMultipartGuard.call([])
+      |> maybe_decode_compressed_body(settings)
+    else
+      conn
     end
   end
 
@@ -196,16 +191,6 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
 
       _other ->
         false
-    end
-  end
-
-  defp json_request?(conn) do
-    conn
-    |> get_req_header("content-type")
-    |> List.first()
-    |> case do
-      nil -> false
-      content_type -> json_content_type?(content_type)
     end
   end
 
@@ -408,6 +393,18 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
   end
 
   defp enforce_audio_transcription_permission(conn), do: conn
+
+  @spec authenticated_multipart_media_request?(Plug.Conn.t()) :: boolean()
+  def authenticated_multipart_media_request?(%Plug.Conn{method: "POST", private: %{runtime_api_auth: %{api_key: _key, pool: _pool}}} = conn) do
+    Path.decoded_segments(conn) in [
+      ["backend-api", "transcribe"],
+      ["v1", "files"],
+      ["v1", "audio", "transcriptions"],
+      ["v1", "images", "edits"]
+    ]
+  end
+
+  def authenticated_multipart_media_request?(_conn), do: false
 
   @spec protected_backend_json_request?(Plug.Conn.t() | term()) :: boolean()
   def protected_backend_json_request?(%Plug.Conn{method: method} = conn) when method in ["POST", "PUT", "PATCH", "DELETE"] do

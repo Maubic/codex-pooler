@@ -219,12 +219,22 @@ connections capture their limits on upgrade and must reconnect to pick up a chan
 
 Choose limits for the memory available at the expected concurrent request count:
 compressed bodies, decompressed JSON, and parsed input coexist during decoding.
-Decoding occurs before gateway admission, so gateway concurrency limits do not
-cap simultaneous body decoding. The decompressed budget also bounds plain JSON,
-MCP request bodies and incoming websocket frames. Keep the ratio and timeout
+Runtime generation decoding occurs before gateway admission, so those concurrency
+limits do not cap simultaneous body decoding. The decompressed budget bounds plain
+JSON on runtime routes, MCP request bodies and incoming websocket frames; MCP
+authenticates and enters its dedicated admission lane before decoding. Keep the ratio and timeout
 budgets enabled, and check any reverse proxy body limit too. These are Pooler
 ingress budgets chosen to accommodate large histories, not a claim about the
 upstream's maximum body size. File and multipart upload budgets remain separate.
+
+Browser, admin and unrouted requests retain the ordinary 8,000,000-byte parsed-body
+limit, independently of runtime ingress settings. A small valid body can be parsed
+before an unrouted request returns `404`. Only authenticated `POST` requests to the
+exact `/backend-api/transcribe`, `/v1/files`, `/v1/audio/transcriptions` and
+`/v1/images/edits` routes use the 2,147,483,647-byte multipart parser envelope.
+Multipart accounting includes parsed headers and field bytes, not total HTTP wire
+size. File, audio and image validation still applies its own limits afterward;
+the parser envelope does not increase an upload's accepted domain limit.
 
 Pool image permission is checked after Pool API-key authentication and before
 body parsing for exactly these four actions: `POST /backend-api/codex/images/generations`,
