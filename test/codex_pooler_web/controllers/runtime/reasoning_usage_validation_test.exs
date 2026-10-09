@@ -25,9 +25,80 @@ defmodule CodexPoolerWeb.Runtime.ReasoningUsageValidationTest do
     end
   end
 
+  for mode <- ~w(full lite), level <- [:root, :direct], shape <- [:null, :scalar, :array, :malformed, :valid, :absent] do
+    test "#{mode} compact JSON #{level} #{shape} usage retains envelope precedence" do
+      assert_precedence_surface!(unquote(mode), :compact_json, unquote(level), unquote(shape))
+    end
+  end
+
+  for mode <- ~w(full lite), transport <- [:sse, :websocket], shape <- [:null, :valid, :absent] do
+    test "#{mode} #{transport} #{shape} root usage keeps the stream aggregate contract" do
+      assert_precedence_surface!(unquote(mode), unquote(transport), :root, unquote(shape))
+    end
+  end
+
+  defp assert_precedence_surface!(mode, transport, level, shape) do
+    response = precedence_response(transport, level, shape)
+    {request, attempt, settlement, reservation} = run_surface!(mode, transport, response)
+    known? = shape == :valid or (shape == :absent and transport == :compact_json)
+    expected_status = if known?, do: "usage_known", else: "usage_unknown"
+    assert {request.usage_status, attempt.usage_status, settlement.usage_status} == {expected_status, expected_status, expected_status}
+
+    if known? do
+      expected_total = if shape == :valid, do: 12, else: 36
+      expected_cost = if shape == :valid, do: 140, else: 420
+      assert settlement.total_tokens == expected_total
+      assert Decimal.equal?(settlement.settled_cost_micros, Decimal.new(expected_cost))
+      assert settlement.details["estimated_from_reserve"] == false
+    else
+      assert settlement.details["settled_cost_micros"] == nil
+      assert settlement.details["estimated_from_reserve"] == true
+      assert settlement.total_tokens == reservation.total_tokens
+    end
+  end
+
+  defp precedence_response(transport, level, shape) do
+    nested = %{"input_tokens" => 30, "output_tokens" => 6, "total_tokens" => 36}
+    item = %{"type" => "compaction", "encrypted_content" => "synthetic-encrypted-compaction", "response" => %{"usage" => nested}}
+    response = %{"id" => "resp_usage_precedence", "object" => if(transport == :compact_json, do: "response.compaction", else: "response"), "status" => "completed", "output" => [item]}
+    put_precedence_usage(response, level, precedence_usage(shape, nested))
+  end
+
+  defp precedence_usage(:null, _nested), do: nil
+  defp precedence_usage(:scalar, _nested), do: 42
+  defp precedence_usage(:array, nested), do: [nested]
+  defp precedence_usage(:malformed, _nested), do: %{"input_tokens" => -1}
+  defp precedence_usage(:valid, _nested), do: %{"input_tokens" => 10, "output_tokens" => 2, "total_tokens" => 12}
+  defp precedence_usage(:absent, _nested), do: :absent
+
+  defp put_precedence_usage(response, :root, :absent), do: response
+  defp put_precedence_usage(response, :direct, :absent), do: Map.put(response, "response", %{})
+  defp put_precedence_usage(response, :root, usage), do: Map.put(response, "usage", usage)
+  defp put_precedence_usage(response, :direct, usage), do: Map.put(response, "response", %{"usage" => usage})
+
   defp assert_surface!(mode, transport, reasoning) do
     response = %{"id" => "resp_reasoning_subset", "object" => "response", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 2, "total_tokens" => 12, "output_tokens_details" => %{"reasoning_tokens" => reasoning}}}
     response = if transport == :compact_json, do: Map.merge(response, %{"object" => "response.compaction", "output" => [%{"type" => "compaction", "encrypted_content" => "synthetic-encrypted-compaction"}]}), else: response
+    {request, attempt, settlement, reservation} = run_surface!(mode, transport, response)
+
+    if reasoning <= 2 do
+      assert request.usage_status == "usage_known"
+      assert attempt.usage_status == "usage_known"
+      assert settlement.usage_status == "usage_known"
+      assert {settlement.input_tokens, settlement.output_tokens, settlement.reasoning_tokens, settlement.total_tokens} == {10, 2, 2, 12}
+      assert Decimal.equal?(settlement.settled_cost_micros, Decimal.new(160))
+    else
+      assert request.usage_status == "usage_unknown"
+      assert attempt.usage_status == "usage_unknown"
+      assert settlement.usage_status == "usage_unknown"
+      assert settlement.details["usage_source"] == if(transport == :sse, do: "sse_usage_missing", else: "invalid_usage_tokens")
+      assert settlement.details["settled_cost_micros"] == nil
+      assert settlement.details["estimated_from_reserve"] == true
+      assert settlement.total_tokens == reservation.total_tokens
+    end
+  end
+
+  defp run_surface!(mode, transport, response) do
     terminal = %{"type" => "response.completed", "response" => response}
 
     upstream_mode =
@@ -54,21 +125,7 @@ defmodule CodexPoolerWeb.Runtime.ReasoningUsageValidationTest do
     assert FakeUpstream.count(upstream) == 1
     assert attempt.transport == expected_transport(transport)
 
-    if reasoning <= 2 do
-      assert request.usage_status == "usage_known"
-      assert attempt.usage_status == "usage_known"
-      assert settlement.usage_status == "usage_known"
-      assert {settlement.input_tokens, settlement.output_tokens, settlement.reasoning_tokens, settlement.total_tokens} == {10, 2, 2, 12}
-      assert Decimal.equal?(settlement.settled_cost_micros, Decimal.new(160))
-    else
-      assert request.usage_status == "usage_unknown"
-      assert attempt.usage_status == "usage_unknown"
-      assert settlement.usage_status == "usage_unknown"
-      assert settlement.details["usage_source"] == if(transport == :sse, do: "sse_usage_missing", else: "invalid_usage_tokens")
-      assert settlement.details["settled_cost_micros"] == nil
-      assert settlement.details["estimated_from_reserve"] == true
-      assert settlement.total_tokens == reservation.total_tokens
-    end
+    {request, attempt, settlement, reservation}
   end
 
   defp expected_transport(:compact_json), do: "http_compact_json"

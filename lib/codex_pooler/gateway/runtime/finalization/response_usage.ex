@@ -216,12 +216,11 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
 
   defp usage_from_decoded(decoded, default \\ true)
 
-  defp usage_from_decoded(%{"usage" => usage} = decoded, _default) when is_map(usage),
+  defp usage_from_decoded(%{"usage" => usage} = decoded, _default),
     do: normalize_usage(usage, decoded)
 
-  defp usage_from_decoded(%{"response" => %{"usage" => usage} = response}, _default)
-       when is_map(usage),
-       do: normalize_usage(usage, response)
+  defp usage_from_decoded(%{"response" => %{"usage" => usage} = response}, _default),
+    do: normalize_usage(usage, response)
 
   defp usage_from_decoded(%{"output" => output}, default) when is_list(output) do
     latest_usage(output) || maybe_default_usage(default)
@@ -239,7 +238,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
     end)
   end
 
-  defp normalize_usage(usage, envelope) do
+  defp normalize_usage(usage, envelope) when is_map(usage) do
     with {:ok, input_tokens} <-
            required_int_value(usage["input_tokens"] || usage["prompt_tokens"]),
          {:ok, cached_input_tokens} <- cached_input_tokens_value(usage),
@@ -268,6 +267,9 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
         maybe_put_served_model(%{status: "usage_unknown", source: "invalid_usage_tokens"}, envelope)
     end
   end
+
+  defp normalize_usage(_invalid, envelope),
+    do: maybe_put_served_model(%{status: "usage_unknown", source: "invalid_usage_tokens"}, envelope)
 
   # Same field, same contract on both transports: the non-streaming path used
   # to take any binary at all, so the two disagreed about the same provider
