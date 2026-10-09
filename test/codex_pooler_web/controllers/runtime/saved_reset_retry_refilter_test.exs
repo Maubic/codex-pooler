@@ -42,6 +42,7 @@ defmodule CodexPoolerWeb.Runtime.SavedResetRetryRefilterTest do
   alias CodexPooler.ProviderCreditsFixtures
   alias CodexPooler.Repo
   alias CodexPooler.SavedResetConfirmationFixtures
+  alias CodexPooler.SavedResetPostCommitFailureSupport, as: PostCommit
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
@@ -50,6 +51,63 @@ defmodule CodexPoolerWeb.Runtime.SavedResetRetryRefilterTest do
   @consume_path "/api/codex/rate-limit-reset-credits/consume"
   @usage_paths ["/api/codex/usage", "/backend-api/codex/usage", "/wham/usage", "/backend-api/wham/usage"]
   @turn_endpoint "/backend-api/codex/responses"
+
+  setup context do
+    if context[:post_commit_fault], do: %{post_commit_support: PostCommit.start!(context)}, else: :ok
+  end
+
+  for mode <- ["full", "lite"] do
+    @tag :post_commit_fault
+    test "native HTTP #{mode} preserves committed pending recovery when the quota snapshot fails", %{post_commit_support: support} do
+      fixture = PostCommit.fixture!(support)
+      _revision = set_model_serving_mode!(model_serving_scope(), fixture, unquote(mode))
+      {_server, port} = start_public_endpoint_with_server!()
+      :ok = PostCommit.arm!(fixture, :snapshot)
+
+      response =
+        try do
+          post_public_native!(port, fixture, unquote(mode))
+        rescue
+          exception -> {:raised, exception.__struct__}
+        end
+
+      PostCommit.restore!(fixture)
+      PostCommit.emit(fixture, "native_http_#{unquote(mode)}")
+      assert PostCommit.receipt!(fixture).query_errors > 0
+      response_status = if is_map(response), do: response.status, else: response
+      assert response_status == 503
+      assert [request] = rows!(%{setup: fixture})
+      assert request.status == "rejected"
+      assert get_in(request.request_metadata, ["quota_decision", "non_credit_recovery_outcome"]) == "pending"
+      assert Repo.aggregate(from(a in Attempt, where: a.request_id == ^request.id), :count) == 0
+      assert consumes(fixture.fake) == 1
+      assert provider_sends(fixture.fake) == 0
+    end
+  end
+
+  for forwarding <- [false, true] do
+    @tag :post_commit_fault
+    test "native websocket full forwarding=#{forwarding} preserves committed pending recovery on snapshot failure", %{post_commit_support: support} do
+      put_owner_forwarding!(unquote(forwarding))
+      fixture = PostCommit.fixture!(support)
+      _revision = set_model_serving_mode!(model_serving_scope(), fixture, "full")
+      {_server, port} = start_public_endpoint_with_server!()
+      :ok = PostCommit.arm!(fixture, :snapshot)
+      terminal = native_websocket_turn!(port, %{setup: fixture}, canonical_turn?: true)
+      PostCommit.restore!(fixture)
+      PostCommit.emit(fixture, "native_ws_full_forwarding_#{unquote(forwarding)}")
+      assert PostCommit.receipt!(fixture).query_errors > 0
+      assert %{"type" => "error"} = terminal
+      assert get_in(terminal, ["error", "code"]) in ["quota_exhausted", "quota_evidence_unavailable"]
+      assert terminal["status"] == 503
+      assert [request] = await_settled_rows!(%{setup: fixture})
+      assert request.status == "rejected"
+      assert get_in(request.request_metadata, ["quota_decision", "non_credit_recovery_outcome"]) == "pending"
+      assert Repo.aggregate(from(a in Attempt, where: a.request_id == ^request.id), :count) == 0
+      assert consumes(fixture.fake) == 1
+      assert provider_sends(fixture.fake) == 0
+    end
+  end
 
   for mode <- ["full", "lite"] do
     test "native HTTP #{mode}, threshold shape: refused before dispatch after one reset" do
@@ -277,13 +335,30 @@ defmodule CodexPoolerWeb.Runtime.SavedResetRetryRefilterTest do
     |> post(@turn_endpoint, CodexPooler.JSON.encode!(%{"model" => pool.setup.model.exposed_model_id, "input" => native_text_input("synthetic retry prompt"), "stream" => true}))
   end
 
-  defp native_websocket_turn!(port, pool) do
+  defp post_public_native!(port, fixture, mode) do
+    thread = Ecto.UUID.generate()
+    headers = [{"authorization", fixture.authorization}, {"session-id", thread}, {"content-type", "application/json"}]
+    headers = if mode == "lite", do: [{"x-openai-internal-codex-responses-lite", "true"} | headers], else: headers
+    assert {:ok, response} = Req.post("http://127.0.0.1:#{port}#{@turn_endpoint}", headers: headers, json: %{"model" => fixture.model.exposed_model_id, "input" => native_text_input("synthetic retry prompt"), "stream" => true}, retry: false)
+    response
+  end
+
+  defp native_websocket_turn!(port, pool, opts \\ []) do
     thread_id = Ecto.UUID.generate()
     {:ok, conn} = Mint.HTTP.connect(:http, "127.0.0.1", port, protocols: [:http1])
     headers = [{"authorization", pool.setup.authorization}, {"session-id", thread_id}, {"thread-id", thread_id}, {"x-client-request-id", thread_id}, {"x-codex-window-id", "#{thread_id}:0"}]
     {:ok, conn, ref} = Mint.WebSocket.upgrade(:ws, conn, @turn_endpoint, headers)
     {:ok, conn, status, response_headers} = await_public_websocket_upgrade(conn, ref)
     {conn, websocket} = mint_websocket_new!(conn, ref, status, response_headers)
+
+    client_metadata = %{"session_id" => thread_id, "thread_id" => thread_id, "turn_id" => "#{thread_id}-turn"}
+
+    client_metadata =
+      if Keyword.get(opts, :canonical_turn?, false) do
+        Map.put(client_metadata, "x-codex-turn-metadata", CodexPooler.JSON.encode!(%{"session_id" => thread_id, "thread_id" => thread_id, "turn_id" => "sample_reset_failure", "request_kind" => "turn", "window_id" => "#{thread_id}:0", "window_number" => 0}))
+      else
+        client_metadata
+      end
 
     frame =
       CodexPooler.JSON.encode!(%{
@@ -296,7 +371,7 @@ defmodule CodexPoolerWeb.Runtime.SavedResetRetryRefilterTest do
         "parallel_tool_calls" => true,
         "store" => false,
         "stream" => true,
-        "client_metadata" => %{"session_id" => thread_id, "thread_id" => thread_id, "turn_id" => "#{thread_id}-turn"}
+        "client_metadata" => client_metadata
       })
 
     try do

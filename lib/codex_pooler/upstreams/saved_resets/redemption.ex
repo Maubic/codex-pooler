@@ -5,6 +5,8 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
 
   import Ecto.Query
 
+  require Logger
+
   alias CodexPooler.Events
   alias CodexPooler.Gateway.Routing.CircuitHealth
   alias CodexPooler.Platform.OutboundHTTP
@@ -3034,10 +3036,11 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
          claim,
          emit_after_commit?
        ) do
-    if emit_after_commit? and is_map(telemetry_redemption),
-      do: ConvergenceTelemetry.emit(telemetry_redemption)
-
-    broadcast_redemption(updated_identity)
+    if emit_after_commit? do
+      publish_committed_attempt(updated_identity, finalized_result, telemetry_redemption)
+    else
+      broadcast_redemption(updated_identity)
+    end
 
     {:ok,
      finalized_result
@@ -3050,6 +3053,18 @@ defmodule CodexPooler.Upstreams.SavedResetRedemption do
     if claim_has_reserved_dispatch?(claim),
       do: {:error, :saved_reset_consume_outcome_ambiguous},
       else: {:error, reason}
+  end
+
+  # A successful outer transaction is already authoritative. Publication is
+  # ancillary; it cannot turn that result into an ambiguous provider consume.
+  # Caller-owned transactions keep their existing rollback/error semantics.
+  defp publish_committed_attempt(identity, result, telemetry_redemption) do
+    if is_map(telemetry_redemption), do: ConvergenceTelemetry.emit(telemetry_redemption)
+    broadcast_redemption(identity)
+  rescue
+    exception ->
+      Logger.warning("saved reset publication failed after commit applied=#{result.applied?} exception=#{inspect(exception.__struct__)}")
+      :ok
   end
 
   defp finalizer_telemetry_redemption(%{"convergence_source" => "finalizer"} = redemption),

@@ -9,6 +9,7 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
   alias CodexPooler.Gateway.Routing.QuotaRefresh.{Executor, Plan}
   alias CodexPooler.Gateway.Routing.SavedResetAutoRedeem
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
+  alias CodexPooler.Upstreams.Quota.RoutingQuotaSnapshot
 
   @type candidate :: CandidateEligibility.FilterInput.candidate()
   @type gateway_error :: Contracts.gateway_error()
@@ -50,6 +51,7 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
 
     filter_input
     |> filter_candidates(route_state, request_options, quota_mode, saved_reset_scan_at, saved_reset_opts)
+    |> SavedResetAutoRedeem.clear_post_apply_failure()
     |> CircuitRetryAfter.put(filter_input.candidates, route_state)
   end
 
@@ -117,9 +119,13 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
     {result, recorded, recovery_plan} = threshold_recovery(result, recovery_plan, quota_mode, saved_reset_scan_at, saved_reset_opts)
 
     filtered =
-      case result do
-        {:error, _error} -> recover_or_defer_capacity(result, recovery_plan, quota_mode, saved_reset_scan_at, saved_reset_opts, refresh_attempted?, recorded)
-        admitted -> admit_servable_capacity(admitted, filter_input, quota_mode, route_state, refresh_attempted?)
+      if SavedResetAutoRedeem.post_apply_failure?(result) do
+        result
+      else
+        case result do
+          {:error, _error} -> recover_or_defer_capacity(result, recovery_plan, quota_mode, saved_reset_scan_at, saved_reset_opts, refresh_attempted?, recorded)
+          admitted -> admit_servable_capacity(admitted, filter_input, quota_mode, route_state, refresh_attempted?)
+        end
       end
 
     keep_recorded_recovery_outcome(filtered, recorded)
@@ -138,12 +144,24 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
 
         case applied_recovery_outcome(scanned) do
           nil -> {scanned, nil, recovery_plan}
-          applied -> {scanned, applied, %{recovery_plan | route_state: RouteState.refresh_quota_snapshots(state)}}
+          applied -> refresh_after_threshold_recovery(scanned, applied, state, recovery_plan)
         end
 
       recorded ->
         {result, recorded, recovery_plan}
     end
+  end
+
+  defp refresh_after_threshold_recovery(scanned, applied, state, recovery_plan) do
+    if SavedResetAutoRedeem.post_apply_failure?(scanned) do
+      {scanned, applied, recovery_plan}
+    else
+      {scanned, applied, %{recovery_plan | route_state: RouteState.refresh_quota_snapshots(state)}}
+    end
+  rescue
+    exception in [DBConnection.ConnectionError, Ecto.QueryError, Postgrex.Error, RoutingQuotaSnapshot.LoadError] ->
+      failure = SavedResetAutoRedeem.post_apply_failure_result(scanned, SavedResetAutoRedeem.recovery_outcome(scanned), exception, __STACKTRACE__)
+      {failure, applied, recovery_plan}
   end
 
   defp admit_servable_capacity(admitted, input, quota_mode, state, refresh_attempted?) do
@@ -208,8 +226,14 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
     end
   end
 
+  defp deferred_capacity({:error, %{saved_reset_post_apply_failure: true}} = failure, _input, _state, _quota_mode, _refresh_attempted?), do: failure
+
   defp deferred_capacity(recovered, input, state, quota_mode, refresh_attempted?) do
     outcome = SavedResetAutoRedeem.recovery_outcome(recovered)
+    deferred_capacity_with_outcome(recovered, input, state, quota_mode, refresh_attempted?, outcome)
+  end
+
+  defp deferred_capacity_with_outcome(recovered, input, state, quota_mode, refresh_attempted?, outcome) do
     refreshed_state = if outcome in [:failed, :not_applied, :pending, :confirmed], do: RouteState.refresh_quota_snapshots(state), else: state
 
     case Plan.filter_eligible_candidates(input, refreshed_state) do
@@ -221,6 +245,13 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
         |> put_recovery_outcome(outcome)
         |> maybe_allow_missing_quota(input, quota_mode, refreshed_state)
     end
+  rescue
+    exception in [DBConnection.ConnectionError, Ecto.QueryError, Postgrex.Error, RoutingQuotaSnapshot.LoadError] ->
+      if outcome in [:pending, :confirmed] do
+        SavedResetAutoRedeem.post_apply_failure_result(recovered, outcome, exception, __STACKTRACE__)
+      else
+        reraise exception, __STACKTRACE__
+      end
   end
 
   defp put_recovery_outcome({:error, error}, outcome), do: {:error, Map.put(error, :non_credit_recovery_outcome, Atom.to_string(outcome))}

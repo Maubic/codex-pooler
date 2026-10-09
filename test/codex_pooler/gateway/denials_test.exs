@@ -16,6 +16,51 @@ defmodule CodexPooler.Gateway.DenialsTest do
 
   @endpoint_path "/backend-api/codex/responses"
 
+  for outcome <- ["pending", "confirmed"] do
+    test "gateway refusal records trusted #{outcome} recovery beside the safe quota decision" do
+      {context, fake} = recovery_denial_context(%{non_credit_recovery_outcome: unquote(outcome), untrusted_extra: "discarded-denial-value"})
+      options = RequestOptions.put_routing(context.opts, quota_decision: %{"allowed" => false, "eligible_candidate_count" => 0, "raw_debug" => "discarded-quota-value"})
+      context = %{context | opts: options}
+      assert {:error, reason} = Denials.log_gateway(context)
+      assert reason == context.reason
+      assert [request] = Repo.all(Request)
+      assert request.request_metadata["quota_decision"] == %{"allowed" => false, "eligible_candidate_count" => 0, "non_credit_recovery_outcome" => unquote(outcome)}
+      refute inspect(request.request_metadata) =~ "discarded-"
+      assert request.status == "rejected"
+      assert request.response_status_code == 503
+      assert Repo.all(Attempt) == []
+      assert FakeUpstream.count(fake) == 0
+    end
+  end
+
+  for {label, value} <- [{"absent", nil}, {"failed", "failed"}, {"unknown string", "untrusted"}, {"atom", :pending}, {"map", %{"state" => "pending"}}, {"list", ["pending"]}] do
+    test "gateway refusal ignores #{label} recovery values" do
+      {context, _fake} = recovery_denial_context(%{non_credit_recovery_outcome: unquote(Macro.escape(value))})
+      assert {:error, _reason} = Denials.log_gateway(context)
+      assert [request] = Repo.all(Request)
+      refute Map.has_key?(request.request_metadata, "quota_decision")
+    end
+  end
+
+  test "request payload and string-key reason lookalikes cannot forge recovery metadata" do
+    {context, _fake} = recovery_denial_context(%{"non_credit_recovery_outcome" => "pending"})
+    payload = Map.merge(context.payload, %{"non_credit_recovery_outcome" => "confirmed", "quota_decision" => %{"non_credit_recovery_outcome" => "pending"}})
+    context = %{context | payload: payload, opts: RequestOptions.build(%{}, @endpoint_path, payload)}
+    assert {:error, _reason} = Denials.log_gateway(context)
+    assert [request] = Repo.all(Request)
+    refute Map.has_key?(request.request_metadata, "quota_decision")
+    refute Map.has_key?(request.request_metadata, "non_credit_recovery_outcome")
+  end
+
+  defp recovery_denial_context(extra) do
+    fake = start_upstream(FakeUpstream.json_response(%{"data" => []}))
+    setup = gateway_setup(fake)
+    {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
+    payload = %{"model" => setup.model.exposed_model_id}
+    reason = Map.merge(%{status: 503, code: "quota_exhausted", message: "upstream quota is exhausted"}, extra)
+    {%Denials.Context{auth: auth, model: setup.model, payload: payload, endpoint: @endpoint_path, opts: RequestOptions.build(%{}, @endpoint_path, payload), reason: reason}, fake}
+  end
+
   test "trusted concurrency denials replace domain prose and give each unclaimed retry its own row" do
     fake = start_upstream(FakeUpstream.json_response(%{"data" => []}))
     setup = gateway_setup(fake)

@@ -13,6 +13,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
   alias CodexPooler.Gateway.Routing.SessionContinuity
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Quotas.WindowClassifier
+  alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Quota.{CapacityAssessment, RoutingQuotaSnapshot, Windows}
   alias CodexPooler.Upstreams.SavedResetRedemption
   alias CodexPooler.Upstreams.SavedResets
@@ -33,6 +34,37 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
   def recovery_outcome({:ok, _candidates, decision}), do: decode_recovery_outcome(decision["non_credit_recovery_outcome"])
   def recovery_outcome({:ok, _candidates, decision, _state}), do: decode_recovery_outcome(decision["non_credit_recovery_outcome"])
   def recovery_outcome(_result), do: :unavailable
+
+  @doc false
+  @spec post_apply_failure?(term()) :: boolean()
+  def post_apply_failure?({:error, %{saved_reset_post_apply_failure: true}}), do: true
+  def post_apply_failure?(_result), do: false
+
+  @doc false
+  @spec clear_post_apply_failure(term()) :: term()
+  def clear_post_apply_failure({:error, %{} = error}), do: {:error, Map.delete(error, :saved_reset_post_apply_failure)}
+  def clear_post_apply_failure(result), do: result
+
+  @doc false
+  @spec post_apply_failure_result(term(), :pending | :confirmed, Exception.t(), Exception.stacktrace()) :: {:error, map()}
+  def post_apply_failure_result(result, outcome, exception, stacktrace) when outcome in [:pending, :confirmed] do
+    if Repo.in_transaction?(), do: reraise(exception, stacktrace)
+    Logger.warning("saved reset routing failed after commit applied=true outcome=#{outcome} exception=#{safe_reason(exception)}")
+
+    {:error, error} =
+      case result do
+        {:error, %{} = error} -> {:error, error}
+        _previously_admitted -> CandidateEligibility.quota_unavailable_error([], true)
+      end
+
+    {:error,
+     error
+     |> Map.delete(:usage_limit)
+     |> Map.put(:status, 503)
+     |> Map.put(:non_credit_recovery_outcome, Atom.to_string(outcome))
+     |> Map.put(:saved_reset_post_apply_failure, true)}
+  end
+
   @doc "Attempts existing reset recovery from actual included-only exclusions, never a policy-created pressure error."
   @spec recover_non_credit_exhaustion(non_credit_recovery_input(), map(), :required | :optional, DateTime.t(), refilter_options()) :: term()
   def recover_non_credit_exhaustion(%{candidate_exclusions: exclusions, result: result}, plan, :required, timestamp, opts) do
@@ -236,15 +268,15 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
       {:ok, %{applied?: true, code: code} = redeem_result} ->
         log_redemption(assignment, identity, "gateway_auto", trigger_detail, code, true)
 
-        route_after_redemption(
+        route_after_applied_redemption(
           result,
           refresh_plan,
           assignment,
           redeem_result,
           scan_timestamp,
-          opts
+          opts,
+          if(pending_probe?(redeem_result), do: :pending, else: :confirmed)
         )
-        |> put_recovery_outcome(if(pending_probe?(redeem_result), do: :pending, else: :confirmed))
 
       {:ok, %{applied?: applied?, code: code}} ->
         log_redemption(assignment, identity, "gateway_auto", trigger_detail, code, applied?)
@@ -274,6 +306,14 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
       )
 
       put_recovery_outcome(result, :failed)
+  end
+
+  defp route_after_applied_redemption(result, refresh_plan, assignment, redeem_result, scan_timestamp, opts, outcome) do
+    route_after_redemption(result, refresh_plan, assignment, redeem_result, scan_timestamp, opts)
+    |> put_recovery_outcome(outcome)
+  rescue
+    exception in [DBConnection.ConnectionError, Ecto.QueryError, Postgrex.Error, RoutingQuotaSnapshot.LoadError] ->
+      post_apply_failure_result(result, outcome, exception, __STACKTRACE__)
   end
 
   # A confirmed redemption (fresh usable quota) can route through the normal
