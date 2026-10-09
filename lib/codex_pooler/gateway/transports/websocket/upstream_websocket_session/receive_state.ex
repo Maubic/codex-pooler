@@ -70,7 +70,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Rece
     terminal_candidate_class: nil,
     terminal_candidate_rejection: nil,
     text_frame_count: 0,
-    body: {[], 0},
+    body: {[], 0, false},
     collected_body: :disabled,
     websocket_frame_headers: %{},
     peer_close_metadata: %{},
