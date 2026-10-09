@@ -6,7 +6,7 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
   alias CodexPooler.Events
   alias CodexPooler.Repo
 
-  alias CodexPooler.Upstreams.Auth.{AccessTokenExpiry, CodexAuth, TokenRefreshMetadata}
+  alias CodexPooler.Upstreams.Auth.{AccessTokenExpiry, CodexAuth, RefreshTokenRecovery, TokenRefreshMetadata}
   alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
   alias CodexPooler.Upstreams.Lifecycle.IdentityLifecycle
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
@@ -282,8 +282,10 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
       )
       |> Map.put(:proactive?, trigger_kind == "scheduled" and locked.status == @active)
 
-    case Secrets.decrypt_active_secret(locked, "refresh_token") do
-      {:ok, refresh_token} ->
+    case Secrets.decrypt_active_secret_with_id(locked, "refresh_token") do
+      {:ok, refresh_token, source_secret_id} ->
+        attempt = Map.put(attempt, :source_secret_id, source_secret_id)
+
         refreshed_metadata =
           put_token_refresh_metadata(locked.metadata, in_progress_token_refresh_metadata(attempt))
 
@@ -373,15 +375,41 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
 
   defp finalize_token_refresh(refresh_result, identity_id, trigger_kind, attempt) do
     Repo.transaction(fn ->
-      identity_id
-      |> lock_upstream_identity()
-      |> finalize_token_refresh_from_lock(refresh_result, trigger_kind, attempt)
+      identity = lock_upstream_identity(identity_id)
+      {identity, retained?} = recover_exceptional_rotation(identity, refresh_result, attempt)
+      {finalize_token_refresh_from_lock(identity, refresh_result, trigger_kind, attempt), retained?, identity}
     end)
     |> case do
-      {:ok, {:refresh_in_progress, metadata}} -> {:error, :refresh_in_progress, metadata}
-      {:ok, result} -> tap_upstream_change({:ok, result}, "upstream_account_token_refreshed")
-      {:error, reason} -> {:error, reason}
+      {:ok, {{:refresh_in_progress, metadata}, retained?, identity}} ->
+        if retained?, do: tap_upstream_change({:ok, %{identity: identity}}, "upstream_account_token_refreshed")
+        {:error, :refresh_in_progress, metadata}
+
+      {:ok, {result, _retained?, _identity}} ->
+        tap_upstream_change({:ok, result}, "upstream_account_token_refreshed")
+
+      {:error, reason} ->
+        {:error, reason}
     end
+  end
+
+  defp recover_exceptional_rotation(%UpstreamIdentity{} = identity, {:ok, attrs}, attempt) do
+    current = token_refresh_metadata(identity.metadata)
+    owns_attempt? = owns_attempt?(current, attempt)
+
+    if not owns_attempt? or identity.status not in @token_refresh_candidate_statuses do
+      case RefreshTokenRecovery.retain(identity, attempt, attrs, "superseded_attempt") do
+        {:ok, result, updated} -> {updated, result == :retained}
+        {:error, error} -> Repo.rollback(error)
+      end
+    else
+      {identity, false}
+    end
+  end
+
+  defp recover_exceptional_rotation(identity, _result, _attempt), do: {identity, false}
+
+  defp owns_attempt?(current, attempt) do
+    current["status"] == "refreshing" and current["attempt_id"] == attempt.attempt_id and current["generation"] == attempt.generation and current["credential_epoch"] == attempt.credential_epoch
   end
 
   defp finalize_token_refresh_from_lock(
@@ -481,6 +509,12 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
       token_refresh_result(:active, active_identity, retryable?: false, reason: nil)
     else
       {:error, %{code: :access_token_expired}} ->
+        identity =
+          case RefreshTokenRecovery.retain(identity, attempt, token_attrs, "expired_access_token") do
+            {:ok, _result, updated} -> updated
+            {:error, error} -> Repo.rollback(error)
+          end
+
         finalize_refresh_failure(
           identity,
           trigger_kind,
@@ -678,7 +712,8 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
       "trigger_kind" => attempt.trigger_kind,
       "receive_timeout_ms" => attempt.receive_timeout_ms,
       "stale_after_ms" => attempt.stale_after_ms,
-      "credential_epoch" => attempt.credential_epoch
+      "credential_epoch" => attempt.credential_epoch,
+      "source_secret_id" => Map.get(attempt, :source_secret_id)
     }
   end
 

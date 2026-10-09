@@ -111,6 +111,16 @@ defmodule CodexPooler.Upstreams.Secrets do
   @spec decrypt_active_secret(identity_ref(), String.t()) ::
           {:ok, binary()} | {:error, lifecycle_error()}
   def decrypt_active_secret(identity_or_id, secret_kind) when is_binary(secret_kind) do
+    case decrypt_active_secret_with_id(identity_or_id, secret_kind) do
+      {:ok, plaintext, _secret_id} -> {:ok, plaintext}
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc false
+  @spec decrypt_active_secret_with_id(identity_ref(), String.t()) ::
+          {:ok, binary(), Ecto.UUID.t()} | {:error, lifecycle_error()}
+  def decrypt_active_secret_with_id(identity_or_id, secret_kind) when is_binary(secret_kind) do
     identity_id = identity_id(identity_or_id)
     normalized_kind = normalize_token(secret_kind)
 
@@ -126,7 +136,10 @@ defmodule CodexPooler.Upstreams.Secrets do
 
     case secret do
       %EncryptedSecret{} ->
-        decrypt_upstream_secret(secret)
+        case decrypt_upstream_secret(secret) do
+          {:ok, plaintext} -> {:ok, plaintext, secret.id}
+          {:error, _} = error -> error
+        end
 
       nil ->
         {:error, lifecycle_error(:upstream_secret_not_found, "active upstream secret was not found")}
