@@ -2131,7 +2131,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   def handle_call({:complete_steering_successor, lane, identity, result}, _from, %{active_turn: %{native_response_steering: lane, descriptor: descriptor}} = state) do
     if Map.take(descriptor, [:request_id, :attempt_id, :replay_generation]) == identity do
       if downstream = state.active_turn.downstream, do: state.callbacks.downstream_sender.(downstream.pid, {:native_response_steering_done, lane, identity, result})
-      state = %{state | termination_cleanup_witness: state.active_turn.cleanup_witness, forwarded_terminal_request_id: identity.request_id}
+      state = %{state | termination_cleanup_witness: state.active_turn.cleanup_witness}
+      state = %{state | forwarded_terminal_request_id: forwarded_terminal_request_id(state)}
       {:reply, :ok, state |> clear_active_turn() |> apply_native_steering_owner_success(result)}
     else
       {:reply, :ok, state}
