@@ -244,6 +244,35 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
     end
   end
 
+  for source <- ["messages", "input"], lifted? <- [false, true] do
+    @tag :chat_top_level_instructions
+    test "Chat #{source} preserves top-level instructions with lifted=#{lifted?}" do
+      messages = if(unquote(lifted?), do: [%{"role" => "system", "content" => "synthetic system"}, %{"role" => "developer", "content" => "synthetic developer"}], else: []) ++ [%{"role" => "user", "content" => "synthetic user"}]
+      payload = %{"model" => "gpt-fixture-text", unquote(source) => messages, "instructions" => "synthetic top"}
+      assert {:ok, result} = Chat.coerce(payload)
+      assert result.payload["instructions"] == if(unquote(lifted?), do: "synthetic top\nsynthetic system\nsynthetic developer", else: "synthetic top")
+      assert Enum.map(result.payload["input"], & &1["role"]) == ["user"]
+    end
+  end
+
+  @tag :chat_top_level_instructions
+  test "Chat preserves absent null and empty instructions behavior with lifted text" do
+    for source <- ["messages", "input"], instructions <- [:absent, nil, ""] do
+      payload = %{"model" => "gpt-fixture-text", source => [%{"role" => "system", "content" => "synthetic system"}, %{"role" => "developer", "content" => "synthetic developer"}, %{"role" => "user", "content" => "synthetic user"}]}
+      payload = if instructions == :absent, do: payload, else: Map.put(payload, "instructions", instructions)
+      assert {:ok, result} = Chat.coerce(payload)
+      assert result.payload["instructions"] == "synthetic system\nsynthetic developer"
+    end
+  end
+
+  @tag :chat_top_level_instructions
+  test "Chat messages preserves explicit null and empty instructions like input fallback" do
+    for instructions <- [nil, ""] do
+      assert {:ok, result} = Chat.coerce(%{"model" => "gpt-fixture-text", "messages" => [%{"role" => "user", "content" => "synthetic user"}], "instructions" => instructions})
+      assert Map.fetch(result.payload, "instructions") == {:ok, instructions}
+    end
+  end
+
   @tag :responses_coercion
   test "string Responses input coerces to a backend-compatible input_text message" do
     assert {:ok, result} =

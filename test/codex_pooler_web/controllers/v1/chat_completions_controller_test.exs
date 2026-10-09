@@ -20,11 +20,13 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsControllerTest do
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
     only: [
       auth: 2,
+      curl_json_request!: 4,
       gateway_setup: 1,
       gateway_setup: 2,
       gateway_upstream: 4,
       prime_weekly_exhausted_quota!: 1,
       prime_weekly_probe_quota!: 1,
+      start_public_endpoint!: 0,
       start_upstream: 1
     ]
 
@@ -44,6 +46,34 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsControllerTest do
   alias CodexPooler.Repo
 
   @reasoning_denial_message "reasoning effort is not available for this API key"
+
+  for mode <- ~w(full lite), stream <- [false, true], source <- ["messages", "input"] do
+    @tag :chat_top_level_instructions
+    test "real HTTP Chat preserves #{source} top-level and lifted instructions in #{mode} stream=#{stream}" do
+      terminal = %{"type" => "response.completed", "response" => %{"id" => "resp_chat_instructions", "object" => "response", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 2, "output_tokens" => 1, "total_tokens" => 3}}}
+      upstream = start_upstream(FakeUpstream.sse_stream([terminal]))
+      setup = gateway_setup(upstream)
+      put_chat_model_serving_mode!(setup, unquote(mode))
+      port = start_public_endpoint!()
+      input = [%{"role" => "system", "content" => "synthetic system"}, %{"role" => "developer", "content" => "synthetic developer"}, %{"role" => "user", "content" => "synthetic user"}]
+      payload = %{"model" => setup.model.exposed_model_id, unquote(source) => input, "instructions" => "synthetic top", "stream" => unquote(stream)}
+      {headers, body} = curl_json_request!(port, setup.authorization, payload, "/v1/chat/completions")
+      assert String.starts_with?(headers, "HTTP/1.1 200")
+      if unquote(stream), do: assert(body =~ "data: [DONE]"), else: assert(CodexPooler.JSON.decode!(body)["object"] == "chat.completion")
+      assert [captured] = FakeUpstream.requests(upstream)
+      expected = "synthetic top\nsynthetic system\nsynthetic developer"
+
+      if unquote(mode) == "full" do
+        assert captured.json["instructions"] == expected
+        assert Enum.map(captured.json["input"], & &1["role"]) == ["user"]
+      else
+        refute Map.has_key?(captured.json, "instructions")
+        assert [instruction, user] = Enum.reject(captured.json["input"], &(&1["type"] == "additional_tools"))
+        assert instruction["content"] == [%{"type" => "input_text", "text" => expected}]
+        assert user["role"] == "user"
+      end
+    end
+  end
 
   test "POST /v1/chat/completions enforces reasoning availability before gateway effort", %{
     conn: conn

@@ -4144,6 +4144,7 @@ defmodule CodexPooler.CompatibilityMatrix do
       instruction_lifting: %{
         roles: ["system", "developer"],
         destination: "instructions",
+        chat_top_level_instructions: "preserved_in_messages_and_input_fallback",
         merge_order: ["existing_instructions", "input_order_instruction_text"],
         residual_non_text_role: "user",
         blank_text: "omitted",

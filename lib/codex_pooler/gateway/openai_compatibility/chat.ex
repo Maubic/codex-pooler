@@ -407,6 +407,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Chat do
 
     with {:ok, base} <- maybe_put_tools(base, payload) do
       base
+      |> maybe_put(payload, "instructions")
       |> maybe_put_tool_choice(payload)
       |> maybe_put(payload, "parallel_tool_calls")
       |> maybe_put(payload, "metadata")
