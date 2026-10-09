@@ -9,6 +9,7 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
   alias CodexPooler.Pools.Routing, as: PoolRouting
   alias CodexPoolerWeb.GatewayControllerHelpers
   alias CodexPoolerWeb.Mcp.Authentication
+  alias CodexPoolerWeb.Plugs.BackendFilesMultipartGuard
   alias CodexPoolerWeb.Plugs.RuntimeIngress.{CompressedBody, Firewall, Path}
   alias CodexPoolerWeb.Plugs.RuntimeIngress.Firewall.Decision
   alias CodexPoolerWeb.V1.UnsupportedRoutes
@@ -74,6 +75,7 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
         |> authenticate_protected_backend_json_request()
         |> enforce_image_generation_permission()
         |> enforce_audio_transcription_permission()
+        |> BackendFilesMultipartGuard.call([])
         |> maybe_decode_compressed_body(settings)
 
       json_request?(conn) ->

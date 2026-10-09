@@ -12,6 +12,7 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
   alias CodexPooler.InstanceSettings
   alias CodexPooler.InstanceSettings.Cache
   alias CodexPooler.InstanceSettings.Settings
+  alias CodexPooler.MCP
   alias CodexPooler.Pools
   alias CodexPooler.Pools.RoutingSettings
   alias CodexPooler.Repo
@@ -120,8 +121,22 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
 
       assert json_response(protected_runtime, 401)["error"]["code"] == "api_key_missing"
 
+      missing_mcp =
+        build_conn()
+        |> put_req_header("content-type", "multipart/form-data; boundary=example")
+        |> post("/mcp", "invalid multipart fixture")
+
+      assert json_response(missing_mcp, 401)["error"]["code"] == -32_000
+      assert %Plug.Conn.Unfetched{} = missing_mcp.body_params
+
+      user = Repo.get!(CodexPooler.Accounts.User, setup.api_key.created_by_user_id)
+      assert {:ok, _settings} = InstanceSettings.update_system_settings(InstanceSettings.ensure_singleton!(), %{"mcp" => %{"enabled" => true}})
+      assert {:ok, _operator_settings} = MCP.set_operator_mcp_enabled(user, true)
+      assert {:ok, %{raw_token: raw_token}} = MCP.create_operator_token(user, %{label: "Ingress contract"})
+
       mcp =
         build_conn()
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> put_req_header("content-type", "multipart/form-data; boundary=example")
         |> post("/mcp", "invalid multipart fixture")
 

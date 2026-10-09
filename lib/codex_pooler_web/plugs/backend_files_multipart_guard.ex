@@ -5,6 +5,7 @@ defmodule CodexPoolerWeb.Plugs.BackendFilesMultipartGuard do
 
   alias CodexPoolerWeb.GatewayControllerHelpers, as: GatewayHelpers
   alias CodexPoolerWeb.Plugs.RuntimeIngress.Path
+  alias Plug.Conn.Utils
 
   @files_path ["backend-api", "files"]
 
@@ -41,7 +42,7 @@ defmodule CodexPoolerWeb.Plugs.BackendFilesMultipartGuard do
     |> List.first()
     |> case do
       nil -> false
-      content_type -> String.starts_with?(String.downcase(content_type), "multipart/form-data")
+      content_type -> match?({:ok, "multipart", _subtype, _params}, Utils.content_type(content_type))
     end
   end
 end
