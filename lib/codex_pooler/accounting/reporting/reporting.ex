@@ -527,7 +527,7 @@ defmodule CodexPooler.Accounting.Reporting do
   defp select_settlement_bucket(query, :hour) do
     select(query, [entry], %{
       pool_id: entry.pool_id,
-      bucket: fragment("date_trunc('hour', ?)", entry.occurred_at),
+      bucket: fragment("date_trunc('hour', ?, 'UTC')", entry.occurred_at),
       request_count: entry.request_count,
       usage_status: entry.usage_status,
       input_tokens: entry.input_tokens,
@@ -542,7 +542,7 @@ defmodule CodexPooler.Accounting.Reporting do
   defp select_settlement_bucket(query, :day) do
     select(query, [entry], %{
       pool_id: entry.pool_id,
-      bucket: fragment("date_trunc('day', ?)", entry.occurred_at),
+      bucket: fragment("date_trunc('day', ?, 'UTC')", entry.occurred_at),
       request_count: entry.request_count,
       usage_status: entry.usage_status,
       input_tokens: entry.input_tokens,

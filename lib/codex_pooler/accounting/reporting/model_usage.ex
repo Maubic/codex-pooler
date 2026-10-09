@@ -10,7 +10,7 @@ defmodule CodexPooler.Accounting.Reporting.ModelUsage do
   @query """
   WITH rollup_source AS (
     SELECT
-      rollup.bucket_started_at AS bucket,
+      rollup.bucket_started_at AT TIME ZONE 'UTC' AS bucket,
       COALESCE(NULLIF(BTRIM(rollup.model_code), ''), $7::text) AS model_code,
       rollup.request_count,
       rollup.success_count,
@@ -26,8 +26,8 @@ defmodule CodexPooler.Accounting.Reporting.ModelUsage do
     FROM public.hourly_model_usage_rollups AS rollup
     WHERE $6::text = 'hour'
       AND rollup.pool_id = ANY($1::uuid[])
-      AND rollup.bucket_started_at >= $4
-      AND rollup.bucket_started_at < $5
+      AND rollup.bucket_started_at >= ($4::timestamptz AT TIME ZONE 'UTC')
+      AND rollup.bucket_started_at < ($5::timestamptz AT TIME ZONE 'UTC')
 
     UNION ALL
 
@@ -53,14 +53,14 @@ defmodule CodexPooler.Accounting.Reporting.ModelUsage do
       AND rollup.pool_id = ANY($1::uuid[])
       AND rollup.dimension_kind = 'model'
       AND rollup.model_id IS NOT NULL
-      AND rollup.rollup_date >= ($4 AT TIME ZONE 'UTC')::date
-      AND rollup.rollup_date < ($5 AT TIME ZONE 'UTC')::date
+      AND rollup.rollup_date >= ($4::timestamptz AT TIME ZONE 'UTC')::date
+      AND rollup.rollup_date < ($5::timestamptz AT TIME ZONE 'UTC')::date
   ),
   raw_edge_source AS (
     SELECT
       CASE
-        WHEN $6::text = 'day' THEN date_trunc('day', entry.occurred_at)
-        ELSE date_trunc('hour', entry.occurred_at)
+        WHEN $6::text = 'day' THEN date_trunc('day', entry.occurred_at, 'UTC')
+        ELSE date_trunc('hour', entry.occurred_at, 'UTC')
       END AS bucket,
       COALESCE(NULLIF(BTRIM(model.exposed_model_id), ''), $7::text) AS model_code,
       1::bigint AS request_count,

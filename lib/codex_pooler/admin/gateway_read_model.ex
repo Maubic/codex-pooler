@@ -84,10 +84,10 @@ defmodule CodexPooler.Admin.GatewayReadModel do
         where:
           request.pool_id in ^pool_ids and request.admitted_at >= ^started_at and
             request.admitted_at <= ^ended_at,
-        group_by: fragment("date_trunc('hour', ?)", request.admitted_at),
-        order_by: [asc: fragment("date_trunc('hour', ?)", request.admitted_at)],
+        group_by: fragment("date_trunc('hour', ? AT TIME ZONE 'UTC')", request.admitted_at),
+        order_by: [asc: fragment("date_trunc('hour', ? AT TIME ZONE 'UTC')", request.admitted_at)],
         select: %{
-          bucket: type(fragment("date_trunc('hour', ?)", request.admitted_at), :utc_datetime_usec),
+          bucket: type(fragment("date_trunc('hour', ? AT TIME ZONE 'UTC')", request.admitted_at), :utc_datetime_usec),
           requests: count(request.id),
           succeeded: filter(count(request.id), request.status == "succeeded"),
           in_progress: filter(count(request.id), request.status == "in_progress")
@@ -107,10 +107,10 @@ defmodule CodexPooler.Admin.GatewayReadModel do
         where:
           request.pool_id in ^pool_ids and request.admitted_at >= ^started_at and
             request.admitted_at <= ^ended_at,
-        group_by: fragment("date_trunc('day', ?)", request.admitted_at),
-        order_by: [asc: fragment("date_trunc('day', ?)", request.admitted_at)],
+        group_by: fragment("date_trunc('day', ? AT TIME ZONE 'UTC')", request.admitted_at),
+        order_by: [asc: fragment("date_trunc('day', ? AT TIME ZONE 'UTC')", request.admitted_at)],
         select: %{
-          bucket: type(fragment("date_trunc('day', ?)", request.admitted_at), :utc_datetime_usec),
+          bucket: type(fragment("date_trunc('day', ? AT TIME ZONE 'UTC')", request.admitted_at), :utc_datetime_usec),
           requests: count(request.id),
           succeeded: filter(count(request.id), request.status == "succeeded"),
           in_progress: filter(count(request.id), request.status == "in_progress")
@@ -203,11 +203,11 @@ defmodule CodexPooler.Admin.GatewayReadModel do
         where:
           request.pool_id in ^pool_ids and request.admitted_at >= ^started_at and
             request.admitted_at <= ^ended_at,
-        group_by: [request.pool_id, fragment("date_trunc('hour', ?)", request.admitted_at)],
-        order_by: [asc: fragment("date_trunc('hour', ?)", request.admitted_at)],
+        group_by: [request.pool_id, fragment("date_trunc('hour', ? AT TIME ZONE 'UTC')", request.admitted_at)],
+        order_by: [asc: fragment("date_trunc('hour', ? AT TIME ZONE 'UTC')", request.admitted_at)],
         select: %{
           pool_id: request.pool_id,
-          bucket: type(fragment("date_trunc('hour', ?)", request.admitted_at), :utc_datetime_usec),
+          bucket: type(fragment("date_trunc('hour', ? AT TIME ZONE 'UTC')", request.admitted_at), :utc_datetime_usec),
           requests: count(request.id)
         }
     )
@@ -219,11 +219,11 @@ defmodule CodexPooler.Admin.GatewayReadModel do
         where:
           request.pool_id in ^pool_ids and request.admitted_at >= ^started_at and
             request.admitted_at <= ^ended_at,
-        group_by: [request.pool_id, fragment("date_trunc('day', ?)", request.admitted_at)],
-        order_by: [asc: fragment("date_trunc('day', ?)", request.admitted_at)],
+        group_by: [request.pool_id, fragment("date_trunc('day', ? AT TIME ZONE 'UTC')", request.admitted_at)],
+        order_by: [asc: fragment("date_trunc('day', ? AT TIME ZONE 'UTC')", request.admitted_at)],
         select: %{
           pool_id: request.pool_id,
-          bucket: type(fragment("date_trunc('day', ?)", request.admitted_at), :utc_datetime_usec),
+          bucket: type(fragment("date_trunc('day', ? AT TIME ZONE 'UTC')", request.admitted_at), :utc_datetime_usec),
           requests: count(request.id)
         }
     )

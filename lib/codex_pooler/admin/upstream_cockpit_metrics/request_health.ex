@@ -113,9 +113,9 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
   # classified by `RequestOutcome.client_cancelled?/2`.
   defp daily_counts(base_query) do
     base_query
-    |> group_by([request], [fragment("DATE(?)", request.admitted_at), request.status, request.last_error_code])
+    |> group_by([request], [fragment("DATE(? AT TIME ZONE 'UTC')", request.admitted_at), request.status, request.last_error_code])
     |> select([request], %{
-      date: type(fragment("DATE(?)", request.admitted_at), :date),
+      date: type(fragment("DATE(? AT TIME ZONE 'UTC')", request.admitted_at), :date),
       status: request.status,
       last_error_code: request.last_error_code,
       count: count(request.id)
