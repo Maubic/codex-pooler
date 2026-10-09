@@ -28,6 +28,41 @@ defmodule CodexPooler.MCP.TokenTest do
     %{user: user, scope: Scope.for_user(user)}
   end
 
+  test "MCP key lookups and mutations reject malformed ids without writes", %{user: user} do
+    {:ok, %{key: key}} = MCP.create_operator_token(user, %{label: "Boundary token"})
+    %{user: other} = operator_fixture(user, %{"password_change_required" => "false"})
+    before_rows = {Repo.reload!(key), Repo.all(AuditEvent)}
+    assert {:ok, visible} = MCP.get_operator_token(user, String.upcase(key.id))
+    assert visible.id == key.id
+
+    for operation <- [:get_operator_token, :update_operator_token, :delete_operator_token] do
+      call = fn actor, id ->
+        args = if operation == :update_operator_token, do: [actor, id, %{label: "Changed"}], else: [actor, id]
+
+        try do
+          case apply(MCP, operation, args) do
+            {:error, error} -> {:error, error}
+            _ -> :unexpected_success
+          end
+        rescue
+          Ecto.Query.CastError -> :cast_error
+        end
+      end
+
+      expected = call.(user, Ecto.UUID.generate())
+      assert {:error, %{code: :mcp_token_missing}} = expected
+      assert call.(other, key.id) == expected
+
+      for id <- ["not-a-uuid", "", String.duplicate("z", 36)] do
+        assert call.(user, id) == expected
+        assert {:error, %{code: :invalid_operator}} = call.(nil, id)
+      end
+    end
+
+    unchanged? = before_rows == {Repo.reload!(key), Repo.all(AuditEvent)}
+    assert unchanged?
+  end
+
   test "creates operator MCP keys with one-time raw token and light storage", %{user: user} do
     assert {:ok, %{key: key, raw_token: raw_token}} =
              MCP.create_operator_token(user, %{label: " Laptop MCP "})

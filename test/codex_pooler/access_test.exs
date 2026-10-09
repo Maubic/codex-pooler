@@ -24,6 +24,57 @@ defmodule CodexPooler.AccessTest do
     :ok
   end
 
+  for operation <- [:get_api_key, :get_api_key_with_policy, :rotate_api_key, :delete_api_key, :pause_api_key, :resume_api_key, :revoke_api_key, :update_api_key, :update_api_key_with_policy] do
+    test "#{operation} rejects malformed key ids like missing ids without writes" do
+      {scope, pool} = owner_scope_and_pool()
+      {:ok, %{api_key: key}} = Access.create_api_key(scope, pool, %{display_name: "Boundary key"})
+      before_rows = {Repo.reload!(key), Repo.all(APIKeyPolicyBinding), Repo.all(AuditEvent)}
+
+      call = fn actor, id ->
+        args = if unquote(operation) in [:update_api_key, :update_api_key_with_policy], do: [actor, id, %{display_name: "Changed"}], else: [actor, id]
+
+        try do
+          case apply(Access, unquote(operation), args) do
+            {:error, error} -> {:error, error}
+            _ -> :unexpected_success
+          end
+        rescue
+          Ecto.Query.CastError -> :cast_error
+        end
+      end
+
+      expected = call.(scope, Ecto.UUID.generate())
+      assert {:error, %{code: :api_key_not_found}} = expected
+
+      for id <- ["not-a-uuid", "", String.duplicate("z", 36)] do
+        assert call.(scope, id) == expected
+        assert {:error, %{code: :invalid_request}} = call.(nil, id)
+      end
+
+      unchanged? = before_rows == {Repo.reload!(key), Repo.all(APIKeyPolicyBinding), Repo.all(AuditEvent)}
+      assert unchanged?
+    end
+  end
+
+  test "malformed lookup validation preserves inaccessible key authorization" do
+    {scope, pool} = owner_scope_and_pool()
+    {:ok, %{api_key: key}} = Access.create_api_key(scope, pool, %{display_name: "Private key"})
+    %{user: admin} = operator_fixture(scope, %{"password_change_required" => "false"})
+    admin_scope = Scope.for_user(admin)
+    before_rows = {Repo.reload!(key), Repo.all(APIKeyPolicyBinding), Repo.all(AuditEvent)}
+    assert {:ok, visible} = Access.get_api_key(scope, String.upcase(key.id))
+    assert visible.id == key.id
+    assert {:error, %{code: :api_key_not_found}} = Access.get_api_key(admin_scope, key.id)
+
+    for operation <- [:rotate_api_key, :delete_api_key] do
+      assert {:error, %{code: :capability_denied}} = apply(Access, operation, [admin_scope, key.id])
+      assert apply(Access, operation, [admin_scope, "not-a-uuid"]) == apply(Access, operation, [admin_scope, Ecto.UUID.generate()])
+    end
+
+    unchanged? = before_rows == {Repo.reload!(key), Repo.all(APIKeyPolicyBinding), Repo.all(AuditEvent)}
+    assert unchanged?
+  end
+
   describe "key-wide active request setting" do
     test "persists create, update, rotation, Pool move, safe reads, audit and explicit clearing" do
       {scope, pool} = owner_scope_and_pool()

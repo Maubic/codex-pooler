@@ -122,7 +122,8 @@ defmodule CodexPooler.Access.APIKeys.Queries do
 
   @spec get_api_key(Scope.t(), Ecto.UUID.t()) :: {:ok, APIKey.t()} | {:error, access_error()}
   def get_api_key(%Scope{} = scope, api_key_id) when is_binary(api_key_id) do
-    with %APIKey{} = api_key <- Repo.get(APIKey, api_key_id),
+    with {:ok, api_key_id} <- Ecto.UUID.cast(api_key_id),
+         %APIKey{} = api_key <- Repo.get(APIKey, api_key_id),
          {:ok, _decision} <-
            PoolAuthorization.require_capability(
              scope,
@@ -131,6 +132,9 @@ defmodule CodexPooler.Access.APIKeys.Queries do
            ) do
       {:ok, api_key}
     else
+      :error ->
+        {:error, Errors.access_error(:api_key_not_found, "api key was not found")}
+
       nil ->
         {:error, Errors.access_error(:api_key_not_found, "api key was not found")}
 
