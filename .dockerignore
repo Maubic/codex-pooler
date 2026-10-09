@@ -14,6 +14,3 @@
 erl_crash.dump
 *.ez
 codex_pooler-*.tar
-
-/vendor/gen_smtp/_build/
-/vendor/gen_smtp/src/smtp_rfc822_parse.erl
