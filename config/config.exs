@@ -170,7 +170,6 @@ config :codex_pooler, CodexPooler.Accounts,
   totp_key_version: "v1"
 
 config :codex_pooler, CodexPooler.Files,
-  max_file_size_bytes: 25 * 1024 * 1024,
   # TTL applies to database metadata for upstream-backed files, not local payload storage.
   file_ttl_seconds: 24 * 60 * 60
 
