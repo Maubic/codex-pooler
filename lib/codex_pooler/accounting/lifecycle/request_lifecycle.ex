@@ -1352,6 +1352,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
           cached_input_tokens,
           cache_write_tokens,
           output_tokens,
+          reasoning_tokens,
           total_tokens
         )
 
@@ -1405,12 +1406,14 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
          cached_input_tokens,
          cache_write_tokens,
          output_tokens,
+         reasoning_tokens,
          total_tokens
        ) do
     with true <- nonnegative_integer?(input_tokens),
          true <- valid_optional_counter?(cached_input_tokens),
          true <- valid_optional_counter?(cache_write_tokens),
          true <- nonnegative_integer?(output_tokens),
+         true <- reasoning_tokens <= output_tokens,
          true <- nonnegative_integer?(total_tokens),
          {:ok, reads} <- optional_counter_for_sum(cached_input_tokens),
          {:ok, writes} <- optional_counter_for_sum(cache_write_tokens) do

@@ -78,10 +78,9 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
         cached = Map.get(normalized, :cached_input_tokens, 0) || 0
         written = Map.get(normalized, :cache_write_tokens, 0) || 0
 
-        if cached + written <= normalized.input_tokens and
-             normalized.reasoning_tokens <= normalized.output_tokens,
-           do: Map.put(normalized, :service_tier, bounded_service_tier(envelope["service_tier"])),
-           else: maybe_put_served_model(%{status: "usage_unknown", source: "invalid_usage_tokens"}, envelope)
+        if cached + written <= normalized.input_tokens,
+          do: Map.put(normalized, :service_tier, bounded_service_tier(envelope["service_tier"])),
+          else: maybe_put_served_model(%{status: "usage_unknown", source: "invalid_usage_tokens"}, envelope)
 
       unknown ->
         maybe_put_served_model(unknown, envelope)
@@ -248,6 +247,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
          {:ok, output_tokens} <-
            required_int_value(usage["output_tokens"] || usage["completion_tokens"]),
          {:ok, reasoning_tokens} <- reasoning_tokens_value(usage),
+         true <- reasoning_tokens <= output_tokens,
          {:ok, total_tokens} <-
            total_tokens_value(usage["total_tokens"], input_tokens, output_tokens),
          true <- total_tokens == input_tokens + output_tokens do

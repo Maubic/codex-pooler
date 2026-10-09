@@ -8,11 +8,55 @@ defmodule CodexPooler.Accounting.UsageSettlementPostgresTest do
   alias CodexPooler.Accounting
   alias CodexPooler.Accounting.{DailyRollup, HourlyModelUsageRollup, LedgerEntry, RequestLogFact}
   alias CodexPooler.Accounting.RequestLifecycle.LedgerEntries
+  alias CodexPooler.Gateway.Runtime.Finalization.ResponseUsage
   alias CodexPooler.Repo
   alias CodexPoolerWeb.Runtime.BackendCodexTestSupport
   alias Ecto.Adapters.SQL.Sandbox
 
   @detection_budget 15_000
+
+  for source <- [:direct, :json], reasoning <- [0, 2, 3] do
+    test "#{source} settlement validates reasoning #{reasoning} against output 2 before committing" do
+      fixture = Sandbox.unboxed_run(Repo, fn -> accounting_setup() end)
+
+      on_exit(fn ->
+        Sandbox.unboxed_run(Repo, fn -> BackendCodexTestSupport.cleanup_unboxed_pool!(fixture) end)
+      end)
+
+      Sandbox.unboxed_run(Repo, fn ->
+        {:ok, reserved} = Accounting.reserve(fixture.auth, fixture.model, %{"model" => fixture.model.exposed_model_id, "max_output_tokens" => 5}, %{})
+        {:ok, attempt} = Accounting.create_attempt(reserved.request, fixture.assignment)
+        reasoning = unquote(reasoning)
+
+        usage =
+          case unquote(source) do
+            :direct -> %{status: "usage_known", input_tokens: 10, output_tokens: 2, reasoning_tokens: reasoning, total_tokens: 12}
+            :json -> ResponseUsage.from_json(CodexPooler.JSON.encode!(%{"usage" => %{"input_tokens" => 10, "output_tokens" => 2, "output_tokens_details" => %{"reasoning_tokens" => reasoning}, "total_tokens" => 12}}))
+          end
+
+        assert {:ok, finalized} = Accounting.finalize_success(reserved.request, attempt, usage, %{response_status_code: 200})
+        request_id = reserved.request.id
+        entry = Repo.one!(from(e in LedgerEntry, where: e.request_id == ^request_id and e.entry_kind == "settlement" and e.amount_status == "recorded"))
+
+        if reasoning <= 2 do
+          assert finalized.request.usage_status == "usage_known"
+          assert entry.usage_status == "usage_known"
+          assert {entry.input_tokens, entry.output_tokens, entry.reasoning_tokens || 0, entry.total_tokens} == {10, 2, reasoning, 12}
+          assert Decimal.equal?(entry.settled_cost_micros, Decimal.new(140 + 10 * reasoning))
+        else
+          assert finalized.request.usage_status == "usage_unknown"
+          assert finalized.attempt.usage_status == "usage_unknown"
+          assert entry.usage_status == "usage_unknown"
+          assert entry.details["usage_source"] == "invalid_usage_tokens"
+          assert entry.details["settled_cost_micros"] == nil
+          assert entry.details["estimated_from_reserve"] == true
+          reservation = Repo.one!(from(e in LedgerEntry, where: e.request_id == ^request_id and e.entry_kind == "reservation"))
+          assert entry.total_tokens == reservation.total_tokens
+          assert entry.reasoning_tokens == reservation.reasoning_tokens
+        end
+      end)
+    end
+  end
 
   test "committed finalizers race one late measured usage correction through PostgreSQL locks" do
     fixture =

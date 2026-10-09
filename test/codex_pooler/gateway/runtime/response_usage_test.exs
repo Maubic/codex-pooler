@@ -13,6 +13,15 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
   end
 
   describe "from_json/1" do
+    test "valid nested reasoning is authoritative even when a flat counter disagrees" do
+      for {nested, flat, expected} <- [{0, 3, "usage_known"}, {2, 3, "usage_known"}, {3, 0, "usage_unknown"}] do
+        body = CodexPooler.JSON.encode!(%{"usage" => %{"input_tokens" => 10, "output_tokens" => 2, "reasoning_tokens" => flat, "output_tokens_details" => %{"reasoning_tokens" => nested}}})
+        parsed = ResponseUsage.from_json(body)
+        assert parsed.status == expected
+        if expected == "usage_known", do: assert(parsed.reasoning_tokens == nested)
+      end
+    end
+
     test "extracts flat usage from JSON responses" do
       body =
         CodexPooler.JSON.encode!(%{
