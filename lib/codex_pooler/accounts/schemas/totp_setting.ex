@@ -11,6 +11,7 @@ defmodule CodexPooler.Accounts.TOTPSetting do
     field :status, :string
     field :enrolled_at, :utc_datetime_usec
     field :verified_at, :utc_datetime_usec
+    field :last_used_step, :integer
     field :disabled_at, :utc_datetime_usec
     field :created_at, :utc_datetime_usec
     field :updated_at, :utc_datetime_usec

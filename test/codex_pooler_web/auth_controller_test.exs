@@ -224,6 +224,24 @@ defmodule CodexPoolerWeb.AuthControllerTest do
     assert redirected_to(conn) == ~p"/admin/pools"
   end
 
+  test "two pending login sessions cannot reuse one TOTP code" do
+    %{user: user} = bootstrap_owner_fixture()
+    {:ok, setup} = Accounts.enable_totp_for_user(user)
+
+    pending =
+      for _ <- 1..2 do
+        build_conn() |> post(~p"/login", %{"user" => %{"email" => user.email, "password" => valid_user_password()}})
+      end
+
+    code = Accounts.current_totp_code(setup.secret)
+    [first, second] = Enum.map(pending, fn conn -> post(recycle(conn), ~p"/login", %{"user" => %{"totp_code" => code}}) end)
+    assert redirected_to(first) == ~p"/admin/pools"
+    assert get_session(first, :user_token) != nil
+    second_session_issued? = get_session(second, :user_token) != nil
+    refute second_session_issued?
+    assert redirected_to(second) == ~p"/login?mfa=1"
+  end
+
   test "TOTP-required login continues on a second-factor screen", %{conn: conn} do
     %{user: user} = bootstrap_owner_fixture(%{"email" => "owner@example.com"})
     {:ok, %{secret: secret}} = Accounts.enable_totp_for_user(user)

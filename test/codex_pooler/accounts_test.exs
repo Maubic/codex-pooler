@@ -86,6 +86,105 @@ defmodule CodexPooler.AccountsTest do
     end
   end
 
+  describe "TOTP replay protection" do
+    for offset <- [-1, 0, 1] do
+      test "consumes the matched #{offset} drift step and rejects its replay" do
+        %{user: user} = bootstrap_owner_fixture()
+        {:ok, setup} = Accounts.enable_totp_for_user(user)
+        at = totp_test_time(setup.secret)
+        step = div(DateTime.to_unix(at), 30) + unquote(offset)
+        code = totp_for_step(setup.secret, step)
+        clock = fn -> at end
+        assert :ok = MFA.verify_second_factor(user, code, nil, %{}, clock: clock)
+        assert Repo.reload!(setup.setting).last_used_step == step
+        result = MFA.verify_second_factor(user, code, nil, %{}, clock: clock)
+        assert result == {:error, :invalid_totp_code}
+        assert Repo.reload!(setup.setting).last_used_step == step
+      end
+    end
+
+    test "advances only for newer in-window codes and leaves invalid and rolled-back attempts unconsumed" do
+      %{user: user} = bootstrap_owner_fixture()
+      {:ok, setup} = Accounts.enable_totp_for_user(user)
+      at = totp_test_time(setup.secret)
+      step = div(DateTime.to_unix(at), 30)
+      clock = fn -> at end
+      invalid = MFA.verify_second_factor(user, "not-a-code", nil, %{}, clock: clock)
+      assert invalid == {:error, :totp_required}
+      assert is_nil(Repo.reload!(setup.setting).last_used_step)
+      outside = MFA.verify_second_factor(user, totp_for_step(setup.secret, step - 2), nil, %{}, clock: clock)
+      assert outside == {:error, :invalid_totp_code}
+      assert is_nil(Repo.reload!(setup.setting).last_used_step)
+
+      assert {:error, :cancelled} =
+               Repo.transaction(fn ->
+                 :ok = MFA.verify_second_factor(user, totp_for_step(setup.secret, step), nil, %{}, clock: clock)
+                 Repo.rollback(:cancelled)
+               end)
+
+      assert is_nil(Repo.reload!(setup.setting).last_used_step)
+      assert :ok = MFA.verify_second_factor(user, totp_for_step(setup.secret, step), nil, %{}, clock: clock)
+      previous = MFA.verify_second_factor(user, totp_for_step(setup.secret, step - 1), nil, %{}, clock: clock)
+      assert previous == {:error, :invalid_totp_code}
+      assert :ok = MFA.verify_second_factor(user, totp_for_step(setup.secret, step + 1), nil, %{}, clock: clock)
+      assert Repo.reload!(setup.setting).last_used_step == step + 1
+    end
+
+    for state <- [:disabled, :deleted] do
+      test "#{state} operator cannot consume a factor through a stale user struct" do
+        %{user: user} = bootstrap_owner_fixture()
+        {:ok, setup} = Accounts.enable_totp_for_user(user)
+
+        changes =
+          case unquote(state) do
+            :disabled -> [status: "disabled"]
+            :deleted -> [deleted_at: DateTime.utc_now()]
+          end
+
+        user |> change(changes) |> Repo.update!()
+        result = MFA.verify_second_factor(user, Accounts.current_totp_code(setup.secret), nil, %{})
+        assert result == {:error, :invalid_credentials}
+        assert is_nil(Repo.reload!(setup.setting).last_used_step)
+      end
+    end
+
+    test "the verifier refuses a successfully consumed code" do
+      %{user: user} = bootstrap_owner_fixture()
+      {:ok, setup} = Accounts.enable_totp_for_user(user)
+      code = Accounts.current_totp_code(setup.secret)
+      assert :ok = MFA.verify_second_factor(user, code, nil, %{})
+      result = MFA.verify_second_factor(user, code, nil, %{})
+      assert result == {:error, :invalid_totp_code}
+    end
+
+    for path <- [:password, :pending] do
+      test "#{path} login issues only one session for the same code" do
+        %{user: user} = bootstrap_owner_fixture()
+        {:ok, setup} = Accounts.enable_totp_for_user(user)
+        code = Accounts.current_totp_code(setup.secret)
+        attrs = %{"email" => user.email, "password" => valid_user_password(), "totp_code" => code}
+
+        login = fn ->
+          result =
+            case unquote(path) do
+              :password -> Accounts.login_user(attrs)
+              :pending -> Accounts.complete_second_factor_login(user.id, attrs)
+            end
+
+          case result do
+            {:ok, _} -> :session_issued
+            {:error, reason} -> reason
+          end
+        end
+
+        before_count = Repo.aggregate(from(s in Session, where: s.user_id == ^user.id), :count)
+        assert login.() == :session_issued
+        assert login.() == :invalid_totp_code
+        assert Repo.aggregate(from(s in Session, where: s.user_id == ^user.id), :count) == before_count + 1
+      end
+    end
+  end
+
   describe "login_user/2" do
     test "rejects invalid credentials safely and creates sessions for valid credentials" do
       %{user: user} = bootstrap_owner_fixture(%{"email" => "owner@example.com"})
@@ -376,6 +475,22 @@ defmodule CodexPooler.AccountsTest do
       assert Repo.reload!(required_user).password_change_required == true
     end
   end
+
+  defp totp_test_time(secret) do
+    Enum.find_value(0..100, fn offset ->
+      at = DateTime.add(~U[2060-01-01 00:00:15.000000Z], offset * 150, :second)
+      step = div(DateTime.to_unix(at), 30)
+      codes = Enum.map(-2..1, &totp_for_step(secret, step + &1))
+      if length(Enum.uniq(codes)) == 4, do: at
+    end)
+  end
+
+  defp totp_for_step(secret, step) do
+    hmac = :crypto.mac(:hmac, :sha, Base.decode32!(secret, padding: false), <<step::64>>)
+    offset = Bitwise.band(:binary.last(hmac), 15)
+    <<value::32>> = binary_part(hmac, offset, 4)
+    value |> Bitwise.band(0x7FFFFFFF) |> rem(1_000_000) |> Integer.to_string() |> String.pad_leading(6, "0")
+  end
 end
 
 defmodule CodexPooler.AccountsTOTPEnrollmentConcurrencyTest do
@@ -387,7 +502,7 @@ defmodule CodexPooler.AccountsTOTPEnrollmentConcurrencyTest do
   import Ecto.Query
 
   alias CodexPooler.Accounts
-  alias CodexPooler.Accounts.{RecoveryCode, TOTPSetting}
+  alias CodexPooler.Accounts.{RecoveryCode, Session, TOTPSetting}
   alias CodexPooler.Repo
   alias Ecto.Adapters.SQL.Sandbox
 
@@ -487,6 +602,96 @@ defmodule CodexPooler.AccountsTOTPEnrollmentConcurrencyTest do
     assert length(code_ids) == 10
     assert code_ids == original_code_ids
     assert generation == 1
+  end
+
+  test "independent concurrent logins consume one step and issue exactly one session" do
+    %{user: user} = committed_bootstrap_owner_fixture!()
+    {:ok, setup} = run_unboxed(fn -> Accounts.enable_totp_for_user(user) end)
+    code = Accounts.current_totp_code(setup.secret)
+    parent = self()
+    barrier = make_ref()
+    handler_id = {__MODULE__, barrier}
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    :ok = :telemetry.attach(handler_id, [:codex_pooler, :repo, :query], &__MODULE__.observe_enrollment_lock/4, barrier)
+    supervisor = start_supervised!({Task.Supervisor, []})
+    count_sessions = fn -> Repo.aggregate(from(s in Session, where: s.user_id == ^user.id), :count) end
+    before_count = run_unboxed(count_sessions)
+
+    holder =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          Repo.transaction(fn ->
+            {:ok, _login} = Accounts.complete_second_factor_login(user.id, %{"totp_code" => code})
+            %{rows: [[backend]]} = Repo.query!("SELECT pg_backend_pid()")
+            send(parent, {barrier, :holder, backend})
+
+            receive do
+              {^barrier, :release} -> :consumed
+            after
+              @budget -> raise "factor commit release missing"
+            end
+          end)
+        end)
+      end)
+
+    holder_monitor = Process.monitor(holder.pid)
+    assert_receive {^barrier, :holder, holder_backend}, @budget
+    assert run_unboxed(fn -> is_nil(Repo.reload!(setup.setting).last_used_step) end)
+
+    waiter =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          Repo.checkout(fn ->
+            %{rows: [[backend]]} = Repo.query!("SELECT pg_backend_pid()")
+            Process.put({__MODULE__, :enrollment_probe}, barrier)
+
+            proof =
+              try do
+                Repo.transaction(fn ->
+                  Repo.query!("SET LOCAL lock_timeout = '200ms'")
+                  Accounts.complete_second_factor_login(user.id, %{"totp_code" => code})
+                end)
+
+                :did_not_wait
+              rescue
+                error in Postgrex.Error -> {error.postgres.code, Process.get({__MODULE__, :user_lock_query}, false)}
+              end
+
+            send(parent, {barrier, :proof, backend, proof})
+
+            receive do
+              {^barrier, :retry} ->
+                case Accounts.complete_second_factor_login(user.id, %{"totp_code" => code}) do
+                  {:ok, _login} -> :session_issued
+                  {:error, reason} -> reason
+                end
+            after
+              @budget -> raise "factor retry release missing"
+            end
+          end)
+        end)
+      end)
+
+    waiter_monitor = Process.monitor(waiter.pid)
+    assert_receive {^barrier, :proof, waiter_backend, proof}, @budget
+    send(holder.pid, {barrier, :release})
+    assert {:ok, :consumed} = Task.await(holder, @budget)
+    send(waiter.pid, {barrier, :retry})
+    outcome = Task.await(waiter, @budget)
+    assert_receive {:DOWN, ^holder_monitor, :process, _, :normal}, @budget
+    assert_receive {:DOWN, ^waiter_monitor, :process, _, :normal}, @budget
+    assert waiter_backend != holder_backend
+    assert proof == {:lock_not_available, true}
+    assert outcome == :invalid_totp_code
+    assert run_unboxed(count_sessions) == before_count + 1
+
+    run_unboxed(fn ->
+      current = Repo.reload!(setup.setting)
+      unchanged_secret? = current.secret_ciphertext == setup.setting.secret_ciphertext
+      assert unchanged_secret?
+      assert is_integer(current.last_used_step)
+      assert Repo.aggregate(from(c in RecoveryCode, where: c.user_id == ^user.id and c.status == "active"), :count) == 10
+    end)
   end
 
   @doc false
