@@ -22,6 +22,7 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
   @window_kinds ~w(primary secondary)
   @max_credit_balance 9_223_372_036_854_775_807
   @max_legacy_window_seconds 31_536_000
+  @max_storable_window_seconds 2_147_483_647 * 60
 
   @type usage_result :: %{
           required(:windows) => [Evidence.t()],
@@ -291,7 +292,7 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
          "reset_at" => reset_at
        }) do
     is_integer(used_percent) and used_percent in 0..100 and
-      is_integer(limit_window_seconds) and limit_window_seconds > 0 and
+      is_integer(limit_window_seconds) and limit_window_seconds in 1..@max_storable_window_seconds and
       is_integer(reset_after_seconds) and reset_after_seconds >= 0 and
       is_integer(reset_at) and reset_at > 0
   end

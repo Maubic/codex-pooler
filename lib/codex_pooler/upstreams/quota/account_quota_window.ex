@@ -8,6 +8,7 @@ defmodule CodexPooler.Upstreams.Quota.AccountQuotaWindow do
 
   @window_kinds ~w(primary secondary)
   @max_credit_balance 9_223_372_036_854_775_807
+  @max_window_minutes 2_147_483_647
   @freshness_states ~w(fresh stale unknown)
   @source_precisions ~w(authoritative observed inferred unknown)
   @quota_scopes ~w(account model upstream_model feature)
@@ -118,7 +119,7 @@ defmodule CodexPooler.Upstreams.Quota.AccountQuotaWindow do
     |> validate_number(:used_percent, greater_than_or_equal_to: 0, less_than_or_equal_to: 100)
     |> validate_length(:source, min: 1)
     |> validate_length(:quota_family, min: 1)
-    |> validate_number(:window_minutes, greater_than: 0)
+    |> validate_number(:window_minutes, greater_than: 0, less_than_or_equal_to: @max_window_minutes)
     |> validate_number(:merge_precedence, greater_than_or_equal_to: 0)
     |> unique_constraint(:window_kind,
       name: :account_quota_windows_evidence_identity_uq
