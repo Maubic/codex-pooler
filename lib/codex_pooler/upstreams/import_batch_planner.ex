@@ -6,7 +6,7 @@ defmodule CodexPooler.Upstreams.ImportBatchPlanner do
   alias CodexPooler.Accounts.Scope
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
-  alias CodexPooler.Upstreams.Lifecycle.{CredentialFencing, IdentityLifecycle, IdentitySlotLock}
+  alias CodexPooler.Upstreams.Lifecycle.{CredentialAuthorization, CredentialFencing, IdentityLifecycle, IdentitySlotLock}
   alias CodexPooler.Upstreams.PreparedAccount
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
@@ -39,7 +39,7 @@ defmodule CodexPooler.Upstreams.ImportBatchPlanner do
       when is_list(prepared_accounts) do
     if Repo.in_transaction?() do
       with {:ok, prepared_accounts} <- validate_prepared(prepared_accounts, scope, pool) do
-        build_plan(prepared_accounts)
+        build_plan(prepared_accounts, scope)
       end
     else
       {:error, lifecycle_error(:transaction_required, "batch import requires a caller-owned transaction")}
@@ -58,7 +58,7 @@ defmodule CodexPooler.Upstreams.ImportBatchPlanner do
       when is_list(prepared_accounts) do
     if Repo.in_transaction?() do
       with {:ok, prepared_accounts} <- validate_prepared(prepared_accounts, scope, pool),
-           {:ok, plan, _locked_rows, _diagnostics} <- build_plan(prepared_accounts) do
+           {:ok, plan, _locked_rows, _diagnostics} <- build_plan(prepared_accounts, scope) do
         {:ok, length(plan)}
       end
     else
@@ -79,7 +79,7 @@ defmodule CodexPooler.Upstreams.ImportBatchPlanner do
       when is_list(prepared_accounts) do
     if Repo.in_transaction?() do
       with {:ok, prepared_accounts} <- validate_prepared(prepared_accounts, scope, pool),
-           {:ok, plan, _locked_rows, diagnostics} <- build_plan(prepared_accounts) do
+           {:ok, plan, _locked_rows, diagnostics} <- build_plan(prepared_accounts, scope) do
         {:ok, plan, diagnostics}
       end
     else
@@ -108,7 +108,7 @@ defmodule CodexPooler.Upstreams.ImportBatchPlanner do
     end
   end
 
-  defp build_plan(prepared_accounts) do
+  defp build_plan(prepared_accounts, scope) do
     declared_attrs = Enum.flat_map(prepared_accounts, &witness_attrs/1)
 
     candidate_domains = %{
@@ -145,7 +145,8 @@ defmodule CodexPooler.Upstreams.ImportBatchPlanner do
 
       with :ok <- validate_declared_closure(candidates_after_lock, locked_resources),
            :ok <- validate_initial_witnesses(prepared_accounts, candidates_after_lock),
-           {:ok, plan} <- simulate(prepared_accounts, candidates_after_lock) do
+           {:ok, plan} <- simulate(prepared_accounts, candidates_after_lock),
+           :ok <- CredentialAuthorization.require_served_pools(scope, existing_target_ids(plan)) do
         diagnostics = %{
           advisory_resources: locked_resources,
           candidate_loads: %{
@@ -163,6 +164,10 @@ defmodule CodexPooler.Upstreams.ImportBatchPlanner do
         {:ok, plan, locked_rows, diagnostics}
       end
     end
+  end
+
+  defp existing_target_ids(plan) do
+    for {_prepared, {:existing, id}} <- plan, uniq: true, do: id
   end
 
   defp empty_diagnostics do

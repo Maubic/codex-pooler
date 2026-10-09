@@ -11,6 +11,7 @@ defmodule CodexPooler.Upstreams.TokenLinking do
   alias CodexPooler.Upstreams.Auth.TokenRefreshMetadata
   alias CodexPooler.Upstreams.ImportBatchPlanner
   alias CodexPooler.Upstreams.Lifecycle.AccountAudit
+  alias CodexPooler.Upstreams.Lifecycle.CredentialAuthorization
   alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
   alias CodexPooler.Upstreams.Lifecycle.IdentityLifecycle
   alias CodexPooler.Upstreams.Lifecycle.IdentitySlotLock
@@ -423,7 +424,8 @@ defmodule CodexPooler.Upstreams.TokenLinking do
       {:ok, %UpstreamIdentity{} = identity} ->
         identity = maybe_lock_selected_identity(identity, selection)
 
-        with {:ok, replacement_metadata, epoch} <-
+        with :ok <- CredentialAuthorization.require_served_pools(scope, [identity.id]),
+             {:ok, replacement_metadata, epoch} <-
                CredentialFencing.prepare_replacement_metadata(identity),
              :ok <- PreparedAccount.evaluate(prepared, now()),
              attrs =
