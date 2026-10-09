@@ -48,7 +48,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
 
   @type callbacks :: %{
           required(:register_continuity) => (term(), term(), term() -> term()),
-          required(:stream_result) => (Req.Response.t(), term() -> term())
+          required(:stream_result) => (Req.Response.t(), term() -> term()),
+          optional(:auth_refresh_failover?) => boolean()
         }
   @type dispatch_result :: CodexPooler.Gateway.Runtime.Dispatch.dispatch_result()
 
@@ -235,7 +236,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
       # suppressed refresh (bound reset probe, connection-bound compaction,
       # client retry dispatch) never tried one.
       kind = if attempted? == true, do: :exhausted, else: :suppressed
-      finalize_exhausted_auth_refresh(context, dispatch_request, response, failure, started, kind)
+
+      finish_auth_refresh_failure(context, dispatch_request, callbacks, response, failure, started, kind)
     else
       case retry_after_websocket_auth_refresh(
              prepared_context,
@@ -248,6 +250,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
           {:ok, finalized}
 
         {:ok, retry_prepared_context, retry_dispatch_request} ->
+          # Keep ordinary same-assignment retry suppression. Only a second
+          # rejected handshake may use the original candidate failover permission.
+          callbacks = Map.put(callbacks, :auth_refresh_failover?, auth_refresh_failover?(context))
           dispatch(retry_prepared_context, retry_dispatch_request, callbacks)
 
         {:error, _reason} = error ->
@@ -265,6 +270,26 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
       end
     end
   end
+
+  defp finish_auth_refresh_failure(context, dispatch_request, callbacks, response, failure, started, kind) do
+    if exhausted_auth_refresh_failover?(context, response, callbacks) do
+      response_context = auth_refresh_websocket_response_context(context, response)
+
+      case record_auth_refresh_first_attempt_failure(context, response_context, failure, started) do
+        {:ok, _recorded_failure} -> failover_after_recorded_auth_failure(context, %{})
+        {:stale_generation, finalized} -> {:ok, finalized}
+        {:error, _reason} = error -> error
+      end
+    else
+      finalize_exhausted_auth_refresh(context, dispatch_request, response, failure, started, kind)
+    end
+  end
+
+  defp exhausted_auth_refresh_failover?(%{auth_refresh_retry_attempted?: true} = context, %{reason: {:websocket_upgrade_failed, 401, _headers}, body: ""} = response, %{auth_refresh_failover?: true}) do
+    not match?(%{transport_failure: %{"upstream_committed" => true}}, response) and not retry_suppressed?(context)
+  end
+
+  defp exhausted_auth_refresh_failover?(_context, _response, _callbacks), do: false
 
   defp retry_after_websocket_auth_refresh(
          %PreparedContext{context: context} = prepared_context,
