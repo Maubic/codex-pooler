@@ -12,6 +12,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpAuthRefreshTest do
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
     only: [
       auth: 2,
+      register_unboxed_pool_cleanup!: 1,
+      start_public_endpoint_with_server!: 0,
       gateway_setup: 1,
       gateway_upstream: 4,
       native_text_input: 1,
@@ -25,11 +27,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpAuthRefreshTest do
     ]
 
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestLogs}
+  alias CodexPooler.Accounting.RequestLifecycle.WindowUsage
   alias CodexPooler.FakeUpstream
+  alias CodexPooler.Gateway.Runtime.Finalization.SettlementRetry
   alias CodexPooler.Jobs.AccountReconciliationWorker
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
+  alias Ecto.Adapters.SQL.Sandbox
 
   @endpoint_path "/backend-api/codex/responses"
   @initial_token "upstream-token"
@@ -41,6 +46,125 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpAuthRefreshTest do
     Logger.configure(level: :info)
     on_exit(fn -> Logger.configure(level: previous_level) end)
     :ok
+  end
+
+  for fault <- [:rollback, :raised, :metadata, :transient_cleanup], route <- ["/backend-api/codex/responses", "/v1/responses"], stream? <- [false, true] do
+    @tag :retry_accounting_failure
+    @tag capture_log: false
+    @tag fault: fault, route: route, stream?: stream?
+    test "#{route} stream=#{stream?} retry accounting #{fault} releases the current request synchronously", %{fault: fault, route: route, stream?: stream?} do
+      on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+      Sandbox.mode(Repo, :auto)
+      upstream = start_upstream(FakeUpstream.strict_sequence([expect_dispatch(@initial_token, unauthorized_response(401, "invalid_api_key", "synthetic auth refusal")), oauth_refresh(refreshed_token_response("synthetic-refreshed"))]))
+      setup = gateway_setup(upstream)
+      register_unboxed_pool_cleanup!(setup)
+      store_refresh_token!(setup.identity, "synthetic-refresh")
+      install_retry_accounting_fault!(setup, if(fault == :transient_cleanup, do: :raised, else: fault))
+      cleanup_sequence = if fault == :transient_cleanup, do: install_transient_cleanup_fault!(setup)
+      {server, port} = start_public_endpoint_with_server!()
+
+      on_exit(fn ->
+        monitor = Process.monitor(server)
+
+        try do
+          ThousandIsland.stop(server)
+        catch
+          :exit, _stopped -> :ok
+        end
+
+        assert_receive {:DOWN, ^monitor, :process, ^server, _reason}, 15_000
+        assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [], 1_000)
+      end)
+
+      {response, logs} = with_log(fn -> Req.post!("http://127.0.0.1:#{port}" <> route, headers: [{"authorization", setup.authorization}], json: Map.put(stream_payload(setup, "retry-accounting"), "stream", stream?), retry: false, receive_timeout: 15_000) end)
+      [request] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id)
+      attempts = Repo.all(from a in Attempt, where: a.request_id == ^request.id, order_by: a.attempt_number)
+      entries = Repo.all(from l in LedgerEntry, where: l.request_id == ^request.id)
+      observed = %{http_status: response.status, code: get_in(response.body, ["error", "code"]), request_status: request.status, completed: not is_nil(request.completed_at), attempt_statuses: Enum.map(attempts, & &1.status), releases: Enum.count(entries, &(&1.entry_kind == "release")), settlements: Enum.count(entries, &(&1.entry_kind == "settlement"))}
+      assert observed == %{http_status: 500, code: "gateway_accounting_failed", request_status: "failed", completed: true, attempt_statuses: ["failed"], releases: 1, settlements: 1}
+      reservation = Enum.find(entries, &(&1.entry_kind == "reservation"))
+      release = Enum.find(entries, &(&1.entry_kind == "release"))
+      assert reservation.request_count - release.request_count == 0
+      assert (reservation.total_tokens || 0) - (release.total_tokens || 0) == 0
+      assert Decimal.equal?(Decimal.sub(reservation.estimated_cost_micros, release.estimated_cost_micros), 0)
+      usage = WindowUsage.window_usages(setup.api_key.id, test: DateTime.add(DateTime.utc_now(), -3_600, :second))
+      assert usage.test.pending_total_tokens == 0
+      assert logs =~ "gateway accounting finalization failed"
+
+      if cleanup_sequence do
+        assert Repo.query!("SELECT last_value FROM #{cleanup_sequence}").rows == [[2]]
+        assert logs =~ "settlement completed after a transient database failure"
+      end
+
+      assert :ok = FakeUpstream.verify!(upstream)
+      assert Enum.map(FakeUpstream.requests(upstream), & &1.path) == [@endpoint_path, "/oauth/token"]
+    end
+  end
+
+  for successor <- [:newer_attempt, :newer_generation, :newer_owner] do
+    @tag :retry_accounting_authority
+    @tag capture_log: false
+    @tag successor: successor
+    test "retry accounting cleanup preserves #{successor} authority", %{successor: successor} do
+      on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+      Sandbox.mode(Repo, :auto)
+      upstream = start_upstream(FakeUpstream.strict_sequence([expect_dispatch(@initial_token, unauthorized_response(401, "invalid_api_key", "synthetic auth refusal")), oauth_refresh(refreshed_token_response("synthetic-refreshed"))]))
+      setup = gateway_setup(upstream)
+      register_unboxed_pool_cleanup!(setup)
+      store_refresh_token!(setup.identity, "synthetic-refresh")
+      snapshot = install_successor_fault!(setup, successor)
+      port = retry_failure_listener!()
+      {response, _logs} = with_log(fn -> Req.post!("http://127.0.0.1:#{port}" <> @endpoint_path, headers: [{"authorization", setup.authorization}, {"session-id", Ecto.UUID.generate()}], json: stream_payload(setup, "stale-retry"), retry: false) end)
+      assert response.status == 500
+      assert response.body["error"]["code"] == "gateway_accounting_failed"
+      [request] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id)
+      assert_successor_unchanged!(snapshot, setup, successor)
+
+      if successor == :newer_owner do
+        assert request.status == "failed"
+        assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "release"), :count) == 1
+      else
+        assert request.status == "in_progress"
+        assert is_nil(request.completed_at)
+        assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind in ["release", "settlement"]), :count) == 0
+      end
+
+      assert :ok = FakeUpstream.verify!(upstream)
+    end
+  end
+
+  @tag :retry_accounting_persistent
+  @tag capture_log: false
+  test "persistent database refusal preserves the primary accounting error without claiming cleanup" do
+    on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+    Sandbox.mode(Repo, :auto)
+    CodexPooler.TestAppEnv.restore_on_exit(SettlementRetry)
+    Application.put_env(:codex_pooler, SettlementRetry, window_ms: 0)
+    upstream = start_upstream(FakeUpstream.strict_sequence([expect_dispatch(@initial_token, unauthorized_response(401, "invalid_api_key", "synthetic auth refusal")), oauth_refresh(refreshed_token_response("synthetic-refreshed"))]))
+    setup = gateway_setup(upstream)
+    register_unboxed_pool_cleanup!(setup)
+    store_refresh_token!(setup.identity, "synthetic-refresh")
+    install_retry_accounting_fault!(setup, :raised)
+    name = "persistent_retry_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+    on_exit(fn ->
+      Repo.query!("DROP TRIGGER IF EXISTS #{name} ON ledger_entries")
+      Repo.query!("DROP FUNCTION IF EXISTS #{name}()")
+    end)
+
+    Repo.query!("CREATE FUNCTION #{name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic database unavailable' USING ERRCODE = 'admin_shutdown'; END $$")
+    Repo.query!("CREATE TRIGGER #{name} BEFORE INSERT ON ledger_entries FOR EACH ROW WHEN (NEW.pool_id = '#{setup.pool.id}'::uuid AND NEW.entry_kind IN ('settlement','release')) EXECUTE FUNCTION #{name}()")
+    port = retry_failure_listener!()
+    {response, logs} = with_log(fn -> Req.post!("http://127.0.0.1:#{port}" <> @endpoint_path, headers: [{"authorization", setup.authorization}], json: stream_payload(setup, "persistent-retry"), retry: false) end)
+    assert response.status == 500
+    assert response.body["error"]["code"] == "gateway_accounting_failed"
+    [request] = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id)
+    assert request.status == "in_progress"
+    assert is_nil(request.completed_at)
+    assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind in ["release", "settlement"]), :count) == 0
+    assert logs =~ "settlement abandoned after transient database failures"
+    assert logs =~ "fallback=execution_recovery"
+    assert :ok = FakeUpstream.verify!(upstream)
   end
 
   test "scheduled transient refresh preserves a hard-pinned continuation", %{conn: conn} do
@@ -737,6 +861,112 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpAuthRefreshTest do
            }
          }) <> "\n\n"
      ]}
+  end
+
+  defp install_transient_cleanup_fault!(setup) do
+    CodexPooler.TestAppEnv.restore_on_exit(SettlementRetry)
+    Application.put_env(:codex_pooler, SettlementRetry, initial_backoff_ms: 1, max_backoff_ms: 1)
+    name = "transient_retry_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+    on_exit(fn ->
+      Repo.query!("DROP TRIGGER IF EXISTS #{name} ON ledger_entries")
+      Repo.query!("DROP FUNCTION IF EXISTS #{name}()")
+      Repo.query!("DROP SEQUENCE IF EXISTS #{name}_passes")
+    end)
+
+    Repo.query!("CREATE SEQUENCE #{name}_passes")
+    Repo.query!("CREATE FUNCTION #{name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('#{name}_passes') = 1 THEN RAISE EXCEPTION 'synthetic transient settlement refusal' USING ERRCODE = 'query_canceled'; END IF; RETURN NEW; END $$")
+    Repo.query!("CREATE TRIGGER #{name} BEFORE INSERT ON ledger_entries FOR EACH ROW WHEN (NEW.pool_id = '#{setup.pool.id}'::uuid AND NEW.entry_kind = 'settlement') EXECUTE FUNCTION #{name}()")
+    name <> "_passes"
+  end
+
+  defp retry_failure_listener! do
+    {server, port} = start_public_endpoint_with_server!()
+
+    on_exit(fn ->
+      monitor = Process.monitor(server)
+
+      try do
+        ThousandIsland.stop(server)
+      catch
+        :exit, _stopped -> :ok
+      end
+
+      assert_receive {:DOWN, ^monitor, :process, ^server, _reason}, 15_000
+      assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [], 1_000)
+    end)
+
+    port
+  end
+
+  defp install_successor_fault!(setup, successor) do
+    name = "retry_successor_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+    on_exit(fn ->
+      Repo.query!("DROP TRIGGER IF EXISTS #{name} ON requests")
+      Repo.query!("DROP FUNCTION IF EXISTS #{name}()")
+      Repo.query!("DROP TABLE IF EXISTS #{name}")
+    end)
+
+    {mutation, snapshot} =
+      case successor do
+        :newer_attempt ->
+          {"INSERT INTO attempts SELECT (jsonb_populate_record(NULL::attempts, to_jsonb(a) || jsonb_build_object('id','#{Ecto.UUID.generate()}','attempt_number',2,'status','in_progress','completed_at',NULL))).* FROM attempts a WHERE a.request_id=NEW.id AND a.attempt_number=1;", "SELECT 'request', md5(row_to_json(r)::text) FROM requests r WHERE r.id=NEW.id UNION ALL SELECT 'attempt', md5(row_to_json(a)::text) FROM attempts a WHERE a.request_id=NEW.id"}
+
+        :newer_generation ->
+          {"UPDATE attempts SET replay_generation=1 WHERE request_id=NEW.id;", "SELECT 'request', md5(row_to_json(r)::text) FROM requests r WHERE r.id=NEW.id UNION ALL SELECT 'attempt', md5(row_to_json(a)::text) FROM attempts a WHERE a.request_id=NEW.id"}
+
+        :newer_owner ->
+          token = Ecto.UUID.generate()
+          {"UPDATE codex_sessions SET owner_lease_token='#{token}'::uuid WHERE pool_id=NEW.pool_id; UPDATE bridge_owner_leases SET lease_token='#{token}'::uuid WHERE pool_id=NEW.pool_id;", "SELECT 'session', md5(row_to_json(s)::text) FROM codex_sessions s WHERE s.pool_id=NEW.pool_id UNION ALL SELECT 'lease', md5(row_to_json(l)::text) FROM bridge_owner_leases l WHERE l.pool_id=NEW.pool_id UNION ALL SELECT 'alias',md5(row_to_json(a)::text) FROM bridge_session_aliases a WHERE a.pool_id=NEW.pool_id"}
+      end
+
+    Repo.query!("CREATE TABLE #{name} (kind text, fingerprint text)")
+    Repo.query!("CREATE FUNCTION #{name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN UPDATE upstream_identities SET metadata=metadata || jsonb_build_object('permanent_deletion_requested_at','2026-10-09T00:00:00Z') WHERE id='#{setup.identity.id}'::uuid; #{mutation} INSERT INTO #{name} #{snapshot}; RETURN NULL; END $$")
+    Repo.query!("CREATE TRIGGER #{name} AFTER UPDATE OF request_metadata ON requests FOR EACH ROW WHEN (NEW.pool_id='#{setup.pool.id}'::uuid AND NEW.request_metadata ? 'auth_refresh' AND NOT OLD.request_metadata ? 'auth_refresh') EXECUTE FUNCTION #{name}()")
+    name
+  end
+
+  defp assert_successor_unchanged!(name, setup, successor) do
+    expected = Repo.query!("SELECT kind,fingerprint FROM #{name} ORDER BY kind,fingerprint").rows
+    assert expected != []
+
+    actual =
+      if successor == :newer_owner do
+        counts = Enum.frequencies_by(expected, &hd/1)
+        assert counts["session"] == 1
+        assert counts["lease"] == 1
+        Repo.query!("SELECT * FROM (SELECT 'session' AS kind,md5(row_to_json(s)::text) AS fingerprint FROM codex_sessions s WHERE s.pool_id='#{setup.pool.id}'::uuid UNION ALL SELECT 'lease',md5(row_to_json(l)::text) FROM bridge_owner_leases l WHERE l.pool_id='#{setup.pool.id}'::uuid UNION ALL SELECT 'alias',md5(row_to_json(a)::text) FROM bridge_session_aliases a WHERE a.pool_id='#{setup.pool.id}'::uuid) x ORDER BY kind,fingerprint").rows
+      else
+        Repo.query!("SELECT * FROM (SELECT 'request' AS kind,md5(row_to_json(r)::text) AS fingerprint FROM requests r WHERE r.pool_id='#{setup.pool.id}'::uuid UNION ALL SELECT 'attempt',md5(row_to_json(a)::text) FROM attempts a JOIN requests r ON r.id=a.request_id WHERE r.pool_id='#{setup.pool.id}'::uuid) x ORDER BY kind,fingerprint").rows
+      end
+
+    assert actual == expected
+  end
+
+  defp install_retry_accounting_fault!(setup, fault) do
+    name = "retry_accounting_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+    table = if fault in [:rollback, :metadata], do: "requests", else: "attempts"
+
+    on_exit(fn ->
+      Repo.query!("DROP TRIGGER IF EXISTS #{name} ON #{table}")
+      Repo.query!("DROP FUNCTION IF EXISTS #{name}()")
+    end)
+
+    {body, condition, timing} =
+      case fault do
+        :rollback ->
+          {"UPDATE upstream_identities SET metadata = metadata || jsonb_build_object('permanent_deletion_requested_at','2026-10-09T00:00:00Z') WHERE id = '#{setup.identity.id}'::uuid; RETURN NULL;", "NEW.pool_id = '#{setup.pool.id}'::uuid AND NEW.request_metadata ? 'auth_refresh'", "AFTER UPDATE OF request_metadata"}
+
+        :metadata ->
+          {"RAISE EXCEPTION 'synthetic metadata merge failure' USING ERRCODE = 'check_violation';", "NEW.pool_id = '#{setup.pool.id}'::uuid AND NEW.request_metadata ? 'auth_refresh'", "BEFORE UPDATE OF request_metadata"}
+
+        :raised ->
+          {"RAISE EXCEPTION 'synthetic retry insert failure' USING ERRCODE = 'check_violation';", "NEW.attempt_number = 2 AND NEW.pool_upstream_assignment_id = '#{setup.assignment.id}'::uuid", "BEFORE INSERT"}
+      end
+
+    Repo.query!("CREATE FUNCTION #{name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN #{body} END $$")
+    Repo.query!("CREATE TRIGGER #{name} #{timing} ON #{table} FOR EACH ROW WHEN (#{condition}) EXECUTE FUNCTION #{name}()")
   end
 
   defp unauthorized_response(status, code, message) do
