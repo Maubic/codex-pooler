@@ -60,6 +60,109 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
     :ok
   end
 
+  @tag :parser_error_envelopes
+  test "live parser exceptions use runtime and MCP envelopes before Phoenix renders generic errors" do
+    setup_runtime_ingress(%OperationalSettings{max_decompressed_body_bytes: 16})
+    setup = active_api_key_fixture()
+    upstream = start_upstream(FakeUpstream.json_response(%{"id" => "must_not_dispatch"}))
+    active_upstream_assignment_fixture(setup.pool, %{metadata: %{"base_url" => FakeUpstream.url(upstream)}})
+    user = Repo.get!(CodexPooler.Accounts.User, setup.api_key.created_by_user_id)
+    assert {:ok, _settings} = InstanceSettings.update_system_settings(InstanceSettings.ensure_singleton!(), %{"mcp" => %{"enabled" => true}})
+    assert {:ok, _operator_settings} = MCP.set_operator_mcp_enabled(user, true)
+    assert {:ok, %{raw_token: raw_token}} = MCP.create_operator_token(user, %{label: "Parser error contract"})
+    port = start_parser_error_endpoint!()
+    counts = parser_error_side_effect_counts()
+    body = CodexPooler.JSON.encode!(%{"model" => "sample-model", "input" => "synthetic input"})
+    query = "a" <> String.duplicate("[b]", 40) <> "=1"
+
+    multipart = parser_error_request(port, "/backend-api/transcribe", "multipart/form-data; boundary=example", "invalid multipart fixture", setup.authorization)
+    oversized = parser_error_request(port, "/backend-api/codex/responses", "application/json", body, setup.authorization)
+    setup_runtime_ingress(%OperationalSettings{max_decompressed_body_bytes: 1_024})
+    mcp = parser_error_request(port, "/mcp?" <> query, "application/json", ~s({"jsonrpc":"2.0","id":1,"method":"tools/list"}), "Bearer #{raw_token}")
+
+    observed = Enum.map([multipart, oversized, mcp], &Map.take(&1, [:status, :code, :jsonrpc, :id, :phoenix_renders, :plug_error_catches, :endpoint_error_handlers, :wrapper_order]))
+
+    assert Enum.map(observed, &Map.take(&1, [:status, :code, :jsonrpc, :id])) == [
+             %{status: 400, code: "invalid_request", jsonrpc: nil, id: nil},
+             %{status: 413, code: "decompressed_request_too_large", jsonrpc: nil, id: nil},
+             %{status: 400, code: -32_600, jsonrpc: "2.0", id: nil}
+           ],
+           inspect(observed)
+
+    assert multipart.part_reads > 0
+    assert oversized.body_reads > 0
+    assert mcp.body_reads > 0
+    assert Enum.all?([multipart, oversized, mcp], &(&1.uploads == 0 and &1.phoenix_renders == 0))
+    assert multipart.message == "request body could not be parsed"
+    assert mcp.message == "request query is invalid"
+
+    for path <- ["/backend-api/transcribe", "/v1/audio/transcriptions"] do
+      for authorization <- [nil, "Bearer invalid-key"] do
+        refused = parser_error_request(port, path, "multipart/form-data; boundary=example", "invalid multipart fixture", authorization)
+        assert refused.status == 401
+        assert {refused.body_reads, refused.part_reads, refused.json_decodes, refused.compressed_decodes, refused.uploads} == {0, 0, 0, 0, 0}
+      end
+    end
+
+    for path <- ["/backend-api/codex/responses", "/v1/responses"], encoding <- [nil, "gzip"] do
+      encoded = if encoding, do: :zlib.gzip(body), else: body
+      headers = if encoding, do: [{"content-encoding", encoding}], else: []
+      queried = parser_error_request(port, path <> "?" <> query, "application/json", encoded, setup.authorization, headers)
+      assert {queried.status, queried.code, queried.message} == {400, "invalid_request", "request query is invalid"}
+      assert queried.phoenix_renders == 0
+      assert queried.uploads == 0
+
+      for authorization <- [nil, "Bearer invalid-key"] do
+        refused = parser_error_request(port, path <> "?" <> query, "application/json", encoded, authorization, headers)
+        assert refused.status == 401
+        assert {refused.body_reads, refused.part_reads, refused.json_decodes, refused.compressed_decodes, refused.uploads} == {0, 0, 0, 0, 0}
+      end
+    end
+
+    for authorization <- [nil, "Bearer invalid-key"] do
+      refused = parser_error_request(port, "/mcp?" <> query, "application/json", "{", authorization)
+      assert {refused.status, refused.code, refused.jsonrpc} == {401, -32_000, "2.0"}
+      assert {refused.body_reads, refused.part_reads, refused.json_decodes, refused.compressed_decodes, refused.uploads} == {0, 0, 0, 0, 0}
+    end
+
+    ping = parser_error_request(port, "/mcp?ordinary=1", "application/json", ~s({"jsonrpc":"2.0","id":1,"method":"ping"}), "Bearer #{raw_token}")
+    assert {ping.status, ping.jsonrpc, ping.id, ping.code} == {200, "2.0", 1, nil}
+    assert ping.body_reads > 0
+    assert ping.json_decodes > 0
+    malformed_mcp = parser_error_request(port, "/mcp", "application/json", "{", "Bearer #{raw_token}")
+    assert {malformed_mcp.status, malformed_mcp.code, malformed_mcp.jsonrpc, malformed_mcp.message} == {400, -32_700, "2.0", "parse error"}
+
+    setup_runtime_ingress(%OperationalSettings{max_decompressed_body_bytes: 16})
+    compressed = parser_error_request(port, "/backend-api/codex/responses", "application/json", :zlib.gzip(body), setup.authorization, [{"content-encoding", "gzip"}])
+    assert {compressed.status, compressed.code} == {oversized.status, oversized.code}
+    assert compressed.compressed_decodes == 1
+    assert compressed.phoenix_renders == 0
+    multipart_oversized = parser_error_request(port, "/backend-api/codex/responses", "multipart/form-data; boundary=scope-boundary", parser_multipart_body(8_000_001), setup.authorization)
+    assert {multipart_oversized.status, multipart_oversized.code, multipart_oversized.message} == {413, "request_too_large", "request body is too large"}
+    assert multipart_oversized.phoenix_renders == 0
+    assert parser_error_side_effect_counts() == counts
+    assert FakeUpstream.requests(upstream) == []
+  end
+
+  @tag :parser_error_envelopes
+  test "ordinary parser errors remain generic Phoenix responses and browser CSRF stays enforced" do
+    setup_runtime_ingress(%OperationalSettings{max_decompressed_body_bytes: 16})
+    port = start_parser_error_endpoint!()
+    query = "a" <> String.duplicate("[b]", 40) <> "=1"
+
+    for path <- ["/login", "/admin/unknown-parser-route", "/unknown-parser-route"] do
+      malformed = parser_error_request(port, path, "application/json", "{", nil)
+      assert {malformed.status, malformed.code, malformed.jsonrpc, malformed.phoenix_renders} == {400, nil, nil, 1}
+      queried = parser_error_request(port, path <> "?" <> query, "application/json", "{}", nil)
+      assert {queried.status, queried.code, queried.jsonrpc, queried.phoenix_renders} == {400, nil, nil, 1}
+    end
+
+    oversized = parser_error_request(port, "/unknown-parser-route", "application/json", String.duplicate("a", 8_000_001), nil)
+    assert {oversized.status, oversized.code, oversized.jsonrpc, oversized.phoenix_renders} == {413, nil, nil, 1}
+    csrf = parser_error_request(port, "/login", "application/json", "{}", nil, [{"accept", "text/html"}])
+    assert {csrf.status, csrf.code, csrf.jsonrpc, csrf.phoenix_renders} == {403, nil, nil, 1}
+  end
+
   @tag :parser_budget_scope
   test "ordinary JSON login and unknown routes do not inherit runtime JSON limits" do
     setup_runtime_ingress(%OperationalSettings{max_decompressed_body_bytes: 16})
@@ -1950,6 +2053,111 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngressTest do
       assert error.status == 400
       assert error.code == "invalid_request"
       assert error.message == "compressed request body is invalid"
+    end
+  end
+
+  defp parser_error_side_effect_counts do
+    for schema <- [Request, Attempt, LedgerEntry, CodexPooler.Files.FileRecord, CodexPooler.Audit.AuditEvent], into: %{}, do: {schema, Repo.aggregate(schema, :count)}
+  end
+
+  defp start_parser_error_endpoint! do
+    observer = self()
+    functions = [{Plug.Conn, :read_body, 2}, {Plug.Conn, :read_part_headers, 2}, {CodexPooler.JSON, :decode, 2}, {CompressedBody, :decode, 2}, {Plug.Upload, :random_file, 1}, {Phoenix.Endpoint.RenderErrors, :__catch__, 5}, {Plug.ErrorHandler, :__catch__, 6}]
+    functions = if function_exported?(@endpoint, :handle_errors, 2), do: [{@endpoint, :handle_errors, 2} | functions], else: functions
+    on_exit(fn -> for mfa <- functions, do: :erlang.trace_pattern(mfa, false, [:local]) end)
+
+    for {module, _function, _arity} = mfa <- functions do
+      Code.ensure_loaded!(module)
+      assert :erlang.trace_pattern(mfa, true, [:local]) == 1
+    end
+
+    probe = fn conn, _opts ->
+      Process.delete(:parser_error_sent_conn)
+      :erlang.trace(self(), true, [:call, :arity, {:tracer, observer}])
+
+      conn =
+        register_before_send(conn, fn result ->
+          Process.put(:parser_error_sent_conn, result)
+          result
+        end)
+
+      result =
+        try do
+          @endpoint.call(conn, @endpoint.init([]))
+        rescue
+          _error ->
+            case Process.get(:parser_error_sent_conn) do
+              %Plug.Conn{} = sent -> %{sent | state: :sent}
+              _none -> reraise "parser probe failed before sending a response", __STACKTRACE__
+            end
+        end
+
+      :erlang.trace(self(), false, [:call])
+      delivered = :erlang.trace_delivered(self())
+
+      receive do
+        {:trace_delivered, _pid, ^delivered} -> :ok
+      after
+        5_000 -> raise "parser exception trace barrier timed out"
+      end
+
+      send(observer, {:parser_error_finished, self(), not match?(%Plug.Conn.Unfetched{}, result.body_params)})
+      Process.delete(:parser_error_sent_conn)
+      result
+    end
+
+    refute @endpoint.config(:debug_errors, false)
+    listener = start_supervised!({Bandit, plug: probe, port: 0, ip: {127, 0, 0, 1}, startup_log: false})
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(listener)
+
+    on_exit(fn ->
+      refute Process.alive?(listener)
+      assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [], 1_000)
+    end)
+
+    port
+  end
+
+  defp parser_error_request(port, path, content_type, body, authorization, extra_headers \\ []) do
+    headers = [{"connection", "close"}, {"content-type", content_type}, {"accept", "application/json, text/event-stream"}]
+    headers = Enum.reduce(extra_headers, headers, fn {key, value}, headers -> List.keystore(headers, key, 0, {key, value}) end)
+    headers = if authorization, do: [{"authorization", authorization} | headers], else: headers
+    response = Req.post!("http://127.0.0.1:#{port}" <> path, headers: headers, body: body, decode_body: false, redirect: false, retry: false)
+    assert_receive {:parser_error_finished, pid, parsed}, 10_000
+    {calls, wrapper_order} = drain_parser_error_calls(pid, %{}, [])
+
+    envelope =
+      case CodexPooler.JSON.decode(response.body) do
+        {:ok, value} when is_map(value) -> value
+        _other -> %{}
+      end
+
+    %{
+      wrapper_order: wrapper_order,
+      status: response.status,
+      code: get_in(envelope, ["error", "code"]),
+      message: get_in(envelope, ["error", "message"]),
+      jsonrpc: envelope["jsonrpc"],
+      id: envelope["id"],
+      parsed: parsed,
+      body_reads: Map.get(calls, {Plug.Conn, :read_body, 2}, 0),
+      part_reads: Map.get(calls, {Plug.Conn, :read_part_headers, 2}, 0),
+      json_decodes: Map.get(calls, {CodexPooler.JSON, :decode, 2}, 0),
+      compressed_decodes: Map.get(calls, {CompressedBody, :decode, 2}, 0),
+      uploads: Map.get(calls, {Plug.Upload, :random_file, 1}, 0),
+      phoenix_renders: Map.get(calls, {Phoenix.Endpoint.RenderErrors, :__catch__, 5}, 0),
+      plug_error_catches: Map.get(calls, {Plug.ErrorHandler, :__catch__, 6}, 0),
+      endpoint_error_handlers: Map.get(calls, {@endpoint, :handle_errors, 2}, 0)
+    }
+  end
+
+  defp drain_parser_error_calls(pid, counts, order) do
+    receive do
+      {:trace, ^pid, :call, {module, _function, _arity} = mfa} ->
+        order = if module in [Phoenix.Endpoint.RenderErrors, Plug.ErrorHandler], do: [module | order], else: order
+        drain_parser_error_calls(pid, Map.update(counts, mfa, 1, &(&1 + 1)), order)
+    after
+      0 -> {counts, Enum.reverse(order)}
     end
   end
 

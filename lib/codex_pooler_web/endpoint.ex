@@ -1,6 +1,5 @@
 defmodule CodexPoolerWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :codex_pooler
-  use Plug.ErrorHandler
 
   alias CodexPoolerWeb.Plugs.RuntimeIngress.CompressedBody
 
@@ -89,6 +88,12 @@ defmodule CodexPoolerWeb.Endpoint do
   defp parse_body(conn, _opts) do
     opts = if RuntimeIngress.authenticated_multipart_media_request?(conn), do: @media_parser_opts, else: @ordinary_parser_opts
     Plug.Parsers.call(conn, opts)
+  rescue
+    error in [Plug.Parsers.ParseError, Plug.Parsers.RequestTooLargeError, Plug.Conn.InvalidQueryError] ->
+      case RuntimeIngress.handle_parser_error(conn, error) do
+        {:ok, conn} -> conn
+        :unhandled -> reraise error, __STACKTRACE__
+      end
   end
 
   defp trusted_proxy_remote_ip(conn, opts), do: TrustedProxyRemoteIp.call(conn, opts)
@@ -112,18 +117,4 @@ defmodule CodexPoolerWeb.Endpoint do
     do: false
 
   def request_log_level(_conn), do: :info
-
-  @impl Plug.ErrorHandler
-  def handle_errors(conn, %{reason: %Plug.Parsers.ParseError{}}) do
-    cond do
-      RuntimeIngress.protected_backend_json_request?(conn) ->
-        RuntimeIngress.send_parse_error(conn)
-
-      RuntimeIngress.mcp_request?(conn) ->
-        RuntimeIngress.send_mcp_parse_error(conn)
-
-      true ->
-        Plug.Conn.send_resp(conn, conn.status || 400, "Bad Request")
-    end
-  end
 end

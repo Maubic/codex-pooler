@@ -81,21 +81,43 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
     end
   end
 
-  @spec send_parse_error(Plug.Conn.t()) :: Plug.Conn.t()
-  def send_parse_error(conn) do
-    send_runtime_error(conn, %{
-      status: 400,
-      code: "invalid_request",
-      message: "request body must be valid JSON"
-    })
+  @spec handle_parser_error(Plug.Conn.t(), Exception.t()) :: {:ok, Plug.Conn.t()} | :unhandled
+  def handle_parser_error(conn, %Plug.Parsers.ParseError{}) do
+    send_scoped_parser_error(conn, 400, "invalid_request", "request body could not be parsed", -32_700)
   end
 
-  @spec send_mcp_parse_error(Plug.Conn.t()) :: Plug.Conn.t()
-  def send_mcp_parse_error(conn), do: send_mcp_error(conn, 400, -32_700, "parse error")
+  def handle_parser_error(conn, %Plug.Conn.InvalidQueryError{}) do
+    send_scoped_parser_error(conn, 400, "invalid_request", "request query is invalid", -32_600)
+  end
 
-  @spec mcp_request?(Plug.Conn.t() | term()) :: boolean()
-  def mcp_request?(%Plug.Conn{} = conn), do: Path.fetch(conn).scope == :mcp
-  def mcp_request?(_conn), do: false
+  def handle_parser_error(conn, %Plug.Parsers.RequestTooLargeError{}) do
+    case {Path.fetch(conn).scope, Enum.any?(get_req_header(conn, "content-type"), &json_content_type?/1)} do
+      {:passthrough, _json?} ->
+        :unhandled
+
+      {_scope, true} ->
+        limit = operational_settings(conn).max_decompressed_body_bytes
+        message = "decompressed request body exceeds the #{limit}-byte limit; ask the operator to increase ingress.max_decompressed_body_bytes in System > Firewall before retrying"
+        send_scoped_parser_error(conn, 413, "decompressed_request_too_large", message, -32_600)
+
+      {_scope, false} ->
+        send_scoped_parser_error(conn, 413, "request_too_large", "request body is too large", -32_600)
+    end
+  end
+
+  defp send_scoped_parser_error(conn, status, code, message, mcp_code) do
+    case Path.fetch(conn).scope do
+      :runtime ->
+        {:ok, send_runtime_error(conn, status, code, message)}
+
+      :mcp ->
+        message = if mcp_code == -32_700, do: "parse error", else: message
+        {:ok, send_mcp_error(conn, status, mcp_code, message)}
+
+      :passthrough ->
+        :unhandled
+    end
+  end
 
   defp enforce_mcp_firewall(conn, settings) do
     case Firewall.evaluate(conn, settings) do
@@ -247,6 +269,10 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
       |> Map.merge(path_params)
 
     %{conn | body_params: body_params, params: params, query_params: query_params}
+  rescue
+    error in Plug.Conn.InvalidQueryError ->
+      {:ok, conn} = handle_parser_error(conn, error)
+      conn
   end
 
   defp make_empty_if_unfetched(%Plug.Conn.Unfetched{}), do: %{}
@@ -446,6 +472,10 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
       {:error, reason, conn} -> send_runtime_error(conn, reason)
       {:error, reason} -> send_runtime_error(conn, reason)
     end
+  rescue
+    error in Plug.Conn.InvalidQueryError ->
+      {:ok, conn} = handle_parser_error(conn, error)
+      conn
   end
 
   defp send_pruned_runtime_helper_absent(conn) do
