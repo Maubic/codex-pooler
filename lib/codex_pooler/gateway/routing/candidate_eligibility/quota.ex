@@ -489,7 +489,9 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.Quota do
     Map.merge(decision, %{"capacity_basis" => Atom.to_string(first.capacity_basis), "routing_state" => Atom.to_string(first.routing_state), "candidate_capacity" => per_assignment})
   end
 
-  defp sanitize_quota_exclusion(%{} = exclusion) do
+  @doc false
+  @spec sanitize_quota_exclusion(map()) :: map()
+  def sanitize_quota_exclusion(%{} = exclusion) do
     exclusion
     |> Map.take([
       :code,
@@ -506,7 +508,10 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.Quota do
       :source_precision,
       :freshness_state,
       :reset_at,
-      :hint_reset_at
+      :hint_reset_at,
+      :retained_refusal_code,
+      :retained_refusal_observed_at,
+      :retained_refusal_reset_at
     ])
     |> Map.new(fn {key, value} -> {to_string(key), value} end)
   end

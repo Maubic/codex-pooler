@@ -251,6 +251,14 @@ defmodule CodexPooler.Gateway.Runtime.Finalization do
     metadata =
       Metadata.route_attempt_metadata(context.request_options)
       |> Map.put("provider_credits_admission", %{"version" => 1, "capacity_basis" => Atom.to_string(denial.capacity_basis), "reason_codes" => denial.reason_codes, "sent" => false})
+      |> Map.put(
+        "candidate_exclusions",
+        Enum.map(Enum.take(denial.candidate_exclusions, 1), fn exclusion ->
+          exclusion
+          |> Map.take([:pool_upstream_assignment_id, :upstream_identity_id])
+          |> Map.put(:reasons, Enum.map(Enum.take(exclusion.reasons, 20), &Quota.sanitize_quota_exclusion/1))
+        end)
+      )
 
     attrs = %{response_status_code: public_error.status, last_error_code: code, error_message: public_error.message, latency_ms: latency, usage: ResponseUsage.undispatched(), usage_status: "not_applicable", attempt_metadata: metadata, before_finalize: fn -> DispatchLifecycle.neutral_completion(context) end}
 
