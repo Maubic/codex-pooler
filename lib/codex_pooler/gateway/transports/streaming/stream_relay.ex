@@ -11,6 +11,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
   @type stream_write_result ::
           {:ok, relay_state()}
           | {:error, term()}
+          | {:error, term(), relay_state()}
           | {:local_stream_failure, relay_state(), :native_preamble_limit_exceeded}
           | {:retry_first_event, StreamProtocol.terminal_failure()}
           | {:terminal_stream_failure, StreamProtocol.terminal_failure()}
@@ -213,6 +214,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelay do
   defp stream_write_result({:local_stream_failure, state, reason}, _previous_state, chunks, data, response, handlers) do
     source_cancel(response)
     {:halt, {:error, state, append_stream_chunk(chunks, data, handlers), reason}}
+  end
+
+  defp stream_write_result({:error, reason, state}, _previous_state, chunks, _data, response, _handlers) do
+    source_cancel(response)
+    {:halt, {:error, state, chunks, {:chunk, reason}}}
   end
 
   defp stream_write_result({:error, reason}, state, chunks, _data, response, _handlers) do

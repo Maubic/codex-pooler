@@ -195,8 +195,8 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   # wholesale, so the downstream delivery receipt is merged only after either
   # finalizer returned. The relay hands both finalizers the state that carries
   # the write evidence; a downstream write that failed inside the relay loop is
-  # only visible here through its `{:chunk, reason}` failure reason, because
-  # the relay keeps the pre-write state on that path.
+  # signalled here through its `{:chunk, reason}` failure reason. The state
+  # retains successful earlier writes in the same upstream chunk.
   defp with_http_delivery_receipt(
          %{finalize_success: finalize_success, finalize_failure: finalize_failure} = handlers,
          %ResponseContext{} = response_context
@@ -825,6 +825,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
       {:ok, %{target: target, codex_responses_sse_block_state: %{overflow_count: _}} = conn} when target != :websocket -> {:ok, conn}
       {:ok, conn} -> {:terminal_stream_failure, conn, failure}
       {:error, _reason} = error -> error
+      {:error, _reason, _state} = error -> error
       {:local_stream_failure, _, _} = failure -> failure
     end
   end
@@ -874,9 +875,18 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
 
   defp write_stream_data(%ResponseContext{} = response_context, conn, data) do
     case write_stream_data_preserving_state(response_context, conn, data) do
-      {:ok, conn} -> {:ok, conn}
-      {:error, reason, _conn} -> {:error, reason}
-      {:local_stream_failure, conn, reason} -> {:local_stream_failure, conn, reason}
+      {:ok, conn} ->
+        {:ok, conn}
+
+      {:error, reason, advanced} ->
+        # A native batch can write earlier parts before a later part fails.
+        # Keep parsed-but-unwritten state out of the legacy first-write failure.
+        if DownstreamDeliveryEvidence.fetch(advanced).frames > DownstreamDeliveryEvidence.fetch(conn).frames,
+          do: {:error, reason, advanced},
+          else: {:error, reason}
+
+      {:local_stream_failure, conn, reason} ->
+        {:local_stream_failure, conn, reason}
     end
   end
 
@@ -1050,6 +1060,13 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
       {:ok, conn} ->
         record_http_delivery_receipt(conn, response_context)
         {:ok, conn}
+
+      {:error, reason, advanced} ->
+        advanced
+        |> DownstreamDeliveryEvidence.record_write_failure()
+        |> record_http_delivery_receipt(response_context)
+
+        {:error, reason}
 
       {:error, _reason} = error ->
         conn

@@ -23,6 +23,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpMailboxPrefixTest do
     end
   end
 
+  for mode <- ["full", "lite"] do
+    @tag mode: mode, count: 2, role: :remote_resume, delivery: :cut, partial_tool?: false, cut_after_item: 2
+    test "#{mode} retains the first coalesced item when the client cuts after both writes", context do
+      assert_mailbox_prefix_retains_first_coalesced_item!(context)
+    end
+
+    @tag mode: mode, count: 2, role: :remote_resume, delivery: :cut, partial_tool?: false, cut_after_item: 0
+    test "#{mode} records no mailbox prefix when the first output write fails", context do
+      assert_mailbox_prefix_retains_first_coalesced_item!(context)
+    end
+  end
+
   # Reason: the body of a generated test; its branches select the matrix case.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp assert_mailbox_prefix_retains_first_coalesced_item!(context) do
@@ -70,20 +82,28 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpMailboxPrefixTest do
 
     retained =
       if context.delivery == :cut do
-        {conn, ref} = start_request(port, setup, payload, thread)
-        {conn, retained} = until_item(conn, ref, "")
+        hold = %{ref: make_ref(), after_item: Map.get(context, :cut_after_item, 1)}
+        {conn, ref} = start_request(port, setup, payload, thread, true, hold)
+        {conn, retained} = if hold.after_item == 0, do: until_headers(conn, ref), else: until_item(conn, ref, "")
+        assert_receive {:mailbox_prefix_write_held, hold_ref, writer}, @budget
+        assert hold_ref == hold.ref
+        monitor = Process.monitor(writer)
         assert_receive {:fake_upstream_gate, :before_terminal, handler, ^gate}, @budget
         # Reset the real connection so the held upstream tail observes cancellation.
         :ok = :inet.setopts(Mint.HTTP.get_socket(conn), linger: {true, 0})
         Mint.HTTP.close(conn)
+        assert_receive {:mailbox_prefix_client_closed, ^hold_ref, ^writer, reason}, @budget
+        assert reason in [:closed, :econnreset]
         send(handler, {:fake_upstream_release_gate, gate})
+        assert_receive {:DOWN, ^monitor, :process, ^writer, _reason}, @budget
+        assert_mailbox_write_schedule!(hold, context)
         retained
       else
         assert {200, _body} = post(port, setup, payload, thread)
         hd(outputs)
       end
 
-    retained = Map.put(retained, "content", nil)
+    retained = if retained, do: Map.put(retained, "content", nil)
     first = await_latest_settled(setup, System.monotonic_time(:millisecond) + @budget)
 
     if prelude_id do
@@ -98,46 +118,58 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpMailboxPrefixTest do
     turn = Repo.get_by!(CodexTurn, request_id: first.id)
     recorded = get_in(attempt.response_metadata, ["native_http_resume_progress", "output_item_done_count"])
     prefix = attempt.response_metadata["native_http_mailbox_prefix"]
-    assert prefix["output_item_done_count"] == context.count
-    assert length(prefix["item_digests"]) == context.count
 
-    if context.delivery == :cut do
+    if Map.get(context, :cut_after_item) == 0 do
+      assert recorded == 0
+      assert prefix == %{}
+      assert get_in(attempt.response_metadata, ["downstream_delivery", "frames_after_visible"]) == 0
       assert {first.status, first.last_error_code, turn.status} == {"failed", "client_disconnected", "interrupted"}
+      assert Repo.aggregate(from(a in Attempt, where: a.request_id == ^first.id), :count) == 1
+      assert Repo.aggregate(from(l in CodexPooler.Accounting.LedgerEntry, where: l.request_id == ^first.id and l.entry_kind == "settlement"), :count) == 1
+      assert FakeUpstream.count(upstream) == 1
     else
-      assert {first.status, turn.status} == {"succeeded", "succeeded"}
+      assert prefix["output_item_done_count"] == context.count
+      assert length(prefix["item_digests"]) == context.count
+      if context.delivery == :cut, do: assert(get_in(attempt.response_metadata, ["downstream_delivery", "frames_after_visible"]) == Map.get(context, :cut_after_item, 1))
+
+      if context.delivery == :cut do
+        assert {first.status, first.last_error_code, turn.status} == {"failed", "client_disconnected", "interrupted"}
+      else
+        assert {first.status, turn.status} == {"succeeded", "succeeded"}
+      end
+
+      assert recorded == context.count
+      mailbox = %{"type" => "agent_message", "author" => "/root/worker", "recipient" => "/root", "content" => [%{"type" => "input_text", "text" => "synthetic update"}]}
+      successor = Map.put(payload, "input", input ++ [retained, mailbox])
+      bad = put_in(successor, ["input", Access.at(-2), "encrypted_content"], "changed_synthetic")
+      {bad_status, _} = post(port, setup, bad, thread)
+      assert bad_status == 409
+      {call_without_output_status, _} = post(port, setup, Map.put(payload, "input", input ++ [retained, tool, mailbox]), thread)
+      assert call_without_output_status == 409
+
+      if context.count == 2 do
+        {nonprefix_status, _} = post(port, setup, Map.put(payload, "input", input ++ [List.last(outputs), mailbox]), thread)
+        assert nonprefix_status == 409
+        {reordered_status, _} = post(port, setup, Map.put(payload, "input", input ++ Enum.reverse(outputs) ++ [mailbox]), thread)
+        assert reordered_status == 409
+      end
+
+      {status, _} = post(port, setup, successor, thread)
+      assert status == 200
+      requests = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id, order_by: [asc: r.admitted_at])
+      assert length(requests) == if(prelude_id, do: 3, else: 2)
+      [predecessor, admitted] = Enum.take(requests, -2)
+      assert predecessor.id == first.id
+      assert admitted.request_metadata["client_resend"]["predecessor_request_id"] == first.id
+      assert Repo.aggregate(from(l in CodexPooler.Accounting.RequestClientRetryLink, where: l.predecessor_request_id == ^first.id and l.successor_request_id == ^admitted.id), :count) == 1
+
+      for request <- requests do
+        assert Repo.aggregate(from(a in Attempt, where: a.request_id == ^request.id), :count) == 1
+        assert Repo.aggregate(from(l in CodexPooler.Accounting.LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "settlement"), :count) == 1
+      end
+
+      assert FakeUpstream.count(upstream) == if(prelude_id, do: 3, else: 2)
     end
-
-    assert recorded == context.count
-    mailbox = %{"type" => "agent_message", "author" => "/root/worker", "recipient" => "/root", "content" => [%{"type" => "input_text", "text" => "synthetic update"}]}
-    successor = Map.put(payload, "input", input ++ [retained, mailbox])
-    bad = put_in(successor, ["input", Access.at(-2), "encrypted_content"], "changed_synthetic")
-    {bad_status, _} = post(port, setup, bad, thread)
-    assert bad_status == 409
-    {call_without_output_status, _} = post(port, setup, Map.put(payload, "input", input ++ [retained, tool, mailbox]), thread)
-    assert call_without_output_status == 409
-
-    if context.count == 2 do
-      {nonprefix_status, _} = post(port, setup, Map.put(payload, "input", input ++ [List.last(outputs), mailbox]), thread)
-      assert nonprefix_status == 409
-      {reordered_status, _} = post(port, setup, Map.put(payload, "input", input ++ Enum.reverse(outputs) ++ [mailbox]), thread)
-      assert reordered_status == 409
-    end
-
-    {status, _} = post(port, setup, successor, thread)
-    assert status == 200
-    requests = Repo.all(from r in Request, where: r.pool_id == ^setup.pool.id, order_by: [asc: r.admitted_at])
-    assert length(requests) == if(prelude_id, do: 3, else: 2)
-    [predecessor, admitted] = Enum.take(requests, -2)
-    assert predecessor.id == first.id
-    assert admitted.request_metadata["client_resend"]["predecessor_request_id"] == first.id
-    assert Repo.aggregate(from(l in CodexPooler.Accounting.RequestClientRetryLink, where: l.predecessor_request_id == ^first.id and l.successor_request_id == ^admitted.id), :count) == 1
-
-    for request <- requests do
-      assert Repo.aggregate(from(a in Attempt, where: a.request_id == ^request.id), :count) == 1
-      assert Repo.aggregate(from(l in CodexPooler.Accounting.LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "settlement"), :count) == 1
-    end
-
-    assert FakeUpstream.count(upstream) == if(prelude_id, do: 3, else: 2)
   end
 
   for mode <- ["full", "lite"] do
@@ -342,13 +374,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpMailboxPrefixTest do
 
   defp event(data), do: "event: #{data["type"]}\ndata: " <> CodexPooler.JSON.encode!(data) <> "\n\n"
 
-  defp start_request(port, setup, payload, thread, register_exit? \\ true) do
+  defp start_request(port, setup, payload, thread, register_exit?, hold) do
     {:ok, conn} = Mint.HTTP.connect(:http, "127.0.0.1", port, mode: :passive)
     if register_exit?, do: on_exit(fn -> Mint.HTTP.close(conn) end)
     metadata = payload["client_metadata"]["x-codex-turn-metadata"]
     window = CodexPooler.JSON.decode!(metadata)["window_number"]
     headers = [{"authorization", setup.authorization}, {"content-type", "application/json"}, {"session-id", thread}, {"thread-id", thread}, {"x-codex-window-id", "#{thread}:#{window}"}, {"x-codex-turn-metadata", metadata}, {"originator", "codex_cli_rs"}]
     headers = if setup.serving_mode == "lite", do: [{"x-openai-internal-codex-responses-lite", "true"} | headers], else: headers
+    if hold, do: install_mailbox_write_hold!(conn, port, hold)
     {:ok, conn, ref} = Mint.HTTP.request(conn, "POST", @path, headers, CodexPooler.JSON.encode!(payload))
     {conn, ref}
   end
@@ -373,7 +406,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpMailboxPrefixTest do
   end
 
   defp post(port, setup, payload, thread, register_exit? \\ true) do
-    {conn, ref} = start_request(port, setup, payload, thread, register_exit?)
+    {conn, ref} = start_request(port, setup, payload, thread, register_exit?, nil)
 
     try do
       all(conn, ref, nil, "")
@@ -410,5 +443,107 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpMailboxPrefixTest do
         Process.sleep(10)
         await_latest_settled(setup, deadline)
     end
+  end
+
+  defp until_headers(conn, ref) do
+    assert {:ok, conn, responses} = Mint.HTTP.recv(conn, 0, @budget)
+    refute Enum.any?(responses, &match?({:data, ^ref, data} when data != "", &1))
+
+    if Enum.any?(responses, &match?({:status, ^ref, 200}, &1)),
+      do: {conn, nil},
+      else: until_headers(conn, ref)
+  end
+
+  defp install_mailbox_write_hold!(conn, port, hold) do
+    {:ok, {_address, client_port}} = :inet.sockname(Mint.HTTP.get_socket(conn))
+    id = {__MODULE__, System.unique_integer([:positive])}
+    config = Map.merge(hold, %{test: self(), public_port: port, client_port: client_port})
+    on_exit(fn -> :telemetry.detach(id) end)
+    :ok = :telemetry.attach_many(id, [[:thousand_island, :connection, :send], [:thousand_island, :connection, :send_error]], &__MODULE__.observe_mailbox_write/4, config)
+    watch = {CodexPoolerWeb.WebsocketDownstreamWriteWatch, :send}
+    assert [^watch, ^id] = for(%{id: handler} <- :telemetry.list_handlers([:thousand_island, :connection, :send]), handler in [watch, id], do: handler)
+  end
+
+  # The hold runs after the real socket send succeeded. Receiving the client's
+  # RST on this exact port makes the next part's failure causal, without a sleep.
+  @doc false
+  def observe_mailbox_write(event, %{data: data} = measurements, _metadata, config) do
+    socket = mailbox_writer_socket(config.public_port)
+    owner_key = {__MODULE__, config.ref}
+    owned? = Process.get(owner_key, false) or (is_port(socket) and match?({:ok, {_, port}} when port == config.client_port, :inet.peername(socket)))
+
+    if owned? do
+      Process.put(owner_key, true)
+      bytes = IO.iodata_to_binary(data)
+      item = mailbox_written_item(bytes)
+      kind = List.last(event)
+      if item, do: send(config.test, {:mailbox_prefix_write, config.ref, kind, item, measurements[:error]})
+
+      if kind == :send and item == config.after_item do
+        monitor = Process.monitor(config.test)
+        :ok = :inet.setopts(socket, active: :once)
+        send(config.test, {:mailbox_prefix_write_held, config.ref, self()})
+
+        receive do
+          {:tcp_error, ^socket, reason} = closed ->
+            send(config.test, {:mailbox_prefix_client_closed, config.ref, self(), reason})
+            send(self(), closed)
+
+          {:tcp_closed, ^socket} = closed ->
+            send(config.test, {:mailbox_prefix_client_closed, config.ref, self(), :closed})
+            send(self(), closed)
+
+          {:DOWN, ^monitor, :process, _test, _reason} ->
+            :ok
+        after
+          @budget -> send(config.test, {:mailbox_prefix_client_closed, config.ref, self(), :not_observed})
+        end
+
+        Process.demonitor(monitor, [:flush])
+      end
+    end
+
+    :ok
+  end
+
+  defp mailbox_writer_socket(public_port) do
+    {:links, links} = Process.info(self(), :links)
+
+    Enum.find(links, fn link ->
+      is_port(link) and Port.info(link, :name) == {:name, ~c"tcp_inet"} and match?({:ok, {_, port}} when port == public_port, :inet.sockname(link))
+    end)
+  end
+
+  defp mailbox_written_item(bytes) do
+    cond do
+      String.starts_with?(bytes, "HTTP/1.1 200") -> 0
+      String.contains?(bytes, "rs_synthetic_1") -> 1
+      String.contains?(bytes, "rs_synthetic_2") -> 2
+      String.contains?(bytes, "fc_synthetic") -> :partial_tool
+      true -> nil
+    end
+  end
+
+  defp assert_mailbox_write_schedule!(%{ref: ref, after_item: after_item}, context) do
+    assert_receive {:mailbox_prefix_write, ^ref, :send, 0, nil}, @budget
+
+    for item <- 1..after_item//1 do
+      assert_receive {:mailbox_prefix_write, ^ref, :send, ^item, nil}, @budget
+    end
+
+    failed_item =
+      cond do
+        after_item == 0 -> 1
+        after_item == 1 and context.count == 2 -> 2
+        after_item == 1 and context.partial_tool? -> :partial_tool
+        true -> nil
+      end
+
+    if failed_item do
+      assert_receive {:mailbox_prefix_write, ^ref, :send_error, ^failed_item, reason}, @budget
+      assert reason in [:closed, :econnreset, :enotconn, :epipe]
+    end
+
+    refute_received {:mailbox_prefix_write, ^ref, :send, _item, _error}
   end
 end
