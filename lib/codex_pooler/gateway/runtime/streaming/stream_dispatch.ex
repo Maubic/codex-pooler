@@ -648,7 +648,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
   defp write_flushed_first_event(%ResponseContext{} = response_context, state, buffer) do
     case write_stream_data_preserving_state(response_context, state, buffer) do
       {:ok, state} -> write_eof_normalized_stream_data(response_context, state)
-      {:error, reason, state} -> {:chunk_error, state, reason}
+      {:error, reason, advanced} -> {:chunk_error, restore_failed_flush_delivery(advanced, state), reason}
     end
   end
 
@@ -656,14 +656,28 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
          %ResponseContext{context: %{payload: payload, request_options: opts}},
          state
        ) do
-    {data, state, delivery} =
+    {data, advanced, delivery} =
       DownstreamStream.flush_eof_delivery(DownstreamStream.endpoint(payload, opts), opts, state)
 
-    case write_normalized_stream_data_preserving_state(state, data, delivery) do
-      {:ok, state} -> {:ok, state}
-      {:error, reason, state} -> {:chunk_error, state, reason}
+    case write_normalized_stream_data_preserving_state(advanced, data, delivery) do
+      {:ok, advanced} -> {:ok, advanced}
+      {:error, reason, advanced} -> {:chunk_error, restore_failed_flush_delivery(advanced, state), reason}
     end
   end
+
+  # EOF parsing still owns terminal/usage/source evidence after a failed write.
+  # Only delivery counters must stay at their pre-write values. The separate
+  # downstream receipt records writes only on success; its failure flag is set
+  # by the enclosing finalization hook and must not be discarded here.
+  defp restore_failed_flush_delivery(
+         %{public_openai_responses: %{summary: summary} = stream} = advanced,
+         %{public_openai_responses: %{summary: previous}}
+       ) do
+    delivery_keys = [:created_seen, :visible_seen, :delta_count, :delta_bytes, :text_done_count, :text_done_bytes, :item_done_count, :synthetic_terminal_sent, :relay_bytes]
+    %{advanced | public_openai_responses: %{stream | summary: Map.merge(summary, Map.take(previous, delivery_keys))}}
+  end
+
+  defp restore_failed_flush_delivery(advanced, _previous), do: advanced
 
   # Mirrors finalize_http_stream_failure precedence for a flush that parsed
   # data but could not write it: an upstream terminal decoded from the flushed
