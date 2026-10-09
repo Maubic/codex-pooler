@@ -5,6 +5,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
 
   alias CodexPooler.Access.APIKey
   alias CodexPooler.Access.APIKeyPolicyBinding
+  alias CodexPooler.Access.APIKeys.PolicyPersistence
   alias CodexPooler.Pools.Pool
   alias CodexPooler.ServiceTier
   alias CodexPoolerWeb.DateTimeInput
@@ -31,7 +32,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
   # the key's metadata (its labels) and every model override after the one
   # the form edits. They never come from a submission (findings#206 row
   # 206-504).
-  @carried_keys ~w(stored_metadata retained_model_policies stored_expires_at expiry_timezone)
+  @carried_keys ~w(stored_metadata retained_model_policies stored_expires_at expiry_timezone stored_edit_revision)
 
   @spec limit_fields() :: [String.t()]
   def limit_fields, do: @limit_fields
@@ -47,6 +48,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
 
     default_params(%{
       "id" => api_key.id,
+      "stored_edit_revision" => PolicyPersistence.edit_revision(api_key, policy_bindings),
       "display_name" => api_key.display_name,
       "pool_id" => api_key.pool_id,
       "status" => api_key.status,
@@ -158,6 +160,15 @@ defmodule CodexPoolerWeb.Admin.ApiKeyPolicyForm do
       model_policies: model_policy_attrs(params) ++ retained_model_policies(params),
       metadata: metadata_attrs(params)
     }
+    |> put_edit_revision(params)
+  end
+
+  defp put_edit_revision(attrs, params) do
+    if blank_to_nil(params["id"]) do
+      Map.put(attrs, :expected_edit_revision, params["stored_edit_revision"])
+    else
+      attrs
+    end
   end
 
   @doc """

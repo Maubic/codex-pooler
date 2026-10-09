@@ -152,8 +152,25 @@ defmodule CodexPooler.Access.APIKeys.Queries do
   @spec get_api_key_with_policy(Scope.t(), Ecto.UUID.t()) ::
           {:ok, api_key_with_policy()} | {:error, access_error()}
   def get_api_key_with_policy(%Scope{} = scope, api_key_id) when is_binary(api_key_id) do
-    with {:ok, api_key} <- get_api_key(scope, api_key_id) do
-      {:ok, api_key_with_policy(api_key)}
+    # One statement observes the key and all bindings from the same MVCC snapshot.
+    # It deliberately takes no read lock that a surrounding caller could upgrade.
+    with {:ok, api_key_id} <- Ecto.UUID.cast(api_key_id),
+         [{%APIKey{} = api_key, _binding} | _] = rows <-
+           Repo.all(
+             from key in APIKey,
+               left_join: binding in APIKeyPolicyBinding,
+               on: binding.api_key_id == key.id,
+               where: key.id == ^api_key_id,
+               order_by: [asc: binding.binding_scope, asc: binding.model_identifier],
+               select: {key, binding}
+           ),
+         {:ok, _decision} <- PoolAuthorization.require_capability(scope, PoolAuthorization.capability(:pool_api_key_manage), pool_id: api_key.pool_id) do
+      bindings = rows |> Enum.map(&elem(&1, 1)) |> Enum.reject(&is_nil/1)
+      {:ok, api_key_with_policy(api_key, bindings)}
+    else
+      missing when missing in [:error, []] -> {:error, Errors.access_error(:api_key_not_found, "api key was not found")}
+      {:error, %{code: :capability_denied}} -> {:error, Errors.access_error(:api_key_not_found, "api key was not found")}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -161,13 +178,11 @@ defmodule CodexPooler.Access.APIKeys.Queries do
     do: {:error, Errors.access_error(:invalid_request, "user scope is required")}
 
   defp api_key_with_policy(%APIKey{} = api_key) do
-    bindings =
-      Repo.all(
-        from binding in APIKeyPolicyBinding,
-          where: binding.api_key_id == ^api_key.id,
-          order_by: [asc: binding.binding_scope, asc: binding.model_identifier]
-      )
+    bindings = Repo.all(from binding in APIKeyPolicyBinding, where: binding.api_key_id == ^api_key.id, order_by: [asc: binding.binding_scope, asc: binding.model_identifier])
+    api_key_with_policy(api_key, bindings)
+  end
 
+  defp api_key_with_policy(%APIKey{} = api_key, bindings) do
     %{
       api_key: api_key,
       policy: %{

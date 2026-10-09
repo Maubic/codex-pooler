@@ -870,7 +870,7 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLiveTest do
     assert frequencies == %{
              "api_keys" => 1,
              "pools" => 1,
-             "api_key_policy_bindings" => 2,
+             "api_key_policy_bindings" => 1,
              "daily_rollups" => 1,
              "ledger_entries" => 1,
              nil => 1,
