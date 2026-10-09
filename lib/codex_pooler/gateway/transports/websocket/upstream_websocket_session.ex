@@ -3557,11 +3557,24 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   defp close_state(%{conn: conn} = state) do
+    retire_socket(Mint.HTTP.get_socket(conn))
     {:ok, _conn} = Mint.HTTP.close(conn)
     close_connection_state(state)
   end
 
   defp close_state(state), do: close_connection_state(state)
+
+  defp retire_socket(socket) when is_port(socket) do
+    :inet.setopts(socket, linger: {true, 0})
+  end
+
+  # This connection is being retired. Do not wait for its queued output or
+  # a TLS close notification behind that output; active sends keep their
+  # original options. Shutdown marks TLS closed before Mint releases it.
+  defp retire_socket(socket) do
+    :ssl.setopts(socket, linger: {true, 0}, send_timeout: 50, send_timeout_close: true)
+    :ssl.shutdown(socket, :read_write)
+  end
 
   # A compaction collected on the closing connection and not confirmed yet
   # keeps its admission as the one confirmation it can still accept
