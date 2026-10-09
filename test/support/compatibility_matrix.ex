@@ -893,6 +893,9 @@ defmodule CodexPooler.CompatibilityMatrix do
       current: :retryable_503_before_dispatch,
       categories: [:error, :degraded],
       routes: [
+        %{method: :get, path: "/api/codex/usage"},
+        %{method: :get, path: "/wham/usage"},
+        %{method: :get, path: "/backend-api/wham/usage"},
         %{method: :get, path: "/backend-api/codex/models"},
         %{method: :get, path: "/backend-api/codex/responses", transport: :websocket},
         %{method: :post, path: "/backend-api/codex/responses"},

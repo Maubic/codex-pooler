@@ -21,6 +21,25 @@ defmodule CodexPoolerWeb.Runtime.RuntimeDatabaseUnavailableTest do
   alias CodexPooler.Repo
   alias CodexPooler.UnavailableRepo
 
+  @usage_paths ["/api/codex/usage", "/wham/usage", "/backend-api/wham/usage"]
+
+  defmodule UsageEndpoint do
+    @moduledoc false
+    @behaviour Plug
+
+    def init(repo), do: repo
+
+    def call(conn, repo) do
+      previous = CodexPooler.Repo.put_dynamic_repo(repo)
+
+      try do
+        CodexPoolerWeb.Endpoint.call(conn, CodexPoolerWeb.Endpoint.init([]))
+      after
+        CodexPooler.Repo.put_dynamic_repo(previous)
+      end
+    end
+  end
+
   @unavailable_body %{
     "error" => %{
       "type" => "server_error",
@@ -84,6 +103,130 @@ defmodule CodexPoolerWeb.Runtime.RuntimeDatabaseUnavailableTest do
       assert_unavailable!(response, log, "authentication")
       assert FakeUpstream.count(context.upstream) == 0
     end
+  end
+
+  for path <- @usage_paths, account_header? <- [false, true] do
+    @tag :usage_auth_unavailable
+    test "usage #{path} preserves pool failure with account header #{account_header?}", context do
+      assert_usage_pool_unavailable(context, unquote(path), unquote(account_header?))
+    end
+
+    @tag :usage_auth_unavailable
+    test "usage #{path} preserves PostgreSQL cancellation with account header #{account_header?}", context do
+      assert_usage_query_cancelled(context, unquote(path), unquote(account_header?))
+    end
+
+    @tag :usage_auth_unavailable
+    test "HTTP usage #{path} preserves pool failure with account header #{account_header?}", context do
+      assert_http_usage_pool_unavailable(context, unquote(path), unquote(account_header?))
+    end
+  end
+
+  @tag :usage_auth_unavailable
+  test "healthy HTTP usage aliases distinguish invalid credentials from valid API keys" do
+    upstream = start_upstream(FakeUpstream.json_response(%{}))
+    setup = gateway_setup(upstream)
+    counter = observe_usage_admission!()
+    server = start_supervised!({Bandit, plug: CodexPoolerWeb.Endpoint, port: 0, ip: {127, 0, 0, 1}, startup_log: false})
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
+
+    for path <- @usage_paths, account_header? <- [false, true] do
+      headers = usage_conn(build_conn(), setup, account_header?).req_headers
+      invalid_headers = List.keystore(headers, "authorization", 0, {"authorization", "Bearer sk-cxp-synthetic-unknown"})
+      response = Req.get!("http://127.0.0.1:#{port}#{path}", headers: invalid_headers, retry: false)
+      assert response.status == 401
+      assert response.body["error"]["code"] == if(account_header?, do: "invalid_authorization", else: "invalid_api_key")
+    end
+
+    assert_usage_not_admitted!(setup, upstream, counter)
+
+    for path <- @usage_paths, account_header? <- [false, true] do
+      headers = usage_conn(build_conn(), setup, account_header?).req_headers
+      response = Req.get!("http://127.0.0.1:#{port}#{path}", headers: headers, retry: false)
+      assert response.status == 200
+      assert response.body["plan_type"] == "unknown"
+      assert is_map(response.body["rate_limit"])
+    end
+
+    assert :counters.get(counter, 1) == 6
+    assert FakeUpstream.count(upstream) == 0
+  end
+
+  defp assert_usage_pool_unavailable(%{conn: conn}, path, account_header?) do
+    upstream = start_upstream(FakeUpstream.json_response(%{}))
+    setup = gateway_setup(upstream)
+    counter = observe_usage_admission!()
+    unavailable = UnavailableRepo.hold!()
+
+    {response, log} =
+      UnavailableRepo.run(unavailable, fn ->
+        ExUnit.CaptureLog.with_log(fn -> usage_conn(conn, setup, account_header?) |> get(path) end)
+      end)
+
+    assert_unavailable!(response, log, "authentication")
+    assert_usage_not_admitted!(setup, upstream, counter)
+  end
+
+  defp assert_usage_query_cancelled(%{conn: conn}, path, account_header?) do
+    upstream = start_upstream(FakeUpstream.json_response(%{}))
+    setup = gateway_setup(upstream)
+    counter = observe_usage_admission!()
+    repo = start_supervised!({Repo, name: nil, pool: DBConnection.ConnectionPool, pool_size: 1, parameters: [statement_timeout: "50ms"]})
+    Repo.query!("LOCK TABLE api_keys IN ACCESS EXCLUSIVE MODE")
+    previous = Repo.put_dynamic_repo(repo)
+
+    {response, log} =
+      try do
+        ExUnit.CaptureLog.with_log(fn -> usage_conn(conn, setup, account_header?) |> get(path) end)
+      after
+        Repo.put_dynamic_repo(previous)
+      end
+
+    assert_unavailable!(response, log, "authentication", "postgres_query_canceled")
+    assert_usage_not_admitted!(setup, upstream, counter)
+  end
+
+  defp assert_http_usage_pool_unavailable(_context, path, account_header?) do
+    upstream = start_upstream(FakeUpstream.json_response(%{}))
+    setup = gateway_setup(upstream)
+    counter = observe_usage_admission!()
+    unavailable = UnavailableRepo.hold!()
+    server = start_supervised!({Bandit, plug: {UsageEndpoint, unavailable.repo}, port: 0, ip: {127, 0, 0, 1}, startup_log: false})
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
+    headers = usage_conn(build_conn(), setup, account_header?).req_headers
+
+    {response, log} =
+      UnavailableRepo.run(unavailable, fn ->
+        ExUnit.CaptureLog.with_log(fn -> Req.get!("http://127.0.0.1:#{port}#{path}", headers: headers, retry: false, decode_body: false) end)
+      end)
+
+    assert_unavailable!(%{status: response.status, resp_body: response.body}, log, "authentication")
+    assert_usage_not_admitted!(setup, upstream, counter)
+  end
+
+  defp usage_conn(conn, setup, account_header?) do
+    conn = auth(conn, setup)
+    if account_header?, do: put_req_header(conn, "chatgpt-account-id", "synthetic-account"), else: conn
+  end
+
+  defp observe_usage_admission! do
+    counter = :counters.new(1, [])
+    handler = {__MODULE__, make_ref()}
+    on_exit(fn -> :telemetry.detach(handler) end)
+    events = for event <- [:accepted, :enqueued, :rejected], do: [:codex_pooler, :gateway, :admission, event]
+    :ok = :telemetry.attach_many(handler, events, &__MODULE__.observe_admission/4, counter)
+    counter
+  end
+
+  @doc false
+  def observe_admission(_event, _measurements, %{endpoint: path}, counter) when path in @usage_paths, do: :counters.add(counter, 1, 1)
+  def observe_admission(_event, _measurements, _metadata, _counter), do: :ok
+
+  defp assert_usage_not_admitted!(setup, upstream, counter) do
+    assert :counters.get(counter, 1) == 0
+    assert FakeUpstream.count(upstream) == 0
+    assert Repo.aggregate(from(r in Request, where: r.pool_id == ^setup.pool.id), :count) == 0
+    assert Repo.aggregate(from(l in LedgerEntry, where: l.pool_id == ^setup.pool.id), :count) == 0
   end
 
   # PostgreSQL ends in-flight statements with `57P01 admin_shutdown` when the

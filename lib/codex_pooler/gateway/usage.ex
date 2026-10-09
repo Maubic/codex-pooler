@@ -61,6 +61,8 @@ defmodule CodexPooler.Gateway.Usage do
           {:ok, codex_usage_auth()} | {:error, gateway_error()}
   def resolve_codex_usage_auth({:ok, auth}, %RequestOptions{}), do: {:ok, {:api_key, auth}}
 
+  def resolve_codex_usage_auth({:error, %{status: status}} = error, %RequestOptions{}) when status != 401, do: error
+
   def resolve_codex_usage_auth({:error, _reason}, %RequestOptions{} = request_options) do
     request_options = request_options(request_options, "/api/codex/usage", %{})
     chatgpt_account_id = request_options.usage_authentication.chatgpt_account_id
