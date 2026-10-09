@@ -110,9 +110,10 @@ defmodule CodexPooler.Alerts.Delivery.Execution do
       end
 
       Process.demonitor(task.ref, [:flush])
+      task_ref = task.ref
 
       receive do
-        {ref, _} when ref == task.ref -> :ok
+        {^task_ref, _} -> :ok
       after
         0 -> :ok
       end
