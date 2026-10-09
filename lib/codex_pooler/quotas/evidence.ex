@@ -50,6 +50,7 @@ defmodule CodexPooler.Quotas.Evidence do
   ]
 
   @account_quota_key "account"
+  @max_credit_balance 9_223_372_036_854_775_807
   @window_kinds ~w(primary secondary)
   @source_precisions ~w(authoritative observed inferred unknown)
   @quota_scopes ~w(account model upstream_model feature)
@@ -443,6 +444,7 @@ defmodule CodexPooler.Quotas.Evidence do
   defp validate_optional_non_negative_integer(errors, attrs, field) do
     case Map.get(attrs, field) do
       nil -> errors
+      value when is_integer(value) and value > @max_credit_balance -> add_error(errors, field, "must be less than or equal to #{@max_credit_balance}")
       value when is_integer(value) and value >= 0 -> errors
       _value -> add_error(errors, field, "must be greater than or equal to 0")
     end

@@ -20,6 +20,7 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
   alias CodexPooler.Quotas.Evidence.Descriptors
 
   @window_kinds ~w(primary secondary)
+  @max_credit_balance 9_223_372_036_854_775_807
 
   @type usage_result :: %{
           required(:windows) => [Evidence.t()],
@@ -660,12 +661,12 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
   def codex_usage_credits(%{"balance" => balance}), do: codex_credit_balance(balance)
   def codex_usage_credits(_credits), do: nil
 
-  defp codex_credit_balance(balance) when is_integer(balance) and balance >= 0, do: balance
+  defp codex_credit_balance(balance) when is_integer(balance) and balance >= 0 and balance <= @max_credit_balance, do: balance
 
   defp codex_credit_balance(balance) when is_float(balance) do
     cond do
       balance == 0 -> 0
-      balance > 0 -> round(balance)
+      balance > 0 -> codex_credit_balance(round(balance))
       true -> nil
     end
   end
@@ -679,12 +680,11 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
 
       match?({_, ""}, Integer.parse(balance)) ->
         {value, ""} = Integer.parse(balance)
-        if value >= 0, do: value
+        codex_credit_balance(value)
 
       true ->
         case Float.parse(balance) do
-          {value, ""} when value == 0 -> 0
-          {value, ""} when value > 0 -> round(value)
+          {value, ""} -> codex_credit_balance(value)
           _invalid -> nil
         end
     end
