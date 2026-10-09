@@ -10,6 +10,47 @@ defmodule CodexPooler.RuntimeConfigTest do
     "CODEX_POOLER_UPSTREAM_SECRET_KEY" => String.duplicate("r", 32)
   }
 
+  @tag :endpoint_key_contract
+  test "production refuses missing empty and short endpoint secrets with value-free diagnostics" do
+    observations =
+      for {shape, value} <- [missing: nil, empty: "", one_byte: "x", short: Base.encode16(:crypto.strong_rand_bytes(32)) |> binary_part(0, 63)] do
+        observed =
+          with_env(Map.put(@required_env, "SECRET_KEY_BASE", value), fn ->
+            try do
+              Config.Reader.read!("config/runtime.exs", env: :prod)
+              %{shape: shape, refused: false, safe_message: false}
+            rescue
+              error -> %{shape: shape, refused: true, safe_message: Exception.message(error) == "SECRET_KEY_BASE must be at least 64 bytes"}
+            end
+          end)
+
+        observed
+      end
+
+    assert Enum.all?(observations, &(&1.refused and &1.safe_message)), inspect(observations)
+  end
+
+  @tag :endpoint_key_contract
+  test "production preserves endpoint secrets at and above the byte boundary" do
+    for key <- [Base.encode16(:crypto.strong_rand_bytes(32)), Base.encode16(:crypto.strong_rand_bytes(33)) |> binary_part(0, 65), String.duplicate("é", 32)] do
+      with_env(Map.put(@required_env, "SECRET_KEY_BASE", key), fn ->
+        config = Config.Reader.read!("config/runtime.exs", env: :prod)
+        unchanged? = config[:codex_pooler][CodexPoolerWeb.Endpoint][:secret_key_base] == key
+        assert unchanged?
+      end)
+    end
+  end
+
+  @tag :endpoint_key_contract
+  test "development and test runtime do not require an endpoint secret override" do
+    with_env(Map.put(@required_env, "SECRET_KEY_BASE", nil), fn ->
+      for environment <- [:dev, :test] do
+        config = Config.Reader.read!("config/runtime.exs", env: environment)
+        refute Keyword.has_key?(config[:codex_pooler][CodexPoolerWeb.Endpoint], :secret_key_base)
+      end
+    end)
+  end
+
   @tag :totp_key_contract
   test "production rejects absent empty malformed and wrong-size TOTP encryption keys without exposing values" do
     for {shape, value} <- [missing: nil, empty: "", malformed: "synthetic-invalid-key", short: Base.encode64(:crypto.strong_rand_bytes(31)), long: Base.encode64(:crypto.strong_rand_bytes(33))] do
