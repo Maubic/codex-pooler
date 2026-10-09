@@ -25,6 +25,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
   alias CodexPooler.Jobs.AlertDeliveryWorker
   alias CodexPooler.Mailer
   alias CodexPooler.Repo
+  alias Oban.Engines.Basic
 
   @forbidden_arg_fragments ~w(
     prompt request_body response_body body bearer token access_token refresh_token authorization
@@ -62,7 +63,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
     assert job.args["trigger_kind"] == "incident_match"
     assert_safe_job_args(job.args)
 
-    assert :ok = perform_job(AlertDeliveryWorker, job.args)
+    assert :ok = perform_claimed_delivery(job.args)
 
     assert [attempt] = attempts_for(incident, channel)
     assert attempt.status == "sent"
@@ -98,7 +99,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
     %{incident: incident, channel: channel} = alert_delivery_fixture()
     Application.put_env(:codex_pooler, Mailer, [])
 
-    assert :ok = perform_job(AlertDeliveryWorker, delivery_args(incident, channel))
+    assert :ok = perform_claimed_delivery(delivery_args(incident, channel))
 
     assert [attempt] = attempts_for(incident, channel)
     assert attempt.status == "failed"
@@ -119,7 +120,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
   test "disabled email channel records a discarded attempt without sending" do
     %{incident: incident, channel: channel} = alert_delivery_fixture(channel_state: "disabled")
 
-    assert :ok = perform_job(AlertDeliveryWorker, delivery_args(incident, channel))
+    assert :ok = perform_claimed_delivery(delivery_args(incident, channel))
 
     assert [attempt] = attempts_for(incident, channel)
     assert attempt.status == "discarded"
@@ -133,7 +134,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
     %{incident: incident, channel: channel} = alert_delivery_fixture(rule_cooldown_minutes: 30)
     args = delivery_args(incident, channel)
 
-    assert :ok = perform_job(AlertDeliveryWorker, args)
+    assert :ok = perform_claimed_delivery(args)
 
     assert :ok = AlertDeliveryWorker.perform(%Oban.Job{args: args, attempt: 2})
 
@@ -148,7 +149,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
     %{incident: incident, channel: channel} = alert_delivery_fixture(rule_cooldown_minutes: 5)
     args = delivery_args(incident, channel)
 
-    assert :ok = perform_job(AlertDeliveryWorker, args)
+    assert :ok = perform_claimed_delivery(args)
 
     stale_completed_at =
       DateTime.add(DateTime.utc_now(), -10, :minute) |> DateTime.truncate(:microsecond)
@@ -182,7 +183,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
 
     assert_safe_job_args(job.args)
 
-    assert :ok = perform_job(AlertDeliveryWorker, job.args)
+    assert :ok = perform_claimed_delivery(job.args)
 
     assert [request] = FakeUpstream.requests(fake)
     assert request.method == "POST"
@@ -253,7 +254,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
         )
 
       assert {:error, %{code: ^expected_code, retryable: true}} =
-               perform_job(AlertDeliveryWorker, delivery_args(incident, channel))
+               perform_claimed_delivery(delivery_args(incident, channel))
 
       assert [request] = FakeUpstream.requests(fake)
       assert request.path == "/alerts/retry-#{status}"
@@ -293,7 +294,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
                )
     end
 
-    assert :ok = perform_job(AlertDeliveryWorker, delivery_args(incident, channel), attempt: 1)
+    assert :ok = perform_claimed_delivery(delivery_args(incident, channel), attempt: 1)
     attempt = List.last(attempts_for(incident, channel))
     assert attempt.attempt_number == 6
     assert attempt.status == "sent"
@@ -325,14 +326,14 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
     end
 
     assert {:error, %{retryable: true}} =
-             perform_job(AlertDeliveryWorker, delivery_args(incident, channel), attempt: 1)
+             perform_claimed_delivery(delivery_args(incident, channel), attempt: 1)
 
     attempt = List.last(attempts_for(incident, channel))
     assert attempt.attempt_number == 6
     assert attempt.max_attempts == 5
     assert DateTime.diff(attempt.next_retry_at, attempt.completed_at, :second) == 60
 
-    assert :ok = perform_job(AlertDeliveryWorker, delivery_args(incident, channel), attempt: 5)
+    assert :ok = perform_claimed_delivery(delivery_args(incident, channel), attempt: 5)
     terminal = List.last(attempts_for(incident, channel))
     assert terminal.attempt_number == 7
     assert terminal.status == "failed"
@@ -365,14 +366,14 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
     end
 
     assert {:error, %{retryable: true}} =
-             perform_job(AlertDeliveryWorker, delivery_args(incident, channel), attempt: 1)
+             perform_claimed_delivery(delivery_args(incident, channel), attempt: 1)
 
     attempt = List.last(attempts_for(incident, channel))
     assert attempt.attempt_number == 6
     assert attempt.max_attempts == 5
     assert DateTime.diff(attempt.next_retry_at, attempt.completed_at, :second) == 60
 
-    assert :ok = perform_job(AlertDeliveryWorker, delivery_args(incident, channel), attempt: 5)
+    assert :ok = perform_claimed_delivery(delivery_args(incident, channel), attempt: 5)
     terminal = List.last(attempts_for(incident, channel))
     assert terminal.attempt_number == 7
     assert terminal.status == "failed"
@@ -392,7 +393,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
         signing_secret: "whsec_delivery_terminal"
       )
 
-    assert :ok = perform_job(AlertDeliveryWorker, delivery_args(incident, channel))
+    assert :ok = perform_claimed_delivery(delivery_args(incident, channel))
 
     assert [request] = FakeUpstream.requests(fake)
     assert request.path == "/alerts/permanent"
@@ -565,4 +566,17 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
   defp unique_suffix, do: System.unique_integer([:positive])
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+  # The webhook worker's execution binding requires the actual durable claim;
+  # Oban.Testing.build_job invents an id and cannot certify that boundary.
+  defp perform_claimed_delivery(args, opts \\ []) do
+    queue = "claimed_alert_#{System.unique_integer([:positive])}"
+    attempt = Keyword.get(opts, :attempt, 1)
+    changeset = AlertDeliveryWorker.new(args, queue: queue, unique: false)
+    job = changeset |> Ecto.Changeset.put_change(:attempt, attempt - 1) |> Repo.insert!()
+    conf = Oban.config()
+    {:ok, meta} = Basic.init(conf, queue: queue, limit: 1)
+    {:ok, {_meta, [claimed]}} = Basic.fetch_jobs(conf, meta, %{})
+    assert claimed.id == job.id
+    Oban.Testing.perform_job(claimed, [])
+  end
 end

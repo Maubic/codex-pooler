@@ -7,6 +7,7 @@ defmodule CodexPooler.Alerts do
   alias CodexPooler.Alerts.ChannelManagement
   alias CodexPooler.Alerts.Delivery.DeliveryScheduling
   alias CodexPooler.Alerts.Delivery.EmailDelivery
+  alias CodexPooler.Alerts.Delivery.PendingRecovery
   alias CodexPooler.Alerts.Delivery.WebhookDelivery
   alias CodexPooler.Alerts.Evaluation.Evaluator
   alias CodexPooler.Alerts.Incidents.IncidentLifecycle
@@ -24,6 +25,9 @@ defmodule CodexPooler.Alerts do
   }
 
   alias CodexPooler.Pools.Pool
+
+  @spec recover_pending_deliveries(keyword()) :: {:ok, map()} | {:error, atom(), map()}
+  defdelegate recover_pending_deliveries(opts \\ []), to: PendingRecovery, as: :recover
 
   @type access_error :: Authorization.access_error()
   @type rule_result :: RuleManagement.rule_result()

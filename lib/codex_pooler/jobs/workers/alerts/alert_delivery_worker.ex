@@ -16,6 +16,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryWorker do
 
   alias CodexPooler.Alerts
   alias CodexPooler.Alerts.Delivery.EmailDelivery
+  alias CodexPooler.Alerts.Delivery.Execution
   alias CodexPooler.Alerts.Delivery.WebhookDelivery
 
   @type delivery_error ::
@@ -36,17 +37,24 @@ defmodule CodexPooler.Jobs.AlertDeliveryWorker do
   end
 
   @impl Oban.Worker
-  def perform(%Oban.Job{
-        args: %{
-          "alert_incident_id" => incident_id,
-          "alert_channel_id" => channel_id
-        },
-        attempt: attempt
-      }) do
-    persisted_attempt_number =
-      Alerts.next_delivery_attempt_number(incident_id, channel_id, attempt)
+  def perform(
+        %Oban.Job{
+          args: %{
+            "alert_incident_id" => incident_id,
+            "alert_channel_id" => channel_id
+          },
+          attempt: attempt
+        } = job
+      ) do
+    execution = Execution.new(job)
 
-    case Alerts.deliver_incident_to_channel(incident_id, channel_id, persisted_attempt_number, retry_attempt: attempt) do
+    persisted_attempt_number =
+      Execution.storage(execution, fn ->
+        if is_integer(job.id), do: Alerts.recover_pending_deliveries(job_id: job.id)
+        Alerts.next_delivery_attempt_number(incident_id, channel_id, attempt)
+      end)
+
+    case Alerts.deliver_incident_to_channel(incident_id, channel_id, persisted_attempt_number, retry_attempt: attempt, delivery_execution: execution) do
       {:ok, _attempt} -> :ok
       {:error, %{retryable: true} = reason} -> {:error, Map.take(reason, [:code, :retryable])}
       {:error, reason} -> {:cancel, sanitize_error(reason)}
