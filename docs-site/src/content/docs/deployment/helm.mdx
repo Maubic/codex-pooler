@@ -38,7 +38,7 @@ The chart has four release roles:
 - `app`, serves HTTP with `OBAN_MODE=web` and `PHX_SERVER=true`
 - `oban.worker`, runs background jobs with `OBAN_MODE=worker`
 - `oban.scheduler`, runs scheduled jobs with `OBAN_MODE=scheduler`
-- `migrations`, runs release migrations before app rollout when enabled
+- `migrations`, runs release migrations as a release-owned Job when enabled
 
 All roles use the same image repository and tag. Only the app role serves HTTP. Worker, scheduler, and migration pods don't expose the HTTP endpoint.
 
@@ -137,9 +137,11 @@ migrations:
   enabled: true
 ```
 
-The migration hook runs database migrations and imports the vendored OpenAI pricing feed. The scheduler keeps scheduled background work separate from request-serving pods.
+The migration Job is a regular release manifest, not a Helm hook. It uses the chart-created or existing Secret, runs database migrations, and imports the vendored pricing feed. The scheduler keeps scheduled background work separate from request-serving pods.
 
-Complete migrations before starting app pods on the new image. Execution recovery requires the attempt execution-identity columns, their index, and the `execution_terminal_proofs` table; disabling the hook requires completing the same release migrations separately before app startup.
+Images containing `CodexPooler.Platform.JobRuntime` check the complete image-required migration set before every Oban start or restart. Worker, scheduler and combined roles refuse queue and plugin startup while schema is incomplete or the database is unavailable, and normal restarts retry after migrations complete. This gate belongs to the image: the chart default `0.11.5` and older image overrides do not acquire it by upgrading the chart. Readiness probes alone cannot prevent background work from starting on those images. Apply migrations before starting their job roles.
+
+Use `helm upgrade --install ... --wait --wait-for-jobs` to report migration Job failure as a failed release operation. Flux HelmReleases use `spec.install.disableWaitForJobs: false` and `spec.upgrade.disableWaitForJobs: false`. Leave waiting itself enabled (`disableWait: false`). These settings wait for Jobs; they do not establish startup ordering inside older images. With `migrations.enabled=false`, complete the same image-required migrations externally. Stop or drain job roles before removing schema they require.
 
 The 0.8.0 upgrade and rollback procedures target PostgreSQL 18. API-key history migrations commit short `NOT VALID` constraint swaps before validating existing rows separately. Migration runners serialize through PostgreSQL advisory locks; interrupted concurrent index builds are checked and repaired on retry when their definitions match. A conflicting index definition requires investigation. These migrations do not make an arbitrary older image compatible: after API-key deletion leaves null-key history, the 0.7.8 image is incompatible with that retained history and the ledger migration refuses to restore required key ownership. Preserve the history and use compatible code; do not treat an image-only rollback as recovery.
 
