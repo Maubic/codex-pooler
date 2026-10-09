@@ -4145,6 +4145,12 @@ defmodule CodexPooler.CompatibilityMatrix do
         roles: ["system", "developer"],
         destination: "instructions",
         chat_top_level_instructions: "preserved_in_messages_and_input_fallback",
+        top_level_instructions: %{
+          presence: "optional",
+          accepted_types: ["string", "null"],
+          validation_timing: "before_lifting",
+          invalid_type: %{status: 400, type: "invalid_request_error", code: "invalid_request", param: "instructions", upstream_dispatch: false}
+        },
         merge_order: ["existing_instructions", "input_order_instruction_text"],
         residual_non_text_role: "user",
         blank_text: "omitted",

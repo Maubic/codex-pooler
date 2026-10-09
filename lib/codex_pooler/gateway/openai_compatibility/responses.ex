@@ -53,6 +53,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
          :ok <- Validation.reject_unsupported_fields(payload, :responses),
          :ok <- Validation.require_model(payload),
          :ok <- reject_locally_unsupported_fields(payload),
+         :ok <- validate_instructions(payload),
          :ok <- validate_metadata(payload),
          :ok <- validate_access_programs(payload),
          :ok <- validate_prompt_cache_options(payload),
@@ -121,6 +122,13 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
 
   defp expands_input_positions?(%{"role" => "assistant", "tool_calls" => calls}) when is_list(calls), do: length(calls) != 1
   defp expands_input_positions?(_item), do: false
+
+  defp validate_instructions(%{"instructions" => instructions}) when is_binary(instructions) or is_nil(instructions), do: :ok
+
+  defp validate_instructions(%{"instructions" => _instructions}),
+    do: {:error, Error.invalid_request("instructions must be a string or null", "instructions")}
+
+  defp validate_instructions(_payload), do: :ok
 
   defp validate_access_programs(%{"access_programs" => programs}) when is_map(programs) do
     cond do

@@ -316,6 +316,43 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
     end
   end
 
+  for surface <- [:responses, :chat_messages, :chat_fallback], lifted? <- [false, true], {shape, instructions} <- [{"integer", 1}, {"float", 1.5}, {"boolean", true}, {"object", %{}}, {"array", []}, {"message array", [%{"role" => "developer", "content" => "synthetic"}]}] do
+    @tag :instructions_type_contract
+    test "#{surface} refuses #{shape} instructions before lifted=#{lifted?} normalization" do
+      input = if(unquote(lifted?), do: [%{"role" => "system", "content" => "synthetic system"}, %{"role" => "developer", "content" => "synthetic developer"}], else: []) ++ [%{"role" => "user", "content" => "synthetic user"}]
+      input_field = if unquote(surface) == :chat_messages, do: "messages", else: "input"
+      payload = %{"model" => "gpt-fixture-text", input_field => input, "instructions" => unquote(Macro.escape(instructions))}
+      adapter = if unquote(surface) == :responses, do: Responses, else: Chat
+
+      for result <- [adapter.validate(payload), adapter.coerce(payload)] do
+        assert {:error, %{status: 400, code: "invalid_request", param: "instructions", message: "instructions must be a string or null"}} = result
+      end
+    end
+  end
+
+  @tag :instructions_type_contract
+  test "Responses and Chat preserve valid instructions and lifted ordering" do
+    for surface <- [:responses, :chat_messages, :chat_fallback], lifted? <- [false, true], instructions <- [:absent, nil, "", "synthetic top"] do
+      input = if(lifted?, do: [%{"role" => "system", "content" => "synthetic system"}, %{"role" => "developer", "content" => "synthetic developer"}], else: []) ++ [%{"role" => "user", "content" => "synthetic user"}]
+      input_field = if surface == :chat_messages, do: "messages", else: "input"
+      payload = %{"model" => "gpt-fixture-text", input_field => input}
+      payload = if instructions == :absent, do: payload, else: Map.put(payload, "instructions", instructions)
+      adapter = if surface == :responses, do: Responses, else: Chat
+      assert {:ok, result} = adapter.coerce(payload)
+
+      expected =
+        cond do
+          lifted? and instructions == "synthetic top" -> "synthetic top\nsynthetic system\nsynthetic developer"
+          lifted? -> "synthetic system\nsynthetic developer"
+          instructions == :absent -> if(surface == :chat_fallback, do: "", else: :absent)
+          true -> instructions
+        end
+
+      assert Map.get(result.payload, "instructions", :absent) == expected
+      assert Enum.map(result.payload["input"], & &1["role"]) == ["user"]
+    end
+  end
+
   @tag :responses_coercion
   test "string Responses input coerces to a backend-compatible input_text message" do
     assert {:ok, result} =
