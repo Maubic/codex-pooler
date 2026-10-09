@@ -619,33 +619,11 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
     )
   end
 
-  defp active_refresh_attempt_metadata(
-         %UpstreamIdentity{status: @refreshing} = identity,
-         timestamp
-       ) do
-    metadata = token_refresh_metadata(identity.metadata)
-
-    if active_refresh_attempt?(metadata, timestamp) do
-      {:ok, refresh_in_progress_metadata(metadata)}
+  defp active_refresh_attempt_metadata(%UpstreamIdentity{} = identity, timestamp) do
+    if CredentialFencing.active_token_refresh?(identity, timestamp) do
+      {:ok, refresh_in_progress_metadata(identity)}
     else
       :none
-    end
-  end
-
-  defp active_refresh_attempt_metadata(_identity, _timestamp), do: :none
-
-  defp active_refresh_attempt?(%{} = metadata, timestamp) do
-    with "refreshing" <- metadata["status"],
-         attempt_id when is_binary(attempt_id) <- metadata["attempt_id"],
-         generation when is_integer(generation) and generation >= 0 <- metadata["generation"],
-         started_at when is_binary(started_at) <- metadata["started_at"],
-         stale_after_ms when is_integer(stale_after_ms) and stale_after_ms > 0 <-
-           metadata["stale_after_ms"],
-         {:ok, started_at, _offset} <- DateTime.from_iso8601(started_at),
-         true <- DateTime.diff(timestamp, started_at, :millisecond) < stale_after_ms do
-      true
-    else
-      _value -> false
     end
   end
 

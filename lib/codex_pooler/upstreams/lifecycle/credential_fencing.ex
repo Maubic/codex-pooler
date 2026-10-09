@@ -26,6 +26,7 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
   @secret_active "active"
   @active IdentityStatus.active_status()
   @pending IdentityStatus.pending_status()
+  @refreshing IdentityStatus.refreshing_status()
   @refresh_failed IdentityStatus.refresh_failed_status()
   @reauth_required IdentityStatus.reauth_required_status()
 
@@ -35,6 +36,22 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
         }
   @type guarded_result :: :applied | :superseded
   @type probe_completion_mode :: :active_only | :auth_failure
+
+  @spec active_token_refresh?(UpstreamIdentity.t(), DateTime.t()) :: boolean()
+  def active_token_refresh?(%UpstreamIdentity{} = identity, %DateTime{} = timestamp) do
+    with %{} = metadata <- (identity.metadata || %{})["token_refresh"],
+         "refreshing" <- metadata["status"],
+         attempt_id when is_binary(attempt_id) <- metadata["attempt_id"],
+         generation when is_integer(generation) and generation >= 0 <- metadata["generation"],
+         started_at when is_binary(started_at) <- metadata["started_at"],
+         stale_after_ms when is_integer(stale_after_ms) and stale_after_ms > 0 <- metadata["stale_after_ms"],
+         {:ok, started_at, _offset} <- DateTime.from_iso8601(started_at),
+         true <- DateTime.diff(timestamp, started_at, :millisecond) < stale_after_ms do
+      true
+    else
+      _value -> false
+    end
+  end
 
   @spec initialize_metadata(map() | nil) :: map()
   def initialize_metadata(metadata) do
@@ -618,7 +635,7 @@ defmodule CodexPooler.Upstreams.Lifecycle.CredentialFencing do
 
     identity
     |> UpstreamIdentity.changeset(%{
-      status: @active,
+      status: if(active_token_refresh?(identity, timestamp), do: @refreshing, else: @active),
       disabled_at: nil,
       metadata:
         identity.metadata

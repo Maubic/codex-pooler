@@ -13,6 +13,7 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefreshTest do
   alias CodexPooler.Upstreams.Auth.{CodexAuth, TokenRefreshMetadata}
   alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
   alias CodexPooler.Upstreams.Lifecycle.IdentityLifecycle
+  alias CodexPooler.Upstreams.Reconciliation.PoolReconciliation
   alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
   alias Ecto.Adapters.SQL.Sandbox
@@ -645,6 +646,94 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefreshTest do
                Secrets.decrypt_active_secret(identity, "access_token")
     end
 
+    @tag :refresh_usage_overlap
+    test "usage HTTP success preserves a live refresh and refuses duplicate provider dispatch" do
+      usage_ref = make_ref()
+      refresh_ref = make_ref()
+
+      usage_payload = %{
+        "plan_type" => "pro",
+        "rate_limit" => %{
+          "primary_window" => %{"used_percent" => 10, "limit_window_seconds" => 18_000, "reset_after_seconds" => 3600}
+        }
+      }
+
+      response = %{"access_token" => secret("access", "overlap-new"), "expires_in" => 3600}
+
+      upstream =
+        start_path_upstream(%{
+          "/backend-api/wham/usage" => FakeUpstream.barrier_json_response(usage_payload, notify: self(), release_ref: usage_ref),
+          "/oauth/token" => FakeUpstream.barrier_json_response(response, notify: self(), release_ref: refresh_ref)
+        })
+
+      identity = refreshable_identity_fixture("active", %{"base_url" => FakeUpstream.url(upstream)})
+      store_secret!(identity, "access_token", secret("access", "overlap-old"))
+      store_secret!(identity, "refresh_token", secret("refresh", "overlap"))
+      assignment = active_assignment_for_identity!(identity)
+      parent = self()
+      supervisor = start_supervised!(Task.Supervisor)
+
+      usage =
+        Task.Supervisor.async_nolink(supervisor, fn ->
+          Sandbox.allow(Repo, parent, self())
+          PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+        end)
+
+      usage_monitor = Process.monitor(usage.pid)
+      assert_receive {:fake_upstream_timeout_barrier, :before_headers, usage_handler, ^usage_ref}, @detection_timeout_ms
+      assert Repo.reload!(identity).status == "active"
+
+      first =
+        Task.Supervisor.async_nolink(supervisor, fn ->
+          Sandbox.allow(Repo, parent, self())
+          TokenRefresh.refresh_access_token(identity)
+        end)
+
+      refresh_monitor = Process.monitor(first.pid)
+      assert_receive {:fake_upstream_timeout_barrier, :before_headers, refresh_handler, ^refresh_ref}, @detection_timeout_ms
+      claim = Repo.reload!(identity).metadata["token_refresh"]
+      send(usage_handler, {:fake_upstream_release_timeout, usage_ref})
+      assert {:ok, completed_usage} = Task.await(usage, @detection_timeout_ms)
+      assert_receive {:DOWN, ^usage_monitor, :process, _, :normal}, @detection_timeout_ms
+      usage_status = completed_usage.status
+      assert completed_usage.metadata["token_refresh"] == claim
+
+      # A wrongly admitted duplicate must finish too, without trapping cleanup at a barrier.
+      FakeUpstream.set_mode(upstream, {:path_json, %{"/oauth/token" => {200, response}}})
+      duplicate = TokenRefresh.refresh_access_token(identity)
+      refresh_requests = Enum.count(FakeUpstream.requests(upstream), &(&1.path == "/oauth/token"))
+      send(refresh_handler, {:fake_upstream_release_timeout, refresh_ref})
+      first_result = Task.await(first, @detection_timeout_ms)
+      assert_receive {:DOWN, ^refresh_monitor, :process, _, :normal}, @detection_timeout_ms
+
+      assert refresh_requests == 1
+      assert {:ok, %{status: :active}} = first_result
+      assert match?({:error, :refresh_in_progress, _}, duplicate)
+      assert usage_status == "refreshing"
+      assert Repo.reload!(identity).status == "active"
+      assert {:ok, %{status: :active}} = TokenRefresh.refresh_access_token(identity)
+      assert Enum.count(FakeUpstream.requests(upstream), &(&1.path == "/oauth/token")) == 2
+    end
+
+    @tag :refresh_usage_overlap
+    test "usage success restores active for stale or malformed refresh attempts" do
+      for refresh <- [
+            active_attempt_metadata() |> Map.put("started_at", DateTime.to_iso8601(DateTime.add(DateTime.utc_now(), -120))),
+            active_attempt_metadata() |> Map.put("started_at", "invalid"),
+            active_attempt_metadata() |> Map.put("generation", nil),
+            %{"status" => "succeeded"}
+          ] do
+        identity = refreshable_identity_fixture("refreshing", %{"token_refresh" => refresh})
+        assert {:ok, _allocated, fence} = CredentialFencing.allocate_usage_probe(identity)
+
+        assert {:ok, :applied, updated, :persisted} =
+                 CredentialFencing.apply_usage_success(identity, fence, fn _locked -> {:ok, :persisted} end)
+
+        assert updated.status == "active"
+        assert updated.metadata["token_refresh"] == refresh
+      end
+    end
+
     test "concurrent refreshes for one identity produce one provider request and one in-progress result" do
       refresh_token = secret("refresh", "single-flight")
       new_access_token = secret("access", "single-flight")
@@ -770,34 +859,39 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefreshTest do
       assert FakeUpstream.count(upstream) == 2
     end
 
-    test "active non-stale attempt returns in-progress without decrypting secrets or provider I/O" do
-      upstream =
-        start_path_upstream(%{
-          "/oauth/token" => {200, %{"access_token" => secret("access", "unused")}}
-        })
+    for status <- ~w(active refresh_due refresh_failed refreshing) do
+      @tag :refresh_usage_overlap
+      test "#{status} non-stale attempt returns in-progress without decrypting secrets or provider I/O" do
+        status = unquote(status)
 
-      metadata = active_attempt_metadata()
+        upstream =
+          start_path_upstream(%{
+            "/oauth/token" => {200, %{"access_token" => secret("access", "unused")}}
+          })
 
-      identity =
-        refreshable_identity_fixture("refreshing", %{
-          "base_url" => FakeUpstream.url(upstream),
-          "token_refresh" => metadata
-        })
+        metadata = active_attempt_metadata()
 
-      assert {:error, :refresh_in_progress, in_progress} =
-               TokenRefresh.refresh_access_token(identity, trigger_kind: "direct_retry")
+        identity =
+          refreshable_identity_fixture(status, %{
+            "base_url" => FakeUpstream.url(upstream),
+            "token_refresh" => metadata
+          })
 
-      assert in_progress == %{
-               attempt_id: metadata["attempt_id"],
-               generation: metadata["generation"],
-               started_at: metadata["started_at"],
-               stale_after_ms: metadata["stale_after_ms"]
-             }
+        assert {:error, :refresh_in_progress, in_progress} =
+                 TokenRefresh.refresh_access_token(identity, trigger_kind: "direct_retry")
 
-      persisted = Repo.get!(UpstreamIdentity, identity.id)
-      assert persisted.status == "refreshing"
-      assert persisted.metadata["token_refresh"] == metadata
-      assert FakeUpstream.count(upstream) == 0
+        assert in_progress == %{
+                 attempt_id: metadata["attempt_id"],
+                 generation: metadata["generation"],
+                 started_at: metadata["started_at"],
+                 stale_after_ms: metadata["stale_after_ms"]
+               }
+
+        persisted = Repo.get!(UpstreamIdentity, identity.id)
+        assert persisted.status == status
+        assert persisted.metadata["token_refresh"] == metadata
+        assert FakeUpstream.count(upstream) == 0
+      end
     end
 
     test "custom receive timeout reaches Codex OAuth refresh request" do
