@@ -170,6 +170,10 @@ defmodule CodexPooler.Upstreams.OAuthFlows.Completion do
         polled_flow = Lifecycle.update_device_poll!(flow, retry_after_seconds)
         %{status: :pending, flow: polled_flow}
 
+      {:error, %{code: :codex_auth_transient} = reason} when not is_map_key(reason, :stage) ->
+        polled_flow = Lifecycle.update_device_poll!(flow, flow.interval_seconds)
+        %{status: :pending, flow: polled_flow}
+
       {:error, %{code: :codex_device_code_expired}} ->
         Lifecycle.expire_locked_flow!(flow)
         oauth_error(OAuthCallback.safe_error(:expired_flow))

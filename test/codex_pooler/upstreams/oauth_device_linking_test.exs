@@ -3,6 +3,8 @@ defmodule CodexPooler.Upstreams.OAuthDeviceLinkingTest do
 
   import Ecto.Query
 
+  alias CodexPooler.Access
+  alias CodexPooler.Access.InviteOnboarding
   alias CodexPooler.Accounts.Scope
   alias CodexPooler.Audit.AuditEvent
   alias CodexPooler.Events
@@ -134,6 +136,92 @@ defmodule CodexPooler.Upstreams.OAuthDeviceLinkingTest do
     assert slowed.status == "pending"
     assert slowed.interval_seconds == 10
     assert DateTime.diff(slowed.poll_after_at, slowed.last_polled_at, :second) in 9..10
+  end
+
+  test "transient HTTP polling failure keeps the persisted device flow pending until recovery" do
+    scope = fixture_owner_scope()
+    provider = start_provider!(device_routes(%{"/api/accounts/deviceauth/token" => {503, %{"error" => "temporarily_unavailable"}}}))
+    assert {:ok, %{flow: flow}} = Upstreams.start_device_oauth(scope, pool_fixture())
+    assert {:error, %{code: :codex_auth_transient}} = CodexAuth.poll_device_authorization(device_poll_state())
+    assert_transient_flow_pending(scope, flow)
+    FakeUpstream.set_mode(provider, {:path_json, successful_device_routes("acct_device_http_recovery")})
+    assert_flow_recovers(scope, flow)
+    assert Enum.map(FakeOpenAIAuthProvider.requests(provider), & &1.path) == ["/api/accounts/deviceauth/usercode", "/api/accounts/deviceauth/token", "/api/accounts/deviceauth/token", "/api/accounts/deviceauth/token", "/oauth/token"]
+  end
+
+  test "connection failure during polling keeps the same device flow pending until recovery" do
+    scope = fixture_owner_scope()
+    provider = start_provider!(device_routes(%{"/api/accounts/deviceauth/token" => {400, %{"error" => "authorization_pending"}}}))
+    assert {:ok, %{flow: flow}} = Upstreams.start_device_oauth(scope, pool_fixture())
+    FakeOpenAIAuthProvider.stop(provider)
+    refute Process.alive?(provider.supervisor)
+    assert {:error, %{code: :codex_auth_transient}} = CodexAuth.poll_device_authorization(device_poll_state())
+    assert_transient_flow_pending(scope, flow)
+    recovered = start_provider!(successful_device_routes("acct_device_connection_recovery"))
+    assert_flow_recovers(scope, flow)
+    assert Enum.map(FakeOpenAIAuthProvider.requests(recovered), & &1.path) == ["/api/accounts/deviceauth/token", "/oauth/token"]
+  end
+
+  test "transient polling cannot extend the device flow deadline or poll beyond it" do
+    scope = fixture_owner_scope()
+    provider = start_provider!(device_routes(%{"/api/accounts/deviceauth/token" => {503, %{"error" => "temporarily_unavailable"}}}))
+    assert {:ok, %{flow: flow}} = Upstreams.start_device_oauth(scope, pool_fixture())
+    assert_transient_flow_pending(scope, flow)
+    expired_at = DateTime.utc_now() |> DateTime.add(-1, :second)
+    flow |> Ecto.Changeset.change(expires_at: expired_at) |> Repo.update!()
+
+    assert {:error, %{code: :expired_flow}} = Upstreams.poll_device_oauth(scope, flow.id)
+    assert {:error, %{code: :expired_flow}} = Upstreams.poll_device_oauth(scope, flow.id)
+    assert Enum.map(FakeOpenAIAuthProvider.requests(provider), & &1.path) == ["/api/accounts/deviceauth/usercode", "/api/accounts/deviceauth/token"]
+    assert DateTime.compare(Repo.reload!(flow).expires_at, expired_at) == :eq
+    assert Repo.aggregate(UpstreamIdentity, :count) == 0
+  end
+
+  test "post-authorization token exchange transient failure remains terminal" do
+    scope = fixture_owner_scope()
+
+    routes =
+      successful_device_routes("acct_device_exchange_failure")
+      |> Map.put("/oauth/token", {503, %{"error" => "temporarily_unavailable"}})
+
+    provider = start_provider!(routes)
+    assert {:ok, %{flow: flow}} = Upstreams.start_device_oauth(scope, pool_fixture())
+    assert {:error, %{code: :token_exchange_failed}} = Upstreams.poll_device_oauth(scope, flow.id)
+    assert Repo.reload!(flow).status == "failed"
+    assert {:error, %{code: :flow_not_pending}} = Upstreams.poll_device_oauth(scope, flow.id)
+    assert Enum.map(FakeOpenAIAuthProvider.requests(provider), & &1.path) == ["/api/accounts/deviceauth/usercode", "/api/accounts/deviceauth/token", "/oauth/token"]
+    assert Repo.aggregate(UpstreamIdentity, :count) == 0
+    assert Repo.aggregate(EncryptedSecret, :count) == 0
+  end
+
+  test "malformed polling error remains terminal rather than transient" do
+    scope = fixture_owner_scope()
+    provider = start_provider!(device_routes(%{"/api/accounts/deviceauth/token" => {400, %{"error" => "invalid_request"}}}))
+    assert {:ok, %{flow: flow}} = Upstreams.start_device_oauth(scope, pool_fixture())
+    assert {:error, %{code: :codex_auth_malformed}} = CodexAuth.poll_device_authorization(device_poll_state())
+    assert {:error, %{code: :token_exchange_failed}} = Upstreams.poll_device_oauth(scope, flow.id)
+    assert Repo.reload!(flow).status == "failed"
+    assert {:error, %{code: :flow_not_pending}} = Upstreams.poll_device_oauth(scope, flow.id)
+    assert length(FakeOpenAIAuthProvider.requests(provider)) == 3
+  end
+
+  test "invite polling retains its pending account across a real transient response and completes later" do
+    scope = fixture_owner_scope()
+    pool = pool_fixture(%{created_by_user_id: scope.user.id})
+    assert {:ok, %{token: token}} = Access.create_invite(scope, pool, %{invited_email: "device-acct_device_invite_recovery@example.com"})
+    provider = start_provider!(device_routes(%{"/api/accounts/deviceauth/token" => {503, %{"error" => "temporarily_unavailable"}}}))
+    assert {:ok, started} = InviteOnboarding.start_device(token)
+    identity = started.account.identity
+    assert {:error, %{code: :codex_auth_transient}} = InviteOnboarding.poll_device(token, identity.id)
+    assert Repo.reload!(identity).status == "pending"
+    assert Repo.reload!(started.account.assignment).status == "pending"
+    assert active_secret_count("access_token") == 0
+    assert active_secret_count("refresh_token") == 0
+    FakeUpstream.set_mode(provider, {:path_json, successful_device_routes("acct_device_invite_recovery")})
+    assert {:ok, result} = InviteOnboarding.poll_device(token, identity.id)
+    assert result.identity.id == identity.id
+    assert Repo.reload!(identity).status == "active"
+    assert Enum.map(FakeOpenAIAuthProvider.requests(provider), & &1.path) == ["/api/accounts/deviceauth/usercode", "/api/accounts/deviceauth/token", "/api/accounts/deviceauth/token", "/oauth/token"]
   end
 
   @tag :subject_plumbing
@@ -445,10 +533,55 @@ defmodule CodexPooler.Upstreams.OAuthDeviceLinkingTest do
   end
 
   defp start_provider!(routes) do
-    {:ok, provider} = FakeOpenAIAuthProvider.start_link(routes)
+    name = :"device_linking_provider_#{System.unique_integer([:positive])}"
+
+    on_exit(fn ->
+      if pid = Process.whereis(name) do
+        FakeOpenAIAuthProvider.stop(%FakeUpstream{supervisor: pid})
+        refute Process.alive?(pid)
+      end
+
+      assert Process.whereis(name) == nil
+    end)
+
+    {:ok, provider} = FakeUpstream.start_link({:path_json, routes}, supervisor_name: name)
+    Process.unlink(provider.supervisor)
     Application.put_env(:codex_pooler, CodexAuth, issuer: FakeOpenAIAuthProvider.url(provider))
-    on_exit(fn -> FakeOpenAIAuthProvider.stop(provider) end)
     provider
+  end
+
+  defp assert_transient_flow_pending(scope, flow) do
+    result = Upstreams.poll_device_oauth(scope, flow.id)
+    stored = Repo.reload!(flow)
+    assert stored.status == "pending"
+    assert {:ok, %{status: :pending, flow: pending}} = result
+    assert stored.id == pending.id
+    assert stored.error_code == nil
+    assert stored.error_message == nil
+    assert stored.interval_seconds == flow.interval_seconds
+    assert DateTime.compare(stored.expires_at, flow.expires_at) == :eq
+    assert DateTime.diff(stored.poll_after_at, stored.last_polled_at, :second) == flow.interval_seconds
+    assert Repo.aggregate(UpstreamIdentity, :count) == 0
+    assert Repo.aggregate(PoolUpstreamAssignment, :count) == 0
+    assert Repo.aggregate(EncryptedSecret, :count) == 0
+  end
+
+  defp assert_flow_recovers(scope, flow) do
+    assert {:ok, %{status: :completed, flow: completed, identity: identity}} = Upstreams.poll_device_oauth(scope, flow.id)
+    assert completed.id == flow.id
+    assert Repo.reload!(flow).status == "completed"
+    assert Repo.reload!(identity).status == "active"
+    assert active_secret_count("access_token") == 1
+    assert active_secret_count("refresh_token") == 1
+  end
+
+  defp device_poll_state, do: %{"device_auth_id" => "device-auth-linking", "user_code" => "CODE-LINK", "poll_interval_seconds" => 5}
+
+  defp successful_device_routes(account_id) do
+    device_routes(%{
+      "/api/accounts/deviceauth/token" => {200, FakeOpenAIAuthProvider.authorization_code_response()},
+      "/oauth/token" => {200, FakeOpenAIAuthProvider.token_response(id_token: device_id_token(account_id))}
+    })
   end
 
   defp device_routes(extra_routes) do

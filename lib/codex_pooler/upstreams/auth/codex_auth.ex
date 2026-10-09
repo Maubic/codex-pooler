@@ -14,6 +14,7 @@ defmodule CodexPooler.Upstreams.Auth.CodexAuth do
   @type auth_error :: %{
           required(:code) => atom(),
           required(:message) => String.t(),
+          optional(:stage) => :token_exchange,
           optional(:retry_after_seconds) => pos_integer(),
           optional(:status) => pos_integer()
         }
@@ -381,6 +382,7 @@ defmodule CodexPooler.Upstreams.Auth.CodexAuth do
                 verifier,
                 CodexAuth.device_redirect_uri()
               )
+              |> mark_device_exchange_result()
 
             _invalid ->
               auth_error(:codex_auth_malformed, "Codex device response was incomplete", 502)
@@ -393,6 +395,9 @@ defmodule CodexPooler.Upstreams.Auth.CodexAuth do
           auth_error(:codex_auth_transient, Exception.message(reason), 502)
       end
     end
+
+    defp mark_device_exchange_result({:error, reason}), do: {:error, Map.put(reason, :stage, :token_exchange)}
+    defp mark_device_exchange_result({:ok, _tokens} = result), do: result
 
     defp request_tokens_for_authorization_code(code, verifier, redirect_uri) do
       url = CodexAuth.issuer() <> "/oauth/token"
