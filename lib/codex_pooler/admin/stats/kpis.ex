@@ -65,7 +65,7 @@ defmodule CodexPooler.Admin.Stats.Kpis do
     }
   end
 
-  @spec tokens_per_second_kpi([map()], %{latency_ms: non_neg_integer()}) :: map()
+  @spec tokens_per_second_kpi([map()], %{required(:latency_ms) => non_neg_integer(), optional(:latency_count) => non_neg_integer(), optional(:source_count) => non_neg_integer()}) :: map()
   def tokens_per_second_kpi(settlements, %{latency_ms: latency_ms}) do
     total_tokens = Aggregates.sum_integer(settlements, :total_tokens)
 
@@ -90,7 +90,7 @@ defmodule CodexPooler.Admin.Stats.Kpis do
     }
   end
 
-  @spec average_latency_kpi(%{latency_ms: non_neg_integer(), latency_count: non_neg_integer()}) :: map()
+  @spec average_latency_kpi(%{required(:latency_ms) => non_neg_integer(), required(:latency_count) => non_neg_integer(), optional(:source_count) => non_neg_integer()}) :: map()
   def average_latency_kpi(%{latency_ms: latency_ms, latency_count: latency_count}) do
     value = if latency_count > 0, do: round(latency_ms / latency_count)
     %{value: value, unit: "ms"}
