@@ -980,7 +980,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "p95 duration of all HTTP requests observed by Phoenix endpoint instrumentation, including /healthz and /readyz probes, /metrics scrapes when enabled, and unmatched endpoint traffic. Probes and scrapes can dominate a low-traffic pod's sample population; this is not gateway-only latency.",
+      "description": "p95 duration of all HTTP requests observed by Phoenix endpoint instrumentation, including /healthz and /readyz probes, /metrics scrapes when enabled, and unmatched endpoint traffic. Probes and scrapes can dominate a low-traffic pod's sample population; this is not gateway-only latency. Histogram quantiles are interpolated estimates with a 300 s top finite bucket; a quantile in +Inf is reported as 300 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1032,7 +1032,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Top matched routes with router-dispatch stop observations by p95 latency, including /healthz and /readyz probes and /metrics scrapes when enabled. These route series exclude unmatched endpoint requests and differ from endpoint totals. The active-route filter avoids stale NaN/empty legend rows when a route has no observations in the current interval.",
+      "description": "Top matched routes with router-dispatch stop observations by p95 latency, including /healthz and /readyz probes and /metrics scrapes when enabled. These route series exclude unmatched endpoint requests and differ from endpoint totals. The active-route filter avoids stale NaN/empty legend rows when a route has no observations in the current interval. Histogram quantiles are interpolated estimates with a 300 s top finite bucket; a quantile in +Inf is reported as 300 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1339,7 +1339,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Time requests spent waiting in local admission queues before execution or timeout.",
+      "description": "Time requests spent waiting in local admission queues before execution or timeout. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1628,7 +1628,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
+      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1680,7 +1680,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
+      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1732,7 +1732,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
+      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1888,7 +1888,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Database connection checkout pressure by safe source and command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
+      "description": "Database connection checkout pressure by safe source and command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -2162,7 +2162,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "p95 duration for full admin stats dashboard builds. Pair spikes here with hot query source and DB queue panels to identify expensive stats reload paths.",
+      "description": "p95 duration for full admin stats dashboard builds. Pair spikes here with hot query source and DB queue panels to identify expensive stats reload paths. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -2266,7 +2266,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "p95 admin request-log reload duration by bounded stage and scope. Pair spikes with DB queue, hot safe query source, and pg_stat_statements evidence when validating request-log read-path remediation.",
+      "description": "p95 admin request-log reload duration by bounded stage and scope. Pair spikes with DB queue, hot safe query source, and pg_stat_statements evidence when validating request-log read-path remediation. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",

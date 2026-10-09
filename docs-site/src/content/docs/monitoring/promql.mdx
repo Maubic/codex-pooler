@@ -11,6 +11,14 @@ Replace `namespace="example-app"` and `job="codex-pooler-app"` with your target 
 
 Application metrics come from Codex Pooler. Container metrics require kubelet/cAdvisor, and `kube_*` metrics require kube-state-metrics.
 
+## Reading latency percentiles
+
+Latency histograms produce interpolated estimates, not exact request durations. Endpoint and routed-request histograms have finite buckets through 300 seconds; admission, repository-query and admin-reload/build histograms have finite buckets through 60 seconds. Subsecond buckets preserve low-latency resolution; higher bounds include 10, 15, 30 and 60 seconds and, for endpoint/route durations, 120 and 300 seconds.
+
+Observations above the top finite bound still contribute to the `+Inf` bucket, count and sum. If p95 falls in that bucket, `histogram_quantile` reports the top finite bound: 300 or 60 seconds. That value is not an upper bound on individual observations. Long-lived streams and operator-configured waits can exceed these ranges; inspect request timings or the overflow share when the percentile reaches the ceiling. An observation exactly on a finite boundary belongs to that bucket, and interpolation can place the estimate below that boundary. Floating-point unit conversion can place a nominal boundary value in the adjacent bucket.
+
+Aggregate histogram buckets before calculating a percentile; do not average per-pod percentiles. Keep one bucket schema across the selected pods: during a rolling change of bucket bounds, old and new pods expose different `le` series, so compare homogeneous pod cohorts until the rollout and query window contain only the new schema.
+
 ## Traffic and latency
 
 ### HTTP request rate

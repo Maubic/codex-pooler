@@ -101,7 +101,11 @@ defmodule CodexPoolerWeb.TelemetryTest do
                0.5,
                1,
                2,
-               5
+               5,
+               10,
+               15,
+               30,
+               60
              ]
     end
   end
@@ -238,7 +242,11 @@ defmodule CodexPoolerWeb.TelemetryTest do
                0.5,
                1,
                2,
-               5
+               5,
+               10,
+               15,
+               30,
+               60
              ]
     end
 
@@ -764,7 +772,11 @@ defmodule CodexPoolerWeb.TelemetryTest do
              0.5,
              1,
              2,
-             5
+             5,
+             10,
+             15,
+             30,
+             60
            ]
   end
 
@@ -833,7 +845,11 @@ defmodule CodexPoolerWeb.TelemetryTest do
              0.5,
              1,
              2,
-             5
+             5,
+             10,
+             15,
+             30,
+             60
            ]
   end
 
