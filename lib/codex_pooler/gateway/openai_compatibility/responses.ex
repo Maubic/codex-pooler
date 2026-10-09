@@ -751,6 +751,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
     validate_function_tool(tool)
   end
 
+  defp validate_namespace_tool(%{"type" => "function", "name" => name, "strict" => true} = tool)
+       when is_binary(name),
+       do: validate_function_tool(tool)
+
   defp validate_namespace_tool(%{"type" => "custom"} = tool), do: validate_custom_tool(tool)
 
   defp validate_namespace_tool(_tool),
@@ -778,6 +782,11 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses do
       validate_optional_output_schema(tool)
     end
   end
+
+  # Validate the remaining tool fields first; StrictSchema diagnoses the original missing/non-map root afterwards.
+  defp validate_function_tool(%{"type" => "function", "name" => name, "strict" => true} = tool)
+       when is_binary(name),
+       do: validate_function_tool(Map.put(tool, "parameters", %{}))
 
   defp validate_function_tool(_tool),
     do: {:error, Error.invalid_request("function tool requires flat name and parameters", "tools")}

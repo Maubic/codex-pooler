@@ -273,6 +273,49 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
     end
   end
 
+  for layout <- [:flat, :namespace], root <- [:absent, nil, true, 7, "schema", [], %{"type" => "string"}] do
+    tool = %{"type" => "function", "name" => "strict_root_fixture", "strict" => true}
+    tool = if root == :absent, do: tool, else: Map.put(tool, "parameters", root)
+
+    @tag :strict_root_diagnostic
+    test "Responses strict #{layout} root #{inspect(root)} reports its indexed parameters path" do
+      tool = unquote(Macro.escape(tool))
+      {tools, param} = if unquote(layout) == :flat, do: {[%{"type" => "web_search"}, tool], "tools.1.parameters"}, else: {[%{"type" => "namespace", "name" => "fixture_namespace", "description" => "Synthetic namespace", "tools" => [%{"type" => "custom", "name" => "custom_fixture"}, tool]}], "tools.0.tools.1.parameters"}
+      assert {:error, %{status: 400, code: "invalid_function_parameters", param: ^param}} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => "synthetic", "tools" => tools})
+    end
+  end
+
+  @tag :strict_root_diagnostic
+  test "strict root diagnostics preserve malformed tools and non-strict boundaries" do
+    strict = %{"type" => "function", "name" => "strict_root_fixture", "strict" => true, "parameters" => nil}
+    malformed = [Map.put(strict, "name", ""), Map.delete(strict, "name"), Map.put(strict, "name", 1), Map.put(strict, "type", "unknown"), Map.put(strict, "unexpected", true), %{"type" => "function", "function" => Map.drop(strict, ["type"])}, %{"type" => "namespace", "name" => "fixture_namespace", "description" => "", "tools" => [strict]}]
+
+    for tool <- malformed do
+      assert {:error, %{status: 400, code: "invalid_request", param: "tools"}} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => "synthetic", "tools" => [tool]})
+    end
+
+    for tool <- [Map.delete(strict, "strict"), strict |> Map.put("strict", false) |> Map.delete("parameters")] do
+      assert {:error, %{status: 400, code: "invalid_request", param: "tools"}} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => "synthetic", "tools" => [tool]})
+    end
+
+    assert {:ok, _} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => "synthetic", "tools" => [strict |> Map.put("strict", false) |> Map.put("parameters", true)]})
+  end
+
+  @tag :strict_root_diagnostic
+  test "supported translated Chat object and typed invalid roots retain their existing path" do
+    for {root, expected} <- [{%{"type" => "object", "properties" => %{}, "required" => [], "additionalProperties" => false}, :ok}, {%{"type" => "string"}, :strict_error}, {nil, :shape_error}, {:absent, :shape_error}] do
+      function = %{"name" => "strict_root_fixture", "strict" => true}
+      function = if root == :absent, do: function, else: Map.put(function, "parameters", root)
+      result = Chat.coerce(%{"model" => "gpt-fixture-text", "messages" => [%{"role" => "user", "content" => "synthetic"}], "tools" => [%{"type" => "function", "function" => function}]})
+
+      case expected do
+        :ok -> assert {:ok, _} = result
+        :strict_error -> assert {:error, %{code: "invalid_function_parameters", param: "tools.0.parameters"}} = result
+        :shape_error -> assert {:error, %{code: "invalid_request", param: "tools"}} = result
+      end
+    end
+  end
+
   @tag :responses_coercion
   test "string Responses input coerces to a backend-compatible input_text message" do
     assert {:ok, result} =
