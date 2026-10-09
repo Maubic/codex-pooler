@@ -1025,17 +1025,21 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
         in_progress_turns
         |> Enum.flat_map(&interrupt_turn!(&1, opts, reason, now, caller_owned_transaction?))
 
-      session
-      |> Ecto.Changeset.change(%{
-        status: next_status,
-        disconnected_at: now,
-        closed_at: if(next_status == @session_closed, do: now, else: nil),
-        close_reason: nil,
-        owner_lease_expires_at: lease_expires_at,
-        last_heartbeat_at: now,
-        updated_at: now
-      })
-      |> Repo.update!()
+      # Same-key replacement already retired this row under its ownership
+      # locks. Finalize its turns without reopening it beside the successor.
+      if session.status != @session_closed do
+        session
+        |> Ecto.Changeset.change(%{
+          status: next_status,
+          disconnected_at: now,
+          closed_at: if(next_status == @session_closed, do: now, else: nil),
+          close_reason: nil,
+          owner_lease_expires_at: lease_expires_at,
+          last_heartbeat_at: now,
+          updated_at: now
+        })
+        |> Repo.update!()
+      end
 
       interruption_result(length(in_progress_turns), interrupted_outcomes)
     else

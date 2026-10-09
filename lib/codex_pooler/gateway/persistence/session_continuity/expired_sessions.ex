@@ -6,7 +6,8 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.ExpiredSessions do
   alias CodexPooler.Gateway.Persistence.{
     BridgeOwnerLease,
     BridgeSessionAlias,
-    CodexSession
+    CodexSession,
+    CodexTurn
   }
 
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.OwnerLease, as: OwnerLeaseStatus
@@ -15,6 +16,7 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.ExpiredSessions do
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.SessionAlias,
     as: SessionAliasStatus
 
+  alias CodexPooler.Accounting.Attempt
   alias CodexPooler.Repo
 
   @alias_active SessionAliasStatus.active_status()
@@ -232,13 +234,33 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuity.ExpiredSessions do
     )
   end
 
+  # An expired lease remains the durable authority for physical websocket stop
+  # and settlement. Closing its session must not consume that authority first.
+  # As in owner interruption, no attempt yet is conservatively owner-carried;
+  # a latest HTTP attempt is deliberately excluded.
+  @doc false
+  @spec sessions_with_pending_owner_turns() :: Ecto.Query.t()
+  def sessions_with_pending_owner_turns do
+    latest_http_attempt =
+      from attempt in Attempt,
+        as: :attempt,
+        where: attempt.request_id == parent_as(:turn).request_id and attempt.transport != "websocket",
+        where: not exists(from later in Attempt, where: later.request_id == parent_as(:attempt).request_id and later.attempt_number > parent_as(:attempt).attempt_number)
+
+    from turn in CodexTurn,
+      as: :turn,
+      where: turn.status == ^CodexTurn.in_progress_status() and not exists(latest_http_attempt),
+      select: turn.codex_session_id
+  end
+
   defp expire_leases!([], _now), do: {0, nil}
 
   defp expire_leases!(session_ids, now) do
     BridgeOwnerLease
     |> where(
       [lease],
-      lease.codex_session_id in ^session_ids and lease.status == ^@lease_active
+      lease.codex_session_id in ^session_ids and lease.status == ^@lease_active and
+        lease.codex_session_id not in subquery(sessions_with_pending_owner_turns())
     )
     |> Repo.update_all(set: [status: @lease_expired, released_at: now, updated_at: now])
   end

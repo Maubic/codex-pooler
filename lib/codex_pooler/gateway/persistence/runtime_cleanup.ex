@@ -19,6 +19,7 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
   }
 
   alias CodexPooler.Gateway.OperationalSettings
+  alias CodexPooler.Gateway.Persistence.SessionContinuity.ExpiredSessions
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.OwnerLease, as: OwnerLeaseStatus
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.Session, as: SessionStatus
   alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup
@@ -245,7 +246,7 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
 
       {expired_leases, _} =
         BridgeOwnerLease
-        |> where([lease], lease.status == ^active_lease_status and lease.expires_at <= ^now)
+        |> where([lease], lease.status == ^active_lease_status and lease.expires_at <= ^now and lease.codex_session_id not in subquery(ExpiredSessions.sessions_with_pending_owner_turns()))
         |> Repo.update_all(set: [status: expired_lease_status, released_at: now, updated_at: now])
 
       {expired_idempotency_keys, _} =
@@ -474,7 +475,9 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
           lease.codex_session_id == session.id and
             lease.status == ^BridgeOwnerLease.active_status() and
             lease.expires_at <= ^now and lease.lease_token == session.owner_lease_token and
-            lease.owner_instance_id == session.owner_instance_id,
+            lease.owner_instance_id == session.owner_instance_id and
+            fragment("? IS NOT DISTINCT FROM ?", lease.owner_instance_boot_id, session.owner_instance_boot_id) and
+            lease.pool_id == session.pool_id and lease.api_key_id == session.api_key_id,
         join: turn in CodexTurn,
         on:
           turn.codex_session_id == session.id and
