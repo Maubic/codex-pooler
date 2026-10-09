@@ -64,7 +64,7 @@ defmodule CodexPooler.Gateway.Routing.CircuitTransitionTest do
 
     expire_probe_window!(opened)
 
-    assert {:ok, %{admission: :probe, state: %RoutingCircuitState{status: "half_open"}}} =
+    assert {:ok, %{admission: :probe, state: %RoutingCircuitState{status: "half_open"} = probe}} =
              CircuitState.begin_attempt(auth, model, assignment, "proxy_websocket")
 
     assert_transition(events, "open_to_half_open", "open", "half_open", "none")
@@ -76,7 +76,7 @@ defmodule CodexPooler.Gateway.Routing.CircuitTransitionTest do
                assignment,
                "proxy_websocket",
                :retryable_upstream_status,
-               :probe
+               CircuitState.completion_admission(probe)
              )
 
     assert_transition(
@@ -89,13 +89,13 @@ defmodule CodexPooler.Gateway.Routing.CircuitTransitionTest do
 
     expire_probe_window!(reopened)
 
-    assert {:ok, %{admission: :probe, state: %RoutingCircuitState{status: "half_open"}}} =
+    assert {:ok, %{admission: :probe, state: %RoutingCircuitState{status: "half_open"} = probe}} =
              CircuitState.begin_attempt(auth, model, assignment, "proxy_websocket")
 
     assert_transition(events, "open_to_half_open", "open", "half_open", "none")
 
     assert {:ok, %RoutingCircuitState{status: "closed"}} =
-             CircuitState.record_success(auth, model, assignment, "proxy_websocket", :probe)
+             CircuitState.record_success(auth, model, assignment, "proxy_websocket", CircuitState.completion_admission(probe))
 
     assert_transition(events, "half_open_to_closed", "half_open", "closed", "none")
 
@@ -131,7 +131,7 @@ defmodule CodexPooler.Gateway.Routing.CircuitTransitionTest do
     Enum.reduce(1..2, opened, fn _cycle, current ->
       expire_probe_window!(current)
 
-      assert {:ok, %{admission: :probe, state: %RoutingCircuitState{status: "half_open"}}} =
+      assert {:ok, %{admission: :probe, state: %RoutingCircuitState{status: "half_open"} = probe}} =
                CircuitState.begin_attempt(auth, model, assignment, "proxy_stream")
 
       assert_transition(events, "open_to_half_open", "open", "half_open", "none")
@@ -143,7 +143,7 @@ defmodule CodexPooler.Gateway.Routing.CircuitTransitionTest do
                  assignment,
                  "proxy_stream",
                  :upstream_network_error,
-                 :probe
+                 CircuitState.completion_admission(probe)
                )
 
       assert_transition(
@@ -212,7 +212,7 @@ defmodule CodexPooler.Gateway.Routing.CircuitTransitionTest do
 
     half_open_circuit!(auth, model, assignment, updated_at: now(), probe_count: 0)
 
-    assert {:ok, %{admission: :probe, state: %RoutingCircuitState{status: "half_open"}}} =
+    assert {:ok, %{admission: :probe, state: %RoutingCircuitState{status: "half_open"} = probe}} =
              CircuitState.begin_attempt(auth, model, assignment, "proxy_websocket")
 
     assert {:ok, %RoutingCircuitState{status: "half_open"}} =
@@ -221,7 +221,7 @@ defmodule CodexPooler.Gateway.Routing.CircuitTransitionTest do
                model,
                assignment,
                "proxy_websocket",
-               :probe
+               CircuitState.completion_admission(probe)
              )
 
     Repo.delete_all(RoutingCircuitState)

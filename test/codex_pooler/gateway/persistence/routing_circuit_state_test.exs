@@ -610,7 +610,7 @@ defmodule CodexPooler.Gateway.Persistence.RoutingCircuitStateTest do
                assignment,
                "proxy_websocket",
                :probe_failure,
-               :probe
+               CircuitState.completion_admission(probe)
              )
 
     assert reopened.metadata["probe_in_flight_count"] == 0
@@ -995,20 +995,20 @@ defmodule CodexPooler.Gateway.Persistence.RoutingCircuitStateTest do
 
     assert {:ok, %RoutingCircuitState{status: "half_open", success_count: 1} = first_success} =
              in_db_observer(fn ->
-               CircuitState.record_success(auth, model, assignment, "proxy_stream", :probe)
+               CircuitState.record_success(auth, model, assignment, "proxy_stream", CircuitState.completion_admission(first_probe))
              end)
 
     assert first_success.failure_count == 2
     assert first_success.metadata["probe_in_flight_count"] == 0
 
-    assert {:ok, %{admission: :probe, state: %RoutingCircuitState{status: "half_open"}}} =
+    assert {:ok, %{admission: :probe, state: %RoutingCircuitState{status: "half_open"} = second_probe}} =
              in_db_observer(fn ->
                CircuitState.begin_attempt(auth, model, assignment, "proxy_stream")
              end)
 
     assert {:ok, %RoutingCircuitState{status: "closed", success_count: 2} = recovered} =
              in_db_observer(fn ->
-               CircuitState.record_success(auth, model, assignment, "proxy_stream", :probe)
+               CircuitState.record_success(auth, model, assignment, "proxy_stream", CircuitState.completion_admission(second_probe))
              end)
 
     assert recovered.failure_count == 0

@@ -21,7 +21,8 @@ defmodule CodexPooler.Gateway.Routing.CircuitState do
   @half_open_status CircuitStatus.half_open_status()
 
   @type auth :: CodexPooler.Access.auth_context()
-  @type admission :: :probe | :normal | :none
+  @type probe_receipt :: %{required(:state_id) => Ecto.UUID.t(), required(:generation) => Ecto.UUID.t(), required(:admission_id) => Ecto.UUID.t()}
+  @type admission :: :probe | :normal | :none | {:probe, probe_receipt()}
   @type admission_result :: %{
           required(:admission) => admission(),
           required(:state) => RoutingCircuitState.t() | nil
@@ -37,6 +38,14 @@ defmodule CodexPooler.Gateway.Routing.CircuitState do
           required(:status) => String.t() | nil,
           required(:state) => RoutingCircuitState.t() | nil
         }
+
+  defguardp valid_admission(admission)
+            when admission in [:probe, :normal, :none] or
+                   (is_tuple(admission) and tuple_size(admission) == 2 and elem(admission, 0) == :probe and is_map(elem(admission, 1)))
+
+  @spec completion_admission(RoutingCircuitState.t() | nil) :: admission()
+  def completion_admission(%RoutingCircuitState{probe_receipt: %{} = receipt}), do: {:probe, receipt}
+  def completion_admission(_state), do: :probe
 
   @spec eligible?(auth(), Model.t(), PoolUpstreamAssignment.t(), String.t()) :: boolean()
   def eligible?(
@@ -170,23 +179,14 @@ defmodule CodexPooler.Gateway.Routing.CircuitState do
         admission
       )
       when is_binary(route_class) and route_class != "" and
-             admission in [:probe, :normal, :none] do
+             valid_admission(admission) do
     now = now()
     settings = OperationalSettings.current()
 
     Repo.transaction(fn ->
-      case latest_for_update(auth, model, assignment, route_class) do
-        %RoutingCircuitState{} = state ->
-          updated =
-            state
-            |> RoutingCircuitState.changeset(success_attrs(state, admission, settings, now))
-            |> persist_or_rollback(:update)
-
-          {updated, transition(state, updated, reason_code: nil)}
-
-        nil ->
-          {:ok, nil}
-      end
+      auth
+      |> latest_for_update(model, assignment, route_class)
+      |> complete_success(admission, settings, now)
     end)
     |> unwrap_transaction()
     |> emit_committed_transition()
@@ -233,7 +233,7 @@ defmodule CodexPooler.Gateway.Routing.CircuitState do
         admission
       )
       when is_binary(route_class) and route_class != "" and
-             admission in [:probe, :normal, :none] do
+             valid_admission(admission) do
     reason_code = sanitize_reason_code(reason_code)
 
     failure_context = %{
@@ -288,44 +288,7 @@ defmodule CodexPooler.Gateway.Routing.CircuitState do
          failure_context,
          retry_left
        ) do
-    Repo.transaction(fn ->
-      state = latest_for_update(auth, model, assignment, route_class)
-
-      attrs =
-        failure_attrs(
-          auth,
-          model,
-          assignment,
-          route_class,
-          reason_code,
-          state,
-          failure_context
-        )
-
-      case state do
-        %RoutingCircuitState{} = state ->
-          updated =
-            state
-            |> RoutingCircuitState.changeset(attrs)
-            |> persist_or_rollback(:update)
-
-          {updated, transition(state, updated, reason_code: reason_code)}
-
-        nil ->
-          # The first-failure insert references the assignment and identity
-          # rows through FK checks whose implicit lock order inverts the
-          # canonical identity-first order used by credential fencing; take
-          # the canonical reference locks before inserting.
-          ReferenceLocks.lock_and_validate!(assignment.upstream_identity_id, assignment.id)
-
-          updated =
-            %RoutingCircuitState{}
-            |> RoutingCircuitState.changeset(Map.put(attrs, :created_at, failure_context.now))
-            |> persist_or_rollback(:insert)
-
-          {updated, transition(nil, updated, reason_code: reason_code)}
-      end
-    end)
+    Repo.transaction(fn -> locked_failure(auth, model, assignment, route_class, reason_code, failure_context) end)
     |> unwrap_transaction()
     |> degrade_reference_skip(assignment)
     |> emit_committed_transition()
@@ -356,6 +319,50 @@ defmodule CodexPooler.Gateway.Routing.CircuitState do
         true ->
           reraise error, __STACKTRACE__
       end
+  end
+
+  defp locked_failure(auth, model, assignment, route_class, reason_code, failure_context) do
+    state = latest_for_update(auth, model, assignment, route_class)
+
+    if owns_admission?(state, failure_context.admission) do
+      attrs =
+        failure_attrs(
+          auth,
+          model,
+          assignment,
+          route_class,
+          reason_code,
+          state,
+          %{failure_context | admission: admission_kind(failure_context.admission)}
+        )
+        |> consume_receipt(state, failure_context.admission)
+
+      case state do
+        %RoutingCircuitState{} = state ->
+          updated =
+            state
+            |> RoutingCircuitState.changeset(attrs)
+            |> persist_or_rollback(:update)
+
+          {updated, transition(state, updated, reason_code: reason_code)}
+
+        nil ->
+          # The first-failure insert references the assignment and identity
+          # rows through FK checks whose implicit lock order inverts the
+          # canonical identity-first order used by credential fencing; take
+          # the canonical reference locks before inserting.
+          ReferenceLocks.lock_and_validate!(assignment.upstream_identity_id, assignment.id)
+
+          updated =
+            %RoutingCircuitState{}
+            |> RoutingCircuitState.changeset(Map.put(attrs, :created_at, failure_context.now))
+            |> persist_or_rollback(:insert)
+
+          {updated, transition(nil, updated, reason_code: reason_code)}
+      end
+    else
+      {state, nil}
+    end
   end
 
   defp degrade_reference_skip({:error, %{code: code}}, assignment)
@@ -401,32 +408,13 @@ defmodule CodexPooler.Gateway.Routing.CircuitState do
         admission
       )
       when is_binary(route_class) and route_class != "" and
-             admission in [:probe, :normal, :none] do
+             valid_admission(admission) do
     now = now()
 
     Repo.transaction(fn ->
-      case latest_for_update(auth, model, assignment, route_class) do
-        %RoutingCircuitState{status: @half_open_status} = state when admission == :probe ->
-          updated =
-            state
-            |> RoutingCircuitState.changeset(%{
-              metadata:
-                CircuitHealth.probe_metadata(
-                  state,
-                  max(CircuitHealth.probe_in_flight_count(state) - 1, 0)
-                ),
-              updated_at: now
-            })
-            |> persist_or_rollback(:update)
-
-          {updated, transition(state, updated, reason_code: nil)}
-
-        %RoutingCircuitState{} = state ->
-          {state, nil}
-
-        nil ->
-          {:ok, nil}
-      end
+      auth
+      |> latest_for_update(model, assignment, route_class)
+      |> complete_neutral(admission, now)
     end)
     |> unwrap_transaction()
     |> emit_committed_transition()
@@ -450,6 +438,34 @@ defmodule CodexPooler.Gateway.Routing.CircuitState do
         _admission
       ),
       do: {:error, :invalid_circuit_admission}
+
+  defp complete_success(nil, _admission, _settings, _now), do: {:ok, nil}
+
+  defp complete_success(state, admission, settings, now) do
+    if owns_admission?(state, admission) do
+      attrs = success_attrs(state, admission_kind(admission), settings, now) |> consume_receipt(state, admission)
+      updated = state |> RoutingCircuitState.changeset(attrs) |> persist_or_rollback(:update)
+      {updated, transition(state, updated, reason_code: nil)}
+    else
+      {state, nil}
+    end
+  end
+
+  defp complete_neutral(nil, _admission, _now), do: {:ok, nil}
+
+  defp complete_neutral(state, admission, now) do
+    if owns_admission?(state, admission) and admission_kind(admission) == :probe and
+         (state.status == @half_open_status or is_tuple(admission)) do
+      attrs =
+        %{metadata: CircuitHealth.probe_metadata(state, max(CircuitHealth.probe_in_flight_count(state) - 1, 0)), updated_at: now}
+        |> consume_receipt(state, admission)
+
+      updated = state |> RoutingCircuitState.changeset(attrs) |> persist_or_rollback(:update)
+      {updated, transition(state, updated, reason_code: nil)}
+    else
+      {state, nil}
+    end
+  end
 
   defp begin_attempt_with_snapshot(
          _auth,
@@ -482,16 +498,21 @@ defmodule CodexPooler.Gateway.Routing.CircuitState do
     if DateTime.compare(next_probe_at, now) == :gt do
       Repo.rollback(:routing_circuit_open)
     else
+      generation = Ecto.UUID.generate()
+      token = Ecto.UUID.generate()
+
       state
       |> RoutingCircuitState.changeset(%{
         status: @half_open_status,
         half_opened_at: now,
         success_count: 0,
         metadata: CircuitHealth.probe_metadata(state, 1),
+        probe_generation: generation,
+        probe_admission_ids: [token],
         updated_at: now
       })
       |> persist_or_rollback(:update)
-      |> then(&{&1, :probe})
+      |> then(&{with_probe_receipt(&1, token), :probe})
     end
   end
 
@@ -505,8 +526,14 @@ defmodule CodexPooler.Gateway.Routing.CircuitState do
     if in_flight >= settings.circuit_half_open_probe_limit do
       Repo.rollback(:routing_circuit_probe_in_flight)
     else
+      token = Ecto.UUID.generate()
+      generation = if stale? or is_nil(state.probe_generation), do: Ecto.UUID.generate(), else: state.probe_generation
+      tokens = if stale?, do: [], else: state.probe_admission_ids
+
       attrs = %{
         metadata: CircuitHealth.probe_metadata(state, in_flight + 1),
+        probe_generation: generation,
+        probe_admission_ids: [token | tokens],
         updated_at: now
       }
 
@@ -520,12 +547,30 @@ defmodule CodexPooler.Gateway.Routing.CircuitState do
       state
       |> RoutingCircuitState.changeset(attrs)
       |> persist_or_rollback(:update)
-      |> then(&{&1, :probe})
+      |> then(&{with_probe_receipt(&1, token), :probe})
     end
   end
 
   defp begin_state(%RoutingCircuitState{} = state, _settings, _now), do: {state, :normal}
   defp begin_state(nil, _settings, _now), do: {nil, :none}
+
+  defp with_probe_receipt(state, token),
+    do: %{state | probe_receipt: %{state_id: state.id, generation: state.probe_generation, admission_id: token}}
+
+  defp owns_admission?(%RoutingCircuitState{} = state, {:probe, %{state_id: id, generation: generation, admission_id: token}}),
+    do: state.id == id and is_binary(generation) and state.probe_generation == generation and token in state.probe_admission_ids
+
+  defp owns_admission?(_state, {:probe, _receipt}), do: false
+  defp owns_admission?(%RoutingCircuitState{probe_generation: generation}, :probe), do: is_nil(generation)
+  defp owns_admission?(_state, _admission), do: true
+
+  defp admission_kind({:probe, _receipt}), do: :probe
+  defp admission_kind(admission), do: admission
+
+  defp consume_receipt(attrs, %RoutingCircuitState{} = state, {:probe, %{admission_id: token}}),
+    do: Map.put(attrs, :probe_admission_ids, List.delete(state.probe_admission_ids, token))
+
+  defp consume_receipt(attrs, _state, _admission), do: attrs
 
   defp success_attrs(
          %RoutingCircuitState{status: @half_open_status} = state,

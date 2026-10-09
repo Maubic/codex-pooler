@@ -81,6 +81,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext do
       allow_retry?: allow_retry?,
       routing_attempt_metadata: selection.attempt_metadata,
       route_class: selection.route_class,
+      routing_circuit_state: selection.circuit_state,
       routing_circuit_admission: selection.circuit_admission,
       client_retry_dispatch_authority: context.client_retry_dispatch_authority
     }
