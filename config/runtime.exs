@@ -128,8 +128,11 @@ if config_env() == :prod do
 
   config :codex_pooler, Oban, oban_runtime_config
 
+  totp_encryption_key = System.get_env("CODEX_POOLER_TOTP_ENCRYPTION_KEY")
+  CodexPooler.Accounts.MFA.validate_totp_encryption_key!(totp_encryption_key)
+
   config :codex_pooler, CodexPooler.Accounts,
-    totp_encryption_key: System.get_env("CODEX_POOLER_TOTP_ENCRYPTION_KEY"),
+    totp_encryption_key: totp_encryption_key,
     totp_key_version: System.get_env("CODEX_POOLER_TOTP_KEY_VERSION", "v1")
 
   upstream_secret_key = System.get_env("CODEX_POOLER_UPSTREAM_SECRET_KEY")

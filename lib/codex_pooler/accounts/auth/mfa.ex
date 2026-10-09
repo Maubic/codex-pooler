@@ -14,6 +14,20 @@ defmodule CodexPooler.Accounts.MFA do
   @totp_period_seconds 30
   @totp_digits 6
 
+  @invalid_totp_key_message "CODEX_POOLER_TOTP_ENCRYPTION_KEY must be 32 raw bytes or base64-encoded 32 bytes"
+
+  @spec validate_totp_encryption_key!(term()) :: :ok
+  def validate_totp_encryption_key!(value) when is_binary(value) and byte_size(value) == 32, do: :ok
+
+  def validate_totp_encryption_key!(value) when is_binary(value) do
+    case Base.decode64(value) do
+      {:ok, decoded} when byte_size(decoded) == 32 -> :ok
+      _invalid -> raise @invalid_totp_key_message
+    end
+  end
+
+  def validate_totp_encryption_key!(_value), do: raise(@invalid_totp_key_message)
+
   @spec enable_totp_for_user(User.t()) :: {:ok, map()} | {:error, term()}
   def enable_totp_for_user(%User{} = user) do
     Repo.transaction(fn ->
@@ -222,11 +236,19 @@ defmodule CodexPooler.Accounts.MFA do
         configured
 
       is_binary(configured) ->
+        :ok = validate_totp_encryption_key!(configured)
         Base.decode64!(configured)
 
-      true ->
+      local_totp_key_fallback?() ->
         :crypto.hash(:sha256, "codex-pooler-local-totp-key")
+
+      true ->
+        raise @invalid_totp_key_message
     end
+  end
+
+  defp local_totp_key_fallback? do
+    Code.ensure_loaded?(Mix) and function_exported?(Mix, :env, 0) and Mix.env() in [:dev, :test]
   end
 
   defp encrypt_totp_secret!(secret) do

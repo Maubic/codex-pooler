@@ -16,6 +16,44 @@ defmodule CodexPooler.AccountsTest do
     :ok
   end
 
+  describe "TOTP encryption key compatibility" do
+    @tag :totp_key_contract
+    test "base64 and legacy raw keys decrypt the existing nonce tag ciphertext layout" do
+      previous = CodexPooler.TestAppEnv.restore_on_exit(Accounts)
+      key = :crypto.strong_rand_bytes(32)
+      Application.put_env(:codex_pooler, Accounts, Keyword.put(previous, :totp_encryption_key, Base.encode64(key)))
+      %{user: user} = bootstrap_owner_fixture()
+      {:ok, setup} = Accounts.enable_totp_for_user(user)
+      <<nonce::binary-size(12), tag::binary-size(16), ciphertext::binary>> = setup.setting.secret_ciphertext
+      decrypted = :crypto.crypto_one_time_aead(:aes_256_gcm, key, nonce, ciphertext, "totp", tag, false)
+      unchanged_derivation? = decrypted == setup.secret
+      assert unchanged_derivation?
+
+      legacy_nonce = :crypto.strong_rand_bytes(12)
+      {legacy_ciphertext, legacy_tag} = :crypto.crypto_one_time_aead(:aes_256_gcm, key, legacy_nonce, setup.secret, "totp", true)
+      setup.setting |> Ecto.Changeset.change(secret_ciphertext: legacy_nonce <> legacy_tag <> legacy_ciphertext) |> Repo.update!()
+      at = totp_test_time(setup.secret)
+      step = div(DateTime.to_unix(at), 30)
+      assert :ok = MFA.verify_second_factor(user, totp_for_step(setup.secret, step), nil, %{}, clock: fn -> at end)
+
+      Application.put_env(:codex_pooler, Accounts, Keyword.put(previous, :totp_encryption_key, key))
+      next = DateTime.add(at, 30, :second)
+      assert :ok = MFA.verify_second_factor(user, totp_for_step(setup.secret, step + 1), nil, %{}, clock: fn -> next end)
+    end
+
+    @tag :totp_key_contract
+    test "test fallback keeps the existing local encryption key" do
+      previous = CodexPooler.TestAppEnv.restore_on_exit(Accounts)
+      Application.put_env(:codex_pooler, Accounts, Keyword.put(previous, :totp_encryption_key, nil))
+      %{user: user} = bootstrap_owner_fixture()
+      {:ok, setup} = Accounts.enable_totp_for_user(user)
+      <<nonce::binary-size(12), tag::binary-size(16), ciphertext::binary>> = setup.setting.secret_ciphertext
+      key = :crypto.hash(:sha256, "codex-pooler-local-totp-key")
+      same_secret? = :crypto.crypto_one_time_aead(:aes_256_gcm, key, nonce, ciphertext, "totp", tag, false) == setup.secret
+      assert same_secret?
+    end
+  end
+
   describe "bootstrap_owner/2" do
     test "creates exactly one instance owner, membership, session, and audit row" do
       assert Accounts.bootstrap_status() == "pending"
