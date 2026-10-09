@@ -336,7 +336,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
       usage_status: Map.get(attrs, :usage_status, @usage_unknown),
       served_model: usage.served_model,
       model_observation: usage.model_observation,
-      response_metadata: Metadata.sanitize_metadata(Map.get(attrs, :attempt_metadata, %{}))
+      response_metadata:
+        attrs
+        |> Map.get(:attempt_metadata, %{})
+        |> Metadata.sanitize_metadata()
+        |> ExpiredOwnerGenerationCleanup.preserve(attempt)
+        |> keep_downstream_delivery_receipt(attempt.id)
     })
     |> Repo.update()
     |> case do

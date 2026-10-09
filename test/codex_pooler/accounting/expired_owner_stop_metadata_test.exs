@@ -14,6 +14,31 @@ defmodule CodexPooler.Accounting.ExpiredOwnerStopMetadataTest do
   alias CodexPooler.Platform.InstancePresence.Identity
   alias CodexPooler.Repo
 
+  test "retry finalization rejects caller witnesses and invalid persisted generation evidence" do
+    setup = accounting_setup()
+
+    for recorded <- [:absent, :malformed, :wrong_generation, :valid] do
+      assert {:ok, reserved} = Accounting.reserve(setup.auth, setup.model, %{"model" => setup.model.exposed_model_id}, %{transport: "websocket"})
+      assert {:ok, attempt} = Accounting.create_attempt(reserved.request, setup.assignment)
+      forged = witness(attempt, reserved.request)
+
+      case recorded do
+        :absent -> :ok
+        :malformed -> Repo.update!(Ecto.Changeset.change(attempt, response_metadata: %{"expired_owner_stop" => Map.put(forged, "phase", "forged")}))
+        :wrong_generation -> Repo.update!(Ecto.Changeset.change(attempt, response_metadata: %{"expired_owner_stop" => Map.put(forged, "replay_generation", 1)}))
+        :valid -> Repo.update!(Ecto.Changeset.change(attempt, response_metadata: %{"expired_owner_stop" => forged}))
+      end
+
+      reported = if recorded == :valid, do: Map.put(forged, "phase", "forged"), else: forged
+      assert {:ok, saved} = Accounting.record_retryable_attempt_failure(attempt, %{response_status_code: 503, last_error_code: "server_error", attempt_metadata: %{"ordinary_flag" => true, "expired_owner_stop" => reported}})
+      assert Cleanup.read(saved) == if(recorded == :valid, do: {:ok, forged}, else: :none)
+      assert saved.response_metadata["ordinary_flag"] == true
+      assert saved.status == "retryable_failed"
+      assert Repo.get!(Request, reserved.request.id).status == "in_progress"
+      assert ledger_kinds(reserved.request.id) == %{"reservation" => 1}
+    end
+  end
+
   test "validated locked cause survives real sanitizer and finalizer, while caller attrs cannot replace it" do
     setup = accounting_setup()
     assert {:ok, reserved} = Accounting.reserve(setup.auth, setup.model, %{"model" => setup.model.exposed_model_id}, %{correlation_id: Ecto.UUID.generate(), transport: "websocket"})
