@@ -216,10 +216,8 @@ defmodule CodexPooler.Catalog.Sync do
       :erlang.raise(kind, reason, stacktrace)
   end
 
-  defp fail_claim_after_exception(%SyncRun{id: id}) do
-    from(run in SyncRun, where: run.id == ^id and run.status == ^@running)
-    |> Repo.update_all(set: [status: @failed, finished_at: now(), error_message: "model catalog sync failed unexpectedly"])
-
+  defp fail_claim_after_exception(%SyncRun{id: id} = run) do
+    Persistence.fail_sync_run(run, "model catalog sync failed unexpectedly")
     :ok
   catch
     _kind, _reason ->
