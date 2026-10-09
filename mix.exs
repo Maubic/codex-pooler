@@ -13,7 +13,7 @@ defmodule CodexPooler.MixProject do
       test_coverage: [tool: Six, minimum_coverage: 85.0, threshold: 85],
       aliases: aliases(),
       deps: deps(),
-      dialyzer: [plt_add_apps: [:ex_unit, :mix]],
+      dialyzer: [plt_add_apps: [:ex_unit, :mix], ignore_warnings: "dialyzer_ignore.exs", list_unused_filters: true],
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader]
     ]
