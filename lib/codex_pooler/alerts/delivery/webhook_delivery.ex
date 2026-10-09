@@ -175,6 +175,10 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
     end)
   end
 
+  # Only status is consumed. Drain through Req's streaming parser without
+  # retaining body chunks; framing errors and the absolute deadline still apply.
+  defp discard_response_body({:data, _data}, acc), do: {:cont, acc}
+
   defp post_webhook(url, body, headers, execution) do
     remaining = max(Execution.remaining(execution), 1)
 
@@ -182,6 +186,7 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
       body: body,
       headers: headers,
       decode_body: false,
+      into: &discard_response_body/2,
       receive_timeout: min(@receive_timeout_ms, remaining),
       request_timeout: remaining,
       retry: false,
