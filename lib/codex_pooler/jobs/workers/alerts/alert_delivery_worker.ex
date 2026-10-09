@@ -56,6 +56,8 @@ defmodule CodexPooler.Jobs.AlertDeliveryWorker do
   def perform(%Oban.Job{}), do: {:cancel, :invalid_alert_delivery_args}
 
   @spec sanitize_error(delivery_error()) :: atom() | map()
+  defp sanitize_error(%Ecto.Changeset{}), do: %{code: "alert_delivery_receipt_invalid"}
+
   defp sanitize_error(reason) when is_atom(reason), do: reason
 
   defp sanitize_error(%{code: code}) when is_binary(code),
