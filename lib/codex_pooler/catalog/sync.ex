@@ -5,6 +5,8 @@ defmodule CodexPooler.Catalog.Sync do
 
   import Ecto.Query
 
+  require Logger
+
   alias CodexPooler.Catalog.Sync.{Discovery, Persistence}
   alias CodexPooler.Catalog.SyncRun
   alias CodexPooler.Events
@@ -207,6 +209,22 @@ defmodule CodexPooler.Catalog.Sync do
       {:error, reason} ->
         Persistence.fail_sync_run(run, reason)
     end
+  catch
+    kind, reason ->
+      stacktrace = __STACKTRACE__
+      fail_claim_after_exception(run)
+      :erlang.raise(kind, reason, stacktrace)
+  end
+
+  defp fail_claim_after_exception(%SyncRun{id: id}) do
+    from(run in SyncRun, where: run.id == ^id and run.status == ^@running)
+    |> Repo.update_all(set: [status: @failed, finished_at: now(), error_message: "model catalog sync failed unexpectedly"])
+
+    :ok
+  catch
+    _kind, _reason ->
+      Logger.warning("catalog sync exception finalization failed sync_run_id=#{id}")
+      :ok
   end
 
   defp create_sync_run(pool_id, trigger_kind, started_at) do

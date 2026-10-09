@@ -7,6 +7,7 @@ defmodule CodexPooler.Catalog.SyncClaimTest do
   import CodexPooler.UnboxedFixture, only: [register_unboxed_cleanup!: 1]
 
   alias CodexPooler.Catalog.{Model, Sync, SyncRun}
+  alias CodexPooler.Catalog.Sync.Discovery
   alias CodexPooler.{FakeUpstream, Repo, TestDiagnostics, Upstreams}
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
@@ -169,6 +170,146 @@ defmodule CodexPooler.Catalog.SyncClaimTest do
     assert {:error, %{code: :pool_not_found}} = join(claimant)
     assert catalog_requests(fixture) == 0
     assert run_statuses(fixture) == []
+  end
+
+  for successor_state <- [:running, :completed] do
+    test "late catchable failure preserves an expired claim and its #{successor_state} successor", context do
+      assert_late_exception_fenced(context.supervisor, unquote(successor_state))
+    end
+  end
+
+  test "an unavailable owned Repo cannot replace the original post-claim exception", %{supervisor: supervisor} do
+    fixture = fixture()
+    name = String.to_atom("catalog_unavailable_repo_#{System.unique_integer([:positive])}")
+
+    on_exit(fn ->
+      if pid = Process.whereis(name), do: Supervisor.stop(pid)
+      assert Process.whereis(name) == nil
+    end)
+
+    {:ok, repo} = Repo.start_link(name: name, pool: DBConnection.ConnectionPool, pool_size: 1)
+    Process.unlink(repo)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        caller =
+          worker(supervisor, :unavailable, fn ->
+            previous = Repo.put_dynamic_repo(repo)
+
+            try do
+              Sync.sync_pool_catalog(fixture.pool,
+                fetcher: fn _ ->
+                  Supervisor.stop(repo)
+                  raise ArgumentError, "synthetic unavailable primary"
+                end
+              )
+            rescue
+              error in ArgumentError -> {:primary_preserved, error.message == "synthetic unavailable primary"}
+            after
+              Repo.put_dynamic_repo(previous)
+            end
+          end)
+
+        assert {:primary_preserved, true} = join(caller)
+      end)
+
+    assert log =~ "catalog sync exception finalization failed"
+    refute log =~ "synthetic unavailable primary"
+    refute Process.alive?(repo)
+    assert run_statuses(fixture) == ["running"]
+    assert catalog_requests(fixture) == 0
+    expire_running_claim(fixture)
+    assert {:ok, _} = database(fn -> Sync.sync_pool_catalog(fixture.pool) end)
+    assert run_statuses(fixture) == ["failed", "succeeded"]
+    TestDiagnostics.puts("catalog-exception primary_preserved=true owned_repo_unavailable=true pending_claim_recovered_by_sweep=true")
+  end
+
+  test "untrappable caller death retains the stale-claim recovery backstop", %{supervisor: supervisor} do
+    fixture = fixture()
+    parent = self()
+    ref = make_ref()
+
+    caller =
+      worker(supervisor, :doomed, fn ->
+        Sync.sync_pool_catalog(fixture.pool,
+          fetcher: fn _ ->
+            send(parent, {:claimed_before_death, ref})
+
+            receive do
+              {:unused_release, ^ref} -> {:ok, []}
+            after
+              @budget -> raise "death control was not triggered"
+            end
+          end
+        )
+      end)
+
+    assert_receive {:claimed_before_death, ^ref}, @budget
+    pid = caller.task.pid
+    monitor = caller.monitor
+    task_ref = caller.task.ref
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :killed}, @budget
+    assert_receive {:DOWN, ^task_ref, :process, ^pid, :killed}, @budget
+    assert run_statuses(fixture) == ["running"]
+    expire_running_claim(fixture)
+    assert {:ok, _} = database(fn -> Sync.sync_pool_catalog(fixture.pool) end)
+    assert run_statuses(fixture) == ["failed", "succeeded"]
+    TestDiagnostics.puts("catalog-exception process_death=killed before_sweep=running after_sweep=failed successor=succeeded")
+  end
+
+  defp assert_late_exception_fenced(supervisor, successor_state) do
+    fixture = fixture()
+    original_ref = hold_provider(fixture)
+
+    original =
+      worker(supervisor, :original, fn ->
+        try do
+          Sync.sync_pool_catalog(fixture.pool,
+            fetcher: fn source ->
+              assert {:ok, _} = Discovery.fetch_models_for_assignment(source)
+              raise ArgumentError, "synthetic late catalog failure"
+            end
+          )
+        rescue
+          error in ArgumentError -> {:primary_preserved, error.message == "synthetic late catalog failure"}
+        end
+      end)
+
+    assert_receive {:fake_upstream_timeout_barrier, :before_headers, original_handler, ^original_ref}, @budget
+    assert {:error, %{code: :catalog_sync_in_progress}} = database(fn -> Sync.sync_pool_catalog(fixture.pool) end)
+    assert catalog_requests(fixture) == 1
+    expire_running_claim(fixture)
+    successor_ref = hold_provider(fixture)
+    successor = worker(supervisor, :successor, fn -> Sync.sync_pool_catalog(fixture.pool) end)
+    assert_receive {:fake_upstream_timeout_barrier, :before_headers, successor_handler, ^successor_ref}, @budget
+    assert original.backend != successor.backend
+    assert Process.alive?(original.task.pid)
+    assert catalog_requests(fixture) == 2
+
+    if successor_state == :completed do
+      release_provider(successor_handler, successor_ref)
+      assert {:ok, _} = join(successor)
+    end
+
+    before = database(fn -> Repo.all(from r in SyncRun, where: r.pool_id == ^fixture.pool.id, order_by: r.id) end)
+    release_provider(original_handler, original_ref)
+    assert {:primary_preserved, true} = join(original)
+    assert database(fn -> Repo.all(from r in SyncRun, where: r.pool_id == ^fixture.pool.id, order_by: r.id) end) == before
+
+    if successor_state == :running do
+      release_provider(successor_handler, successor_ref)
+      assert {:ok, _} = join(successor)
+    end
+
+    assert run_statuses(fixture) == ["cancelled", "failed", "succeeded"]
+    TestDiagnostics.puts("catalog-exception successor=#{successor_state} distinct_backends=true late_finalizer_changed_rows=false; stale-characterization original_executor_live=true claim_age_advanced=true overlapping_http_requests=2")
+  end
+
+  defp expire_running_claim(fixture) do
+    database(fn ->
+      assert {1, _} = Repo.update_all(from(r in SyncRun, where: r.pool_id == ^fixture.pool.id and r.status == "running"), set: [started_at: DateTime.add(DateTime.utc_now(), -901, :second)])
+    end)
   end
 
   def hold_source_snapshot(_event, _measurements, metadata, _config) do
