@@ -133,18 +133,21 @@ defmodule CodexPooler.Admin.Stats do
       )
 
     attempts =
-      GatewayReadModel.attempts_for_pool_ids(
+      GatewayReadModel.stats_attempt_totals_for_pool_ids(
         pool_ids,
         normalized.started_at,
         normalized.ended_at
       )
 
-    settlements =
-      AccountingReporting.settlements_for_pool_ids(
+    usage =
+      AccountingReporting.stats_usage_for_pool_ids(
         pool_ids,
+        request_bucket_granularity(normalized.window),
         normalized.started_at,
         normalized.ended_at
       )
+
+    settlements = usage.buckets
 
     daily_rollups =
       AccountingReporting.daily_rollups_for_pool_ids(
@@ -201,8 +204,8 @@ defmodule CodexPooler.Admin.Stats do
         turns: Kpis.turn_kpi(turns)
       },
       tables: %{
-        top_api_keys: Tables.top_api_keys(settlements, pools),
-        upstreams: Tables.upstream_table(settlements, upstream_accounts),
+        top_api_keys: Tables.top_api_keys(usage.keys, pools),
+        upstreams: Tables.upstream_table(usage.upstreams, upstream_accounts),
         recent_failures: recent_failures,
         daily_rollups: Tables.daily_rollup_table(daily_rollups),
         recent_activity: recent_activity
@@ -220,8 +223,8 @@ defmodule CodexPooler.Admin.Stats do
       sources:
         SourceSummary.build(
           request_kpi.value,
-          attempts,
-          settlements,
+          attempts.source_count,
+          usage.source_count,
           daily_rollups,
           turns,
           activity_counts,
@@ -264,9 +267,9 @@ defmodule CodexPooler.Admin.Stats do
         success_rate: Kpis.success_rate_kpi([]),
         tokens: tokens,
         cache_rate: Kpis.cache_rate_kpi(tokens),
-        tokens_per_second: Kpis.tokens_per_second_kpi([], []),
+        tokens_per_second: Kpis.tokens_per_second_kpi([], %{latency_ms: 0}),
         settled_cost: Kpis.settled_cost_kpi([]),
-        average_latency_ms: Kpis.average_latency_kpi([]),
+        average_latency_ms: Kpis.average_latency_kpi(%{latency_ms: 0, latency_count: 0}),
         active_sessions: %{value: 0},
         turns: Kpis.turn_kpi([])
       },
@@ -287,7 +290,7 @@ defmodule CodexPooler.Admin.Stats do
         summary: quota_summary,
         accounts: []
       },
-      sources: SourceSummary.build(0, [], [], [], [], %{audit_events: 0, jobs: 0}, nil, 0),
+      sources: SourceSummary.build(0, 0, 0, [], [], %{audit_events: 0, jobs: 0}, nil, 0),
       empty_states: [
         %{
           code: :no_reporting_pools,

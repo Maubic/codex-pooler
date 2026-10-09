@@ -65,10 +65,9 @@ defmodule CodexPooler.Admin.Stats.Kpis do
     }
   end
 
-  @spec tokens_per_second_kpi([map()], [map()]) :: map()
-  def tokens_per_second_kpi(settlements, attempts) do
+  @spec tokens_per_second_kpi([map()], %{latency_ms: non_neg_integer()}) :: map()
+  def tokens_per_second_kpi(settlements, %{latency_ms: latency_ms}) do
     total_tokens = Aggregates.sum_integer(settlements, :total_tokens)
-    latency_ms = Aggregates.sum_integer(Enum.filter(attempts, & &1.latency_ms), :latency_ms)
 
     value =
       if total_tokens > 0 and latency_ms > 0 do
@@ -91,16 +90,9 @@ defmodule CodexPooler.Admin.Stats.Kpis do
     }
   end
 
-  @spec average_latency_kpi([map()]) :: map()
-  def average_latency_kpi(attempts) do
-    latencies = attempts |> Enum.map(& &1.latency_ms) |> Enum.filter(&is_integer/1)
-
-    value =
-      case latencies do
-        [] -> nil
-        _latencies -> round(Enum.sum(latencies) / length(latencies))
-      end
-
+  @spec average_latency_kpi(%{latency_ms: non_neg_integer(), latency_count: non_neg_integer()}) :: map()
+  def average_latency_kpi(%{latency_ms: latency_ms, latency_count: latency_count}) do
+    value = if latency_count > 0, do: round(latency_ms / latency_count)
     %{value: value, unit: "ms"}
   end
 

@@ -264,6 +264,17 @@ defmodule CodexPooler.Admin.GatewayReadModel do
     |> Map.new(fn {pool_id, total} -> {pool_id, non_negative_integer(total)} end)
   end
 
+  @spec stats_attempt_totals_for_pool_ids([Ecto.UUID.t()], DateTime.t(), DateTime.t()) :: %{source_count: non_neg_integer(), latency_count: non_neg_integer(), latency_ms: non_neg_integer()}
+  def stats_attempt_totals_for_pool_ids(pool_ids, started_at, ended_at) do
+    from(attempt in Attempt,
+      join: request in Request,
+      on: request.id == attempt.request_id,
+      where: request.pool_id in ^pool_ids and attempt.started_at >= ^started_at and attempt.started_at <= ^ended_at,
+      select: %{source_count: count(attempt.id), latency_count: count(attempt.latency_ms), latency_ms: coalesce(sum(attempt.latency_ms), 0)}
+    )
+    |> Repo.one(telemetry_options: [reporting_projection: :stats_attempt_totals])
+  end
+
   @spec active_session_count_for_pool_ids([Ecto.UUID.t()]) :: non_neg_integer()
   def active_session_count_for_pool_ids([]), do: 0
 

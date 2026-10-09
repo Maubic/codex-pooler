@@ -211,7 +211,7 @@ defmodule CodexPooler.Admin.Stats.Tables do
 
   defp usage_pool_name(entries, pool_names_by_id) do
     entries
-    |> Enum.map(& &1.pool_id)
+    |> Enum.flat_map(&Map.get(&1, :pool_ids, [Map.get(&1, :pool_id)]))
     |> Enum.filter(&is_binary/1)
     |> Enum.uniq()
     |> case do
