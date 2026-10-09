@@ -444,7 +444,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Conn
         handle_upgrade_message(conn, ref, deadline, request_caller, response, message)
     after
       max(deadline_ms - clock.(), 0) ->
-        {:error, :upstream_websocket_upgrade_timeout}
+        {:error, conn, :upstream_websocket_upgrade_timeout}
     end
   end
 
