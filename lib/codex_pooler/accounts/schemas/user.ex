@@ -4,7 +4,7 @@ defmodule CodexPooler.Accounts.User do
 
   import Ecto.Changeset
 
-  @derive {Inspect, except: [:password]}
+  @derive {Inspect, except: [:password, :password_hash]}
 
   @email_max_length 160
   @password_min_length 8
@@ -15,7 +15,7 @@ defmodule CodexPooler.Accounts.User do
   schema "users" do
     field :email, :string
     field :display_name, :string
-    field :password_hash, :string
+    field :password_hash, :string, redact: true
     field :status, :string
     field :password_change_required, :boolean, default: false
     field :datetime_format, :string
