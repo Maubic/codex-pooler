@@ -3,7 +3,7 @@ defmodule CodexPooler.AccountsTest do
 
   alias CodexPooler.Accounts
   alias CodexPooler.Accounts.AuditLog
-  alias CodexPooler.Accounts.{RecoveryCode, Session, TOTPSetting, User}
+  alias CodexPooler.Accounts.{MFA, RecoveryCode, Session, TOTPSetting, User}
   alias CodexPooler.Audit.AuditEvent
   alias CodexPooler.Pools.Membership
   alias CodexPooler.Repo
@@ -61,6 +61,28 @@ defmodule CodexPooler.AccountsTest do
       assert Enum.count(results, &match?({:ok, _}, &1)) == 1
       assert Enum.count(results, &(&1 == {:error, :bootstrap_already_completed})) == 1
       assert Repo.aggregate(Membership, :count) == 1
+    end
+  end
+
+  describe "enable_totp_for_user/1" do
+    test "refuses active enrollment without replacing the factor or recovery codes" do
+      %{user: user} = bootstrap_owner_fixture()
+      {:ok, setup} = Accounts.enable_totp_for_user(user)
+      before_codes = Repo.all(from c in RecoveryCode, where: c.user_id == ^user.id, order_by: c.id)
+
+      outcome =
+        case Accounts.enable_totp_for_user(user) do
+          {:ok, _setup} -> :enrolled
+          {:error, reason} -> reason
+        end
+
+      assert outcome == :totp_already_enabled
+      unchanged_setting? = Repo.reload!(setup.setting) == setup.setting
+      unchanged_codes? = Repo.all(from c in RecoveryCode, where: c.user_id == ^user.id, order_by: c.id) == before_codes
+      assert unchanged_setting?
+      assert unchanged_codes?
+      assert :ok = MFA.verify_second_factor(user, Accounts.current_totp_code(setup.secret), nil, %{})
+      assert :ok = MFA.verify_second_factor(user, nil, hd(setup.recovery_codes), %{})
     end
   end
 
@@ -352,6 +374,127 @@ defmodule CodexPooler.AccountsTest do
         |> Repo.insert!()
 
       assert Repo.reload!(required_user).password_change_required == true
+    end
+  end
+end
+
+defmodule CodexPooler.AccountsTOTPEnrollmentConcurrencyTest do
+  use ExUnit.Case, async: false
+  use CodexPooler.CommittedWriteGuard
+
+  import CodexPooler.AccountsFixtures
+  import CodexPooler.UnboxedFixture, only: [run_unboxed: 1]
+  import Ecto.Query
+
+  alias CodexPooler.Accounts
+  alias CodexPooler.Accounts.{RecoveryCode, TOTPSetting}
+  alias CodexPooler.Repo
+  alias Ecto.Adapters.SQL.Sandbox
+
+  @budget 10_000
+
+  test "first enrollments serialize on the user before a TOTP row is visible" do
+    %{user: user} = committed_bootstrap_owner_fixture!()
+    parent = self()
+    barrier = make_ref()
+    handler_id = {__MODULE__, barrier}
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    :ok = :telemetry.attach(handler_id, [:codex_pooler, :repo, :query], &__MODULE__.observe_enrollment_lock/4, barrier)
+    supervisor = start_supervised!({Task.Supervisor, []})
+
+    holder =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          Repo.transaction(fn ->
+            {:ok, setup} = Accounts.enable_totp_for_user(user)
+            %{rows: [[backend]]} = Repo.query!("SELECT pg_backend_pid()")
+            send(parent, {barrier, :holder, backend, setup.setting.id})
+
+            code_ids = Repo.all(from c in RecoveryCode, where: c.totp_setting_id == ^setup.setting.id, order_by: c.id, select: c.id)
+
+            receive do
+              {^barrier, :release} -> {setup.setting, code_ids}
+            after
+              @budget -> raise "enrollment commit release missing"
+            end
+          end)
+        end)
+      end)
+
+    holder_monitor = Process.monitor(holder.pid)
+    assert_receive {^barrier, :holder, holder_backend, setting_id}, @budget
+    refute run_unboxed(fn -> Repo.exists?(from s in TOTPSetting, where: s.user_id == ^user.id) end)
+
+    waiter =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          Repo.checkout(fn ->
+            %{rows: [[backend]]} = Repo.query!("SELECT pg_backend_pid()")
+            send(parent, {barrier, :waiter, backend})
+
+            Process.put({__MODULE__, :enrollment_probe}, barrier)
+
+            lock_proof =
+              try do
+                Repo.transaction(fn ->
+                  Repo.query!("SET LOCAL lock_timeout = '200ms'")
+                  Accounts.enable_totp_for_user(user)
+                end)
+
+                :did_not_wait
+              rescue
+                error in Postgrex.Error ->
+                  {error.postgres.code, Process.get({__MODULE__, :user_lock_query}, false)}
+              end
+
+            send(parent, {barrier, :lock_proof, lock_proof})
+
+            receive do
+              {^barrier, :retry} -> Accounts.enable_totp_for_user(user)
+            after
+              @budget -> raise "enrollment retry release missing"
+            end
+          end)
+        end)
+      end)
+
+    waiter_monitor = Process.monitor(waiter.pid)
+    assert_receive {^barrier, :waiter, waiter_backend}, @budget
+    assert waiter_backend != holder_backend
+    assert_receive {^barrier, :lock_proof, lock_proof}, @budget
+    send(holder.pid, {barrier, :release})
+    assert {:ok, {setting, original_code_ids}} = Task.await(holder, @budget)
+    send(waiter.pid, {barrier, :retry})
+
+    outcome =
+      case Task.await(waiter, @budget) do
+        {:ok, _setup} -> :enrolled
+        {:error, reason} -> reason
+      end
+
+    assert outcome == :totp_already_enabled
+    assert_receive {:DOWN, ^holder_monitor, :process, _, :normal}, @budget
+    assert_receive {:DOWN, ^waiter_monitor, :process, _, :normal}, @budget
+    assert lock_proof == {:lock_not_available, true}
+
+    {unchanged?, code_ids, generation} =
+      run_unboxed(fn ->
+        current = Repo.get_by!(TOTPSetting, user_id: user.id)
+        {current == setting, Repo.all(from c in RecoveryCode, where: c.totp_setting_id == ^setting_id and c.status == "active", order_by: c.id, select: c.id), current.recovery_generation}
+      end)
+
+    assert unchanged?
+    assert length(code_ids) == 10
+    assert code_ids == original_code_ids
+    assert generation == 1
+  end
+
+  @doc false
+  def observe_enrollment_lock(_event, _measurements, metadata, barrier) do
+    if Process.get({__MODULE__, :enrollment_probe}) == barrier and match?({:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}}, metadata.result) do
+      query = metadata.query
+      user_lock? = String.starts_with?(query, "SELECT") and String.contains?(query, ~s(FROM "users")) and String.ends_with?(query, "FOR UPDATE")
+      Process.put({__MODULE__, :user_lock_query}, user_lock?)
     end
   end
 end

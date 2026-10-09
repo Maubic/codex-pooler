@@ -2,6 +2,7 @@ defmodule CodexPoolerWeb.Admin.SettingsLiveTest do
   use CodexPoolerWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  require Ecto.Query
 
   alias CodexPooler.Accounts
   alias CodexPooler.Accounts.TOTPSetting
@@ -337,6 +338,27 @@ defmodule CodexPoolerWeb.Admin.SettingsLiveTest do
     assert disable_html =~ "MCP disabled for this operator"
     assert has_element?(view, "#settings-mcp-key-row-#{key.id}", "Toggle MCP")
     assert {:error, %{code: :mcp_account_disabled}} = MCP.authenticate_token(raw_token)
+  end
+
+  test "stale setup preserves the active factor and refreshes the enabled state", %{conn: conn, user: user} do
+    {:ok, stale, _html} = live(conn, ~p"/admin/settings?tab=security")
+    {:ok, fresh, _html} = live(conn, ~p"/admin/settings?tab=security")
+    assert has_element?(stale, "#settings-enable-totp")
+    fresh |> element("#settings-enable-totp") |> render_click()
+    before_setting = Repo.get_by!(TOTPSetting, user_id: user.id)
+    before_codes = Repo.all(Ecto.Query.from(c in CodexPooler.Accounts.RecoveryCode, where: c.user_id == ^user.id, order_by: c.id))
+
+    html = stale |> element("#settings-enable-totp") |> render_click()
+
+    unchanged_setting? = Repo.get_by!(TOTPSetting, user_id: user.id) == before_setting
+    unchanged_codes? = Repo.all(Ecto.Query.from(c in CodexPooler.Accounts.RecoveryCode, where: c.user_id == ^user.id, order_by: c.id)) == before_codes
+    assert unchanged_setting?
+    assert unchanged_codes?
+    assert html =~ "TOTP is already enabled"
+    assert has_element?(stale, "#settings-totp-status", "TOTP enabled")
+    refute has_element?(stale, "#settings-enable-totp")
+    refute has_element?(stale, "#settings-totp-secret")
+    refute has_element?(stale, "#settings-totp-recovery-codes")
   end
 
   test "enables totp and renders one-time setup material only after creation", %{

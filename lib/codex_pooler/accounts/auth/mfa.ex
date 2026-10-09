@@ -16,12 +16,16 @@ defmodule CodexPooler.Accounts.MFA do
 
   @spec enable_totp_for_user(User.t()) :: {:ok, map()} | {:error, term()}
   def enable_totp_for_user(%User{} = user) do
-    secret = generate_totp_secret()
-    encrypted_secret = encrypt_totp_secret!(secret)
-    now = DateTime.utc_now()
-
     Repo.transaction(fn ->
+      # The user exists before its first setting, so this also serializes initial enrollment.
+      Repo.one!(from u in User, where: u.id == ^user.id, lock: "FOR UPDATE")
       existing = Repo.get_by(TOTPSetting, user_id: user.id)
+
+      if existing && existing.status == "active", do: Repo.rollback(:totp_already_enabled)
+
+      secret = generate_totp_secret()
+      encrypted_secret = encrypt_totp_secret!(secret)
+      now = DateTime.utc_now()
       recovery_generation = if existing, do: existing.recovery_generation + 1, else: 1
 
       setting_changes = %{
