@@ -136,7 +136,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
 
     assert :ok = perform_claimed_delivery(args)
 
-    assert :ok = AlertDeliveryWorker.perform(%Oban.Job{args: args, attempt: 2})
+    assert :ok = perform_claimed_delivery(args, attempt: 2)
 
     assert [sent_attempt, suppressed_attempt] = attempts_for(incident, channel)
     assert sent_attempt.status == "sent"
@@ -157,7 +157,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryJobTest do
     from(attempt in AlertDeliveryAttempt, where: attempt.incident_id == ^incident.id)
     |> Repo.update_all(set: [attempted_at: stale_completed_at, completed_at: stale_completed_at])
 
-    assert :ok = AlertDeliveryWorker.perform(%Oban.Job{args: args, attempt: 1})
+    assert :ok = perform_claimed_delivery(args)
 
     assert [first_attempt, recurrence_attempt] = attempts_for(incident, channel)
     assert first_attempt.status == "sent"

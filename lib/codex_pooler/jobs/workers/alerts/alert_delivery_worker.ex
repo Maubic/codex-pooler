@@ -50,7 +50,7 @@ defmodule CodexPooler.Jobs.AlertDeliveryWorker do
 
     persisted_attempt_number =
       Execution.storage(execution, fn ->
-        if is_integer(job.id), do: Alerts.recover_pending_deliveries(job_id: job.id)
+        Alerts.recover_pending_deliveries(job_id: job.id)
         Alerts.next_delivery_attempt_number(incident_id, channel_id, attempt)
       end)
 
