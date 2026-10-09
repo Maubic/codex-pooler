@@ -139,7 +139,9 @@ sum by (transport, route_class) (
 
 ### Stream buffer truncations
 
-Retained stream bodies reduced to a bounded suffix. This is distinct from the oversized-buffer counter.
+One event per retained body when an append first exceeds the 65,536-byte retention limit, including an exact-limit body followed by overflow. Later appends and compaction do not emit another event. This is distinct from oversized incomplete-buffer events.
+
+The **Stream Buffer Size p95** first-crossing series measures retained bytes including that crossing append. It depends on chunking and does not measure total stream size, peak memory or the current suffix. Truncated observations remain raw: the histogram has a 2 MiB top finite bucket, and a percentile falling in `+Inf` reports 2 MiB even when crossing sizes are larger. Oversized observations use a separate histogram whose measurements saturate at 128 MiB while its raw telemetry events remain unchanged. Both percentiles are interpolated estimates, not upper bounds on actual sizes.
 
 ```promql
 sum by (transport, route_class) (

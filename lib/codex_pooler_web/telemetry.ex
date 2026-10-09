@@ -540,7 +540,7 @@ defmodule CodexPoolerWeb.Telemetry do
         measurement: fn measurements -> min(Map.fetch!(measurements, :bytes), 134_217_728) end,
         tags: [:buffer, :transport, :route_class, :endpoint],
         unit: :byte,
-        description: "Size of oversized incomplete stream buffers.",
+        description: "Incomplete-buffer bytes at an oversized observation. Histogram measurements saturate at 128 MiB; the raw telemetry event is unchanged. Quantiles are interpolated estimates.",
         reporter_options: [
           buckets: [1_048_576, 2_097_152, 8_388_608, 16_777_216, 33_554_432, 134_217_728]
         ]
@@ -549,14 +549,14 @@ defmodule CodexPoolerWeb.Telemetry do
         event_name: [:codex_pooler, :gateway, :stream_buffer, :truncated],
         measurement: :count,
         tags: [:buffer, :transport, :route_class, :endpoint],
-        description: "Retained stream bodies truncated to their bounded suffix."
+        description: "One event per retained body at its first crossing of the 65,536-byte retention limit; later growth does not emit again."
       ),
       distribution("codex_pooler.gateway.stream_buffer.truncated.bytes",
         event_name: [:codex_pooler, :gateway, :stream_buffer, :truncated],
         measurement: :bytes,
         tags: [:buffer, :transport, :route_class, :endpoint],
         unit: :byte,
-        description: "Pre-truncation retained stream body sizes.",
+        description: "Retained bytes including the crossing append at the first crossing of 65,536 bytes, once per body. This is not total stream size, peak memory or current suffix size. Raw observations are preserved; the histogram has a 2 MiB top finite bucket, so a quantile in +Inf reports 2 MiB even when crossing sizes are larger.",
         reporter_options: [buckets: [65_536, 131_072, 262_144, 524_288, 1_048_576, 2_097_152]]
       ),
       counter("codex_pooler.gateway.stream.finalization.count",

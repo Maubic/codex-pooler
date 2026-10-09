@@ -1084,6 +1084,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Oversized incomplete-buffer events and retained-body first crossing events. A retained body emits once when an append first exceeds 65,536 bytes, including an exact-limit body followed by overflow; later growth does not emit again.",
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -1121,7 +1122,7 @@
         {
           "expr": "sum by (buffer, transport, route_class, endpoint) (rate(codex_pooler_gateway_stream_buffer_truncated_count{namespace=\"$namespace\", pod=~\"${pod:regex}\"}[$__rate_interval]))",
           "refId": "",
-          "legendFormat": "truncated {{transport}} {{route_class}} {{endpoint}}",
+          "legendFormat": "first crossing {{transport}} {{route_class}} {{endpoint}}",
           "range": true,
           "instant": false,
           "editorMode": "code"
@@ -1143,7 +1144,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "p95 observed oversized and truncated stream-buffer payload size. Oversized observations saturate at 128 MiB for histogram export, so a value at that ceiling means 128 MiB or larger. The saturation changes telemetry only, not stream-buffer handling or the raw telemetry event.",
+      "description": "Interpolated p95 of two distinct observations: retained bytes including the append at the first crossing of 65,536 bytes, once per body, and oversized incomplete-buffer bytes. First-crossing size depends on chunking; it is not total stream size, peak memory or current suffix size. Truncated observations remain raw, with a 2 MiB top finite bucket; a quantile in +Inf reports 2 MiB even when crossings are larger. Oversized histogram measurements saturate at 128 MiB; the raw oversized telemetry event is unchanged. Neither percentile is an upper bound on actual sizes.",
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
@@ -1181,7 +1182,7 @@
         {
           "expr": "histogram_quantile(0.95, sum by (le, buffer, transport, route_class, endpoint) (rate(codex_pooler_gateway_stream_buffer_truncated_bytes_bucket{namespace=\"$namespace\", pod=~\"${pod:regex}\"}[$__rate_interval])))",
           "refId": "",
-          "legendFormat": "truncated p95 {{transport}} {{route_class}} {{endpoint}}",
+          "legendFormat": "first crossing p95 {{transport}} {{route_class}} {{endpoint}}",
           "range": true,
           "instant": false,
           "editorMode": "code"
