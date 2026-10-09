@@ -137,9 +137,33 @@ defmodule CodexPooler.Catalog.Sync do
     started_at = now()
     {:ok, _summary} = cleanup_stale_sync_runs(started_at)
 
-    with :ok <- ensure_no_running_sync(pool_id, trigger_kind, started_at),
-         {:ok, run} <- create_sync_run(pool_id, trigger_kind, started_at) do
+    with {:ok, run} <- claim_sync_run(pool_id, trigger_kind, started_at) do
       discover_and_persist_catalog(run, assignments, fetcher)
+    end
+  end
+
+  defp claim_sync_run(pool_id, trigger_kind, started_at) do
+    Repo.transact(fn ->
+      with %Pool{} <- Repo.one(from pool in Pool, where: pool.id == ^pool_id, lock: "FOR NO KEY UPDATE"),
+           :ok <- ensure_no_running_sync(pool_id, trigger_kind, started_at),
+           {:ok, run} <- create_sync_run(pool_id, trigger_kind, started_at) do
+        {:ok, {:claimed, run}}
+      else
+        nil ->
+          {:error, catalog_error(:pool_not_found, "pool was not found")}
+
+        {:error, %{code: :catalog_sync_in_progress}} = error ->
+          # The refusal is returned after commit so its cancelled run survives.
+          {:ok, {:refused, error}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end)
+    |> case do
+      {:ok, {:claimed, run}} -> {:ok, run}
+      {:ok, {:refused, error}} -> error
+      {:error, reason} -> {:error, reason}
     end
   end
 
