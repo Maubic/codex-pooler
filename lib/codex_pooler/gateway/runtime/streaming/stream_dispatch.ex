@@ -761,8 +761,12 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
          response_context,
          conn,
          _input
-       ),
-       do: write_stream_data(response_context, conn, data)
+       ) do
+    case write_stream_data(response_context, conn, data) do
+      {:ok, %{target: target, native_terminal_outcome: {:failed, failure}} = conn} when target != :websocket -> {:terminal_stream_failure, conn, failure}
+      result -> result
+    end
+  end
 
   defp handle_classified_stream_data(
          {:write_terminal_failure, data, failure},
@@ -771,6 +775,8 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamDispatch do
          _input
        ) do
     case write_stream_data(response_context, conn, data) do
+      {:ok, %{target: target, native_terminal_outcome: {:failed, observed_failure}} = conn} when target != :websocket -> {:terminal_stream_failure, conn, observed_failure}
+      {:ok, %{target: target, codex_responses_sse_block_state: %{overflow_count: _}} = conn} when target != :websocket -> {:ok, conn}
       {:ok, conn} -> {:terminal_stream_failure, conn, failure}
       {:error, _reason} = error -> error
     end

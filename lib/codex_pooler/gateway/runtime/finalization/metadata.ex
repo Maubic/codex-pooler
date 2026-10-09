@@ -561,6 +561,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Metadata do
     |> Map.merge(public_openai_responses_stream_metadata(state))
     |> Map.merge(DownstreamStream.native_http_progress_metadata(state))
     |> Map.merge(DownstreamStream.native_http_tool_metadata(state))
+    |> Map.merge(DownstreamStream.native_sse_observation_metadata(state))
     |> Map.merge(StreamTiming.metadata(state))
   end
 

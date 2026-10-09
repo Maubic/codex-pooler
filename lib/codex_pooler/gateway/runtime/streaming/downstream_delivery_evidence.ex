@@ -10,7 +10,9 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence do
   # from the wire is retained beyond a bounded SSE block residue used to spot a
   # terminal split across chunks.
 
+  alias CodexPooler.Gateway.Runtime.Streaming.NativeSSEBlock
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
+  alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser
   alias CodexPooler.Gateway.Websocket.DeliveryReceipt
 
   @state_key :downstream_delivery
@@ -23,7 +25,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence do
           end_turn: String.t() | nil,
           pushed_at: DateTime.t() | nil,
           write_failed?: boolean(),
-          sse: StreamProtocol.sse_block_state()
+          sse: SSEParser.observation_state() | StreamProtocol.sse_block_state()
         }
 
   @spec new() :: evidence()
@@ -41,11 +43,21 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence do
 
   @spec fetch(map()) :: evidence()
   def fetch(state) when is_map(state) do
-    case Map.get(state, @state_key) do
-      %{frames: _frames} = evidence -> evidence
-      _missing -> new()
-    end
+    evidence =
+      case Map.get(state, @state_key) do
+        %{frames: _frames} = evidence -> evidence
+        _missing -> new()
+      end
+
+    native_evidence(evidence, state)
   end
+
+  defp native_evidence(%{sse: %{overflow_count: _}} = evidence, _state), do: evidence
+
+  defp native_evidence(evidence, %{codex_responses_sse_block_state: %{overflow_count: _}}),
+    do: %{evidence | sse: Map.merge(SSEParser.new_observation_state(), evidence.sse)}
+
+  defp native_evidence(evidence, _state), do: evidence
 
   @doc """
   Records one successful downstream write. Chunks count as frames only once the
@@ -93,25 +105,39 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence do
     if is_binary(evidence.terminal_class) do
       evidence
     else
-      {blocks, sse} = StreamProtocol.complete_sse_blocks(evidence.sse, written, bounded?: true)
+      {blocks, sse} = observed_blocks(evidence.sse, written)
       record_terminal(%{evidence | sse: sse}, blocks)
     end
   end
 
+  defp observed_blocks(%{overflow_count: _} = sse, written), do: SSEParser.observe_blocks(sse, written)
+  defp observed_blocks(sse, written), do: StreamProtocol.complete_sse_blocks(sse, written, bounded?: true)
+
   defp record_terminal(evidence, blocks) do
     terminal =
-      Enum.find_value(blocks, fn block ->
-        case StreamProtocol.terminal_outcome(block <> "\n\n") do
-          {:ok, outcome} -> outcome
-          _unknown -> nil
-        end
+      Enum.find_value(blocks, fn
+        {:block, raw, separator} ->
+          case raw |> NativeSSEBlock.parse(separator) |> NativeSSEBlock.outcome() do
+            {:ok, outcome} -> outcome
+            _unknown -> nil
+          end
+
+        block when is_binary(block) ->
+          case StreamProtocol.terminal_outcome(block <> "\n\n") do
+            {:ok, outcome} -> outcome
+            _unknown -> nil
+          end
+
+        _discarded ->
+          nil
       end)
 
     case terminal do
       %{} = outcome ->
         %{
           evidence
-          | terminal_class: DeliveryReceipt.terminal_class_from_outcome(outcome),
+          | sse: release_observed_terminal(evidence.sse),
+            terminal_class: DeliveryReceipt.terminal_class_from_outcome(outcome),
             incomplete_reason: Map.get(outcome, :incomplete_reason),
             end_turn: DeliveryReceipt.end_turn_class_from_outcome(outcome),
             pushed_at: DateTime.utc_now()
@@ -121,6 +147,9 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamDeliveryEvidence do
         evidence
     end
   end
+
+  defp release_observed_terminal(%{overflow_count: _} = sse), do: %{sse | buffer: "", carry: "", discarding?: false, event_kind: nil}
+  defp release_observed_terminal(sse), do: sse
 
   defp outcome(%{terminal_class: class}) when is_binary(class), do: "delivered"
   defp outcome(%{write_failed?: true}), do: "aborted"
