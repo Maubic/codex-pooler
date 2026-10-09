@@ -301,7 +301,7 @@ defmodule CodexPoolerWeb.Telemetry do
         measurement: :total_time,
         tags: [:source, :command],
         tag_values: &repo_query_tag_values/1,
-        description: "Total Ecto repository queries by source and SQL command."
+        description: "Total Ecto repository queries by source and SQL command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries."
       ),
       counter("codex_pooler.instance_presence.heartbeat_failure.count",
         event_name: [:codex_pooler, :instance_presence, :heartbeat],
@@ -357,7 +357,7 @@ defmodule CodexPoolerWeb.Telemetry do
         unit: {:native, :second},
         tags: [:source, :command],
         tag_values: &repo_query_tag_values/1,
-        description: "Total Ecto repository query time by source and SQL command.",
+        description: "Total Ecto repository query time by source and SQL command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
         reporter_options: [buckets: @repo_query_buckets]
       ),
       distribution("codex_pooler.repo.query.query_time.seconds",
@@ -366,7 +366,7 @@ defmodule CodexPoolerWeb.Telemetry do
         unit: {:native, :second},
         tags: [:source, :command],
         tag_values: &repo_query_tag_values/1,
-        description: "Ecto repository database execution time by source and SQL command.",
+        description: "Ecto repository database execution time by source and SQL command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
         reporter_options: [buckets: @repo_query_buckets]
       ),
       distribution("codex_pooler.repo.query.queue_time.seconds",
@@ -375,7 +375,7 @@ defmodule CodexPoolerWeb.Telemetry do
         unit: {:native, :second},
         tags: [:source, :command],
         tag_values: &repo_query_tag_values/1,
-        description: "Ecto repository connection checkout queue time by source and SQL command.",
+        description: "Ecto repository connection checkout queue time by source and SQL command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
         reporter_options: [buckets: @repo_query_buckets]
       ),
       distribution("codex_pooler.repo.query.decode_time.seconds",
@@ -384,7 +384,7 @@ defmodule CodexPoolerWeb.Telemetry do
         unit: {:native, :second},
         tags: [:source, :command],
         tag_values: &repo_query_tag_values/1,
-        description: "Ecto repository decode time by source and SQL command.",
+        description: "Ecto repository decode time by source and SQL command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
         reporter_options: [buckets: @repo_query_buckets]
       ),
       last_value("vm.memory.total.bytes",

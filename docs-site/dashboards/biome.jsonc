@@ -1,0 +1,19 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
+	"root": false,
+	// From the repository root: biome lint --config-path=docs-site/dashboards/biome.jsonc --error-on-warnings docs-site/dashboards/panels.mjs
+	"overrides": [
+		{
+			"includes": ["docs-site/dashboards/panels.mjs"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						// Grafana, not JavaScript, expands these literal query placeholders.
+						// npm run check:dashboard --prefix docs-site verifies their serialized use.
+						"noTemplateCurlyInString": "off"
+					}
+				}
+			}
+		}
+	]
+}

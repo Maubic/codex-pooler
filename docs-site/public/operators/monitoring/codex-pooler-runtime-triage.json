@@ -1470,6 +1470,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -1521,6 +1522,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -1572,7 +1574,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Top Ecto query sources by safe source and SQL command. Source falls back to a sanitized table identifier for raw SQL when available.",
+      "description": "Top Ecto query sources by safe source and SQL command. Source falls back to a sanitized table identifier for raw SQL when available. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -1624,6 +1626,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1675,6 +1678,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1726,6 +1730,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1777,7 +1782,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Source-less queries that could not be mapped to a safe Ecto source or table identifier. Use this to spot unclassified raw SQL or telemetry source-attribution gaps.",
+      "description": "Source-less queries that could not be mapped to a safe Ecto source or table identifier. Use this to spot unclassified raw SQL or telemetry source-attribution gaps. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -1829,7 +1834,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "SQL command mix across repository queries. Useful for spotting unexpected write or transaction churn during incidents.",
+      "description": "SQL command mix across repository queries. Useful for spotting unexpected write or transaction churn during incidents. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -1881,7 +1886,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Database connection checkout pressure by safe source and command.",
+      "description": "Database connection checkout pressure by safe source and command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",

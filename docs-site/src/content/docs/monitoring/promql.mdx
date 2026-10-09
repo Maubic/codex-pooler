@@ -137,9 +137,11 @@ sum by (transport, route_class) (
 
 ## Database timings
 
+Repository-query rates and timings cover scraped application pods. In a split-role deployment, `OBAN_MODE=worker` and `OBAN_MODE=scheduler` run no Prometheus reporter, so their query activity is omitted. An empty graph for that share means it is not measured, not that those roles performed no queries. With `OBAN_MODE=all`, co-located job queries are included.
+
 ### Repository query rate
 
-Queries per second from each scraped application pod. Worker/scheduler queries are not exported by those roles.
+Queries per second from each scraped application pod.
 
 ```promql
 sum by (pod) (
