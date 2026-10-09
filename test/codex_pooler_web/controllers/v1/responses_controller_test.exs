@@ -153,6 +153,46 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     end
   end
 
+  for mode <- ~w(full lite), transport <- [:http, :websocket] do
+    @tag :tool_content_presence
+    test "#{transport} Responses refuses missing tool content before effects in #{mode}" do
+      upstream = start_upstream(issue_241_completed_response("tool_content_presence"))
+      setup = gateway_setup(upstream)
+      put_public_model_serving_mode!(setup, unquote(mode))
+      port = start_public_endpoint!()
+
+      for id_field <- ["tool_call_id", "call_id"], output_present? <- [false, true] do
+        item = %{"role" => "tool", id_field => "call_content_presence"}
+        item = if output_present?, do: Map.put(item, "output", "synthetic output"), else: item
+        payload = %{"model" => setup.model.exposed_model_id, "input" => [item]}
+
+        error =
+          if unquote(transport) == :http do
+            {headers, body} = curl_json_request!(port, setup.authorization, payload, "/v1/responses")
+            assert String.starts_with?(headers, "HTTP/1.1 400")
+            CodexPooler.JSON.decode!(body)["error"]
+          else
+            {conn, websocket, ref, _headers} = public_v1_websocket_connect!(port, setup, "tool-content-#{System.unique_integer([:positive])}", [{"openai-beta", "responses_websockets=2026-02-06"}])
+
+            try do
+              {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(Map.merge(payload, %{"type" => "response.create", "stream" => true})))
+              {_conn, _websocket, frame} = public_websocket_receive_text!(conn, websocket, ref)
+              assert %{"type" => "error", "status" => 400, "error" => error} = CodexPooler.JSON.decode!(frame)
+              error
+            after
+              Mint.HTTP.close(conn)
+            end
+          end
+
+        assert %{"type" => "invalid_request_error", "code" => "invalid_request", "param" => "input"} = error
+        assert FakeUpstream.count(upstream) == 0
+        assert Repo.aggregate(Request, :count) == 0
+        assert Repo.aggregate(Attempt, :count) == 0
+        assert Repo.aggregate(LedgerEntry, :count) == 0
+      end
+    end
+  end
+
   for mode <- ~w(full lite), stream <- [false, true] do
     @tag :access_programs
     test "POST /v1/responses rejects malformed access programs before effects in #{mode} with stream=#{stream}", %{conn: conn} do

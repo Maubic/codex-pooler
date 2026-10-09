@@ -4242,6 +4242,11 @@ defmodule CodexPooler.CompatibilityMatrix do
         input_role: "tool",
         id_fields: ["tool_call_id", "call_id"],
         translated_type: "function_call_output",
+        content_presence: %{
+          missing: "reject_before_dispatch",
+          explicit_null: "empty_string_output",
+          top_level_output_fallback: false
+        },
         requires_previous_response_id: true,
         metadata_only: true
       },

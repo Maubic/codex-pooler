@@ -684,10 +684,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   defp tool_output(%{"content" => %{"output" => output}}) when is_binary(output),
     do: {:ok, output}
 
-  defp tool_output(%{"content" => _content}),
+  defp tool_output(_item),
     do: {:error, Error.invalid_request("input item shape is not translatable", "input")}
-
-  defp tool_output(_item), do: {:ok, ""}
 
   defp normalize_tool_output_part(part) when is_binary(part) do
     {:ok, %{"type" => "input_text", "text" => part}}

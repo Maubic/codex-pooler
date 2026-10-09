@@ -208,6 +208,42 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
     end
   end
 
+  for id_field <- ["tool_call_id", "call_id"], output_present? <- [false, true] do
+    @tag :tool_content_presence
+    test "Responses refuses tool #{id_field} without content with output_present=#{output_present?}" do
+      item = %{"role" => "tool", unquote(id_field) => "call_content_presence"}
+      item = if unquote(output_present?), do: Map.put(item, "output", "synthetic output"), else: item
+      assert {:error, %{status: 400, code: "invalid_request", param: "input"}} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [item]})
+    end
+  end
+
+  @tag :tool_content_presence
+  test "Responses preserves present tool content including explicit null and native output" do
+    for {content, output} <- [{nil, ""}, {"", ""}, {"synthetic output", "synthetic output"}, {%{"output" => "synthetic output", "exit_code" => 0}, "synthetic output"}, {%{"output" => ""}, ""}, {[%{"type" => "text", "text" => "synthetic output"}], [%{"type" => "input_text", "text" => "synthetic output"}]}] do
+      item = %{"role" => "tool", "tool_call_id" => "call_content_presence", "content" => content, "output" => "ignored top-level output"}
+      assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [item]})
+      assert result.payload["input"] == [%{"type" => "function_call_output", "call_id" => "call_content_presence", "output" => output}]
+    end
+
+    native = %{"type" => "function_call_output", "call_id" => "call_content_presence", "output" => "synthetic native output"}
+    assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [native]})
+    assert result.payload["input"] == [native]
+  end
+
+  @tag :tool_content_presence
+  test "Chat retains its missing and null tool content refusal and valid string contract" do
+    item = %{"role" => "tool", "tool_call_id" => "call_content_presence", "output" => "synthetic output"}
+
+    for message <- [item, Map.put(item, "content", nil)] do
+      assert {:error, %{status: 400, code: "invalid_request", param: "messages"}} = Chat.coerce(%{"model" => "gpt-fixture-text", "messages" => [message]})
+    end
+
+    for content <- ["", "synthetic output"] do
+      assert {:ok, result} = Chat.coerce(%{"model" => "gpt-fixture-text", "messages" => [Map.put(item, "content", content)]})
+      assert hd(result.payload["input"])["output"] == [%{"type" => "input_text", "text" => content}]
+    end
+  end
+
   @tag :responses_coercion
   test "string Responses input coerces to a backend-compatible input_text message" do
     assert {:ok, result} =
