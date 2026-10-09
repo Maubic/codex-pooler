@@ -133,6 +133,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
           required(:semantic_turn_key) => <<_::256>>,
           optional(:input_digest) => <<_::256>>,
           optional(:websocket_compaction_claims) => [String.t()],
+          optional(:tool_continuation_claims) => [String.t()],
           optional(:turn_progress) => <<_::256>>,
           optional(:turn_position) => NativeTurnContinuation.progress_position(),
           optional(:steered_claim) => String.t()
@@ -252,10 +253,10 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
         claim(identity.turn_claim_key, :opening)
 
       :tool_continuation ->
-        claim(
-          WebsocketTurnIdentity.request_claim_key(identity.semantic_turn_key, payload),
-          :tool_continuation
-        )
+        with {:ok, claim} <- claim(WebsocketTurnIdentity.request_claim_key(identity.semantic_turn_key, payload), :tool_continuation) do
+          claims = Enum.map(tool_transport_variants(payload), &WebsocketTurnIdentity.request_claim_key(identity.semantic_turn_key, &1)) |> Enum.uniq()
+          {:ok, Map.put(claim, :tool_continuation_claims, claims)}
+        end
 
       {:post_compaction_resume, anchor} ->
         claim(
@@ -427,7 +428,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
   # reasoning/commentary before incoming mail, never delivered tool items.
   defp native_client_retry_witness(identity, %{"input" => input} = payload, request_options, :tool_continuation)
        when is_list(input) do
-    with {:ok, [digest | async_digests]} <- collect_digests([payload | async_metadata_payload(payload)], &WebsocketTurnIdentity.replay_claim_digest(identity.semantic_turn_key, &1)),
+    with {:ok, [digest | async_digests]} <- collect_digests(tool_witness_variants(payload), &WebsocketTurnIdentity.replay_claim_digest(identity.semantic_turn_key, &1)),
          {:ok, witness} <- ClientRetry.original_witness(digest, request_options.runtime.api_key_runtime_epoch, async_digests -- [digest]) do
       witness
       |> NativeMailboxContinuation.attach(identity.semantic_turn_key, payload, request_options)
@@ -438,6 +439,34 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity do
   end
 
   defp native_client_retry_witness(_identity, _payload, _request_options, _arm), do: nil
+
+  # Keep the historical HTTP primary bytes. These bounded transient variants
+  # locate existing websocket roots without changing tool output or anchors.
+  defp tool_transport_variants(payload) do
+    metadata = Map.get(payload, "client_metadata", %{})
+
+    if known_transport_field?(payload, "type", "response.create") and is_map(metadata) and known_transport_field?(metadata, @websocket_lite_marker, "true") do
+      body = Map.delete(payload, "type")
+      body = if Map.has_key?(body, "client_metadata"), do: Map.put(body, "client_metadata", Map.delete(metadata, @websocket_lite_marker)), else: body
+      variants = [body, Map.put(body, "type", "response.create")] |> Enum.flat_map(&lite_marker_variants/1)
+      Enum.uniq([payload | variants])
+    else
+      [payload]
+    end
+  end
+
+  defp known_transport_field?(map, key, expected) do
+    case Map.fetch(map, key) do
+      :error -> true
+      {:ok, ^expected} -> true
+      _unknown -> false
+    end
+  end
+
+  defp tool_witness_variants(payload) do
+    variants = tool_transport_variants(payload)
+    Enum.uniq(variants ++ Enum.flat_map(variants, &async_metadata_payload/1))
+  end
 
   # The frame before the client filled its asynchronous turn metadata, under
   # both Lite variants; none when it carries no such field.
