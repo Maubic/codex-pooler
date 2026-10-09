@@ -8,9 +8,9 @@ These packages retain the exact runtime source and dependency requirements of th
 | postgrex | 0.22.4 | migrate the existing optional Jason reference allowance from `xref.exclude` to `elixirc_options.no_warn_undefined` |
 | phoenix_ecto | 4.7.0 | migrate the same three existing optional Ecto.Migrator reference allowances to the supported compiler option |
 | telemetry_metrics_prometheus_core | 1.2.1 | remove unused `require Logger`; explicitly ignore the Range step in the existing tuple bucket pattern |
-| gen_smtp | 1.3.0 | replace two deprecated Erlang `catch` expressions with `try/catch`, preserving normal results, thrown values, exit reasons and error stack traces |
+| gen_smtp | 1.3.0 | replace two deprecated Erlang `catch` expressions with `try/catch`, preserving normal results, thrown values, exit reasons and error stack traces; install the returned state after a successful server code-change callback |
 
-The upstream release versions remain unchanged. Gettext's honest minimum is the only changed language requirement. The metrics package already requires Elixir 1.12, which supports stepped ranges. No new undefined-reference allowances are introduced. SMTP's existing callback-state behavior is preserved; these compatibility patches do not redesign the SMTP upgrade or code-change contracts.
+The upstream release versions remain unchanged. Gettext's honest minimum is the only changed language requirement. The metrics package already requires Elixir 1.12, which supports stepped ranges. No new undefined-reference allowances are introduced. SMTP's exception handling is preserved. Successful server code-change callbacks now install their returned state, including a thrown `{ok, State}` result; other outcomes retain the previous callback state.
 
 ## provenance and licenses
 

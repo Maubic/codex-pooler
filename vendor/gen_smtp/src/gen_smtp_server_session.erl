@@ -397,7 +397,7 @@ terminate(Reason, #state{
 -spec code_change(OldVsn :: any(), State :: #state{}, Extra :: any()) -> {'ok', #state{}}.
 code_change(OldVsn, #state{module = Module, callbackstate = CallbackState} = State, Extra) ->
     % TODO - this should probably be the callback module's version or its checksum
-    CallbackState =
+    UpdatedCallbackState =
         case
             try Module:code_change(OldVsn, CallbackState, Extra)
             catch
@@ -409,7 +409,7 @@ code_change(OldVsn, #state{module = Module, callbackstate = CallbackState} = Sta
             {ok, NewCallbackState} -> NewCallbackState;
             _ -> CallbackState
         end,
-    {ok, State#state{callbackstate = CallbackState}}.
+    {ok, State#state{callbackstate = UpdatedCallbackState}}.
 
 -spec parse_request(Packet :: binary()) -> {binary(), binary()}.
 parse_request(Packet) ->

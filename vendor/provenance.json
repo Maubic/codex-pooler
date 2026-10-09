@@ -223,12 +223,16 @@
       },
       "patched_files": {
         "src/gen_smtp_client.erl": "392cc0a52486da0774af555e10b2a34d1b0b0c4344a58b2365492b0dad42cf19",
-        "src/gen_smtp_server_session.erl": "1be4ba6f076d01815bdd5b09d40c70770ffaa513b3cf8782ac097ad59fb207fa"
+        "src/gen_smtp_server_session.erl": "10342c805227a0997db4c7cdc4ba29b139c170528a050c9aa40911697455ef25"
       },
       "patch_origins": [
         "https://www.erlang.org/doc/system/expressions.html#catch-and-throw"
       ],
-      "license_notice": "LICENSE"
+      "license_notice": "LICENSE",
+      "local_changes": [
+        "Preserve legacy catch results using try/catch for OTP 29 compatibility.",
+        "Install the new callback state returned by successful SMTP server code_change callbacks; keep the old state on other outcomes."
+      ]
     }
   ],
   "generated_artifacts": {

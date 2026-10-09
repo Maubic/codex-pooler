@@ -170,14 +170,45 @@ defmodule CodexPooler.DependencyRuntimeContractTest do
         assert :ok = :sys.change_code(session, :gen_smtp_server_session, :old, action)
         assert :sys.get_state(session) == original
       end
-
-      # The released server rematches CallbackState; retain its existing
-      # rejection of a different callback state instead of fixing it here.
-      assert {:error, {:EXIT, {{:badmatch, _}, stack}}} = :sys.change_code(session, :gen_smtp_server_session, :old, :changed)
-      assert [{:gen_smtp_server_session, :code_change, 3, _} | _] = stack
-      assert :sys.get_state(session) == original
     after
       :sys.resume(session)
+    end
+  end
+
+  for {action, revision} <- [changed: 1, throw_changed: 2] do
+    @change_action action
+    @change_revision revision
+
+    test "SMTP live code change #{@change_action} reaches the next protocol callback" do
+      port = smtp_server!()
+      {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false, packet: :line], @timeout)
+      on_exit(fn -> :gen_tcp.close(socket) end)
+      assert {:ok, <<"220", _::binary>>} = :gen_tcp.recv(socket, 0, @timeout)
+      assert_receive {:smtp_session, session}, @timeout
+      assert :ok = :gen_tcp.send(socket, "HELO example.com\r\n")
+      assert {:ok, <<"250", _::binary>>} = :gen_tcp.recv(socket, 0, @timeout)
+      assert_receive {:smtp_helo_revision, ^session, 0}, @timeout
+      original = :sys.get_state(session)
+      assert :ok = :sys.suspend(session)
+
+      try do
+        assert :ok = :sys.change_code(session, :gen_smtp_server_session, :old, @change_action)
+        changed = :sys.get_state(session)
+        refute changed == original
+
+        for action <- [:same, :throw_same, :throw, :exit, :error, :other] do
+          assert :ok = :sys.change_code(session, :gen_smtp_server_session, :old, action)
+          assert :sys.get_state(session) == changed
+        end
+      after
+        :sys.resume(session)
+      end
+
+      assert :ok = :gen_tcp.send(socket, "HELO example.com\r\n")
+      assert {:ok, <<"250", _::binary>>} = :gen_tcp.recv(socket, 0, @timeout)
+      assert_receive {:smtp_helo_revision, ^session, @change_revision}, @timeout
+      assert :ok = :gen_tcp.send(socket, "QUIT\r\n")
+      assert {:ok, <<"221", _::binary>>} = :gen_tcp.recv(socket, 0, @timeout)
     end
   end
 

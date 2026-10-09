@@ -26,7 +26,9 @@ init(_Hostname, _Count, _Peer, Options) ->
     Owner ! {smtp_session, self()},
     {ok, "example.com ESMTP", #{owner => Owner, tls => false}}.
 
-'handle_HELO'(_Hostname, State) -> {ok, State}.
+'handle_HELO'(_Hostname, #{owner := Owner} = State) ->
+    Owner ! {smtp_helo_revision, self(), maps:get(revision, State, 0)},
+    {ok, State}.
 'handle_EHLO'(_Hostname, Extensions, State) ->
     {ok, Extensions ++ [{"STARTTLS", true}], State}.
 'handle_STARTTLS'(#{owner := Owner} = State) ->
@@ -53,4 +55,5 @@ code_change(_Old, _State, throw) -> throw(synthetic_throw);
 code_change(_Old, _State, exit) -> exit(synthetic_exit);
 code_change(_Old, _State, error) -> erlang:error(synthetic_error);
 code_change(_Old, _State, other) -> other;
-code_change(_Old, State, changed) -> {ok, State#{changed => true}}.
+code_change(_Old, State, changed) -> {ok, State#{revision => 1}};
+code_change(_Old, State, throw_changed) -> throw({ok, State#{revision => 2}}).
