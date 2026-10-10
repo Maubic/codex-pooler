@@ -47,15 +47,15 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
 
     # Cards reuse the chart palette by rank so a model's tint matches its column:
     # top-5 get the model colors, the rest fold into the muted "Other" color.
-    other = "color-mix(in oklab, var(--color-base-content) 40%, transparent)"
+    other = "var(--admin-chart-other-models)"
 
     assert Enum.map(model.models, & &1.color) ==
              [
                "var(--color-primary)",
                "var(--color-info)",
                "var(--color-warning)",
-               "var(--color-accent)",
-               "var(--color-secondary)"
+               "var(--color-reset-bank)",
+               "var(--admin-chart-requests)"
              ] ++ List.duplicate(other, 7)
 
     chart = model.traffic.chart
@@ -102,7 +102,7 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
              "var(--color-primary)",
              "var(--color-info)",
              "var(--color-warning)",
-             "color-mix(in oklab, var(--color-base-content) 40%, transparent)",
+             "var(--admin-chart-other-models)",
              "var(--color-success)"
            ]
 
@@ -146,7 +146,7 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
     assert cost_series["data"] == Enum.map(fallback_rows, & &1.cost_usd)
     assert Enum.sum(Enum.map(fallback_rows, & &1.total)) == 130
 
-    assert length(model.outcomes) == 40
+    assert length(model.outcomes) == 200
     assert Enum.all?(model.outcomes, &(&1.status.data_status in ["ok", "warn", "err", "neutral"]))
 
     assert Enum.all?(
@@ -162,6 +162,7 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
     assert Enum.all?(
              model.outcomes,
              &(Map.keys(&1) |> Enum.sort() == [
+                 :client,
                  :code,
                  :cost,
                  :effort,
@@ -317,7 +318,7 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
         %{bucket_index: 1, label: "model-2", total_tokens: 10},
         %{bucket_index: 0, label: "model-3", total_tokens: 5}
       ],
-      outcomes: Enum.map(1..45, &outcome(&1))
+      outcomes: Enum.map(1..205, &outcome(&1))
     }
   end
 

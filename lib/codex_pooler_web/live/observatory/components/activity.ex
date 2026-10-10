@@ -6,8 +6,6 @@ defmodule CodexPoolerWeb.Observatory.Components.Activity do
   alias CodexPoolerWeb.Admin.BadgeComponents, as: AdminBadges
   alias CodexPoolerWeb.Observatory.Components.Section
 
-  @max_outcomes 12
-
   attr :traffic, :map, required: true
   attr :outcomes, :list, required: true
   attr :window, :string, default: nil
@@ -140,9 +138,12 @@ defmodule CodexPoolerWeb.Observatory.Components.Activity do
   end
 
   attr :outcomes, :list, required: true
+  attr :has_more, :boolean, default: false
+  attr :loading_more, :boolean, default: false
+  attr :load_error, :boolean, default: false
 
   def outcomes_panel(assigns) do
-    assigns = assign(assigns, :visible_outcomes, assigns.outcomes |> List.wrap() |> group_unattributed() |> Enum.take(@max_outcomes))
+    assigns = assign(assigns, :visible_outcomes, assigns.outcomes |> List.wrap() |> group_unattributed())
 
     ~H"""
     <section
@@ -150,15 +151,25 @@ defmodule CodexPoolerWeb.Observatory.Components.Activity do
       class="grid min-w-0 gap-4"
       aria-labelledby="observatory-outcomes-heading"
     >
-      <Section.divider id="observatory-outcomes-heading" label="Recent outcomes" />
+      <Section.divider id="observatory-outcomes-heading" label="Recent outcomes" suffix="Last 60 minutes" />
       <div id="observatory-outcomes-scroll" class="overflow-x-auto">
         <table id="observatory-outcomes-table" class="table table-sm min-w-160">
           <caption class="sr-only">Recent request outcomes</caption>
+          <colgroup>
+            <col class="observatory-outcome-time" />
+            <col class="observatory-outcome-model" />
+            <col class="observatory-outcome-endpoint" />
+            <col class="observatory-outcome-client" />
+            <col class="observatory-outcome-status" />
+            <col class="observatory-outcome-tokens-column" />
+            <col class="observatory-outcome-cost" />
+          </colgroup>
           <thead>
             <tr>
               <th scope="col">Time</th>
               <th scope="col">Model</th>
               <th scope="col">Endpoint</th>
+              <th scope="col" class="observatory-outcome-client">Client</th>
               <th scope="col" class="text-center">Status</th>
               <th scope="col" class="text-right">Tokens</th>
               <th scope="col" class="text-right">Cost</th>
@@ -173,7 +184,8 @@ defmodule CodexPoolerWeb.Observatory.Components.Activity do
             >
               <td
                 data-label="Time"
-                class="whitespace-nowrap text-xs tabular-nums text-base-content/55"
+                class="truncate text-xs tabular-nums text-base-content/70"
+                title={outcome.timestamp}
               >
                 {outcome.timestamp}
               </td>
@@ -181,22 +193,22 @@ defmodule CodexPoolerWeb.Observatory.Components.Activity do
                 :if={!Map.has_key?(outcome, :count)}
                 scope="row"
                 data-label="Model"
-                class="max-w-48 font-normal"
+                class="max-w-64 font-normal"
               >
-                <div class="grid min-w-0 gap-1">
+                <div class="flex min-w-0 items-center gap-2">
                   <span class="flex min-w-0 items-baseline gap-1 text-sm leading-4">
-                    <span data-role="outcome-model" class="min-w-0 truncate font-semibold">{outcome.model}</span>
+                    <span data-role="outcome-model" class="min-w-0 truncate font-semibold" title={outcome.model}>{outcome.model}</span>
                     <span
                       :if={Map.get(outcome, :effort)}
                       data-role="outcome-effort"
-                      class="shrink-0 text-xs text-base-content/55"
+                      class="shrink-0 text-xs text-base-content/70"
                     >· {outcome.effort}</span>
                   </span>
                   <span
                     :if={Map.get(outcome, :speed_level)}
                     data-role="outcome-speed"
                     data-speed-level={outcome.speed_level}
-                    class="inline-flex items-center gap-px text-warning"
+                    class="inline-flex shrink-0 items-center gap-px text-warning"
                     title={speed_title(outcome.speed_level)}
                   >
                     <.icon
@@ -217,57 +229,55 @@ defmodule CodexPoolerWeb.Observatory.Components.Activity do
               >
                 — no model · {outcome.count} requests
               </th>
-              <td data-label="Endpoint" class="text-base-content/60">{outcome.endpoint}</td>
+              <td data-label="Endpoint" class="truncate text-xs text-base-content/70" title={outcome.endpoint}>{outcome.endpoint}</td>
+              <td data-label="Client" class="observatory-outcome-client max-w-40 text-xs text-base-content/70">
+                <.client client={Map.get(outcome, :client)} />
+              </td>
               <td data-label="Status" class="text-center">
                 <span
                   class={[
                     AdminBadges.status_chip_class(status_for_tone(outcome.status.tone)),
-                    "observatory-metadata-chip whitespace-nowrap !px-2 !py-0.5"
+                    "observatory-metadata-chip max-w-full truncate !px-2 !py-0.5"
                   ]}
                   data-role="outcome-status"
                   data-status={status_data_status(outcome.status.data_status)}
                   role="status"
+                  title={outcome.status.label}
                 >
                   {outcome.status.label}
                 </span>
               </td>
               <td data-label="Tokens" class="whitespace-nowrap text-right tabular-nums">
-                <div class="grid justify-items-end gap-1">
+                <div class="observatory-outcome-tokens flex items-center justify-end gap-2">
                   <span class="flex items-center justify-end gap-2 text-sm leading-4">
-                    <span
-                      :if={composition(outcome)}
-                      data-role="outcome-token-bar"
-                      role="img"
-                      aria-label={composition_title(outcome)}
-                      title={composition_title(outcome)}
-                      class="hidden h-2 w-20 overflow-hidden rounded-xs lg:flex"
-                    >
-                      <span
-                        :for={segment <- composition(outcome)}
-                        data-role={segment_role(segment.key)}
-                        data-token-count={segment.count}
-                        aria-hidden="true"
-                        class={["h-full min-w-0 basis-0", segment_color(segment.key)]}
-                        style={"flex-grow: #{segment.count}"}
-                      ></span>
-                    </span>
-                    <span data-role="outcome-tokens" class="min-w-12 text-right">{outcome.tokens.label}</span>
+                    <span data-role="outcome-tokens" class="text-right font-semibold">{outcome.tokens.label}</span>
                   </span>
                   <span
-                    :if={Map.get(outcome.tokens, :cached_label)}
+                    :if={Map.get(outcome.tokens, :cache_percentage_label)}
                     data-role="outcome-cached"
-                    class="text-[11px] leading-4 text-base-content/55"
+                    class="text-xs text-base-content/70"
                   >
-                    {outcome.tokens.cached_label}
+                    {outcome.tokens.cache_percentage_label}
                   </span>
                 </div>
               </td>
               <td data-label="Cost" class="whitespace-nowrap text-right text-sm tabular-nums">
-                <span data-role="outcome-cost">{outcome.cost.label}</span>
+                <span data-role="outcome-cost" class="font-semibold">{outcome.cost.label}</span>
               </td>
             </tr>
           </tbody>
         </table>
+      </div>
+      <p :if={@visible_outcomes == []} id="observatory-outcomes-empty" class="py-4 text-center text-sm text-base-content/70">
+        No requests in the last 60 minutes
+      </p>
+      <div :if={@has_more or @load_error} class="flex flex-wrap items-center justify-center gap-3">
+        <p :if={@load_error} id="observatory-outcomes-load-error" role="status" class="text-xs text-error">
+          Older requests could not be loaded. Try again.
+        </p>
+        <button id="observatory-outcomes-load-more" type="button" class="btn btn-ghost btn-sm" phx-click="load-more-outcomes" disabled={@loading_more}>
+          {if @loading_more, do: "Loading requests…", else: "Load older requests"}
+        </button>
       </div>
     </section>
     """
@@ -289,22 +299,31 @@ defmodule CodexPoolerWeb.Observatory.Components.Activity do
   defp speed_title(2), do: "Fast (priority tier)"
   defp speed_title(_level), do: "Normal speed"
 
-  defp composition(outcome), do: Map.get(outcome.tokens, :composition)
+  attr :client, :map, default: nil
 
-  defp composition_title(outcome) do
-    outcome
-    |> composition()
-    |> Enum.map_join("; ", &"#{&1.label}: #{&1.count}")
-    |> then(&"#{outcome.tokens.label} total tokens — #{&1}. Output includes reasoning tokens.")
+  defp client(%{client: nil} = assigns) do
+    ~H"""
+    <span data-role="outcome-client">Unknown client</span>
+    """
   end
 
-  defp segment_role(:cached_input), do: "cached-token-bar"
-  defp segment_role(:uncached_input), do: "uncached-token-bar"
-  defp segment_role(:output), do: "output-token-bar"
-
-  defp segment_color(:cached_input), do: "bg-info"
-  defp segment_color(:uncached_input), do: "bg-info/25"
-  defp segment_color(:output), do: "bg-success"
+  defp client(assigns) do
+    ~H"""
+    <span data-role="outcome-client" data-client-kind={@client.kind} class="inline-flex max-w-full items-center gap-1.5 whitespace-nowrap">
+      <span aria-hidden="true" class="inline-flex shrink-0">
+        <%= case @client.logo do %>
+          <% %{format: :svg, asset: asset} -> %>
+            <span class="request-client-logo" style={"mask-image: url(#{~p"/images/client-logos/#{asset}"})"}></span>
+          <% %{format: :png, asset: asset} -> %>
+            <img class="request-client-logo-image" src={~p"/images/client-logos/#{asset}"} width="14" height="14" alt="" />
+          <% nil -> %>
+            <.icon name={@client.icon} class="size-3.5" />
+        <% end %>
+      </span>
+      <span class="truncate">{@client.label}</span>
+    </span>
+    """
+  end
 
   # Requests that name no model and move no tokens (model listings and the
   # like) would otherwise fill the table; consecutive identical ones become
@@ -336,7 +355,7 @@ defmodule CodexPoolerWeb.Observatory.Components.Activity do
 
   defp unattributed?(outcome), do: outcome.model == "Unknown model" and get_in(outcome, [:tokens, :total]) == 0
 
-  defp same_group?(group, outcome), do: group.endpoint == outcome.endpoint and group.status == outcome.status
+  defp same_group?(group, outcome), do: group.endpoint == outcome.endpoint and group.status == outcome.status and Map.get(group, :client) == Map.get(outcome, :client)
 
   defp start_group(outcome), do: Map.put(outcome, :count, 1)
 end

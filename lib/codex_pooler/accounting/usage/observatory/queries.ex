@@ -48,10 +48,17 @@ defmodule CodexPooler.Accounting.Usage.Observatory.Queries do
     end)
   end
 
-  def outcomes(identity, window) do
-    Repo.all(
-      QueryScope.recent_outcomes(identity, window),
-      telemetry_options: [reporting_projection: :observatory_outcomes]
-    )
+  def outcomes(identity, window, cursor \\ nil) do
+    rows =
+      Repo.all(
+        QueryScope.recent_outcomes(identity, window, cursor),
+        telemetry_options: [reporting_projection: :observatory_outcomes]
+      )
+
+    {outcomes, extra} = Enum.split(rows, 200)
+    has_more = extra != []
+    next_cursor = if has_more, do: Map.take(List.last(outcomes), [:timestamp, :id])
+
+    %{outcomes: outcomes, outcomes_page: %{as_of: window.ended_at, next_cursor: next_cursor, has_more: has_more}}
   end
 end

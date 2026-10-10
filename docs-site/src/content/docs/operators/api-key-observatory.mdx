@@ -54,18 +54,19 @@ The **Traffic** chart plots tokens per time bucket as stacked columns, one colou
 
 ### Recent outcomes
 
-The table lists up to 12 rows drawn from the latest 40 requests of the window, newest first:
+The table shows requests admitted in the last 60 minutes, newest first, independently of the selected chart window. It loads 200 requests at a time; **Load older requests** adds more from the same hour. Desktop rows keep the request details on one line; narrow screens use labelled cards. At smaller widths the client column is hidden to keep tokens and cost visible:
 
 | Column | Content |
 | --- | --- |
 | Time | The admission time of the request, in UTC. |
-| Model | The model, then the reasoning effort after a dot, and a speed indicator below: one bolt for normal speed, two for the fast priority tier, three for ultrafast. |
+| Model | The model, then the reasoning effort after a dot, and an inline speed indicator: one bolt for normal speed, two for the fast priority tier, three for ultrafast. |
 | Endpoint | A sanitized endpoint class: `responses`, `chat_completions`, `completions`, `embeddings` or `other`. |
+| Client | A recognized client name with its icon. Unrecognized user agents show a generic client label; raw user agents are never shown. |
 | Status | The outcome: `Succeeded`, `Failed` or `Rejected` with a sanitized reason (`Rate limited`, `Authentication issue`, `Timed out`, `Service unavailable`, `Invalid request` or `Request failed`), `Accepted`, `In progress` or `Client cancelled`. |
-| Tokens | The total, a bar that splits cached input, uncached input and output (output includes reasoning tokens), and the cached share of the input below it. |
+| Tokens | The total and the cached share of input, such as `47.4k (98.6% cached)`. The percentage is omitted when the recorded breakdown is incomplete. |
 | Cost | The settled or estimated cost, or a dash when none is available. |
 
-Consecutive requests with the same endpoint class and status that name no model and carry no tokens, such as clients listing models, fold into one `— no model · N requests` row that shows the newest time of the group.
+Consecutive requests with the same endpoint class, status and client that name no model and carry no tokens, such as clients listing models, fold into one `— no model · N requests` row that shows the newest time of the group. Refreshing starts a new hour snapshot and replaces any older pages already loaded.
 
 A request whose client closed the connection before the response finished, for example a client that interrupts a stream to send its next request, is shown as `Client cancelled` instead of a failure. The success rate leaves these requests out of both its counts, and its detail line says how many there were.
 
@@ -75,7 +76,7 @@ The page refreshes while visible. You can pause and resume refresh, and a hidden
 
 ## Key-local and sanitized by design
 
-Every value is anchored to the authenticated API key. The Observatory does not combine data from another key, another Pool, or a separate administration view. It does not show prompts, completions, request or response bodies, file or media contents, headers, cookies, bearer credentials, raw idempotency keys, IP addresses, user agents, upstream identities, or raw error text.
+Every value is anchored to the authenticated API key. The Observatory does not combine data from another key, another Pool, or a separate administration view. It does not show prompts, completions, request or response bodies, file or media contents, headers, cookies, bearer credentials, raw idempotency keys, IP addresses, raw user agents, upstream identities, or raw error text.
 
 Costs are usage-reporting values, not provider invoices. A value may be settled, estimated while accounting completes, or unavailable when pricing or accounting data is missing.
 

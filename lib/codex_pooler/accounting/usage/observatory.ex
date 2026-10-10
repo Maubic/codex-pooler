@@ -30,6 +30,9 @@ defmodule CodexPooler.Accounting.Usage.Observatory do
         }
 
   @type principal :: DashboardPrincipal.t()
+  @type cursor :: %{required(:timestamp) => DateTime.t(), required(:id) => Ecto.UUID.t()}
+  @type outcomes_page :: %{required(:as_of) => DateTime.t(), required(:next_cursor) => cursor() | nil, required(:has_more) => boolean()}
+  @type outcomes_result :: %{required(:outcomes) => [map()], required(:outcomes_page) => outcomes_page()}
 
   @spec read(principal(), String.t()) :: {:ok, map()} | {:error, error()}
   def read(%DashboardPrincipal{} = principal, window_key),
@@ -47,9 +50,10 @@ defmodule CodexPooler.Accounting.Usage.Observatory do
       %{summary: summary, buckets: buckets, models: models, model_buckets: model_buckets} =
         identity |> Queries.grid(window) |> Rollup.fold()
 
-      outcomes = Queries.outcomes(identity, window)
+      %{outcomes: outcomes, outcomes_page: page} = Queries.outcomes(identity, outcomes_window(window.ended_at))
+      projection = Presentation.build(window, summary, buckets, models, outcomes, model_buckets)
 
-      {:ok, Presentation.build(window, summary, buckets, models, outcomes, model_buckets)}
+      {:ok, Map.put(projection, :outcomes_page, page)}
     else
       {:error, :unauthorized} ->
         {:error, error(:unauthorized, "Observatory reporting requires an authenticated principal")}
@@ -60,6 +64,63 @@ defmodule CodexPooler.Accounting.Usage.Observatory do
   end
 
   def read(_principal, _window_key, _opts), do: unauthorized_error()
+
+  @doc """
+  Read one page of the authenticated key's outcomes from a pinned sixty-minute window.
+
+  The cursor is server-owned pagination state from the previous result. Every page
+  revalidates the dashboard principal and applies its canonical key and Pool scope.
+  """
+  @spec read_outcomes(principal(), keyword()) :: {:ok, outcomes_result()} | {:error, error()}
+  def read_outcomes(principal, opts \\ [])
+
+  def read_outcomes(%DashboardPrincipal{} = principal, opts) do
+    with :ok <- validate_outcomes_options(opts),
+         {:ok, ended_at} <- upper_bound(Keyword.get(opts, :as_of)),
+         window = outcomes_window(ended_at),
+         {:ok, cursor} <- normalize_cursor(Keyword.get(opts, :before), window),
+         {:ok, canonical_principal} <- Principal.load(principal),
+         {:ok, identity} <- canonical_identity(canonical_principal) do
+      %{outcomes: outcomes, outcomes_page: page} = Queries.outcomes(identity, window, cursor)
+      {:ok, %{outcomes: Presentation.outcomes(outcomes), outcomes_page: page}}
+    else
+      {:error, :unauthorized} -> unauthorized_error()
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def read_outcomes(_principal, _opts), do: unauthorized_error()
+
+  defp outcomes_window(ended_at),
+    do: %{started_at: DateTime.add(ended_at, -3_600, :second), ended_at: ended_at}
+
+  defp validate_outcomes_options(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) and Keyword.keys(opts) -- [:as_of, :before] == [] and
+         (is_nil(Keyword.get(opts, :before)) or match?(%DateTime{}, Keyword.get(opts, :as_of))) do
+      :ok
+    else
+      {:error, error(:invalid_input, "Observatory outcome options are invalid")}
+    end
+  end
+
+  defp validate_outcomes_options(_opts),
+    do: {:error, error(:invalid_input, "Observatory outcome options are invalid")}
+
+  defp normalize_cursor(nil, _window), do: {:ok, nil}
+
+  defp normalize_cursor(%{timestamp: %DateTime{} = timestamp, id: id} = cursor, window) when map_size(cursor) == 2 do
+    with {:ok, id} <- Ecto.UUID.cast(id),
+         {:ok, timestamp} <- DateTime.shift_zone(timestamp, "Etc/UTC"),
+         true <- DateTime.compare(timestamp, window.started_at) != :lt,
+         true <- DateTime.compare(timestamp, window.ended_at) == :lt do
+      {:ok, %{timestamp: timestamp, id: id}}
+    else
+      _invalid -> {:error, error(:invalid_input, "Observatory outcome cursor is invalid")}
+    end
+  end
+
+  defp normalize_cursor(_cursor, _window),
+    do: {:error, error(:invalid_input, "Observatory outcome cursor is invalid")}
 
   defp validate_options(opts) when is_list(opts) do
     if Keyword.keyword?(opts) and Keyword.keys(opts) -- [:as_of] == [] do

@@ -2140,7 +2140,7 @@ body {
 }
 
 .observatory-metadata-chip {
-  font-size: var(--observatory-type-fact-label-size) !important;
+  @apply text-xs;
 }
 
 .observatory-kpi {
@@ -2192,10 +2192,9 @@ body {
 }
 
 .observatory-kpi-detail {
-  @apply leading-5;
+  @apply text-xs leading-5;
 
-  color: color-mix(in oklab, var(--color-base-content) 55%, transparent);
-  font-size: var(--observatory-type-fine-size);
+  color: color-mix(in oklab, var(--color-base-content) 70%, transparent);
 }
 
 .observatory-trend {
@@ -2226,7 +2225,50 @@ body {
 }
 
 .observatory-metric {
-  font-size: var(--observatory-type-fine-compact-size);
+  @apply text-xs;
+}
+
+@media (width < 64rem) {
+  #observatory-outcomes-table .observatory-outcome-client {
+    display: none;
+  }
+}
+
+@media (40rem < width < 64rem) {
+  #observatory-outcomes-table {
+    width: 100%;
+    min-width: 0;
+    table-layout: fixed;
+  }
+
+  #observatory-outcomes-table th,
+  #observatory-outcomes-table td {
+    @apply px-2;
+  }
+
+  #observatory-outcomes-table .observatory-outcome-time {
+    width: 17%;
+  }
+
+  #observatory-outcomes-table .observatory-outcome-model {
+    width: 25%;
+  }
+
+  #observatory-outcomes-table .observatory-outcome-endpoint {
+    width: 10%;
+  }
+
+  #observatory-outcomes-table .observatory-outcome-status {
+    width: 13%;
+  }
+
+  #observatory-outcomes-table .observatory-outcome-tokens-column {
+    width: 24%;
+  }
+
+  #observatory-outcomes-table .observatory-outcome-cost {
+    width: 11%;
+  }
 }
 
 /* Below the content-width breakpoint the outcomes ledger reflows from a wide
@@ -2264,11 +2306,14 @@ body {
 
   #observatory-outcomes-table tbody td::before,
   #observatory-outcomes-table tbody th[scope="row"]::before {
-    @apply font-semibold uppercase text-base-content/45;
+    @apply text-xs font-semibold uppercase text-base-content/70;
 
     content: attr(data-label);
-    font-size: var(--observatory-type-fact-label-size);
     letter-spacing: var(--observatory-type-fact-label-tracking);
+  }
+
+  .observatory-outcome-tokens {
+    @apply flex-wrap;
   }
 }
 

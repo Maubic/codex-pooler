@@ -1,6 +1,8 @@
 defmodule CodexPooler.Accounting.Usage.Observatory.Presentation do
   @moduledoc false
 
+  alias CodexPooler.Accounting.ClientIdentity
+
   def build(window, summary, sparse_buckets, models, outcomes, model_buckets \\ []) do
     summary = normalize_row(summary)
     normalized_buckets = buckets(window, sparse_buckets)
@@ -13,9 +15,12 @@ defmodule CodexPooler.Accounting.Usage.Observatory.Presentation do
       model_buckets: model_bucket_rows(model_buckets),
       trends: trends(normalized_buckets),
       models: model_distribution(models, summary.total_tokens),
-      outcomes: Enum.map(outcomes, &outcome/1)
+      outcomes: outcomes(outcomes)
     }
   end
+
+  @spec outcomes([map()]) :: [map()]
+  def outcomes(rows), do: Enum.map(rows, &outcome/1)
 
   defp model_bucket_rows(rows) when is_list(rows) do
     Enum.map(rows, fn row ->
@@ -194,6 +199,7 @@ defmodule CodexPooler.Accounting.Usage.Observatory.Presentation do
     %{
       timestamp: row.timestamp,
       model: row.model,
+      client: ClientIdentity.classify(Map.get(row, :user_agent)),
       endpoint_class: row.endpoint_class,
       status: row.status,
       code: row.code,

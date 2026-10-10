@@ -3,6 +3,7 @@ defmodule CodexPoolerWeb.Observatory.ComponentsOutcomeGroupsTest do
 
   import Phoenix.LiveViewTest
 
+  alias CodexPooler.Accounting.ClientIdentity
   alias CodexPoolerWeb.Observatory.Components.{Activity, Telemetry}
 
   test "consecutive requests without a model and without tokens fold into one row" do
@@ -35,6 +36,52 @@ defmodule CodexPoolerWeb.Observatory.ComponentsOutcomeGroupsTest do
 
     assert LazyHTML.query(fragment, "[data-role='observatory-outcome-row']") |> Enum.count() == 3
     assert LazyHTML.query(fragment, "[data-role='observatory-outcome-group']") |> Enum.empty?()
+  end
+
+  test "shows every loaded request after grouping without a fixed row cutoff" do
+    outcomes =
+      List.duplicate(outcome("Unknown model", "other", 0), 40) ++
+        Enum.map(1..70, &outcome("sample-model-#{&1}", "responses", &1))
+
+    fragment = render_outcomes(outcomes)
+    rows = LazyHTML.query(fragment, "[data-role='observatory-outcome-row']") |> Enum.to_list()
+
+    assert length(rows) == 71
+    assert hd(rows) |> LazyHTML.text() =~ "40 requests"
+    assert List.last(rows) |> LazyHTML.text() =~ "sample-model-70"
+
+    attributed = render_outcomes(Enum.map(1..70, &outcome("sample-model-#{&1}", "responses", &1)))
+    assert LazyHTML.query(attributed, "[data-role='outcome-model']") |> Enum.count() == 70
+  end
+
+  test "compact rows show total tokens, cache percentage and normalized client" do
+    request =
+      outcome("sample-model", "responses", 100)
+      |> Map.merge(%{
+        effort: "high",
+        speed_level: 2,
+        client: ClientIdentity.from_kind("opencode"),
+        tokens: %{
+          total: 100,
+          label: "100",
+          cache_percentage_label: "(75.0% cached)"
+        }
+      })
+
+    fragment = render_outcomes([request])
+
+    assert LazyHTML.query(fragment, "[data-role='outcome-speed'][data-speed-level='2']") |> LazyHTML.text() =~ "Fast (priority tier)"
+    assert LazyHTML.query(fragment, "[data-role='outcome-effort']") |> LazyHTML.text() =~ "high"
+    assert LazyHTML.query(fragment, "[data-role='outcome-tokens']") |> LazyHTML.text() == "100"
+    assert LazyHTML.query(fragment, "[data-role='outcome-cached']") |> LazyHTML.text() |> String.trim() == "(75.0% cached)"
+    assert LazyHTML.query(fragment, "[data-role='outcome-client'][data-client-kind='opencode']") |> LazyHTML.text() |> String.trim() == "opencode"
+    assert LazyHTML.query(fragment, "[data-role='outcome-client'] .request-client-logo") |> Enum.count() == 1
+  end
+
+  test "requests from different clients remain distinct even without a model" do
+    first = Map.put(outcome("Unknown model", "other", 0), :client, ClientIdentity.from_kind("codex"))
+    second = Map.put(first, :client, ClientIdentity.from_kind("opencode"))
+    assert render_outcomes([first, second]) |> LazyHTML.query("[data-role='observatory-outcome-row']") |> Enum.count() == 2
   end
 
   test "an unavailable trend renders no trend element" do

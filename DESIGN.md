@@ -534,9 +534,9 @@ This is the complete inventory; it is not a new global scale:
 | `--observatory-type-wordmark-suffix-tracking` | `0.14em` | Wordmark suffix tracking |
 | `--observatory-type-control-size` | `0.6875rem` | Window and chart-mode segmented button type |
 | `--observatory-type-control-leading` | `1.3` | Segmented button line height |
-| `--observatory-type-fine-size` | `0.71875rem` | Freshness and fact-detail type |
+| `--observatory-type-fine-size` | `0.71875rem` | Freshness type; body metadata and fact details use `text-xs` |
 | `--observatory-type-fine-compact-size` | `0.65625rem` | Freshness type on phones at or below 420px |
-| `--observatory-type-fact-label-size` | `0.625rem` | Telemetry fact labels and Observatory micro metadata chips |
+| `--observatory-type-fact-label-size` | `0.625rem` | Telemetry fact labels; metadata chips use `text-xs` |
 | `--observatory-type-fact-label-tracking` | `0.08em` | Telemetry fact-label tracking |
 | `--observatory-type-fact-value-size` | `1.3125rem` | Standard telemetry fact value |
 | `--observatory-type-fact-value-leading` | `1.15` | Telemetry fact-value line height |
@@ -2059,7 +2059,7 @@ and [Observatory rules in `app.css`](assets/css/app.css).
 - Top to bottom: a KPI row of four separate cards, a main row with the traffic section beside the model
   distribution, and the recent-outcomes table across the full width. At 1100px and above (`observatory-split`) the
   main row is `grid-template-columns: minmax(0,2fr) minmax(0,1fr)` with a 24px gap; below it everything is one column
-  and charts scroll inside their own `overflow-x-auto` region. The KPI row is 4 columns from `xl`, 2×2 from `sm` and
+  and charts scroll inside their own `overflow-x-auto` region. The KPI row is 4 columns from `lg` (1024px), 2×2 from `sm` and
   one column below. No horizontal scroll of primary content at any width (375/768/1280 are the checked breakpoints).
 - **KPI cards** (`.observatory-kpi`, bordered `rounded-box` cards, one fact each): an uppercase micro label with a 28px
   tinted icon tile, then the value in the sans face at 30px semibold with `tabular-nums` and a muted unit, then a
@@ -2082,16 +2082,14 @@ and [Observatory rules in `app.css`](assets/css/app.css).
   stack sums to total tokens) with a settled+estimated **cost line** on a
   second (right) axis — the app's shipped "Traffic over time" pattern. Green
   is reserved for the cost line, so the model columns draw from
-  primary/info/warning/accent/secondary and never collide with it. ~264px tall.
+  primary/info/warning/reset-bank/chart-requests with chart-other-models for the folded remainder, and never collide with it. Small model values use neutral readable ink in both themes; chart colors belong to the bars and series. ~264px tall.
 - **Recent outcomes** (cardless: heading + hairline rule): a
   zebra table ([Compact and definition lists](#compact-and-definition-lists) idiom, `table-sm` density) inside its own
   `overflow-x-auto`. Columns: Time (muted, readable "Jul 16, 23:22:23"
-  format) · Model (name in semibold with the reasoning effort muted beside it, and under it the three speed bolts of
+  format) · Model (name in semibold with the reasoning effort muted beside it, followed inline by the three speed bolts of
   the request-log model cell: one filled normal, two fast, three ultrafast) · Endpoint class (muted) · Status
-  ([Chips](#chips-status-count-metadata-severity-protocol-redacted) micro chips: ok/warn/err/neutral) · Tokens (the
-  request-log token cell: a cached / uncached / output composition bar, the total, and "N cached · P% of input" below;
-  total only when the breakdown is incomplete) · Cost, both in the sans face with `tabular-nums`. Below `lg` the rows
-  reflow into labelled cards. Bounded at 12 rows drawn from the 40 most recent requests, with consecutive requests that name no model and move no tokens folded into one muted "— no model · N requests" row; only sanitized fields ever appear
+  ([Chips](#chips-status-count-metadata-severity-protocol-redacted) micro chips: ok/warn/err/neutral) · Client (the existing local client mark and allowlisted label, never the raw user agent) · Tokens ("47.4k (98.6% cached)", percentage of input; total only when the breakdown is incomplete) · Cost, both in the sans face with `tabular-nums`. Body metadata, status chips, model request counts and model token/cost details use `text-xs` (12px); model names and request token/cost values use `text-sm` (14px). All inherit Roboto Condensed; tabular figures align numbers. KPI detail lines also use `text-xs`, with their established larger values retained. Above 640px each request occupies one compact line; at or below 640px the rows
+  reflow into labelled cards and token details may wrap within their labelled cell. Below 1024px the client column steps aside; tables between 640px and 1024px use fixed proportions for time/model/endpoint/status/tokens/cost so the numeric columns remain visible without horizontal scrolling. The primary token and cost values share the model's 14px semibold Roboto Condensed styling; the parenthesized cache percentage is 12px regular metadata. The ledger covers the last 60 minutes independently of the selected chart window. Reads fetch 200 requests per page with a pinned admission-time/id cursor; "Load older requests" appends further pages from that same hour, with no fixed total cutoff. A refresh replaces the hour snapshot and clears pending pagination. Consecutive requests with the same endpoint, status and normalized client that name no model and move no tokens fold into one muted "— no model · N requests" row; only sanitized fields ever appear
   (timestamp, model, endpoint class, safe status/code, latency, settled
   tokens/cost). No per-row status stripe and no `sanitized` chip — the status
   chip and the section's "metadata only" subtext carry that.

@@ -46,8 +46,23 @@ defmodule CodexPooler.Accounting.ObservatoryQueryPlanTest do
       "result_limit" => "rejected"
     }
 
+    {{:ok, next_page}, [next_query]} =
+      Support.collect_observatory_queries(fn ->
+        Observatory.read_outcomes(principal, as_of: upper_bound, before: projection.outcomes_page.next_cursor)
+      end)
+
+    next_plan = Support.explain!(next_query)
+    request_work = Support.relation_work(next_plan.root, "requests")["total_relation_work"]
+    fact_work = Support.relation_work(next_plan.root, "request_log_facts")["total_relation_work"]
+    assert length(next_page.outcomes) == 40
+    refute next_page.outcomes_page.has_more
+    assert request_work <= 41
+    assert fact_work <= 41
+    assert Support.index_condition_contains?(next_plan.root, "requests", ["api_key_id", "pool_id", "admitted_at", "id"])
+
     plans
     |> Receipt.build(projection, length(queries), row_count, checks, probes)
+    |> Map.put("paging", %{outcomes: length(next_page.outcomes), has_more: next_page.outcomes_page.has_more, request_relation_work: request_work, fact_relation_work: fact_work})
     |> Receipt.write_if_requested!()
   end
 

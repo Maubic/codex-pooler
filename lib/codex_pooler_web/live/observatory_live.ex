@@ -25,6 +25,9 @@ defmodule CodexPoolerWeb.ObservatoryLive do
      |> assign(:loading, not paused)
      |> assign(:observatory_state, if(paused, do: :stale, else: :loading))
      |> assign(:observatory_report, nil)
+     |> assign(:outcomes_page, nil)
+     |> assign(:loading_outcomes, false)
+     |> assign(:outcomes_load_error, false)
      |> assign(:refreshing, false)
      |> assign(:request_generation, 0)
      |> assign(:applied_generation, 0)
@@ -78,11 +81,43 @@ defmodule CodexPoolerWeb.ObservatoryLive do
     {:noreply, request_refresh(socket)}
   end
 
+  def handle_event("load-more-outcomes", _params, %{assigns: %{loading_outcomes: false, refreshing: false, outcomes_page: %{has_more: true} = page}} = socket) do
+    case ObservatoryAuth.revalidate(socket) do
+      {:ok, socket} ->
+        principal = socket.assigns.dashboard_principal
+        generation = socket.assigns.request_generation
+        reader = reader_module()
+
+        {:noreply,
+         socket
+         |> assign(loading_outcomes: true, outcomes_load_error: false)
+         |> start_async({:observatory_outcomes, generation}, fn ->
+           reader.read_outcomes(principal, as_of: page.as_of, before: page.next_cursor)
+         end)}
+
+      {:error, socket} ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("load-more-outcomes", _params, socket), do: {:noreply, socket}
+
   @impl true
   def handle_async({:observatory_refresh, generation}, result, socket) do
     if generation == socket.assigns.request_generation do
       case ObservatoryAuth.revalidate(socket) do
         {:ok, socket} -> {:noreply, apply_refresh_result(socket, generation, result)}
+        {:error, socket} -> {:noreply, socket}
+      end
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_async({:observatory_outcomes, generation}, result, socket) do
+    if generation == socket.assigns.request_generation do
+      case ObservatoryAuth.revalidate(socket) do
+        {:ok, socket} -> {:noreply, apply_outcomes_result(socket, result)}
         {:error, socket} -> {:noreply, socket}
       end
     else
@@ -169,7 +204,12 @@ defmodule CodexPoolerWeb.ObservatoryLive do
             />
           </div>
 
-          <Activity.outcomes_panel outcomes={@observatory_report.outcomes} />
+          <Activity.outcomes_panel
+            outcomes={@observatory_report.outcomes}
+            has_more={!@refreshing && @outcomes_page != nil && @outcomes_page.has_more}
+            loading_more={@loading_outcomes}
+            load_error={@outcomes_load_error}
+          />
         </div>
       </section>
     </Layouts.app>
@@ -178,7 +218,7 @@ defmodule CodexPoolerWeb.ObservatoryLive do
 
   defp request_refresh(socket) do
     generation = socket.assigns.request_generation + 1
-    socket = assign(socket, :request_generation, generation)
+    socket = assign(socket, request_generation: generation, outcomes_page: nil, loading_outcomes: false, outcomes_load_error: false)
 
     case ObservatoryAuth.revalidate(socket) do
       {:ok, socket} ->
@@ -208,6 +248,7 @@ defmodule CodexPoolerWeb.ObservatoryLive do
       loading: false,
       refreshing: false,
       observatory_report: presentation,
+      outcomes_page: Map.get(report, :outcomes_page),
       observatory_state: presentation.state
     )
   end
@@ -219,9 +260,18 @@ defmodule CodexPoolerWeb.ObservatoryLive do
       loading: false,
       refreshing: false,
       observatory_report: nil,
+      outcomes_page: nil,
       observatory_state: :error
     )
   end
+
+  defp apply_outcomes_result(socket, {:ok, {:ok, %{outcomes: outcomes, outcomes_page: page}}}) do
+    report = socket.assigns.observatory_report
+    report = %{report | outcomes: report.outcomes ++ Presentation.build_outcomes(outcomes)}
+    assign(socket, observatory_report: report, outcomes_page: page, loading_outcomes: false, outcomes_load_error: false)
+  end
+
+  defp apply_outcomes_result(socket, _error), do: assign(socket, loading_outcomes: false, outcomes_load_error: true)
 
   defp reader_module,
     do: Application.get_env(:codex_pooler, :observatory_reader, UsageObservatory)

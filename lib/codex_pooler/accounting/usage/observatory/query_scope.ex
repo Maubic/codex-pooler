@@ -245,16 +245,16 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
   end
 
   @doc """
-  The forty most recent scoped outcomes. The page shows twelve rows of them once
-  consecutive requests without a model have been folded into one row.
+  One keyset page of the most recent scoped outcomes, with one lookahead row.
+  Admission time and id provide a deterministic cursor even when timestamps tie.
 
   This is a dedicated query rather than a slice of `scoped_facts/2` so the
-  endpoint/error-code regex classification runs over only the forty rows the
+  endpoint/error-code regex classification runs over only the rows the
   limit keeps, not the whole window. `requests_api_key_pool_admitted_id_idx`
   yields the scoped rows in the requested deterministic order, so the limit
-  stops early and the fact/model joins are forty primary-key lookups.
+  stops early and the fact/model joins are bounded primary-key lookups.
   """
-  def recent_outcomes(identity, window) do
+  def recent_outcomes(identity, window, cursor \\ nil) do
     from(request in Request,
       as: :request,
       left_join: fact in RequestLogFact,
@@ -270,8 +270,10 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
           ^window.ended_at
         ),
       order_by: [desc: request.admitted_at, desc: request.id],
-      limit: 40,
+      limit: 201,
       select: %{
+        id: request.id,
+        user_agent: request.user_agent,
         timestamp: request.admitted_at,
         model: model_label(model.exposed_model_id),
         endpoint_class: endpoint_class(request.endpoint),
@@ -309,7 +311,14 @@ defmodule CodexPooler.Accounting.Usage.Observatory.QueryScope do
           )
       }
     )
+    |> before_cursor(cursor)
     |> select_merge(^outcome_columns())
+  end
+
+  defp before_cursor(query, nil), do: query
+
+  defp before_cursor(query, %{timestamp: timestamp, id: id}) do
+    where(query, [request: request], fragment("ROW(?, ?) < ROW(?, ?)", request.admitted_at, request.id, type(^timestamp, :utc_datetime_usec), type(^id, :binary_id)))
   end
 
   # A request the client cancelled (`RequestOutcome`) is counted apart and is

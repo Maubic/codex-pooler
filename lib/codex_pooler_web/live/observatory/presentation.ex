@@ -3,6 +3,7 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
   Builds the bounded, holder-facing render model for the API Key Observatory.
   """
 
+  alias CodexPooler.Accounting.ClientIdentity
   alias CodexPoolerWeb.Admin.RequestLogsDisplay
   alias CodexPoolerWeb.Observatory.Presentation.Safety
 
@@ -29,7 +30,7 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
           map(get(p, :trends))
         ),
       models: models(get(p, :models), non_negative(get(tokens, :total))),
-      outcomes: outcomes(get(p, :outcomes)),
+      outcomes: build_outcomes(get(p, :outcomes)),
       traffic: traffic(get(p, :buckets), get(p, :model_buckets), get(p, :models), tokens)
     }
   end
@@ -140,10 +141,10 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
     "var(--color-primary)",
     "var(--color-info)",
     "var(--color-warning)",
-    "var(--color-accent)",
-    "var(--color-secondary)"
+    "var(--color-reset-bank)",
+    "var(--admin-chart-requests)"
   ]
-  @chart_other_color "color-mix(in oklab, var(--color-base-content) 40%, transparent)"
+  @chart_other_color "var(--admin-chart-other-models)"
   @chart_cost_color "var(--color-success)"
   @max_chart_models 5
 
@@ -298,8 +299,8 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
         cost_label: money_amount(non_negative(get(row, :cost_micros))),
         bar_percent: model_bar_percent(share),
         # Same palette + rank order as the traffic chart columns, so a model's
-        # card tint matches its bar/line in the chart (top-5 colored, rest folded
-        # into the muted "Other" color).
+        # distribution bar matches its chart series (top-5 colored, rest folded
+        # into the "Other" color).
         color: Enum.at(@chart_model_colors, index, @chart_other_color),
         shine_delay: shine_delay(index)
       }
@@ -321,8 +322,10 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
   # banked-reset life bars in the upstream cockpit.
   defp shine_delay(index), do: Float.round(rem(index, 6) * 0.4, 2)
 
-  defp outcomes(value) when is_list(value), do: Enum.take(value, 40) |> Enum.map(&outcome/1)
-  defp outcomes(_value), do: []
+  @doc "Builds one bounded page of safe holder-facing outcomes."
+  @spec build_outcomes(term()) :: [map()]
+  def build_outcomes(value) when is_list(value), do: Enum.take(value, 200) |> Enum.map(&outcome/1)
+  def build_outcomes(_value), do: []
 
   defp outcome(value) do
     row = map(value)
@@ -331,6 +334,7 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
     cost = cost(get(row, :cost), ["settled", "estimated"])
 
     %{
+      client: ClientIdentity.from_kind(get(get(row, :client), :kind)),
       code: code,
       cost: cost,
       effort: Safety.sanitize_text(get(row, :reasoning_effort), nil),
@@ -357,34 +361,28 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
   end
 
   defp tokens(row, total) do
-    input = non_negative(get(row, :input_tokens))
-    cached = non_negative(get(row, :cached_input_tokens))
-    output = non_negative(get(row, :output_tokens))
-    base = %{total: total, label: token_label(total), composition: nil, cached_label: nil}
+    input = get(row, :input_tokens)
+    cached = get(row, :cached_input_tokens)
+    output = get(row, :output_tokens)
+    base = %{total: total, label: outcome_token_label(total), cache_percentage_label: nil}
 
-    if total > 0 and input + output == total and cached <= input do
-      %{
-        base
-        | composition: [
-            %{key: :cached_input, label: "Cached input", count: cached},
-            %{key: :uncached_input, label: "Uncached input", count: input - cached},
-            %{key: :output, label: "Output", count: output}
-          ],
-          cached_label: cached_label(cached, input)
-      }
+    if valid_token_counts?([get(row, :total_tokens), input, cached, output]) and total > 0 and input + output == total and cached <= input do
+      %{base | cache_percentage_label: cache_percentage_label(cached, input)}
     else
       base
     end
   end
 
-  defp cached_label(0, _input), do: "0 cached"
+  defp valid_token_counts?(counts), do: Enum.all?(counts, &(is_integer(&1) and &1 >= 0))
 
-  defp cached_label(cached, input) when input > 0 do
+  defp cache_percentage_label(0, input) when input > 0, do: "(0% cached)"
+
+  defp cache_percentage_label(cached, input) when input > 0 do
     rate = Float.round(cached / input * 100, 1)
-    "#{token_label(cached)} cached · #{rate}% of input"
+    "(#{rate}% cached)"
   end
 
-  defp cached_label(_cached, _input), do: nil
+  defp cache_percentage_label(_cached, _input), do: nil
 
   # A client cancellation (`RequestOutcome`) is not a failure: it names no reason.
   defp status("client_cancelled", _code), do: status("client_cancelled")
@@ -444,11 +442,12 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
   defp token_label(value) when value < 999_950_000, do: "#{Float.round(value / 1_000_000, 1)}M"
   defp token_label(value), do: "#{Float.round(value / 1_000_000_000, 1)}B"
 
+  defp outcome_token_label(value), do: value |> token_label() |> String.replace("K", "k")
+
   defp money_label(micros),
     do: :io_lib.format("$~.2f", [micros / 1_000_000]) |> IO.iodata_to_binary()
 
-  # Money without the currency glyph, so the model card can tint the amount but
-  # leave the "$" a neutral color to keep it legible.
+  # Money without the currency glyph, so the model row can mute the unit.
   defp money_amount(micros),
     do: :io_lib.format("~.2f", [micros / 1_000_000]) |> IO.iodata_to_binary()
 

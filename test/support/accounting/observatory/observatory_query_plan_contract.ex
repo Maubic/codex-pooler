@@ -58,7 +58,7 @@ defmodule CodexPooler.Accounting.ObservatoryQueryPlanContract do
       "fact_table_indexed_access" => Support.no_fact_sequential_scans?(plans),
       "fact_scope_predicates_present" => predicates_present_for_all?(plans, "request_log_facts", @fact_predicates),
       "fixture_volume" => fixture_row_count >= @minimum_fixture_rows,
-      "outcome_count" => length(projection.outcomes) <= 40,
+      "outcome_count" => length(projection.outcomes) <= 200,
       "outcome_fact_bounded_indexed_access" => outcome_plan && Support.indexed_access?(outcome_plan.root, "request_log_facts"),
       "outcome_request_bounded_indexed_access" => outcome_plan && Support.indexed_access?(outcome_plan.root, "requests"),
       "outcome_request_ordered_scope_index" => outcome_plan && Support.uses_index?(outcome_plan.root, @outcomes_request_index),

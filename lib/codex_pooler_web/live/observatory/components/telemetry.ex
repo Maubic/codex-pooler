@@ -25,7 +25,7 @@ defmodule CodexPoolerWeb.Observatory.Components.Telemetry do
     <section id="observatory-overview" aria-labelledby="observatory-overview-title">
       <h2 id="observatory-overview-title" class="sr-only">Usage overview</h2>
 
-      <dl id="observatory-overview-facts" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <dl id="observatory-overview-facts" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <div id="observatory-fact-success" class="observatory-kpi">
           <dt class="observatory-kpi-label">
             <span class="observatory-kpi-icon bg-success/15 text-success">
@@ -46,7 +46,7 @@ defmodule CodexPoolerWeb.Observatory.Components.Telemetry do
               id="observatory-success-trend"
               data-role="observatory-trend"
               data-direction={trend_direction(@overview, :success_rate)}
-              class={["observatory-trend font-mono tabular-nums", trend_class(@overview, :success_rate)]}
+              class={["observatory-trend tabular-nums", trend_class(@overview, :success_rate)]}
             >
               {trend_text(@overview, :success_rate)}
             </span>
@@ -76,7 +76,7 @@ defmodule CodexPoolerWeb.Observatory.Components.Telemetry do
               id="observatory-cache-trend"
               data-role="observatory-trend"
               data-direction={trend_direction(@overview, :cache_rate)}
-              class={["observatory-trend font-mono tabular-nums", trend_class(@overview, :cache_rate)]}
+              class={["observatory-trend tabular-nums", trend_class(@overview, :cache_rate)]}
             >
               {trend_text(@overview, :cache_rate)}
             </span>
@@ -168,14 +168,11 @@ defmodule CodexPoolerWeb.Observatory.Components.Telemetry do
           <div class="flex min-w-0 items-baseline justify-between gap-3">
             <span class="min-w-0 truncate text-sm font-semibold leading-5 text-base-content">
               {safe_model_label(model)}
-              <span class="ml-0.5 text-xs font-normal text-base-content/55">
+              <span class="ml-0.5 text-xs font-normal text-base-content/70">
                 {model_requests(model)}
               </span>
             </span>
-            <span
-              class="shrink-0 text-xs font-medium leading-4 tabular-nums"
-              style={"color: #{model_color(model)}"}
-            >
+            <span class="shrink-0 text-xs font-medium leading-4 tabular-nums text-base-content">
               {model_share(model)}
             </span>
           </div>
@@ -194,14 +191,8 @@ defmodule CodexPoolerWeb.Observatory.Components.Telemetry do
             ></span>
           </div>
           <div class="flex items-baseline justify-between gap-3">
-            <span
-              class="observatory-metric min-w-0 truncate tabular-nums"
-              style={"color: #{model_color(model)}"}
-            >{safe_model_tokens(model)}<span class="text-base-content/45"> tks</span></span>
-            <span
-              class="observatory-metric shrink-0 tabular-nums"
-              style={"color: #{model_color(model)}"}
-            ><span class="text-base-content/45">$</span>{model_cost(model)}</span>
+            <span class="observatory-metric min-w-0 truncate tabular-nums text-base-content">{safe_model_tokens(model)}<span class="text-base-content/70"> tks</span></span>
+            <span class="observatory-metric shrink-0 tabular-nums text-base-content"><span class="text-base-content/70">$</span>{model_cost(model)}</span>
           </div>
         </li>
       </ol>
