@@ -98,19 +98,24 @@ defmodule CodexPooler.Upstreams.Quota.CapacityAssessment do
 
   @spec credit_usable?(RoutingQuotaSnapshot.t(), request_context()) :: boolean()
   def credit_usable?(%RoutingQuotaSnapshot{} = snapshot, context \\ []) do
+    is_nil(credit_unavailability_reason(snapshot, context))
+  end
+
+  @doc "The first failed credit-authority check, as a bounded diagnostic code; nil when usable."
+  @spec credit_unavailability_reason(RoutingQuotaSnapshot.t(), request_context()) :: String.t() | nil
+  def credit_unavailability_reason(%RoutingQuotaSnapshot{} = snapshot, context \\ []) do
     facts = snapshot.capacity_facts
     opts = quota_options(context)
 
-    with %CapacityFacts{credit_permission: :available, denial_category: category} <- facts,
-         true <- category in [:none, :included_limit],
-         true <- CapacityFactsStore.fresh?(facts, snapshot.credential_epoch, snapshot.as_of),
-         true <- is_nil(AccountDenial.active_for_credits(snapshot)),
-         false <- retained_credit_blocker?(snapshot),
-         false <- later_scoped_denial?(snapshot, opts),
-         true <- explained_account_windows?(snapshot, facts, opts) do
-      true
-    else
-      _denied -> false
+    cond do
+      not match?(%CapacityFacts{credit_permission: :available}, facts) -> "provider_credit_permission_unavailable"
+      facts.denial_category not in [:none, :included_limit] -> "provider_credit_permission_denied"
+      not CapacityFactsStore.fresh?(facts, snapshot.credential_epoch, snapshot.as_of) -> "provider_credit_evidence_not_current"
+      not is_nil(AccountDenial.active_for_credits(snapshot)) -> "provider_credit_account_denied"
+      retained_credit_blocker?(snapshot) -> "provider_credit_blocker_retained"
+      later_scoped_denial?(snapshot, opts) -> "provider_credit_scoped_denial"
+      not explained_account_windows?(snapshot, facts, opts) -> "provider_credit_window_mismatch"
+      true -> nil
     end
   end
 

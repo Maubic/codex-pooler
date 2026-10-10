@@ -77,12 +77,22 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
   @tag credits_multi_path: true
   @tag credits_negative: true
   test "equal-strength conflicting grants stay unknown independent of selected display payload" do
+    previous_level = Logger.level()
+    on_exit(fn -> Logger.configure(level: previous_level) end)
+    Logger.configure(level: :info)
     first = credit_payload()
     second = put_in(first, ["credits", "balance"], "0.25")
 
     for payloads <- [[first, second], [second, first]] do
       {fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, Enum.map(payloads, &{200, &1}))))
-      assert {:ok, result} = UsageProbe.fetch_from_identity(identity, assignment, DateTime.utc_now(), [])
+      {{:ok, result}, log} = ExUnit.CaptureLog.with_log([level: :info], fn -> UsageProbe.fetch_from_identity(identity, assignment, DateTime.utc_now(), []) end)
+      assert log =~ "reason_code=conflicting_usage_receipts"
+      assert log =~ "differing_fields=balance"
+      identity_hash = :crypto.hash(:sha256, identity.id) |> Base.encode16(case: :lower) |> binary_part(0, 12)
+      assert log =~ "identity_hash=#{identity_hash}"
+      refute log =~ identity.id
+      refute log =~ "0.125"
+      refute log =~ "0.25"
       assert result.usage_path == hd(@paths)
       assert result.capacity_facts.credit_permission == :unknown
       assert Enum.map(result.capacity_observations, & &1.balance) == Enum.map(payloads, &(get_in(&1, ["credits", "balance"]) |> Decimal.new() |> Decimal.normalize() |> Decimal.to_string(:normal)))
@@ -90,6 +100,9 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
       assert {:ok, identity} = PoolReconciliation.refresh_quota_from_usage(Repo.reload!(identity), assignment)
       assert {:ok, facts} = CapacityFactsStore.load(identity.metadata)
       assert facts.credit_permission == :unknown
+      decision = public_decision(identity, DateTime.utc_now())
+      refute decision.eligible?
+      assert "provider_credit_permission_unavailable" in decision.reason_codes
     end
   end
 
@@ -413,7 +426,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
     {fake, identity, assignment} = setup_upstream(routes_for(:wham_usage, team_allowed(now)))
     identity = recorded_reading!(identity, team_denial(denied_at), denied_at)
     assert {:ok, %{observations: [%{denial_category: :workspace_limit}]}} = CapacityFactsStore.load_blockers(identity.metadata)
-    assert public_decision(identity, denied_at).reason_codes == ["provider_denied", "provider_credit_capacity_unverified"]
+    assert public_decision(identity, denied_at).reason_codes == ["provider_denied", "provider_credit_capacity_unverified", "provider_credit_permission_unavailable"]
 
     assert {:ok, identity} = refresh_at(identity, assignment, now)
     assert {:ok, facts} = CapacityFactsStore.load(identity.metadata)

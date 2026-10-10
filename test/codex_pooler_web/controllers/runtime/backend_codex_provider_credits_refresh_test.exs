@@ -86,7 +86,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexProviderCreditsRefreshTest do
     assert {:refused, 429, "quota_exhausted"} = turn!(:http, port, setup, Ecto.UUID.generate(), "full")
     assert FakeUpstream.count(upstream) == 0
     assert %Request{status: "rejected", response_status_code: 429, last_error_code: "quota_exhausted", request_metadata: %{"candidate_exclusions" => [exclusion]}} = await_settled!(setup)
-    assert %{"upstream_identity_id" => identity_id, "reasons" => [%{"provider_credits_reason_codes" => ["exhausted", "provider_credit_capacity_unverified"]}]} = exclusion
+    assert %{"upstream_identity_id" => identity_id, "reasons" => [%{"provider_credits_reason_codes" => ["exhausted", "provider_credit_capacity_unverified", "provider_credit_evidence_not_current"]}]} = exclusion
     assert identity_id == setup.identity.id
 
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)

@@ -559,7 +559,7 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
   defp fetch_summary(value, key), do: Map.get(value, key, Map.get(value, Atom.to_string(key)))
 
   defp bounded_capacity_reasons(reasons) when is_list(reasons) do
-    allowed = ~w(exhausted not_fresh expired reset_missing unknown_unusable provider_denied provider_credits_disabled provider_credit_capacity_unverified capacity_basis_unknown non_credit_capacity_unverified saved_reset_probe_pending saved_reset_recovery_unavailable)
+    allowed = ~w(exhausted not_fresh expired reset_missing unknown_unusable provider_denied provider_credits_disabled provider_credit_capacity_unverified provider_credit_permission_unavailable provider_credit_permission_denied provider_credit_evidence_not_current provider_credit_account_denied provider_credit_blocker_retained provider_credit_scoped_denial provider_credit_window_mismatch capacity_basis_unknown non_credit_capacity_unverified saved_reset_probe_pending saved_reset_recovery_unavailable)
     reasons |> Enum.filter(&(&1 in allowed)) |> Enum.uniq() |> Enum.take(12)
   end
 

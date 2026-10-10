@@ -36,7 +36,7 @@ defmodule CodexPoolerWeb.Runtime.RetainedFeatureRefusalDiagnosticsTest do
     snapshot = snapshot(identity, @at)
     result = record("reported_before_reset", snapshot)
     refute result.eligible
-    assert result.reasons == ["not_fresh", "provider_credit_capacity_unverified"]
+    assert result.reasons == ["not_fresh", "provider_credit_capacity_unverified", "provider_credit_permission_unavailable"]
     assert result.account_denial == false
     assert_diagnostic(hd(result.exclusions), @observed, @reset)
     assert [%{reason_codes: ["not_fresh"], quota_scope: "feature"}] = result.exclusions
@@ -50,7 +50,7 @@ defmodule CodexPoolerWeb.Runtime.RetainedFeatureRefusalDiagnosticsTest do
     identity = persist_usage!(Repo.reload!(identity), usage_payload(@at, before_reset), before_reset)
     still_blocked = record("one_second_before_feature_reset", snapshot(identity, before_reset))
     refute still_blocked.eligible
-    assert still_blocked.reasons == ["not_fresh", "provider_credit_capacity_unverified"]
+    assert still_blocked.reasons == ["not_fresh", "provider_credit_capacity_unverified", "provider_credit_permission_unavailable"]
     assert_diagnostic(hd(still_blocked.exclusions), @observed, @reset)
 
     boundary = @reset
@@ -172,7 +172,7 @@ defmodule CodexPoolerWeb.Runtime.RetainedFeatureRefusalDiagnosticsTest do
       changed = %{feature | metadata: Map.put(feature.metadata, "rate_limit_error_code", marker)}
       result = record("unknown_marker", %{baseline | raw_windows: account ++ [changed]})
       refute result.eligible
-      assert result.reasons == ["not_fresh", "provider_credit_capacity_unverified"]
+      assert result.reasons == ["not_fresh", "provider_credit_capacity_unverified", "provider_credit_permission_unavailable"]
       refute Map.has_key?(hd(result.exclusions), :retained_refusal_code)
     end
 
@@ -197,12 +197,12 @@ defmodule CodexPoolerWeb.Runtime.RetainedFeatureRefusalDiagnosticsTest do
     result = record("wrong_epoch_permission", changed)
     refute result.eligible
     assert result.account_denial
-    assert result.reasons == ["provider_denied", "provider_credit_capacity_unverified"]
+    assert result.reasons == ["provider_denied", "provider_credit_capacity_unverified", "provider_credit_permission_unavailable"]
     stale_permission = %{baseline | availability: %{baseline.availability | observed_at: DateTime.add(@at, -901)}}
     stale_result = record("stale_permission", stale_permission)
     refute stale_result.eligible
     assert stale_result.account_denial
-    assert stale_result.reasons == ["provider_denied", "provider_credit_capacity_unverified"]
+    assert stale_result.reasons == ["provider_denied", "provider_credit_capacity_unverified", "provider_credit_permission_unavailable"]
     assert_diagnostic(hd(result.exclusions), @observed, @reset, "usage_limit_exceeded")
   end
 

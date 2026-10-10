@@ -3,6 +3,7 @@ defmodule CodexPooler.Gateway.Routing.ProviderCreditsTest do
 
   import CodexPooler.PoolerFixtures
 
+  alias CodexPooler.Gateway.Routing.ProviderCredits
   alias CodexPooler.Quotas.CapacityFacts
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.ProviderCreditsPolicy
@@ -262,6 +263,41 @@ defmodule CodexPooler.Gateway.Routing.ProviderCreditsTest do
   defp qualified_weekly_snapshot do
     snapshot = snapshot(:weekly, true)
     %{snapshot | capacity_facts: %{snapshot.capacity_facts | source_kind: :wham_usage}}
+  end
+
+  test "credit refusals name the failed authority check without changing eligibility" do
+    valid = qualified_weekly_snapshot()
+    [weekly] = valid.raw_windows
+
+    cases = [
+      {%{valid | capacity_facts: nil}, "provider_credit_permission_unavailable"},
+      {invalidate(valid, :stale), "provider_credit_evidence_not_current"},
+      {invalidate(valid, :future), "provider_credit_evidence_not_current"},
+      {invalidate(valid, :epoch), "provider_credit_evidence_not_current"},
+      {%{valid | capacity_facts: %{valid.capacity_facts | denial_category: :spend_limit}}, "provider_credit_permission_denied"},
+      {%{valid | capacity_blockers_overflowed?: true}, "provider_credit_blocker_retained"},
+      {invalidate(valid, :later_denial), "provider_credit_scoped_denial"},
+      {%{valid | raw_windows: [%{weekly | metadata: %{"rate_limit_reached_type" => "workspace_owner_usage_limit_reached"}}]}, "provider_credit_account_denied"},
+      {%{valid | raw_windows: [%{weekly | reset_at: DateTime.add(weekly.reset_at, 60, :second)}]}, "provider_credit_window_mismatch"}
+    ]
+
+    for {snapshot, reason} <- cases do
+      assert CapacityAssessment.credit_unavailability_reason(snapshot, @context) == reason
+      refute CapacityAssessment.credit_usable?(snapshot, @context)
+      decision = Upstreams.provider_credits_decision(snapshot, @context)
+      refute decision.eligible?
+      assert "provider_credit_capacity_unverified" in decision.reason_codes
+      assert reason in decision.reason_codes
+      eligibility = ProviderCredits.eligibility(snapshot, @context)
+      refute eligibility.eligible?
+
+      if reason != "provider_credit_account_denied" do
+        assert Enum.any?(eligibility.exclusions, fn exclusion -> reason in Map.get(exclusion, :provider_credits_reason_codes, Map.get(exclusion, :reason_codes, [])) end)
+      end
+    end
+
+    assert CapacityAssessment.credit_unavailability_reason(valid, @context) == nil
+    assert Upstreams.provider_credits_decision(valid, @context).reason_codes == []
   end
 
   defp invalidate_qualified(snapshot, context, :unlimited), do: {%{snapshot | capacity_facts: %{snapshot.capacity_facts | unlimited: true, balance: nil}}, context}
