@@ -46,7 +46,7 @@ test("publication queues every pending release and recovery steps also run for r
 	);
 	assert.match(
 		workflow,
-		/  image:\n    needs: select\n    if: needs\.select\.outputs\.ready == 'true' && needs\.select\.outputs\.image_action == 'build'\n/,
+		/ {2}image:\n {4}needs: select\n {4}if: needs\.select\.outputs\.ready == 'true' && needs\.select\.outputs\.image_action == 'build'\n/,
 	);
 	assert.match(
 		step("Recover aliases from the existing immutable image"),
@@ -66,7 +66,7 @@ test("each platform is built natively and only the publish job tags the merged i
 		"a cache export failure must not fail a publication",
 	);
 	assert.doesNotMatch(build, /\n\s+tags:/, "a platform image is never tagged");
-	assert.match(workflow, /  publish:\n    needs: \[select, image\]\n/);
+	assert.match(workflow, / {2}publish:\n {4}needs: \[select, image\]\n/);
 	const publish = workflow.slice(workflow.indexOf("  publish:\n"));
 	assert.match(publish, /group: release-image-publication\n\s+queue: max/);
 	assert.doesNotMatch(
@@ -85,7 +85,10 @@ test("waking the chart repository follows the image and never blocks publication
 	assert.match(wake, /if: steps\.publication\.outputs\.ready == 'true'\n/);
 	assert.match(wake, /continue-on-error: true/);
 	assert.match(wake, /HELM_WAKE_TOKEN/);
-	assert.match(wake, /gh workflow run wake-renovate\.yml --repo icoretech\/helm/);
+	assert.match(
+		wake,
+		/gh workflow run wake-renovate\.yml --repo icoretech\/helm/,
+	);
 	assert.ok(
 		workflow.indexOf("- name: Wake the Helm chart update") >
 			workflow.indexOf("- name: Upload release assets"),
@@ -102,6 +105,8 @@ test("the actual release packaging step produces a readable archive, checksum an
 		"docker-compose.yml",
 		".env.example",
 		"scripts/self-host/generate-env.sh",
+		"scripts/self-host/totp-upgrade-preflight.sh",
+		"scripts/self-host/totp-upgrade-preflight.exs",
 	])
 		writeFileSync(join(root, file), `sample ${file}\n`);
 	const digest = `sha256:${"a".repeat(64)}`;
@@ -121,6 +126,17 @@ test("the actual release packaging step produces a readable archive, checksum an
 		encoding: "utf8",
 	});
 	assert.match(files, /scripts\/self-host\/generate-env.sh/);
+	for (const extension of ["sh", "exs"]) {
+		const file = `scripts/self-host/totp-upgrade-preflight.${extension}`;
+		assert.ok(files.split("\n").includes(`${base}/${file}`));
+		assert.equal(
+			execFileSync("tar", ["-xOzf", `dist/${base}.tar.gz`, `${base}/${file}`], {
+				cwd: root,
+				encoding: "utf8",
+			}),
+			readFileSync(join(root, file), "utf8"),
+		);
+	}
 	assert.match(files, /\.env.example/);
 	execFileSync("sha256sum", ["-c", `${base}.tar.gz.sha256`], {
 		cwd: join(root, "dist"),
