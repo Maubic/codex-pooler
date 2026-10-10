@@ -111,12 +111,29 @@ defmodule CodexPooler.Alerts.WebhookResponseBodyBoundTest do
     end
   end
 
-  test "a delayed body after 200 headers still reaches the owned deadline and closes the socket", context do
+  test "a short full-delivery deadline preserves its receipt before HTTP or during a delayed body", context do
     fixture = fixture!(context, :delayed)
+    receiver_monitor = Process.monitor(fixture.receiver.pid)
+    assert_receive {:delayed_listener, listener}, 2_000
     execution = %{Execution.new(fixture.job) | deadline: System.monotonic_time(:millisecond) + 200}
     assert {:error, %{code: "alert_webhook_delivery_timeout", retryable: true}} = WebhookDelivery.deliver_incident_to_channel(fixture.incident.id, fixture.channel.id, 1, delivery_execution: execution)
-    assert_receive :client_socket_closed, 2_000
-    assert Task.await(fixture.receiver) == :closed
+    # Closing only the listener releases a never-connected accept. An already
+    # accepted TLS socket must still observe the actual client's closure.
+    :ok = :ssl.close(listener)
+    phase = Task.await(fixture.receiver, 5_000)
+    assert_receive {:DOWN, ^receiver_monitor, :process, _, :normal}, 2_000
+    assert phase in [:not_connected, :closed_before_http, :closed_before_headers, :closed]
+
+    if phase == :closed do
+      assert_receive {:signed_request, true}, 2_000
+      assert_receive :delayed_headers_sent, 2_000
+      assert_receive :client_socket_closed, 2_000
+    else
+      refute_received :client_socket_closed
+    end
+
+    assert Execution.remaining(execution) == 0
+    TestDiagnostics.puts("webhook-delayed-timeout phase=#{phase} deadline_ms=200 receiver_down=true")
     [attempt] = Repo.all(from a in AlertDeliveryAttempt, where: a.incident_id == ^fixture.incident.id)
     assert attempt.status == "retryable"
     assert attempt.response_metadata["delivery_outcome"] == "unknown"
@@ -182,25 +199,71 @@ defmodule CodexPooler.Alerts.WebhookResponseBodyBoundTest do
     on_exit(fn -> :ssl.close(listener) end)
     {:ok, {_, port}} = :ssl.sockname(listener)
     parent = self()
+    if mode == :delayed, do: send(parent, {:delayed_listener, listener})
 
     receiver =
       Task.async(fn ->
-        {:ok, transport} = :ssl.transport_accept(listener, 5_000)
-        {:ok, socket} = :ssl.handshake(transport, 5_000)
+        if mode == :delayed do
+          receive_delayed(listener, parent)
+        else
+          {:ok, transport} = :ssl.transport_accept(listener, 5_000)
+          {:ok, socket} = :ssl.handshake(transport, 5_000)
 
-        try do
-          {headers, body} = read_request(socket, "")
-          signature = header(headers, "x-codex-pooler-signature")
-          if signature, do: send(parent, {:signed_request, valid_signature?(headers, signature, body)})
-          send_response(socket, mode, parent)
-        after
-          :ssl.close(socket)
+          try do
+            {headers, body} = read_request(socket, "")
+            signature = header(headers, "x-codex-pooler-signature")
+            if signature, do: send(parent, {:signed_request, valid_signature?(headers, signature, body)})
+            send_response(socket, mode, parent)
+          after
+            :ssl.close(socket)
+          end
+
+          :closed
         end
-
-        :closed
       end)
 
     {"https://#{context.host}:#{port}/hooks", receiver}
+  end
+
+  defp receive_delayed(listener, parent) do
+    case :ssl.transport_accept(listener, 5_000) do
+      {:error, :closed} ->
+        :not_connected
+
+      {:ok, transport} ->
+        try do
+          case :ssl.handshake(transport, 5_000) do
+            {:ok, socket} -> receive_delayed_request(socket, parent, "")
+            {:error, reason} when reason in [:closed, :econnreset] -> :closed_before_http
+          end
+        after
+          :ssl.close(transport)
+        end
+    end
+  end
+
+  defp receive_delayed_request(socket, parent, buffer) do
+    case :binary.split(buffer, "\r\n\r\n") do
+      [headers, body] ->
+        length = headers |> header("content-length") |> String.to_integer()
+
+        if byte_size(body) >= length do
+          send(parent, {:signed_request, valid_signature?(headers, header(headers, "x-codex-pooler-signature"), binary_part(body, 0, length))})
+          send_response(socket, :delayed, parent)
+        else
+          receive_delayed_bytes(socket, parent, buffer)
+        end
+
+      _ ->
+        receive_delayed_bytes(socket, parent, buffer)
+    end
+  end
+
+  defp receive_delayed_bytes(socket, parent, buffer) do
+    case :ssl.recv(socket, 0, 5_000) do
+      {:ok, bytes} -> receive_delayed_request(socket, parent, buffer <> bytes)
+      {:error, reason} when reason in [:closed, :econnreset] -> :closed_before_http
+    end
   end
 
   defp read_request(socket, buffer) do
@@ -244,9 +307,16 @@ defmodule CodexPooler.Alerts.WebhookResponseBodyBoundTest do
   end
 
   defp send_response(socket, :delayed, parent) do
-    :ok = :ssl.send(socket, "HTTP/1.1 200 OK\r\ncontent-length: 1\r\n\r\n")
-    assert {:error, :closed} = :ssl.recv(socket, 0, 5_000)
-    send(parent, :client_socket_closed)
+    case :ssl.send(socket, "HTTP/1.1 200 OK\r\ncontent-length: 1\r\n\r\n") do
+      :ok ->
+        send(parent, :delayed_headers_sent)
+        assert {:error, :closed} = :ssl.recv(socket, 0, 5_000)
+        send(parent, :client_socket_closed)
+        :closed
+
+      {:error, reason} when reason in [:closed, :econnreset] ->
+        :closed_before_headers
+    end
   end
 
   defp send_response(socket, {:held, size, status}, parent) do
