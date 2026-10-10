@@ -45,6 +45,7 @@ local helmVersion = 'v4.3.0';
         name: 'quality',
         image: 'elixir:1.20.4-otp-29-slim',
         commands: [
+          'mix quality.test_cleanup',
           'apt-get update',
           'apt-get install -y --no-install-recommends build-essential ca-certificates cmake curl git libsctp1 lsof procps python3 ripgrep tar tzdata',
           'curl -fsSLO https://get.helm.sh/helm-' + helmVersion + '-linux-amd64.tar.gz',

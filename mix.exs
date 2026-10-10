@@ -133,6 +133,7 @@ defmodule CodexPooler.MixProject do
       # say nothing about it, so an unformatted line reached CI and failed the
       # build after the whole suite had already passed locally.
       "quality.format": ["format --check-formatted"],
+      "quality.test_cleanup": ["cmd elixir dev_support/check_test_listener_cleanup.exs"],
       "quality.xref": [
         "compile --warnings-as-errors",
         "xref graph --format plain --label compile-connected --fail-above 0 --no-compile"
@@ -141,6 +142,7 @@ defmodule CodexPooler.MixProject do
       "quality.dialyzer": ["compile --warnings-as-errors", "dialyzer --no-compile"],
       "quality.security": ["sobelow --exit --threshold medium --skip"],
       quality: [
+        "quality.test_cleanup",
         "quality.format",
         "quality.xref",
         "quality.credo",
