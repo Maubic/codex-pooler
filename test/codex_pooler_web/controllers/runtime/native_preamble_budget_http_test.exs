@@ -42,6 +42,7 @@ defmodule CodexPoolerWeb.Runtime.NativePreambleBudgetHttpTest do
     Repo.insert!(%ModelServingOverride{pool_id: fixture.pool.id, exposed_model_id: fixture.model.exposed_model_id, mode: mode, created_at: now, updated_at: now})
     {listener, port} = start_public_endpoint_with_server!()
     monitor = Process.monitor(listener)
+    ownership = capture_public_endpoint_ownership!(listener)
     mfas = install_trace()
     retained = {StreamRelay, :stream_upstream, 4}
     url = "http://127.0.0.1:#{port}/backend-api/codex/responses"
@@ -60,7 +61,7 @@ defmodule CodexPoolerWeb.Runtime.NativePreambleBudgetHttpTest do
 
     :ok = ThousandIsland.stop(listener)
     assert_receive {:DOWN, ^monitor, :process, ^listener, _}, @timeout
-    assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000)
+    assert_public_endpoint_released!(ownership)
   end
 
   defp native_claim(name, fixture, payload, headers) when name in [:claim_overflow, :claim_after_visible] do

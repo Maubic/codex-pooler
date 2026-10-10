@@ -45,6 +45,40 @@ defmodule CodexPoolerWeb.Runtime.NativeTerminalTrackingHttpTest do
     end
   end
 
+  test "endpoint cleanup identifies original resources when its port is reused" do
+    {listener, port} = start_public_endpoint_with_server!()
+    ownership = capture_public_endpoint_ownership!(listener)
+    monitor = Process.monitor(listener)
+    assert_raise ExUnit.AssertionError, fn -> assert_public_endpoint_released!(ownership) end
+    :ok = ThousandIsland.stop(listener)
+    assert_receive {:DOWN, ^monitor, :process, ^listener, _}, @budget
+    supervisor = start_supervised!(Task.Supervisor)
+    parent = self()
+
+    successor =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        {:ok, socket} = :gen_tcp.listen(port, [:binary, active: false, ip: {127, 0, 0, 1}, reuseaddr: true])
+        send(parent, {:successor_listening, self(), socket})
+
+        receive do
+          :finish -> :gen_tcp.close(socket)
+        end
+      end)
+
+    successor_pid = successor.pid
+    successor_monitor = Process.monitor(successor_pid)
+    assert_receive {:successor_listening, ^successor_pid, successor_socket}, @budget
+    {:ok, connection} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000)
+    :ok = :gen_tcp.close(connection)
+    assert_public_endpoint_released!(ownership)
+    assert Process.alive?(successor_pid)
+    assert Port.info(successor_socket) != nil
+    send(successor.pid, :finish)
+    assert :ok = Task.await(successor, @budget)
+    assert_receive {:DOWN, ^successor_monitor, :process, ^successor_pid, :normal}, @budget
+    assert Port.info(successor_socket) == nil
+  end
+
   defp run_scenario(mode, scenario, tool?) do
     {chunks, terminal} = chunks(scenario)
     chunks = if tool?, do: [tool_event() | chunks], else: chunks
@@ -64,6 +98,7 @@ defmodule CodexPoolerWeb.Runtime.NativeTerminalTrackingHttpTest do
     Repo.insert!(%ModelServingOverride{pool_id: setup.pool.id, exposed_model_id: setup.model.exposed_model_id, mode: mode, created_at: timestamp, updated_at: timestamp})
     {listener, port} = start_public_endpoint_with_server!()
     listener_monitor = Process.monitor(listener)
+    ownership = capture_public_endpoint_ownership!(listener)
     source_mfa = {StreamAttempt, :classify_first_event, 3}
     cancel_mfa = {StreamRelay, :source_cancel, 1}
     Code.ensure_loaded!(StreamAttempt)
@@ -123,7 +158,7 @@ defmodule CodexPoolerWeb.Runtime.NativeTerminalTrackingHttpTest do
     assert_outcome(scenario, terminal, tool?, cancellations, request, attempt)
     :ok = ThousandIsland.stop(listener)
     assert_receive {:DOWN, ^listener_monitor, :process, ^listener, _}, @budget
-    assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000)
+    assert_public_endpoint_released!(ownership)
   end
 
   defp assert_outcome(scenario, terminal, tool?, cancellations, request, attempt) do

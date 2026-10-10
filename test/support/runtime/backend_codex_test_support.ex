@@ -1179,6 +1179,43 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
     {server, port}
   end
 
+  def capture_public_endpoint_ownership!(server) do
+    listener = ThousandIsland.Server.listener_pid(server)
+    assert is_pid(listener)
+    %{listener_sockets: sockets} = :sys.get_state(listener)
+    assert sockets != []
+    assert Enum.all?(sockets, fn {_id, socket} -> is_port(socket) end)
+    processes = [server | endpoint_child_pids(server)]
+    assert listener in processes
+
+    %{
+      processes: Enum.map(processes, &{&1, Process.monitor(&1)}),
+      sockets: Enum.map(sockets, fn {_id, socket} -> {socket, Port.monitor(socket)} end)
+    }
+  end
+
+  def assert_public_endpoint_released!(%{processes: processes, sockets: sockets}) do
+    for {pid, ref} <- processes do
+      refute Process.alive?(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 15_000
+    end
+
+    for {socket, ref} <- sockets do
+      assert Port.info(socket) == nil
+      assert_receive {:DOWN, ^ref, :port, ^socket, _reason}, 15_000
+    end
+
+    :ok
+  end
+
+  defp endpoint_child_pids(server) do
+    Enum.flat_map(Supervisor.which_children(server), fn
+      {_id, child, :supervisor, _modules} when is_pid(child) -> [child | endpoint_child_pids(child)]
+      {_id, child, _type, _modules} when is_pid(child) -> [child]
+      _other -> []
+    end)
+  end
+
   def public_websocket_connect!(port, setup, turn_state, path \\ "/backend-api/codex/responses") do
     {conn, websocket, ref, _response_headers} =
       public_websocket_connect_with_headers!(port, setup, turn_state, path)
