@@ -66,13 +66,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpMailboxRaceTest do
     test "#{mode} consumed-prefix successor before any settlement row lock keeps the live fence", %{mode: mode} do
       gate = make_ref()
       {upstream, setup, port, thread, payload} = scenario(mode, [cut_response(1, gate), completed_response()])
-      {retained, handler} = consume_and_cut!(port, setup, payload, thread, gate)
+      {conn, retained, handler} = consume_until_gate!(port, setup, payload, thread, gate)
       [first] = requests(setup)
       attempt = Repo.get_by!(Attempt, request_id: first.id)
       executor = :erlang.list_to_pid(String.to_charlist(attempt.owner_process_id))
       assert Process.alive?(executor)
       hold = MailboxPrefixRaceSupport.hold_before_session_lock!(executor)
       on_exit(fn -> send(executor, {hold, :release}) end)
+      cut_downstream!(conn)
       send(handler, {:fake_upstream_release_gate, gate})
       assert_receive {^hold, :before_session_lock, ^executor}, @budget
       first = Repo.get!(Request, first.id)
@@ -220,14 +221,23 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpMailboxRaceTest do
   end
 
   defp consume_and_cut!(port, setup, payload, thread, gate) do
+    {conn, retained, handler} = consume_until_gate!(port, setup, payload, thread, gate)
+    cut_downstream!(conn)
+    {retained, handler}
+  end
+
+  defp consume_until_gate!(port, setup, payload, thread, gate) do
     {conn, ref} = start_request!(port, setup, payload, thread)
     on_exit(fn -> Mint.HTTP.close(conn) end)
     {conn, retained} = receive_first_item!(conn, ref, "")
     assert_receive {:fake_upstream_gate, :before_terminal, handler, ^gate}, @budget
     on_exit(fn -> send(handler, {:fake_upstream_release_gate, gate}) end)
+    {conn, retained, handler}
+  end
+
+  defp cut_downstream!(conn) do
     :ok = :inet.setopts(Mint.HTTP.get_socket(conn), linger: {true, 0})
     Mint.HTTP.close(conn)
-    {retained, handler}
   end
 
   defp start_request!(port, setup, payload, thread) do
