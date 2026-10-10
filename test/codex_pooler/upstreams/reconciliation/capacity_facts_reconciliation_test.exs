@@ -75,31 +75,139 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
   end
 
   @tag credits_multi_path: true
-  @tag credits_negative: true
-  test "equal-strength conflicting grants stay unknown independent of selected display payload" do
+  test "positive balance drift preserves a complete credit grant independent of selected display payload" do
     first = credit_payload()
     second = put_in(first, ["credits", "balance"], "0.25")
 
     for payloads <- [[first, second], [second, first]] do
       {fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, Enum.map(payloads, &{200, &1}))))
       {{:ok, result}, log} = with_info_log(fn -> UsageProbe.fetch_from_identity(identity, assignment, DateTime.utc_now(), []) end)
-      assert log =~ "reason_code=conflicting_usage_receipts"
-      assert log =~ "differing_fields=balance"
-      identity_hash = :crypto.hash(:sha256, identity.id) |> Base.encode16(case: :lower) |> binary_part(0, 12)
-      assert log =~ "identity_hash=#{identity_hash}"
+      refute log =~ "quota capacity authority unavailable"
       refute log =~ identity.id
       refute log =~ "0.125"
       refute log =~ "0.25"
       assert result.usage_path == hd(@paths)
-      assert result.capacity_facts.credit_permission == :unknown
+      assert result.capacity_facts.credit_permission == :available
+      assert result.capacity_facts == hd(result.capacity_observations)
       assert Enum.map(result.capacity_observations, & &1.balance) == Enum.map(payloads, &(get_in(&1, ["credits", "balance"]) |> Decimal.new() |> Decimal.normalize() |> Decimal.to_string(:normal)))
       assert requested_paths(fake) == @paths
       assert {:ok, identity} = PoolReconciliation.refresh_quota_from_usage(Repo.reload!(identity), assignment)
       assert {:ok, facts} = CapacityFactsStore.load(identity.metadata)
-      assert facts.credit_permission == :unknown
+      assert facts.credit_permission == :available
+      assert facts.included_permission == :exhausted
       decision = public_decision(identity, DateTime.utc_now())
-      refute decision.eligible?
-      assert "provider_credit_permission_unavailable" in decision.reason_codes
+      assert decision.eligible?
+      assert decision.capacity_basis == :provider_credits
+      assert decision.reason_codes == []
+    end
+  end
+
+  for reverse <- [false, true] do
+    @tag credits_negative: true
+    test "an observed finite zero vetoes a stronger positive credit grant, reverse=#{reverse}" do
+      positive = credit_payload()
+      zero = Map.put(positive, "credits", %{"balance" => "0", "has_credits" => false, "unlimited" => false})
+      payloads = if unquote(reverse), do: [zero, positive], else: [positive, zero]
+      {fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, Enum.map(payloads, &{200, &1}))))
+      {{:ok, result}, log} = with_info_log(fn -> UsageProbe.fetch_from_identity(identity, assignment, DateTime.utc_now(), []) end)
+      assert result.capacity_facts.credit_permission == :unknown
+      assert log =~ "reason_code=conflicting_usage_receipts"
+      assert log =~ "differing_fields=credit_permission,balance,has_credits"
+      assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+      assert {:ok, facts} = CapacityFactsStore.load(refreshed.metadata)
+      assert facts.credit_permission == :unknown
+      refute public_decision(refreshed, DateTime.utc_now()).eligible?
+      assert requested_paths(fake) == @paths ++ @paths
+    end
+  end
+
+  test "positive balance drift preserves included authority without merging receipts" do
+    first = included_payload()
+    second = put_in(first, ["credits", "balance"], "0.25")
+    {_fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, [{200, first}, {200, second}])))
+    assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+    assert {:ok, facts} = CapacityFactsStore.load(refreshed.metadata)
+    assert facts.included_permission == :available
+    assert facts.credit_permission == :available
+    assert facts.balance == "0.125"
+  end
+
+  for difference <- [:included_permission, :unlimited, :windows] do
+    @tag credits_negative: true
+    test "positive balance drift cannot hide a #{difference} disagreement" do
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+      first = credit_payload() |> put_account_window(604_800, 100, now)
+      second = put_in(first, ["credits", "balance"], "0.25")
+
+      second =
+        case unquote(difference) do
+          :included_permission -> put_in(second, ["rate_limit", "allowed"], true) |> put_in(["rate_limit", "limit_reached"], false)
+          :unlimited -> put_in(second, ["credits", "unlimited"], true)
+          :windows -> put_in(second, ["rate_limit", "primary_window", "used_percent"], 99)
+        end
+
+      for payloads <- [[first, second], [second, first]] do
+        {_fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, Enum.map(payloads, &{200, &1}))))
+        assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+        assert {:ok, facts} = CapacityFactsStore.load(refreshed.metadata)
+        assert facts.credit_permission == :unknown
+        refute public_decision(refreshed, DateTime.utc_now()).eligible?
+      end
+    end
+  end
+
+  test "unlimited zero balance remains valid when both complete receipts agree" do
+    payload = Map.put(credit_payload(), "credits", %{"balance" => "0", "has_credits" => false, "unlimited" => true})
+    {_fake, identity, assignment} = setup_upstream(Map.new(@paths, &{&1, {200, payload}}))
+    assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+    assert {:ok, facts} = CapacityFactsStore.load(refreshed.metadata)
+    assert facts.credit_permission == :available
+    assert facts.unlimited
+    assert public_decision(refreshed, DateTime.utc_now()).eligible?
+  end
+
+  for balance <- [nil, "0"] do
+    test "unlimited #{inspect(balance)} versus positive balance remains a conflict" do
+      first = Map.put(credit_payload(), "credits", %{"balance" => unquote(balance), "has_credits" => true, "unlimited" => true})
+      second = put_in(first, ["credits", "balance"], "0.25")
+      {_fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, [{200, first}, {200, second}])))
+      assert {:ok, result} = UsageProbe.fetch_from_identity(identity, assignment, DateTime.utc_now(), [])
+      assert Enum.all?(result.capacity_observations, &(&1.credit_permission == :available))
+      assert result.capacity_facts.credit_permission == :unknown
+    end
+  end
+
+  test "a third finite-zero receipt vetoes positive balance drift in every endpoint order" do
+    positive = credit_payload()
+    other = put_in(positive, ["credits", "balance"], "0.25")
+    zero = Map.put(positive, "credits", %{"balance" => "0", "has_credits" => false, "unlimited" => false})
+    paths = ["/api/codex/usage" | @paths]
+
+    for payloads <- [[positive, other, zero], [positive, zero, other], [other, positive, zero], [other, zero, positive], [zero, positive, other], [zero, other, positive]] do
+      {fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(paths, Enum.map(payloads, &{200, &1}))))
+      identity = Repo.update!(Ecto.Changeset.change(identity, metadata: Map.put(identity.metadata, "usage_path", hd(paths))))
+      assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+      assert {:ok, facts} = CapacityFactsStore.load(refreshed.metadata)
+      assert facts.credit_permission == :unknown
+      assert facts.included_permission == :unknown
+      refute public_decision(refreshed, DateTime.utc_now()).eligible?
+      assert requested_paths(fake) == ["/api/codex/usage", "/backend-api/codex/usage", "/backend-api/wham/usage"]
+    end
+  end
+
+  for balance <- ["0", nil, "not-a-number"] do
+    @tag credits_negative: true
+    test "a #{inspect(balance)} balance never uses the positive drift exception" do
+      positive = credit_payload()
+      second = put_in(positive, ["credits", "balance"], unquote(balance))
+      # has_credits=true with zero is malformed; missing finite balance and
+      # no included attestation is wholly unknown and must also fail closed.
+      second = if is_nil(unquote(balance)), do: Map.delete(second, "rate_limit"), else: second
+      {_fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, [{200, positive}, {200, second}])))
+      assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+      assert {:ok, facts} = CapacityFactsStore.load(refreshed.metadata)
+      refute facts.credit_permission == :available
+      refute public_decision(refreshed, DateTime.utc_now()).eligible?
     end
   end
 
@@ -115,7 +223,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
     end
   end
 
-  test "unknown receipt takes precedence over conflicting grants in a three-source fetch" do
+  test "unknown receipt revokes otherwise coherent positive grants in a three-source fetch" do
     paths = ["/api/codex/usage" | @paths]
     payloads = [credit_payload(), put_in(credit_payload(), ["credits", "balance"], "0.25"), %{}]
     {fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(paths, Enum.map(payloads, &{200, &1}))))

@@ -882,6 +882,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
     strongest = Enum.max_by(observations, &capacity_strength/1)
     peers = Enum.filter(observations, &(capacity_strength(&1) == capacity_strength(strongest)))
     unknown = Enum.filter(observations, &(&1.credit_permission == :unknown and &1.denial_category == :unknown))
+    unavailable = Enum.filter(observations, &(&1.credit_permission == :unavailable))
 
     cond do
       strongest.denial_category in [:workspace_limit, :model_limit, :malformed, :spend_limit] ->
@@ -889,6 +890,9 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
 
       unknown != [] ->
         {strongest, :unknown_usage_receipt, unknown}
+
+      strongest.credit_permission == :available and unavailable != [] ->
+        {strongest, :conflicting_usage_receipts, peers ++ unavailable}
 
       Enum.all?(peers, &same_capacity_envelope?(&1, strongest)) ->
         {strongest, nil, []}
@@ -907,7 +911,8 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
   defp capacity_strength(_facts), do: 1
 
   defp same_capacity_envelope?(left, right) do
-    Map.drop(Map.from_struct(left), [:source_kind, :account_windows]) == Map.drop(Map.from_struct(right), [:source_kind, :account_windows]) and
+    Map.drop(Map.from_struct(left), [:source_kind, :account_windows, :balance]) == Map.drop(Map.from_struct(right), [:source_kind, :account_windows, :balance]) and
+      same_balance_authority?(left, right) and
       length(left.account_windows) == length(right.account_windows) and
       Enum.all?(left.account_windows, fn window ->
         Enum.any?(right.account_windows, fn other ->
@@ -916,6 +921,12 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
         end)
       end)
   end
+
+  # Two serial usage endpoints can meter different positive balances while
+  # agreeing on every authority field. Keep the complete chosen receipt; never
+  # combine its spend clearance or windows with another receipt's credit grant.
+  defp same_balance_authority?(left, right),
+    do: left.balance == right.balance or (CapacityFacts.positive_balance?(left) and CapacityFacts.positive_balance?(right))
 
   defp maybe_log_capacity_unavailable(%Result{capacity_facts: %{credit_permission: :unknown}, capacity_observations: [_ | _] = observations}, identity_id) do
     case capacity_reduction_decision(observations) do
