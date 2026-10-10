@@ -93,16 +93,77 @@ defmodule CodexPooler.Alerts.WebhookDeliveryDeadlineTest do
     assert attempt.response_metadata["delivery_execution"]["job_id"] == fixture.job.id
   end
 
-  test "an already near absolute deadline cancels actual private HTTPS drip and releases its connection", context do
+  test "full delivery preserves the timeout receipt whether its short budget reaches HTTPS or expires earlier", context do
     fixture = fixture!(context, :drip)
     execution = %{Execution.new(fixture.job) | deadline: System.monotonic_time(:millisecond) + 300}
     assert {:error, %{code: "alert_webhook_delivery_timeout", retryable: true}} = WebhookDelivery.deliver_incident_to_channel(fixture.incident.id, fixture.channel.id, 1, delivery_execution: execution)
-    assert_receive {:https_request, _}, 5_000
-    assert_receive :https_connection_released, 5_000
+    assert Execution.remaining(execution) == 0
+
+    # A valid absolute timeout may consume its budget before HTTP arrival.
+    # Fence any accepted connection before classifying the observed phase.
+    assert {:ok, connections} = ThousandIsland.connection_pids(fixture.server)
+    monitors = Enum.map(connections, &{&1, Process.monitor(&1)})
+    for {pid, monitor} <- monitors, do: assert_receive({:DOWN, ^monitor, :process, ^pid, _reason}, 5_000)
+    assert {:ok, []} = ThousandIsland.connection_pids(fixture.server)
+
+    reached_http? =
+      receive do
+        {:https_request, _receiver} ->
+          assert_receive :https_connection_released, 5_000
+          true
+      after
+        0 -> false
+      end
+
     [attempt] = Repo.all(from a in AlertDeliveryAttempt, where: a.incident_id == ^fixture.incident.id)
     assert attempt.status == "retryable"
     assert DateTime.compare(attempt.next_retry_at, attempt.completed_at) == :gt
     assert attempt.response_metadata["delivery_outcome"] == "unknown"
+    assert attempt.response_metadata["delivery_execution"]["job_id"] == fixture.job.id
+    CodexPooler.TestDiagnostics.puts("alert-full-delivery deadline_ms=300 reached_http=#{reached_http?} active_connections=0 receipt=retryable outcome=unknown")
+  end
+
+  test "a 300ms absolute deadline cancels an established private HTTPS drip and releases its connection", context do
+    fixture = fixture!(context, :drip)
+    {:ok, connection_tracker} = Agent.start(fn -> nil end)
+
+    on_exit(fn ->
+      if connection = Agent.get(connection_tracker, & &1), do: Mint.HTTP.close(connection)
+      Agent.stop(connection_tracker)
+    end)
+
+    uri = URI.parse(fixture.url)
+    assert {:ok, connection} = Mint.HTTP.connect(:https, context.ip, uri.port, hostname: context.host, protocols: [:http1], mode: :passive, transport_opts: [cacerts: context.cert[:cacerts]])
+    Agent.update(connection_tracker, fn _ -> connection end)
+    assert {:ok, connection, ref} = Mint.HTTP.request(connection, "POST", uri.path, [], "")
+    assert_receive {:https_request, _}, 5_000
+    connection = await_first_drip(connection, ref)
+    parent = self()
+    tasks = start_supervised!(Task.Supervisor)
+
+    caller =
+      Task.Supervisor.async_nolink(tasks, fn ->
+        execution = %{Execution.new() | deadline: System.monotonic_time(:millisecond) + 300}
+
+        Execution.run(execution, fn ->
+          send(parent, {:drip_executor, self()})
+
+          receive do
+            {:owned_drip, connection} -> drain_drip(connection)
+          end
+        end)
+      end)
+
+    caller_monitor = Process.monitor(caller.pid)
+    assert_receive {:drip_executor, executor}, 5_000
+    executor_monitor = Process.monitor(executor)
+    assert {:ok, connection} = Mint.HTTP.controlling_process(connection, executor)
+    send(executor, {:owned_drip, connection})
+    assert {:error, :delivery_timeout} = Task.await(caller, 5_000)
+    assert_receive {:DOWN, ^executor_monitor, :process, ^executor, :killed}, 5_000
+    assert_receive {:DOWN, ^caller_monitor, :process, _, :normal}, 5_000
+    assert_receive :https_connection_released, 5_000
+    CodexPooler.TestDiagnostics.puts("alert-drip established_before_budget=true deadline_ms=300 executor_down=true peer_released=true")
   end
 
   test "TLS negotiation that never answers is cancelled by the same absolute deadline" do
@@ -159,6 +220,7 @@ defmodule CodexPooler.Alerts.WebhookDeliveryDeadlineTest do
     [attempt] = Repo.all(from a in AlertDeliveryAttempt, where: a.incident_id == ^incident.id)
     assert attempt.status == "retryable"
     assert attempt.completed_at
+    assert DateTime.compare(attempt.next_retry_at, attempt.completed_at) == :gt
     assert attempt.response_metadata["delivery_outcome"] == "unknown"
     CodexPooler.TestDiagnostics.puts("alert-preparation deadline_expired=true tcp_connections=0 receipt=retryable outcome=unknown")
   end
@@ -239,6 +301,18 @@ defmodule CodexPooler.Alerts.WebhookDeliveryDeadlineTest do
     :ok
   end
 
+  defp await_first_drip(connection, ref) do
+    assert {:ok, connection, events} = Mint.HTTP.recv(connection, 0, 5_000)
+    if Enum.any?(events, &match?({:data, ^ref, _}, &1)), do: connection, else: await_first_drip(connection, ref)
+  end
+
+  defp drain_drip(connection) do
+    case Mint.HTTP.recv(connection, 0, :infinity) do
+      {:ok, connection, _events} -> drain_drip(connection)
+      {:error, _connection, error, _events} -> {:unexpected_close, error}
+    end
+  end
+
   defp drain_closed_socket(socket, count) do
     case :gen_tcp.recv(socket, 0, 5_000) do
       {:ok, data} -> drain_closed_socket(socket, count + byte_size(data))
@@ -273,6 +347,6 @@ defmodule CodexPooler.Alerts.WebhookDeliveryDeadlineTest do
     {:ok, meta} = Basic.init(conf, queue: queue, limit: 1)
     {:ok, {_meta, [claimed]}} = Basic.fetch_jobs(conf, meta, %{})
     assert claimed.id == job.id
-    %{incident: incident, channel: channel, job: claimed, url: "https://#{context.host}:#{port}/hooks"}
+    %{server: server, incident: incident, channel: channel, job: claimed, url: "https://#{context.host}:#{port}/hooks"}
   end
 end
