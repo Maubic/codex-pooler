@@ -77,15 +77,12 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
   @tag credits_multi_path: true
   @tag credits_negative: true
   test "equal-strength conflicting grants stay unknown independent of selected display payload" do
-    previous_level = Logger.level()
-    on_exit(fn -> Logger.configure(level: previous_level) end)
-    Logger.configure(level: :info)
     first = credit_payload()
     second = put_in(first, ["credits", "balance"], "0.25")
 
     for payloads <- [[first, second], [second, first]] do
       {fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, Enum.map(payloads, &{200, &1}))))
-      {{:ok, result}, log} = ExUnit.CaptureLog.with_log([level: :info], fn -> UsageProbe.fetch_from_identity(identity, assignment, DateTime.utc_now(), []) end)
+      {{:ok, result}, log} = with_info_log(fn -> UsageProbe.fetch_from_identity(identity, assignment, DateTime.utc_now(), []) end)
       assert log =~ "reason_code=conflicting_usage_receipts"
       assert log =~ "differing_fields=balance"
       identity_hash = :crypto.hash(:sha256, identity.id) |> Base.encode16(case: :lower) |> binary_part(0, 12)
@@ -103,6 +100,60 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
       decision = public_decision(identity, DateTime.utc_now())
       refute decision.eligible?
       assert "provider_credit_permission_unavailable" in decision.reason_codes
+    end
+  end
+
+  for reverse <- [false, true] do
+    test "unknown queried receipt revokes a grant with the exact source logged, reverse=#{reverse}" do
+      assert_unknown_receipt_diagnostic(unquote(reverse))
+    end
+  end
+
+  for single <- [false, true] do
+    test "unusable unknown receipts emit one diagnostic and revoke persisted credits, single=#{single}" do
+      assert_unusable_unknown_diagnostic(unquote(single))
+    end
+  end
+
+  test "unknown receipt takes precedence over conflicting grants in a three-source fetch" do
+    paths = ["/api/codex/usage" | @paths]
+    payloads = [credit_payload(), put_in(credit_payload(), ["credits", "balance"], "0.25"), %{}]
+    {fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(paths, Enum.map(payloads, &{200, &1}))))
+    identity = Repo.update!(Ecto.Changeset.change(identity, metadata: Map.put(identity.metadata, "usage_path", hd(paths))))
+    observed_at = DateTime.utc_now()
+    {{:ok, result}, log} = with_info_log(fn -> UsageProbe.fetch_from_identity(identity, assignment, observed_at, []) end)
+    assert result.capacity_facts.credit_permission == :unknown
+    assert length(result.capacity_observations) == 3
+    assert_unknown_log(log, identity, observed_at, "codex_usage")
+    assert requested_paths(fake) == ["/api/codex/usage", "/backend-api/codex/usage", "/backend-api/wham/usage"]
+  end
+
+  for blocker <- [:malformed, :spend, :workspace], reverse <- [false, true] do
+    test "#{blocker} denial wins over unknown receipts without a false diagnostic, reverse=#{reverse}" do
+      assert_denial_diagnostic_precedence(unquote(blocker), unquote(reverse))
+    end
+  end
+
+  test "equal-strength malformed receipts with different balances do not log a conflict" do
+    first = blocking_payload(credit_payload(), :malformed)
+    second = put_in(first, ["credits", "balance"], "0.25")
+    {_fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, [{200, first}, {200, second}])))
+    {{:ok, result}, log} = with_info_log(fn -> UsageProbe.fetch_from_identity(identity, assignment, DateTime.utc_now(), []) end)
+    assert result.capacity_facts.denial_category == :malformed
+    assert result.capacity_facts.credit_permission == :unknown
+    refute log =~ "quota capacity authority unavailable"
+  end
+
+  for grants_present <- [false, true] do
+    test "unknown credit permission with included-limit denial is not an unknown receipt, grants_present=#{grants_present}" do
+      incomplete = Map.delete(credit_payload(), "spend_control")
+      second = if unquote(grants_present), do: credit_payload(), else: incomplete
+      {fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, [{200, incomplete}, {200, second}])))
+      {{:ok, result}, log} = with_info_log(fn -> UsageProbe.fetch_from_identity(identity, assignment, DateTime.utc_now(), []) end)
+      assert [%{credit_permission: :unknown, denial_category: :included_limit} | _] = result.capacity_observations
+      assert result.capacity_facts.credit_permission == if(unquote(grants_present), do: :available, else: :unknown)
+      refute log =~ "quota capacity authority unavailable"
+      assert requested_paths(fake) == @paths
     end
   end
 
@@ -587,6 +638,68 @@ defmodule CodexPooler.Upstreams.Reconciliation.CapacityFactsReconciliationTest d
       )
 
     {fake, identity, assignment}
+  end
+
+  defp assert_unknown_receipt_diagnostic(reverse) do
+    unknown = %{"diagnostic_canary" => "private-provider-value"}
+    payloads = if reverse, do: [unknown, credit_payload()], else: [credit_payload(), unknown]
+    {fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, Enum.map(payloads, &{200, &1}))))
+    observed_at = DateTime.utc_now()
+    {{:ok, result}, log} = with_info_log(fn -> UsageProbe.fetch_from_identity(identity, assignment, observed_at, []) end)
+    assert result.capacity_facts.credit_permission == :unknown
+    assert length(result.capacity_observations) == 2
+    assert_unknown_log(log, identity, observed_at, if(reverse, do: "wham_usage", else: "codex_usage"))
+    refute log =~ "private-provider-value"
+    assert requested_paths(fake) == @paths
+  end
+
+  defp assert_unusable_unknown_diagnostic(single) do
+    {fake, identity, assignment} = setup_upstream(Map.new(@paths, &{&1, {200, credit_payload()}}))
+    assert {:ok, identity} = PoolReconciliation.refresh_quota_from_usage(identity, assignment)
+    routes = if single, do: routes_for(:wham_usage, %{}), else: Map.new(@paths, &{&1, {200, %{}}})
+    FakeUpstream.set_mode(fake, {:path_json, routes})
+    observed_at = DateTime.utc_now()
+    {outcome, log} = with_info_log(fn -> refresh_at(identity, assignment, observed_at) end)
+    assert {:error, %{code: :upstream_quota_unusable}} = outcome
+    assert {:ok, facts} = CapacityFactsStore.load(Repo.reload!(identity).metadata)
+    assert facts.credit_permission == :unknown
+    assert facts.included_permission == :unknown
+    assert_unknown_log(log, identity, observed_at, if(single, do: "wham_usage", else: "codex_usage,wham_usage"))
+  end
+
+  defp assert_denial_diagnostic_precedence(blocker, reverse) do
+    denied = blocking_payload(credit_payload(), blocker)
+    payloads = if reverse, do: [%{}, denied], else: [denied, %{}]
+    {fake, identity, assignment} = setup_upstream(Map.new(Enum.zip(@paths, Enum.map(payloads, &{200, &1}))))
+    {{:ok, result}, log} = with_info_log(fn -> UsageProbe.fetch_from_identity(identity, assignment, DateTime.utc_now(), []) end)
+    assert result.capacity_facts.denial_category == %{malformed: :malformed, spend: :spend_limit, workspace: :workspace_limit}[blocker]
+    refute result.capacity_facts.credit_permission == :available
+    refute log =~ "quota capacity authority unavailable"
+    assert requested_paths(fake) == @paths
+  end
+
+  defp assert_unknown_log(log, identity, observed_at, sources) do
+    assert length(Regex.scan(~r/quota capacity authority unavailable/, log)) == 1
+    assert log =~ "reason_code=unknown_usage_receipt"
+    assert log =~ "observed_at=#{DateTime.to_iso8601(observed_at)} sources=#{sources}"
+    identity_hash = :crypto.hash(:sha256, identity.id) |> Base.encode16(case: :lower) |> binary_part(0, 12)
+    assert log =~ "identity_hash=#{identity_hash}"
+    refute log =~ identity.id
+    refute log =~ "conflicting_usage_receipts"
+    refute log =~ "differing_fields"
+    refute log =~ "0.125"
+  end
+
+  defp with_info_log(fun) do
+    previous_level = Logger.level()
+    on_exit(fn -> Logger.configure(level: previous_level) end)
+    Logger.configure(level: :info)
+
+    try do
+      ExUnit.CaptureLog.with_log([level: :info], fun)
+    after
+      Logger.configure(level: previous_level)
+    end
   end
 
   defp refresh_at(identity, assignment, observed_at), do: PoolReconciliation.refresh_quota_from_usage(identity, assignment, observed_at: observed_at)

@@ -194,8 +194,15 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
     with {:ok, credential_epoch} <- probe_credential_epoch(identity, fence),
          {:ok, result} <-
            do_fetch(identity, assignment, access_token, observed_at, opts, credential_epoch) do
-      maybe_log_capacity_conflict(result, identity.id)
+      maybe_log_capacity_unavailable(result, identity.id)
       {:ok, %{result | credential_fence: fence}}
+    else
+      {:error, {:capacity_observation_unusable, %Result{} = result}} = error ->
+        maybe_log_capacity_unavailable(result, identity.id)
+        error
+
+      error ->
+        error
     end
   end
 
@@ -865,21 +872,29 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
   # Stronger denials survive payload preference and incomplete/equal conflicts
   # cannot create the missing spend/window evidence of another receipt.
   defp reduce_capacity_facts(observations) do
+    case capacity_reduction_decision(observations) do
+      {strongest, nil, _observations} -> strongest
+      {strongest, _reason, _observations} -> CapacityFacts.revoke(strongest)
+    end
+  end
+
+  defp capacity_reduction_decision(observations) do
     strongest = Enum.max_by(observations, &capacity_strength/1)
     peers = Enum.filter(observations, &(capacity_strength(&1) == capacity_strength(strongest)))
+    unknown = Enum.filter(observations, &(&1.credit_permission == :unknown and &1.denial_category == :unknown))
 
     cond do
       strongest.denial_category in [:workspace_limit, :model_limit, :malformed, :spend_limit] ->
-        strongest
+        {strongest, nil, []}
 
-      Enum.any?(observations, &(&1.credit_permission == :unknown and &1.denial_category == :unknown)) ->
-        CapacityFacts.revoke(strongest)
+      unknown != [] ->
+        {strongest, :unknown_usage_receipt, unknown}
 
       Enum.all?(peers, &same_capacity_envelope?(&1, strongest)) ->
-        strongest
+        {strongest, nil, []}
 
       true ->
-        CapacityFacts.revoke(strongest)
+        {strongest, :conflicting_usage_receipts, peers}
     end
   end
 
@@ -902,26 +917,30 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
       end)
   end
 
-  defp maybe_log_capacity_conflict(%Result{capacity_facts: %{credit_permission: :unknown}, capacity_observations: [_ | _] = observations}, identity_id) do
-    strongest = Enum.max_by(observations, &capacity_strength/1)
-    peers = Enum.filter(observations, &(capacity_strength(&1) == capacity_strength(strongest)))
-
-    if Enum.any?(peers, &(not same_capacity_envelope?(&1, strongest))) do
-      log_capacity_conflict(peers, strongest, identity_id)
+  defp maybe_log_capacity_unavailable(%Result{capacity_facts: %{credit_permission: :unknown}, capacity_observations: [_ | _] = observations}, identity_id) do
+    case capacity_reduction_decision(observations) do
+      {_strongest, nil, _observations} -> :ok
+      {strongest, reason, relevant} -> log_capacity_unavailable(reason, relevant, strongest, identity_id)
     end
   end
 
-  defp maybe_log_capacity_conflict(_result, _identity_id), do: :ok
+  defp maybe_log_capacity_unavailable(_result, _identity_id), do: :ok
 
-  defp log_capacity_conflict(peers, strongest, identity_id) do
+  defp log_capacity_unavailable(reason, observations, strongest, identity_id) do
+    sources = observations |> Enum.map(& &1.source_kind) |> Enum.uniq() |> Enum.sort() |> Enum.join(",")
+    identity_hash = :crypto.hash(:sha256, identity_id) |> Base.encode16(case: :lower) |> binary_part(0, 12)
+    Logger.info("quota capacity authority unavailable reason_code=#{reason} identity_hash=#{identity_hash} observed_at=#{DateTime.to_iso8601(strongest.observed_at)} sources=#{sources}#{capacity_differing_fields(reason, observations, strongest)}")
+  end
+
+  defp capacity_differing_fields(:unknown_usage_receipt, _observations, _strongest), do: ""
+
+  defp capacity_differing_fields(:conflicting_usage_receipts, peers, strongest) do
     fields =
       [:included_permission, :credit_permission, :denial_category, :balance, :has_credits, :unlimited, :account_windows]
       |> Enum.filter(fn key -> Enum.any?(peers, &(Map.fetch!(&1, key) != Map.fetch!(strongest, key))) end)
       |> Enum.join(",")
 
-    sources = peers |> Enum.map(& &1.source_kind) |> Enum.uniq() |> Enum.sort() |> Enum.join(",")
-    identity_hash = :crypto.hash(:sha256, identity_id) |> Base.encode16(case: :lower) |> binary_part(0, 12)
-    Logger.info("quota capacity authority unavailable reason_code=conflicting_usage_receipts identity_hash=#{identity_hash} observed_at=#{DateTime.to_iso8601(strongest.observed_at)} sources=#{sources} differing_fields=#{fields}")
+    " differing_fields=#{fields}"
   end
 
   defp covered_descriptors(payload, windows, account_availability, observed_at) do
