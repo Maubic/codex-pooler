@@ -32,6 +32,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionRetir
       task = Task.Supervisor.async_nolink(start_supervised!(Task.Supervisor), fn -> UpstreamWebsocketSession.request(session, request) end)
       assert_receive {:peer_upgraded, ref, 1, holder}, @budget
       assert ref == peer.ref
+      holder_monitor = Process.monitor(holder)
       on_exit(fn -> send(holder, :release_peer) end)
       assert_receive {:trace_ts, ^session, :call, {ConnectionUpgrade, :await_upgrade, 4}, socket, _time}, @budget
       assert_receive {:trace_ts, ^session, :call, {UpstreamWebsocketSession, :send_text, 2}, send_at}, @budget
@@ -75,7 +76,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionRetir
       send(session, {if(context.transport == :ws, do: :tcp_closed, else: :ssl_closed), socket})
       assert Mint.HTTP.get_socket(:sys.get_state(session).conn) == successor
       send(holder, :release_peer)
-      assert_receive {:peer_closed, ^ref, 1}, @budget
+      assert :ok = Peer.await_closed!(peer, 1, holder, holder_monitor, @budget)
       assert {:ok, %{terminal: "response.completed", upstream_websocket_connection: %{reused: true}}} = bounded_request!(session, request(peer.url, 1024))
     end
   end
@@ -90,6 +91,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionRetir
       task = Task.Supervisor.async_nolink(start_supervised!(Task.Supervisor), fn -> UpstreamWebsocketSession.request(session, request) end)
       assert_receive {:peer_upgraded, ref, 1, holder}, @budget
       assert ref == peer.ref
+      holder_monitor = Process.monitor(holder)
       on_exit(fn -> send(holder, :release_peer) end)
       assert_receive {:trace_ts, ^session, :call, {ConnectionUpgrade, :await_upgrade, 4}, socket, _}, @budget
       assert_receive {:trace_ts, ^session, :call, {UpstreamWebsocketSession, :send_text, 2}, begin_at}, @budget
@@ -116,9 +118,32 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionRetir
       assert retired_ms < 1_500
       assert {:ok, %{terminal: "response.completed"}} = bounded_request!(session, request(peer.url, 1024))
       send(holder, :release_peer)
-      assert_receive {:peer_closed, ^ref, 1}, @budget
+      assert :ok = Peer.await_closed!(peer, 1, holder, holder_monitor, @budget)
       CodexPooler.TestDiagnostics.puts(fn -> CodexPooler.JSON.encode!(%{scenario: "queued_retirement_control", transport: context.transport, ending: unquote(ending), queued_bytes: queued, retirement_ms: retired_ms, successor_completed: true, old_resources_down: true}) end)
     end
+  end
+
+  @tag transport: :wss
+  test "peer-close diagnostics fail for a live held peer and for its death", context do
+    peer = Peer.start!(context, [:stalled])
+    session = start_session!()
+    request = %{request(peer.url, 1024) | timeouts: %{connect_timeout_ms: 5_000, receive_timeout_ms: 10_000}}
+    task = Task.Supervisor.async_nolink(start_supervised!(Task.Supervisor), fn -> UpstreamWebsocketSession.request(session, request) end)
+    assert_receive {:peer_upgraded, ref, 1, holder}, @budget
+    assert ref == peer.ref
+    on_exit(fn -> send(holder, :release_peer) end)
+    live_monitor = Process.monitor(holder)
+
+    live_error = assert_raise ExUnit.AssertionError, fn -> Peer.await_closed!(peer, 1, holder, live_monitor, 0) end
+    assert "physical peer close not observed: " <> live_json = live_error.message
+    assert %{"cause" => "timeout", "holder_alive" => true, "read_calls" => 0} = CodexPooler.JSON.decode!(live_json)
+
+    death_monitor = Process.monitor(holder)
+    Process.exit(holder, :kill)
+    death_error = assert_raise ExUnit.AssertionError, fn -> Peer.await_closed!(peer, 1, holder, death_monitor, @budget) end
+    assert "physical peer close not observed: " <> death_json = death_error.message
+    assert %{"cause" => "holder_down", "holder_exit" => "killed", "holder_alive" => false} = CodexPooler.JSON.decode!(death_json)
+    assert {:ok, {:error, _reason}} = Task.yield(task, 1_500)
   end
 
   defp bounded_request!(session, request) do

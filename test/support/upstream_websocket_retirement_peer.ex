@@ -33,58 +33,63 @@ defmodule CodexPooler.UpstreamWebsocketRetirementPeer do
   def socket_closed?(:ws, socket), do: Port.info(socket) == nil
   def socket_closed?(:wss, socket), do: match?({:error, :closed}, :ssl.connection_information(socket))
 
-  @spec start!(map(), [atom()]) :: %{url: String.t(), ref: reference()}
+  @spec start!(map(), [atom()]) :: %{url: String.t(), ref: reference(), progress: :ets.tid()}
   def start!(context, scripts) do
     parent = self()
     ref = make_ref()
-    {:ok, tracker} = Agent.start(fn -> %{tasks: [], sockets: []} end)
+    {:ok, tracker} = Agent.start(fn -> %{tasks: [], sockets: [], progress: :ets.new(__MODULE__, [:set, :public])} end)
 
     on_exit(fn ->
       resources = Agent.get(tracker, & &1)
       assert Enum.all?(resources.tasks, &(not Process.alive?(&1)))
       assert Enum.all?(resources.sockets, fn {transport, socket} -> socket_closed?(transport, socket) end)
       Agent.stop(tracker)
+      assert :ets.info(resources.progress) == :undefined
       CodexPooler.TestDiagnostics.puts(fn -> CodexPooler.JSON.encode!(%{scenario: "retirement_peer_cleanup", tasks_stopped: true, sockets_closed: true}) end)
     end)
 
-    start_supervised!(Supervisor.child_spec({Task, fn -> peer(parent, ref, context, scripts, tracker) end}, id: ref, restart: :temporary))
+    progress = Agent.get(tracker, & &1.progress)
+    start_supervised!(Supervisor.child_spec({Task, fn -> peer(parent, ref, context, scripts, tracker, progress) end}, id: ref, restart: :temporary))
     assert_receive {:peer_listening, ^ref, port}, @budget
     scheme = if context.transport == :wss, do: "https", else: "http"
-    %{url: "#{scheme}://127.0.0.1:#{port}/backend-api/codex/responses", ref: ref}
+    %{url: "#{scheme}://127.0.0.1:#{port}/backend-api/codex/responses", ref: ref, progress: progress}
   end
 
-  defp peer(parent, ref, context, scripts, tracker) do
+  defp peer(parent, ref, context, scripts, tracker, progress) do
     peer_pid = self()
     Agent.update(tracker, &%{&1 | tasks: [peer_pid | &1.tasks]})
     {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, packet: :raw, reuseaddr: true, recbuf: 4096, ip: {127, 0, 0, 1}])
     Agent.update(tracker, &%{&1 | sockets: [{:ws, listener} | &1.sockets]})
     {:ok, port} = :inet.port(listener)
     send(parent, {:peer_listening, ref, port})
-    accept_loop(listener, parent, ref, context, scripts, tracker, 1)
+    accept_loop(listener, parent, ref, context, scripts, tracker, progress, 1)
   end
 
-  defp accept_loop(listener, parent, ref, context, scripts, tracker, id) do
+  defp accept_loop(listener, parent, ref, context, scripts, tracker, progress, id) do
     {:ok, socket} = :gen_tcp.accept(listener)
 
     holder =
       spawn_link(fn ->
         receive do
-          :owned -> serve(socket, parent, ref, context, Enum.at(scripts, id - 1, List.last(scripts)), id, tracker)
+          :owned -> serve(socket, parent, ref, context, Enum.at(scripts, id - 1, List.last(scripts)), id, tracker, progress)
         end
       end)
 
+    initial_progress = %{phase: :accepted, holder: holder, raw: socket, tls_processes: [], received_bytes: 0, read_calls: 0, last_recv: :none, recv_started_at: nil}
+    true = :ets.insert(progress, {id, initial_progress})
     Agent.update(tracker, &%{&1 | tasks: [holder | &1.tasks], sockets: [{:ws, socket} | &1.sockets]})
     :ok = :gen_tcp.controlling_process(socket, holder)
     send(holder, :owned)
-    accept_loop(listener, parent, ref, context, scripts, tracker, id + 1)
+    accept_loop(listener, parent, ref, context, scripts, tracker, progress, id + 1)
   end
 
-  defp serve(raw, parent, ref, context, script, id, tracker) do
+  defp serve(raw, parent, ref, context, script, id, tracker, progress) do
     {transport, socket} =
       if context.transport == :wss do
         case :ssl.handshake(raw, [cert: context.certificate[:cert], key: context.certificate[:key], active: false, mode: :binary], @budget) do
           {:ok, socket} ->
             Agent.update(tracker, &%{&1 | sockets: [{:wss, socket} | &1.sockets]})
+            update_progress(progress, id, &Map.put(&1, :tls_processes, socket_processes(socket)))
             {:ssl, socket}
 
           {:error, _reason} ->
@@ -111,6 +116,7 @@ defmodule CodexPooler.UpstreamWebsocketRetirementPeer do
         :ok = transport.send(socket, ["HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ", accept, "\r\n\r\n"])
     end
 
+    update_progress(progress, id, &Map.put(&1, :phase, :upgraded))
     send(parent, {:peer_upgraded, ref, id, self()})
 
     if script == :early_terminal do
@@ -119,8 +125,12 @@ defmodule CodexPooler.UpstreamWebsocketRetirementPeer do
     end
 
     if script in [:stalled, :early_terminal] do
+      update_progress(progress, id, &Map.put(&1, :phase, :held))
+
       receive do
-        :release_peer -> drain(transport, socket, parent, ref, id)
+        :release_peer ->
+          update_progress(progress, id, &Map.put(&1, :phase, :draining))
+          drain(transport, socket, parent, ref, id, progress)
       end
     else
       serve_frames(transport, socket, parent, ref, id, script, 0)
@@ -165,11 +175,74 @@ defmodule CodexPooler.UpstreamWebsocketRetirementPeer do
     end
   end
 
-  defp drain(transport, socket, parent, ref, id) do
+  defp drain(transport, socket, parent, ref, id, progress) do
+    update_progress(progress, id, &%{&1 | read_calls: &1.read_calls + 1, last_recv: :pending, recv_started_at: System.monotonic_time(:millisecond)})
+
     case transport.recv(socket, 0, @budget) do
-      {:ok, _discarded} -> drain(transport, socket, parent, ref, id)
-      {:error, reason} when reason in [:closed, :econnreset] -> send(parent, {:peer_closed, ref, id})
-      {:error, reason} -> exit({:peer_drain_failed, reason})
+      {:ok, discarded} ->
+        update_progress(progress, id, &%{&1 | received_bytes: &1.received_bytes + byte_size(discarded), last_recv: :ok})
+        drain(transport, socket, parent, ref, id, progress)
+
+      {:error, reason} when reason in [:closed, :econnreset] ->
+        update_progress(progress, id, &%{&1 | phase: :closed, last_recv: reason})
+        send(parent, {:peer_closed, ref, id})
+
+      {:error, reason} ->
+        update_progress(progress, id, &%{&1 | phase: :failed, last_recv: if(reason == :timeout, do: :timeout, else: :other_error)})
+        exit({:peer_drain_failed, reason})
     end
   end
+
+  @spec await_closed!(map(), pos_integer(), pid(), reference(), non_neg_integer()) :: :ok
+  def await_closed!(peer, id, holder, monitor, timeout) do
+    ref = peer.ref
+
+    result =
+      receive do
+        {:peer_closed, ^ref, ^id} -> :ok
+        {:DOWN, ^monitor, :process, ^holder, reason} -> {:holder_down, exit_class(reason)}
+      after
+        timeout -> :timeout
+      end
+
+    Process.demonitor(monitor, [:flush])
+
+    case result do
+      :ok -> :ok
+      failure -> flunk("physical peer close not observed: " <> CodexPooler.JSON.encode!(failure_snapshot(peer, id, failure)))
+    end
+  end
+
+  defp failure_snapshot(peer, id, failure) do
+    cause = if failure == :timeout, do: %{cause: :timeout}, else: %{cause: :holder_down, holder_exit: elem(failure, 1)}
+    Map.merge(snapshot(peer, id), cause)
+  end
+
+  defp snapshot(%{progress: table}, id) do
+    case :ets.lookup(table, id) do
+      [] ->
+        %{phase: :not_registered}
+
+      [{^id, progress}] ->
+        progress
+        |> Map.take([:phase, :received_bytes, :read_calls, :last_recv])
+        |> Map.merge(%{holder_alive: Process.alive?(progress.holder), raw_port_alive: Port.info(progress.raw) != nil, tls_process_count: length(progress.tls_processes), tls_processes_alive: Enum.count(progress.tls_processes, &Process.alive?/1), recv_pending_ms: if(progress.last_recv == :pending, do: max(System.monotonic_time(:millisecond) - progress.recv_started_at, 0), else: 0)})
+    end
+  rescue
+    ArgumentError -> %{phase: :diagnostics_unavailable}
+  end
+
+  defp exit_class(reason) when reason in [:normal, :shutdown, :killed], do: reason
+  defp exit_class(_reason), do: :other_exit
+
+  defp update_progress(table, id, fun) do
+    [{^id, progress}] = :ets.lookup(table, id)
+    true = :ets.insert(table, {id, fun.(progress)})
+    :ok
+  end
+
+  defp socket_processes(value) when is_pid(value), do: [value]
+  defp socket_processes(value) when is_tuple(value), do: value |> Tuple.to_list() |> Enum.flat_map(&socket_processes/1) |> Enum.uniq()
+  defp socket_processes(value) when is_list(value), do: Enum.flat_map(value, &socket_processes/1) |> Enum.uniq()
+  defp socket_processes(_value), do: []
 end
