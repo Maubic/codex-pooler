@@ -83,6 +83,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketResponseSteerTest do
     end
   end
 
+  for forwarding <- [:off, :on] do
+    @tag forwarding: forwarding
+    test "full owner forwarding #{forwarding}: provider close wins while the steering lane is delayed", ctx do
+      assert_late_full_close!(ctx.forwarding, hold_close?: true)
+    end
+  end
+
+  @tag slow: "boots a second VM owning the closing upstream connection"
+  test "a remote owner's provider close wins while the local steering lane is delayed" do
+    assert_late_full_close!(:on, hold_close?: true, peer?: true)
+  end
+
   for forwarding <- [:off, :on], mode <- ["full", "lite"], successor? <- [false, true] do
     @tag forwarding: forwarding, serving_mode: mode, successor?: successor?
     test "#{mode} owner forwarding #{forwarding}: accepted steering with successor #{successor?} leaves the pending client tool output usable", ctx do
@@ -385,16 +397,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketResponseSteerTest do
     drop!(client)
   end
 
-  defp assert_late_full_close!(forwarding) do
+  defp assert_late_full_close!(forwarding, opts \\ []) do
     put_owner_forwarding!(forwarding == :on)
+    peer? = Keyword.get(opts, :peer?, false)
+    if peer?, do: enter_peer_owner_topology!()
     hold = make_ref()
     {response_id, _successor_id} = response_ids()
     terminal = original_terminal_events(response_id, :completed)
     upstream = start_steerable!(response_id, opening_events(response_id), terminal, [], hold, outcome: :post_terminal_close)
     setup = gateway_setup(upstream)
     set_model_serving_mode!(model_serving_scope(), setup, "full")
-    {_server, port} = start_public_endpoint_with_server!()
     turn = new_turn(setup, "full")
+    peer_owner = if peer?, do: start_peer_window_owner!(setup, "#{turn.thread}:0")
+    if peer?, do: assert(node(peer_owner.owner_pid) != node())
+    {_server, port} = start_public_endpoint_with_server!()
     client = port |> connect!(setup, turn) |> prewarm!(turn) |> send_frame!(opener_frame(turn))
     assert_receive {:fake_upstream_steerable_open, handler, ^hold}, @detection_timeout_ms
     {client, _opening} = receive_n!(client, length(opening_events(response_id)))
@@ -405,11 +421,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketResponseSteerTest do
     assert [original] = await_settled_rows!(setup, 1)
     _delivery = await_downstream_delivery!(original)
     client = await_idle_and_ping!(client)
+    lane = if Keyword.get(opts, :hold_close?, false), do: hold_lane_peer_close!(client)
     sent = steer_frame(response_id)
 
     {{client, frames, code, reason}, log} =
       with_info_log(fn ->
         result = client |> send_frame!(sent) |> receive_until_close!()
+
+        if lane do
+          assert_receive {:peer_close_held, ^lane, 1000, true}, @detection_timeout_ms
+          send(lane, :release_peer_close)
+        end
+
         {closed, _frames, _code, _reason} = result
         drop!(closed)
         result
@@ -424,6 +447,32 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketResponseSteerTest do
     assert_safe_diagnostics!(log, [response_id])
     assert :ok = FakeUpstream.verify!(upstream)
     assert client.frames == []
+  end
+
+  defp hold_lane_peer_close!(client) do
+    lane = await_socket_connection_state!(client.socket, &(MapSet.size(&1.tasks) == 0)).native_response_steering
+    observer = self()
+    on_exit(fn -> send(lane, :release_peer_close) end)
+
+    :ok =
+      :sys.install(
+        lane,
+        {fn
+           acc, {:in, {:"$gen_cast", {:peer_close, code, reason}}}, _name ->
+             send(observer, {:peer_close_held, self(), code, reason == ""})
+
+             receive do
+               :release_peer_close -> acc
+             after
+               @detection_timeout_ms -> raise "steering peer-close barrier timed out"
+             end
+
+           acc, _event, _name ->
+             acc
+         end, :ok}
+      )
+
+    lane
   end
 
   defp assert_client_owned_tool_continuation!(forwarding, mode, successor?) do

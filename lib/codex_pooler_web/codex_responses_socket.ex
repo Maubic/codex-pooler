@@ -580,7 +580,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   defp handle_socket_info({:native_response_steering_close, lane, code, reason}, %{native_response_steering: lane} = state) when code in 1000..4999 and is_binary(reason) do
-    {:stop, :normal, {code, reason}, state}
+    close_if_revoked_idle({:stop, :normal, {code, reason}, state})
   end
 
   defp handle_socket_info({:native_response_steering_control, lane, data}, %{native_response_steering: lane} = state), do: native_push(Adapter.native_downstream_response_chunk(data, fn -> false end, usage_limit_originator(state)), state)
@@ -1673,12 +1673,13 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # socket idle closes it: a caller runs the note and then the funnel.
   defp note_upstream_connection_closed(
          state,
-         %{cause: cause, lifecycle_id: lifecycle_id, generation: generation},
+         %{cause: cause, lifecycle_id: lifecycle_id, generation: generation} = signal,
          forwarding
        )
        when is_atom(cause) and is_binary(lifecycle_id) and is_integer(generation) and generation > 0 and
               forwarding in [:off, :on] do
     upstream_close = %{cause: cause, lifecycle_id: lifecycle_id, generation: generation, forwarding: forwarding}
+    upstream_close = put_upstream_signal_close_detail(upstream_close, signal, state)
 
     cond do
       not CloseDiagnostics.anchor_invalidating_cause?(cause) ->
@@ -1694,6 +1695,15 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   defp note_upstream_connection_closed(state, _signal, _forwarding), do: state
+
+  defp put_upstream_signal_close_detail(upstream_close, signal, %{native_response_steering: lane}) when is_pid(lane) do
+    case WebsocketOwnerContract.upstream_closed_signal(signal) do
+      {:ok, %{steering_peer_close: {^lane, code, reason}}} -> Map.put(upstream_close, :close_detail, {code, reason})
+      _other -> upstream_close
+    end
+  end
+
+  defp put_upstream_signal_close_detail(upstream_close, _signal, _state), do: upstream_close
 
   # A client frame after the signal shows the client is still using the
   # socket: its request meets the fresh upstream connection as it did before
@@ -1733,7 +1743,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     case upstream_close_decision(state) do
       :wait -> {:ok, state}
       {:skip, skip_reason} -> {:ok, state |> drop_upstream_close(upstream_close, skip_reason) |> maybe_start_queued_response_task()}
-      :close -> {:stop, :normal, Adapter.close_detail(:upstream_connection_closed), close_after_upstream_close(state, upstream_close)}
+      :close -> {:stop, :normal, Map.get(upstream_close, :close_detail, Adapter.close_detail(:upstream_connection_closed)), close_after_upstream_close(state, upstream_close)}
     end
   end
 
@@ -1746,7 +1756,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         {:push, messages, state |> drop_upstream_close(upstream_close, skip_reason) |> maybe_start_queued_response_task()}
 
       :close ->
-        {:stop, :normal, Adapter.close_detail(:upstream_connection_closed), List.wrap(messages), close_after_upstream_close(state, upstream_close)}
+        {:stop, :normal, Map.get(upstream_close, :close_detail, Adapter.close_detail(:upstream_connection_closed)), List.wrap(messages), close_after_upstream_close(state, upstream_close)}
     end
   end
 

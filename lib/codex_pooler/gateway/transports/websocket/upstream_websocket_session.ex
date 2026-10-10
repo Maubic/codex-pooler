@@ -125,7 +125,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
              required(:cause) => CloseDiagnostics.cause(),
              required(:lifecycle_id) => Ecto.UUID.t(),
              required(:generation) => pos_integer(),
-             required(:connection_requests) => pos_integer()
+             required(:connection_requests) => pos_integer(),
+             optional(:steering_peer_close) => {pid(), integer(), binary()}
            }}
 
   # `connection_close_subscriber: pid` names the one process that learns when
@@ -2577,7 +2578,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp close_async(state, {:trailing, halt}, :peer_close_frame, details) do
     lifecycle = connection_lifecycle_state(state)
     Logger.info("upstream websocket coalesced close drained reason_code=peer_close_frame halt=#{halt} close_code=#{coalesced_close_code(Keyword.get(details, :close_code))} lifecycle_id=#{lifecycle.lifecycle_id} generation=#{lifecycle.generation}")
-    close_and_signal(state, :peer_close_frame, &close_state/1)
+    close_and_signal(state, :peer_close_frame, &close_state/1, details)
   end
 
   defp close_async(state, {:trailing, _halt}, cause, details), do: close_between_requests(state, cause, details)
@@ -2587,13 +2588,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # 206-356); a close inside a request is recorded on the attempt instead.
   defp close_between_requests(state, cause, details \\ []) do
     :ok = CloseDiagnostics.log_close(state, cause, details)
-    close_and_signal(state, cause, &close_state/1)
+    close_and_signal(state, cause, &close_state/1, details)
   end
 
   # The signal is built from the state before the close, which drops the
   # connection's request count, and sent once the connection is closed.
-  defp close_and_signal(state, cause, close) do
-    signal = connection_closed_signal(state, cause)
+  defp close_and_signal(state, cause, close, details \\ []) do
+    signal = connection_closed_signal(state, cause, details)
     closed = close.(state)
     :ok = send_connection_closed_signal(signal)
     closed
@@ -2602,18 +2603,27 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # Nothing to tell without a subscriber or a live connection, for a cause
   # that ends no anchor, or for a connection that never carried a request: a
   # connection that sent nothing produced no response to anchor on.
-  defp connection_closed_signal(%{conn: _conn, connection_close_subscriber: subscriber} = state, cause)
+  defp connection_closed_signal(%{conn: _conn, connection_close_subscriber: subscriber} = state, cause, details)
        when is_pid(subscriber) do
     requests = Map.get(state, :connection_request_count, 0)
 
     if is_integer(requests) and requests > 0 and CloseDiagnostics.anchor_invalidating_cause?(cause) do
-      {subscriber, {:upstream_websocket_connection_closed, self(), %{cause: cause, lifecycle_id: state.lifecycle_id, generation: state.generation, connection_requests: requests}}}
+      signal = %{cause: cause, lifecycle_id: state.lifecycle_id, generation: state.generation, connection_requests: requests}
+      signal = put_steering_peer_close(signal, state, details)
+      {subscriber, {:upstream_websocket_connection_closed, self(), signal}}
     else
       nil
     end
   end
 
-  defp connection_closed_signal(_state, _cause), do: nil
+  defp connection_closed_signal(_state, _cause, _details), do: nil
+
+  # The lane forwards this same close asynchronously. Carry its authority on
+  # the lifecycle signal too, so an idle downstream cannot race it with 1001.
+  defp put_steering_peer_close(%{cause: :peer_close_frame} = signal, %{native_response_steering_receive: %ReceiveState{steering_requested?: true, native_response_steering: lane}}, details) when is_pid(lane),
+    do: Map.put(signal, :steering_peer_close, {lane, Keyword.get(details, :close_code) || 1000, Keyword.get(details, :close_reason) || ""})
+
+  defp put_steering_peer_close(signal, _state, _details), do: signal
 
   defp send_connection_closed_signal({subscriber, message}) do
     send(subscriber, message)
