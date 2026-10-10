@@ -59,15 +59,14 @@ defmodule CodexPoolerWeb.Admin.JobsLive do
       else
         load_jobs_page(socket, params)
       end
-      |> maybe_clear_missing_selected_job()
-      |> maybe_clear_missing_selected_worker_failure()
+      |> maybe_patch_jobs_params(params)
 
     {:noreply, socket}
   end
 
   @impl true
   def handle_event("filter", %{"filters" => filter_params}, socket) do
-    {:noreply, push_patch(socket, to: ~p"/admin/jobs?#{JobFilterForm.query_params(filter_params)}")}
+    {:noreply, patch_filters(socket, filter_params)}
   end
 
   def handle_event("select_attention_filter", %{"attention" => attention}, socket) do
@@ -261,24 +260,19 @@ defmodule CodexPoolerWeb.Admin.JobsLive do
     """
   end
 
-  defp maybe_clear_missing_selected_job(socket) do
-    if (socket.assigns.owner_authorized? and socket.assigns.filters.job_id) &&
-         is_nil(socket.assigns.selected_job) do
-      push_patch(socket,
-        to: ~p"/admin/jobs?#{JobFilterForm.close_job_query_params(socket.assigns.current_params)}"
-      )
-    else
-      socket
-    end
-  end
+  defp maybe_patch_jobs_params(socket, requested_params) do
+    params = socket.assigns.current_params
 
-  defp maybe_clear_missing_selected_worker_failure(socket) do
-    if socket.assigns.owner_authorized? &&
-         Map.has_key?(socket.assigns.current_params, @worker_failure_job_id_param) &&
-         is_nil(socket.assigns.selected_worker_failure_job_id) do
-      push_patch(socket,
-        to: ~p"/admin/jobs?#{close_worker_failure_query_params(socket.assigns.current_params)}"
-      )
+    params =
+      if socket.assigns.filters.job_id && is_nil(socket.assigns.selected_job), do: Map.delete(params, "job_id"), else: params
+
+    params =
+      if is_nil(socket.assigns.selected_worker_failure_job_id),
+        do: Map.delete(params, @worker_failure_job_id_param),
+        else: params
+
+    if socket.assigns.owner_authorized? and params != requested_params do
+      push_patch(socket, to: ~p"/admin/jobs?#{params}", replace: true)
     else
       socket
     end
@@ -289,8 +283,14 @@ defmodule CodexPoolerWeb.Admin.JobsLive do
   end
 
   defp patch_filters(socket, updates) do
-    params = Map.merge(socket.assigns.form_values, updates)
-    push_patch(socket, to: ~p"/admin/jobs?#{JobFilterForm.query_params(params)}")
+    params =
+      socket.assigns.form_values
+      |> Map.merge(updates)
+      |> Map.delete("page")
+      |> JobFilterForm.query_params()
+      |> maybe_put_worker_failure_job_id(socket.assigns.selected_worker_failure_job_id)
+
+    push_patch(socket, to: ~p"/admin/jobs?#{params}")
   end
 
   defp maybe_start_connected_refresh(socket) do
@@ -308,6 +308,7 @@ defmodule CodexPoolerWeb.Admin.JobsLive do
       |> cancel_jobs_reload_timer()
       |> assign(:jobs_reload_timer, nil)
       |> load_jobs_page(socket.assigns.current_params)
+      |> maybe_patch_jobs_params(socket.assigns.current_params)
       |> reconcile_pool_subscriptions()
     else
       socket
@@ -316,15 +317,28 @@ defmodule CodexPoolerWeb.Admin.JobsLive do
 
   defp load_jobs_page(socket, params) do
     params = jobs_params(socket, params)
+    {page_state, params} = load_valid_jobs_page(socket.assigns.current_scope, params)
+    assign_page_state(socket, page_state, params)
+  end
 
-    socket.assigns.current_scope
-    |> JobsReadModel.load(
-      params: params,
-      include_overview: false,
-      resolved_failure_resolution: resolved_failure_resolution(params),
-      unresolved_failure_limit: @worker_failure_marker_limit
-    )
-    |> then(&assign_page_state(socket, &1, params))
+  defp load_valid_jobs_page(scope, params) do
+    page_state =
+      JobsReadModel.load(scope,
+        params: params,
+        include_overview: false,
+        resolved_failure_resolution: resolved_failure_resolution(params),
+        unresolved_failure_limit: @worker_failure_marker_limit
+      )
+
+    %{total: total, limit: limit} = page_state.explorer
+    last_page = max(div(total + limit - 1, limit), 1)
+
+    if page_state.filters.page > last_page do
+      params = if last_page == 1, do: Map.delete(params, "page"), else: Map.put(params, "page", to_string(last_page))
+      load_valid_jobs_page(scope, params)
+    else
+      {page_state, params}
+    end
   end
 
   defp resolved_failure_resolution(params) do

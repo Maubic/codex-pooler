@@ -1752,6 +1752,8 @@ carry the filters forward and drop the drawer selection, and changing any filter
 drops the page, because a page number only means something against the result set
 it was counted from.
 
+The Jobs explorer keeps its existing sticky pager and live offset-based list. Dropdown and form filter changes reset to page one. If a refresh or a direct URL requests a page beyond the current result set, recover the last valid page and replace the URL's page parameter while preserving the other filters. An entirely empty result returns to page one and renders the existing empty state; a page with surviving matches must remain reachable through the pager. Keep the rows, range, page number and URL synchronized, including when completed jobs leave the default view.
+
 **Offset paging only holds still if the list holds still.** These tables are
 live — request logs debounce a rebuild on every Pool event — and an offset into
 a growing set is not a stable address: rows shift down under the reader and
