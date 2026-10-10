@@ -1,6 +1,8 @@
 defmodule CodexPoolerWeb.Plugs.McpIngressTest do
   use CodexPoolerWeb.ConnCase, async: false
 
+  import CodexPoolerWeb.Runtime.BackendCodexTestSupport, only: [capture_public_endpoint_identity!: 1, assert_public_endpoint_identity_released!: 1]
+
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Gateway.Transports.Admission
   alias CodexPooler.InstanceSettings
@@ -300,10 +302,10 @@ defmodule CodexPoolerWeb.Plugs.McpIngressTest do
     refute @endpoint.config(:debug_errors, false)
     listener = start_supervised!({Bandit, plug: probe, port: 0, ip: {127, 0, 0, 1}, startup_log: false})
     {:ok, {_ip, port}} = ThousandIsland.listener_info(listener)
+    ownership = capture_public_endpoint_identity!(listener)
 
     on_exit(fn ->
-      refute Process.alive?(listener)
-      assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [], 1_000)
+      assert_public_endpoint_identity_released!(ownership)
     end)
 
     for {authorization, expected_status, expected_reads} <- [

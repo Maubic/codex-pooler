@@ -7,7 +7,7 @@ defmodule CodexPoolerWeb.Runtime.RequestLoggingTest do
   import CodexPooler.AccountsFixtures, only: [bootstrap_owner_fixture: 0, reset_bootstrap_state_fixture!: 0]
 
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
-    only: [auth: 2, gateway_setup: 1, start_upstream: 1]
+    only: [auth: 2, gateway_setup: 1, start_upstream: 1, capture_public_endpoint_identity!: 1, assert_public_endpoint_identity_released!: 1]
 
   alias CodexPooler.Access
   alias CodexPooler.Accounting.Request
@@ -16,6 +16,25 @@ defmodule CodexPoolerWeb.Runtime.RequestLoggingTest do
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Repo
   alias CodexPoolerWeb.RequestLogger
+
+  test "listener identity survives callback process changes and numeric port reuse" do
+    options = [plug: fn conn, _opts -> Plug.Conn.send_resp(conn, 200, "ok") end, port: 0, ip: {127, 0, 0, 1}, startup_log: false]
+    listener = start_supervised!({Bandit, options}, id: :original_listener)
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(listener)
+    ownership = capture_public_endpoint_identity!(listener)
+    assert_raise ExUnit.AssertionError, fn -> assert_public_endpoint_identity_released!(ownership) end
+    stop_supervised!(:original_listener)
+    successor = start_supervised!({Bandit, Keyword.put(options, :port, port)}, id: :successor_listener)
+    successor_ownership = capture_public_endpoint_identity!(successor)
+    assert :ok = Task.async(fn -> assert_public_endpoint_identity_released!(ownership) end) |> Task.await()
+    assert Process.alive?(successor)
+    assert Enum.all?(successor_ownership.sockets, &(Port.info(&1) != nil))
+
+    on_exit(fn ->
+      assert_public_endpoint_identity_released!(ownership)
+      assert_public_endpoint_identity_released!(successor_ownership)
+    end)
+  end
 
   setup do
     reset_bootstrap_state_fixture!()
@@ -310,10 +329,10 @@ defmodule CodexPoolerWeb.Runtime.RequestLoggingTest do
     refute @endpoint.config(:debug_errors, false)
     listener = start_supervised!({Bandit, plug: probe, port: 0, ip: {127, 0, 0, 1}, startup_log: false})
     {:ok, {_ip, port}} = ThousandIsland.listener_info(listener)
+    ownership = capture_public_endpoint_identity!(listener)
 
     on_exit(fn ->
-      refute Process.alive?(listener)
-      assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [], 1_000)
+      assert_public_endpoint_identity_released!(ownership)
     end)
 
     port

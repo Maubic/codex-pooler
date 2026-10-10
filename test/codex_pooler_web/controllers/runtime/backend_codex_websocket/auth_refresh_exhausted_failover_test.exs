@@ -2,7 +2,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.AuthRefreshExhaustedFailo
   use CodexPoolerWeb.ConnCase, async: false
 
   import Ecto.Query
-  import CodexPoolerWeb.Runtime.BackendCodexTestSupport, only: [seed_preferring_assignment: 2, start_upstream: 1, start_public_endpoint_with_server!: 0, public_websocket_connect_with_request_headers!: 5, public_websocket_send_text!: 4, public_websocket_receive_text!: 3]
+  import CodexPoolerWeb.Runtime.BackendCodexTestSupport, only: [seed_preferring_assignment: 2, start_upstream: 1, start_public_endpoint_with_server!: 0, public_websocket_connect_with_request_headers!: 5, public_websocket_send_text!: 4, public_websocket_receive_text!: 3, capture_public_endpoint_identity!: 1, assert_public_endpoint_identity_released!: 1]
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [execute_websocket_response: 4, strict_native_response: 4, websocket_auth_refresh_payload: 2, websocket_failover_candidates!: 3, route_circuit_failures: 1, account_reconciliation_jobs: 1, held_websocket_handshake_401: 2]
 
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [enter_peer_owner_topology!: 0, start_peer_session_owner!: 2]
@@ -210,6 +210,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.AuthRefreshExhaustedFailo
 
   defp start_owned_endpoint! do
     {server, port} = start_public_endpoint_with_server!()
+    ownership = capture_public_endpoint_identity!(server)
 
     on_exit(fn ->
       monitor = Process.monitor(server)
@@ -221,7 +222,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.AuthRefreshExhaustedFailo
       end
 
       assert_receive {:DOWN, ^monitor, :process, ^server, _reason}, 15_000
-      assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [], 1_000)
+      assert_public_endpoint_identity_released!(ownership)
     end)
 
     port

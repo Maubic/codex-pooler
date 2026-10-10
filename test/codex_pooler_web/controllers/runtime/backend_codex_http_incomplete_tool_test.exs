@@ -46,6 +46,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpIncompleteToolTest do
     Repo.insert!(%ModelServingOverride{pool_id: setup.pool.id, exposed_model_id: setup.model.exposed_model_id, mode: mode, created_at: timestamp, updated_at: timestamp})
     {listener, port} = start_public_endpoint_with_server!()
     listener_monitor = Process.monitor(listener)
+    ownership = capture_public_endpoint_ownership!(listener)
     thread = Ecto.UUID.generate()
     document = CodexPooler.JSON.encode!(%{"session_id" => thread, "thread_id" => thread, "turn_id" => "sample-incomplete-turn", "request_kind" => "turn"})
     payload = %{"model" => setup.model.exposed_model_id, "instructions" => "synthetic", "input" => input(arm), "stream" => true, "store" => false, "client_metadata" => %{"x-codex-turn-metadata" => document}}
@@ -101,7 +102,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpIncompleteToolTest do
     evidence(%{mode: mode, arm: arm, tool: tool?, schedule: schedule, outcome: outcome}, lengths, request, attempt, policy)
     :ok = ThousandIsland.stop(listener)
     assert_receive {:DOWN, ^listener_monitor, :process, ^listener, _}, @budget
-    assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000)
+    assert_public_endpoint_released!(ownership)
   end
 
   defp stream_chunks(prefix, terminal, :whole), do: [prefix, terminal]

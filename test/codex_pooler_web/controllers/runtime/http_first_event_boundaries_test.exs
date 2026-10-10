@@ -108,6 +108,7 @@ defmodule CodexPoolerWeb.Runtime.HttpFirstEventBoundariesTest do
     {setup, first, second} = stream_retry_setup(FakeUpstream.sse_stream(split(terminal, div(byte_size(terminal), 2)), done: false))
     {listener, port} = start_public_endpoint_with_server!()
     monitor = Process.monitor(listener)
+    ownership = capture_public_endpoint_ownership!(listener)
     response = Req.post!("http://127.0.0.1:#{port}/v1/responses", json: %{"model" => setup.model.exposed_model_id, "input" => native_text_input("synthetic separatorless"), "stream" => true}, headers: [{"authorization", setup.authorization}, {"x-request-id", deterministic_rotation_seed(2, 0)}], retry: false, receive_timeout: @budget)
     assert response.status == 200
     assert response.body =~ "response.failed"
@@ -123,7 +124,7 @@ defmodule CodexPoolerWeb.Runtime.HttpFirstEventBoundariesTest do
     assert attempt.response_metadata["downstream_delivery"]["outcome"] == "delivered"
     :ok = ThousandIsland.stop(listener)
     assert_receive {:DOWN, ^monitor, :process, ^listener, _reason}, @budget
-    assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000)
+    assert_public_endpoint_released!(ownership)
   end
 
   defp closed_socket! do
@@ -147,6 +148,7 @@ defmodule CodexPoolerWeb.Runtime.HttpFirstEventBoundariesTest do
     Repo.insert!(%ModelServingOverride{pool_id: setup.pool.id, exposed_model_id: setup.model.exposed_model_id, mode: mode, created_at: timestamp, updated_at: timestamp})
     {listener, port} = start_public_endpoint_with_server!()
     monitor = Process.monitor(listener)
+    ownership = capture_public_endpoint_ownership!(listener)
     path = if surface == :native, do: "/backend-api/codex/responses", else: "/v1/responses"
     response = Req.post!("http://127.0.0.1:#{port}" <> path, json: %{"model" => setup.model.exposed_model_id, "input" => native_text_input("synthetic EOF"), "stream" => true}, headers: [{"authorization", setup.authorization}, {"x-request-id", deterministic_rotation_seed(2, 0)}], retry: false, receive_timeout: @budget)
     assert response.status == 200
@@ -161,7 +163,7 @@ defmodule CodexPoolerWeb.Runtime.HttpFirstEventBoundariesTest do
     assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^request.id and l.entry_kind == "release"), :count) == 1
     :ok = ThousandIsland.stop(listener)
     assert_receive {:DOWN, ^monitor, :process, ^listener, _reason}, @budget
-    assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000)
+    assert_public_endpoint_released!(ownership)
   end
 
   defp run_scenario(surface, mode, boundary, type, prefix, expected) do

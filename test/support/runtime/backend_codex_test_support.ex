@@ -1180,6 +1180,17 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
   end
 
   def capture_public_endpoint_ownership!(server) do
+    %{processes: processes, sockets: sockets} = capture_public_endpoint_identity!(server)
+
+    %{
+      processes: Enum.map(processes, &{&1, Process.monitor(&1)}),
+      sockets: Enum.map(sockets, &{&1, Port.monitor(&1)})
+    }
+  end
+
+  # Identities, unlike monitor references, can be checked from ExUnit's separate
+  # on_exit process. A replacement listener may already own the numeric TCP port.
+  def capture_public_endpoint_identity!(server) do
     listener = ThousandIsland.Server.listener_pid(server)
     assert is_pid(listener)
     %{listener_sockets: sockets} = :sys.get_state(listener)
@@ -1189,9 +1200,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
     assert listener in processes
 
     %{
-      processes: Enum.map(processes, &{&1, Process.monitor(&1)}),
-      sockets: Enum.map(sockets, fn {_id, socket} -> {socket, Port.monitor(socket)} end)
+      processes: processes,
+      sockets: Enum.map(sockets, fn {_id, socket} -> socket end)
     }
+  end
+
+  def assert_public_endpoint_identity_released!(%{processes: processes, sockets: sockets}) do
+    Enum.each(processes, fn pid -> refute Process.alive?(pid) end)
+    Enum.each(sockets, fn socket -> assert Port.info(socket) == nil end)
+    :ok
   end
 
   def assert_public_endpoint_released!(%{processes: processes, sockets: sockets}) do

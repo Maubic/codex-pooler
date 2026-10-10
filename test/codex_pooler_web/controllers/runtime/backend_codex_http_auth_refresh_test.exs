@@ -12,6 +12,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpAuthRefreshTest do
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport,
     only: [
       auth: 2,
+      capture_public_endpoint_identity!: 1,
+      assert_public_endpoint_identity_released!: 1,
       register_unboxed_pool_cleanup!: 1,
       start_public_endpoint_with_server!: 0,
       gateway_setup: 1,
@@ -62,6 +64,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpAuthRefreshTest do
       install_retry_accounting_fault!(setup, if(fault == :transient_cleanup, do: :raised, else: fault))
       cleanup_sequence = if fault == :transient_cleanup, do: install_transient_cleanup_fault!(setup)
       {server, port} = start_public_endpoint_with_server!()
+      ownership = capture_public_endpoint_identity!(server)
 
       on_exit(fn ->
         monitor = Process.monitor(server)
@@ -73,7 +76,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpAuthRefreshTest do
         end
 
         assert_receive {:DOWN, ^monitor, :process, ^server, _reason}, 15_000
-        assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [], 1_000)
+        assert_public_endpoint_identity_released!(ownership)
       end)
 
       {response, logs} = with_log(fn -> Req.post!("http://127.0.0.1:#{port}" <> route, headers: [{"authorization", setup.authorization}], json: Map.put(stream_payload(setup, "retry-accounting"), "stream", stream?), retry: false, receive_timeout: 15_000) end)
@@ -882,6 +885,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpAuthRefreshTest do
 
   defp retry_failure_listener! do
     {server, port} = start_public_endpoint_with_server!()
+    ownership = capture_public_endpoint_identity!(server)
 
     on_exit(fn ->
       monitor = Process.monitor(server)
@@ -893,7 +897,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpAuthRefreshTest do
       end
 
       assert_receive {:DOWN, ^monitor, :process, ^server, _reason}, 15_000
-      assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [], 1_000)
+      assert_public_endpoint_identity_released!(ownership)
     end)
 
     port

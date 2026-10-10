@@ -1407,6 +1407,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrainShutdownFailureTe
   end
 
   test "actual application stop passes prep_stop failure and terminates its owned work and listener", %{peer: peer} do
+    children = :erpc.call(peer.node, Supervisor, :which_children, [CodexPooler.Supervisor])
+    {:unreachable_node_listener, listener, :supervisor, _modules} = List.keyfind(children, :unreachable_node_listener, 0)
+    ownership = :erpc.call(peer.node, CodexPoolerWeb.Runtime.BackendCodexTestSupport, :capture_public_endpoint_identity!, [listener])
     :ok = :erpc.call(peer.node, System, :put_env, ["CODEX_POOLER_WEBSOCKET_DRAIN_TIMEOUT_MS", "1000"])
     {:ok, activity} = :erpc.call(peer.node, FailureSupport, :start_shutdown_activity, [self()])
     assert_receive {:shutdown_activity_ready, ^activity}, @budget
@@ -1432,6 +1435,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrainShutdownFailureTe
     assert_receive {:DOWN, ^activity_monitor, :process, ^activity, _}, @budget
     assert_receive {:DOWN, ^supervisor_monitor, :process, ^supervisor, _}, @budget
     assert is_nil(:erpc.call(peer.node, Process, :whereis, [CodexPooler.Supervisor]))
-    assert {:error, :econnrefused} = :gen_tcp.connect(~c"127.0.0.1", peer.port, [:binary, active: false], 1000)
+    assert :ok = :erpc.call(peer.node, CodexPoolerWeb.Runtime.BackendCodexTestSupport, :assert_public_endpoint_identity_released!, [ownership])
   end
 end

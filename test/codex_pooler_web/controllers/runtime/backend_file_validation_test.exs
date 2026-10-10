@@ -4,7 +4,7 @@ defmodule CodexPoolerWeb.Runtime.BackendFileValidationTest do
   import Ecto.Query
   import ExUnit.CaptureLog
   import CodexPooler.PoolerFixtures
-  import CodexPoolerWeb.Runtime.BackendCodexTestSupport, only: [auth: 2, gateway_setup: 2, start_upstream: 1]
+  import CodexPoolerWeb.Runtime.BackendCodexTestSupport, only: [auth: 2, gateway_setup: 2, start_upstream: 1, capture_public_endpoint_identity!: 1, assert_public_endpoint_identity_released!: 1]
 
   alias CodexPooler.Accounting.{Attempt, Request}
   alias CodexPooler.Audit.AuditEvent
@@ -610,10 +610,10 @@ defmodule CodexPoolerWeb.Runtime.BackendFileValidationTest do
     refute @endpoint.config(:debug_errors, false)
     listener = start_supervised!({Bandit, plug: probe, port: 0, ip: {127, 0, 0, 1}, startup_log: false}, id: :file_ingress_listener)
     {:ok, {_ip, port}} = ThousandIsland.listener_info(listener)
+    ownership = capture_public_endpoint_identity!(listener)
 
     on_exit(fn ->
-      refute Process.alive?(listener)
-      assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [], 1_000)
+      assert_public_endpoint_identity_released!(ownership)
     end)
 
     {listener, port}
