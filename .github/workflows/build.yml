@@ -369,7 +369,7 @@ jobs:
 
           mkdir -p "${asset_dir}/scripts/self-host"
           cp README.md docker-compose.yml .env.example "${asset_dir}/"
-          cp scripts/self-host/generate-env.sh "${asset_dir}/scripts/self-host/"
+          cp scripts/self-host/generate-env.sh scripts/self-host/totp-upgrade-preflight.sh scripts/self-host/totp-upgrade-preflight.exs "${asset_dir}/scripts/self-host/"
 
           tar -C dist -czf "dist/${asset_base}.tar.gz" "${asset_base}"
 
