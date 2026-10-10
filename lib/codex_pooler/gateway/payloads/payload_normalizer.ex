@@ -29,8 +29,18 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
 
   @ultra_rewrite_targets ~w(max xhigh high medium low)
 
+  # Request controls removed on every surface before dispatch. Client-supplied
+  # max_output_tokens is forwarded: the provider enforces it in Full and Lite.
+  # Removal here does not imply that the backend refuses every other control.
+  # `metadata` joined on 2026-10-06: the backend now answers it
+  # `400 {"detail": "Unsupported parameter: metadata"}` over HTTP and the same
+  # text in a codeless error frame on the websocket, an empty object included,
+  # Full and Lite (direct probe, findings#333). It is client bookkeeping that
+  # changes nothing the model generates, so dropping it keeps a request the
+  # backend would refuse whole; `/v1` still validates it with the public API's
+  # shape (`Responses.validate_metadata/1`).
   @unsupported_upstream_fields ~w(
-    max_output_tokens
+    metadata
     prompt_cache_retention
     safety_identifier
     temperature
@@ -165,10 +175,29 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
   @spec validate(map(), RequestOptions.t()) :: :ok | {:error, Error.reason()}
   def validate(payload, %RequestOptions{} = request_options) do
     with :ok <- validate_compact_projection(payload, request_options),
-         :ok <- validate_native_responses_shape(payload, request_options) do
+         :ok <- validate_native_responses_shape(payload, request_options),
+         :ok <- validate_programmatic_tool_calling(payload, request_options) do
       validate_tool_choice(payload, request_options)
     end
   end
+
+  # The Codex backend refuses the `programmatic_tool_calling` tool type when the
+  # model is served Full (`400 {"detail": "Unsupported tool type:
+  # programmatic_tool_calling"}` over HTTP, the same text in a codeless error
+  # frame on the websocket) and accepts it in a Lite `additional_tools` manifest
+  # (direct probe 2026-10-06, findings#333, both transports). A public `/v1`
+  # declaration is refused before dispatch when the resolved serving mode is
+  # Full and forwarded in the manifest under Lite; native routes keep relaying
+  # the provider's answer.
+  defp validate_programmatic_tool_calling(%{"tools" => tools}, %RequestOptions{} = request_options) when is_list(tools) do
+    if RequestOptions.OpenAICompatibility.translated_responses_surface?(request_options.openai_compatibility) and
+         not RequestOptions.use_responses_lite?(request_options) and
+         Enum.any?(tools, &match?(%{"type" => "programmatic_tool_calling"}, &1)),
+       do: {:error, Error.invalid_request("programmatic_tool_calling is not supported on a Full Responses backend", "tools")},
+       else: :ok
+  end
+
+  defp validate_programmatic_tool_calling(_payload, _request_options), do: :ok
 
   defp validate_native_responses_shape(
          payload,

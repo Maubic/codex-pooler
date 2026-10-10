@@ -289,9 +289,27 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.Quota do
         {:error, Enum.reverse(exclusions), Enum.reverse(refreshable_candidates)}
 
       candidates ->
-        {:ok, candidates, quota_decision(candidates, assessments)}
+        {:ok, candidates, quota_decision(candidates, assessments) |> Map.put(:route_filter_exclusions, diagnostic_exclusions(exclusions, assessments, band))}
     end
   end
+
+  # Carry the decision that actually excluded each candidate to route filtering.
+  # The atom-keyed handoff is removed there before quota metadata is persisted.
+  defp diagnostic_exclusions(exclusions, assessments, band) do
+    Map.new(exclusions, fn exclusion ->
+      codes = diagnostic_reason_codes(exclusion.reasons, band)
+
+      assessment = Map.fetch!(assessments, exclusion.pool_upstream_assignment_id)
+      detail = %{reason: if(band == :non_credit, do: "non_credit_band_excluded", else: "quota_unavailable"), reason_codes: codes}
+
+      {exclusion.pool_upstream_assignment_id, Map.merge(detail, Map.take(assessment, [:observed_capacity_reason_codes]))}
+    end)
+  end
+
+  defp diagnostic_reason_codes(_reasons, :non_credit), do: []
+
+  defp diagnostic_reason_codes(reasons, :all),
+    do: Enum.flat_map(reasons, fn reason -> Map.get(reason, "reason_codes", []) ++ Map.get(reason, "provider_credits_reason_codes", []) end)
 
   defp routing_quota_eligibility(identity, %Model{} = model, route_state, request_options \\ nil, band \\ :all, assignment \\ nil) do
     snapshot =
@@ -489,7 +507,9 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.Quota do
     Map.merge(decision, %{"capacity_basis" => Atom.to_string(first.capacity_basis), "routing_state" => Atom.to_string(first.routing_state), "candidate_capacity" => per_assignment})
   end
 
-  defp sanitize_quota_exclusion(%{} = exclusion) do
+  @doc false
+  @spec sanitize_quota_exclusion(map()) :: map()
+  def sanitize_quota_exclusion(%{} = exclusion) do
     exclusion
     |> Map.take([
       :code,
@@ -506,7 +526,10 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.Quota do
       :source_precision,
       :freshness_state,
       :reset_at,
-      :hint_reset_at
+      :hint_reset_at,
+      :retained_refusal_code,
+      :retained_refusal_observed_at,
+      :retained_refusal_reset_at
     ])
     |> Map.new(fn {key, value} -> {to_string(key), value} end)
   end

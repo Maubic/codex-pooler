@@ -48,6 +48,36 @@ defmodule CodexPoolerWeb.CodexResponsesSocketUpstreamCloseTest do
     assert line =~ "websocket downstream closed after upstream connection close reason_code=peer_close_frame lifecycle_id=#{ctx.lifecycle_id} generation=3 forwarding=off codex_session_id=#{@codex_session_id}"
   end
 
+  test "actual peer authority survives a dead matching lane and preserves its reason", ctx do
+    {lane, monitor} = spawn_monitor(fn -> :ok end)
+    assert_receive {:DOWN, ^monitor, :process, ^lane, :normal}
+    state = Map.put(native_state(ctx), :native_response_steering, lane)
+    {tag, session, signal} = ctx.signal
+    signal = Map.put(signal, :steering_peer_close, {lane, 1000, "synthetic peer close"})
+
+    assert {:stop, :normal, {1000, "synthetic peer close"}, _stopped} = CodexResponsesSocket.handle_info({tag, session, signal}, state)
+  end
+
+  test "a mismatched or malformed steering close retains normal idle 1001", ctx do
+    lane = spawn_quiet_process()
+    state = Map.put(native_state(ctx), :native_response_steering, lane)
+    {tag, session, signal} = ctx.signal
+
+    for detail <- [{self(), 1000, ""}, {lane, 999, ""}, {lane, 1000, <<255>>}, {lane, 1000, String.duplicate("x", 124)}] do
+      assert {:stop, :normal, @upstream_close_detail, _stopped} = CodexResponsesSocket.handle_info({tag, session, Map.put(signal, :steering_peer_close, detail)}, state)
+    end
+  end
+
+  test "known revocation wins over both copies of the steering peer close", ctx do
+    lane = spawn_quiet_process()
+    state = native_state(ctx) |> Map.merge(%{native_response_steering: lane, api_key_revoked?: true, api_key_close_sent?: false})
+    {tag, session, signal} = ctx.signal
+    signal = Map.put(signal, :steering_peer_close, {lane, 1000, ""})
+
+    assert {:stop, :normal, {1008, "api key is no longer active"}, _stopped} = CodexResponsesSocket.handle_info({tag, session, signal}, state)
+    assert {:stop, :normal, {1008, "api key is no longer active"}, _stopped} = CodexResponsesSocket.handle_info({:native_response_steering_close, lane, 1000, ""}, state)
+  end
+
   test "the latched socket closes 1001 once its last task is gone", ctx do
     state = settling_state(ctx)
     {:ok, latched} = CodexResponsesSocket.handle_info(ctx.signal, state)

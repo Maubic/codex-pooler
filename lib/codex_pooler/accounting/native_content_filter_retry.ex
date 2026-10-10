@@ -7,6 +7,7 @@ defmodule CodexPooler.Accounting.NativeContentFilterRetry do
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
+  alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
   @terminal %{"version" => 1, "event_type" => "response.incomplete", "reason" => "content_filter"}
 
@@ -105,9 +106,9 @@ defmodule CodexPooler.Accounting.NativeContentFilterRetry do
   def current_source?(%Attempt{response_metadata: metadata, model_id: model_id}) do
     case sanitize_source(metadata["native_content_filter_source"]) do
       %{"assignment_id" => assignment_id, "identity_id" => identity_id, "credential_epoch" => epoch, "upstream_model" => upstream} ->
-        identity = Repo.one(from a in CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment, join: i in CodexPooler.Upstreams.Schemas.UpstreamIdentity, on: i.id == a.upstream_identity_id, where: a.id == ^assignment_id and i.id == ^identity_id and a.status == "active" and i.status == "active", select: i)
+        identity = Repo.one(from a in CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment, join: i in UpstreamIdentity, on: i.id == a.upstream_identity_id, where: a.id == ^assignment_id and i.id == ^identity_id and a.status == "active" and i.status == "active", select: i)
         model = Repo.get(CodexPooler.Catalog.Model, model_id)
-        not is_nil(identity) and CredentialFencing.credential_epoch(identity) == epoch and not is_nil(model) and model.upstream_model_id == upstream
+        not is_nil(identity) and bound_credential?(identity, epoch, CredentialFencing.credential_epoch(identity)) and not is_nil(model) and model.upstream_model_id == upstream
 
       _invalid ->
         false
@@ -264,9 +265,21 @@ defmodule CodexPooler.Accounting.NativeContentFilterRetry do
   defp binding_required?(metadata, predecessor), do: get_in(metadata || %{}, ["client_resend", "predecessor_shape"]) == "content_filter_retry" or content_filter_metadata?(predecessor)
 
   defp binding_scope_matches?(binding, request, scope) do
-    expected = %{"assignment_id" => scope.assignment_id, "identity_id" => scope.identity_id, "credential_epoch" => scope.credential_epoch, "serving_mode" => scope.serving_mode, "requested_model" => request.requested_model, "effective_model" => scope.effective_model, "upstream_model" => scope.upstream_model}
-    Map.take(binding, Map.keys(expected)) == expected
+    expected = %{"assignment_id" => scope.assignment_id, "identity_id" => scope.identity_id, "serving_mode" => scope.serving_mode, "requested_model" => request.requested_model, "effective_model" => scope.effective_model, "upstream_model" => scope.upstream_model}
+    Map.take(binding, Map.keys(expected)) == expected and bound_credential?(Repo.get(UpstreamIdentity, scope.identity_id), binding["credential_epoch"], scope.credential_epoch)
   end
+
+  # The one credential check of the binding, for admission (`current_source?/1`),
+  # attempt creation and the remote owner (`dispatch_allowed?/2`): the identity
+  # dispatches with its current credential (`scope_epoch`), and that credential
+  # is the one it held at the content-filter terminal's epoch, renewed by token
+  # refreshes at most. A refresh used to read as a replacement here and refused
+  # every guided retry after it (findings#330); a credential an operator linked,
+  # imported or relinked since, or a pause, still refuses.
+  defp bound_credential?(%UpstreamIdentity{} = identity, bound_epoch, scope_epoch),
+    do: CredentialFencing.credential_epoch(identity) == scope_epoch and CredentialFencing.same_credential_since?(identity, bound_epoch)
+
+  defp bound_credential?(_identity, _bound_epoch, _scope_epoch), do: false
 
   defp predecessor_binding_matches?(%{} = metadata, binding), do: sanitize_source(metadata["native_content_filter_source"]) == binding and sanitize_terminal(metadata["native_content_filter_terminal"]) == @terminal
   defp predecessor_binding_matches?(_metadata, _binding), do: false

@@ -14,6 +14,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Requ
     :writer,
     :message_mapper,
     :frame_observer,
+    :payload_write_observer,
     :submission_observer,
     :reset_probe,
     :provider_credits_context,
@@ -32,11 +33,16 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Requ
     :attempt_id,
     :native_client_retry_observation,
     :client_retry_dispatch_authority,
+    :native_response_steering,
     assignment_advertised?: false,
     connection_bound_continuation?: false,
     websocket_delivery_mode: :relay,
     forward_error_body?: true
   ]
+
+  # Direct requests carry the lane; owner-forwarded requests bind its owner
+  # before submission. Neither value is part of the provider payload.
+  @type native_response_steering :: pid() | {pid(), pid()} | nil
 
   @type writer ::
           (binary() -> any())
@@ -45,6 +51,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Requ
           | nil
   @type delivery_mode :: :relay | :collect_compaction | :collect_full_history
   @type effective_serving_mode :: String.t() | nil
+  # Called once in the upstream session process before the request's payload
+  # is written to the provider (`UpstreamWebsocketSession`'s
+  # `observe_payload_write/1`): `:ok` lets the write go ahead, any other answer
+  # ends the request unsent.
+  @type payload_write_observer :: (-> :ok | :refused) | nil
   @type frame_observer ::
           (binary() -> any())
           | (binary(), CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.decoded_frame() ->
@@ -59,6 +70,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Requ
           writer: writer(),
           message_mapper: CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.message_mapper(),
           frame_observer: frame_observer(),
+          payload_write_observer: payload_write_observer(),
           submission_observer: (-> any()) | nil,
           reset_probe: ResetProbe.t() | nil,
           provider_credits_context: CodexPooler.Gateway.Transports.ProviderCreditsAdmission.Context.t() | nil,
@@ -79,6 +91,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Requ
           attempt_id: Ecto.UUID.t() | nil,
           native_client_retry_observation: CodexPooler.Accounting.ClientRetry.Observation.t() | nil,
           client_retry_dispatch_authority: CodexPooler.Accounting.ClientRetry.DispatchAuthority.t() | nil,
+          native_response_steering: native_response_steering(),
           assignment_advertised?: boolean(),
           connection_bound_continuation?: boolean(),
           websocket_delivery_mode: delivery_mode(),

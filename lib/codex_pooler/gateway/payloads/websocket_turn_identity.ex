@@ -47,10 +47,8 @@ defmodule CodexPooler.Gateway.Payloads.WebsocketTurnIdentity do
   @replay_tail_suffix_limit 256
   @http_resume_input_domain "native_http_resume_input_v1"
   @completed_item_domain "native_websocket_completed_item_v1"
-  # The nonterminal assistant phases whose completed messages the client resends from its typed message model
-  # (findings#306): commentary (observed with Codex 0.160.0) and `partial_answer` (Codex 8b6bb1c77, the same model
-  # and fields; source-derived, no released client sends it yet). `final_answer` and an unphased message keep the
-  # generic identity, which retains provider-only fields.
+  # The typed client model retains these nonterminal assistant messages with its own field projection.
+  # `final_answer` and an unphased message keep the generic identity, which retains provider-only fields.
   @client_resend_message_phases ["commentary", "partial_answer"]
   # How many trailing items of an unanchored request are tried as the completed
   # items a cut predecessor pushed before its client left (findings#232 row

@@ -69,9 +69,10 @@ defmodule CodexPoolerWeb.Telemetry do
     consumed_final: "finalizing"
   }
 
-  @repo_query_buckets [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]
-  @admission_queue_buckets [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]
-  @admin_stats_duration_buckets [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]
+  @http_duration_buckets [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300]
+  @repo_query_buckets [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60]
+  @admission_queue_buckets [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60]
+  @admin_stats_duration_buckets [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60]
   @admin_stats_windows ~w(1h 5h 24h 7d)
   @admin_stats_scopes ~w(selected_pool all_visible_pools)
   @admin_stats_reload_stages ~w(scheduled coalesced cancelled executed)
@@ -272,16 +273,16 @@ defmodule CodexPoolerWeb.Telemetry do
         event_name: [:phoenix, :endpoint, :stop],
         measurement: :duration,
         unit: {:native, :second},
-        description: "Phoenix endpoint request duration.",
-        reporter_options: [buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]]
+        description: "Phoenix endpoint request duration. Histogram quantiles are interpolated estimates with a 300 s top finite bucket; a quantile in +Inf is reported as 300 s even when observations are longer.",
+        reporter_options: [buckets: @http_duration_buckets]
       ),
       distribution("phoenix.router_dispatch.stop.duration.seconds",
         event_name: [:phoenix, :router_dispatch, :stop],
         measurement: :duration,
         unit: {:native, :second},
         tags: [:route],
-        description: "Phoenix router dispatch duration by route.",
-        reporter_options: [buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]]
+        description: "Phoenix router dispatch duration by route. Histogram quantiles are interpolated estimates with a 300 s top finite bucket; a quantile in +Inf is reported as 300 s even when observations are longer.",
+        reporter_options: [buckets: @http_duration_buckets]
       ),
       counter("codex_pooler.http.route.count",
         event_name: [:phoenix, :router_dispatch, :stop],
@@ -301,7 +302,7 @@ defmodule CodexPoolerWeb.Telemetry do
         measurement: :total_time,
         tags: [:source, :command],
         tag_values: &repo_query_tag_values/1,
-        description: "Total Ecto repository queries by source and SQL command."
+        description: "Total Ecto repository queries by source and SQL command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries."
       ),
       counter("codex_pooler.instance_presence.heartbeat_failure.count",
         event_name: [:codex_pooler, :instance_presence, :heartbeat],
@@ -332,7 +333,7 @@ defmodule CodexPoolerWeb.Telemetry do
         unit: {:native, :second},
         tags: [:stage, :scope],
         tag_values: &request_logs_reload_tag_values/1,
-        description: "Admin request-log reload duration by stage and scope.",
+        description: "Admin request-log reload duration by stage and scope. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
         reporter_options: [buckets: @admin_stats_duration_buckets]
       ),
       counter("codex_pooler.admin.stats.dashboard.build.count",
@@ -348,7 +349,7 @@ defmodule CodexPoolerWeb.Telemetry do
         unit: {:native, :second},
         tags: [:outcome, :window, :scope],
         tag_values: &admin_stats_build_tag_values/1,
-        description: "Admin stats dashboard build duration by outcome, window, and scope.",
+        description: "Admin stats dashboard build duration by outcome, window, and scope. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
         reporter_options: [buckets: @admin_stats_duration_buckets]
       ),
       distribution("codex_pooler.repo.query.total_time.seconds",
@@ -357,7 +358,7 @@ defmodule CodexPoolerWeb.Telemetry do
         unit: {:native, :second},
         tags: [:source, :command],
         tag_values: &repo_query_tag_values/1,
-        description: "Total Ecto repository query time by source and SQL command.",
+        description: "Total Ecto repository query time by source and SQL command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
         reporter_options: [buckets: @repo_query_buckets]
       ),
       distribution("codex_pooler.repo.query.query_time.seconds",
@@ -366,7 +367,7 @@ defmodule CodexPoolerWeb.Telemetry do
         unit: {:native, :second},
         tags: [:source, :command],
         tag_values: &repo_query_tag_values/1,
-        description: "Ecto repository database execution time by source and SQL command.",
+        description: "Ecto repository database execution time by source and SQL command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
         reporter_options: [buckets: @repo_query_buckets]
       ),
       distribution("codex_pooler.repo.query.queue_time.seconds",
@@ -375,7 +376,7 @@ defmodule CodexPoolerWeb.Telemetry do
         unit: {:native, :second},
         tags: [:source, :command],
         tag_values: &repo_query_tag_values/1,
-        description: "Ecto repository connection checkout queue time by source and SQL command.",
+        description: "Ecto repository connection checkout queue time by source and SQL command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
         reporter_options: [buckets: @repo_query_buckets]
       ),
       distribution("codex_pooler.repo.query.decode_time.seconds",
@@ -384,7 +385,7 @@ defmodule CodexPoolerWeb.Telemetry do
         unit: {:native, :second},
         tags: [:source, :command],
         tag_values: &repo_query_tag_values/1,
-        description: "Ecto repository decode time by source and SQL command.",
+        description: "Ecto repository decode time by source and SQL command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
         reporter_options: [buckets: @repo_query_buckets]
       ),
       last_value("vm.memory.total.bytes",
@@ -502,7 +503,7 @@ defmodule CodexPoolerWeb.Telemetry do
         unit: {:millisecond, :second},
         tags: [:route_class, :transport],
         tag_values: &admission_tag_values/1,
-        description: "Gateway admission queue time for dequeued requests.",
+        description: "Gateway admission queue time for dequeued requests. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
         reporter_options: [buckets: @admission_queue_buckets]
       ),
       distribution("codex_pooler.gateway.admission.timeout_time.seconds",
@@ -511,7 +512,7 @@ defmodule CodexPoolerWeb.Telemetry do
         unit: {:millisecond, :second},
         tags: [:route_class, :transport],
         tag_values: &admission_tag_values/1,
-        description: "Gateway admission queue time for timed-out requests.",
+        description: "Gateway admission queue time for timed-out requests. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
         reporter_options: [buckets: @admission_queue_buckets]
       ),
       last_value("codex_pooler.gateway.admission.running",
@@ -539,7 +540,7 @@ defmodule CodexPoolerWeb.Telemetry do
         measurement: fn measurements -> min(Map.fetch!(measurements, :bytes), 134_217_728) end,
         tags: [:buffer, :transport, :route_class, :endpoint],
         unit: :byte,
-        description: "Size of oversized incomplete stream buffers.",
+        description: "Incomplete-buffer bytes at an oversized observation. Histogram measurements saturate at 128 MiB; the raw telemetry event is unchanged. Quantiles are interpolated estimates.",
         reporter_options: [
           buckets: [1_048_576, 2_097_152, 8_388_608, 16_777_216, 33_554_432, 134_217_728]
         ]
@@ -548,14 +549,14 @@ defmodule CodexPoolerWeb.Telemetry do
         event_name: [:codex_pooler, :gateway, :stream_buffer, :truncated],
         measurement: :count,
         tags: [:buffer, :transport, :route_class, :endpoint],
-        description: "Retained stream bodies truncated to their bounded suffix."
+        description: "One event per retained body at its first crossing of the 65,536-byte retention limit; later growth does not emit again."
       ),
       distribution("codex_pooler.gateway.stream_buffer.truncated.bytes",
         event_name: [:codex_pooler, :gateway, :stream_buffer, :truncated],
         measurement: :bytes,
         tags: [:buffer, :transport, :route_class, :endpoint],
         unit: :byte,
-        description: "Pre-truncation retained stream body sizes.",
+        description: "Retained bytes including the crossing append at the first crossing of 65,536 bytes, once per body. This is not total stream size, peak memory or current suffix size. Raw observations are preserved; the histogram has a 2 MiB top finite bucket, so a quantile in +Inf reports 2 MiB even when crossing sizes are larger.",
         reporter_options: [buckets: [65_536, 131_072, 262_144, 524_288, 1_048_576, 2_097_152]]
       ),
       counter("codex_pooler.gateway.stream.finalization.count",
@@ -695,8 +696,9 @@ defmodule CodexPoolerWeb.Telemetry do
         tags: [:stage, :transport],
         tag_values: &duplicate_turn_refused_tag_values/1,
         description:
-          "Client-visible 409 duplicate_turn refusals, by bounded refusing stage and transport class. " <>
-            "None writes a request row for the refused request, so request-log counts never include these."
+          "Client-visible 409 duplicate_turn refusals that get no request row, by bounded refusing stage and transport class, " <>
+            "so request-log counts never include these. A guided content-filter retry that dispatch refuses for its account binding " <>
+            "is also answered 409 duplicate_turn, but its request has a row (409, invalid_content_filter_retry_binding) and is not counted."
       )
     ]
   end

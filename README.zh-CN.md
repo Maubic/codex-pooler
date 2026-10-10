@@ -9,6 +9,7 @@
   <a href="#hermes-setup" title="Hermes Agent"><img src=".github/assets/hermes-favicon.png" alt="Hermes Agent" width="24" height="24"></a>
   <a href="#pi-setup" title="Pi"><img src=".github/assets/pi-favicon.png" alt="Pi" width="24" height="24"></a>
   <a href="#omp-setup" title="OMP"><img src=".github/assets/omp-favicon.png" alt="OMP" width="24" height="24"></a>
+  <a href="#omo-native-setup" title="OMO Native"><img src=".github/assets/omo-favicon.png" alt="OMO Native" width="24" height="24"></a>
   <a href="#cursor-setup" title="Cursor"><img src=".github/assets/cursor-favicon.png" alt="Cursor" width="24" height="24"></a>
   <a href="#kilo-code-setup" title="Kilo Code"><img src=".github/assets/kilo-favicon.png" alt="Kilo Code" width="24" height="24"></a>
   <a href="#trae-setup" title="Trae"><img src=".github/assets/trae-favicon.png" alt="Trae" width="24" height="24"></a>
@@ -28,6 +29,10 @@
   <a href="README.md">English</a>
   ·
   <strong>简体中文</strong>
+  ·
+  <a href="README.es.md">Español</a>
+  ·
+  <a href="README.ja.md">日本語</a>
 </p>
 
 <p align="center">
@@ -184,7 +189,8 @@ Codex CLI 和 Desktop 会自动读取 Pool 提供的上下文大小。
 | Windows | `%USERPROFILE%\.codex\config.toml` |
 
 打开对应系统路径下的 `config.toml`，添加以下配置。如果设置了 `CODEX_HOME`，
-请使用该文件夹中的文件。如果已有 `[features]` 节，请将设置添加到现有节中。
+请使用该文件夹中的文件。保留 `name = "OpenAI"`，以使用 Codex 的原生功能。
+模型目录发现默认启用；`model_catalog_url` 将其指向你的 Pool。
 
 ```toml
 model = "gpt-6.1-sol"
@@ -198,16 +204,13 @@ env_key = "CODEX_POOLER_API_KEY"
 wire_api = "responses"
 supports_websockets = true
 requires_openai_auth = true
-
-[features]
-api_key_model_discovery = true
 ```
 
 重启 Codex，选择你的 Pool 提供的模型。
 使用 Codex Desktop 时，
 请按完整指南设置 API 密钥，使应用能够读取它。
 
-**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/)** — 桌面应用配置、账户设置和现有会话。
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/)** — 桌面应用配置、账户设置、现有会话，以及可选的自定义提供商名称及其限制。
 
 </details>
 
@@ -693,6 +696,52 @@ omp
 ```
 
 **[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/omp/)** — 安装、模型选择和长会话。
+
+</details>
+
+<a id="omo-native-setup"></a>
+
+<details>
+<summary><img src=".github/assets/omo-favicon.png" alt="OMO logo" width="16" height="16"> OMO Native <code>models.json</code></summary>
+
+将独立的 `omo` 客户端及其内置 Senpi 引擎连接到你的 Pool。
+在 OpenCode 中使用 OMO 时，请参阅 [OpenCode 配置](#opencode-setup)。
+
+| 系统 | 配置文件 |
+| --- | --- |
+| macOS / Linux | `~/.omo/agent/models.json` |
+| Windows | `%USERPROFILE%\.omo\agent\models.json` |
+
+将此提供方合并到 `models.json`，保留已有的提供方：
+
+```json
+{
+  "providers": {
+    "codex-pooler": {
+      "baseUrl": "https://codex-pooler.example.com/v1",
+      "api": "openai-responses",
+      "apiKey": "$CODEX_POOLER_API_KEY",
+      "authHeader": true,
+      "models": [
+        { "id": "gpt-6.1-sol", "reasoning": true, "defaultThinkingLevel": "medium", "input": ["text"] },
+        { "id": "gpt-6-luna", "reasoning": true, "defaultThinkingLevel": "low", "input": ["text"] },
+        { "id": "gpt-6-astra", "reasoning": true, "defaultThinkingLevel": "high", "input": ["text"] }
+      ]
+    }
+  }
+}
+```
+
+保留 API 密钥引用中的 `$`，并将示例 URL 替换为你的 Pooler 的 `/v1` URL。
+仅保留 Pool 中可用的模型。使用 Sol 启动：
+
+```bash
+omo --provider codex-pooler --model gpt-6.1-sol --thinking medium
+```
+
+此配置涵盖文本请求。完整指南包含默认模型设置和不使用工具的连接检查。
+
+**[完整配置与扩展选项](https://www.codex-pooler.com/docs/clients/omo-native-senpi/)** — 安装、默认模型和连接检查。
 
 </details>
 
@@ -1201,6 +1250,8 @@ console.log(text);
 ![Claude Code on Codex Pooler](.github/assets/codex-pooler-claude.png)
 
 </details>
+
+<a id="quick-start-with-docker-compose"></a>
 
 ## 使用 Docker Compose 快速开始
 

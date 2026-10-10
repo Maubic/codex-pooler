@@ -1,7 +1,20 @@
 defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.InstructionLifter do
   @moduledoc false
 
+  @spec lift(map()) :: map()
   def lift(%{"input" => input} = payload) when is_list(input) do
+    # Removing or relocating instruction messages can manufacture consecutive
+    # configuration updates, whose ordering policy belongs to the provider.
+    if Enum.any?(input, &match?(%{"type" => "configuration_update"}, &1)) do
+      payload
+    else
+      lift_instructions(payload, input)
+    end
+  end
+
+  def lift(payload), do: payload
+
+  defp lift_instructions(payload, input) do
     {input, instruction_texts} =
       Enum.reduce(input, {[], []}, fn item, {items, instruction_texts} ->
         case lift_instruction_item(item) do
@@ -20,8 +33,6 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.InstructionLif
     |> Map.put("input", Enum.reverse(input))
     |> put_lifted_instruction_text(Enum.reverse(instruction_texts))
   end
-
-  def lift(payload), do: payload
 
   defp lift_instruction_item(%{"type" => "message", "role" => role, "content" => content} = item)
        when role in ["system", "developer"] do

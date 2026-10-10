@@ -6,6 +6,21 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger 
   alias CodexPooler.Gateway.Runtime.Finalization.Metadata
   alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
 
+  # The owner-exit fence's fixed vocabularies (findings#327, findings#328,
+  # findings#329 row J): what a submission does with its turn when the owner
+  # it waits on exits, why, and how that owner went.
+  @exit_fence_decisions [:takeover, :settled]
+  @exit_fence_reasons [
+    :payload_unsent,
+    :reset_probe,
+    :owner_alive,
+    :exit_not_recoverable,
+    :payload_started,
+    :socket_turn,
+    :takeover_refused
+  ]
+  @owner_exit_classes [:killed, :noproc, :normal, :shutdown, :owner_crashed, :exception, :other]
+
   @spec owner_started(pid(), keyword()) :: :ok
   def owner_started(pid, opts) do
     owner_event(:info, "websocket owner started",
@@ -122,6 +137,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger 
       request_id: state.request_id,
       downstream_epoch: downstream_epoch(state.downstream)
     )
+  end
+
+  # One line per turn whose owner exited under its submission
+  # (`WebsocketOwnerForwarder.do_submit_remote_owner_request/7`), on the
+  # owner's node: `takeover` hands the turn to a replacement owner, `settled`
+  # answers it without one, and `reason` says why. A refused takeover names
+  # its refusal from the owner error vocabulary (`other` outside it). Only
+  # internal correlators, never a provider identifier or a frame.
+  @spec owner_exit_fence(atom(), atom(), atom(), keyword()) :: :ok
+  def owner_exit_fence(decision, reason, owner_exit, fields)
+      when decision in @exit_fence_decisions and reason in @exit_fence_reasons and
+             owner_exit in @owner_exit_classes and is_list(fields) do
+    owner_event(:info, "websocket owner exit fence", [decision: decision, reason: reason, owner_exit: owner_exit] ++ Keyword.take(fields, [:refusal, :codex_session_id, :request_id, :attempt_id]))
   end
 
   # A different turn from the session's next socket retired the armed

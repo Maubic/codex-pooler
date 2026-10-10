@@ -5282,7 +5282,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     assert [captured] = FakeUpstream.requests(upstream)
     assert captured.path == "/backend-api/codex/responses"
 
-    refute Map.has_key?(captured.json, "max_output_tokens")
+    assert captured.json["max_output_tokens"] == 128
     refute Map.has_key?(captured.json, "prompt_cache_retention")
     refute Map.has_key?(captured.json, "safety_identifier")
     refute Map.has_key?(captured.json, "temperature")

@@ -825,19 +825,36 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.AuthRefreshTest do
                state
              )
 
-    assert_receive {:fake_upstream_timeout_barrier, :before_headers, refresh_pid, ^release_ref},
-                   @detection_timeout_ms
+    {state, refresh_pid} = receive_socket_upstream_barrier!(state, {:fake_upstream_timeout_barrier, :before_headers, release_ref}, @detection_timeout_ms)
 
     log =
       capture_log(fn ->
-        terminator =
+        socket = self()
+
+        tracer =
           Task.async(fn ->
-            CodexResponsesSocket.terminate(:closed, state)
+            1 = :erlang.trace_pattern({CodexResponsesSocket, :terminate, 2}, true, [:local])
+            1 = :erlang.trace(socket, true, [:call, :arity, {:tracer, self()}])
+            send(socket, {:auth_refresh_drain_trace_ready, self()})
+
+            try do
+              receive do
+                {:trace, ^socket, :call, {CodexResponsesSocket, :terminate, 2}} ->
+                  send(refresh_pid, {:fake_upstream_release_timeout, release_ref})
+                  :ok
+              after
+                @detection_timeout_ms -> flunk("the actual socket never entered its auth-refresh termination drain")
+              end
+            after
+              :erlang.trace_pattern({CodexResponsesSocket, :terminate, 2}, false, [:local])
+              :erlang.trace(socket, false, [:call, :arity])
+            end
           end)
 
-        refute Task.yield(terminator, 0)
-        send(refresh_pid, {:fake_upstream_release_timeout, release_ref})
-        assert :ok = Task.await(terminator, @connection_shutdown_timeout_ms)
+        assert_receive {:auth_refresh_drain_trace_ready, tracer_pid}, @detection_timeout_ms
+        assert tracer_pid == tracer.pid
+        assert :ok = CodexResponsesSocket.terminate(:closed, state)
+        assert :ok = Task.await(tracer, @connection_shutdown_timeout_ms)
       end)
 
     assert [first_request, refresh_request, retried_request] = FakeUpstream.requests(upstream)

@@ -535,7 +535,6 @@ defmodule CodexPoolerWeb.OnboardingLive.InviteTest do
 
     assert copy_text == expected
     assert shown_text == expected
-    assert has_element?(view, "#invite-config-features-hint", "[features]")
   end
 
   test "restricted invite rejects a different authorized Codex email without side effects" do

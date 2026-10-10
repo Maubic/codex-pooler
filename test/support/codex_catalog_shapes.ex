@@ -1,8 +1,7 @@
 defmodule CodexPooler.CodexCatalogShapes do
   @moduledoc """
   Synthetic native Codex catalog sources and every served-body projection the
-  Pooler builds from them, for the catalog decode contract (findings#258 row
-  258-34).
+  Pooler builds from them, for the catalog decode contract.
 
   `served_bodies/0` runs the real `CodexCatalog` builders over a synced-shaped
   source (the key set of a provider catalog entry, synthetic values), the
@@ -16,10 +15,42 @@ defmodule CodexPooler.CodexCatalogShapes do
 
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Gateway.Metadata.CodexCatalog
+  alias CodexPooler.Gateway.Metadata.CodexModelDecodeContract
+  alias CodexPooler.Upstreams.CodexClientIdentity
   alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
 
   @representations [:verbatim, :instructions_template, :decode_checked]
   @template "Synthetic instructions template."
+  @managed_client_version Application.compile_env(:codex_pooler, CodexClientIdentity)
+                          |> Keyword.fetch!(:default_client_version)
+
+  @type version_samples :: %{
+          current: String.t(),
+          since: String.t(),
+          through: String.t(),
+          before: String.t(),
+          after: String.t(),
+          checked: [String.t()]
+        }
+
+  @doc "Managed release and decoder boundary samples; the managed release does not extend the verified window."
+  @spec version_samples() :: version_samples()
+  def version_samples do
+    {{major, minor, patch} = since, {last_major, last_minor, last_patch} = through} = CodexModelDecodeContract.verified_range()
+    before = if patch > 0, do: {major, minor, patch - 1}, else: {major, minor - 1, 999}
+    version = fn tuple -> tuple |> Tuple.to_list() |> Enum.join(".") end
+    first = version.(since)
+    last = version.(through)
+
+    %{
+      current: @managed_client_version,
+      since: first,
+      through: last,
+      before: version.(before),
+      after: version.({last_major, last_minor, last_patch + 1}),
+      checked: Enum.uniq([first, @managed_client_version, last, first <> "-alpha.1", @managed_client_version <> "-alpha.1.2", last <> "-alpha.1"])
+    }
+  end
 
   @doc "A catalog source with the key set a synced provider entry carries."
   @spec synced_source(String.t(), map()) :: map()

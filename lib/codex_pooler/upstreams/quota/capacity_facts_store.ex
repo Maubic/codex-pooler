@@ -13,6 +13,8 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
   @window_keys ~w(window_kind window_minutes reset_at used_percent)
   @blocker_keys ~w(version credential_epoch overflowed observations)
   @max_blockers 16
+  @hard_denials [:workspace_limit, :model_limit]
+  @reset_rounding_seconds 5
 
   @type blockers :: %{credential_epoch: pos_integer(), observations: [CapacityFacts.t()], overflowed?: boolean()}
 
@@ -114,7 +116,7 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
         case DateTime.compare(observation.observed_at, current.observed_at) do
           :lt -> metadata
           :eq -> equal_transition(metadata, current, observation, epoch)
-          :gt -> write_observation(metadata, observation, epoch)
+          :gt -> metadata |> retain_replaced(current, epoch) |> write_observation(observation, epoch)
         end
 
       _other ->
@@ -140,10 +142,47 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
     end
   end
 
+  @doc """
+  Moves valid capacity facts and valid retained blockers recorded at
+  `from_epoch` to `to_epoch`, each on its own, and leaves every other value as
+  it is: a token refresh keeps the provider account they describe
+  (findings#334). Only the epoch tags change, the blockers' own and each
+  retained observation's; every other field, `observed_at` included, stays
+  byte for byte.
+  """
+  @spec carry_forward(map(), pos_integer(), pos_integer()) :: map()
+  def carry_forward(metadata, from_epoch, to_epoch) when is_map(metadata) and is_integer(to_epoch) and to_epoch > 0 do
+    metadata =
+      case load(metadata) do
+        {:ok, %CapacityFacts{credential_epoch: ^from_epoch}} -> put_in(metadata, [@key, "credential_epoch"], to_epoch)
+        _absent_invalid_or_other_epoch -> metadata
+      end
+
+    case load_blockers(metadata) do
+      {:ok, %{credential_epoch: ^from_epoch}} ->
+        Map.update!(metadata, @blocker_key, fn blockers ->
+          %{blockers | "credential_epoch" => to_epoch, "observations" => Enum.map(blockers["observations"], &Map.put(&1, "credential_epoch", to_epoch))}
+        end)
+
+      _absent_invalid_or_other_epoch ->
+        metadata
+    end
+  end
+
   defp write_observation(metadata, observation, epoch) do
     metadata
     |> Map.put(@key, encode!(observation, epoch))
     |> write_blockers(observation, epoch)
+  end
+
+  # A blocking current reading denies while it is current. Before a newer reading
+  # replaces it, it is retained unless a witness covers it, as on its own write,
+  # so a denial an earlier release recorded only as the current reading does not
+  # leave with it.
+  defp retain_replaced(metadata, current, epoch) do
+    if blocking_observation?(current),
+      do: put_blockers(metadata, retain_blocking_observation(retained_blockers(metadata, epoch), current), epoch),
+      else: metadata
   end
 
   defp write_blockers(metadata, observation, epoch) do
@@ -151,7 +190,10 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
     retained = Enum.reject(blockers.observations, &supersedes_blocker?(observation, &1))
     blockers = %{blockers | observations: retained}
     blockers = if blocking_observation?(observation), do: retain_blocking_observation(blockers, observation), else: blockers
+    put_blockers(metadata, blockers, epoch)
+  end
 
+  defp put_blockers(metadata, blockers, epoch) do
     if blockers.observations == [] and not blockers.overflowed? do
       Map.delete(metadata, @blocker_key)
     else
@@ -174,17 +216,48 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
     end
   end
 
+  # A denial is left out only when a retained witness already covers it. Otherwise
+  # it is retained beside the first witness of its binding, which stays so the
+  # binding remains denied from its earliest observation, and replaces the later
+  # witnesses it covers: a denial repeated through many cycles keeps the first
+  # witness and the newest one for each set of exhausted windows.
   @spec retain_blocking_observation(blockers(), CapacityFacts.t()) :: blockers()
   defp retain_blocking_observation(blockers, observation) do
-    if Enum.any?(blockers.observations, &(same_blocker_binding?(&1, observation) or strengthens_blocker?(&1, observation))) do
+    if Enum.any?(blockers.observations, &covers_blocker?(&1, observation)) do
       blockers
     else
-      retained = Enum.reject(blockers.observations, &strengthens_blocker?(observation, &1))
+      first = Enum.find(blockers.observations, &same_blocker_binding?(&1, observation))
+      retained = Enum.reject(blockers.observations, &(&1 != first and covers_blocker?(observation, &1)))
 
       if length(retained) < @max_blockers,
         do: %{blockers | observations: retained ++ [observation]},
         else: %{blockers | overflowed?: true}
     end
+  end
+
+  defp covers_blocker?(witness, observation) do
+    (same_blocker_binding?(witness, observation) or strengthens_blocker?(witness, observation)) and
+      covers_clearance?(witness, observation)
+  end
+
+  # Every way the witness ends must also end the observation's denial. Permission
+  # ends both. A hard witness that recorded exhausted windows also ends with their
+  # cycle, so the observation must have recorded exhausted windows too, each one
+  # the witness recorded exhausted and resetting no later. No reset rounding here:
+  # the witness's release and lapse are measured from its own reset, so a denial
+  # resetting even a second later would outlast it.
+  defp covers_clearance?(%{denial_category: category} = witness, observation) when category in @hard_denials,
+    do: covers_exhausted_windows?(exhausted_windows(witness), exhausted_windows(observation))
+
+  defp covers_clearance?(_witness, _observation), do: true
+
+  defp covers_exhausted_windows?([], _exhausted), do: true
+  defp covers_exhausted_windows?(_witnessed, []), do: false
+  defp covers_exhausted_windows?(witnessed, exhausted), do: Enum.all?(exhausted, fn window -> Enum.any?(witnessed, &resets_by?(window, &1)) end)
+
+  defp resets_by?(window, witnessed) do
+    window.window_kind == witnessed.window_kind and window.window_minutes == witnessed.window_minutes and
+      DateTime.compare(window.reset_at, witnessed.reset_at) != :gt
   end
 
   defp same_blocker_binding?(left, right) do
@@ -213,9 +286,51 @@ defmodule CodexPooler.Upstreams.Quota.CapacityFactsStore do
   defp supersedes_blocker?(observation, blocker) do
     compatible_blocker_resources?(observation, blocker) and
       DateTime.compare(observation.observed_at, blocker.observed_at) == :gt and
-      observation.denial_category in [:none, :included_limit] and
-      superseding_permission?(observation, blocker)
+      (permission_supersedes?(observation, blocker) or later_cycle_supersedes?(observation, blocker))
   end
+
+  defp permission_supersedes?(observation, blocker),
+    do: observation.denial_category in [:none, :included_limit] and superseding_permission?(observation, blocker)
+
+  # A workspace or model denial recorded while an account window was exhausted
+  # ends with that window's cycle. A newer reading that no longer reports a hard
+  # denial and shows every such window in a later cycle below its limit (a
+  # natural roll-over or a provider-side reset) releases it, whatever else that
+  # reading leaves unknown. Without an exhausted window only permission clears it.
+  defp later_cycle_supersedes?(observation, %{denial_category: category} = blocker) when category in @hard_denials,
+    do: observation.denial_category not in @hard_denials and exhausted_windows_released?(blocker, &later_cycle_window?(observation, &1))
+
+  defp later_cycle_supersedes?(_observation, _blocker), do: false
+
+  defp later_cycle_window?(observation, exhausted) do
+    Enum.any?(observation.account_windows, fn current ->
+      current.window_kind == exhausted.window_kind and current.window_minutes == exhausted.window_minutes and
+        DateTime.diff(current.reset_at, exhausted.reset_at, :second) > @reset_rounding_seconds and
+        not exhausted_window?(current)
+    end)
+  end
+
+  @doc """
+  True when a workspace or model denial was recorded with at least one exhausted
+  account window and every one of them has reached its reset by `as_of`: the
+  denial ended with those windows' cycle, so it no longer denies the account.
+  """
+  @spec hard_denial_lapsed?(CapacityFacts.t(), DateTime.t()) :: boolean()
+  def hard_denial_lapsed?(%CapacityFacts{denial_category: category} = facts, %DateTime{} = as_of) when category in @hard_denials,
+    do: exhausted_windows_released?(facts, &(DateTime.compare(&1.reset_at, as_of) != :gt))
+
+  def hard_denial_lapsed?(_facts, _as_of), do: false
+
+  defp exhausted_windows_released?(facts, released?) do
+    case exhausted_windows(facts) do
+      [] -> false
+      exhausted -> Enum.all?(exhausted, released?)
+    end
+  end
+
+  defp exhausted_windows(facts), do: Enum.filter(facts.account_windows, &exhausted_window?/1)
+
+  defp exhausted_window?(window), do: Decimal.compare(Decimal.new(window.used_percent), 100) != :lt
 
   defp compatible_blocker_resources?(observation, blocker) do
     observation.source_kind == blocker.source_kind and

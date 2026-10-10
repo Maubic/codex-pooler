@@ -40,7 +40,7 @@ defmodule CodexPooler.Application do
       CodexPooler.Events.PostgresBridge,
       CodexPooler.InstanceSettings.Cache,
       CodexPooler.Accounting.ExecutionRecovery,
-      {Oban, Application.fetch_env!(:codex_pooler, Oban)},
+      {CodexPooler.Platform.JobRuntime, Application.fetch_env!(:codex_pooler, Oban)},
       {DNSCluster, query: Application.get_env(:codex_pooler, :dns_cluster_query) || :ignore, resolver: CodexPooler.Platform.DNSClusterResolver},
       CodexPoolerWeb.Endpoint
     ]

@@ -46,6 +46,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.QueuedResendReplayBinding
 
   @detection_timeout_ms 10_000
   @socket_messages [
+    :native_response_steering_prepare,
     :codex_response_chunk,
     :websocket_owner_frame,
     :websocket_owner_output_commit_probe,
@@ -202,32 +203,44 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.QueuedResendReplayBinding
   end
 
   defp drain_tasks!(state) do
+    drain_tasks!(state, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+  end
+
+  defp drain_tasks!(state, deadline) do
     if MapSet.size(state.tasks) == 0 do
       state
     else
       receive do
-        message when is_tuple(message) and elem(message, 0) in @socket_messages -> message |> handle_socket_message(state) |> drain_tasks!()
+        message when is_tuple(message) and elem(message, 0) in @socket_messages -> message |> handle_socket_message(state) |> drain_tasks!(deadline)
       after
-        @detection_timeout_ms -> flunk("the prewarm's task never reported")
+        max(deadline - System.monotonic_time(:millisecond), 0) -> flunk("the prewarm's task never reported")
       end
     end
   end
 
   defp pump_until_barrier!(state, release_ref) do
+    pump_until_barrier!(state, release_ref, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+  end
+
+  defp pump_until_barrier!(state, release_ref, deadline) do
     receive do
       {:fake_upstream_websocket_barrier, :before_close, upstream_pid, ^release_ref} -> {state, upstream_pid}
-      message when is_tuple(message) and elem(message, 0) in @socket_messages -> pump_until_barrier!(handle_socket_message(message, state), release_ref)
+      message when is_tuple(message) and elem(message, 0) in @socket_messages -> pump_until_barrier!(handle_socket_message(message, state), release_ref, deadline)
     after
-      @detection_timeout_ms -> flunk("the resend never reached the provider")
+      max(deadline - System.monotonic_time(:millisecond), 0) -> flunk("the resend never reached the provider")
     end
   end
 
   defp handle_socket_message(message, state) do
-    case CodexResponsesSocket.handle_info(message, state) do
-      {:push, {:text, _frame}, state} -> state
-      {:ok, state} -> state
-      {:stop, _reason, close_detail, _state} -> flunk("socket closed with #{inspect(close_detail)}")
-    end
+    state =
+      case CodexResponsesSocket.handle_info(message, state) do
+        {:push, {:text, _frame}, state} -> state
+        {:ok, state} -> state
+        {:stop, _reason, close_detail, _state} -> flunk("socket closed with #{inspect(close_detail)}")
+      end
+
+    Process.put(:p118_socket_state, state)
+    state
   end
 
   defp await_armed(request_id, deadline) do

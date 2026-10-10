@@ -517,6 +517,44 @@ defmodule CodexPooler.Catalog.OpenAIPricingPreflightTest do
     assert result.coverage.imported_price_buckets["default"] == 1
   end
 
+  test "skipped fast and priority aliases count once while retaining raw source warnings" do
+    tier = %{
+      "default" => %{"input" => 1, "output" => 2},
+      "inference" => %{"input" => 3, "output" => 4, "training" => 5}
+    }
+
+    for aliases <- [["fast"], ["priority"], ["fast", "priority"]] do
+      payload = put_in(valid_payload(), ["models", "future-model", "prices"], Map.new(aliases, &{&1, tier}))
+      result = OpenAIPricingFormat.classify(payload)
+
+      assert result.compatible?
+      assert result.summary == %{importable_rows: 1, priced_rows: 1, unavailable_rows: 0, skipped_models: 0, skipped_price_buckets: 1}
+      assert [%{service_tier: "priority", price_bucket: "default"}] = result.rows
+      assert result.coverage.imported_price_buckets == %{"default" => 1, "short_context" => 0, "long_context" => 0}
+      assert Enum.map(result.warnings, &{&1.code, &1.path}) == Enum.map(aliases, &{:unsupported_price_bucket, "models.future-model.prices.#{&1}.inference"})
+    end
+  end
+
+  test "skipped descriptor identity preserves different models buckets and nonalias tiers" do
+    tier = %{"audio" => %{"output" => 2}, "text" => %{"input" => 1}}
+    prices = Map.new(~w(fast priority standard ultrafast), &{&1, tier})
+    payload = valid_payload()
+    model = put_in(payload, ["models", "future-model", "prices"], prices)["models"]["future-model"]
+    models = Map.new(~w(first-model second-model), &{&1, Map.put(model, "model", &1)})
+    payload = %{payload | "models" => models, "models_count" => 2}
+    result = OpenAIPricingFormat.classify(payload)
+
+    assert result.compatible?
+    assert result.summary.skipped_price_buckets == 12
+    assert length(result.warnings) == 16
+    assert Enum.all?(result.warnings, &(&1.code == :unsupported_price_bucket))
+    assert result.rows == []
+    assert result.summary.importable_rows == 0
+
+    invalid = put_in(payload, ["models", "first-model", "prices", "priority", "audio", "output"], -1)
+    refute OpenAIPricingFormat.classify(invalid).compatible?
+  end
+
   test "non-token descriptors fail closed unless their complete schema is recognized" do
     for {type, prices} <- [
           {"mixed", %{"standard" => %{"unknown" => %{"output" => 1}}}},
@@ -691,8 +729,9 @@ defmodule CodexPooler.Catalog.OpenAIPricingPreflightTest do
 
   defp write_raw!(raw) do
     path =
-      Path.join(System.tmp_dir!(), "pricing-preflight-#{System.unique_integer([:positive])}.json")
+      Path.join(System.tmp_dir!(), "pricing-preflight-#{Ecto.UUID.generate()}.json")
 
+    on_exit(fn -> File.rm(path) end)
     File.write!(path, raw)
     path
   end

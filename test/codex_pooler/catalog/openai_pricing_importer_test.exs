@@ -2,7 +2,7 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
   use CodexPooler.DataCase, async: false
 
   alias CodexPooler.Accounting
-  alias CodexPooler.Catalog.{OpenAIPricingImporter, PricingSnapshot}
+  alias CodexPooler.Catalog.{OpenAIPricingImporter, OpenAIPricingPreflight, PricingSnapshot}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Repo
   alias CodexPooler.UpstreamConnPoolTelemetry
@@ -288,6 +288,25 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     assert_imported_target_settles("gpt-6-astra", ultrafast: "98400")
   end
 
+  test "the vendored target imports every gpt-6.1-sol ultrafast context bucket including cache writes" do
+    payload = @target |> File.read!() |> CodexPooler.JSON.decode!()
+    assert {:ok, imported} = OpenAIPricingImporter.import_file(@target)
+    rows = Repo.all(from row in PricingSnapshot, where: row.price_version == ^imported.price_version)
+
+    for {bucket, rates} <- [
+          {"default", ["12.0", "0.6", "15.0", "60.0"]},
+          {"short_context", ["12.0", "0.6", "15.0", "60.0"]},
+          {"long_context", ["24.0", "1.2", "30.0", "90.0"]}
+        ] do
+      assert source_rates(payload, "gpt-6.1-sol", "ultrafast", bucket) == Enum.map(rates, &Decimal.new/1)
+      assert_snapshot_rates(rows, "gpt-6.1-sol", "ultrafast", rates, bucket)
+    end
+  end
+
+  test "the vendored target settles gpt-6.1-sol at its served ultrafast rate" do
+    assert_imported_target_settles("gpt-6.1-sol", ultrafast: "19440")
+  end
+
   test "malformed image batch rates reject the whole catalog without snapshot writes" do
     payload = @target |> File.read!() |> CodexPooler.JSON.decode!()
     count = Repo.aggregate(PricingSnapshot, :count)
@@ -341,6 +360,58 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
     assert OpenAIPricingImporter.semantic_equal?(equal, left)
     refute OpenAIPricingImporter.semantic_equal?(left, extra)
     refute OpenAIPricingImporter.semantic_equal?(extra, left)
+  end
+
+  test "file preflight and import count a skipped alias pair like either single alias" do
+    prices = %{
+      "default" => %{"input" => 1, "output" => 2},
+      "inference" => %{"input" => 3, "output" => 4, "training" => 5}
+    }
+
+    for aliases <- [["fast"], ["priority"], ["fast", "priority"]] do
+      identifier = "skipped-alias-#{Enum.join(aliases, "-")}"
+      path = write_json!(valid_payload(identifier, Map.new(aliases, &{&1, prices})))
+      preflight = OpenAIPricingPreflight.validate_file(path)
+      assert {:ok, %{inserted: 1, skipped: 1, total: 2}} = OpenAIPricingImporter.import_file(path)
+      assert preflight.compatible?
+      assert preflight.summary.skipped_price_buckets == 1
+      assert length(preflight.warnings) == length(aliases)
+
+      snapshot = Repo.one!(from row in PricingSnapshot, where: row.model_identifier == ^identifier)
+      assert snapshot.config["service_tier"] == "priority"
+      assert snapshot.config["price_bucket"] == "default"
+      assert snapshot.config["availability"] == "priced"
+      assert Decimal.equal?(snapshot.input_token_micros, 1)
+      assert Decimal.equal?(snapshot.output_token_micros, 2)
+      assert {:ok, %{inserted: 0, skipped: 1, total: 1}} = OpenAIPricingImporter.import_file(path)
+      assert Repo.one!(from row in PricingSnapshot, where: row.model_identifier == ^identifier) == snapshot
+    end
+  end
+
+  test "skipped alias buckets preserve unavailable snapshots and separate model tier coverage" do
+    prices = %{
+      "default" => %{"available" => false},
+      "audio" => %{"output" => 2},
+      "text" => %{"input" => 1}
+    }
+
+    identifiers = ~w(first-skipped-model second-skipped-model)
+    payload = payload_with_models("2026-07-28T00:00:00Z", identifiers)
+    tiers = Map.new(~w(fast priority standard ultrafast), &{&1, prices})
+    payload = Enum.reduce(identifiers, payload, &put_in(&2, ["models", &1, "prices"], tiers))
+    path = write_json!(payload)
+    preflight = OpenAIPricingPreflight.validate_file(path)
+
+    assert {:ok, %{inserted: 6, skipped: 12, total: 18}} = OpenAIPricingImporter.import_file(path)
+    assert preflight.compatible?
+    assert preflight.summary == %{importable_rows: 6, priced_rows: 0, unavailable_rows: 6, skipped_models: 0, skipped_price_buckets: 12}
+    assert preflight.coverage.imported_price_buckets == %{"default" => 6, "short_context" => 0, "long_context" => 0}
+    assert length(preflight.warnings) == 16
+
+    rows = Repo.all(from row in PricingSnapshot, where: row.model_identifier in ^identifiers)
+    assert length(rows) == 6
+    assert Enum.sort(Enum.map(rows, &{&1.model_identifier, &1.config["service_tier"]})) == for(identifier <- identifiers, tier <- ~w(priority standard ultrafast), do: {identifier, tier})
+    assert Enum.all?(rows, &(&1.config["price_bucket"] == "default" and &1.config["availability"] == "unavailable" and is_nil(&1.input_token_micros) and is_nil(&1.output_token_micros)))
   end
 
   test "divergent aliases return bounded conflict and write nothing" do
@@ -1180,8 +1251,9 @@ defmodule CodexPooler.Catalog.OpenAIPricingImporterTest do
 
   defp write_raw!(raw) do
     path =
-      Path.join(System.tmp_dir!(), "pricing-importer-#{System.unique_integer([:positive])}.json")
+      Path.join(System.tmp_dir!(), "pricing-importer-#{Ecto.UUID.generate()}.json")
 
+    on_exit(fn -> File.rm(path) end)
     File.write!(path, raw)
     path
   end

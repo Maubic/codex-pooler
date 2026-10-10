@@ -1,6 +1,5 @@
 defmodule CodexPoolerWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :codex_pooler
-  use Plug.ErrorHandler
 
   alias CodexPoolerWeb.Plugs.RuntimeIngress.CompressedBody
 
@@ -54,14 +53,18 @@ defmodule CodexPoolerWeb.Endpoint do
   plug :runtime_ingress
   plug :backend_files_multipart_guard
 
-  plug Plug.Parsers,
-    parsers: [
-      :urlencoded,
-      {:multipart, length: @multipart_parser_length},
-      {CodexPoolerWeb.Plugs.RuntimeJsonParser, body_reader: {__MODULE__, :read_plain_json_body, []}}
-    ],
-    pass: ["*/*"],
-    json_decoder: Phoenix.json_library()
+  @ordinary_parser_opts Plug.Parsers.init(
+                          parsers: [:urlencoded, :multipart, {CodexPoolerWeb.Plugs.RuntimeJsonParser, body_reader: {__MODULE__, :read_plain_json_body, []}}],
+                          pass: ["*/*"],
+                          json_decoder: Phoenix.json_library()
+                        )
+  @media_parser_opts Plug.Parsers.init(
+                       parsers: [:urlencoded, {:multipart, length: @multipart_parser_length}, {CodexPoolerWeb.Plugs.RuntimeJsonParser, body_reader: {__MODULE__, :read_plain_json_body, []}}],
+                       pass: ["*/*"],
+                       json_decoder: Phoenix.json_library()
+                     )
+
+  plug :parse_body
 
   plug Plug.MethodOverride
   plug Plug.Head
@@ -73,8 +76,25 @@ defmodule CodexPoolerWeb.Endpoint do
   @doc false
   @spec read_plain_json_body(Plug.Conn.t(), keyword()) ::
           CompressedBody.read_result()
-  def read_plain_json_body(conn, opts),
-    do: CompressedBody.read_plain_json_body(conn, opts)
+  def read_plain_json_body(conn, opts) do
+    # Trusted-proxy resolution also stores settings on browser requests; only the ingress parser scope selects runtime limits.
+    if Map.has_key?(conn.private, :codex_pooler_json_parse_error_scope) do
+      CompressedBody.read_plain_json_body(conn, opts)
+    else
+      Plug.Conn.read_body(conn, opts)
+    end
+  end
+
+  defp parse_body(conn, _opts) do
+    opts = if RuntimeIngress.authenticated_multipart_media_request?(conn), do: @media_parser_opts, else: @ordinary_parser_opts
+    Plug.Parsers.call(conn, opts)
+  rescue
+    error in [Plug.Parsers.ParseError, Plug.Parsers.RequestTooLargeError, Plug.Conn.InvalidQueryError] ->
+      case RuntimeIngress.handle_parser_error(conn, error) do
+        {:ok, conn} -> conn
+        :unhandled -> reraise error, __STACKTRACE__
+      end
+  end
 
   defp trusted_proxy_remote_ip(conn, opts), do: TrustedProxyRemoteIp.call(conn, opts)
   defp runtime_ingress(conn, opts), do: RuntimeIngress.call(conn, opts)
@@ -97,18 +117,4 @@ defmodule CodexPoolerWeb.Endpoint do
     do: false
 
   def request_log_level(_conn), do: :info
-
-  @impl Plug.ErrorHandler
-  def handle_errors(conn, %{reason: %Plug.Parsers.ParseError{}}) do
-    cond do
-      RuntimeIngress.protected_backend_json_request?(conn) ->
-        RuntimeIngress.send_parse_error(conn)
-
-      RuntimeIngress.mcp_request?(conn) ->
-        RuntimeIngress.send_mcp_parse_error(conn)
-
-      true ->
-        Plug.Conn.send_resp(conn, conn.status || 400, "Bad Request")
-    end
-  end
 end

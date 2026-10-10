@@ -107,7 +107,10 @@ defmodule CodexPooler.Accounting.RequestLogs.ErrorSummaries do
             message: Map.get(reason, "message"),
             reason_codes: Map.get(reason, "reason_codes"),
             reset_at: Map.get(reason, "reset_at"),
-            route_class: Map.get(reason, "route_class")
+            route_class: Map.get(reason, "route_class"),
+            retained_refusal_code: Map.get(reason, "retained_refusal_code"),
+            retained_refusal_observed_at: Map.get(reason, "retained_refusal_observed_at"),
+            retained_refusal_reset_at: Map.get(reason, "retained_refusal_reset_at")
           })
         ]
 
@@ -129,21 +132,24 @@ defmodule CodexPooler.Accounting.RequestLogs.ErrorSummaries do
 
       message = attempt_error_message(attempt, metadata)
 
+      exclusions = candidate_exclusion_error_summaries(metadata)
+
       if blank?(code) and blank?(message) do
-        []
+        exclusions
       else
-        [
-          clean_error_summary(%{
-            source: "attempt",
-            attempt_number: attempt.attempt_number,
-            status: attempt.status,
-            retryable: attempt.retryable,
-            upstream_status_code: attempt.upstream_status_code,
-            code: code,
-            message: message
-          })
-          |> Map.merge(advised_reset(Map.get(metadata, "usage_limit")))
-        ]
+        exclusions ++
+          [
+            clean_error_summary(%{
+              source: "attempt",
+              attempt_number: attempt.attempt_number,
+              status: attempt.status,
+              retryable: attempt.retryable,
+              upstream_status_code: attempt.upstream_status_code,
+              code: code,
+              message: message
+            })
+            |> Map.merge(advised_reset(Map.get(metadata, "usage_limit")))
+          ]
       end
     end)
   end

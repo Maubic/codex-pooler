@@ -20,15 +20,15 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
       format_model_name: 1,
       format_model_reasoning: 1,
       format_model_reasoning_slot: 1,
-      format_model_service_tier: 1,
       format_record_id: 1,
-      format_requested_tier_detail: 1,
       format_requested_reasoning_detail: 1,
       format_route_latency: 1,
       format_route_metadata: 1,
       format_total: 1,
       format_upstream_account_label: 1,
       model_default_reasoning?: 1,
+      speed_level: 1,
+      speed_level_title: 1,
       route_paths: 1,
       protocol_badge_class: 1,
       protocol_label: 1,
@@ -89,6 +89,16 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
         :if={@request_logs.items != []}
         class="overflow-hidden rounded-box border border-base-300 bg-base-100"
       >
+        <.request_logs_pagination
+          top?={true}
+          page={@page}
+          datetime_preferences={@datetime_preferences}
+          current_params={@current_params}
+          pin_at={@pin_at}
+          frozen?={@frozen?}
+          newer_count={@newer_count}
+          newer_count_exact?={@newer_count_exact?}
+        />
         <Usage.token_composition_legend />
         <div class="request-log-table-scroll lg:overflow-x-auto">
           <table
@@ -96,7 +106,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
             data-has-issues={to_string(@has_issues?)}
             class="admin-request-explorer admin-ledger-table table table-sm admin-log-table font-sans"
           >
-            <%!-- The count is the footer's job; the caption repeats it only for
+            <%!-- The count is the pager's job; the caption repeats it only for
           assistive tech, which reads it before the rows. --%>
             <caption class="sr-only">
               Request logs, {format_total(@request_logs.total)}{if Map.get(@request_logs, :total_exact?) == false,
@@ -116,7 +126,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
             <thead>
               <tr>
                 <th scope="col" class="whitespace-nowrap">Time · Status</th>
-                <th scope="col" class="whitespace-nowrap">Model · Effort · Tier</th>
+                <th scope="col" class="whitespace-nowrap">Model · Effort · Speed</th>
                 <th scope="col" class="whitespace-nowrap">Upstream · Pool · Key</th>
                 <th scope="col" class="whitespace-nowrap">Endpoint · Transport · Client</th>
                 <th :if={@has_issues?} id="request-log-issues-heading" scope="col" class="whitespace-nowrap">Errors · Warnings</th>
@@ -169,22 +179,47 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
             </tbody>
           </table>
         </div>
-        <nav id="request-log-pagination" aria-label="Request log pagination" class="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-base-300 px-3 py-2 text-xs text-base-content/55">
-          <span>Times {@datetime_preferences.timezone}</span>
-          <span id="request-log-pagination-range" data-role="pagination-range" class="tabular-nums">Showing {@page.range}</span>
-          <span data-role="pagination-status">Page {@page.current_page} of {@page.total_pages_label}</span>
-          <span :if={@frozen? && @newer_count > 0} data-role="request-log-newer-count" class="tabular-nums">· {format_total(@newer_count)}{if !@newer_count_exact?, do: "+"} newer</span>
-          <.link :if={@frozen?} id="request-log-back-to-latest" data-role="request-log-back-to-latest" patch={~p"/admin/request-logs?#{RequestLogFilterForm.query_params(@current_params)}"} class="font-semibold text-primary hover:underline">Back to latest</.link>
-          <div class="ml-auto flex items-center gap-1">
-            <button :if={request_id = @current_params["selected_request_id"]} id="request-log-open-selected" type="button" phx-click="open_request_log" phx-value-request-id={request_id} class="btn btn-xs">
-              Open request {format_record_id(request_id)} <.icon name="hero-arrow-top-right-on-square" class="size-3" />
-            </button>
-            <.page_button id="request-log-pagination-prev" label="Previous" icon="hero-chevron-left" path={page_path(@current_params, @page.current_page - 1, @pin_at)} enabled={@page.has_previous_page} />
-            <.page_button id="request-log-pagination-next" label="Next" icon="hero-chevron-right" path={page_path(@current_params, @page.current_page + 1, @pin_at)} enabled={@page.has_next_page} />
-          </div>
-        </nav>
+        <.request_logs_pagination
+          page={@page}
+          datetime_preferences={@datetime_preferences}
+          current_params={@current_params}
+          pin_at={@pin_at}
+          frozen?={@frozen?}
+          newer_count={@newer_count}
+          newer_count_exact?={@newer_count_exact?}
+        />
       </div>
     </div>
+    """
+  end
+
+  attr :top?, :boolean, default: false
+  attr :page, :map, required: true
+  attr :datetime_preferences, :map, required: true
+  attr :current_params, :map, required: true
+  attr :pin_at, :any, required: true
+  attr :frozen?, :boolean, required: true
+  attr :newer_count, :integer, required: true
+  attr :newer_count_exact?, :boolean, required: true
+
+  defp request_logs_pagination(assigns) do
+    assigns = assign(assigns, :suffix, if(assigns.top?, do: "-top", else: ""))
+
+    ~H"""
+    <nav id={"request-log-pagination#{@suffix}"} aria-label="Request log pagination" class={["flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 border-base-300 px-3 py-2 text-xs text-base-content/55", if(@top?, do: "border-b", else: "border-t")]}>
+      <span>Times {@datetime_preferences.timezone}</span>
+      <span id={"request-log-pagination#{@suffix}-range"} data-role="pagination-range" class="tabular-nums">Showing {@page.range}</span>
+      <span data-role="pagination-status">Page {@page.current_page} of {@page.total_pages_label}</span>
+      <span :if={@frozen? && @newer_count > 0} data-role="request-log-newer-count" class="tabular-nums">· {format_total(@newer_count)}{if !@newer_count_exact?, do: "+"} newer</span>
+      <.link :if={@frozen?} id={"request-log-back-to-latest#{@suffix}"} data-role="request-log-back-to-latest" patch={~p"/admin/request-logs?#{RequestLogFilterForm.query_params(@current_params)}"} class="font-semibold text-primary hover:underline">Back to latest</.link>
+      <div class="ml-auto flex items-center gap-1">
+        <button :if={request_id = @current_params["selected_request_id"]} id={"request-log-open-selected#{@suffix}"} type="button" phx-click="open_request_log" phx-value-request-id={request_id} class="btn btn-xs">
+          Open request {format_record_id(request_id)} <.icon name="hero-arrow-top-right-on-square" class="size-3" />
+        </button>
+        <.page_button id={"request-log-pagination#{@suffix}-prev"} label="Previous" icon="hero-chevron-left" path={page_path(@current_params, @page.current_page - 1, @pin_at)} enabled={@page.has_previous_page} />
+        <.page_button id={"request-log-pagination#{@suffix}-next"} label="Next" icon="hero-chevron-right" path={page_path(@current_params, @page.current_page + 1, @pin_at)} enabled={@page.has_next_page} />
+      </div>
+    </nav>
     """
   end
 
@@ -376,27 +411,14 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
         </span>
       </span>
       <span :if={@model_known?} data-role="model-context-line" class="min-w-0 truncate whitespace-nowrap pl-3.5 text-[11px] text-base-content/55">
+        <span data-role="model-speed" data-speed-level={speed_level(@request_log)} class="-ml-3.5 mr-1 inline-flex items-center gap-px align-middle text-warning" title={speed_level_title(@request_log)}>
+          <.icon :for={n <- 1..3} name={if n <= speed_level(@request_log), do: "hero-bolt-solid", else: "hero-bolt"} class={["size-3", n > speed_level(@request_log) && "opacity-30"]} />
+          <span class="sr-only">{speed_level_title(@request_log)}</span>
+        </span>
         <span
           :if={detail = format_requested_reasoning_detail(@request_log)}
           id={"#{@prefix}-#{@request_log.id}-requested-reasoning"}
           data-role="requested-reasoning"
-        >
-          {detail}
-        </span>
-        <span
-          :if={tier = format_model_service_tier(@request_log)}
-          data-role="model-service-tier"
-          class="text-base-content/45"
-          title="Service tier"
-        >
-          <span :if={format_requested_reasoning_detail(@request_log)} aria-hidden="true">·</span> tier {tier}
-        </span>
-        <span
-          :if={detail = format_requested_tier_detail(@request_log)}
-          id={"#{@prefix}-#{@request_log.id}-requested-tier"}
-          data-role="requested-service-tier"
-          class="text-base-content/45"
-          title="Service tier the request asked for; the upstream reported the tier shown before it"
         >
           {detail}
         </span>
@@ -417,7 +439,6 @@ defmodule CodexPoolerWeb.Admin.RequestLogsPresentation do
       title={protocol_title(@request_log)}
     >
       {protocol_label(@request_log.transport)}
-      <Usage.speed_tier_indicator request_log={@request_log} />
     </span>
     """
   end

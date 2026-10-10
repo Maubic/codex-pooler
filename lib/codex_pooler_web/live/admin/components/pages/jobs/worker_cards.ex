@@ -19,7 +19,7 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.WorkerCards do
     ~H"""
     <article
       id={"job-worker-card-#{@card.id}"}
-      class="grid min-w-0 overflow-hidden rounded-box border border-base-300 bg-base-100"
+      class="admin-jobs-worker-card grid min-w-0 rounded-box border border-base-300 bg-base-100"
     >
       <.job_worker_card_header card={@card} />
 
@@ -44,18 +44,19 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.WorkerCards do
     ~H"""
     <header
       data-role="worker-card-header"
-      class="flex flex-row items-center justify-between gap-3 border-b border-base-300 bg-base-200/35 px-4 py-3"
+      class="flex flex-row items-center justify-between gap-2 rounded-t-box bg-base-200/35 px-3 py-2"
     >
       <div class="min-w-0 flex-1">
-        <div data-role="worker-card-title-row" class="flex min-w-0 items-center gap-2.5">
-          <.icon name={@card.icon} class="size-5 shrink-0 text-base-content/45" />
-          <h2 class="min-w-0 truncate text-base font-semibold leading-5 text-base-content">
+        <div data-role="worker-card-title-row" class="flex min-w-0 items-center gap-2">
+          <.icon name={@card.icon} class="size-4 shrink-0 text-base-content/45" />
+          <h2 class="min-w-0 text-sm font-semibold leading-5 text-base-content [overflow-wrap:anywhere]">
             {@card.title}
           </h2>
         </div>
       </div>
 
       <div
+        :if={worker_state_badge_visible?(@card.state) or @card.manual_enqueue}
         data-role="worker-card-header-actions"
         class="flex shrink-0 items-center gap-2 self-center"
       >
@@ -73,12 +74,6 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.WorkerCards do
           <span>{@card.state_label}</span>
         </span>
         <.worker_card_actions :if={@card.manual_enqueue} card={@card} />
-        <span
-          :if={!@card.manual_enqueue}
-          data-role="worker-card-action-spacer"
-          aria-hidden="true"
-          class="btn btn-ghost btn-sm btn-square pointer-events-none invisible"
-        />
       </div>
     </header>
     """
@@ -124,7 +119,7 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.WorkerCards do
     <section
       :if={@card.open_markers != [] or @card.failure_markers != []}
       data-role="worker-activity-strip"
-      class="border-t border-base-300 bg-base-200/35 px-5 py-3"
+      class="border-t border-base-300 bg-base-200/35 px-3 py-2"
     >
       <div class="flex min-w-0 flex-wrap items-center justify-between gap-3">
         <span class="text-xs font-medium text-base-content/60">{@card.activity_label}</span>
@@ -255,13 +250,13 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.WorkerCards do
       ]}
     >
       <div class="min-h-0 overflow-hidden">
-        <div class="grid gap-3 px-4 py-3">
+        <div class="grid gap-3 px-3 py-3">
           <div class="flex min-w-0 items-start justify-between gap-3">
             <div class="min-w-0">
               <p class="text-xs font-semibold uppercase text-error">
                 {if @latest?, do: "Latest failure", else: "Failure detail"}
               </p>
-              <p class="mt-1 truncate font-semibold text-base-content">
+              <p class="mt-1 font-semibold text-base-content [overflow-wrap:anywhere]">
                 {@marker.target_label}
               </p>
             </div>
@@ -279,19 +274,19 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.WorkerCards do
 
           <div
             data-role="failure-panel-summary"
-            class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start"
+            class="grid min-w-0 gap-3"
           >
             <div class="min-w-0">
-              <p class="font-semibold text-error">
+              <p class="font-semibold text-error [overflow-wrap:anywhere]">
                 {@marker.failure.title}
               </p>
-              <p class="mt-0.5 truncate text-xs text-base-content/60">
+              <p class="mt-0.5 text-xs text-base-content/60 [overflow-wrap:anywhere]">
                 {@marker.worker_label}
               </p>
             </div>
             <dl
               data-role="failure-panel-meta"
-              class="grid grid-cols-2 gap-3 text-xs text-base-content/60 sm:min-w-44"
+              class="grid grid-cols-[minmax(0,1fr)_auto] gap-3 text-xs text-base-content/60"
             >
               <div>
                 <dt>When</dt>
@@ -307,7 +302,7 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.WorkerCards do
               </div>
             </dl>
           </div>
-          <p data-role="failure-message" class="leading-6 text-base-content/70">
+          <p data-role="failure-message" class="leading-6 text-base-content/70 [overflow-wrap:anywhere]">
             {@marker.failure.message}
           </p>
         </div>
@@ -331,11 +326,11 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.WorkerCards do
         <AdminComponents.card_fact_value>
           <span
             data-role="next-run"
-            class="inline-flex max-w-full items-center gap-1 tabular-nums"
+            class="inline-flex max-w-full items-start gap-1 tabular-nums"
             title={@card.next_run_title}
           >
-            <.icon name="hero-clock" class="size-3 shrink-0" />
-            <span class="truncate">{@card.next_run}</span>
+            <.icon name="hero-clock" class="mt-1 size-3 shrink-0" />
+            <span>{@card.next_run}</span>
           </span>
         </AdminComponents.card_fact_value>
       </:fact>

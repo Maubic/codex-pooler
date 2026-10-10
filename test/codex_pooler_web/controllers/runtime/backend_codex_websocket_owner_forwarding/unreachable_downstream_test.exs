@@ -457,36 +457,62 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Unreachabl
     @tag shown: :previsible, app_peer: :reachable
     @tag slow: "kills the socket on a peer VM mid-turn and paces the provider past the turn's first output"
     test "the owner keeps generating a turn that showed nothing past its first output", ctx do
-      turn = start_turn!(ctx, :death)
-      %{downstream: %{pid: socket}} = :sys.get_state(turn.owner)
-      assert node(socket) == turn.app_peer.node
-
-      Process.exit(socket, :kill)
-      _lost = await_owner_state!(turn.owner, &lost_turn?/1, "the owner did not keep the turn for a resend")
-      :ok = pace!(turn.pacer, @pace_ms)
-
-      # That node's task can still settle the turn: the owner goes on as
-      # before, output and all.
-      assert %{frames: frames, connection_down_at: nil} = await_frames!(turn.pacer, @frames_before_cancel + 3)
-      assert frames >= @frames_before_cancel + 3
-      assert %{active_turn: %{visible_output?: true}} = :sys.get_state(turn.owner)
-      refute Repo.get(ForwardedGenerationEnd, attempt(turn.request_id).id)
-
-      # And it does, once the provider ends the turn and nobody received it.
-      # Awaited here, before the Pool's rows go: the test used to end with the
-      # turn still `in_progress`, and that task's settlement then raised
-      # `Ecto.NoResultsError` in `lock_finalization_rows/2` (findings#270 row
-      # 270-288).
-      assert {{"failed", 503, "owner_unavailable"}, {"failed", "owner_unavailable"}} == await_turn_settled!(turn.request_id)
-
-      # The owner received the provider's `response.completed` and its usage
-      # but had nobody to deliver it to. Its answer to that node's task keeps
-      # the terminal, so the settlement records the usage the provider
-      # reported (5 in, 10 out) instead of `usage_unknown` at the
-      # reservation's estimate (findings#270 row 270-293).
-      assert %Request{usage_status: "usage_known"} = Repo.get!(Request, turn.request_id)
-      assert settled_usage(turn.request_id) == {"usage_known", 5, 10, 15}
+      assert_reachable_downstream_turn!(ctx, false)
     end
+
+    @tag shown: :previsible, app_peer: :reachable
+    @tag slow: "holds the owned upstream consumer while the provider advances after the reachable socket dies"
+    test "provider progress can precede the reachable owner's visible output", ctx do
+      assert_reachable_downstream_turn!(ctx, true)
+    end
+  end
+
+  defp assert_reachable_downstream_turn!(ctx, hold_upstream?) do
+    turn = start_turn!(ctx, :death)
+    %{downstream: %{pid: socket}} = :sys.get_state(turn.owner)
+    assert node(socket) == turn.app_peer.node
+
+    Process.exit(socket, :kill)
+    _lost = await_owner_state!(turn.owner, &lost_turn?/1, "the owner did not keep the turn for a resend")
+    upstream = if hold_upstream?, do: hold_upstream_consumer!(turn.owner)
+    :ok = pace!(turn.pacer, @pace_ms)
+
+    # That node's task can still settle the turn: the owner goes on as
+    # before, output and all.
+    assert %{frames: frames, connection_down_at: nil} = await_frames!(turn.pacer, @frames_before_cancel + 3)
+    assert frames >= @frames_before_cancel + 3
+
+    if hold_upstream? do
+      assert match?(%{active_turn: %{visible_output?: false}}, :sys.get_state(turn.owner))
+      :ok = resume_task(upstream)
+    end
+
+    visible = await_owner_state!(turn.owner, &match?(%{active_turn: %{visible_output?: true}}, &1), "the owner did not observe the provider's visible output")
+    assert %{active_turn: %{visible_output?: true}} = visible
+    refute Repo.get(ForwardedGenerationEnd, attempt(turn.request_id).id)
+
+    # And it does, once the provider ends the turn and nobody received it.
+    # Awaited here, before the Pool's rows go: the test used to end with the
+    # turn still `in_progress`, and that task's settlement then raised
+    # `Ecto.NoResultsError` in `lock_finalization_rows/2` (findings#270 row
+    # 270-288).
+    assert {{"failed", 503, "owner_unavailable"}, {"failed", "owner_unavailable"}} == await_turn_settled!(turn.request_id)
+
+    # The owner received the provider's `response.completed` and its usage
+    # but had nobody to deliver it to. Its answer to that node's task keeps
+    # the terminal, so the settlement records the usage the provider
+    # reported (5 in, 10 out) instead of `usage_unknown` at the
+    # reservation's estimate (findings#270 row 270-293).
+    assert %Request{usage_status: "usage_known"} = Repo.get!(Request, turn.request_id)
+    assert settled_usage(turn.request_id) == {"usage_known", 5, 10, 15}
+  end
+
+  defp hold_upstream_consumer!(owner) do
+    upstream = :sys.get_state(owner).upstream_pid
+    assert node(upstream) == node()
+    on_exit(fn -> resume_task(upstream) end)
+    true = :erlang.suspend_process(upstream)
+    upstream
   end
 
   # A socket whose turn the owner runs and FakeUpstream holds before any

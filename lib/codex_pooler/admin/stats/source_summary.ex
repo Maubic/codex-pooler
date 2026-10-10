@@ -3,8 +3,8 @@ defmodule CodexPooler.Admin.Stats.SourceSummary do
 
   @spec build(
           non_neg_integer(),
-          [map()],
-          [map()],
+          non_neg_integer(),
+          non_neg_integer(),
           [map()],
           [map()],
           map(),
@@ -24,8 +24,8 @@ defmodule CodexPooler.Admin.Stats.SourceSummary do
       ) do
     %{
       requests: request_count,
-      attempts: length(attempts),
-      settlements: length(settlements),
+      attempts: attempts,
+      settlements: settlements,
       daily_rollups: length(daily_rollups),
       codex_turns: Enum.sum(Enum.map(turns, & &1.count)),
       audit_events: activity_counts.audit_events,

@@ -17,9 +17,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.DispatchTe
   alias CodexPooler.Accounting.RequestLifecycle.Reservation
   alias CodexPooler.AgentV2ContractFixture
   alias CodexPooler.FakeUpstream
+  alias CodexPooler.Gateway.Payloads.NativeCodexTurnMetadata
   alias CodexPooler.Gateway.Persistence.CodexSession
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Gateway.Runtime.Service
+  alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
+  alias CodexPooler.Gateway.Transports.Websocket.OrdinarySuccessResult
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
@@ -95,20 +98,31 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.DispatchTe
       %{state | callbacks: %{state.callbacks | upstream_sender: sender}}
     end)
 
+    thread = "completed-only-#{order}"
+    metadata = %{"session_id" => thread, "thread_id" => thread, "turn_id" => Ecto.UUID.generate(), "request_kind" => "turn", "window_id" => "#{thread}:0", "context_window_id" => Ecto.UUID.generate(), "window_number" => 0}
+    payload = websocket_payload(setup, "completed only", %{"client_metadata" => %{"turn_id" => metadata["turn_id"], "x-codex-window-id" => "#{thread}:0", "x-codex-turn-metadata" => CodexPooler.JSON.encode!(metadata)}})
+
     {:ok, socket} =
       CodexResponsesSocket.handle_in(
-        {websocket_payload(setup, "completed only"), [opcode: :text]},
+        {payload, [opcode: :text]},
         socket
       )
 
-    assert_receive {:arbitration_result, ^barrier, sender}, @handoff_detection_timeout_ms
+    socket = receive_native_response_steering_prepared!(socket)
+    [response_task] = MapSet.to_list(socket.tasks)
+    response_task_monitor = Process.monitor(response_task)
+
+    assert_receive {:arbitration_result, ^barrier, sender, {:ok, %{ordinary_success_result: %OrdinarySuccessResult{} = receipt}}}, @handoff_detection_timeout_ms
+    assert receipt.owner == :sys.get_state(owner).upstream_pid
+    assert receipt.response_digest == NativeCodexTurnMetadata.response_id_digest("resp_completed_only_arbitration")
+    assert %{active_turn: %{task_pid: ^sender, pending_result: nil}, native_compaction_admission: nil} = :sys.get_state(owner)
 
     socket =
       case order do
         :terminal_first ->
           next = receive_completed_only_arbitration_terminal(socket, terminal)
 
-          assert :sys.get_state(owner).active_turn.terminal_forwarded?
+          assert %{active_turn: %{task_pid: ^sender, pending_result: nil, terminal_forwarded?: true}, native_compaction_admission: nil} = :sys.get_state(owner)
           send(sender, {:arbitration_release, barrier})
           next
 
@@ -116,6 +130,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.DispatchTe
           assert_receive {:arbitration_frame, ^barrier, deliver}, @handoff_detection_timeout_ms
           send(sender, {:arbitration_release, barrier})
           assert_receive {:arbitration_pending, ^barrier, false}, @handoff_detection_timeout_ms
+          assert %{active_turn: %{pending_result: {:ok, pending}, terminal_forwarded?: false}, native_compaction_admission: nil} = :sys.get_state(owner)
+          assert pending.ordinary_success_result.owner == owner
+          assert Map.take(pending.ordinary_success_result, [:request_id, :attempt_id, :response_digest, :model_digest, :serving_mode, :lifecycle]) == Map.take(receipt, [:request_id, :attempt_id, :response_digest, :model_digest, :serving_mode, :lifecycle])
           deliver.()
 
           receive_completed_only_arbitration_terminal(socket, terminal)
@@ -123,6 +140,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.DispatchTe
 
     assert {:ok, socket} = receive_owner_socket_complete(socket)
     socket = drain_completed_only_arbitration(socket)
+    assert_receive {:DOWN, ^response_task_monitor, :process, ^response_task, :normal}, @handoff_detection_timeout_ms
+    assert %{active_turn: nil, native_compaction_admission: %NativeCompactionAdmission{phase: :pending_compact, binding: admission_binding}, ordinary_success_result: nil} = :sys.get_state(owner)
+    assert admission_binding.previous_response_digest == receipt.response_digest
+    assert {admission_binding.lifecycle_id, admission_binding.generation} == {receipt.lifecycle.lifecycle_id, receipt.lifecycle.generation}
     assert [request] = request_logs(setup.pool.id)
     assert request.status == "succeeded"
     assert request.response_status_code == 200
@@ -137,7 +158,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.DispatchTe
     fn upstream_pid, payload, writer ->
       observed_writer = completed_only_arbitration_writer(writer, order, parent, barrier)
       result = real_sender.(upstream_pid, payload, observed_writer)
-      send(parent, {:arbitration_result, barrier, self()})
+      send(parent, {:arbitration_result, barrier, self(), result})
 
       receive do
         {:arbitration_release, ^barrier} -> result
@@ -659,7 +680,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.DispatchTe
 
     assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
     assert state.request_response_work_started?
-    owner_worker_pid = assert_blocking_owner_upstream_received!(release_ref)
+    {state, owner_worker_pid} = assert_blocking_owner_upstream_received!(state, release_ref)
 
     try do
       logs =

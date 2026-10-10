@@ -13,6 +13,54 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
   end
 
   describe "from_json/1" do
+    test "present invalid root usage blocks direct response and output item counters" do
+      counters = %{"input_tokens" => 10, "output_tokens" => 2, "total_tokens" => 12}
+
+      for invalid <- [nil, 42, "invalid", [], [counters], %{}, %{"input_tokens" => -1}],
+          fallback <- [%{"response" => %{"usage" => counters}}, %{"output" => [%{"response" => %{"usage" => counters}}]}] do
+        decoded = Map.put(fallback, "usage", invalid)
+
+        for usage <- [ResponseUsage.from_decoded(decoded), ResponseUsage.from_json(CodexPooler.JSON.encode!(decoded))] do
+          assert %{status: "usage_unknown", source: "invalid_usage_tokens"} = usage
+          refute Map.has_key?(usage, :input_tokens)
+        end
+      end
+    end
+
+    test "valid root and direct response usage retain precedence over output items" do
+      root = %{"input_tokens" => 10, "output_tokens" => 2, "total_tokens" => 12}
+      direct = %{"input_tokens" => 20, "output_tokens" => 4, "total_tokens" => 24}
+      nested = %{"input_tokens" => 30, "output_tokens" => 6, "total_tokens" => 36}
+      decoded = %{"usage" => root, "response" => %{"usage" => direct}, "output" => [%{"response" => %{"usage" => nested}}]}
+
+      for {envelope, expected} <- [{decoded, 12}, {Map.delete(decoded, "usage"), 24}, {Map.drop(decoded, ["usage", "response"]), 36}],
+          usage <- [ResponseUsage.from_decoded(envelope), ResponseUsage.from_json(CodexPooler.JSON.encode!(envelope))] do
+        assert %{status: "usage_known", total_tokens: ^expected} = usage
+      end
+    end
+
+    test "present invalid direct response usage blocks output item counters" do
+      counters = %{"input_tokens" => 10, "output_tokens" => 2, "total_tokens" => 12}
+
+      for invalid <- [nil, 42, "invalid", [], [counters], %{}, %{"input_tokens" => -1}] do
+        decoded = %{"response" => %{"usage" => invalid}, "output" => [%{"response" => %{"usage" => counters}}]}
+
+        for usage <- [ResponseUsage.from_decoded(decoded), ResponseUsage.from_json(CodexPooler.JSON.encode!(decoded))] do
+          assert %{status: "usage_unknown", source: "invalid_usage_tokens"} = usage
+          refute Map.has_key?(usage, :input_tokens)
+        end
+      end
+    end
+
+    test "valid nested reasoning is authoritative even when a flat counter disagrees" do
+      for {nested, flat, expected} <- [{0, 3, "usage_known"}, {2, 3, "usage_known"}, {3, 0, "usage_unknown"}] do
+        body = CodexPooler.JSON.encode!(%{"usage" => %{"input_tokens" => 10, "output_tokens" => 2, "reasoning_tokens" => flat, "output_tokens_details" => %{"reasoning_tokens" => nested}}})
+        parsed = ResponseUsage.from_json(body)
+        assert parsed.status == expected
+        if expected == "usage_known", do: assert(parsed.reasoning_tokens == nested)
+      end
+    end
+
     test "extracts flat usage from JSON responses" do
       body =
         CodexPooler.JSON.encode!(%{

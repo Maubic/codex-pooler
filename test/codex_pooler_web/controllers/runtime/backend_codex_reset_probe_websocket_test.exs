@@ -4,6 +4,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexResetProbeWebsocketTest do
   import Ecto.Query
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
 
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport,
+    only: [receive_socket_upstream_barrier!: 3]
+
   alias CodexPooler.Access
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
   alias CodexPooler.FakeUpstream
@@ -276,7 +279,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexResetProbeWebsocketTest do
                state
              )
 
-    assert_receive {:fake_upstream_chunk_barrier, 0, upstream_pid, ^release_ref}, @detection_timeout_ms
+    {state, upstream_pid} = receive_socket_upstream_barrier!(state, {:fake_upstream_chunk_barrier, 0, release_ref}, @detection_timeout_ms)
     assert [response_task_pid] = MapSet.to_list(state.tasks)
     response_task_monitor = Process.monitor(response_task_pid)
 

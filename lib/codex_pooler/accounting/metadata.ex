@@ -200,6 +200,39 @@ defmodule CodexPooler.Accounting.Metadata do
 
   def merge_request_metadata(_request, _metadata, _opts), do: {:error, :invalid_request}
 
+  @doc "Records the server's idle cutoff after the gateway validated the exact active request and attempt."
+  @spec record_downstream_idle_timeout(Request.t(), CodexPooler.Accounting.Attempt.t() | nil, String.t()) :: :ok
+  def record_downstream_idle_timeout(request, attempt, client_activity) do
+    receipt = %{"origin" => "server", "cause" => "idle_timeout", "client_activity" => client_activity}
+    patch = %{"downstream_interruption" => sanitize_downstream_interruption(receipt)}
+    {:ok, _request} = merge_request_metadata(request, patch)
+
+    if attempt do
+      from(a in CodexPooler.Accounting.Attempt,
+        where: a.id == ^attempt.id,
+        update: [set: [response_metadata: fragment("COALESCE(?, '{}'::jsonb) || ?", a.response_metadata, type(^patch, :map))]]
+      )
+      |> Repo.update_all([])
+    end
+
+    :ok
+  end
+
+  @doc "A new attempt owns the request outcome; earlier interruption evidence stays on its own attempt."
+  @spec clear_downstream_interruption!(Request.t()) :: Request.t()
+  def clear_downstream_interruption!(%Request{request_metadata: metadata} = request) do
+    if is_map(metadata) and Map.has_key?(metadata, "downstream_interruption"),
+      do: request |> Ecto.Changeset.change(request_metadata: Map.delete(metadata, "downstream_interruption")) |> Repo.update!(),
+      else: request
+  end
+
+  defp sanitize_downstream_interruption(%{"origin" => "server", "cause" => "idle_timeout"} = value) do
+    activity = if value["client_activity"] in ~w(pong_observed unknown), do: value["client_activity"], else: "unknown"
+    %{"origin" => "server", "cause" => "idle_timeout", "client_activity" => activity}
+  end
+
+  defp sanitize_downstream_interruption(_value), do: %{}
+
   # A provider-declared model identifier is bounded, never erased: a plain
   # ASCII identifier of at most 80 bytes stays cleartext, the shape every
   # catalog model id has, and anything else records a 12-character SHA-256
@@ -385,16 +418,27 @@ defmodule CodexPooler.Accounting.Metadata do
   defp tap_request_log_event(result, _reason), do: result
 
   defp deep_merge(left, right) when is_map(left) and is_map(right) do
-    Map.merge(left, right, fn _key, left_value, right_value ->
+    Map.merge(left, right, fn key, left_value, right_value ->
+      left_value = clear_previous_preference(key, left_value, right_value)
       deep_merge(left_value, right_value)
     end)
   end
 
   defp deep_merge(_left, right), do: right
 
+  # A complete route plan replaces the preference assessment. Partial selected
+  # candidate updates retain the plan, and attempt metadata keeps its history.
+  defp clear_previous_preference("routing", left, %{"strategy" => _strategy}) when is_map(left),
+    do: Map.drop(left, ~w(session_preference_kind session_preference_status session_preference_diagnostics))
+
+  defp clear_previous_preference(_key, left, _right), do: left
+
   defp sanitize_value(value, key)
        when key in [:native_replay_preparation, "native_replay_preparation"],
        do: ReplayPreparation.sanitize(value)
+
+  defp sanitize_value(value, key) when key in [:downstream_interruption, "downstream_interruption"],
+    do: sanitize_downstream_interruption(value)
 
   defp sanitize_value(value, key) when key in [:usage_observation, "usage_observation"],
     do: sanitize_usage_observation(value)

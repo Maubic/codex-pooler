@@ -44,6 +44,16 @@ defmodule CodexPooler.Accounting.RequestOutcomeTest do
     end
   end
 
+  test "server idle cutoff is a failure without changing the stored disconnect code" do
+    row = %Request{status: "failed", last_error_code: "client_disconnected", request_metadata: %{"downstream_interruption" => %{"origin" => "server", "cause" => "idle_timeout", "client_activity" => "pong_observed"}}}
+    refute RequestOutcome.client_cancelled?(row)
+    assert RequestOutcome.display_status(row) == "failed"
+    assert RequestOutcome.display_status(%{row | status: "succeeded"}) == "succeeded"
+    assert RequestOutcome.client_cancelled?(%{row | request_metadata: %{}})
+    refute RequestOutcome.client_cancelled?(%{status: "succeeded", last_error_code: "client_disconnected", client_cancelled?: true})
+    refute RequestOutcome.client_cancelled?(%{status: "failed", last_error_code: "client_disconnected", client_cancelled?: false})
+  end
+
   describe "query conditions" do
     setup do
       pool = pool_fixture()
@@ -61,6 +71,7 @@ defmodule CodexPooler.Accounting.RequestOutcomeTest do
         Enum.map(@kept_out_codes, &request_fixture(context, %{status: "failed", last_error_code: &1, response_status_code: 499})) ++
           [
             request_fixture(context, %{status: "failed", last_error_code: nil, response_status_code: 502}),
+            request_fixture(context, %{status: "failed", last_error_code: "client_disconnected", request_metadata: %{"downstream_interruption" => %{"origin" => "server", "cause" => "idle_timeout", "client_activity" => "unknown"}}}),
             request_fixture(context, %{status: "succeeded", last_error_code: "client_disconnected"}),
             request_fixture(context, %{status: "rejected", last_error_code: "client_disconnected", response_status_code: 499}),
             request_fixture(context)

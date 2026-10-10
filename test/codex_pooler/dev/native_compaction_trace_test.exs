@@ -1115,18 +1115,13 @@ defmodule CodexPooler.Dev.NativeCompactionTraceTest do
     root = private_root("endpoint-full")
 
     started =
-      :post
-      |> Plug.Test.conn(
-        "/start",
-        CodexPooler.JSON.encode!(%{
-          "run" => "endpoint-full",
-          "mode" => "full",
-          "includeModules" => [inspect(NativeAdmission)],
-          "maxEvents" => 1,
-          "maxBytes" => 64_000
-        })
-      )
-      |> TracePlug.call([])
+      trace_start(%{
+        "run" => "endpoint-full",
+        "mode" => "full",
+        "includeModules" => [inspect(NativeAdmission)],
+        "maxEvents" => 1,
+        "maxBytes" => 64_000
+      })
 
     assert started.status == 200
     body = CodexPooler.JSON.decode!(started.resp_body)
@@ -1153,19 +1148,14 @@ defmodule CodexPooler.Dev.NativeCompactionTraceTest do
 
   test "dev trace endpoint locks the F3 happy preset module scope and budgets" do
     started =
-      :post
-      |> Plug.Test.conn(
-        "/start",
-        CodexPooler.JSON.encode!(%{
-          "run" => "f3-happy",
-          "mode" => "safe",
-          "preset" => "f3_happy",
-          "includeModules" => [inspect(NativeAdmission)],
-          "maxEvents" => 1,
-          "maxBytes" => 4_096
-        })
-      )
-      |> TracePlug.call([])
+      trace_start(%{
+        "run" => "f3-happy",
+        "mode" => "safe",
+        "preset" => "f3_happy",
+        "includeModules" => [inspect(NativeAdmission)],
+        "maxEvents" => 1,
+        "maxBytes" => 4_096
+      })
 
     assert started.status == 200
     body = CodexPooler.JSON.decode!(started.resp_body)
@@ -1601,6 +1591,70 @@ defmodule CodexPooler.Dev.NativeCompactionTraceTest do
     Enum.reverse(found) == expected
   end
 
+  for scenario <- [:normal, :repeated_start, :assertion_unwind] do
+    test "endpoint cleanup callbacks remove owned paths and preserve a canary after #{scenario}" do
+      paths = endpoint_cleanup_witness!()
+
+      case unquote(scenario) do
+        :normal ->
+          path = witnessed_endpoint_start!(paths, "cleanup-normal")
+          assert :ok = NativeCompactionTrace.stop_scope()
+          assert File.exists?(path)
+
+        :repeated_start ->
+          first = witnessed_endpoint_start!(paths, "cleanup-first")
+          second = witnessed_endpoint_start!(paths, "cleanup-reset")
+          assert first != second
+          assert File.exists?(first)
+          assert File.exists?(second)
+
+        :assertion_unwind ->
+          assert_raise ExUnit.AssertionError, fn ->
+            witnessed_endpoint_start!(paths, "cleanup-unwind")
+            flunk("synthetic assertion after endpoint start")
+          end
+      end
+    end
+  end
+
+  defp endpoint_cleanup_witness! do
+    root = Path.join(System.tmp_dir!(), "codex-pooler-native-compaction-traces")
+    existed? = File.exists?(root)
+    canary = Path.join(root, "unrelated-canary-#{System.unique_integer([:positive])}")
+
+    on_exit(fn ->
+      remove_endpoint_trace!(canary)
+      if not existed?, do: remove_owned_empty_trace_root(root)
+    end)
+
+    File.mkdir_p!(root)
+    File.touch!(canary)
+    {:ok, paths} = Agent.start(fn -> [] end)
+    on_exit(fn -> Agent.stop(paths) end)
+
+    # Registered before endpoint starts, so this verifier runs after their
+    # actual ExUnit callbacks. The Agent deliberately outlives the test process.
+    on_exit(fn ->
+      owned = Agent.get(paths, & &1)
+      assert owned != []
+      assert Process.whereis(NativeCompactionTrace) == nil
+      for path <- owned, do: refute(File.exists?(path))
+      assert File.exists?(canary)
+      CodexPooler.TestDiagnostics.puts("endpoint-cleanup owned_absent=#{length(owned)} canary_preserved=true collector_stopped=true")
+    end)
+
+    paths
+  end
+
+  defp witnessed_endpoint_start!(paths, label) do
+    conn = trace_start(%{"run" => label, "mode" => "full", "includeModules" => [inspect(NativeAdmission)]})
+    assert conn.status == 200
+    path = CodexPooler.JSON.decode!(conn.resp_body)["path"]
+    Agent.update(paths, &[path | &1])
+    assert File.exists?(path)
+    path
+  end
+
   defp private_root(label) do
     root =
       Path.join(
@@ -1616,9 +1670,52 @@ defmodule CodexPooler.Dev.NativeCompactionTraceTest do
   defp read_entries(path), do: path |> File.stream!() |> Enum.map(&CodexPooler.JSON.decode!/1)
 
   defp trace_start(body) do
-    :post
-    |> Plug.Test.conn("/start", CodexPooler.JSON.encode!(body))
-    |> TracePlug.call([])
+    # The endpoint intentionally uses its default diagnostic root. Own only
+    # this invocation's returned file, never every file in that shared root.
+    root = Path.join(System.tmp_dir!(), "codex-pooler-native-compaction-traces")
+    root_existed? = File.exists?(root)
+
+    conn =
+      :post
+      |> Plug.Test.conn("/start", CodexPooler.JSON.encode!(body))
+      |> TracePlug.call([])
+
+    register_endpoint_trace_cleanup(conn, root, root_existed?)
+    conn
+  end
+
+  defp register_endpoint_trace_cleanup(%Plug.Conn{status: 200, resp_body: body}, root, root_existed?) do
+    case CodexPooler.JSON.decode!(body) do
+      %{"path" => path} when is_binary(path) ->
+        on_exit(fn -> cleanup_endpoint_trace!(path, root, root_existed?) end)
+
+      _safe_trace_without_file ->
+        :ok
+    end
+  end
+
+  defp register_endpoint_trace_cleanup(_conn, _root, _root_existed?), do: :ok
+
+  defp cleanup_endpoint_trace!(path, root, root_existed?) do
+    :ok = NativeCompactionTrace.stop_scope()
+    remove_endpoint_trace!(path)
+    if not root_existed?, do: remove_owned_empty_trace_root(root)
+  end
+
+  defp remove_endpoint_trace!(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> flunk("endpoint trace cleanup failed: #{inspect(reason)}")
+    end
+  end
+
+  defp remove_owned_empty_trace_root(root) do
+    case File.rmdir(root) do
+      :ok -> :ok
+      {:error, reason} when reason in [:enoent, :eexist, :enotempty] -> :ok
+      {:error, reason} -> flunk("endpoint trace directory cleanup failed: #{inspect(reason)}")
+    end
   end
 
   defp sensitivity_state(status, pid),

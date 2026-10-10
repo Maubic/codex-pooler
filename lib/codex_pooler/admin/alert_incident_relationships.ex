@@ -11,6 +11,7 @@ defmodule CodexPooler.Admin.AlertIncidentRelationships do
 
   alias CodexPooler.Accounts.Scope
   alias CodexPooler.Alerts
+  alias CodexPooler.Alerts.Delivery.PendingRecovery
 
   alias CodexPooler.Alerts.Schemas.{
     AlertChannel,
@@ -265,7 +266,7 @@ defmodule CodexPooler.Admin.AlertIncidentRelationships do
 
   defp delivery_summary(attempts, channel_lookup) do
     sent_count = Enum.count(attempts, &(&1.status == AlertDeliveryAttempt.sent_status()))
-    attention_count = Enum.count(attempts, &(&1.status in ["retryable", "failed"]))
+    attention_count = Enum.count(attempts, &(&1.status in ["retryable", "failed"] or PendingRecovery.unresolved?(&1)))
     latest_status = attempts |> List.first() |> then(&(&1 && &1.status))
 
     %{
@@ -290,8 +291,8 @@ defmodule CodexPooler.Admin.AlertIncidentRelationships do
       completed_at: attempt.completed_at,
       response_status_code: attempt.response_status_code,
       retryable: attempt.retryable,
-      failure_code: safe_optional_text(attempt.failure_code),
-      failure_message: safe_optional_text(attempt.failure_message),
+      failure_code: safe_optional_text(attempt.failure_code || if(PendingRecovery.unresolved?(attempt), do: "alert_delivery_unresolved")),
+      failure_message: safe_optional_text(attempt.failure_message || if(PendingRecovery.unresolved?(attempt), do: "delivery outcome unresolved; execution evidence unavailable")),
       response_metadata: safe_attempt_metadata(attempt.response_metadata),
       failure_metadata: safe_attempt_metadata(attempt.failure_metadata)
     }

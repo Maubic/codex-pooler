@@ -377,6 +377,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocketPreparedFrameProvenanceTest do
         dispatched_state
       end
 
+    dispatched_state = prepare_native_task!(dispatched_state)
     assert_receive {:provenance_unexpected_send, _worker}, @detection_timeout_ms
     assert %{suspended_replay: nil, pending_handoff: nil} = :sys.get_state(owner_pid)
     assert [%{} = interrupted | _dispatched] = request_logs(setup.pool.id)
@@ -428,6 +429,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocketPreparedFrameProvenanceTest do
     assert {:ok, first_state} =
              CodexResponsesSocket.handle_in({final_turn_frame(model, "provenance-live-turn-a"), [opcode: :text]}, first_state)
 
+    first_state = prepare_native_task!(first_state)
     assert_receive {:provenance_predecessor_started, predecessor}, @detection_timeout_ms
     {:ok, owner_pid} = WebsocketOwnerSession.lookup(first_state.codex_session.id)
 
@@ -447,6 +449,39 @@ defmodule CodexPoolerWeb.CodexResponsesSocketPreparedFrameProvenanceTest do
     assert reconnect_state.codex_session.id == first_state.codex_session.id
 
     {first_state, reconnect_state, owner_pid, predecessor}
+  end
+
+  # Both reconnect sockets share this mailbox; only the current socket's
+  # tracked task may prepare its lane or update its cleanup authority.
+  defp prepare_native_task!(state) do
+    assert [task] = MapSet.to_list(state.tasks)
+    deadline = System.monotonic_time(:millisecond) + @detection_timeout_ms
+    receive_native_task_preparation!(state, task, deadline)
+  end
+
+  defp receive_native_task_preparation!(state, task, deadline) do
+    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:native_response_steering_prepare, ^task, _ref, _context, _callbacks} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        assert is_pid(state.native_response_steering)
+        state
+
+      {:websocket_owner_cleanup_witness, _correlation, _epoch, ^task, _witness} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        receive_native_task_preparation!(state, task, deadline)
+
+      {:websocket_response_activity, ^task, _token} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        receive_native_task_preparation!(state, task, deadline)
+
+      {:direct_request_cleanup, ^task, _ref, _receipt} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        receive_native_task_preparation!(state, task, deadline)
+    after
+      remaining_ms -> flunk("expected the current socket task's native response preparation")
+    end
   end
 
   # Ends the provider stream the interrupted turn is still holding, so the
@@ -477,7 +512,8 @@ defmodule CodexPoolerWeb.CodexResponsesSocketPreparedFrameProvenanceTest do
         {:ok, state} = CodexResponsesSocket.handle_info(message, state)
         deliver_owner_frames!(state, expected)
 
-      {:websocket_response_activity, _, _} = message ->
+      message
+      when elem(message, 0) in [:native_response_steering_prepare, :websocket_owner_cleanup_witness, :websocket_response_activity, :direct_request_cleanup] ->
         {:ok, state} = CodexResponsesSocket.handle_info(message, state)
         deliver_owner_frames!(state, expected)
     after
@@ -521,7 +557,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocketPreparedFrameProvenanceTest do
   # the owner's frames for the second downstream (its correlation and epoch)
   # and the task's own messages. The first socket's messages, which share this
   # mailbox, stay where they are.
-  @dispatched_task_messages [:websocket_response_activity, :codex_response_done, :websocket_response_delivery_complete, :direct_request_cleanup]
+  @dispatched_task_messages [:native_response_steering_prepare, :websocket_response_activity, :codex_response_done, :websocket_response_delivery_complete, :direct_request_cleanup]
 
   defp settle_dispatched_turn!(state) do
     assert [task] = MapSet.to_list(state.tasks)
@@ -553,6 +589,14 @@ defmodule CodexPoolerWeb.CodexResponsesSocketPreparedFrameProvenanceTest do
 
   defp settle_task!(state, task) do
     receive do
+      {:native_response_steering_prepare, ^task, _ref, _context, _callbacks} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        settle_task!(state, task)
+
+      {:direct_request_cleanup, ^task, _ref, _receipt} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        settle_task!(state, task)
+
       {:websocket_response_activity, ^task, _token} = message ->
         assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
         settle_task!(state, task)

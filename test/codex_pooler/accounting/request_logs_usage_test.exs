@@ -15,6 +15,30 @@ defmodule CodexPooler.Accounting.RequestLogsUsageTest do
 
   import CodexPooler.PoolerFixtures
 
+  test "local Codex usage reset countdown uses the requested snapshot time" do
+    as_of = ~U[2026-09-01 12:00:00.000000Z]
+
+    %{pool: pool, api_key: api_key} = active_api_key_fixture()
+    ensure_default_policy!(api_key)
+
+    assert {:ok, usage} = Accounting.build_codex_usage_for_api_key(pool, api_key, as_of: as_of)
+    assert usage.plan_type == "api_key"
+
+    assert usage.rate_limit.primary_window == %{
+             used_percent: 0,
+             limit_window_seconds: 86_400,
+             reset_after_seconds: 43_200,
+             reset_at: DateTime.to_unix(~U[2026-09-02 00:00:00Z])
+           }
+
+    assert usage.rate_limit.secondary_window == nil
+
+    assert {:ok, later_usage} =
+             Accounting.build_codex_usage_for_api_key(pool, api_key, as_of: DateTime.add(as_of, 61, :second))
+
+    assert later_usage.rate_limit.primary_window == %{usage.rate_limit.primary_window | reset_after_seconds: 43_139}
+  end
+
   test "pre-attempt failure retains admission without provisional or measured request-log spend" do
     setup = CodexPooler.AccountingTestSupport.accounting_setup()
     as_of = ~U[2026-09-20 12:00:00.000000Z]

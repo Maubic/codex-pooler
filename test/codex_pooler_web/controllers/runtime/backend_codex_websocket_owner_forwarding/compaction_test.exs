@@ -152,6 +152,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Compaction
     _revision = set_model_serving_mode!(scope, setup, "full")
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
     {:ok, state} = owner_socket(auth, "ws-owner-native-collect", "owner-native-collect")
+    socket_state_key = make_ref()
+    Process.put(socket_state_key, state)
     native_turn_id = "owner-native-collect-turn"
     context_window_id = "00000000-0000-4000-8000-000000000505"
 
@@ -191,14 +193,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Compaction
       assert {:ok, state} =
                CodexResponsesSocket.handle_in({anchor_payload, [opcode: :text]}, state)
 
+      Process.put(socket_state_key, state)
+
       assert {:push, {:text, anchor_frame}, state} = receive_owner_socket_push(state)
+      Process.put(socket_state_key, state)
 
       assert %{"response" => %{"id" => "resp_owner_collect_anchor"}} =
                CodexPooler.JSON.decode!(anchor_frame)
 
       assert {:push, {:text, anchor_terminal_frame}, state} = receive_owner_socket_push(state)
+      Process.put(socket_state_key, state)
       assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(anchor_terminal_frame)
       assert {:ok, state} = receive_socket_done(state)
+      Process.put(socket_state_key, state)
 
       compact_payload =
         CodexPooler.JSON.encode!(%{
@@ -225,13 +232,18 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Compaction
       assert {:ok, state} =
                CodexResponsesSocket.handle_in({compact_payload, [opcode: :text]}, state)
 
+      Process.put(socket_state_key, state)
+
       assert {:push, {:text, done_frame}, state} = receive_native_collect_socket_push(state)
+      Process.put(socket_state_key, state)
 
       assert %{"type" => "response.output_item.done", "item" => ^compact_item} =
                CodexPooler.JSON.decode!(done_frame)
 
       assert {:push, {:text, completed_frame}, state} = receive_native_collect_socket_push(state)
+      Process.put(socket_state_key, state)
       assert {:ok, state} = receive_socket_done(state)
+      Process.put(socket_state_key, state)
 
       assert %{
                "type" => "response.completed",
@@ -301,6 +313,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Compaction
       assert {:ok, state} =
                CodexResponsesSocket.handle_in({final_payload, [opcode: :text]}, state)
 
+      Process.put(socket_state_key, state)
+      state = receive_native_response_steering_prepared!(state)
+      Process.put(socket_state_key, state)
+
       assert_receive {:fake_upstream_frame_barrier, 0, _handler, ^final_release_ref},
                      @handoff_detection_timeout_ms
 
@@ -332,6 +348,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Compaction
       end
 
       assert {:ok, state} = receive_socket_done(state)
+      Process.put(socket_state_key, state)
 
       assert_receive {:fake_upstream_frame_barrier, 2, _handler, ^final_release_ref},
                      @handoff_detection_timeout_ms
@@ -398,7 +415,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Compaction
       assert final_log.transport == "websocket"
       assert :ok = FakeUpstream.verify!(upstream)
     after
-      CodexResponsesSocket.terminate(:closed, state)
+      CodexResponsesSocket.terminate(:closed, Process.delete(socket_state_key))
     end
   end
 

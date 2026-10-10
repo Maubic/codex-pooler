@@ -95,7 +95,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RolloutDra
 
     payload = websocket_payload(setup, "deadline expiry while owner turn is active")
     assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
-    owner_worker_pid = assert_blocking_owner_upstream_received!(release_ref)
+    {state, owner_worker_pid} = assert_blocking_owner_upstream_received!(state, release_ref)
 
     assert [turn] =
              Repo.all(
@@ -304,7 +304,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RolloutDra
 
     payload = websocket_payload(setup, "disconnect while rollout drain waits")
     assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
-    owner_worker_pid = assert_blocking_owner_upstream_received!(release_ref)
+    {state, owner_worker_pid} = assert_blocking_owner_upstream_received!(state, release_ref)
     owner_pid = state.websocket_owner_pid
     owner_ref = Process.monitor(owner_pid)
 
@@ -404,6 +404,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RolloutDra
 
     payload = websocket_payload(setup, "synthetic rollout terminal ordering")
     assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
+    state = receive_native_response_steering_prepared!(state)
 
     assert_receive {:fake_upstream_websocket_barrier, :before_terminal, barrier_pid, ^release_ref},
                    @detection_budget_ms
@@ -688,7 +689,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RolloutDra
     payload = websocket_payload(setup, "rollout drain while owner request is active")
 
     assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
-    owner_worker_pid = assert_blocking_owner_upstream_received!(release_ref)
+    {state, owner_worker_pid} = assert_blocking_owner_upstream_received!(state, release_ref)
 
     try do
       logs =
@@ -745,7 +746,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RolloutDra
     payload = websocket_payload(setup, "rollout drain while owner request is active")
 
     assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
-    owner_worker_pid = assert_blocking_owner_upstream_received!(release_ref)
+    {state, owner_worker_pid} = assert_blocking_owner_upstream_received!(state, release_ref)
     parent = self()
     owner = state.websocket_owner_pid
     original_persistence = :sys.get_state(owner).persistence
@@ -877,6 +878,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RolloutDra
       })
 
     assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
+    state = receive_native_response_steering_prepared!(state)
 
     assert_receive {:fake_upstream_websocket_barrier, :before_close, upstream_pid, ^release_ref},
                    @detection_budget_ms

@@ -29,6 +29,11 @@ defmodule CodexPooler.Gateway.Persistence.RoutingCircuitState do
     field :next_probe_at, :utc_datetime_usec
     field :last_failure_at, :utc_datetime_usec
     field :last_success_at, :utc_datetime_usec
+    field :probe_generation, :binary_id
+    field :probe_admission_ids, {:array, :binary_id}, default: []
+    # Only the selected runtime state carries its own admission. Reloaded rows
+    # cannot reconstruct a request's ownership from the active admission set.
+    field :probe_receipt, :map, virtual: true
     field :metadata, :map
     field :created_at, :utc_datetime_usec
     field :updated_at, :utc_datetime_usec
@@ -54,6 +59,8 @@ defmodule CodexPooler.Gateway.Persistence.RoutingCircuitState do
       :next_probe_at,
       :last_failure_at,
       :last_success_at,
+      :probe_generation,
+      :probe_admission_ids,
       :metadata,
       :created_at,
       :updated_at

@@ -37,7 +37,7 @@ defmodule CodexPoolerWeb.Admin.ProviderCreditsLiveTest do
     assert has_element?(cockpit, "#provider-credits-observation-details:not([open])")
     assert has_element?(cockpit, "#provider-credits-details", "not a purchased total")
     assert has_element?(list_a, "#{summary(identity)}[title^='Provider credits available;']")
-    assert has_element?(list_a, "#{summary(identity)}-progress[value='99.976'][aria-valuetext='99.976% of observed baseline'].progress-success")
+    assert has_element?(list_a, "#{summary(identity)}-progress[value='99.9'][aria-valuetext='99.9% of observed baseline'].progress-success")
     assert has_element?(list_a, "#upstream-account-#{identity.id}[data-routing-ready-now='true'][data-routing-tone='success']")
     assert has_element?(list_a, "#upstream-account-#{identity.id}-routing-readiness", "Routing ready via credits")
     assert has_element?(list_a, "#upstream-account-#{identity.id}-limit-weekly-progress[value='0']")
@@ -57,7 +57,7 @@ defmodule CodexPoolerWeb.Admin.ProviderCreditsLiveTest do
     await_element!(list_b, "#{summary(identity)}[data-policy-enabled='false']")
     await_element!(list_b, "#provider-credits-enabled:not([checked])")
     assert has_element?(cockpit, "#upstream-provider-credits[data-policy-enabled='false']")
-    assert has_element?(list_a, "#{summary(identity)}-percent", "99.976%")
+    assert has_element?(list_a, "#{summary(identity)}-percent", "99.9%")
     assert has_element?(list_a, "#upstream-account-#{identity.id}[data-routing-ready-now='false']")
     assert has_element?(cockpit, "#upstream-provider-credits-balance", "12,497")
 

@@ -10,6 +10,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
   alias CodexPooler.Gateway.Transports.MisalignmentPolicyViolation
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponses
+  alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser
 
   @type state :: map()
   @type source :: :http | :websocket_bridge
@@ -137,7 +138,8 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
     if ChatCompletions.reconciliation_failed?(stream_state), do: {:failed, nil}
   end
 
-  def terminal_outcome(%{native_terminal_outcome: :completed}), do: :completed
+  def terminal_outcome(%{native_terminal_outcome: {:failed, failure}}), do: {:failed, failure}
+  def terminal_outcome(%{native_terminal_outcome: kind}) when kind in [:completed, :incomplete], do: kind
   def terminal_outcome(_state), do: nil
 
   @spec synthetic_terminal_failure(state(), term()) :: {binary() | nil, state()}
@@ -275,7 +277,8 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
 
   @spec native_http_tool_metadata(state()) :: map()
   def native_http_tool_metadata(%{native_http_tool_observation: observation} = state) do
-    complete? = get_in(state, [:codex_responses_sse_block_state, :buffer]) == ""
+    parser = Map.get(state, :codex_responses_sse_block_state, %{})
+    complete? = parser[:buffer] == "" and Map.get(parser, :carry, "") == "" and not Map.get(parser, :discarding?, false)
     %{"native_http_partial_tool" => NativeHttpToolObservation.metadata(observation, complete?)}
   end
 
@@ -363,86 +366,81 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
   defp normalize_public_openai_responses_stream_data(data, state), do: {data, state}
 
   defp normalize_codex_responses_stream_data(data, endpoint, opts, state) when is_binary(data) do
-    sse_block_state =
-      Map.get(state, :codex_responses_sse_block_state, StreamProtocol.new_sse_block_state())
+    parser = Map.get(state, :codex_responses_sse_block_state, SSEParser.new_observation_state(preamble_policy?: state.target != :websocket))
 
-    buffer = sse_block_state.buffer
-
-    if not Map.has_key?(state, :native_http_tool_observation) and
-         buffer == "" and not sse_block_state.skip_leading_lf? and
-         not codex_responses_sse_chunk?(data) do
+    if not Map.has_key?(state, :native_http_tool_observation) and parser.buffer == "" and
+         not parser.skip_leading_lf? and not parser.discarding? and parser.carry == "" and
+         not codex_responses_sse_chunk?(data) and not possible_sse_prefix?(data) do
       {data, state, nil}
     else
-      previous_buffer = buffer
-      buffered_size = byte_size(previous_buffer) + byte_size(data)
-
-      {blocks, sse_block_state} =
-        StreamProtocol.complete_sse_blocks(sse_block_state, data, bounded?: true)
-
-      buffer = sse_block_state.buffer
-      parsed = Enum.map(blocks, &NativeSSEBlock.parse/1)
-
-      {data, delivery} =
-        if oversized_incomplete_sse_prefix?(blocks, buffer, buffered_size) do
-          BufferTelemetry.record_oversized_incomplete(
-            "codex_responses_sse",
-            buffered_size,
-            StreamProtocol.max_incomplete_sse_block_bytes(),
-            request_options: opts,
-            endpoint: endpoint
-          )
-
-          {previous_buffer <> data, nil}
-        else
-          normalize_native_blocks(parsed, opts, state)
-        end
-
-      state =
-        state
-        |> Map.put(:codex_responses_sse_block_state, sse_block_state)
-        |> observe_native_http_tool_blocks(parsed, buffered_size > StreamProtocol.max_incomplete_sse_block_bytes())
-        |> observe_content_filter_blocks(parsed, buffered_size > StreamProtocol.max_incomplete_sse_block_bytes())
-        |> stage_native_http_progress(parsed)
-        |> track_native_completion(parsed)
-
-      {data, state, delivery}
+      {parts, parser} = SSEParser.observe_blocks(parser, data)
+      observe_native_parts(parts, parser, endpoint, opts, state)
     end
   end
 
-  defp normalize_codex_responses_stream_data(data, _endpoint, _opts, state),
-    do: {data, state, nil}
+  defp normalize_codex_responses_stream_data(data, _endpoint, _opts, state), do: {data, state, nil}
 
-  # An upstream EOF can supply the only missing SSE blank line. The ordinary
-  # incremental path retains that structurally complete final block while it
-  # waits for the separator; at EOF, feed just the terminator into the same
-  # bounded parser and normalization path. Incomplete residue remains withheld.
-  defp flush_codex_responses_sse_eof(
-         opts,
-         %{codex_responses_sse_block_state: %{buffer: buffer} = sse_block_state} = state
-       )
-       when is_binary(buffer) and buffer != "" do
-    {blocks, sse_block_state} =
-      StreamProtocol.complete_sse_blocks(sse_block_state, "\n\n", bounded?: true)
-
-    if blocks != [] and String.trim(sse_block_state.buffer) == "" do
-      parsed = Enum.map(blocks, &NativeSSEBlock.parse/1)
-      {data, delivery} = normalize_native_blocks(parsed, opts, state)
-
-      state =
-        state
-        |> Map.put(:codex_responses_sse_block_state, sse_block_state)
-        |> observe_native_http_tool_blocks(parsed, false)
-        |> observe_content_filter_blocks(parsed, false)
-        |> stage_native_http_progress(parsed)
-        |> track_native_completion(parsed)
-
-      {data, state, delivery}
-    else
-      {"", state, nil}
-    end
+  defp flush_codex_responses_sse_eof(opts, %{codex_responses_sse_block_state: parser} = state) do
+    {parts, parser} = SSEParser.finish_observation(parser)
+    observe_native_parts(parts, parser, "/backend-api/codex/responses", opts, state)
   end
 
   defp flush_codex_responses_sse_eof(_opts, state), do: {"", state, nil}
+
+  defp observe_native_parts(parts, parser, endpoint, opts, state) do
+    private_details? = state.target != :websocket and MisalignmentPolicyViolation.details_allowed?(opts)
+
+    {outputs, parsed} =
+      Enum.map_reduce(parts, [], fn
+        {:block, raw, separator}, parsed ->
+          block = NativeSSEBlock.parse(raw, separator)
+          {NativeSSEBlock.normalize(block, private_details?), [block | parsed]}
+
+        {:preamble_unparsed, raw}, parsed ->
+          {{raw, %{NativeSSEBlock.parse("", "") | preamble_guard?: true, preamble_fragment?: true}}, parsed}
+
+        {:unparsed, raw}, parsed ->
+          {{raw, NativeSSEBlock.parse("", "")}, parsed}
+
+        {:passthrough, raw}, parsed ->
+          {{raw, NativeSSEBlock.parse("", "")}, parsed}
+
+        {:preamble_overflow, raw, limit}, parsed ->
+          BufferTelemetry.record_oversized_incomplete("codex_responses_sse", IO.iodata_length(raw), limit, request_options: opts, endpoint: endpoint)
+          {{raw, %{NativeSSEBlock.parse("", "") | preamble_guard?: true}}, parsed}
+
+        {:overflow, raw, limit}, parsed ->
+          BufferTelemetry.record_oversized_incomplete("codex_responses_sse", IO.iodata_length(raw), limit, request_options: opts, endpoint: endpoint)
+          {{raw, NativeSSEBlock.parse("", "")}, parsed}
+      end)
+
+    oversized? = Enum.any?(parts, &(match?({:overflow, _, _}, &1) or match?({:preamble_overflow, _, _}, &1) or match?({:preamble_unparsed, _}, &1) or match?({:unparsed, _}, &1)))
+    parsed = Enum.reverse(parsed)
+
+    state =
+      state
+      |> Map.put(:codex_responses_sse_block_state, parser)
+      |> observe_native_http_tool_blocks(parsed, oversized?)
+      |> observe_content_filter_blocks(parsed, oversized?)
+      |> stage_native_http_progress(parsed)
+      |> track_native_completion(parsed)
+
+    data = outputs |> Enum.map(&elem(&1, 0)) |> IO.iodata_to_binary()
+    delivery = if state.target != :websocket, do: NativeSSEBlock.delivery(outputs)
+    {data, state, delivery}
+  end
+
+  defp possible_sse_prefix?(data) do
+    data != "" and Enum.any?(["data:", "event:", ":"], &String.starts_with?(&1, data))
+  end
+
+  @spec native_sse_observation_metadata(state()) :: map()
+  def native_sse_observation_metadata(%{codex_responses_sse_block_state: %{overflow_count: _} = parser} = state) do
+    metadata = parser |> SSEParser.observation_metadata() |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+    %{"native_sse_observation" => metadata |> Map.put("version", 1) |> Map.put("terminal_observed", not is_nil(terminal_outcome(state)))}
+  end
+
+  def native_sse_observation_metadata(_state), do: %{}
 
   defp observe_content_filter_blocks(%{native_content_filter_observation: observation} = state, blocks, oversized?) do
     observation = if oversized?, do: ClientRetry.observe_frame(observation, nil, DateTime.utc_now()), else: observation
@@ -457,9 +455,19 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
   defp track_native_completion(state, blocks) do
     Enum.reduce(blocks, state, fn block, state ->
       case NativeSSEBlock.outcome(block) do
-        {:ok, %{kind: :incomplete} = outcome} -> Map.put_new(state, :native_content_filter_outcome, {:ok, outcome})
-        {:ok, %{kind: :completed}} -> Map.put(state, :native_terminal_outcome, :completed)
-        _outcome -> state
+        {:ok, %{kind: :incomplete} = outcome} ->
+          state
+          |> Map.put(:native_terminal_outcome, :incomplete)
+          |> Map.put_new(:native_content_filter_outcome, {:ok, outcome})
+
+        {:ok, %{kind: :completed}} ->
+          Map.put(state, :native_terminal_outcome, :completed)
+
+        {:ok, %{kind: :failed, failure: failure}} ->
+          Map.put(state, :native_terminal_outcome, {:failed, failure})
+
+        _outcome ->
+          state
       end
     end)
   end
@@ -502,14 +510,6 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
   defp comment_block?(raw),
     do: raw |> String.split(["\r\n", "\n", "\r"]) |> Enum.all?(&(&1 == "" or String.starts_with?(&1, ":")))
 
-  defp normalize_native_blocks(blocks, opts, %{target: target}) do
-    private_details? = target != :websocket and MisalignmentPolicyViolation.details_allowed?(opts)
-    outputs = Enum.map(blocks, &NativeSSEBlock.normalize(&1, private_details?))
-    data = outputs |> Enum.map(&elem(&1, 0)) |> IO.iodata_to_binary()
-    delivery = if target != :websocket, do: NativeSSEBlock.delivery(outputs)
-    {data, delivery}
-  end
-
   defp normalize_endpoint_data("/backend-api/codex/responses", data) when is_binary(data) do
     StreamProtocol.normalize_codex_responses_sse_data(data)
   end
@@ -538,11 +538,6 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
       String.contains?(data, ["\ndata: ", "\rdata: "]) or
       String.contains?(data, ["\n\n", "\n\r", "\r\r"])
   end
-
-  defp oversized_incomplete_sse_prefix?([], "", buffered_size),
-    do: buffered_size > StreamProtocol.max_incomplete_sse_block_bytes()
-
-  defp oversized_incomplete_sse_prefix?(_blocks, _buffer, _buffered_size), do: false
 
   defp public_openai_chat_stream?(%RequestOptions{
          openai_compatibility: %{public_openai_chat_stream: true}

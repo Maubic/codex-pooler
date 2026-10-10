@@ -108,7 +108,7 @@ defmodule CodexPooler.Gateway.Payloads.DebugPayloadSummary do
       },
       "routing" => %{
         "model_present" => is_binary(Map.get(payload, "model")),
-        "reasoning_effort" => get_in(payload, ["reasoning", "effort"]),
+        "reasoning_effort" => reasoning_effort(payload),
         "service_tier" => Map.get(payload, "service_tier")
       }
     }
@@ -287,4 +287,8 @@ defmodule CodexPooler.Gateway.Payloads.DebugPayloadSummary do
   end
 
   defp clean_string(_value), do: nil
+
+  # The client's `reasoning` may be any JSON value; only an object's text effort is summarized (findings#339).
+  defp reasoning_effort(%{"reasoning" => %{"effort" => effort}}) when is_binary(effort), do: effort
+  defp reasoning_effort(_payload), do: nil
 end

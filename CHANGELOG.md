@@ -1,5 +1,425 @@
 # Changelog
 
+## [0.12.3](https://github.com/icoretech/codex-pooler/compare/codex-pooler-v0.12.2...codex-pooler-v0.12.3) (2026-10-10)
+
+
+### Features
+
+* **observatory:** show readable recent-hour request outcomes ([4e4d137](https://github.com/icoretech/codex-pooler/commit/4e4d1378057b45e98c9f4f0797d10d09e2cf2460))
+
+
+### Bug Fixes
+
+* **accounting:** distinguish server idle cutoffs from client cancellations ([28c6cae](https://github.com/icoretech/codex-pooler/commit/28c6caefaf7a6612a65affd2bb8a98df3a0e8787))
+* **admin:** preserve request-log pages during live refresh ([0c310c1](https://github.com/icoretech/codex-pooler/commit/0c310c1e569b64b9c0740814e5a12b6d2ac79437))
+* **admin:** recover valid job pages after filtering and refresh ([e4c1433](https://github.com/icoretech/codex-pooler/commit/e4c143347a94a36a64e939ab5b48eb96251b4ba7))
+* **admin:** remove table status bands and empty ledger tracks ([1cbfcd4](https://github.com/icoretech/codex-pooler/commit/1cbfcd4f67fd1f446bd2375f222483d642303ef0))
+* **admin:** size worker cards to available content width ([8bb9667](https://github.com/icoretech/codex-pooler/commit/8bb96677f65518001b835a5ff5e4c2d8e778a705))
+* **quotas:** report unknown usage receipts with reducer precedence ([188f2a7](https://github.com/icoretech/codex-pooler/commit/188f2a7df600309ed61cac7e107ee0fe3e70a604))
+* **quotas:** retain specific credit authority refusal reasons ([84bff98](https://github.com/icoretech/codex-pooler/commit/84bff9835eb8c35625a20ebed35cc846fc16eca3))
+* **routing:** persist session preference exclusion diagnostics ([2fe5614](https://github.com/icoretech/codex-pooler/commit/2fe5614c3f314089d1d48049987dca0d8ed0cd6c))
+* **websocket:** admit user progress after a compaction-first resume ([04f3a19](https://github.com/icoretech/codex-pooler/commit/04f3a19aa6d5941da1d7633254ba54519e041a74))
+
+
+### Tests
+
+* **websocket:** await committed idle timeout attribution ([5adc55e](https://github.com/icoretech/codex-pooler/commit/5adc55e5dee3736bea43de98729e147974a2e916))
+
+
+### Miscellaneous Chores
+
+* **dev:** add additive Observatory request previews ([8ddba12](https://github.com/icoretech/codex-pooler/commit/8ddba12bc78787a3e7c98ecc2129f3465d88150c))
+
+## [0.12.2](https://github.com/icoretech/codex-pooler/compare/codex-pooler-v0.12.1...codex-pooler-v0.12.2) (2026-10-10)
+
+
+### Tests
+
+* align lock and closed-socket observations with real boundaries ([1b196f3](https://github.com/icoretech/codex-pooler/commit/1b196f3b4789e87878ba17bf004b21afff3c044f))
+* distinguish deadline phases and remote watcher detachment ([be81745](https://github.com/icoretech/codex-pooler/commit/be81745e22f7b983d71d2f0de26fc56a69059d28))
+* distinguish delayed webhook timeout connection phases ([65a2adb](https://github.com/icoretech/codex-pooler/commit/65a2adb944f7bc47c79cbdf5462dd7b3ecb04c67))
+* verify destination closure when CONNECT forwarding ends ([5dfbf5e](https://github.com/icoretech/codex-pooler/commit/5dfbf5ea505b7a23e2e55b367490b14d6ca723f6))
+
+## [0.12.1](https://github.com/icoretech/codex-pooler/compare/codex-pooler-v0.12.0...codex-pooler-v0.12.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* **auth:** apply the full TOTP recovery transaction timeout ([5649258](https://github.com/icoretech/codex-pooler/commit/564925825e06b195a4ccddf55c6fd6a114c521dc))
+* **auth:** recover legacy TOTP encryption offline ([a0f6f89](https://github.com/icoretech/codex-pooler/commit/a0f6f898b2f8f643120ae9baccb3a9d76a568df2))
+* **self-host:** check TOTP upgrade compatibility on the old runtime ([76614a2](https://github.com/icoretech/codex-pooler/commit/76614a2f250b21c4b1b7e940499fa68614a5a5c1))
+* **websocket:** retain steering peer close authority across notifications ([7e0d116](https://github.com/icoretech/codex-pooler/commit/7e0d1166d6c98102fc63f20d0808a399d7d7e9ad))
+
+
+### Tests
+
+* await owner visibility after provider pacing ([db94fea](https://github.com/icoretech/codex-pooler/commit/db94feac1b7cdce4c44a75672f2630d65457608f))
+* bind stale projection holds to the test owner lifetime ([e5e35d9](https://github.com/icoretech/codex-pooler/commit/e5e35d9b0ae1b2573c7c276ae29ded7c9da837c5))
+* include upgrade preflight files in release archive fixtures ([857b89e](https://github.com/icoretech/codex-pooler/commit/857b89e0b4c524b2938daffe5eb36fc6d6ac5182))
+* report bounded peer state when retirement closure is missing ([5448d23](https://github.com/icoretech/codex-pooler/commit/5448d235620f81629bcf59414c4abd7c9d550250))
+* verify endpoint cleanup by owned socket identity ([3315b8e](https://github.com/icoretech/codex-pooler/commit/3315b8ed4b25ede37e729c387d344ca9d66d341b))
+
+
+### Miscellaneous Chores
+
+* **deps:** qualify Codex 0.162.1 catalog decoding ([8765f44](https://github.com/icoretech/codex-pooler/commit/8765f448bda143490e6663bc026be96d9d0fcf85))
+* **deps:** use Codex 0.162.1 in the smoke container ([addf316](https://github.com/icoretech/codex-pooler/commit/addf316934d09c29b98470a9fecd95f46594cdaf))
+
+## [0.12.0](https://github.com/icoretech/codex-pooler/compare/codex-pooler-v0.11.5...codex-pooler-v0.12.0) (2026-10-10)
+
+
+### Bug Fixes
+
+* **access:** reject API key edits from stale policy forms ([44c25aa](https://github.com/icoretech/codex-pooler/commit/44c25aab1dc39f640fafb4765d40e291116fcf60))
+* **accounting:** fence websocket HTTP fallbacks through predecessor policy ([8d7b5fa](https://github.com/icoretech/codex-pooler/commit/8d7b5fa5cee7785a01227f4098386aecf810dcce))
+* **accounting:** preserve invalid JSON usage precedence ([5369f8b](https://github.com/icoretech/codex-pooler/commit/5369f8b9f1f42e64c90931b0bdac6f1cbba8760d))
+* **accounting:** record buffered compact client response status ([c020dde](https://github.com/icoretech/codex-pooler/commit/c020dde956553a27db80a24c5c4cfadbd2c0436e))
+* **accounting:** reject reasoning usage above output tokens ([1f8e3a6](https://github.com/icoretech/codex-pooler/commit/1f8e3a6eae8034d6d88d22333132419225dce555))
+* **accounting:** retain delivery evidence in retryable writes ([360d5cc](https://github.com/icoretech/codex-pooler/commit/360d5cc143e3deba23a7d54faa06f55a73deffbe))
+* **accounts:** refuse replacing an active TOTP enrollment ([486f6df](https://github.com/icoretech/codex-pooler/commit/486f6df91107d38d9f8d0c129e292f6c71ccf3c4))
+* **admin:** reject malformed target identifiers before lookup ([75c48f0](https://github.com/icoretech/codex-pooler/commit/75c48f02144f6ce0c6eea2a1862dcad53fa25d26))
+* **alerts:** bound webhook execution and reconcile revoked pending attempts ([4987ddc](https://github.com/icoretech/codex-pooler/commit/4987ddc13146ff2ec0bbb22eba2bfb81505a9acd))
+* **alerts:** cancel receipt changeset failures without crashing ([fe5ab76](https://github.com/icoretech/codex-pooler/commit/fe5ab76a504adc0e2adc0b0312325eebd652b5ba))
+* **alerts:** keep signed webhooks at the configured endpoint ([9c75370](https://github.com/icoretech/codex-pooler/commit/9c753707242474cb7393b4c2da23eb519ef932bb))
+* **alerts:** pin the task reference when draining its reply ([247bfdf](https://github.com/icoretech/codex-pooler/commit/247bfdf9f189f0a1ef8f6c0234f2d9758f470fce))
+* **alerts:** reconcile persisted delivery jobs directly ([9f972e5](https://github.com/icoretech/codex-pooler/commit/9f972e5d9fb72917feb8939f946b678d9c1d6c27))
+* **auth:** consume accepted TOTP steps atomically ([ccfb2f8](https://github.com/icoretech/codex-pooler/commit/ccfb2f84217d4c23723eb7343d283dde9caf0ba1))
+* **auth:** exclude password hashes from inspected operator state ([996db20](https://github.com/icoretech/codex-pooler/commit/996db203fa6734700270f90b2312580d37b5e23b))
+* **auth:** require a valid production TOTP encryption key ([e402ae5](https://github.com/icoretech/codex-pooler/commit/e402ae5386c6c7d9a4da24a5ff3b60f25215eca6))
+* **catalog:** fence publication with the owned running sync claim ([28a3974](https://github.com/icoretech/codex-pooler/commit/28a3974112183a884a21b043dc7824ed9f94b982))
+* **catalog:** finalize owned sync claims after catchable failures ([a62430b](https://github.com/icoretech/codex-pooler/commit/a62430b86579450df0acb2a680f4fe37c204716b))
+* **catalog:** join OpenAI model metadata case-insensitively ([7ad8a16](https://github.com/icoretech/codex-pooler/commit/7ad8a16414db7e3dc34efccd0b54fd94fd2f582c))
+* **catalog:** retain listings from refreshing sources ([570f505](https://github.com/icoretech/codex-pooler/commit/570f505ebd1f80490b2036d4bf5817e0f747bb49))
+* **catalog:** serialize pool sync claims in PostgreSQL ([eb710ee](https://github.com/icoretech/codex-pooler/commit/eb710ee2a447e3fd21ad39e2d9a43d9284826cc7))
+* **chat:** retain top-level instructions with messages ([2330287](https://github.com/icoretech/codex-pooler/commit/23302872cbb1bceb9c3e151c29caf41e0a392834))
+* **compatibility:** report indexed strict parameter root errors ([157d2ce](https://github.com/icoretech/codex-pooler/commit/157d2ce5624180a6927d51a17fefaeafcb62eefd))
+* **compatibility:** validate instructions before normalization ([52339be](https://github.com/icoretech/codex-pooler/commit/52339bec47eaa7e11f9ffdb1b65fa725a6c593c4))
+* **config:** require a 64-byte production endpoint secret ([f344479](https://github.com/icoretech/codex-pooler/commit/f3444798288cbac110280cbd8455ebdf6fee58de))
+* **deps:** replace deprecated compiler and catch constructs ([e4332fb](https://github.com/icoretech/codex-pooler/commit/e4332fbe4676b98b5c1a424cdc3a5b38aeb45716))
+* **dev:** publish PostgreSQL on loopback by default ([779dd80](https://github.com/icoretech/codex-pooler/commit/779dd800e965607b6de7fd92127b63669f13ba77))
+* **docker:** declare a deterministic numeric release user ([8e455cc](https://github.com/icoretech/codex-pooler/commit/8e455cc8650e3e6bdd128d2fed7393bb6e183113))
+* **files:** honor saved upload limits by default ([78b31b5](https://github.com/icoretech/codex-pooler/commit/78b31b5c04b9e4e4dbae8f90601dd2e22b514b5b))
+* **gateway:** fail over after a refreshed websocket handshake is rejected ([2fc51e2](https://github.com/icoretech/codex-pooler/commit/2fc51e22d2a98844088e77ffa79ec15a453f7752))
+* **gateway:** handle stale settlement in compaction cleanup precedence ([9109247](https://github.com/icoretech/codex-pooler/commit/9109247dd38b5e1f292bf6f542ebf3a0ec661868))
+* **gateway:** match HTTP tool continuations to their websocket predecessors ([b54a1cf](https://github.com/icoretech/codex-pooler/commit/b54a1cf152e1f6954ea70b298b3e01c239564246))
+* **gateway:** preserve expired owner leases until turn recovery ([fee7a8e](https://github.com/icoretech/codex-pooler/commit/fee7a8ee794f5470b68faca62843ae33aafa77b9))
+* **gateway:** retain successful stream writes before a later chunk failure ([a8f9f81](https://github.com/icoretech/codex-pooler/commit/a8f9f8176972173d08a2d98e4c6cef34207d51aa))
+* **gateway:** settle current work when HTTP auth retry accounting fails ([5c0d4b6](https://github.com/icoretech/codex-pooler/commit/5c0d4b64cca5d476dd186ea18c44d15e7a29c11a))
+* **ingress:** isolate browser parser budgets from runtime limits ([28735a6](https://github.com/icoretech/codex-pooler/commit/28735a612acd59e8bebd163ac1b7281760b2f67b))
+* **ingress:** map parser errors at their owning boundary ([e5f7bf4](https://github.com/icoretech/codex-pooler/commit/e5f7bf4bd7bbbac25b93bc8709b8473c1afef4bc))
+* **ingress:** reject file multipart before decompression ([4a1f436](https://github.com/icoretech/codex-pooler/commit/4a1f4361548b292aad8c32ad6cf63e64a4c865d1))
+* **jobs:** verify image schema before every Oban start ([745cca5](https://github.com/icoretech/codex-pooler/commit/745cca5b1adbe62ae36dd7339290cc67a54567a2))
+* **logging:** replace invite credentials with route placeholders ([5c82317](https://github.com/icoretech/codex-pooler/commit/5c82317ef1cd8fe2d78d77aa0fd8f4430baa61ae))
+* **mcp:** authenticate requests before reading their bodies ([9132f36](https://github.com/icoretech/codex-pooler/commit/9132f3650007b95f0202af40385c7cc9d9cf3721))
+* **metrics:** extend latency buckets beyond admission and database waits ([c96598c](https://github.com/icoretech/codex-pooler/commit/c96598cfbf24f6d14bd4a35000be3e90e2779a44))
+* **oauth:** commit local device-flow expiry ([97d8aa6](https://github.com/icoretech/codex-pooler/commit/97d8aa6d0684a3b292d03f9e36781469562cfd56))
+* **oauth:** keep transient device polling failures pending ([4d1cec5](https://github.com/icoretech/codex-pooler/commit/4d1cec5fa36e3dc3b3695751ebe46119b88e2434))
+* **observability:** explain retained feature quota refusals ([29e745c](https://github.com/icoretech/codex-pooler/commit/29e745cabce717095f72ccdbdbd1becfe1454b23))
+* **pricing:** count skipped aliases by canonical bucket ([0184973](https://github.com/icoretech/codex-pooler/commit/01849732948d672a79a81f657200a8b07ada6047))
+* **quotas:** bound credit balances before bigint persistence ([24b7834](https://github.com/icoretech/codex-pooler/commit/24b783459188dbfc45c789391daa5382eb4acf95))
+* **quotas:** bound normalized durations before persistence ([19e3a4a](https://github.com/icoretech/codex-pooler/commit/19e3a4a27c41e20ad374d1782752519f76107f22))
+* **quotas:** preserve committed reset outcomes after routing failures ([8bca24a](https://github.com/icoretech/codex-pooler/commit/8bca24a248c139eee42c3be9f7d94910ca1c4e5f))
+* **quotas:** require explicit bounded legacy window durations ([5bacfef](https://github.com/icoretech/codex-pooler/commit/5bacfef61c6f59761bbe863e20598179cba3f61b))
+* **release:** preflight drain marker permissions before relay quiesce ([b08c42a](https://github.com/icoretech/codex-pooler/commit/b08c42a889059137d7d3e41f51f6e70e14a00976))
+* **reporting:** anchor usage buckets and rollups to UTC ([77458bc](https://github.com/icoretech/codex-pooler/commit/77458bc78a16cabf4351ee5f2bed0db00ccb1aa5))
+* **responses:** preserve assistant text before replayed tool calls ([1f4a1b2](https://github.com/icoretech/codex-pooler/commit/1f4a1b20034d834a0f8f2b5613f13d1e729dd040))
+* **responses:** refuse tool-role items without content ([f2863a4](https://github.com/icoretech/codex-pooler/commit/f2863a472cba4bd0bf1d7453a69d28da14d6df48))
+* **routing:** fence circuit probe completion by durable ownership ([5311c56](https://github.com/icoretech/codex-pooler/commit/5311c56a4def21558bde0eea84c466b6034e8b07))
+* **routing:** retain open circuits after late failures ([b20eaf4](https://github.com/icoretech/codex-pooler/commit/b20eaf419503b8423bcda88cfe5d94dda2ce983e))
+* **smtp:** install successful callback state changes ([1671439](https://github.com/icoretech/codex-pooler/commit/1671439c39f7372f9f9419dff3cce6934288fddc))
+* **stats:** accept aggregate counters in KPI input contracts ([572793e](https://github.com/icoretech/codex-pooler/commit/572793e9047e2062e698bcae65809cf96e7889c3))
+* **stats:** aggregate settlement and attempt dashboard rows in SQL ([3996f22](https://github.com/icoretech/codex-pooler/commit/3996f22637770890174b2fc5f346ddc1d9123913))
+* **streaming:** bound held native lifecycle preambles before delivery ([4a020ae](https://github.com/icoretech/codex-pooler/commit/4a020ae72ae422ab5c054df3057fcc030753cfc3))
+* **streaming:** observe native SSE terminals across bounded fragments ([5527ac0](https://github.com/icoretech/codex-pooler/commit/5527ac0d1f16eb554e7134432ac862c86f667ffe))
+* **streaming:** observe truncation after exact retained limits ([b725d78](https://github.com/icoretech/codex-pooler/commit/b725d780c609b7dd118554a940b31b5d34717ab9))
+* **streaming:** retain native incomplete terminal outcomes ([2a1ca4c](https://github.com/icoretech/codex-pooler/commit/2a1ca4c5d9c9ec6a12b43062ab1735ad85a1fe39))
+* **streaming:** wait for first-event data before retry classification ([70a15a2](https://github.com/icoretech/codex-pooler/commit/70a15a2e52181501040521538d7e35a42e513eb9))
+* **upstreams:** authorize credential replacement across served pools ([f3eb5b9](https://github.com/icoretech/codex-pooler/commit/f3eb5b99ebb666c49ab2871e5673c91602e761a5))
+* **upstreams:** preserve live refresh claims during usage updates ([34b7c59](https://github.com/icoretech/codex-pooler/commit/34b7c59bb027c7019de84bdb9d360b2c41850146))
+* **upstreams:** retain fenced refresh-token rotations ([260f5ab](https://github.com/icoretech/codex-pooler/commit/260f5ab77fcec174b74f650f3926471b9a3baa16))
+* **usage:** preserve transient authentication failures ([b43a424](https://github.com/icoretech/codex-pooler/commit/b43a424043bec2045a44f7d667be3d0ca4c1dd67))
+* **usage:** return service unavailable for transient ChatGPT authentication reads ([dac83f8](https://github.com/icoretech/codex-pooler/commit/dac83f8ecf63064ce80d5b5c010683507652e8ab))
+* **v1:** refuse non-object Responses input entries ([07f3a66](https://github.com/icoretech/codex-pooler/commit/07f3a66e683f5d6cff2e464ec950a14d05537799))
+* **webhook:** drain response bodies without retaining their chunks ([fc9504e](https://github.com/icoretech/codex-pooler/commit/fc9504ec8364ea6a3b7e13e58ae40fbe54dbc78f))
+* **webhook:** validate and pin destination addresses before connecting ([2e89073](https://github.com/icoretech/codex-pooler/commit/2e89073589340728ef65e6cbaa24fd274b1b30ba))
+* **websocket:** bound discarded socket retirement with queued output ([4367996](https://github.com/icoretech/codex-pooler/commit/43679962fc202f59d70b323374049b65e7df28d7))
+* **websocket:** resolve drain callers after coordinator and registry failures ([83f23a2](https://github.com/icoretech/codex-pooler/commit/83f23a2c88efe3063424e9f6c91230812f83e7f1))
+* **websocket:** retain only forwarded steering terminal authority during drain ([65d367b](https://github.com/icoretech/codex-pooler/commit/65d367bad5d69cecbffdd92437fada5c155bf40c))
+* **websocket:** retain the acquired connection on upgrade timeout ([50c0075](https://github.com/icoretech/codex-pooler/commit/50c0075cb7b96ce4fcf530d9c2623ecc100e5173))
+
+
+### Reverts
+
+* **deps:** restore the pinned Hex packages ([80db8f4](https://github.com/icoretech/codex-pooler/commit/80db8f42cbbf47d483234749fb2ec0778100d206))
+
+
+### Tests
+
+* **accounting:** remove pricing fixtures when their test exits ([9c33428](https://github.com/icoretech/codex-pooler/commit/9c33428307a7db8efc8171268cac5d2410583c4f))
+* clean up endpoint trace files after fixture teardown ([a5ba586](https://github.com/icoretech/codex-pooler/commit/a5ba58676cd0bf950130bf88d339b2079afe7b7f))
+* **gateway:** distinguish frozen membership from owner turn exclusions ([5c54d97](https://github.com/icoretech/codex-pooler/commit/5c54d970b3f8d9f77f98dd4e8c9567ccb062c05a))
+* **gateway:** pin native SSE observation metadata in transport shapes ([8bbeec5](https://github.com/icoretech/codex-pooler/commit/8bbeec57e22c138dc9c0be10f312b9c7f105c496))
+* **gateway:** require decoded direct candidates in the classifier oracle ([c669a7a](https://github.com/icoretech/codex-pooler/commit/c669a7a8442b9690baab5242212936e81092800c))
+* **gateway:** require linked provider terminal fallback chains ([90e32d4](https://github.com/icoretech/codex-pooler/commit/90e32d41c7fb914b9c320c26d92b32575286a071))
+* install settlement hold before closing the downstream socket ([326cdf1](https://github.com/icoretech/codex-pooler/commit/326cdf1f20f7157f560bf07e105f59227c76f46d))
+* isolate nested make fixture commands and temporary files ([0ae2e28](https://github.com/icoretech/codex-pooler/commit/0ae2e28325b3f051c919af5956b2650813c8c012))
+* **quota:** separate raw duration refusals from normalized anchor guards ([1169932](https://github.com/icoretech/codex-pooler/commit/116993298139d580acfbc6f87010e4898e1e0d89))
+* **routing:** construct peer probes with real dispatch contexts ([88ec530](https://github.com/icoretech/codex-pooler/commit/88ec5301cf844a4e33183e38e4422bf98ff80f80))
+
+
+### Miscellaneous Chores
+
+* **deps:** retain Astro 7.3.8 while integrating the upstream docs update ([43d94c2](https://github.com/icoretech/codex-pooler/commit/43d94c23eefd26e5296b1d5a41d70714b6f96a4f))
+* **deps:** update Astro and Starlight ([e58203a](https://github.com/icoretech/codex-pooler/commit/e58203af4c40d0f9f781ae2875dfc66be04a4441))
+* **deps:** update dependency astro to v7.3.7 ([#512](https://github.com/icoretech/codex-pooler/issues/512)) ([d7c47d0](https://github.com/icoretech/codex-pooler/commit/d7c47d07ae27bdfe7e1c4ad9a28c2c7ae1cc4255))
+* **deps:** update Node build images and Pages runtime to 26.11.1 ([9da9f83](https://github.com/icoretech/codex-pooler/commit/9da9f839cc076b5ba3a154313b3235948a2e5e17))
+* **deps:** update Swoosh to 1.29.0 ([5044dc0](https://github.com/icoretech/codex-pooler/commit/5044dc0e3427091460ac75ac49915e3278deea5e))
+* **pricing:** refresh the embedded OpenAI catalog ([4183d1d](https://github.com/icoretech/codex-pooler/commit/4183d1debf5601149d395c1e2970e2425e42089e))
+* **quality:** exclude the confirmed Ecto Multi opacity false positive ([22793a4](https://github.com/icoretech/codex-pooler/commit/22793a430dfe30e1d4e9f40c9eb159b4f47f9b6e))
+* **release:** set the next application version to 0.12.0 ([351f298](https://github.com/icoretech/codex-pooler/commit/351f298a813890e4a42b66aa070bff6c2ba0444c))
+
+## [0.11.5](https://github.com/icoretech/codex-pooler/compare/codex-pooler-v0.11.4...codex-pooler-v0.11.5) (2026-10-08)
+
+
+### Features
+
+* **admin:** redesign the alert incidents table ([a881bfa](https://github.com/icoretech/codex-pooler/commit/a881bfa20a0e59386fcc6d8904de2d42b055b9a2))
+
+
+### Bug Fixes
+
+* **onboarding:** match generated Codex config to the client guide ([8c1d7b3](https://github.com/icoretech/codex-pooler/commit/8c1d7b3d71a98f9cb00bd90ded7a1983ab0e7e74))
+
+
+### Performance Improvements
+
+* **accounting:** batch retry admission session reads ([4e0a215](https://github.com/icoretech/codex-pooler/commit/4e0a2155d86c5045ddd5f9bfc3424522b01117cd))
+
+
+### Tests
+
+* **gateway:** bound continuation chain request deadlines ([3e3d42a](https://github.com/icoretech/codex-pooler/commit/3e3d42a934dc065fa39f63b242179ceca980cd3f))
+
+
+### Miscellaneous Chores
+
+* **deps:** qualify Codex 0.162.0 catalog decoding ([d6c8c21](https://github.com/icoretech/codex-pooler/commit/d6c8c21ce086b5ee0ef07251872713f5279d42d8))
+
+## [0.11.4](https://github.com/icoretech/codex-pooler/compare/codex-pooler-v0.11.3...codex-pooler-v0.11.4) (2026-10-08)
+
+
+### Bug Fixes
+
+* **pricing:** import the gpt-6.1-sol ultrafast rates ([790b76b](https://github.com/icoretech/codex-pooler/commit/790b76b501164158dc3f8dc3c4a084b2e6cefdae))
+
+
+### Tests
+
+* **observatory:** allow the forty outcome rows in the query-plan contract ([1480627](https://github.com/icoretech/codex-pooler/commit/1480627bde31068a07401d82019063e6a914ae18))
+
+## [0.11.3](https://github.com/icoretech/codex-pooler/compare/codex-pooler-v0.11.2...codex-pooler-v0.11.3) (2026-10-08)
+
+
+### Features
+
+* **admin:** halve the Observatory hold-to-open duration ([b8b65a8](https://github.com/icoretech/codex-pooler/commit/b8b65a8843e24c4dafcf5b28ad9a6cd417f101b9))
+* **admin:** redesign the OpenAI incidents page ([a94d018](https://github.com/icoretech/codex-pooler/commit/a94d018802f9d5cfadd6ea1914b0f3019197d1b5))
+* **admin:** redesign the OpenAI status banner ([63f3e54](https://github.com/icoretech/codex-pooler/commit/63f3e54428a5829b8100961a67a831c07402ba28))
+* **admin:** show request speed as three bolts under the model ([b32d88a](https://github.com/icoretech/codex-pooler/commit/b32d88ae73eefff4d673e5ec06045d61fdf326c5))
+* **observatory:** redesign the access key login page ([dc9047f](https://github.com/icoretech/codex-pooler/commit/dc9047fb2be00ba85530c922d2113724fc14f458))
+* **observatory:** rework the dashboard body ([4d44908](https://github.com/icoretech/codex-pooler/commit/4d449089f044ca4e5cd7b990ce1b133b081ef510))
+
+
+### Bug Fixes
+
+* **accounting:** render quota countdowns at the snapshot time ([d9c477c](https://github.com/icoretech/codex-pooler/commit/d9c477ce51ecce73d59e31257c310dcf0e156158))
+* **admin:** fit the request log table at 1440px so Cost is not clipped ([97e68dc](https://github.com/icoretech/codex-pooler/commit/97e68dc6abf2051c16ae122245b0e6f76711e214))
+* **admin:** show provider credit percentages with one decimal ([d9202d9](https://github.com/icoretech/codex-pooler/commit/d9202d90185bc0ffd90f5129088aa73da7000322))
+* **gateway:** forward client output token limits ([7206e9b](https://github.com/icoretech/codex-pooler/commit/7206e9bbecaac88df996ad3d816b13f8b07cde05))
+* **gateway:** reject SVG data URLs in typed tool outputs ([58b27a2](https://github.com/icoretech/codex-pooler/commit/58b27a2c4d80d6dccfadd0a7f2e094762a9b8c65))
+* **upstreams:** use indexed batches for account deletion ([330f195](https://github.com/icoretech/codex-pooler/commit/330f1958755a6dff4b4f57389db2269cc4b538fa))
+
+
+### Tests
+
+* **gateway:** use a valid output budget in resample fixtures ([2a250bf](https://github.com/icoretech/codex-pooler/commit/2a250bfbe972e23a6dd4576fc27b20026fa3b70a))
+* **routes:** include Decisions in runtime route contracts ([4c4c137](https://github.com/icoretech/codex-pooler/commit/4c4c13774bb3348a104938f625b42bb1e4b2b554))
+* **runtime:** isolate recovery socket database connections ([0b1274f](https://github.com/icoretech/codex-pooler/commit/0b1274ffe9d9e4c03b65c3135c0ef102e69e8290))
+
+
+### Miscellaneous Chores
+
+* **deps:** update helm release codex-pooler to v0.11.0 ([#508](https://github.com/icoretech/codex-pooler/issues/508)) ([fa36b9b](https://github.com/icoretech/codex-pooler/commit/fa36b9bb95925b09044f311edb637c17a5042c5a))
+* **web:** remove the unused page_html home template ([e2e476b](https://github.com/icoretech/codex-pooler/commit/e2e476b80c8ac7af875e52807e13410d8a54b272))
+
+## [0.11.2](https://github.com/icoretech/codex-pooler/compare/codex-pooler-v0.11.1...codex-pooler-v0.11.2) (2026-10-08)
+
+
+### Bug Fixes
+
+* **deps:** update dependency astro to v7.3.6 ([65834d8](https://github.com/icoretech/codex-pooler/commit/65834d80905792d0c9df4306dba1b7284a3f30e5))
+* **deps:** update req to 0.7.5 ([8d2b4d1](https://github.com/icoretech/codex-pooler/commit/8d2b4d1de483ba0e235581f8b3bde4d771e232a8))
+* **gateway:** check the Codex catalog for decodable entries through 0.161.0 ([4873353](https://github.com/icoretech/codex-pooler/commit/4873353632cda80c3ecdb8fc827e486480b1933a))
+* **gateway:** support reasoning updates and native live steering ([100f1de](https://github.com/icoretech/codex-pooler/commit/100f1de976020c64d52716dd62d96c685651d742))
+* **upstreams:** keep a newer workspace denial when the earlier witness of it ends ([ab85417](https://github.com/icoretech/codex-pooler/commit/ab854174222c1c203665972d31ea5987d9dd253a))
+* **upstreams:** let a witness cover a newer denial only up to its own reset, and retain a replaced current denial ([8796c1d](https://github.com/icoretech/codex-pooler/commit/8796c1d300216c123d8829cb18d8378c88a91896))
+* **v1:** declare the Decisions API unsupported ([1258281](https://github.com/icoretech/codex-pooler/commit/12582810843692b052b69edf75b7ad34eb064426))
+
+
+### Tests
+
+* **dev:** drive Socket preparation before native drain barriers ([e5b12c5](https://github.com/icoretech/codex-pooler/commit/e5b12c5952884ac045bcd5641537efb4f8623ce6))
+
+
+### Miscellaneous Chores
+
+* **deps:** classify Renovate version updates as maintenance ([3022187](https://github.com/icoretech/codex-pooler/commit/30221872c89d328f3e6ce7030a7e099f9bfeda71))
+* **deps:** update dependency openai/codex to v0.161.0 ([d2ab577](https://github.com/icoretech/codex-pooler/commit/d2ab577b37d8f2bdd7d63dc9dd1bb027654122f3))
+* **deps:** update ghcr.io/icoretech/codex-docker docker tag to v0.161.0 ([#501](https://github.com/icoretech/codex-pooler/issues/501)) ([cc9de51](https://github.com/icoretech/codex-pooler/commit/cc9de51c42a2fe7b29c5f6a5bee15d5d29711efe))
+
+## [0.11.1](https://github.com/icoretech/codex-pooler/compare/codex-pooler-v0.11.0...codex-pooler-v0.11.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* **upstreams:** end a workspace denial with its window instead of keeping the account out of routing ([bd8a932](https://github.com/icoretech/codex-pooler/commit/bd8a932d868375bb638436b1e010e9732e19be46))
+
+
+### Tests
+
+* **gateway:** pin the strict done status of public Responses tool completion ([7980090](https://github.com/icoretech/codex-pooler/commit/7980090e2c600ab1dd8401b9d3de9561c639f96e))
+* hoist generated test bodies into private functions and start test-fast partitions with a larger binary virtual heap ([be8030d](https://github.com/icoretech/codex-pooler/commit/be8030daece9b409a7b73ef1eabcae89697f36ec))
+* **v1:** print the tool-integrity evidence lines only when test diagnostics are on ([fb6e4f0](https://github.com/icoretech/codex-pooler/commit/fb6e4f02e99e2a2f88aea775affcdc156c2b62d2))
+
+
+### Miscellaneous Chores
+
+* **deps:** update helm release codex-pooler to v0.10.4 ([#490](https://github.com/icoretech/codex-pooler/issues/490)) ([f3ca95f](https://github.com/icoretech/codex-pooler/commit/f3ca95ff928f53913322df243c9e5b0606509ab1))
+
+## [0.11.0](https://github.com/icoretech/codex-pooler/compare/codex-pooler-v0.10.9...codex-pooler-v0.11.0) (2026-10-07)
+
+
+### Features
+
+* **gateway:** accept tool_search and its replayed items on /v1/responses ([f4ba8d9](https://github.com/icoretech/codex-pooler/commit/f4ba8d90727cdde9886824182cd1d18576b89096))
+* **gateway:** carry the partial_answer assistant phase through replay and mailbox continuations ([e29b502](https://github.com/icoretech/codex-pooler/commit/e29b50297c7abf47b9506b1e0ac8c3706302402c))
+* **gateway:** record stream timing and the end_turn class on attempts ([fa7e05e](https://github.com/icoretech/codex-pooler/commit/fa7e05e87df6ce545373dd8692a901425ff9e4f5))
+* **resets:** prioritize eligible accounts by saved reset expiry ([70431d4](https://github.com/icoretech/codex-pooler/commit/70431d437435e6c015f91ed7a7f6453091de6995))
+* **saved-resets:** record what a consume says about the windows it resets ([fe8efaa](https://github.com/icoretech/codex-pooler/commit/fe8efaa33b22216ee93462ec34c9067c7373ede8))
+* **upstreams:** show saved reset request and recovery status ([202866c](https://github.com/icoretech/codex-pooler/commit/202866c6feb5bed4c69e765a5360aa4ef9c67ec7))
+* **v1:** accept Codex agent_message history and the provider's web_search keys ([d7c077c](https://github.com/icoretech/codex-pooler/commit/d7c077c0c941bbf3d45d4b8e92e5b8da9c19b6bc))
+* **v1:** accept replayed web_search_call items and relay unknown_parameter and invalid_parameter ([bfe6a91](https://github.com/icoretech/codex-pooler/commit/bfe6a91bac318ff69a28e570b9a5b5a5a57ae16b))
+* **v1:** refuse the beta Agents API routes with a clear unsupported endpoint ([d49ba07](https://github.com/icoretech/codex-pooler/commit/d49ba07dabb9f73f911bff9666b799c5ab88e013))
+
+
+### Bug Fixes
+
+* **accounting:** admit the exact retry of a native HTTP resend that failed before any output ([906385a](https://github.com/icoretech/codex-pooler/commit/906385a44bc3953a05b1d180fe89081c441ae859))
+* **accounting:** let the full-history resend of a lost anchored websocket turn rejoin it ([9e4b9f2](https://github.com/icoretech/codex-pooler/commit/9e4b9f2c0a4fc8480c808415917517a929dbc826))
+* **accounting:** let the resend of a lost websocket turn that gained workspaces rejoin it ([5af26a1](https://github.com/icoretech/codex-pooler/commit/5af26a113bed40b1504070a00cd8d47300df83db))
+* **accounting:** read a reasoning effort only from an object reasoning, so a malformed one no longer fails the reservation ([c437d82](https://github.com/icoretech/codex-pooler/commit/c437d82d5bd0b1e87c8cb71ed24d4e26575a5f45))
+* **accounting:** refuse every resend of a content-filter turn except its guided retry ([e3bdd4c](https://github.com/icoretech/codex-pooler/commit/e3bdd4c368cd511c8b1861c5ab5003dd3cc179f7))
+* **admin:** fit the connection toast, disabled reasons and poll-pause heading to 375 px ([09c28ef](https://github.com/icoretech/codex-pooler/commit/09c28ef87dfd60d681d0e7eb3535b2f459b30b1a))
+* **admin:** give the saved-reset bank dialog's connection notice the dialog gutter ([6e393bc](https://github.com/icoretech/codex-pooler/commit/6e393bc77eda5484ff63761a18d320469aaee9c2))
+* **admin:** keep the saved-reset status true for finished, paused and legacy resets ([d2d4db2](https://github.com/icoretech/codex-pooler/commit/d2d4db297f14157a4ed97fafb2a94e6c29cadc7a))
+* **admin:** make the saved reset receipt short, outcome-accurate and consistent ([35a3412](https://github.com/icoretech/codex-pooler/commit/35a341237012241272ee57cd1b9909bfd6c1167f))
+* **admin:** offer manual redemption only when the claim would accept it ([8f65cff](https://github.com/icoretech/codex-pooler/commit/8f65cffcf407d99056f56cad133346463b258d2e))
+* **catalog:** check the served catalog for Codex 0.159 and 0.160 clients ([1b4b2d5](https://github.com/icoretech/codex-pooler/commit/1b4b2d50e550835d7240e8bc4f91cad364e6c97f))
+* **catalog:** keep the model picker order out of the canonical partition digest ([0eae9ad](https://github.com/icoretech/codex-pooler/commit/0eae9ad42423e8f626c16efd3de586590e09307c))
+* **deps:** update dependency @astrojs/starlight to v0.42.5 ([4c95d9d](https://github.com/icoretech/codex-pooler/commit/4c95d9dd344b9a8889db9ab2df4e50a9c02e018a))
+* **deps:** update dependency apexcharts to v7.8.0 ([bce8fc0](https://github.com/icoretech/codex-pooler/commit/bce8fc0115a936a711bd992ef00af0faeb932dc6))
+* **dev:** project saved reset receipts in component showcase ([421d60c](https://github.com/icoretech/codex-pooler/commit/421d60c7ed5fc4e684a2a24432c131bd3d2f1d8a))
+* **dispatch:** keep the saved-reset cohort when a request retries ([d09787d](https://github.com/icoretech/codex-pooler/commit/d09787d83a27ceea6a5a9bfdfd6925ecc4bb0abb))
+* **gateway:** complete a websocket usage limit's route health like its HTTP twin ([562941b](https://github.com/icoretech/codex-pooler/commit/562941b8294f07374768d1c8463db872dd0ad1db))
+* **gateway:** fail over a websocket handshake 401 whose refresh cannot retry ([43d2298](https://github.com/icoretech/codex-pooler/commit/43d2298bcb0d8d2cc94dfb7842521f63db82d296))
+* **gateway:** fill an empty streamed /v1 Responses terminal output from the done items ([8f3efb1](https://github.com/icoretech/codex-pooler/commit/8f3efb196441293b5507aabcd238d53754700392))
+* **gateway:** keep a content-filter terminal delivered when the client closes before the write is read back ([7abdce4](https://github.com/icoretech/codex-pooler/commit/7abdce4ab2a9e99aec607fe508b18912d86375a0))
+* **gateway:** keep a guided content-filter retry through its account's token refresh ([f2e274b](https://github.com/icoretech/codex-pooler/commit/f2e274bb189a20b4ea3ae3ced1cd1d0cb5ece071))
+* **gateway:** keep a guided content-filter retry's account pin through the client's retry of it ([a12bcd3](https://github.com/icoretech/codex-pooler/commit/a12bcd39861fbd23fc885ac44afa741ca4d05b9a))
+* **gateway:** keep the live websocket auth exhaustion and upgrade-frame helpers past Dialyzer ([ba82d14](https://github.com/icoretech/codex-pooler/commit/ba82d14912a533ae848a6c301ae90028bb797aa5))
+* **gateway:** log every owner-exit fence decision ([f2e68e6](https://github.com/icoretech/codex-pooler/commit/f2e68e6d22f3756bd936faaef7e096d2563368d8))
+* **gateway:** match a grown resend to its request after Codex fills the turn's workspaces ([63850d0](https://github.com/icoretech/codex-pooler/commit/63850d08a7493ea39cb40c1477b21ab0bdaa12bb))
+* **gateway:** match a retry to its request after Codex fills the turn's workspaces ([ae92791](https://github.com/icoretech/codex-pooler/commit/ae9279101d552b75e3a2bad73beb6993dcbc2d83))
+* **gateway:** match a websocket resend to its request after Codex fills the turn's workspaces ([9d44626](https://github.com/icoretech/codex-pooler/commit/9d446266f7a28950ae4638b84038c078d2bd261f))
+* **gateway:** name the compaction phase event in websocket diagnostics ([2545bae](https://github.com/icoretech/codex-pooler/commit/2545bae3371e5b6cc94f1b65d6d92323106c593e))
+* **gateway:** never resend a turn whose payload left when its owner dies ([c2ddc06](https://github.com/icoretech/codex-pooler/commit/c2ddc066077ad6252f7ee8d865b58c8f78c7c731))
+* **gateway:** never take a socket's turn over after its owner crashed ([0876911](https://github.com/icoretech/codex-pooler/commit/08769114e768a5557d6cf027cb06e0a4a2248354))
+* **gateway:** pin a native HTTP session to the account serving its first output ([5b18737](https://github.com/icoretech/codex-pooler/commit/5b187370d5d0ed32efa57e31a4a0af806b0cf4a8))
+* **gateway:** read a websocket validation refusal's code and field from its text ([e41ed82](https://github.com/icoretech/codex-pooler/commit/e41ed8211f46cc5043f01051810056fedd40a131))
+* **gateway:** read the exhausted-auth answer at runtime so the release build's xref gate passes ([3c6e892](https://github.com/icoretech/codex-pooler/commit/3c6e892e9bf20e5688a7918d5136548c5f16aa0b))
+* **gateway:** record route health when a websocket failure fails over ([4eb2ab2](https://github.com/icoretech/codex-pooler/commit/4eb2ab21727661dbedf4b02691472ec67fd90b06))
+* **gateway:** release a drained request against its earlier candidate's attempt ([f0c9722](https://github.com/icoretech/codex-pooler/commit/f0c972278a665357a77009cc03d140e81cec9a32))
+* **gateway:** release a refusal after an earlier candidate's attempt against that attempt ([75e0419](https://github.com/icoretech/codex-pooler/commit/75e041934bdd7ca450b4910ed701c4654dbfe4ff))
+* **gateway:** route a guided content-filter retry to the account that produced its reasoning ([536f082](https://github.com/icoretech/codex-pooler/commit/536f08229e4319bb50fb2924c0064fe09251e7e5))
+* **gateway:** serve the native HTTP re-sample after a completed response ([124e36c](https://github.com/icoretech/codex-pooler/commit/124e36cc9ea8ffa023906ebeead6025b9991690d))
+* **gateway:** settle a websocket failure after the payload reached the provider ([806d477](https://github.com/icoretech/codex-pooler/commit/806d4776f844a637153519df9c6ec2cb751bdd18))
+* **gateway:** settle exhausted websocket upstream auth as HTTP does ([824e042](https://github.com/icoretech/codex-pooler/commit/824e04294b576fb94b41482f25f37680cc74cd99))
+* **gateway:** settle the frames that share the upstream 101's read ([cecf6d5](https://github.com/icoretech/codex-pooler/commit/cecf6d5b47443b1bd25da48c5899b308edff8888))
+* **jobs:** keep the saved reset request read model out of compile-time dependencies ([f8a517c](https://github.com/icoretech/codex-pooler/commit/f8a517c67ae7757aa7bacbfe63f589f160e23ff9))
+* **platform:** say how many execution proofs the publisher retains when publication stops ([3bd4abc](https://github.com/icoretech/codex-pooler/commit/3bd4abc7303a4eef0b26d3a92cd73503f26a52d5))
+* **quota:** stop a stale meter that only responses report from blocking its account ([ff9199b](https://github.com/icoretech/codex-pooler/commit/ff9199bf6c96ebf5a47a46e8bde52cc067134afc))
+* **quota:** stop routing on a model meter the provider no longer reports ([0bbb357](https://github.com/icoretech/codex-pooler/commit/0bbb35721e73dd70e11bae9c91158b2be967a029))
+* **resets:** decide blocked recovery on the long window alone, never the 5-hour window ([db8f848](https://github.com/icoretech/codex-pooler/commit/db8f848ef543abd5f7c99c0538f832a2bff48194))
+* **resets:** open blocked recovery for an exhausted weekly window next to a usable 5-hour window ([7dafab7](https://github.com/icoretech/codex-pooler/commit/7dafab72019d28f14841da7356a85a8d31d96bc5))
+* **routing:** re-check the held-back partition before a pool-wide quota refusal ([c3de0e2](https://github.com/icoretech/codex-pooler/commit/c3de0e2825c26d902eeea0cd4206b1ca6c7ab5df))
+* **routing:** spend at most one banked reset per request ([86b3374](https://github.com/icoretech/codex-pooler/commit/86b3374c4c9bb092a23e9da1616792a243de3212))
+* **upstreams:** carry the account's quota evidence through its token refresh ([1bb8760](https://github.com/icoretech/codex-pooler/commit/1bb876035557e53980b48648673a3e6535e950ef))
+* **v1:** handle the request fields the Codex backend now refuses ([a81d914](https://github.com/icoretech/codex-pooler/commit/a81d91422fcdcfcd9de65cc5d35d7af63ee12a73))
+* **v1:** keep encrypted markers inside namespace tools during schema lowering ([0a40679](https://github.com/icoretech/codex-pooler/commit/0a40679f5bd87d338bdfeb4cf41cff9daf58eb76))
+* **websocket:** answer a usage-limit-refused connection-bound compaction for the Pool's capacity ([b36bd38](https://github.com/icoretech/codex-pooler/commit/b36bd38474bcbf6250f4750fc7be7e7a6d1bfdbf))
+* **websocket:** keep a content-filter terminal delivered after the client closes ([1292129](https://github.com/icoretech/codex-pooler/commit/1292129dba57e5a46061967c07cd4ac18acacfa1))
+* **websocket:** keep streaming turns open past the downstream idle timeout ([39ab114](https://github.com/icoretech/codex-pooler/commit/39ab114b838f3a0bb539a7ac5be04c16e1a405f5))
+* **websocket:** read the public end_turn outcome without the clause dialyzer proves unreachable ([7e464c8](https://github.com/icoretech/codex-pooler/commit/7e464c8f8fa9e4495ee772b368858e062e407099))
+
+
+### Reverts
+
+* keep blocked recovery closed on a two-window weekly exclusion until decided ([432c10a](https://github.com/icoretech/codex-pooler/commit/432c10ab1a1606b9e07a19c78dcc9d0e7f161351))
+
+
+### Tests
+
+* **dev:** rotate screenshot seed clients by recency rank ([373aa5d](https://github.com/icoretech/codex-pooler/commit/373aa5da1b2ac44ad997e08e08d15eda9138b7df))
+* **gateway:** accept every outcome of a request racing a closing fake and order owner monitors ([a416747](https://github.com/icoretech/codex-pooler/commit/a41674711e20df6fbcd87aa484843c436797117a))
+* **gateway:** answer the blocking owner upstream like a real session ([45f42f5](https://github.com/icoretech/codex-pooler/commit/45f42f58dd9891980e62aaca48f827268e6f9be1))
+* **gateway:** assert no frame follows the recovered response after an owner kill ([d035088](https://github.com/icoretech/codex-pooler/commit/d03508844cf5bd5fc1a18e33fb410cdbe8c375a5))
+* **gateway:** clean up the owners and fakes of the upstream-exit tests ([1693f31](https://github.com/icoretech/codex-pooler/commit/1693f3121425f7f5ee4be47823c13b79fe674720))
+* **gateway:** model the released client's two compaction resends ([0260ebd](https://github.com/icoretech/codex-pooler/commit/0260ebdd3f669ad51180163563f4ea308a3418c6))
+* **gateway:** open mailbox lease scenarios on a long lease and shorten it at the boundary ([ff73403](https://github.com/icoretech/codex-pooler/commit/ff73403ed73deffa20ffd60ab5255c3a00ab0eca))
+* **gateway:** pin that a client gets the closed item, never its announcement ([aeaa34c](https://github.com/icoretech/codex-pooler/commit/aeaa34ce0664601b80d61ef660556de1d0ae2178))
+* **gateway:** pin that a compact request without instructions carries no instructions key ([682bc7f](https://github.com/icoretech/codex-pooler/commit/682bc7f31dd2ee71ee41a31edfcf320457a642de))
+* **gateway:** pin that a compaction's resend never reads the client-retry observation ([528659c](https://github.com/icoretech/codex-pooler/commit/528659c18186f44626ea7d783917bab7b5a99cd6))
+* **gateway:** pin the empty instructions a Full request without them is sent with ([2bdd331](https://github.com/icoretech/codex-pooler/commit/2bdd33109de13b12294dce61a22907e013537ed8))
+* **gateway:** pin the two guards that keep a pinned content-filter retry on its account ([a5e9f90](https://github.com/icoretech/codex-pooler/commit/a5e9f9037d457c8de490542ad88fbaba0bb31f54))
+* **gateway:** poll the cut backend's release and hold the session row after the boundary ([1bde8d9](https://github.com/icoretech/codex-pooler/commit/1bde8d924eb5227e9ffcedef72b8e2ce54980935))
+* **gateway:** run /v1 owner-crash arms on per-process connections and end the takeover capture on its result ([c0d8ebc](https://github.com/icoretech/codex-pooler/commit/c0d8ebc8cfaca3fe729499fc187aa1d4ed80a472))
+* **gateway:** run the production PubSub on real-Repo peers and drop a vacuous cancel test ([a67de72](https://github.com/icoretech/codex-pooler/commit/a67de723a01f9cf0d7853313724add37b813d673))
+* **gateway:** seed the lapse arm's ring by its request id so the preference decides it ([27d0df5](https://github.com/icoretech/codex-pooler/commit/27d0df5c23ca3b23906ee4402eb04177c8a5e4a5))
+* **gateway:** stop retirable local owners by monitor and any DOWN ([74147df](https://github.com/icoretech/codex-pooler/commit/74147df5c8c045c1dee31ca02037fdcadca98907))
+* **gateway:** wait for a retiring lifecycle owner's exit in cleanup ([38cc88d](https://github.com/icoretech/codex-pooler/commit/38cc88da37b3c52f0da573536958bec75698967c))
+* name every accepted native websocket mode in the FakeUpstream refusal ([028d0cd](https://github.com/icoretech/codex-pooler/commit/028d0cd1d92d8196b483182a08493e952384edec))
+* name shared test nodes uniquely across the VMs that share epmd ([0593f2c](https://github.com/icoretech/codex-pooler/commit/0593f2c9f60685d46bb0acf35b5bd789ef5bdcc9))
+* name the provider refusal mode in the FakeUpstream websocket refusal contract ([c985edc](https://github.com/icoretech/codex-pooler/commit/c985edcd3e88201b4933182c3a0cea2b1c3105b5))
+* order monitors before triggers that end the process elsewhere ([096c135](https://github.com/icoretech/codex-pooler/commit/096c1353197026bb7c26ee69f858f25de5ae4d20))
+* **platform:** capture the publisher's outage warning from before the database stops ([d47d3d0](https://github.com/icoretech/codex-pooler/commit/d47d3d030625a751d002f8a901ee90a55b8b188e))
+* **platform:** count the queued proof only once the registry holds it ([06b7993](https://github.com/icoretech/codex-pooler/commit/06b7993a1b0bc3437df092da62491cadc127f178))
+* stop the CI flakes that kept 0.10.9 red ([e1e0810](https://github.com/icoretech/codex-pooler/commit/e1e0810aa19d2e81a50bcb2af6f0b9a3f9bf3b21))
+* **upstreams:** cover saved reset redemption and quota confirmation ([82c2286](https://github.com/icoretech/codex-pooler/commit/82c22867619bb483177019887bd58c38300057cb))
+* **websocket:** await the socket before forcing a session lease to lapse ([e4c9514](https://github.com/icoretech/codex-pooler/commit/e4c9514a72438fc2974bb00c9aec63e3addf48bf))
+* **websocket:** await the socket before forcing lease expiry in the continuation matrix ([23b50ad](https://github.com/icoretech/codex-pooler/commit/23b50adbfb5b967967ca776c46a1f6dc324c687d))
+* **websocket:** wait for the first turn's outcome before holding a lost compaction ([0f32567](https://github.com/icoretech/codex-pooler/commit/0f32567b065c744dddbb632e50275d98aa29aea1))
+* **websocket:** wait the detection budget for the close after an API key expires ([046c723](https://github.com/icoretech/codex-pooler/commit/046c723e8cf6719faa8375eb76280dcda5576f72))
+
+
+### Miscellaneous Chores
+
+* **deps:** update dependency openai/codex to v0.160.1 ([3402c6b](https://github.com/icoretech/codex-pooler/commit/3402c6b02fe83ea26efc8d5a7698c06850870adc))
+* **deps:** update dependency six to v0.4.2 ([7a80c42](https://github.com/icoretech/codex-pooler/commit/7a80c420c279f9d6168c2f7e013166b14d697ba3))
+* **deps:** update ghcr.io/icoretech/codex-docker docker tag to v0.160.1 ([212dbf8](https://github.com/icoretech/codex-pooler/commit/212dbf80fabfe8781675999c2bbfe5317ff7076d))
+* **deps:** update helm release codex-pooler to v0.10.3 ([968657e](https://github.com/icoretech/codex-pooler/commit/968657e11c54e177cb39a0731f3948db86526a73))
+* ignore the Expert language server workspace ([dc8d799](https://github.com/icoretech/codex-pooler/commit/dc8d7997f40c46b552c700887922a04ef68fb88f))
+* release 0.11.0 ([a17e6d2](https://github.com/icoretech/codex-pooler/commit/a17e6d28f05655cafce09c87b5fe5fbcb5a5fa7d))
+
 ## [0.10.9](https://github.com/icoretech/codex-pooler/compare/codex-pooler-v0.10.8...codex-pooler-v0.10.9) (2026-10-05)
 
 

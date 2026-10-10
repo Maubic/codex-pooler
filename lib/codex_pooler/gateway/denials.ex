@@ -7,6 +7,7 @@ defmodule CodexPooler.Gateway.Denials do
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Gateway.Contracts
   alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.Gateway.Payloads.RequestOptions.Routing
   alias CodexPooler.Gateway.Routing.SessionContinuity
 
   @known_reasoning_efforts ~w(none minimal low medium high xhigh max ultra)
@@ -141,6 +142,7 @@ defmodule CodexPooler.Gateway.Denials do
         |> update_in([:request_metadata], fn metadata ->
           metadata
           |> SessionContinuity.put_session_metadata(request_options)
+          |> put_saved_reset_recovery_metadata(reason, request_options.routing)
           |> maybe_put_metadata("candidate_exclusions", Map.get(reason, :candidate_exclusions))
           |> maybe_put_metadata(
             "canonical_partition",
@@ -253,6 +255,14 @@ defmodule CodexPooler.Gateway.Denials do
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
   end
+
+  defp put_saved_reset_recovery_metadata(metadata, %{non_credit_recovery_outcome: outcome}, routing)
+       when outcome in ["pending", "confirmed"] do
+    decision = Routing.accounting_quota_decision(routing) || %{}
+    Map.put(metadata, "quota_decision", Map.put(decision, "non_credit_recovery_outcome", outcome))
+  end
+
+  defp put_saved_reset_recovery_metadata(metadata, _reason, _routing), do: metadata
 
   defp safe_reasoning_policy(policy) when is_map(policy) do
     policy

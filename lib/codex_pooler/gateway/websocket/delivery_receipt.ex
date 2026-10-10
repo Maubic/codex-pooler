@@ -61,9 +61,10 @@ defmodule CodexPooler.Gateway.Websocket.DeliveryReceipt do
   # Why a pushed `response.incomplete` ended its response, for the reasons the
   # provider names in `incomplete_details.reason`: `interrupted` is a response
   # the client stopped with `response.interrupt` (findings#270 row 270-272), a
-  # served request billed for what it generated. Any other reason reads
-  # `other`; a receipt of another terminal has no field.
-  @incomplete_reasons ~w(interrupted max_output_tokens content_filter)
+  # served request billed for what it generated. `steered` ends the original
+  # response before the provider opens a separately accounted successor.
+  # Any other reason reads `other`; another terminal has no field.
+  @incomplete_reasons ~w(interrupted steered max_output_tokens content_filter)
   # Whether the provider's `response.completed` said it affirmatively ended the turn (`response.end_turn`): `true`,
   # `false`, or `absent` for a missing, null or non-boolean field. A client that reads `false` re-samples the turn
   # (findings#311), so a pushed completion names the class and the exposure is read from attempt rows. Only the

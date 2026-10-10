@@ -82,7 +82,20 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.FirstEventClassifierDifferential
     end
 
     defp direct_retry_window_event(buffer) do
-      case StreamProtocol.first_complete_event(buffer) do
+      data_fields =
+        for line <- String.split(buffer, "\n"),
+            "data:" <> value <- [String.trim(line)],
+            do: String.trim_leading(value)
+
+      payload = if data_fields == [], do: buffer, else: Enum.join(data_fields, "\n")
+
+      candidate =
+        case CodexPooler.JSON.decode(payload) do
+          {:ok, decoded} when is_map(decoded) -> StreamProtocol.first_complete_event(buffer)
+          _incomplete_or_nonobject -> :incomplete
+        end
+
+      case candidate do
         {:ok, event} ->
           if StreamProtocol.downstream_visible_event?(event) and
                not StreamProtocol.retry_window_preamble_event?(event),
@@ -156,6 +169,26 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.FirstEventClassifierDifferential
 
       rng
     end)
+  end
+
+  test "independent reference and runtime buffer label-only and nonobject direct candidates" do
+    inputs = ["event: response.output_text.delta", "event: response.failed\ndata: {", "event: response.output_text.delta\ndata: []", "event: response.output_text.delta\ndata: null", "event: response.output_text.delta\ndata: nope"]
+
+    for input <- inputs, classifier <- [&Reference.classify_first_event/3, &StreamAttempt.classify_first_event/3] do
+      assert {:buffered, state} = classifier.(input, StreamAttempt.first_event_state(), false)
+      assert state.classified? == false
+      assert state.buffer == input
+    end
+  end
+
+  test "independent reference and runtime preserve split retryable error until JSON completion" do
+    first = "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":"
+    second = "\"server_error\"}}}"
+
+    for classifier <- [&Reference.classify_first_event/3, &StreamAttempt.classify_first_event/3] do
+      assert {:buffered, state} = classifier.(first, StreamAttempt.first_event_state(), false)
+      assert {{:retry, %{code: "server_error"}}, _state} = classifier.(second, state, false)
+    end
   end
 
   test "exact internal controls remain pre-visible across SSE and direct JSON" do
@@ -370,8 +403,8 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.FirstEventClassifierDifferential
   end
 
   for {gate, chunks} <- [
-        chunk_newline: ["junk", "\nevent: response.output_text.delta\njunk"],
-        event_prefix: ["eve", "nt: response.output_text.delta"],
+        chunk_newline: ["data: {}\njunk", "\nevent: response.output_text.delta\njunk"],
+        event_prefix: ["data: {}\neve", "nt: response.output_text.delta"],
         json_closing_brace: [~s({"type":"response.output_text.delta"), "}"]
       ] do
     @gate gate

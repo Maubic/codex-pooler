@@ -471,6 +471,17 @@ defmodule CodexPooler.CompatibilityMatrixTest do
              }
     end
 
+    test "states that a streamed terminal the provider sent with an empty output lists the delivered items" do
+      feature = CompatibilityMatrix.by_slug!(:v1_supported_surface)
+      fixture = CompatibilityMatrix.fixture!(:v1_supported_surface)
+
+      assert feature.contract =~ "whose output the provider sent empty or absent carries the items the stream delivered in response.output_item.done, ordered by output_index"
+      assert feature.contract =~ "a non-empty terminal output is relayed as sent"
+      assert feature.contract =~ "the native backend routes relay the provider's terminal unchanged"
+      assert fixture.streamed_terminal_output.terminals == ["response.completed", "response.incomplete"]
+      assert fixture.streamed_terminal_output.serving_modes == ["full", "lite"]
+    end
+
     @tag :hosted_shell_history
     test "makes hosted shell history replay boundaries machine-readable" do
       feature = CompatibilityMatrix.by_slug!(:responses_chat)
@@ -603,6 +614,9 @@ defmodule CodexPooler.CompatibilityMatrixTest do
     test "makes backend model catalog ETag derivation and surface capacity machine-readable" do
       feature = CompatibilityMatrix.by_slug!(:backend_models_etag)
       fixture = CompatibilityMatrix.fixture!(:backend_models_etag)
+      {since, through} = CodexModelDecodeContract.verified_range()
+      version = fn {major, minor, patch} -> "#{major}.#{minor}.#{patch}" end
+      expected_window = {version.(since), version.(through)}
 
       assert feature.current == :policy_visible_body_digest
 
@@ -634,7 +648,7 @@ defmodule CodexPooler.CompatibilityMatrixTest do
                  vary_header: "user-agent",
                  client_version_query: :ignored,
                  decode_checked: %{
-                   window: {"0.154.0", "0.160.1"},
+                   window: expected_window,
                    window_version: "whole_version_prereleases_included",
                    body: "template_only_minus_entries_the_client_cannot_decode",
                    left_out_model: %{advertised: false, routable: true},
@@ -648,11 +662,7 @@ defmodule CodexPooler.CompatibilityMatrixTest do
       assert fixture.instructions_representation.template_only_since ==
                CatalogRepresentation.template_only_since()
 
-      # findings#206 row 206-442: the window the matrix names is the one the
-      # decode contract enforces.
-      {since, through} = CodexModelDecodeContract.verified_range()
-      version = fn {major, minor, patch} -> "#{major}.#{minor}.#{patch}" end
-      assert fixture.instructions_representation.decode_checked.window == {version.(since), version.(through)}
+      assert fixture.instructions_representation.decode_checked.window == expected_window
       assert CatalogRepresentation.for_user_agent("codex_cli_rs/#{version.(since)} (Linux 6.8.0; x86_64) unknown") == :decode_checked
       assert CatalogRepresentation.for_user_agent("codex_cli_rs/#{version.(through)} (Linux 6.8.0; x86_64) unknown") == :decode_checked
       assert feature.contract =~ "receives the decode_checked representation"
@@ -933,7 +943,19 @@ defmodule CodexPooler.CompatibilityMatrixTest do
       assert fixture.unsupported_parameter_detail.other_detail_text == "not_relayed"
       assert :detail_body in fixture.unchanged_scopes
       refute :explicit_full_override in fixture.unchanged_scopes
-      assert :websocket_frames in fixture.unchanged_scopes
+      # The Codex backend's websocket sends the refusals it answers over HTTP with a code as a wrapped error with the
+      # HTTP message as text and no code and no param; the text is read for the code and field (findings#336).
+      assert :websocket_text_outside_the_read_templates in fixture.unchanged_scopes
+      refute :websocket_frames in fixture.unchanged_scopes
+
+      reading = fixture.websocket_frame_reading
+      assert reading.provider_message_forwarded == false
+      assert reading.provider_code_or_param_on_frame == "never_replaced"
+      assert Map.values(reading.bracket_kind_codes) -- ValidationRejection.relayable_codes() == []
+      assert for({_template, %{code: code}} <- reading.payload_message_codes, do: code) -- ValidationRejection.relayable_codes() == []
+      assert reading.detail_texts["Unsupported parameter: <path>"] in ValidationRejection.relayable_codes()
+      assert reading.unsupported_tool_type.relayed == false
+      assert CompatibilityMatrix.by_slug!(:upstream_validation_rejection_relay).contract =~ "A wrapped websocket error frame of the same refusal"
       assert fixture.accounting_error_code == "upstream_status"
       assert fixture.retry == false
       assert fixture.routing_health == :unchanged
@@ -1744,7 +1766,7 @@ defmodule CodexPooler.CompatibilityMatrixTest do
   end
 
   defp responses_allowed_tools_summary do
-    "direct public Responses HTTP and websocket response.create accept an exact type=allowed_tools choice only in Full mode, with mode auto or required and a nonempty ordered tools list; named function and custom entries must resolve to undeferred direct top-level same-kind declarations, while type-only programmatic_tool_calling, web_search_preview, web_search, and image_generation entries require a declared top-level tool of the same type; order and duplicates are forwarded unchanged after only the existing tool-definition schema lowering; malformed or undeclared Full choices fail before admission or accounting, valid Lite choices create one rejected Request without Attempts or Ledger rows, top-level MCP declarations retain the tools error while MCP allow-list members use the tool_choice error, and Chat, native backend Responses, namespaces, additional_tools, deferred tools, aliases, unsupported entries, Realtime, and broad OpenAI tool parity remain excluded"
+    "direct public Responses HTTP and websocket response.create accept an exact type=allowed_tools choice only in Full mode, with mode auto or required and a nonempty ordered tools list; named function and custom entries must resolve to undeferred direct top-level same-kind declarations, while type-only web_search and image_generation entries require a declared top-level tool of the same type; order and duplicates are forwarded unchanged after only the existing tool-definition schema lowering; malformed or undeclared Full choices fail before admission or accounting, valid Lite choices create one rejected Request without Attempts or Ledger rows, top-level MCP declarations retain the tools error while MCP allow-list members use the tool_choice error, and Chat, native backend Responses, namespaces, additional_tools, deferred tools, aliases, unsupported entries, Realtime, and broad OpenAI tool parity remain excluded"
   end
 
   defp responses_allowed_tools_contract do
@@ -1767,12 +1789,7 @@ defmodule CodexPooler.CompatibilityMatrixTest do
           defer_loading: ["absent", false]
         },
         built_in: %{
-          types: [
-            "programmatic_tool_calling",
-            "web_search_preview",
-            "web_search",
-            "image_generation"
-          ],
+          types: ["web_search", "image_generation"],
           exact_keys: ["type"],
           declaration_scope: "top_level_tools_only",
           resolution: "at_least_one_same_type_declaration",

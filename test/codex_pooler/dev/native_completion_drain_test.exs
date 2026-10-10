@@ -4,6 +4,7 @@ defmodule CodexPooler.Dev.NativeCompletionDrainTest do
   import Plug.Test
   import Plug.Conn
   import CodexPoolerWeb.Runtime.AnchoredOwnerDrainSupport
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [receive_native_response_steering_prepared!: 1]
   alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
   alias CodexPooler.Dev.NativeCompletionDrain
   alias CodexPooler.Dev.NativePreAttemptDrain
@@ -44,6 +45,8 @@ defmodule CodexPooler.Dev.NativeCompletionDrainTest do
           {CodexPooler.JSON.encode!(payload(setup, metadata())), [opcode: :text]},
           state
         )
+
+      state = receive_native_response_steering_prepared!(state)
 
       assert_receive {:fake_upstream_timeout_barrier, :before_terminal, upstream_pid, ^release_ref},
                      15_000

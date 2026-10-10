@@ -336,7 +336,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
       usage_status: Map.get(attrs, :usage_status, @usage_unknown),
       served_model: usage.served_model,
       model_observation: usage.model_observation,
-      response_metadata: Metadata.sanitize_metadata(Map.get(attrs, :attempt_metadata, %{}))
+      response_metadata:
+        attrs
+        |> Map.get(:attempt_metadata, %{})
+        |> Metadata.sanitize_metadata()
+        |> ExpiredOwnerGenerationCleanup.preserve(attempt)
+        |> keep_downstream_delivery_receipt(attempt.id)
     })
     |> Repo.update()
     |> case do
@@ -1178,12 +1183,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
         from(a in Attempt,
           where: a.id == ^attempt_id,
           lock: "FOR UPDATE",
-          select: fragment("?->?", a.response_metadata, ^@downstream_delivery_key)
+          select: a.response_metadata
         )
       )
 
     case recorded do
-      %{} = receipt -> Map.put_new(metadata, @downstream_delivery_key, receipt)
+      %{} = recorded -> Map.merge(Map.take(recorded, [@downstream_delivery_key, "downstream_interruption"]), metadata)
       _none -> metadata
     end
   end
@@ -1352,6 +1357,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
           cached_input_tokens,
           cache_write_tokens,
           output_tokens,
+          reasoning_tokens,
           total_tokens
         )
 
@@ -1405,12 +1411,14 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
          cached_input_tokens,
          cache_write_tokens,
          output_tokens,
+         reasoning_tokens,
          total_tokens
        ) do
     with true <- nonnegative_integer?(input_tokens),
          true <- valid_optional_counter?(cached_input_tokens),
          true <- valid_optional_counter?(cache_write_tokens),
          true <- nonnegative_integer?(output_tokens),
+         true <- reasoning_tokens <= output_tokens,
          true <- nonnegative_integer?(total_tokens),
          {:ok, reads} <- optional_counter_for_sum(cached_input_tokens),
          {:ok, writes} <- optional_counter_for_sum(cache_write_tokens) do
@@ -1461,6 +1469,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   defp attempt_model(_request, _attrs), do: nil
 
   defp insert_attempt!(request, assignment, attrs, timestamp) do
+    request = Metadata.clear_downstream_interruption!(request)
     model = attempt_model(request, attrs)
     pricing_snapshot = attempt_pricing_snapshot(request, model, attrs)
     {owner_instance_id, owner_instance_boot_id} = attempt_owner(attrs)

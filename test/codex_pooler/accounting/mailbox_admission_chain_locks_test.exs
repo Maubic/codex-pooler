@@ -17,6 +17,86 @@ defmodule CodexPooler.Accounting.MailboxAdmissionChainLocksTest do
   @endpoint "/backend-api/codex/responses"
   @barrier {Reservation, :runtime_authorization_barrier}
 
+  @tag mailbox_observation_contract: true
+  test "a live blocker does not make an earlier activity snapshot a row-lock observation" do
+    fixture = committed_fixture()
+    parent = self()
+    ref = make_ref()
+
+    holder =
+      Task.async(fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          Repo.transaction(fn ->
+            Repo.one!(from s in CodexSession, where: s.id == ^fixture.session.id, lock: "FOR UPDATE")
+            send(parent, {:snapshot_holder, ref, backend_pid()})
+            receive do: ({:release, ^ref} -> :ok)
+          end)
+        end)
+      end)
+
+    stop_on_exit(holder)
+    holder_monitor = Process.monitor(holder.pid)
+    assert_receive {:snapshot_holder, ^ref, blocker}, @budget
+
+    waiter =
+      Task.async(fn ->
+        Sandbox.unboxed_run(Repo, fn ->
+          backend = backend_pid()
+
+          Repo.transaction(fn ->
+            send(parent, {:snapshot_waiter, ref, backend})
+            receive do: ({:lock, ^ref} -> :ok)
+            Repo.one!(from s in CodexSession, where: s.id == ^fixture.session.id, lock: "FOR UPDATE")
+          end)
+        end)
+      end)
+
+    stop_on_exit(waiter)
+    waiter_monitor = Process.monitor(waiter.pid)
+    assert_receive {:snapshot_waiter, ^ref, actor}, @budget
+
+    try do
+      Sandbox.unboxed_run(Repo, fn ->
+        Repo.transaction(fn ->
+          assert [["BEGIN"]] = Repo.query!("SELECT query FROM pg_stat_activity WHERE pid=$1", [actor]).rows
+          send(waiter.pid, {:lock, ref})
+          stale = await_snapshot_block(actor, blocker, System.monotonic_time(:millisecond) + @budget)
+          assert [["BEGIN", _, _]] = stale
+          assert lock_observation(stale, blocker, "codex_sessions") == nil
+          Repo.query!("SELECT pg_stat_clear_snapshot()")
+          fresh = await_snapshot_block(actor, blocker, System.monotonic_time(:millisecond) + @budget)
+          assert %{query: query, blocker_backend: ^blocker} = lock_observation(fresh, blocker, "codex_sessions")
+          assert query =~ "codex_sessions"
+          assert lock_observation(fresh, blocker, "attempts") == nil
+          wrong_blocker = Repo.query!("SELECT query, backend_xid::text, xact_start::text FROM pg_stat_activity WHERE pid=$1 AND $2=ANY(pg_blocking_pids(pid))", [actor, actor]).rows
+          assert wrong_blocker == []
+          assert lock_observation(wrong_blocker, actor, "codex_sessions") == nil
+        end)
+      end)
+    after
+      send(holder.pid, {:release, ref})
+      assert {:ok, :ok} = Task.await(holder, @budget)
+      assert {:ok, %CodexSession{}} = Task.await(waiter, @budget)
+      assert_receive {:DOWN, ^holder_monitor, :process, _, :normal}, @budget
+      assert_receive {:DOWN, ^waiter_monitor, :process, _, :normal}, @budget
+    end
+  end
+
+  defp await_snapshot_block(waiter, blocker, deadline) do
+    rows = Repo.query!("SELECT query, backend_xid::text, xact_start::text FROM pg_stat_activity WHERE pid=$1 AND $2=ANY(pg_blocking_pids(pid))", [waiter, blocker]).rows
+
+    if rows == [] do
+      assert System.monotonic_time(:millisecond) < deadline
+
+      receive do
+      after
+        5 -> await_snapshot_block(waiter, blocker, deadline)
+      end
+    else
+      rows
+    end
+  end
+
   for inserted_edges <- [1, 2, 3] do
     @tag mailbox_admission_lock_order: true
     @tag mailbox_lock_rediscovery: true
@@ -75,7 +155,7 @@ defmodule CodexPooler.Accounting.MailboxAdmissionChainLocksTest do
 
       {tail, observations} =
         Enum.reduce(Enum.with_index(blockers), {fixture.original, []}, fn {blocker, index}, {predecessor, observations} ->
-          observation = await_block(claim_backend, blocker.backend)
+          observation = await_block(claim_backend, blocker.backend, "codex_sessions")
           assert observation.query =~ "codex_sessions"
           assert_previous_admission_locks_released(fixture)
           next_session = Enum.at(fixture.sessions, index + 1)
@@ -156,7 +236,7 @@ defmodule CodexPooler.Accounting.MailboxAdmissionChainLocksTest do
 
     waits =
       Enum.reduce(Enum.with_index(blockers), {fixture.original, []}, fn {blocker, index}, {predecessor, observations} ->
-        observation = await_block(actor_backend, blocker.backend)
+        observation = await_block(actor_backend, blocker.backend, "codex_sessions")
         assert observation.query =~ "codex_sessions"
         send(blocker.task.pid, {:fresh_append, ref, predecessor, Enum.at(fixture.sessions, index + 1)})
         assert {:ok, successor} = Task.await(blocker.task, @budget)
@@ -221,7 +301,7 @@ defmodule CodexPooler.Accounting.MailboxAdmissionChainLocksTest do
       observations =
         Enum.reduce(Enum.with_index(blockers), {fixture.original, []}, fn {blocker, index}, {predecessor, observations} ->
           refute actor_backend == blocker.backend
-          observation = await_block(actor_backend, blocker.backend)
+          observation = await_block(actor_backend, blocker.backend, "codex_sessions")
           assert observation.query =~ "codex_sessions"
           assert_previous_admission_locks_released(fixture)
           send(blocker.task.pid, {:append_entry, ref, predecessor, Enum.at(fixture.sessions, index + 1)})
@@ -346,7 +426,7 @@ defmodule CodexPooler.Accounting.MailboxAdmissionChainLocksTest do
 
     stop_on_exit(actor)
     assert_receive {:execution_actor, ^ref, actor_backend}, @budget
-    turn_wait = await_block(actor_backend, turn_backend)
+    turn_wait = await_block(actor_backend, turn_backend, "codex_turns")
     assert turn_wait.query =~ "codex_turns"
     send(holder.pid, {:release, ref})
     assert {:ok, :updated} = Task.await(holder, @budget)
@@ -415,7 +495,7 @@ defmodule CodexPooler.Accounting.MailboxAdmissionChainLocksTest do
 
     stop_on_exit(actor)
     assert_receive {:epoch_actor, ^ref, actor_backend}, @budget
-    observation = await_block(actor_backend, holder_backend)
+    observation = await_block(actor_backend, holder_backend, "codex_sessions")
     assert observation.query =~ "codex_sessions"
     send(holder.pid, {:release, ref})
     assert {:ok, :updated} = Task.await(holder, @budget)
@@ -491,7 +571,7 @@ defmodule CodexPooler.Accounting.MailboxAdmissionChainLocksTest do
     assert_receive {:clock_backend, ^ref, actor_backend}, @budget
     assert_receive {:admission_clock, ^ref, before_wait_clock}, @budget
     assert DateTime.compare(before_wait_clock, deadline) == :lt
-    observation = await_block(actor_backend, holder_backend)
+    observation = await_block(actor_backend, holder_backend, "attempts")
     assert observation.query =~ "attempts"
     wait_for_database_deadline(deadline)
     send(holder.pid, {:release, ref})
@@ -519,6 +599,45 @@ defmodule CodexPooler.Accounting.MailboxAdmissionChainLocksTest do
       refute Enum.at(fixture.sessions, 1).id in ids
       assert fixture.session.id in ids
       assert {:error, %{code: :duplicate_request}} = Accounting.claim_websocket_turn(fixture.auth, fixture.model, opts)
+    end)
+  end
+
+  @tag mailbox_admission_query_cost: true
+  test "sixteen failed-claim edges discover every session with bounded reads" do
+    fixture = committed_fixture()
+
+    Sandbox.unboxed_run(Repo, fn ->
+      sessions = Enum.map(1..16, fn _ -> insert_session(fixture.auth, Ecto.UUID.generate()) end)
+      tail = Enum.reduce(sessions, fixture.original, &append_edge(fixture, &2, &1))
+      opts = %{fixture.opts | correlation_id: tail.correlation_id}
+      expected = MapSet.new([fixture.session.id | Enum.map(sessions, & &1.id)])
+      counter = :atomics.new(1, [])
+      handler = {__MODULE__, :discovery_reads, make_ref()}
+      actor = self()
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      :ok =
+        :telemetry.attach(
+          handler,
+          [:codex_pooler, :repo, :query],
+          fn _event, _measurements, metadata, {actor, counter} ->
+            if self() == actor and metadata[:repo] == Repo and String.starts_with?(metadata[:query] || "", "SELECT"), do: :atomics.add(counter, 1, 1)
+          end,
+          {actor, counter}
+        )
+
+      try do
+        ids = Reservation.mailbox_admission_session_ids(fixture.auth, fixture.model, opts)
+        assert MapSet.new(ids) == expected
+        reads = :atomics.get(counter, 1)
+        assert reads > 0
+        # The bound allows both fresh discovery walks and their exact session
+        # sets, without a query for every ancestor's turn and session per hop.
+        assert reads <= 48
+        emit_receipt(%{scenario: "sixteen_edge_discovery_cost", distinct_sessions: MapSet.size(expected), select_queries: reads})
+      after
+        :telemetry.detach(handler)
+      end
     end)
   end
 
@@ -592,21 +711,28 @@ defmodule CodexPooler.Accounting.MailboxAdmissionChainLocksTest do
     Repo.insert!(%CodexSession{id: id, pool_id: auth.pool.id, api_key_id: auth.api_key.id, session_key: "mailbox-chain-lock-#{System.unique_integer([:positive, :monotonic])}", status: "active", created_at: now, updated_at: now})
   end
 
-  defp await_block(waiter, blocker), do: await_block(waiter, blocker, System.monotonic_time(:millisecond) + @budget)
+  defp await_block(waiter, blocker, expected_query), do: await_block(waiter, blocker, expected_query, System.monotonic_time(:millisecond) + @budget)
 
-  defp await_block(waiter, blocker, deadline) do
+  defp await_block(waiter, blocker, expected_query, deadline) do
     rows = Sandbox.unboxed_run(Repo, fn -> Repo.query!("SELECT query, backend_xid::text, xact_start::text FROM pg_stat_activity WHERE pid=$1 AND $2=ANY(pg_blocking_pids(pid))", [waiter, blocker]).rows end)
 
-    case rows do
-      [[query, xid, started_at]] ->
-        %{query: query, transaction_id: xid, transaction_start: started_at, blocker_backend: blocker}
+    case lock_observation(rows, blocker, expected_query) do
+      %{} = observation ->
+        observation
 
-      [] ->
+      nil ->
         assert System.monotonic_time(:millisecond) < deadline, "admission did not block on the expected session"
         Process.sleep(20)
-        await_block(waiter, blocker, deadline)
+        await_block(waiter, blocker, expected_query, deadline)
     end
   end
+
+  # Activity text is snapshotted before pg_blocking_pids reads the live lock state.
+  defp lock_observation([[query, xid, started_at]], blocker, expected_query) do
+    if String.contains?(query, expected_query), do: %{query: query, transaction_id: xid, transaction_start: started_at, blocker_backend: blocker}
+  end
+
+  defp lock_observation([], _blocker, _expected_query), do: nil
 
   defp await_execution_session_wait(waiter, blocker, ref, deadline) do
     receive do
@@ -615,13 +741,13 @@ defmodule CodexPooler.Accounting.MailboxAdmissionChainLocksTest do
       0 -> :ok
     end
 
-    rows = Sandbox.unboxed_run(Repo, fn -> Repo.query!("SELECT query FROM pg_stat_activity WHERE pid=$1 AND $2=ANY(pg_blocking_pids(pid))", [waiter, blocker]).rows end)
+    rows = Sandbox.unboxed_run(Repo, fn -> Repo.query!("SELECT query, backend_xid::text, xact_start::text FROM pg_stat_activity WHERE pid=$1 AND $2=ANY(pg_blocking_pids(pid))", [waiter, blocker]).rows end)
 
-    case rows do
-      [[query]] ->
+    case lock_observation(rows, blocker, "codex_sessions") do
+      %{query: query} ->
         query
 
-      [] ->
+      nil ->
         assert System.monotonic_time(:millisecond) < deadline, "execution rediscovery did not reach its session lock"
         Process.sleep(20)
         await_execution_session_wait(waiter, blocker, ref, deadline)

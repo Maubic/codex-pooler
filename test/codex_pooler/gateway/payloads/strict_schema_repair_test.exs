@@ -51,6 +51,113 @@ defmodule CodexPooler.Gateway.Payloads.StrictSchemaRepairTest do
                  ]
                })
     end
+
+    test "accepts released Bash strict nullable properties without rewriting any target layout" do
+      nullable = fn schema -> %{"anyOf" => [schema, %{"type" => "null"}]} end
+
+      schema =
+        strict_object_schema(%{
+          "i" => %{"type" => "string"},
+          "command" => %{"type" => "string"},
+          "timeout" => nullable.(%{"type" => "number"}),
+          "cwd" => nullable.(%{"type" => "string"}),
+          "pty" => nullable.(%{"type" => "boolean"}),
+          "async" => nullable.(%{"type" => "boolean"}),
+          "name" => nullable.(%{"type" => "string"}),
+          "ready" =>
+            nullable.(
+              strict_object_schema(%{
+                "log" => nullable.(%{"type" => "string"}),
+                "port" => nullable.(%{"type" => "number"}),
+                "host" => nullable.(%{"type" => "string"}),
+                "timeout" => nullable.(%{"type" => "number"})
+              })
+            )
+        })
+
+      Enum.each(strict_target_payloads(schema), fn {_target_label, payload, _code, _param} ->
+        snapshot = payload
+        assert :ok = StrictSchema.validate(payload)
+        assert :ok = StrictSchema.validate_public(payload)
+        assert :ok = StrictSchema.validate_public_type_vocabulary(payload)
+        assert :ok = StrictSchema.validate_public_root_contract(payload)
+        assert payload == snapshot
+      end)
+    end
+
+    test "a nested property named parameters is not a strict target root" do
+      schema = strict_object_schema(%{"parameters" => %{"anyOf" => [%{"type" => "string"}, %{"type" => "null"}]}})
+
+      Enum.each(strict_target_payloads(schema), fn {_target_label, payload, _code, _param} ->
+        assert :ok = StrictSchema.validate(payload)
+        assert :ok = StrictSchema.validate_public(payload)
+        assert :ok = StrictSchema.validate_public_root_contract(payload)
+      end)
+    end
+
+    test "validates nested anyOf branches through arrays and existing local definitions" do
+      nullable = %{"anyOf" => [%{"type" => "string"}, %{"type" => "null"}]}
+
+      schema =
+        strict_object_schema(
+          %{
+            "entries" => %{"type" => "array", "items" => nullable},
+            "defined" => %{"$ref" => "#/$defs/value"}
+          },
+          %{"$defs" => %{"value" => nullable}}
+        )
+
+      payload = %{"tools" => [strict_flat_function_tool("nested_union_fixture", schema)]}
+      assert :ok = StrictSchema.validate(payload)
+
+      invalid_items = put_in(payload, ["tools", Access.at(0), "parameters", "properties", "entries", "items", "anyOf"], [%{}])
+
+      assert {:error, %{code: "invalid_function_parameters", param: "tools.0.parameters.properties.entries.items.anyOf.0.type"}} =
+               StrictSchema.validate(invalid_items)
+
+      invalid_definition = put_in(payload, ["tools", Access.at(0), "parameters", "$defs", "value", "anyOf"], [%{}])
+
+      assert {:error, %{code: "invalid_function_parameters", param: "tools.0.parameters.properties.defined.anyOf.0.type"}} =
+               StrictSchema.validate(invalid_definition)
+    end
+
+    test "nested unions retain malformed branch and strict object refusals in every target layout" do
+      invalid = [
+        {%{}, ".type"},
+        {%{"anyOf" => []}, ".type"},
+        {%{"anyOf" => nil}, ".type"},
+        {%{"anyOf" => %{}}, ".type"},
+        {%{"anyOf" => [%{}]}, ".anyOf.0.type"},
+        {%{"anyOf" => ["string"]}, ".anyOf.0"},
+        {%{"anyOf" => [%{"type" => nil}]}, ".anyOf.0.type"},
+        {%{"anyOf" => [%{"type" => "string"}, %{"type" => ""}]}, ".anyOf.1.type"},
+        {%{"type" => nil, "anyOf" => [%{"type" => "string"}]}, ".type"},
+        {%{"type" => [], "anyOf" => [%{"type" => "string"}]}, ".type"},
+        {%{"anyOf" => [%{"type" => "object", "properties" => %{}, "required" => []}]}, ".anyOf.0"},
+        {%{"anyOf" => [strict_object_schema(%{"value" => %{"type" => "string"}}, %{"required" => []})]}, ".anyOf.0.required"},
+        {%{"oneOf" => [%{"type" => "string"}]}, ".type"},
+        {%{"allOf" => [%{"type" => "string"}]}, ".type"}
+      ]
+
+      Enum.each(invalid, fn {candidate, suffix} ->
+        schema = strict_object_schema(%{"candidate" => candidate})
+
+        Enum.each(strict_target_payloads(schema), fn {_target_label, payload, code, root_param} ->
+          param = root_param <> ".properties.candidate" <> suffix
+          assert {:error, %{status: 400, code: ^code, param: ^param}} = StrictSchema.validate(payload)
+        end)
+      end)
+    end
+
+    test "a typeless root union remains refused by native and public strict root contracts" do
+      schema = %{"anyOf" => [strict_object_schema(%{}), strict_object_schema(%{})]}
+
+      Enum.each(strict_target_payloads(schema), fn {_target_label, payload, code, root_param} ->
+        param = root_param <> ".type"
+        assert {:error, %{status: 400, code: ^code, param: ^param}} = StrictSchema.validate(payload)
+        assert {:error, %{status: 400, code: ^code, param: ^root_param}} = StrictSchema.validate_public_root_contract(payload)
+      end)
+    end
   end
 
   describe "validate_public_type_vocabulary/1" do

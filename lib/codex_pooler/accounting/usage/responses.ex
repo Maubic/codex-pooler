@@ -107,7 +107,10 @@ defmodule CodexPooler.Accounting.UsageResponses do
   end
 
   @spec codex_rate_limit(map() | nil, map() | nil) :: map()
-  def codex_rate_limit(primary, secondary) do
+  def codex_rate_limit(primary, secondary), do: codex_rate_limit(primary, secondary, now())
+
+  @spec codex_rate_limit(map() | nil, map() | nil, DateTime.t()) :: map()
+  def codex_rate_limit(primary, secondary, as_of) do
     allowed =
       [primary, secondary]
       |> Enum.reject(&is_nil/1)
@@ -116,8 +119,8 @@ defmodule CodexPooler.Accounting.UsageResponses do
     %{
       allowed: allowed,
       limit_reached: not allowed,
-      primary_window: codex_window_snapshot(primary),
-      secondary_window: codex_window_snapshot(secondary)
+      primary_window: codex_window_snapshot(primary, as_of),
+      secondary_window: codex_window_snapshot(secondary, as_of)
     }
   end
 
@@ -177,7 +180,7 @@ defmodule CodexPooler.Accounting.UsageResponses do
   end
 
   defp additional_rate_limit(primary, secondary, windows, as_of) do
-    rate_limit = codex_rate_limit(primary, secondary)
+    rate_limit = codex_rate_limit(primary, secondary, as_of)
 
     allowed =
       Enum.all?(windows, fn window ->
@@ -284,9 +287,9 @@ defmodule CodexPooler.Accounting.UsageResponses do
     end
   end
 
-  defp codex_window_snapshot(nil), do: nil
+  defp codex_window_snapshot(nil, _as_of), do: nil
 
-  defp codex_window_snapshot(limit) do
+  defp codex_window_snapshot(limit, as_of) do
     reset_at =
       limit.reset_at &&
         DateTime.from_iso8601(limit.reset_at)
@@ -298,7 +301,7 @@ defmodule CodexPooler.Accounting.UsageResponses do
     %{
       used_percent: snapshot_used_percent(limit),
       limit_window_seconds: window_seconds(limit.limit_window),
-      reset_after_seconds: if(reset_at, do: max(DateTime.diff(reset_at, now(), :second), 0), else: nil),
+      reset_after_seconds: if(reset_at, do: max(DateTime.diff(reset_at, as_of, :second), 0), else: nil),
       reset_at: if(reset_at, do: DateTime.to_unix(reset_at), else: nil)
     }
   end

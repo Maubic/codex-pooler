@@ -36,6 +36,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport.ReplayRemoteNodeClient
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport.TurnBudgetNodeClient
+  alias CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
   alias Ecto.Adapters.SQL.Sandbox
 
@@ -167,29 +168,24 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
     end
   end
 
+  # The owner dies before the turn's payload left (its upstream session is
+  # held at the payload write, before the forwarder's observer marks the turn
+  # started), so the forwarder hands the turn to a replacement owner, which
+  # sends it once. A turn whose payload had started to leave is never handed
+  # over (findings#327, `owner_crash_after_send_test.exs`); this test used to
+  # kill the owner after the provider had the payload and counted the
+  # replacement's second send of it as the recovery.
   @tag :owner_crash_recovery
   test "replacement owner preserves the active proxy epoch after pre-visible owner death" do
-    release_ref = make_ref()
+    hold_ref = make_ref()
 
     upstream =
       start_upstream(
-        # Strict finite scenario: the first send is held pre-visible until the
-        # owner is killed and the connection then closes without a terminal, the
-        # replacement owner replays exactly one lite turn, and the next socket
-        # sends exactly one full turn.
+        # Strict finite scenario: the replacement owner sends exactly one lite
+        # turn, the one its predecessor never wrote, and the next socket sends
+        # exactly one full turn.
         # provenance: synthetic_adversarial
         FakeUpstream.strict_sequence([
-          FakeUpstream.expect_request(
-            method: "WEBSOCKET",
-            json: [valid: true, equals: %{"type" => "response.create"}],
-            respond:
-              FakeUpstream.websocket_close_without_terminal_barrier(
-                notify: self(),
-                release_ref: release_ref,
-                code: 1001,
-                reason: "synthetic pre-visible owner death close"
-              )
-          ),
           FakeUpstream.expect_request(
             method: "WEBSOCKET",
             json: [valid: true, equals: %{"type" => "response.create"}],
@@ -219,7 +215,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
     scope = model_serving_scope()
     revision = set_model_serving_mode!(scope, setup, "lite")
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
-    {:ok, state} = owner_socket(auth, "ws-owner-mode-kill", "owner-mode-kill")
+    held_write = OwnerCrashAfterSendScenario.held_write_boundary(self(), hold_ref, :linked, :before_mark)
+    {:ok, state} = owner_socket(auth, "ws-owner-mode-kill", "owner-mode-kill", websocket_owner_forwarder_opts: [upstream: held_write])
     remote_node = :"codex_pooler@killed-mode-owner.example"
 
     base_node_opts =
@@ -276,12 +273,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
 
       assert_remote_submit_request_v8!(remote_state, remote_node)
 
-      assert_receive {:fake_upstream_websocket_barrier, :before_close, upstream_pid, ^release_ref},
-                     @detection_timeout_ms
+      assert_receive {:payload_write_held, held_session, ^hold_ref, :unmarked}, @detection_timeout_ms
+      held_session_monitor = Process.monitor(held_session)
 
       try do
-        assert [projected_lite_request] = await_upstream_requests(upstream, 1)
-        assert_canonical_lite_owner_request!(projected_lite_request)
+        assert FakeUpstream.count(upstream) == 0
 
         assert [in_progress_request] = request_logs(setup.pool.id)
         assert in_progress_request.status == "in_progress"
@@ -303,7 +299,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
 
         Process.exit(old_owner_pid, :kill)
         assert_receive {:DOWN, ^old_owner_ref, :process, ^old_owner_pid, :killed}, @detection_timeout_ms
-        send(upstream_pid, {:fake_upstream_release_websocket, release_ref})
+        # The held upstream session goes with its owner, before its write.
+        assert_receive {:DOWN, ^held_session_monitor, :process, ^held_session, :killed}, @detection_timeout_ms
 
         assert :ok = Task.await(interrupted_turn, 3_000)
 
@@ -322,7 +319,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
         refute recovered_remote_state.websocket_owner_lease_token ==
                  remote_state.websocket_owner_lease_token
 
-        assert FakeUpstream.count(upstream) == 2
+        assert FakeUpstream.count(upstream) == 1
         assert [recovered_request] = request_logs(setup.pool.id)
         assert_owner_mode_accounting!(recovered_request, "lite", "succeeded", remote_node)
 
@@ -416,10 +413,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
           CodexResponsesSocket.terminate(:closed, next_remote_state)
         end
 
-        assert [killed_lite_request, recovered_lite_request, full_request] =
-                 await_upstream_requests(upstream, 3)
+        assert [recovered_lite_request, full_request] = await_upstream_requests(upstream, 2)
 
-        assert_canonical_lite_owner_request!(killed_lite_request)
         assert_canonical_lite_owner_request!(recovered_lite_request)
         assert_canonical_full_owner_request!(full_request)
 
@@ -433,8 +428,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.OwnerDeath
 
         assert :ok = FakeUpstream.verify!(upstream)
       after
-        send(upstream_pid, {:fake_upstream_release_websocket, release_ref})
-
         if Process.alive?(interrupted_turn.pid) do
           Task.shutdown(interrupted_turn, :brutal_kill)
         end

@@ -1915,6 +1915,8 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     handler_id = {__MODULE__, :stale_pool_window, projection_ref}
     first_seven_day_projection = :atomics.new(1, signed: false)
 
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
     :ok =
       :telemetry.attach(
         handler_id,
@@ -1926,23 +1928,17 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
             if traffic_projection_window(metadata) == :seven_days and
                  :atomics.compare_exchange(first_seven_day_projection, 1, 0, 1) == :ok do
-              send(test_pid, {handler_id, :held, query_pid})
-
-              receive do
-                {^handler_id, :release} -> :ok
-              after
-                5_000 -> flunk("timed out waiting to release stale seven-day projection")
-              end
+              hold_pool_traffic_projection(test_pid, handler_id)
             end
           end
         end,
         nil
       )
 
-    on_exit(fn -> :telemetry.detach(handler_id) end)
-
     render_patch(view, ~p"/admin/pools?traffic_window=7d")
     assert_receive {^handler_id, :held, seven_day_query_pid}, 2_000
+    seven_day_monitor = Process.monitor(seven_day_query_pid)
+    release_pool_projection_on_exit(seven_day_query_pid, handler_id)
 
     {_proxy_ref, _proxy_topic, proxy_pid} = view.proxy
     view_pid = view.pid
@@ -1961,7 +1957,6 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
                    2_000
 
     :erlang.trace(proxy_pid, false, [:send])
-    seven_day_monitor = Process.monitor(seven_day_query_pid)
     send(seven_day_query_pid, {handler_id, :release})
     _ = Task.await(patch_task, 2_000)
     assert_receive {:DOWN, ^seven_day_monitor, :process, ^seven_day_query_pid, :normal}, 2_000
@@ -1987,6 +1982,14 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
     assert traffic_projection_windows(projection_events, view) ==
              MapSet.new([:twenty_four_hours, :seven_days])
+  end
+
+  for release <- [:explicit, :owner_down] do
+    @tag :admin_pool_url_filters
+    @tag slow: "observes the retired five-second projection-hold expiry on a real query"
+    test "traffic query hold remains owned until #{release}" do
+      assert_pool_projection_hold(unquote(release))
+    end
   end
 
   test "renders the pools shell and protected controls for authenticated admins", %{
@@ -4947,6 +4950,89 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
              Pools.delete_archived_pool(nil, pool, pool.slug)
 
     assert Pools.can_manage_pools?(scope)
+  end
+
+  defp hold_pool_traffic_projection(owner, handler_id) do
+    owner_monitor = Process.monitor(owner)
+    send(owner, {handler_id, :held, self()})
+
+    try do
+      receive do
+        {^handler_id, :release} -> :ok
+        {:DOWN, ^owner_monitor, :process, ^owner, _reason} -> :ok
+      end
+    after
+      Process.demonitor(owner_monitor, [:flush])
+    end
+  end
+
+  defp release_pool_projection_on_exit(query_pid, handler_id) do
+    on_exit(fn ->
+      monitor = Process.monitor(query_pid)
+      send(query_pid, {handler_id, :release})
+      assert_receive {:DOWN, ^monitor, :process, ^query_pid, _reason}, 2_000
+    end)
+  end
+
+  defp assert_pool_projection_hold(release) do
+    parent = self()
+    handler_id = {__MODULE__, :query_hold, make_ref()}
+    supervisor = start_supervised!(Task.Supervisor)
+
+    owner =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        receive do
+          {^handler_id, :held, query_pid} -> send(parent, {handler_id, :held, query_pid})
+        end
+
+        receive do
+          :finish -> :ok
+        end
+      end)
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:codex_pooler, :repo, :query],
+        fn _, _, metadata, _ ->
+          if metadata[:repo] == Repo and metadata[:query] == "SELECT 1", do: hold_pool_traffic_projection(owner.pid, handler_id)
+        end,
+        nil
+      )
+
+    query =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        %{rows: [[1]]} = Repo.query!("SELECT 1")
+        %{rows: [[2]]} = Repo.query!("SELECT 2")
+        :ok
+      end)
+
+    query_pid = query.pid
+    assert_receive {^handler_id, :held, ^query_pid}, 2_000
+    query_monitor = Process.monitor(query_pid)
+    release_pool_projection_on_exit(query_pid, handler_id)
+
+    case release do
+      :explicit ->
+        # This is the old barrier's actual expiry boundary, not a readiness sleep.
+        elapsed = make_ref()
+        Process.send_after(self(), {elapsed, :old_hold_expired}, 5_100)
+        assert_receive {^elapsed, :old_hold_expired}, 6_000
+        assert Process.alive?(query_pid)
+        send(query_pid, {handler_id, :release})
+
+      :owner_down ->
+        owner_monitor = Process.monitor(owner.pid)
+        send(owner.pid, :finish)
+        assert_receive {:DOWN, ^owner_monitor, :process, _, :normal}, 2_000
+    end
+
+    assert :ok = Task.await(query, 2_000)
+    assert_receive {:DOWN, ^query_monitor, :process, ^query_pid, :normal}, 2_000
+    send(owner.pid, :finish)
+    assert :ok = Task.await(owner, 2_000)
   end
 
   defp open_create_dialog(view) do

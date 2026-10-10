@@ -6,6 +6,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   import CodexPooler.AccountsFixtures
   import CodexPooler.PoolerFixtures
   import ExUnit.CaptureLog
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport, only: [with_info_log: 1]
 
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.OperationalSettings
@@ -43,6 +44,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport
+  alias CodexPoolerWeb.Runtime.OwnerCrashAfterSendScenario
 
   @frame "synthetic-frame"
   @peer_detection_timeout_ms 10_000
@@ -818,12 +820,22 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     assert_receive {:marker_takeover_submit_started, first_worker, ^release_ref}
     _marker_path = WebsocketRolloutDrainSupport.configure_drain_marker!()
 
-    first_owner_ref = Process.monitor(first_owner)
-    Process.exit(first_owner, :kill)
-    assert_receive {:DOWN, ^first_owner_ref, :process, ^first_owner, :killed}
-    send(first_worker, {:release_marker_takeover_submit, release_ref})
+    {:ok, log} =
+      with_info_log(fn ->
+        first_owner_ref = Process.monitor(first_owner)
+        Process.exit(first_owner, :kill)
+        assert_receive {:DOWN, ^first_owner_ref, :process, ^first_owner, :killed}
+        send(first_worker, {:release_marker_takeover_submit, release_ref})
 
-    assert Task.await(submitter, 2_000) == {:error, :owner_drained}
+        assert Task.await(submitter, 2_000) == {:error, :owner_drained}
+        :ok
+      end)
+
+    # The takeover was refused by the drain: one fence line names the refusal.
+    assert OwnerCrashAfterSendScenario.fence_lines(log) == [
+             %{"decision" => "settled", "reason" => "takeover_refused", "refusal" => "owner_drained", "owner_exit" => "killed", "codex_session_id" => session.id}
+           ]
+
     assert {:error, :owner_unavailable} = WebsocketOwnerSession.lookup(session.id)
     refute_received {:websocket_owner_runtime_recovered, _, _, _}
     refute_received {:websocket_owner_harness_upstream_started, _recovery_upstream_pid}
@@ -1030,12 +1042,26 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
 
     assert_receive {:first_public_owner_submit_started, first_worker, ^release_ref}
 
-    first_owner_ref = Process.monitor(first_owner)
-    Process.exit(first_owner, :kill)
-    assert_receive {:DOWN, ^first_owner_ref, :process, ^first_owner, :killed}
-    send(first_worker, {:release_first_public_owner_submit, release_ref})
+    # The submitter tells this downstream the recovered runtime before it logs
+    # the takeover (`take_over_turn/4` logs the decision once it is final), so
+    # the capture ends on the result the submitter sends after both: a capture
+    # that ended on the notification missed the line (Drone 1867).
+    {recovered_stable, log} =
+      with_info_log(fn ->
+        first_owner_ref = Process.monitor(first_owner)
+        Process.exit(first_owner, :kill)
+        assert_receive {:DOWN, ^first_owner_ref, :process, ^first_owner, :killed}
+        send(first_worker, {:release_first_public_owner_submit, release_ref})
 
-    assert_receive {:websocket_owner_runtime_recovered, "corr-exit-after-submit", 1, %{websocket_owner_downstream: recovered_stable}}
+        assert_receive {:websocket_owner_runtime_recovered, "corr-exit-after-submit", 1, %{websocket_owner_downstream: recovered_stable}}
+        assert_receive {:public_owner_retry_result, ^submitter, {:ok, %{terminal: "response.completed", status: 200}}}
+        recovered_stable
+      end)
+
+    # Not a socket's turn: no submission notification, so the takeover is taken.
+    assert OwnerCrashAfterSendScenario.fence_lines(log) == [
+             %{"decision" => "takeover", "reason" => "payload_unsent", "owner_exit" => "killed", "codex_session_id" => session.id}
+           ]
 
     assert MapSet.new(Map.keys(recovered_stable)) ==
              MapSet.new([:pid, :epoch, :correlation_id, :active_turn_reconnect?])
@@ -1047,8 +1073,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
     assert_receive {:websocket_owner_frame, "corr-exit-after-submit", 1, ^submitter, {:data, ^terminal_frame}}
 
     assert_receive {:websocket_owner_frame, "corr-exit-after-submit", 1, ^submitter, :complete}
-
-    assert_receive {:public_owner_retry_result, ^submitter, {:ok, %{terminal: "response.completed", status: 200}}}
 
     assert {:ok, recovered_owner} = WebsocketOwnerSession.lookup(session.id)
     recovered_owner_state = :sys.get_state(recovered_owner)
@@ -1105,12 +1129,21 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
 
     assert_receive {:bound_owner_submit_started, first_worker, ^release_ref}
 
-    first_owner_ref = Process.monitor(first_owner)
-    Process.exit(first_owner, :kill)
-    assert_receive {:DOWN, ^first_owner_ref, :process, ^first_owner, :killed}
-    send(first_worker, {:release_bound_owner_submit, release_ref})
+    {:ok, log} =
+      with_info_log(fn ->
+        first_owner_ref = Process.monitor(first_owner)
+        Process.exit(first_owner, :kill)
+        assert_receive {:DOWN, ^first_owner_ref, :process, ^first_owner, :killed}
+        send(first_worker, {:release_bound_owner_submit, release_ref})
 
-    assert Task.await(submitter, 2_000) == {:error, :owner_crashed}
+        assert Task.await(submitter, 2_000) == {:error, :owner_crashed}
+        :ok
+      end)
+
+    assert OwnerCrashAfterSendScenario.fence_lines(log) == [
+             %{"decision" => "settled", "reason" => "reset_probe", "owner_exit" => "killed", "codex_session_id" => session.id}
+           ]
+
     assert {:error, :owner_unavailable} = WebsocketOwnerSession.lookup(session.id)
     refute_received {:websocket_owner_runtime_recovered, _, _, _}
     refute_received {:websocket_owner_harness_upstream_started, _upstream_pid}

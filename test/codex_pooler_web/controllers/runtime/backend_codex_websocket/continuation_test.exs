@@ -896,7 +896,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ContinuationTest do
       assert {:ok, state} =
                CodexResponsesSocket.handle_in({first_payload, [opcode: :text]}, state)
 
-      assert_receive {:fake_upstream_chunk_barrier, 0, first_upstream_pid, ^release_ref}, @detection_timeout_ms
+      {state, first_upstream_pid} = receive_socket_upstream_barrier!(state, {:fake_upstream_chunk_barrier, 0, release_ref}, @detection_timeout_ms)
 
       second_payload =
         CodexPooler.JSON.encode!(%{
@@ -912,15 +912,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ContinuationTest do
 
       send(first_upstream_pid, {:fake_upstream_release_chunk, release_ref})
 
-      assert_receive {:fake_upstream_chunk_barrier, 0, second_upstream_pid, ^release_ref}, @detection_timeout_ms
+      {state, second_upstream_pid} = receive_socket_upstream_barrier!(state, {:fake_upstream_chunk_barrier, 0, release_ref}, @detection_timeout_ms)
       send(second_upstream_pid, {:fake_upstream_release_chunk, release_ref})
 
       assert {:push, {:text, first_frame}, state} = receive_socket_push(state)
       assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(first_frame)
       assert {:push, {:text, second_frame}, state} = receive_socket_push(state)
       assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(second_frame)
-      assert {:ok, state} = receive_socket_done(state)
-      assert {:ok, _state} = receive_socket_done(state)
+      assert {:ok, state} = receive_socket_turn_done(state)
+      assert {:ok, _state} = receive_socket_turn_done(state)
 
       assert [first_request, second_request] = FakeUpstream.requests(upstream)
       assert first_request.websocket_connection_id == second_request.websocket_connection_id
@@ -977,7 +977,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ContinuationTest do
       assert {:ok, state} =
                CodexResponsesSocket.handle_in({first_payload, [opcode: :text]}, state)
 
-      assert_receive {:fake_upstream_chunk_barrier, 0, first_upstream_pid, ^release_ref}, @detection_timeout_ms
+      {state, first_upstream_pid} = receive_socket_upstream_barrier!(state, {:fake_upstream_chunk_barrier, 0, release_ref}, @detection_timeout_ms)
 
       second_payload =
         CodexPooler.JSON.encode!(%{
@@ -1004,14 +1004,14 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ContinuationTest do
 
       assert {:push, {:text, first_frame}, state} = receive_socket_push(state)
       assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(first_frame)
-      assert {:ok, state} = receive_socket_done(state)
+      assert {:ok, state} = receive_socket_turn_done(state)
 
-      assert_receive {:fake_upstream_chunk_barrier, 0, second_upstream_pid, ^release_ref}, @detection_timeout_ms
+      {state, second_upstream_pid} = receive_socket_upstream_barrier!(state, {:fake_upstream_chunk_barrier, 0, release_ref}, @detection_timeout_ms)
       send(second_upstream_pid, {:fake_upstream_release_chunk, release_ref})
 
       assert {:push, {:text, second_frame}, state} = receive_socket_push(state)
       assert %{"type" => "response.completed"} = CodexPooler.JSON.decode!(second_frame)
-      assert {:ok, _state} = receive_socket_done(state)
+      assert {:ok, _state} = receive_socket_turn_done(state)
 
       assert [first_request, second_request] = FakeUpstream.requests(upstream)
       assert first_request.websocket_connection_id == second_request.websocket_connection_id

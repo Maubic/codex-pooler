@@ -33,6 +33,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.TerminalDiscriminator
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV9
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
   alias CodexPooler.Gateway.Transports.WebsocketOwnerPreviousReleaseFixture
@@ -137,7 +138,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
     def call_owner(_node, module, function, args, timeout) do
       send(state().notify, {:turn_budget_remote_call, function, timeout})
 
-      if function == :remote_submit_request_v8 and timeout <= state().minimum_timeout_ms do
+      if function in [:remote_submit_request_v8, :remote_submit_request_v9] and timeout <= state().minimum_timeout_ms do
         {:error, :owner_forward_timeout}
       else
         apply(module, function, args)
@@ -271,7 +272,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
       :current ->
         assert Keyword.get(opts, :repo) == :real
         assert is_struct(:erpc.call(peer_node, Upstreams, :get_upstream_identity, [identity.id]), UpstreamIdentity)
-        trace_remote_v8_calls!(peer_node)
+        trace_remote_submission_calls!(peer_node)
 
       :previous ->
         assert {:module, WebsocketOwnerForwarder} =
@@ -447,28 +448,33 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
   def relay_native_compaction_lifecycle(_event, _measurements, _metadata, _test_pid), do: :ok
 
   @doc false
-  def start_forwarder_v8_trace(notify) when is_pid(notify) do
-    tracer = spawn(fn -> forwarder_v8_trace_loop(notify) end)
+  def start_forwarder_submission_trace(notify) when is_pid(notify) do
+    tracer = spawn(fn -> forwarder_submission_trace_loop(notify) end)
     {:module, WebsocketOwnerForwarder} = Code.ensure_loaded(WebsocketOwnerForwarder)
     :erlang.trace_pattern({WebsocketOwnerForwarder, :remote_submit_request_v8, 3}, true, [:local])
+    :erlang.trace_pattern({WebsocketOwnerForwarder, :remote_submit_request_v9, 3}, true, [:local])
     :erlang.trace(:all, true, [:call, {:tracer, tracer}])
     :erlang.trace(:new, true, [:call, {:tracer, tracer}])
     {:ok, tracer}
   end
 
-  defp trace_remote_v8_calls!(peer_node) do
-    assert {:ok, tracer} = :erpc.call(peer_node, __MODULE__, :start_forwarder_v8_trace, [self()])
+  defp trace_remote_submission_calls!(peer_node) do
+    assert {:ok, tracer} = :erpc.call(peer_node, __MODULE__, :start_forwarder_submission_trace, [self()])
     assert node(tracer) == peer_node
   end
 
-  defp forwarder_v8_trace_loop(notify) do
+  defp forwarder_submission_trace_loop(notify) do
     receive do
       {:trace, pid, :call, {WebsocketOwnerForwarder, :remote_submit_request_v8, args}} ->
         send(notify, {:remote_forwarder_v8_call, pid, args})
-        forwarder_v8_trace_loop(notify)
+        forwarder_submission_trace_loop(notify)
+
+      {:trace, pid, :call, {WebsocketOwnerForwarder, :remote_submit_request_v9, args}} ->
+        send(notify, {:remote_forwarder_v9_call, pid, args})
+        forwarder_submission_trace_loop(notify)
 
       _other ->
-        forwarder_v8_trace_loop(notify)
+        forwarder_submission_trace_loop(notify)
     end
   end
 
@@ -622,6 +628,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
 
   def receive_receiver_delivery_gap_result(task_pid, state) do
     receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        receive_receiver_delivery_gap_result(task_pid, state)
+
       {:websocket_response_activity, ^task_pid, _activity_token} = message ->
         assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
         receive_receiver_delivery_gap_result(task_pid, state)
@@ -725,6 +735,23 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
                    timeout
 
     assert :ok = WebsocketOwnerRequestV8.validate(owner_request)
+    refute contains_function?(owner_request)
+    owner_request
+  end
+
+  @spec assert_remote_submit_request_v9!(map(), node(), non_neg_integer()) :: WebsocketOwnerRequestV9.t()
+  def assert_remote_submit_request_v9!(state, remote_node, timeout \\ @handoff_detection_timeout_ms) do
+    codex_session_id = state.codex_session.id
+    [owner_turn_id] = MapSet.to_list(state.tasks)
+    downstream = Map.put(state.websocket_owner_downstream, :owner_turn_id, owner_turn_id)
+    lane = state.native_response_steering
+
+    assert_receive {:remote_forwarder_v9_call, remote_pid, [^codex_session_id, ^downstream, %WebsocketOwnerRequestV9{version: 9, native_response_steering: ^lane} = owner_request]},
+                   timeout
+
+    assert node(remote_pid) == remote_node
+    assert node(lane) == node()
+    assert :ok = WebsocketOwnerRequestV9.validate(owner_request)
     refute contains_function?(owner_request)
     owner_request
   end
@@ -899,8 +926,44 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
     if Process.alive?(task_pid), do: send(task_pid, :stop)
   end
 
+  # Drive only setup callbacks before an upstream barrier; leave frames,
+  # completion messages and the barrier itself to the caller's existing loop.
+  @spec receive_native_response_steering_prepared!(map()) :: map()
+  def receive_native_response_steering_prepared!(state) do
+    deadline = System.monotonic_time(:millisecond) + @handoff_detection_timeout_ms
+    await_native_response_steering_prepared!(state, deadline)
+  end
+
+  defp await_native_response_steering_prepared!(state, deadline) do
+    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        assert is_pid(state.native_response_steering)
+        state
+
+      {:websocket_response_activity, _task, _token} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_native_response_steering_prepared!(state, deadline)
+
+      {:websocket_owner_cleanup_witness, _correlation, _epoch, _task, _witness} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_native_response_steering_prepared!(state, deadline)
+
+      {:direct_request_cleanup, _task, _ref, _receipt} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_native_response_steering_prepared!(state, deadline)
+    after
+      remaining_ms -> flunk("expected native socket response steering preparation")
+    end
+  end
+
   def receive_owner_socket_push(state) do
     receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        handle_owner_socket_push_message(message, state)
+
       {:websocket_owner_cleanup_witness, _, _, _, _} = message ->
         handle_owner_socket_push_message(message, state)
 
@@ -928,6 +991,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
 
   def receive_native_collect_socket_push(state) do
     receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        handle_native_collect_socket_push_message(message, state)
+
       {:websocket_owner_cleanup_witness, _, _, _, _} = message ->
         handle_native_collect_socket_push_message(message, state)
 
@@ -983,6 +1049,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
 
   def receive_owner_socket_raw_push(state) do
     receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        handle_owner_socket_raw_push_message(message, state)
+
       {:websocket_owner_frame, _correlation_id, _epoch, _owner_turn_id, _payload} = message ->
         handle_owner_socket_raw_push_message(message, state)
 
@@ -1026,6 +1095,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
 
   defp await_owner_socket_complete(state, frames) do
     receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        handle_owner_socket_complete_control(message, state, frames)
+
       {:websocket_owner_frame, _correlation_id, _epoch, _owner_turn_id, _payload} = message ->
         handle_owner_socket_complete_message(message, state, frames)
 
@@ -1112,6 +1184,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
 
   def flush_socket_done(state) do
     receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        flush_socket_done(state)
+
       {:codex_response_done, pid, result} ->
         CodexResponsesSocket.handle_info({:codex_response_done, pid, result}, state)
     after
@@ -1259,12 +1335,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
                state
              )
 
-    assert_receive {:websocket_owner_cleanup_witness, _correlation, _epoch, _task, witness} =
-                     message,
-                   @handoff_detection_timeout_ms
-
-    assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
-    assert state.websocket_owner_cleanup_witness == witness
+    {state, witness} = receive_owner_socket_cleanup_witness!(state)
 
     assert_receive {:fake_upstream_timeout_barrier, :before_terminal, barrier, ^release_ref},
                    @handoff_detection_timeout_ms
@@ -1277,6 +1348,29 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
     assert attempt.status == "in_progress"
     assert turn.status == "in_progress"
     %{request: request, attempt: attempt, turn: turn, state: state}
+  end
+
+  defp receive_owner_socket_cleanup_witness!(state) do
+    receive do
+      {:websocket_owner_cleanup_witness, _correlation, _epoch, _task, witness} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        assert state.websocket_owner_cleanup_witness == witness
+        {state, witness}
+
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        receive_owner_socket_cleanup_witness!(state)
+
+      {:websocket_response_activity, _task, _token} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        receive_owner_socket_cleanup_witness!(state)
+
+      {:direct_request_cleanup, _task, _ref, _receipt} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        receive_owner_socket_cleanup_witness!(state)
+    after
+      @handoff_detection_timeout_ms -> flunk("expected owner websocket cleanup witness")
+    end
   end
 
   def assert_owner_interruption_state!(%{
@@ -1523,12 +1617,39 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
     }
   end
 
-  def assert_blocking_owner_upstream_received!(release_ref) do
+  # This process is the callback-driven socket: the dispatcher cannot reach
+  # the upstream until the real socket prepares its steering lane. Retain
+  # activity and cleanup state for the later delivery and terminate callbacks.
+  @spec assert_blocking_owner_upstream_received!(map(), reference()) :: {map(), pid()}
+  def assert_blocking_owner_upstream_received!(state, release_ref) do
+    deadline = System.monotonic_time(:millisecond) + @blocking_owner_receive_timeout_ms
+    await_blocking_owner_upstream_received!(state, release_ref, deadline)
+  end
+
+  defp await_blocking_owner_upstream_received!(state, release_ref, deadline) do
+    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+
     receive do
-      {:blocking_owner_upstream_received, owner_worker_pid, ^release_ref} -> owner_worker_pid
+      {:blocking_owner_upstream_received, owner_worker_pid, ^release_ref} ->
+        {state, owner_worker_pid}
+
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_blocking_owner_upstream_received!(state, release_ref, deadline)
+
+      {:websocket_response_activity, _task, _token} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_blocking_owner_upstream_received!(state, release_ref, deadline)
+
+      {:websocket_owner_cleanup_witness, _correlation, _epoch, _task, _witness} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_blocking_owner_upstream_received!(state, release_ref, deadline)
+
+      {:direct_request_cleanup, _task, _ref, _receipt} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_blocking_owner_upstream_received!(state, release_ref, deadline)
     after
-      @blocking_owner_receive_timeout_ms ->
-        flunk("expected blocking owner upstream to receive the websocket request")
+      remaining_ms -> flunk("expected blocking owner upstream to receive the websocket request")
     end
   end
 
@@ -1555,6 +1676,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport do
       :error ->
         if MapSet.member?(state.tasks, task_pid) do
           receive do
+            {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+              assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+              acknowledge_response_task_delivery_if_pending(state, task_pid)
+
             {:websocket_response_activity, ^task_pid, _token} = message ->
               assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
               acknowledge_response_task_delivery_if_pending(state, task_pid)

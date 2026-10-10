@@ -11,30 +11,50 @@ defmodule CodexPooler.Gateway.Runtime.DispatchTest do
 
   alias CodexPooler.Access
   alias CodexPooler.Accounting
-  alias CodexPooler.Accounting.{Attempt, LedgerEntry, PreAttemptRelease, Request}
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, PreAttemptRelease, Request, RequestReplay, RequestReplayEntitlement}
   alias CodexPooler.Accounting.FailureResponse
+  alias CodexPooler.AccountingTestSupport
+  alias CodexPooler.AccountsFixtures
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Payloads.CompactionTrigger
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.RequestOptions.CompactionProjectionContext
   alias CodexPooler.Gateway.Payloads.RequestOptions.ResetProbe
-  alias CodexPooler.Gateway.Persistence.RoutingCircuitState
-  alias CodexPooler.Gateway.Routing.{BridgeRing, RoutePlanInput}
+  alias CodexPooler.Gateway.Persistence.{CodexTurn, RoutingCircuitState, SessionContinuity}
+  alias CodexPooler.Gateway.Routing.{BridgeRing, CircuitState, RoutePlanInput}
   alias CodexPooler.Gateway.Runtime.Dispatch
   alias CodexPooler.Gateway.Runtime.Dispatch.AccountingReservation
   alias CodexPooler.Gateway.Runtime.Dispatch.CandidateDispatch
   alias CodexPooler.Gateway.Runtime.Dispatch.Context
   alias CodexPooler.Gateway.Runtime.Dispatch.PreDispatch
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
+  alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
   alias CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement
+  alias CodexPooler.Gateway.Runtime.Finalization.SettlementRetry
   alias CodexPooler.Gateway.Runtime.Routing.DispatchLifecycle
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
+  alias CodexPooler.Gateway.Websocket
+  alias CodexPooler.PoolerFixtures
   alias CodexPooler.Pools.ModelServingOverride
   alias CodexPooler.Repo
+  alias CodexPooler.RequestReplayFixtures
+  alias CodexPooler.UnboxedFixture
   alias CodexPooler.Upstreams.SavedResets.ProbeLease
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
   alias CodexPooler.Upstreams.Secrets
+  alias Ecto.Adapters.SQL.Sandbox
 
   @endpoint_path "/backend-api/codex/responses"
+
+  setup context do
+    if context[:committed_cleanup] do
+      CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+      on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+      :ok = Sandbox.mode(Repo, :auto)
+    end
+
+    :ok
+  end
 
   test "compaction projection merge cleanup applies the total settlement precedence table" do
     merge_reason = :merge_failed
@@ -43,8 +63,10 @@ defmodule CodexPooler.Gateway.Runtime.DispatchTest do
 
     cases = [
       {{:ok, :settled}, :ok, {:accounting_failure, :merge_compaction_projection_metadata, :merge_failed}},
+      {{:stale_generation, :newer_generation}, :ok, {:accounting_failure, :merge_compaction_projection_metadata, :merge_failed}},
       {{:error, settlement_error}, :ok, {:error, settlement_error}},
       {{:ok, :settled}, {:error, neutral_error}, {:error, neutral_error}},
+      {{:stale_generation, :newer_generation}, {:error, neutral_error}, {:error, neutral_error}},
       {{:error, settlement_error}, {:error, neutral_error}, {:accounting_failure, :merge_compaction_projection_cleanup, {settlement_error, neutral_error}}}
     ]
 
@@ -69,6 +91,89 @@ defmodule CodexPooler.Gateway.Runtime.DispatchTest do
       refute_received :settlement_cleanup
       refute_received :neutral_cleanup
     end
+  end
+
+  for neutral <- [:ok, :error] do
+    test "candidate compaction merge failure contains a stale settlement with neutral #{neutral}" do
+      fixture = projection_merge_failure_fixture(unquote(neutral))
+      parent = self()
+      neutral_error = %{status: 500, code: "neutral_failed", message: "neutral cleanup failed"}
+
+      operations = %{
+        merge_request_metadata: fn _request, _metadata -> {:error, :synthetic_merge_failure} end,
+        finalize_failure: fn _request, _attempt, _attrs ->
+          send(parent, :stale_settlement_called)
+          {:stale_generation, %{}}
+        end,
+        neutral_completion: fn context ->
+          send(parent, :neutral_called)
+          assert :ok = DispatchLifecycle.neutral_completion(context)
+          if unquote(neutral) == :ok, do: :ok, else: {:error, neutral_error}
+        end
+      }
+
+      expected_code = if unquote(neutral) == :ok, do: "gateway_accounting_failed", else: "neutral_failed"
+
+      capture_log(fn ->
+        assert {:error, %{code: ^expected_code}} = CandidateDispatch.dispatch_with_operations(fixture.context, fn _prepared -> flunk("merge failure dispatched upstream") end, operations)
+      end)
+
+      assert_received :stale_settlement_called
+      assert_received :neutral_called
+      refute_received :stale_settlement_called
+      refute_received :neutral_called
+      assert FakeUpstream.count(fixture.first_upstream) == 0
+      assert FakeUpstream.count(fixture.second_upstream) == 0
+      assert Repo.get!(Request, fixture.request.id).status == "in_progress"
+      assert Repo.aggregate(from(l in LedgerEntry, where: l.request_id == ^fixture.request.id and l.entry_kind != "reservation"), :count) == 0
+    end
+  end
+
+  # Compaction bridges are excluded from replay preparation. This composes the
+  # shared cleanup boundary with a real ordinary-turn authority transition; it
+  # does not manufacture a compact replay or claim a production compaction race.
+  for newer <- [:in_progress, :succeeded], neutral <- [:ok, :error] do
+    @tag :committed_cleanup
+    test "real generation transfer leaves #{newer} replay untouched with neutral #{neutral}" do
+      assert_generation_cleanup!(unquote(newer), unquote(neutral))
+    end
+  end
+
+  @tag :committed_cleanup
+  test "current-owner HTTP compact cleanup rolls back request attempt ledger and turn together on settlement failure" do
+    fixture = committed_cleanup_fixture!(:compact)
+    context = cleanup_selection!(fixture)
+    before = replay_rows(fixture)
+    parent = self()
+    sequence = install_deferred_cleanup_failure!(fixture.request.id)
+    CodexPooler.TestAppEnv.restore_on_exit(SettlementRetry)
+    Application.put_env(:codex_pooler, SettlementRetry, window_ms: 0)
+
+    log =
+      capture_log(fn ->
+        assert {:error, %{code: "gateway_accounting_failed"}} =
+                 CandidateDispatch.run_compaction_projection_cleanup(
+                   fn ->
+                     send(parent, :current_settlement)
+                     AttemptSettlement.finalize_failure(fixture.request, fixture.attempt, %{last_error_code: "gateway_accounting_failed", response_status_code: 500})
+                   end,
+                   fn ->
+                     send(parent, :current_neutral)
+                     DispatchLifecycle.neutral_completion(context)
+                   end,
+                   :synthetic_merge_failure
+                 )
+      end)
+
+    assert log =~ "settlement abandoned"
+    assert [[1, true]] = Repo.query!("SELECT last_value, is_called FROM #{sequence}").rows
+    assert replay_rows(fixture) == before
+    assert_received :current_settlement
+    assert_received :current_neutral
+    refute_received :current_settlement
+    refute_received :current_neutral
+    assert Repo.get!(RoutingCircuitState, context.routing_circuit_state.id).probe_admission_ids == []
+    CodexPooler.TestDiagnostics.puts("current_owner_cleanup deferred_commit_graph=1 rollback_preserved_all_rows=true neutral_calls=1")
   end
 
   test "candidate dispatch merge failure runs complete fail-closed cleanup precedence" do
@@ -952,6 +1057,177 @@ defmodule CodexPooler.Gateway.Runtime.DispatchTest do
     end
   end
 
+  defp assert_generation_cleanup!(newer, neutral) do
+    fixture = committed_cleanup_fixture!()
+    context = cleanup_selection!(fixture)
+    parent = self()
+    ref = make_ref()
+    supervisor = start_supervised!(Task.Supervisor)
+
+    stale_caller =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        Repo.checkout(fn ->
+          [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+          send(parent, {ref, :old_caller_ready, backend})
+
+          receive do
+            {^ref, :authority_changed} -> run_stale_cleanup(fixture, context, parent, ref, neutral)
+          after
+            15_000 -> flunk("authority writer did not release the stale caller")
+          end
+        end)
+      end)
+
+    assert_receive {^ref, :old_caller_ready, old_backend}, 15_000
+
+    writer_backend =
+      Repo.checkout(fn ->
+        [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
+        assert backend != old_backend
+        assert {:ok, armed} = RequestReplay.arm(RequestReplayFixtures.arm_input(fixture))
+        input = RequestReplayFixtures.consume_input(fixture, armed, :crypto.strong_rand_bytes(32))
+        assert {:ok, replay} = RequestReplay.consume(input)
+        assert replay.attempt.replay_generation == 1
+        assert replay.attempt.id != fixture.attempt.id
+
+        if newer == :succeeded do
+          assert {:ok, _settled} = AttemptSettlement.finalize_success(replay.request, replay.attempt, %{status: "usage_known", input_tokens: 1, output_tokens: 1, total_tokens: 2}, %{response_status_code: 200})
+        end
+
+        backend
+      end)
+
+    before = replay_rows(fixture)
+    send(stale_caller.pid, {ref, :authority_changed})
+    result = Task.await(stale_caller, 15_000)
+    assert_receive {^ref, :settlement, :stale_generation}, 15_000
+    assert_receive {^ref, :neutral}, 15_000
+    refute_received {^ref, :settlement, _}
+    refute_received {^ref, :neutral}
+    assert replay_rows(fixture) == before
+    assert Repo.get!(RoutingCircuitState, context.routing_circuit_state.id).probe_admission_ids == []
+    {:ok, owner} = WebsocketOwnerSession.lookup(fixture.session.id)
+    assert Agent.get(:sys.get_state(owner).upstream_pid, & &1) == 0
+
+    expected = if neutral == :ok, do: {:accounting_failure, :merge_compaction_projection_metadata, :synthetic_merge_failure}, else: {:error, neutral_cleanup_error()}
+    assert result == expected
+    CodexPooler.TestDiagnostics.puts("cleanup authority old_backend=#{old_backend} writer_backend=#{writer_backend} generation=0->1 newer=#{newer} stale=true neutral=#{neutral} rows_unchanged=true")
+  end
+
+  defp run_stale_cleanup(fixture, context, parent, ref, neutral) do
+    CandidateDispatch.run_compaction_projection_cleanup(
+      fn ->
+        result = AttemptSettlement.finalize_failure(fixture.request, fixture.attempt, %{last_error_code: "gateway_accounting_failed", response_status_code: 500})
+        send(parent, {ref, :settlement, elem(result, 0)})
+        result
+      end,
+      fn ->
+        send(parent, {ref, :neutral})
+        assert :ok = DispatchLifecycle.neutral_completion(context)
+        if neutral == :ok, do: :ok, else: {:error, neutral_cleanup_error()}
+      end,
+      :synthetic_merge_failure
+    )
+  rescue
+    CaseClauseError -> {:raised, CaseClauseError}
+  end
+
+  defp neutral_cleanup_error, do: %{status: 500, code: "neutral_failed", message: "neutral cleanup failed"}
+
+  defp install_deferred_cleanup_failure!(request_id) do
+    suffix = request_id |> String.replace("-", "")
+    sequence = "cleanup_commit_#{suffix}"
+    function = "cleanup_abort_#{suffix}"
+    trigger = "cleanup_abort_#{suffix}"
+
+    on_exit(fn ->
+      Repo.query!("DROP TRIGGER IF EXISTS #{trigger} ON requests")
+      Repo.query!("DROP FUNCTION IF EXISTS #{function}()")
+      Repo.query!("DROP SEQUENCE IF EXISTS #{sequence}")
+      assert [[nil, nil]] = Repo.query!("SELECT to_regclass($1), to_regprocedure($2)", [sequence, function <> "()"]).rows
+      CodexPooler.TestDiagnostics.puts("current_owner_cleanup sql_objects_removed=true")
+    end)
+
+    Repo.query!("CREATE SEQUENCE #{sequence}")
+
+    Repo.query!("""
+    CREATE FUNCTION #{function}() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.status <> 'failed'
+        OR (SELECT count(*) FROM attempts WHERE request_id = NEW.id AND status = 'failed') <> 1
+        OR (SELECT count(*) FROM ledger_entries WHERE request_id = NEW.id AND entry_kind IN ('settlement', 'release')) <> 2
+        OR (SELECT count(*) FROM codex_turns WHERE request_id = NEW.id AND status = 'failed') <> 1 THEN
+        RAISE EXCEPTION 'settlement did not reach complete graph';
+      END IF;
+      PERFORM nextval('#{sequence}');
+      RAISE EXCEPTION 'synthetic deferred settlement failure' USING ERRCODE = '40001';
+    END;
+    $$
+    """)
+
+    Repo.query!("CREATE CONSTRAINT TRIGGER #{trigger} AFTER UPDATE ON requests DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.id = '#{request_id}'::uuid) EXECUTE FUNCTION #{function}()")
+    sequence
+  end
+
+  defp replay_rows(fixture) do
+    %{
+      request: Repo.get!(Request, fixture.request.id),
+      attempts: Repo.all(from a in Attempt, where: a.request_id == ^fixture.request.id, order_by: a.attempt_number),
+      entitlement: Repo.get_by(RequestReplayEntitlement, request_id: fixture.request.id),
+      ledger: Repo.all(from l in LedgerEntry, where: l.request_id == ^fixture.request.id, order_by: l.id),
+      turn: Repo.get!(CodexTurn, fixture.turn.id)
+    }
+  end
+
+  defp cleanup_selection!(fixture) do
+    route_class = if fixture.request.transport == "websocket", do: "proxy_websocket", else: "proxy_compact"
+    half_open_dispatch_circuit!(fixture.auth, fixture.model, fixture.assignment, fixture.identity, route_class)
+    assert {:ok, %{admission: admission, state: state}} = CircuitState.begin_attempt(fixture.auth, fixture.model, fixture.assignment, route_class)
+    assert length(state.probe_admission_ids) == 1
+    %SelectedCandidateContext{auth: fixture.auth, model: fixture.model, assignment: fixture.assignment, identity: fixture.identity, route_class: route_class, routing_circuit_state: state, routing_circuit_admission: admission, routing_attempt_metadata: %{}}
+  end
+
+  defp committed_cleanup_fixture!(kind \\ :replay) do
+    %{user: owner} = AccountsFixtures.committed_bootstrap_owner_fixture!()
+    {:ok, holder} = Agent.start(fn -> nil end)
+
+    on_exit(fn ->
+      try do
+        if fixture = Agent.get(holder, & &1), do: UnboxedFixture.cleanup_unboxed!(fn -> delete_cleanup_fixture!(fixture) end)
+      after
+        Agent.stop(holder)
+      end
+    end)
+
+    {:ok, fixture} = Repo.transaction(fn -> record_cleanup_fixture!(holder, owner, kind) end)
+    fixture
+  end
+
+  defp record_cleanup_fixture!(holder, owner, kind) do
+    fixture = if kind == :replay, do: RequestReplayFixtures.replay_fixture(owner: owner, reservation?: true), else: compact_cleanup_fixture!()
+    Agent.update(holder, fn _ -> fixture end)
+    fixture
+  end
+
+  defp delete_cleanup_fixture!(fixture) do
+    RequestReplayFixtures.stop_replay_owner(fixture.session.id)
+    Repo.delete_all(from e in RequestReplayEntitlement, where: e.request_id == ^fixture.request.id)
+    PoolerFixtures.delete_committed_pools!([fixture.pool.id])
+    Repo.delete_all(from i in UpstreamIdentity, where: i.id == ^fixture.identity.id)
+    if pricing = Map.get(fixture, :pricing), do: Repo.delete!(pricing)
+  end
+
+  defp compact_cleanup_fixture! do
+    setup = AccountingTestSupport.accounting_setup()
+    downstream = compact_downstream(setup, "resp_current_owner_cleanup")
+    compact = CompactionTrigger.project_responses_payload(downstream)
+    assert {:ok, reserved} = reserve_compact(setup.auth, setup, compact)
+    assert {:ok, session} = Websocket.start_codex_session(setup.auth, %{accepted_turn_state: Ecto.UUID.generate()})
+    assert {:ok, turn} = SessionContinuity.start_codex_turn(session, reserved.request, compact_request_options(compact, downstream))
+    assert {:ok, attempt} = Accounting.create_attempt(reserved.request, setup.assignment)
+    Map.merge(setup, %{request: reserved.request, attempt: attempt, session: session, turn: turn})
+  end
+
   defp payload(setup) do
     %{
       "model" => setup.model.exposed_model_id,
@@ -1035,7 +1311,7 @@ defmodule CodexPooler.Gateway.Runtime.DispatchTest do
     }
   end
 
-  defp half_open_dispatch_circuit!(auth, model, assignment, identity) do
+  defp half_open_dispatch_circuit!(auth, model, assignment, identity, route_class \\ "proxy_compact") do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     %RoutingCircuitState{
@@ -1043,7 +1319,7 @@ defmodule CodexPooler.Gateway.Runtime.DispatchTest do
       pool_upstream_assignment_id: assignment.id,
       upstream_identity_id: identity.id,
       model_identifier: model.exposed_model_id,
-      route_class: "proxy_compact",
+      route_class: route_class,
       status: "half_open",
       reason_code: "projection_merge_test_probe",
       failure_count: 3,

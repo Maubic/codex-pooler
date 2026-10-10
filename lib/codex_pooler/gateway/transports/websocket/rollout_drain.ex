@@ -158,6 +158,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
      %{
        draining?: activity_registry_draining?(activity_registry),
        active_drain: nil,
+       last_summary: nil,
        deadline_ms: nil,
        shutdown_started_at_ms: nil,
        shutdown_timeout_ms: nil,
@@ -224,64 +225,130 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
         start_local_drain(remaining_timeout_ms, from, state, true, state.drain_policy)
 
       :exhausted ->
-        summary = empty_summary(:ok, state.shutdown_timeout_ms, true)
+        result = if state.last_summary, do: state.last_summary.result, else: :ok
+        summary = empty_summary(result, state.shutdown_timeout_ms, true)
         log_drain_finished(summary)
         {:reply, summary, state}
     end
   end
 
+  # A cohort cannot run until the waiter-owning server can observe its death.
+  def handle_call({:rollout_drain_worker, ref, pid}, _from, %{active_drain: %{ref: ref, coordinator_down?: false} = active} = state) do
+    monitor = Process.monitor(pid)
+    {:reply, :ok, %{state | active_drain: %{active | workers: Map.put(active.workers, monitor, pid)}}}
+  end
+
+  def handle_call({:rollout_drain_worker, _ref, _pid}, _from, state), do: {:reply, :closed, state}
+
+  def handle_call({:rollout_drain_progress, ref, counters, pending, owners_seen}, _from, %{active_drain: %{ref: ref} = active} = state) do
+    {:reply, :ok, %{state | active_drain: %{active | counters: counters, pending: pending, owners_seen: owners_seen}}}
+  end
+
+  # Checkpoint each result before returning it to the ordered async stream:
+  # a later completed cohort must survive an earlier cohort/coordinator failure.
+  def handle_call({:rollout_drain_work_result, ref, item, result}, _from, %{active_drain: %{ref: ref} = active} = state) do
+    active =
+      if item in active.pending do
+        %{active | counters: count_work_result({item, {:ok, result}}, active.counters), pending: List.delete(active.pending, item)}
+      else
+        active
+      end
+
+    {:reply, :ok, %{state | active_drain: active}}
+  end
+
   @impl GenServer
-  def handle_info({:rollout_drain_finished, ref, summary}, %{active_drain: %{ref: ref}} = state) do
-    Enum.each(state.active_drain.waiters, &GenServer.reply(&1, summary))
-    {:noreply, %{state | active_drain: nil}}
+  def handle_info({:rollout_drain_finished, ref, summary}, %{active_drain: %{ref: ref} = active} = state) do
+    finish_drain_if_stopped(%{state | active_drain: %{active | summary: summary}})
+  end
+
+  def handle_info({:rollout_drain_timeout, ref}, %{active_drain: %{ref: ref} = active} = state) do
+    Process.exit(active.pid, :kill)
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, %{active_drain: %{monitor: monitor} = active} = state) do
+    if is_nil(active.summary), do: Enum.each(active.workers, fn {_ref, pid} -> Process.exit(pid, :kill) end)
+    finish_drain_if_stopped(%{state | active_drain: %{active | coordinator_down?: true}})
+  end
+
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, %{active_drain: %{workers: workers} = active} = state) when is_map_key(workers, monitor) do
+    finish_drain_if_stopped(%{state | active_drain: %{active | workers: Map.delete(workers, monitor)}})
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  @impl GenServer
+  def terminate(_reason, %{active_drain: active}) when is_map(active) do
+    Process.cancel_timer(active.timer)
+    Process.exit(active.pid, :kill)
+    Enum.each(active.workers, fn {_monitor, pid} -> Process.exit(pid, :kill) end)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
+
+  defp finish_drain_if_stopped(%{active_drain: %{coordinator_down?: true, workers: workers} = active} = state) when map_size(workers) == 0 do
+    summary = active.summary || failed_drain_summary(active)
+    Process.cancel_timer(active.timer)
+    :ets.delete(active.snapshot)
+    log_drain_finished(summary)
+    Enum.each(active.waiters, &GenServer.reply(&1, summary))
+    {:noreply, %{state | active_drain: nil, last_summary: summary}}
+  end
+
+  defp finish_drain_if_stopped(state), do: {:noreply, state}
+
+  defp failed_drain_summary(active) do
+    counters = Enum.reduce(active.pending, active.counters, &count_work_result({&1, {:exit, :coordinator_down}}, &2))
+    summary = summary(counters, active.owners_seen, active.timeout_ms, active.started_at, active.already_draining?)
+    %{summary | result: :error}
+  end
 
   @spec drain_local_work(
           pos_integer(),
           boolean(),
           map(),
           {GenServer.server(), Registry.registry()},
-          {GenServer.server(), reference(), integer(), [DeferredStreamRegistry.drain_entry()]}
+          {GenServer.server(), integer(), :ets.tid(), pid(), reference()}
         ) :: summary()
   defp drain_local_work(
          timeout_ms,
          already_draining?,
          drain_policy,
          {activity_registry, owner_registry},
-         {stream_registry, stream_drain_epoch, deadline_ms, initial_streams}
+         {stream_registry, deadline_ms, snapshot, caller, ref}
        ) do
     started_at = System.monotonic_time(:millisecond)
+    {stream_drain_epoch, initial_streams} = DeferredStreamRegistry.begin_drain(name: stream_registry, deadline: %{at: deadline_ms, now_ms: drain_policy.now_ms})
+    :ets.insert(snapshot, {:entries, initial_streams})
     {drain_epoch, activities} = ActivityRegistry.begin_drain(name: activity_registry)
     owners = local_owner_sessions(owner_registry)
 
-    # Owned by this coordinator; killed cohort workers cannot erase the last
-    # real snapshot, including admissions promoted after begin_drain.
-    snapshot = :ets.new(__MODULE__, [:set, :public])
-    :ets.insert(snapshot, {:entries, initial_streams})
-
+    # The server owns the observed HTTP cohort so coordinator death cannot
+    # erase admissions promoted after begin_drain.
     work =
       Enum.map(owners, fn {key, owner} = entry ->
         if Registry.lookup(owner_registry, key) == [{owner, :starting}], do: {:starting_owner, entry}, else: {:owner, entry}
       end) ++
         Enum.map(activities, &{:activity, &1}) ++ [{:http_streams, snapshot}]
 
+    counters = empty_counters(activities, [])
+    :ok = GenServer.call(caller, {:rollout_drain_progress, ref, counters, work, length(owners)})
+
     results =
       work
       |> Task.async_stream(
-        fn
-          {:owner, {_key, owner}} ->
-            {:owner, drain_owner_after_turn(owner, deadline_ms, drain_policy)}
+        fn item ->
+          case GenServer.call(caller, {:rollout_drain_worker, ref, self()}) do
+            :ok ->
+              result = drain_work_item(item, deadline_ms, drain_policy, stream_registry, activity_registry)
+              :ok = GenServer.call(caller, {:rollout_drain_work_result, ref, item, result})
+              result
 
-          {:starting_owner, {_key, owner}} ->
-            {:owner, drain_starting_owner_after_turn(owner, deadline_ms, drain_policy)}
-
-          {:activity, activity} ->
-            {:activity, activity.kind, ActivityDrain.drain(activity, deadline_ms, drain_policy, activity_registry)}
-
-          {:http_streams, snapshot} ->
-            drain_http_cohort(deadline_ms, drain_policy, stream_registry, snapshot)
+            :closed ->
+              :coordinator_closed
+          end
         end,
         max_concurrency: max(1, length(work)),
         on_timeout: :kill_task,
@@ -289,17 +356,31 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
         timeout: owner_task_timeout_ms(timeout_ms, drain_policy)
       )
 
-    counters =
-      work
-      |> Enum.zip(results)
-      |> Enum.reduce(empty_counters(activities, []), &count_work_result/2)
+    {counters, []} =
+      Enum.reduce(results, {counters, work}, fn result, {counters, [item | remaining]} ->
+        counters = count_work_result({item, result}, counters)
+        {counters, remaining}
+      end)
 
-    :ets.delete(snapshot)
-    :ok = ActivityRegistry.complete_drain(drain_epoch, name: activity_registry)
-    :ok = DeferredStreamRegistry.complete_drain(stream_drain_epoch, name: stream_registry)
+    activity_completed? = complete_registry_drain(fn -> ActivityRegistry.complete_drain(drain_epoch, name: activity_registry) end)
+    stream_completed? = complete_registry_drain(fn -> DeferredStreamRegistry.complete_drain(stream_drain_epoch, name: stream_registry) end)
+    result = summary(counters, length(owners), timeout_ms, started_at, already_draining?)
+    if activity_completed? and stream_completed?, do: result, else: %{result | result: :error}
+  end
 
+  defp drain_work_item({:owner, {_key, owner}}, deadline, policy, _streams, _activities), do: {:owner, drain_owner_after_turn(owner, deadline, policy)}
+  defp drain_work_item({:starting_owner, {_key, owner}}, deadline, policy, _streams, _activities), do: {:owner, drain_starting_owner_after_turn(owner, deadline, policy)}
+  defp drain_work_item({:activity, activity}, deadline, policy, _streams, activities), do: {:activity, activity.kind, ActivityDrain.drain(activity, deadline, policy, activities)}
+  defp drain_work_item({:http_streams, snapshot}, deadline, policy, streams, _activities), do: drain_http_cohort(deadline, policy, streams, snapshot)
+
+  defp complete_registry_drain(fun) do
+    fun.() == :ok
+  catch
+    :exit, _reason -> false
+  end
+
+  defp summary(counters, owners_seen, timeout_ms, started_at, already_draining?) do
     elapsed_ms = max(0, System.monotonic_time(:millisecond) - started_at)
-    owners_seen = length(owners)
 
     %{
       result: drain_result(counters),
@@ -617,30 +698,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrain do
     deadline_ms =
       state.deadline_ms || poll_deadline_ms(timeout_ms, drain_policy.now_ms.(), drain_policy)
 
-    {stream_epoch, streams} =
-      DeferredStreamRegistry.begin_drain(
-        name: state.stream_registry,
-        deadline: %{at: deadline_ms, now_ms: drain_policy.now_ms}
-      )
-
+    snapshot = :ets.new(__MODULE__, [:set, :public])
+    :ets.insert(snapshot, {:entries, []})
     log_drain_started(timeout_ms, already_draining?, max(0, deadline_ms - drain_policy.now_ms.()))
 
-    {:ok, _pid} =
-      Task.start(fn ->
-        summary =
-          drain_local_work(
-            timeout_ms,
-            already_draining?,
-            drain_policy,
-            {state.activity_registry, state.owner_registry},
-            {state.stream_registry, stream_epoch, deadline_ms, streams}
-          )
-
-        log_drain_finished(summary)
+    {pid, monitor} =
+      spawn_monitor(fn ->
+        summary = drain_local_work(timeout_ms, already_draining?, drain_policy, {state.activity_registry, state.owner_registry}, {state.stream_registry, deadline_ms, snapshot, caller, ref})
         send(caller, {:rollout_drain_finished, ref, summary})
       end)
 
-    active_drain = %{ref: ref, waiters: [from]}
+    timer = Process.send_after(self(), {:rollout_drain_timeout, ref}, owner_task_timeout_ms(timeout_ms, drain_policy))
+    active_drain = %{ref: ref, timer: timer, pid: pid, monitor: monitor, waiters: [from], workers: %{}, coordinator_down?: false, summary: nil, snapshot: snapshot, counters: empty_counters([], []), pending: [{:http_streams, snapshot}], owners_seen: 0, timeout_ms: timeout_ms, started_at: System.monotonic_time(:millisecond), already_draining?: already_draining?}
 
     state =
       state

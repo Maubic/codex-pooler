@@ -6,6 +6,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
   import Ecto.Query
 
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport
+
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport,
+    only: [await_socket_connection_state!: 2, await_succeeded_pool_requests!: 2, model_serving_scope: 0, receive_native_terminal!: 3, released_client_frame: 2, set_model_serving_mode!: 3, socket_connection_state!: 1, socket_transport_barrier!: 3]
+
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport
 
   alias CodexPooler.Access
@@ -24,6 +28,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
   alias CodexPoolerWeb.CodexResponsesSocket
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport.ReplayRemoteNodeClient
   alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport.TurnBudgetNodeClient
+  alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
   alias CodexPoolerWeb.WebsocketConnectionLogger
 
   @preservation_model "gpt-4o"
@@ -60,6 +65,163 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
   @tag :findings116
   test "proxy-to-owner retires a connection-limit socket before guarded recovery" do
     assert_owner_connection_limit_recovery(:proxy)
+  end
+
+  for continuation <- [:processed, :tool_output] do
+    test "ordinary native socket close preserves the owner producing connection for #{continuation}" do
+      assert_ordinary_socket_connection_reuse(unquote(continuation))
+    end
+  end
+
+  defp assert_ordinary_socket_connection_reuse(continuation) do
+    response_id = "resp_owner_ordinary_reuse_#{continuation}"
+    next_id = "resp_owner_ordinary_reuse_next_#{continuation}"
+    upstream = start_upstream(ordinary_socket_reuse_scenario(continuation, response_id, next_id))
+    setup = gateway_setup(upstream, preservation_model_opts())
+    set_model_serving_mode!(model_serving_scope(), setup, "full")
+    port = start_public_endpoint!()
+    thread = "owner-ordinary-reuse-#{continuation}-#{System.unique_integer([:positive])}"
+    first = connect_ordinary_socket!(port, setup, thread)
+
+    {owner, upstream_session, lane, lane_monitor, producing_connection, producing_epoch} =
+      try do
+        frame = released_client_frame(setup, thread).(native_text_input("synthetic ordinary owner turn"), Ecto.UUID.generate(), %{})
+        {conn, websocket} = public_websocket_send_text!(first.conn, first.websocket, first.ref, frame)
+        {conn, websocket, terminal} = receive_native_terminal!(conn, websocket, first.ref)
+        assert %{"type" => "response.completed", "response" => %{"id" => ^response_id}} = terminal
+        state = await_socket_connection_state!(first.socket, &(MapSet.size(&1.tasks) == 0))
+        assert {:ok, owner} = WebsocketOwnerSession.lookup(state.codex_session.id)
+        assert %{active_turn: nil, upstream_pid: upstream_session} = :sys.get_state(owner)
+        lane = state.native_response_steering
+        assert %{active: nil, activated?: false, admission_revoked?: false, owner: ^owner, upstream: ^upstream_session, original_result: {:ok, %{}}} = :sys.get_state(lane)
+        assert {:ok, %{generation: generation} = producing_connection} = UpstreamWebsocketSession.live_connection(upstream_session)
+        assert is_integer(generation) and generation > 0
+        lane_monitor = Process.monitor(lane)
+        {conn, _websocket} = socket_transport_barrier!(conn, websocket, first.ref)
+        Mint.HTTP.close(conn)
+        {owner, upstream_session, lane, lane_monitor, producing_connection, state.websocket_owner_downstream.epoch}
+      after
+        Mint.HTTP.close(first.conn)
+        :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(first.socket)
+      end
+
+    # The old socket and its idle actor have both finished cleanup before the
+    # replacement can send: absence of a close is scoped to the producing lane.
+    assert_receive {:DOWN, ^lane_monitor, :process, ^lane, :normal}, @handoff_detection_timeout_ms
+    assert %{active_turn: nil, downstream: nil, upstream_pid: ^upstream_session} = :sys.get_state(owner)
+    assert {:ok, ^producing_connection} = UpstreamWebsocketSession.live_connection(upstream_session)
+    second = connect_ordinary_socket!(port, setup, thread)
+
+    try do
+      state = socket_connection_state!(second.socket)
+      assert {:ok, ^owner} = WebsocketOwnerSession.lookup(state.codex_session.id)
+      assert state.websocket_owner_downstream.epoch > producing_epoch
+      accounting_before = {pool_attempts(setup.pool.id), Enum.sort_by(pool_ledger_entries(setup.pool.id), & &1.id)}
+      payload = ordinary_socket_reuse_payload(continuation, setup, thread, response_id)
+      {conn, websocket} = public_websocket_send_text!(second.conn, second.websocket, second.ref, payload)
+
+      {conn, websocket} =
+        case continuation do
+          :processed ->
+            {conn, websocket}
+
+          :tool_output ->
+            {conn, websocket, terminal} = receive_native_terminal!(conn, websocket, second.ref)
+            assert %{"type" => "response.completed", "response" => %{"id" => ^next_id}} = terminal
+            {conn, websocket}
+        end
+
+      {conn, websocket} = socket_transport_barrier!(conn, websocket, second.ref)
+      # A downstream pong orders frame handling, not the asynchronous control
+      # task. Its metadata row is written only after the existing session sent
+      # the acknowledgement; provider receipt remains a separate boundary.
+      assert [first_log, next_log] = await_succeeded_pool_requests!(setup.pool.id, 2)
+      state = await_socket_connection_state!(second.socket, &(MapSet.size(&1.tasks) == 0))
+      assert [first_request, next_request] = await_ordinary_socket_reuse_requests!(upstream, 2)
+      assert first_request.method == "WEBSOCKET"
+      assert next_request.method == "WEBSOCKET"
+      assert next_request.websocket_connection_id == first_request.websocket_connection_id
+      assert FakeUpstream.websocket_connection_count(upstream) == 1
+      assert FakeUpstream.http_request_count(upstream) == 0
+      assert {:ok, ^producing_connection} = UpstreamWebsocketSession.live_connection(upstream_session)
+      assert first_log.status == "succeeded"
+      assert next_log.status == "succeeded"
+      assert next_log.response_status_code == 200
+
+      if continuation == :processed do
+        assert next_request.json == %{"type" => "response.processed", "response_id" => response_id}
+        assert next_log.request_metadata["response_processed"] == true
+        assert next_log.usage_status == "not_applicable"
+        assert next_log.request_metadata["requested_stream"] == false
+        assert {pool_attempts(setup.pool.id), Enum.sort_by(pool_ledger_entries(setup.pool.id), & &1.id)} == accounting_before
+        assert Repo.aggregate(from(turn in CodexTurn, where: turn.request_id == ^next_log.id), :count) == 0
+        refute is_pid(Map.get(state, :native_response_steering))
+        assert FakeUpstream.physical_counts(upstream) == %{http_generation: 0, websocket_generation: 1, usage: 0, consume: 0, other: 1}
+      end
+
+      # Fence the finished task before asserting that the 200 control outcome
+      # stayed silent: no terminal or error may race this second pong.
+      {conn, _websocket} = socket_transport_barrier!(conn, websocket, second.ref)
+      assert :ok = FakeUpstream.verify!(upstream)
+      Mint.HTTP.close(conn)
+    after
+      Mint.HTTP.close(second.conn)
+      :ok = WebsocketCleanupFence.await_listener_socket_cleanup!(second.socket)
+    end
+  end
+
+  defp await_ordinary_socket_reuse_requests!(upstream, count, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + @handoff_detection_timeout_ms
+    requests = FakeUpstream.requests(upstream)
+
+    cond do
+      length(requests) >= count ->
+        requests
+
+      System.monotonic_time(:millisecond) < deadline ->
+        receive do
+        after
+          5 -> await_ordinary_socket_reuse_requests!(upstream, count, deadline)
+        end
+
+      true ->
+        flunk("expected #{count} ordinary owner websocket requests, got #{length(requests)}")
+    end
+  end
+
+  defp connect_ordinary_socket!(port, setup, thread) do
+    before = WebsocketCleanupFence.listener_sockets()
+    {conn, websocket, ref} = public_websocket_connect!(port, setup, thread)
+    socket = WebsocketCleanupFence.await_new_listener_socket!(before)
+    %{conn: conn, websocket: websocket, ref: ref, socket: socket}
+  end
+
+  defp ordinary_socket_reuse_scenario(continuation, response_id, next_id) do
+    next_expectation =
+      case continuation do
+        :processed ->
+          [valid: true, equals: %{"type" => "response.processed", "response_id" => response_id}]
+
+        :tool_output ->
+          [valid: true, equals: %{"type" => "response.create", "previous_response_id" => response_id, "input.0.type" => "function_call_output"}]
+      end
+
+    next_frames = if continuation == :processed, do: [], else: [ordinary_socket_reuse_terminal(next_id)]
+
+    # provenance: synthetic_adversarial; a settled, unsteered response followed
+    # by one control or continuation on a replacement downstream socket.
+    FakeUpstream.strict_sequence([
+      FakeUpstream.expect_request(method: "WEBSOCKET", websocket_connection_ordinal: 1, json: [valid: true, equals: %{"type" => "response.create"}, forbidden: ["previous_response_id"]], respond: FakeUpstream.websocket_text_frames([ordinary_socket_reuse_terminal(response_id)])),
+      FakeUpstream.expect_request(method: "WEBSOCKET", websocket_connection_ordinal: 1, json: next_expectation, respond: FakeUpstream.websocket_text_frames(next_frames))
+    ])
+  end
+
+  defp ordinary_socket_reuse_terminal(response_id), do: CodexPooler.JSON.encode!(%{"type" => "response.completed", "response" => %{"id" => response_id, "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 3, "output_tokens" => 2, "total_tokens" => 5}}})
+
+  defp ordinary_socket_reuse_payload(:processed, _setup, _thread, response_id), do: CodexPooler.JSON.encode!(%{"type" => "response.processed", "response_id" => response_id})
+
+  defp ordinary_socket_reuse_payload(:tool_output, setup, thread, response_id) do
+    released_client_frame(setup, thread).([%{"type" => "function_call_output", "call_id" => "call_owner_ordinary_reuse", "output" => "synthetic tool output"}], Ecto.UUID.generate(), %{"previous_response_id" => response_id})
   end
 
   test "response.processed after reconnect is forwarded through the owner upstream connection" do
@@ -562,6 +724,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
 
       send(processed_pid, {:chained_owner_upstream_release, release_ref})
       assert {:ok, queued_state} = receive_socket_done(queued_state)
+      queued_state = receive_native_response_steering_prepared!(queued_state)
 
       assert_receive {:chained_owner_upstream_tool_started, ^release_ref},
                      @queued_owner_upstream_start_timeout_ms
@@ -769,7 +932,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
         assert {:ok, origin_state} =
                  CodexResponsesSocket.handle_in({active_payload, [opcode: :text]}, origin_state)
 
-        active_worker_pid = assert_blocking_owner_upstream_received!(release_ref)
+        {origin_state, active_worker_pid} = assert_blocking_owner_upstream_received!(origin_state, release_ref)
 
         assert {:ok, origin_state} =
                  CodexResponsesSocket.handle_in({queued_a_payload, [opcode: :text]}, origin_state)
@@ -1259,17 +1422,24 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.Continuati
     try do
       anchor_payload = websocket_payload(setup, "synthetic owner generation anchor #{route}")
       owner_opts = owner_response_options(state, owner_node_opts(state, route))
+      # A synchronous owner API caller has delivery transport, not a socket callback loop.
+      assert %RequestOptions{runtime: %{direct_cleanup: nil}, transport: %{websocket_owner: %{downstream: %{pid: downstream}}}} = owner_opts
+      assert downstream == self()
 
       assert :ok =
                Gateway.run_websocket_response(auth, anchor_payload, owner_opts, fn _data ->
                  :ok
                end)
 
+      refute_received {:native_response_steering_prepare, _, _, _, _}
+      assert Map.get(state, :native_response_steering) == nil
+      assert {:ok, owner_pid} = WebsocketOwnerSession.lookup(state.codex_session.id)
+      assert %{native_response_steering: nil} = :sys.get_state(owner_pid)
+
       assert {:push, {:text, anchor_frame}, state} = receive_owner_socket_push(state)
       assert owner_response_id(anchor_frame) == previous_response_id
       assert {:ok, state} = receive_owner_socket_complete(state)
 
-      assert {:ok, owner_pid} = WebsocketOwnerSession.lookup(state.codex_session.id)
       upstream_pid = :sys.get_state(owner_pid).upstream_pid
       assert :ok = UpstreamWebsocketSession.invalidate_connection(upstream_pid)
 

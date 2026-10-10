@@ -54,7 +54,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
     def call_owner(node, module, function, args, _timeout) do
       downstream = Enum.find(args, &(is_map(&1) and is_pid(Map.get(&1, :pid))))
       send(downstream.pid, {:cancellation_node_call, self(), node, function})
-      result = apply(module, function, args)
+      # A remote call executes in its own process. Inline apply makes the
+      # owner monitor the caller too, racing its DOWN against watcher detach.
+      result = :erpc.call(node(), module, function, args, 15_000)
       send(downstream.pid, {:cancellation_node_call_complete, self(), node, function, result})
       result
     end
@@ -580,11 +582,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerProtocolIntegra
     assert_receive {:DOWN, ^owner_task_ref, :process, ^owner_task, :shutdown},
                    @detection_timeout_ms
 
-    assert_receive {:websocket_owner_frame, "corr-cancel", 1, {:error, :client_disconnected, safe_payload}},
-                   @detection_timeout_ms
-
-    assert safe_payload.code == "client_disconnected"
-    assert_receive {:websocket_owner_frame, "corr-cancel", 1, :complete}, @detection_timeout_ms
+    # Detach deliberately removes the downstream before settlement. The
+    # watcher guarantees resource cleanup, not frames to the departed client.
     assert %{active_turn: nil, downstream: nil} = :sys.get_state(owner)
     assert FakeUpstream.count(upstream) == 1
 

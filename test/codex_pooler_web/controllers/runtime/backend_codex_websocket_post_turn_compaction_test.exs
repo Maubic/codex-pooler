@@ -55,6 +55,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketPostTurnCompactionTest do
   @lifecycle_event [:codex_pooler, :gateway, :native_compaction, :lifecycle]
   @anchor_usage %{"input_tokens" => 1_200, "output_tokens" => 9, "total_tokens" => 1_209}
   @socket_messages [
+    :native_response_steering_prepare,
     :codex_response_chunk,
     :websocket_owner_frame,
     :websocket_owner_output_commit_probe,

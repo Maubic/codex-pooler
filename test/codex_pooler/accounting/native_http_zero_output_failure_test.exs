@@ -26,9 +26,14 @@ defmodule CodexPooler.Accounting.NativeHttpZeroOutputFailureTest do
     end
 
     test "a cut code other than upstream_stream_error while the turn showed nothing" do
-      for code <- ["stream_idle_timeout", "owner_task_exception"] do
+      for code <- ["stream_idle_timeout", "owner_task_exception", "upstream_response_too_large"] do
         assert ClientRetry.verified_native_http_zero_output_failure?(turn(code: code, visible_at: nil, status: "interrupted"), request(code: code), attempt(code: code)), code
       end
+    end
+
+    test "JSON body limit with no visible output remains a zero-output failure" do
+      code = "upstream_response_too_large"
+      assert ClientRetry.verified_native_http_zero_output_failure?(turn(code: code, transport: "http_json", visible_at: nil), request(code: code, transport: "http_json"), attempt(code: code, transport: "http_json"))
     end
 
     test "a relay that counted no completed item" do
@@ -43,7 +48,7 @@ defmodule CodexPooler.Accounting.NativeHttpZeroOutputFailureTest do
     end
 
     test "a cut after the turn showed the client output" do
-      for code <- ["stream_idle_timeout", "client_disconnected", "owner_task_exception"] do
+      for code <- ["stream_idle_timeout", "client_disconnected", "owner_task_exception", "upstream_response_too_large"] do
         refute ClientRetry.verified_native_http_zero_output_failure?(turn(code: code), request(code: code), attempt(code: code)), code
       end
     end

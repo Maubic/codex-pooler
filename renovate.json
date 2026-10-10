@@ -24,6 +24,9 @@
     "dependencies"
   ],
   "platformAutomerge": false,
+  "semanticCommits": "enabled",
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
   "prConcurrentLimit": 10,
   "prHourlyLimit": 0,
   "rangeStrategy": "bump",
@@ -152,6 +155,12 @@
         "typescript"
       ],
       "allowedVersions": "<7"
+    },
+    {
+      "description": "Classify dependency version updates as maintenance rather than product fixes",
+      "matchPackageNames": ["*"],
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
     }
   ],
   "customManagers": [

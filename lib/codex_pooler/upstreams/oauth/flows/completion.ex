@@ -102,7 +102,7 @@ defmodule CodexPooler.Upstreams.OAuthFlows.Completion do
     cond do
       DateTime.compare(flow.expires_at, Lifecycle.now()) != :gt ->
         Lifecycle.expire_locked_flow!(flow)
-        Repo.rollback(OAuthCallback.safe_error(:expired_flow))
+        oauth_error(OAuthCallback.safe_error(:expired_flow))
 
       flow.flow_kind != "device" ->
         Repo.rollback(OAuthCallback.safe_error(:flow_not_pending))
@@ -168,6 +168,10 @@ defmodule CodexPooler.Upstreams.OAuthFlows.Completion do
       {:error, %{code: code, retry_after_seconds: retry_after_seconds}}
       when code in [:codex_device_authorization_pending, :codex_device_authorization_slow_down] ->
         polled_flow = Lifecycle.update_device_poll!(flow, retry_after_seconds)
+        %{status: :pending, flow: polled_flow}
+
+      {:error, %{code: :codex_auth_transient} = reason} when not is_map_key(reason, :stage) ->
+        polled_flow = Lifecycle.update_device_poll!(flow, flow.interval_seconds)
         %{status: :pending, flow: polled_flow}
 
       {:error, %{code: :codex_device_code_expired}} ->

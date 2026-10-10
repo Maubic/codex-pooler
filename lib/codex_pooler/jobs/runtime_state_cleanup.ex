@@ -4,6 +4,7 @@ defmodule CodexPooler.Jobs.RuntimeStateCleanup do
   require Logger
 
   alias CodexPooler.Accounting
+  alias CodexPooler.Alerts
   alias CodexPooler.Catalog
   alias CodexPooler.Files
   alias CodexPooler.Gateway.Persistence.RuntimeCleanup
@@ -35,6 +36,7 @@ defmodule CodexPooler.Jobs.RuntimeStateCleanup do
 
   defp steps(now) do
     [
+      {:alert_deliveries, fn -> Alerts.recover_pending_deliveries(now: now) end},
       {:files, fn -> Files.cleanup_expired(now) end},
       {:stale_reservations, fn -> Accounting.recover_stale_reservations(now) end},
       # Ownership recovery runs on the liveness window, not the six-hour stale

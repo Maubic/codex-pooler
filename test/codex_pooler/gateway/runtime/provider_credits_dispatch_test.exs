@@ -43,218 +43,256 @@ defmodule CodexPooler.Gateway.Runtime.ProviderCreditsDispatchTest do
 
   @moduletag capture_log: true
 
+  # A comprehension expands and compiles a test's body once per generated test, so a loop that generates more than a few tests keeps
+  # the scenario in a private function below it and each generated test is one call.
   for mode <- [:full, :lite], mutation <- [:none, :binding_removed, :binding_epoch, :binding_model, :credential_epoch, :capacity] do
     @tag content_filter_boundary: true
     test "content-filter successor #{mode} checks #{mutation} on the actual remote owner before send" do
-      fixture = open!(allow_provider_credits: true)
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :b, :legacy_windowless)
-      configure_runtime_mode!(setup, unquote(mode))
-      client = open_owned_socket!(fixture, setup)
-      metadata = native_metadata()
-      original = native_payload(setup, metadata, SocketSupport.native_text_input("synthetic content filter"))
-      original = if unquote(mode) == :lite, do: put_in(original, ["client_metadata", "ws_request_header_x_openai_internal_codex_responses_lite"], "true"), else: original
-      terminal = %{"type" => "response.incomplete", "response" => %{"id" => "resp_synthetic_filter", "status" => "incomplete", "incomplete_details" => %{"reason" => "content_filter"}, "output" => [], "usage" => %{"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}}}
-      FakeUpstream.set_mode(fixture.upstream, FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(terminal)]))
-      {client, first} = send_socket_turn!(client, original)
-      assert first["type"] == "response.incomplete"
-      assert generation_count(fixture) == 1
-      guidance = %{"type" => "message", "role" => "developer", "content" => [%{"type" => "input_text", "text" => "<content_filter_guidance>\nsynthetic guidance\n</content_filter_guidance>"}]}
-      successor = Map.update!(original, "input", &(&1 ++ [guidance]))
-      FakeUpstream.set_mode(fixture.upstream, native_completed("resp_synthetic_filter_successor", []))
-      selected = hold_socket_generation!(client, successor)
-      assert selected.summary.request_id != nil
-      assert selected.summary.attempt_id != nil
-
-      UnboxedFixture.run_unboxed(fn ->
-        request = Repo.get!(Accounting.Request, selected.summary.request_id)
-        assert request.request_metadata["native_content_filter_binding"]["version"] == 1
-
-        case unquote(mutation) do
-          :binding_removed ->
-            request |> Ecto.Changeset.change(request_metadata: Map.delete(request.request_metadata, "native_content_filter_binding")) |> Repo.update!()
-
-          :binding_epoch ->
-            request |> Ecto.Changeset.change(request_metadata: put_in(request.request_metadata, ["native_content_filter_binding", "credential_epoch"], 2)) |> Repo.update!()
-
-          :binding_model ->
-            request |> Ecto.Changeset.change(request_metadata: put_in(request.request_metadata, ["native_content_filter_binding", "upstream_model"], "synthetic-changed-model")) |> Repo.update!()
-
-          :credential_epoch ->
-            identity = Repo.get!(UpstreamIdentity, setup.identity.id)
-            identity |> Ecto.Changeset.change(metadata: CredentialFencing.advance_credential_epoch(identity)) |> Repo.update!()
-
-          _other ->
-            :ok
-        end
-      end)
-
-      if unquote(mutation) == :capacity, do: ProviderCreditsFixtures.commit_policy!(fixture, :legacy_windowless, false, fixture.peer.node)
-      send(selected.sender, {:provider_credits_owner_release, selected.reference})
-      {client, final} = receive_client_terminal(selected.client)
-
-      if unquote(mutation) == :none do
-        assert final["type"] == "response.completed"
-        assert generation_count(fixture) == 2
-      else
-        assert final["type"] in ["error", "response.failed"]
-        assert generation_count(fixture) == 1
-        assert_unsent_attempt!(selected.summary.attempt_id)
-      end
-
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
-      close_client!(client)
+      assert_content_filter_successor_checks_mutation!(unquote(mode), unquote(mutation))
     end
+  end
+
+  defp assert_content_filter_successor_checks_mutation!(mode, mutation) do
+    fixture = open!(allow_provider_credits: true)
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :b, :legacy_windowless)
+    configure_runtime_mode!(setup, mode)
+    client = open_owned_socket!(fixture, setup)
+    metadata = native_metadata()
+    original = native_payload(setup, metadata, SocketSupport.native_text_input("synthetic content filter"))
+    original = if mode == :lite, do: put_in(original, ["client_metadata", "ws_request_header_x_openai_internal_codex_responses_lite"], "true"), else: original
+    terminal = %{"type" => "response.incomplete", "response" => %{"id" => "resp_synthetic_filter", "status" => "incomplete", "incomplete_details" => %{"reason" => "content_filter"}, "output" => [], "usage" => %{"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}}}
+    FakeUpstream.set_mode(fixture.upstream, FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(terminal)]))
+    {client, first} = send_socket_turn!(client, original)
+    assert first["type"] == "response.incomplete"
+    assert generation_count(fixture) == 1
+    guidance = %{"type" => "message", "role" => "developer", "content" => [%{"type" => "input_text", "text" => "<content_filter_guidance>\nsynthetic guidance\n</content_filter_guidance>"}]}
+    successor = Map.update!(original, "input", &(&1 ++ [guidance]))
+    FakeUpstream.set_mode(fixture.upstream, native_completed("resp_synthetic_filter_successor", []))
+    selected = hold_socket_generation!(client, successor)
+    assert selected.summary.request_id != nil
+    assert selected.summary.attempt_id != nil
+
+    UnboxedFixture.run_unboxed(fn ->
+      request = Repo.get!(Accounting.Request, selected.summary.request_id)
+      assert request.request_metadata["native_content_filter_binding"]["version"] == 1
+
+      case mutation do
+        :binding_removed ->
+          request |> Ecto.Changeset.change(request_metadata: Map.delete(request.request_metadata, "native_content_filter_binding")) |> Repo.update!()
+
+        :binding_epoch ->
+          request |> Ecto.Changeset.change(request_metadata: put_in(request.request_metadata, ["native_content_filter_binding", "credential_epoch"], 2)) |> Repo.update!()
+
+        :binding_model ->
+          request |> Ecto.Changeset.change(request_metadata: put_in(request.request_metadata, ["native_content_filter_binding", "upstream_model"], "synthetic-changed-model")) |> Repo.update!()
+
+        :credential_epoch ->
+          identity = Repo.get!(UpstreamIdentity, setup.identity.id)
+          identity |> Ecto.Changeset.change(metadata: CredentialFencing.advance_credential_epoch(identity)) |> Repo.update!()
+
+        _other ->
+          :ok
+      end
+    end)
+
+    if mutation == :capacity, do: ProviderCreditsFixtures.commit_policy!(fixture, :legacy_windowless, false, fixture.peer.node)
+    send(selected.sender, {:provider_credits_owner_release, selected.reference})
+    {client, final} = receive_client_terminal(selected.client)
+
+    if mutation == :none do
+      assert final["type"] == "response.completed"
+      assert generation_count(fixture) == 2
+    else
+      assert final["type"] in ["error", "response.failed"]
+      assert generation_count(fixture) == 1
+      assert_unsent_attempt!(selected.summary.attempt_id)
+    end
+
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+    close_client!(client)
   end
 
   for mode <- [:full, :lite], transport <- [:http_json, :http_sse, :native_websocket, :bridged_websocket] do
     test "included capacity remains physically admitted with opt-out over #{transport} #{mode}" do
-      fixture = open!()
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :included)
-      request = request(fixture, setup, unquote(transport), unquote(mode))
-      assert {:ok, result} = execute(request, nil)
-      receipt = admission(result)
-      assert receipt.capacity_basis in [:included_window, :ordinary_provider_permission]
-      refute receipt.non_credit_guarded_probe
-
-      if unquote(transport) == :http_sse do
-        assert %Req.Response.Async{} = result.body
-        assert drain_http(result) =~ "response.completed"
-      end
-
-      assert receipt.context.serving_mode == unquote(mode)
-      assert receipt.context.transport == unquote(transport)
-      assert generation_count(fixture) == 1
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+      assert_included_capacity_admitted_with_opt_out!(unquote(transport), unquote(mode))
     end
 
     test "fresh credit-only permission physically sends in both Pools over #{transport} #{mode}" do
-      fixture = open!(allow_provider_credits: true)
-
-      for pool <- [:a, :b], state <- [:weekly_credit_only, :windowless_credit_only] do
-        setup = ProviderCreditsFixtures.runtime_setup!(fixture, pool, state, model: "synthetic-#{state}-#{pool}")
-        request = request(fixture, setup, unquote(transport), unquote(mode))
-        assert {:ok, response} = execute(request, nil)
-        assert admission(response).capacity_basis == :provider_credits
-        refute admission(response).non_credit_guarded_probe
-        assert admission(response).context.upstream_model == setup.model.upstream_model_id
-        if unquote(transport) == :http_sse, do: assert(drain_http(response) =~ "response.completed")
-      end
-
-      assert generation_count(fixture) == 4
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+      assert_fresh_credit_only_permission_sends_in_both_pools!(unquote(transport), unquote(mode))
     end
 
     @tag credits_negative: true
     test "credit opt-out is final for actual credit-only capacity over #{transport} #{mode}" do
-      fixture = open!()
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :windowless_credit_only)
-      assert {:error, %{reason: :provider_credits_policy_denied, started: false, reason_codes: reasons}} = execute(request(fixture, setup, unquote(transport), unquote(mode)), nil)
-      assert "provider_credits_disabled" in reasons
-      assert generation_count(fixture) == 0
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+      assert_credit_opt_out_final_for_credit_only_capacity!(unquote(transport), unquote(mode))
     end
 
     @tag credits_negative: true
     test "workspace denial blocks a selected included identity over #{transport} #{mode}" do
-      fixture = open!(allow_provider_credits: true)
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :included)
-      selected = request(fixture, setup, unquote(transport), unquote(mode))
-
-      UnboxedFixture.run_unboxed(fn ->
-        ProviderCreditsFixtures.persist_usage!(Repo.get!(UpstreamIdentity, setup.identity.id), ProviderCreditsFixtures.usage_payload(:workspace_blocked), DateTime.utc_now())
-      end)
-
-      assert {:error, %{reason: :provider_credits_policy_denied, started: false, reason_codes: reasons}} = execute(selected, nil)
-      assert "provider_denied" in reasons
-      assert generation_count(fixture) == 0
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+      assert_workspace_denial_blocks_included_identity!(unquote(transport), unquote(mode))
     end
 
     @tag credits_negative: true
     test "late workspace header below exhaustion denies every admitted basis over #{transport} #{mode}" do
-      fixture = open!(allow_provider_credits: true)
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :included)
-      selected = request(fixture, setup, unquote(transport), unquote(mode))
-      denied_at = persist_runtime_denial!(setup.identity)
-      assert {:error, %{reason: :provider_credits_policy_denied, started: false, reason_codes: reasons, candidate_exclusions: [exclusion]}} = execute(selected, nil)
-      assert reasons == ["exhausted", "provider_denied"]
-      assert [%{"rate_limit_reached_type" => "workspace_member_credits_depleted", "quota_scope" => "account"}] = Enum.map(exclusion.reasons, &Map.take(&1, ["rate_limit_reached_type", "quota_scope"]))
-      assert generation_count(fixture) == 0
-
-      UnboxedFixture.run_unboxed(fn ->
-        identity = Repo.get!(UpstreamIdentity, setup.identity.id)
-        epoch = CredentialFencing.credential_epoch(identity)
-        metadata = Map.put(identity.metadata, AccountAvailabilityStore.metadata_key(), AccountAvailabilityStore.encode!(:available, DateTime.add(denied_at, 1, :microsecond), epoch))
-        Repo.update!(Ecto.Changeset.change(identity, metadata: metadata))
-      end)
-
-      assert {:ok, result} = execute(selected, nil)
-      assert admission(result).capacity_basis in [:included_window, :ordinary_provider_permission]
-      if unquote(transport) == :http_sse, do: assert(drain_http(result) =~ "response.completed")
-      assert generation_count(fixture) == 1
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+      assert_late_workspace_header_denies_every_basis!(unquote(transport), unquote(mode))
     end
 
     test "authorized consume and matching included confirmation precede #{transport} #{mode} generation" do
-      fixture = open!()
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :weekly_credit_only)
-      recovered = recover_included!(fixture, setup)
-      assert recovered.metadata["saved_reset_redemption"]["phase"] == "confirmed_by_quota"
-      request = request(fixture, %{setup | identity: recovered}, unquote(transport), unquote(mode))
-      assert {:ok, result} = execute(request, nil)
-      assert admission(result).capacity_basis == :recovered_included
-      refute admission(result).non_credit_guarded_probe
-      if unquote(transport) == :http_sse, do: assert(drain_http(result) =~ "response.completed")
-      assert generation_count(fixture) == 1
-      receipts = FakeUpstream.physical_receipts(fixture.upstream)
-      assert [consume] = Enum.filter(receipts, &(&1.kind == :consume))
-      assert [generation] = Enum.filter(receipts, &(&1.kind == :generation))
-      assert confirmation = Enum.find(receipts, &(&1.kind == :usage and &1.ordinal > consume.ordinal))
-      assert consume.ordinal < confirmation.ordinal
-      assert confirmation.ordinal < generation.ordinal
+      assert_consume_and_included_confirmation_precede_generation!(unquote(transport), unquote(mode))
     end
+  end
+
+  defp assert_included_capacity_admitted_with_opt_out!(transport, mode) do
+    fixture = open!()
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :included)
+    request = request(fixture, setup, transport, mode)
+    assert {:ok, result} = execute(request, nil)
+    receipt = admission(result)
+    assert receipt.capacity_basis in [:included_window, :ordinary_provider_permission]
+    refute receipt.non_credit_guarded_probe
+
+    if transport == :http_sse do
+      assert %Req.Response.Async{} = result.body
+      assert drain_http(result) =~ "response.completed"
+    end
+
+    assert receipt.context.serving_mode == mode
+    assert receipt.context.transport == transport
+    assert generation_count(fixture) == 1
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+  end
+
+  defp assert_fresh_credit_only_permission_sends_in_both_pools!(transport, mode) do
+    fixture = open!(allow_provider_credits: true)
+
+    for pool <- [:a, :b], state <- [:weekly_credit_only, :windowless_credit_only] do
+      setup = ProviderCreditsFixtures.runtime_setup!(fixture, pool, state, model: "synthetic-#{state}-#{pool}")
+      request = request(fixture, setup, transport, mode)
+      assert {:ok, response} = execute(request, nil)
+      assert admission(response).capacity_basis == :provider_credits
+      refute admission(response).non_credit_guarded_probe
+      assert admission(response).context.upstream_model == setup.model.upstream_model_id
+      if transport == :http_sse, do: assert(drain_http(response) =~ "response.completed")
+    end
+
+    assert generation_count(fixture) == 4
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+  end
+
+  defp assert_credit_opt_out_final_for_credit_only_capacity!(transport, mode) do
+    fixture = open!()
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :windowless_credit_only)
+    assert {:error, %{reason: :provider_credits_policy_denied, started: false, reason_codes: reasons}} = execute(request(fixture, setup, transport, mode), nil)
+    assert "provider_credits_disabled" in reasons
+    assert generation_count(fixture) == 0
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+  end
+
+  defp assert_workspace_denial_blocks_included_identity!(transport, mode) do
+    fixture = open!(allow_provider_credits: true)
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :included)
+    selected = request(fixture, setup, transport, mode)
+
+    UnboxedFixture.run_unboxed(fn ->
+      ProviderCreditsFixtures.persist_usage!(Repo.get!(UpstreamIdentity, setup.identity.id), ProviderCreditsFixtures.usage_payload(:workspace_blocked), DateTime.utc_now())
+    end)
+
+    assert {:error, %{reason: :provider_credits_policy_denied, started: false, reason_codes: reasons}} = execute(selected, nil)
+    assert "provider_denied" in reasons
+    assert generation_count(fixture) == 0
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+  end
+
+  defp assert_late_workspace_header_denies_every_basis!(transport, mode) do
+    fixture = open!(allow_provider_credits: true)
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :included)
+    selected = request(fixture, setup, transport, mode)
+    denied_at = persist_runtime_denial!(setup.identity)
+    assert {:error, %{reason: :provider_credits_policy_denied, started: false, reason_codes: reasons, candidate_exclusions: [exclusion]}} = execute(selected, nil)
+    assert reasons == ["exhausted", "provider_denied"]
+    assert [%{"rate_limit_reached_type" => "workspace_member_credits_depleted", "quota_scope" => "account"}] = Enum.map(exclusion.reasons, &Map.take(&1, ["rate_limit_reached_type", "quota_scope"]))
+    assert generation_count(fixture) == 0
+
+    UnboxedFixture.run_unboxed(fn ->
+      identity = Repo.get!(UpstreamIdentity, setup.identity.id)
+      epoch = CredentialFencing.credential_epoch(identity)
+      metadata = Map.put(identity.metadata, AccountAvailabilityStore.metadata_key(), AccountAvailabilityStore.encode!(:available, DateTime.add(denied_at, 1, :microsecond), epoch))
+      Repo.update!(Ecto.Changeset.change(identity, metadata: metadata))
+    end)
+
+    assert {:ok, result} = execute(selected, nil)
+    assert admission(result).capacity_basis in [:included_window, :ordinary_provider_permission]
+    if transport == :http_sse, do: assert(drain_http(result) =~ "response.completed")
+    assert generation_count(fixture) == 1
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+  end
+
+  defp assert_consume_and_included_confirmation_precede_generation!(transport, mode) do
+    fixture = open!()
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :weekly_credit_only)
+    recovered = recover_included!(fixture, setup)
+    assert recovered.metadata["saved_reset_redemption"]["phase"] == "confirmed_by_quota"
+    request = request(fixture, %{setup | identity: recovered}, transport, mode)
+    assert {:ok, result} = execute(request, nil)
+    assert admission(result).capacity_basis == :recovered_included
+    refute admission(result).non_credit_guarded_probe
+    if transport == :http_sse, do: assert(drain_http(result) =~ "response.completed")
+    assert generation_count(fixture) == 1
+    receipts = FakeUpstream.physical_receipts(fixture.upstream)
+    assert [consume] = Enum.filter(receipts, &(&1.kind == :consume))
+    assert [generation] = Enum.filter(receipts, &(&1.kind == :generation))
+    assert confirmation = Enum.find(receipts, &(&1.kind == :usage and &1.ordinal > consume.ordinal))
+    assert consume.ordinal < confirmation.ordinal
+    assert confirmation.ordinal < generation.ordinal
   end
 
   for mode <- [:full, :lite], transport <- [:http_json, :http_sse] do
     @tag credits_negative: true
     test "T3 #{transport} final read observes the other replica's revocation in both Pools #{mode}" do
-      fixture = open!(allow_provider_credits: true)
-
-      for pool <- [:a, :b] do
-        ProviderCreditsFixtures.commit_policy!(fixture, :legacy_windowless, true)
-        setup = ProviderCreditsFixtures.runtime_setup!(fixture, pool, :legacy_windowless)
-        request = request(fixture, setup, unquote(transport), unquote(mode))
-        reference = make_ref()
-        worker = ProviderCreditsFixtures.start_peer_work!(fixture, {ProviderCreditsDispatchSupport, :held_http, [request, self(), reference]})
-        assert_receive {:dispatch_reader_ready, ^reference, reader, backend}, @budget
-        barrier = ProviderCreditsFixtures.before_read_barrier!(fixture, setup.identity.id, backend_pid: backend)
-        send(reader, {:dispatch_read, reference})
-        assert %{phase: :before_final_read, backend_pid: ^backend} = ProviderCreditsFixtures.await_before_read!(barrier)
-        ProviderCreditsFixtures.commit_policy_and_release!(barrier, false)
-        assert {:error, %{reason: :provider_credits_policy_denied, started: false, reason_codes: reasons}} = await_worker(worker)
-        assert "provider_credits_disabled" in reasons
-        assert generation_count(fixture) == 0
-      end
+      assert_final_read_observes_other_replica_revocation!(unquote(transport), unquote(mode))
     end
 
     test "T4 #{transport} admitted read may finish after opt-out and the next Pool rechecks #{mode}" do
-      fixture = open!(allow_provider_credits: true)
-      first = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :legacy_windowless)
-      second = ProviderCreditsFixtures.runtime_setup!(fixture, :b, :legacy_windowless)
-      barrier = ProviderCreditsFixtures.after_read_barrier!(fixture, first.identity.id, node: fixture.peer.node)
-      worker = ProviderCreditsFixtures.start_peer_work!(fixture, {ProviderCreditsDispatchSupport, :execute_terminal, [request(fixture, first, unquote(transport), unquote(mode)), nil]})
-      reference = barrier.ref
-      assert_receive {:provider_credits_barrier, ^reference, :after_final_read, emitter}, @budget
-      assert emitter == worker.pid
-      assert generation_count(fixture) == 0
-      ProviderCreditsFixtures.commit_policy!(fixture, :legacy_windowless, false)
-      ProviderCreditsFixtures.release_barrier!(barrier)
-      assert {:ok, response} = await_worker(worker)
-      assert admission(response).capacity_basis == :unknown_legacy
-      if unquote(transport) == :http_sse, do: assert(response.terminal_completed?)
-      assert {:error, %{reason: :provider_credits_policy_denied, started: false}} = execute(request(fixture, second, unquote(transport), unquote(mode)), nil)
-      assert generation_count(fixture) == 1
+      assert_admitted_read_may_finish_after_opt_out!(unquote(transport), unquote(mode))
     end
+  end
+
+  defp assert_final_read_observes_other_replica_revocation!(transport, mode) do
+    fixture = open!(allow_provider_credits: true)
+
+    for pool <- [:a, :b] do
+      ProviderCreditsFixtures.commit_policy!(fixture, :legacy_windowless, true)
+      setup = ProviderCreditsFixtures.runtime_setup!(fixture, pool, :legacy_windowless)
+      request = request(fixture, setup, transport, mode)
+      reference = make_ref()
+      worker = ProviderCreditsFixtures.start_peer_work!(fixture, {ProviderCreditsDispatchSupport, :held_http, [request, self(), reference]})
+      assert_receive {:dispatch_reader_ready, ^reference, reader, backend}, @budget
+      barrier = ProviderCreditsFixtures.before_read_barrier!(fixture, setup.identity.id, backend_pid: backend)
+      send(reader, {:dispatch_read, reference})
+      assert %{phase: :before_final_read, backend_pid: ^backend} = ProviderCreditsFixtures.await_before_read!(barrier)
+      ProviderCreditsFixtures.commit_policy_and_release!(barrier, false)
+      assert {:error, %{reason: :provider_credits_policy_denied, started: false, reason_codes: reasons}} = await_worker(worker)
+      assert "provider_credits_disabled" in reasons
+      assert generation_count(fixture) == 0
+    end
+  end
+
+  defp assert_admitted_read_may_finish_after_opt_out!(transport, mode) do
+    fixture = open!(allow_provider_credits: true)
+    first = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :legacy_windowless)
+    second = ProviderCreditsFixtures.runtime_setup!(fixture, :b, :legacy_windowless)
+    barrier = ProviderCreditsFixtures.after_read_barrier!(fixture, first.identity.id, node: fixture.peer.node)
+    worker = ProviderCreditsFixtures.start_peer_work!(fixture, {ProviderCreditsDispatchSupport, :execute_terminal, [request(fixture, first, transport, mode), nil]})
+    reference = barrier.ref
+    assert_receive {:provider_credits_barrier, ^reference, :after_final_read, emitter}, @budget
+    assert emitter == worker.pid
+    assert generation_count(fixture) == 0
+    ProviderCreditsFixtures.commit_policy!(fixture, :legacy_windowless, false)
+    ProviderCreditsFixtures.release_barrier!(barrier)
+    assert {:ok, response} = await_worker(worker)
+    assert admission(response).capacity_basis == :unknown_legacy
+    if transport == :http_sse, do: assert(response.terminal_completed?)
+    assert {:error, %{reason: :provider_credits_policy_denied, started: false}} = execute(request(fixture, second, transport, mode), nil)
+    assert generation_count(fixture) == 1
   end
 
   for mode <- [:full, :lite] do
@@ -322,177 +360,190 @@ defmodule CodexPooler.Gateway.Runtime.ProviderCreditsDispatchTest do
   for path <- ["/backend-api/codex/responses", "/v1/responses"], mode <- ["full", "lite"], state <- [:included, :weekly_credit_only] do
     @tag credits_negative: true
     test "native public boundary #{path} #{mode} admits actual #{state} permission" do
-      TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, nil)
-      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
-      fixture = open!(allow_provider_credits: unquote(state) == :weekly_credit_only)
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, unquote(state))
-      FakeUpstream.set_mode(fixture.upstream, FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(%{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_surface", "status" => "completed", "usage" => %{"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}}})]))
-
-      UnboxedFixture.run_unboxed(fn ->
-        now = DateTime.utc_now()
-        Repo.insert!(%ModelServingOverride{pool_id: setup.pool.id, exposed_model_id: setup.model.exposed_model_id, mode: unquote(mode), created_at: now, updated_at: now})
-      end)
-
-      {_server, port} = SocketSupport.start_public_endpoint_with_server!()
-      {conn, websocket, reference} = SocketSupport.public_websocket_connect!(port, setup, Ecto.UUID.generate(), unquote(path))
-      socket = Mint.HTTP.get_socket(conn)
-      on_exit(fn -> :gen_tcp.close(socket) end)
-      frame = CodexPooler.JSON.encode!(%{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => [%{"type" => "message", "role" => "user", "content" => [%{"type" => "input_text", "text" => "synthetic"}]}], "stream" => true})
-      {conn, websocket} = SocketSupport.public_websocket_send_text!(conn, websocket, reference, frame)
-      {conn, _websocket, terminal} = receive_terminal(conn, websocket, reference)
-
-      assert terminal["type"] == "response.completed"
-      assert generation_count(fixture) == 1
-
-      Mint.HTTP.close(conn)
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+      assert_public_boundary_admits_actual_permission!(unquote(state), unquote(mode), unquote(path))
     end
+  end
+
+  defp assert_public_boundary_admits_actual_permission!(state, mode, path) do
+    TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, nil)
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
+    fixture = open!(allow_provider_credits: state == :weekly_credit_only)
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, state)
+    FakeUpstream.set_mode(fixture.upstream, FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(%{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_surface", "status" => "completed", "usage" => %{"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}}})]))
+
+    UnboxedFixture.run_unboxed(fn ->
+      now = DateTime.utc_now()
+      Repo.insert!(%ModelServingOverride{pool_id: setup.pool.id, exposed_model_id: setup.model.exposed_model_id, mode: mode, created_at: now, updated_at: now})
+    end)
+
+    {_server, port} = SocketSupport.start_public_endpoint_with_server!()
+    {conn, websocket, reference} = SocketSupport.public_websocket_connect!(port, setup, Ecto.UUID.generate(), path)
+    socket = Mint.HTTP.get_socket(conn)
+    on_exit(fn -> :gen_tcp.close(socket) end)
+    frame = CodexPooler.JSON.encode!(%{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => [%{"type" => "message", "role" => "user", "content" => [%{"type" => "input_text", "text" => "synthetic"}]}], "stream" => true})
+    {conn, websocket} = SocketSupport.public_websocket_send_text!(conn, websocket, reference, frame)
+    {conn, _websocket, terminal} = receive_terminal(conn, websocket, reference)
+
+    assert terminal["type"] == "response.completed"
+    assert generation_count(fixture) == 1
+
+    Mint.HTTP.close(conn)
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
   end
 
   for path <- ["/backend-api/codex/responses", "/v1/responses"], mode <- [:full, :lite], boundary <- [:credit_off, :workspace, :recovered] do
     @tag credits_negative: true
     test "public Socket #{path} #{mode} enforces #{boundary} at its actual wire boundary" do
-      fixture = open!(allow_provider_credits: unquote(boundary) != :credit_off)
-      state = if unquote(boundary) == :workspace, do: :included, else: :weekly_credit_only
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, state)
-      configure_runtime_mode!(setup, unquote(mode))
-
-      case unquote(boundary) do
-        :recovered -> recover_included!(fixture, setup)
-        :workspace -> persist_runtime_denial!(setup.identity)
-        :credit_off -> :ok
-      end
-
-      FakeUpstream.set_mode(fixture.upstream, native_completed("resp_synthetic_public_matrix", []))
-      {_server, port} = SocketSupport.start_public_endpoint_with_server!()
-      before = WebsocketCleanupFence.listener_sockets()
-      {conn, websocket, reference} = SocketSupport.public_websocket_connect!(port, setup, Ecto.UUID.generate(), unquote(path))
-      socket = Mint.HTTP.get_socket(conn)
-      on_exit(fn -> :gen_tcp.close(socket) end)
-      socket_pid = WebsocketCleanupFence.await_new_listener_socket!(before)
-      payload = %{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => SocketSupport.native_text_input("synthetic public matrix"), "stream" => true}
-      {conn, websocket} = SocketSupport.public_websocket_send_text!(conn, websocket, reference, CodexPooler.JSON.encode!(payload))
-      {conn, _websocket, terminal} = receive_terminal(conn, websocket, reference)
-      WireSupport.await_socket_connection_state!(socket_pid, &(MapSet.size(&1.tasks) == 0))
-
-      if unquote(boundary) == :recovered do
-        assert terminal["type"] == "response.completed"
-        assert generation_count(fixture) == 1
-        receipts = FakeUpstream.physical_receipts(fixture.upstream)
-        assert [consume] = Enum.filter(receipts, &(&1.kind == :consume))
-        assert [generation] = Enum.filter(receipts, &(&1.kind == :generation))
-        assert confirmation = Enum.find(receipts, &(&1.kind == :usage and &1.ordinal > consume.ordinal))
-        assert consume.ordinal < confirmation.ordinal and confirmation.ordinal < generation.ordinal
-        assert FakeUpstream.physical_counts(fixture.upstream).consume == 1
-      else
-        assert terminal["type"] in ["error", "response.failed"]
-        assert generation_count(fixture) == 0
-        assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
-      end
-
-      Mint.HTTP.close(conn)
-      WebsocketCleanupFence.await_listener_socket_cleanup!(socket_pid)
+      assert_public_socket_enforces_boundary_at_wire!(unquote(boundary), unquote(mode), unquote(path))
     end
+  end
+
+  defp assert_public_socket_enforces_boundary_at_wire!(boundary, mode, path) do
+    fixture = open!(allow_provider_credits: boundary != :credit_off)
+    state = if boundary == :workspace, do: :included, else: :weekly_credit_only
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, state)
+    configure_runtime_mode!(setup, mode)
+
+    case boundary do
+      :recovered -> recover_included!(fixture, setup)
+      :workspace -> persist_runtime_denial!(setup.identity)
+      :credit_off -> :ok
+    end
+
+    FakeUpstream.set_mode(fixture.upstream, native_completed("resp_synthetic_public_matrix", []))
+    {_server, port} = SocketSupport.start_public_endpoint_with_server!()
+    before = WebsocketCleanupFence.listener_sockets()
+    {conn, websocket, reference} = SocketSupport.public_websocket_connect!(port, setup, Ecto.UUID.generate(), path)
+    socket = Mint.HTTP.get_socket(conn)
+    on_exit(fn -> :gen_tcp.close(socket) end)
+    socket_pid = WebsocketCleanupFence.await_new_listener_socket!(before)
+    payload = %{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => SocketSupport.native_text_input("synthetic public matrix"), "stream" => true}
+    {conn, websocket} = SocketSupport.public_websocket_send_text!(conn, websocket, reference, CodexPooler.JSON.encode!(payload))
+    {conn, _websocket, terminal} = receive_terminal(conn, websocket, reference)
+    WireSupport.await_socket_connection_state!(socket_pid, &(MapSet.size(&1.tasks) == 0))
+
+    if boundary == :recovered do
+      assert terminal["type"] == "response.completed"
+      assert generation_count(fixture) == 1
+      receipts = FakeUpstream.physical_receipts(fixture.upstream)
+      assert [consume] = Enum.filter(receipts, &(&1.kind == :consume))
+      assert [generation] = Enum.filter(receipts, &(&1.kind == :generation))
+      assert confirmation = Enum.find(receipts, &(&1.kind == :usage and &1.ordinal > consume.ordinal))
+      assert consume.ordinal < confirmation.ordinal and confirmation.ordinal < generation.ordinal
+      assert FakeUpstream.physical_counts(fixture.upstream).consume == 1
+    else
+      assert terminal["type"] in ["error", "response.failed"]
+      assert generation_count(fixture) == 0
+      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+    end
+
+    Mint.HTTP.close(conn)
+    WebsocketCleanupFence.await_listener_socket_cleanup!(socket_pid)
   end
 
   for mode <- [:full, :lite], operation <- [:anchored, :steer, :compact] do
     @tag credits_negative: true
     test "T3 actual remote Socket #{operation} generation honors final-read revocation #{mode}" do
-      fixture = open!(allow_provider_credits: true)
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :b, :legacy_windowless)
-      mode = unquote(mode)
-      operation = unquote(operation)
-      metadata = native_metadata()
-      configure_runtime_mode!(setup, mode)
-      client = open_owned_socket!(fixture, setup)
-      output = synthetic_assistant_item("msg_synthetic_gate_anchor")
-      anchor = "resp_synthetic_gate_anchor"
-      FakeUpstream.set_mode(fixture.upstream, native_completed(anchor, [output]))
-      {client, terminal} = send_socket_turn!(client, native_payload(setup, metadata, SocketSupport.native_text_input("synthetic opener")))
-      assert terminal["type"] == "response.completed"
-      assert generation_count(fixture) == 1
-      assert {:ok, connection} = :erpc.call(fixture.peer.node, UpstreamWebsocketSession, :live_connection, [client.upstream_session], @budget)
-      lifecycle = connection.lifecycle_id
-      assert_active_anchor!(client.codex_session_id, anchor)
-
-      FakeUpstream.set_mode(fixture.upstream, generation_reply(operation, "resp_synthetic_gate_positive"))
-      payload = controlled_generation_payload(setup, metadata, operation, anchor)
-      positive = hold_socket_generation!(client, payload)
-      assert_handoff_contract!(positive.summary, operation, mode)
-      send(positive.sender, {:provider_credits_owner_release, positive.reference})
-      {client, positive_terminal} = receive_client_terminal(positive.client)
-      assert positive_terminal["type"] == "response.completed"
-      assert generation_count(fixture) == 2
-      {client, admitted_count} = complete_positive_control!(client, fixture, setup, metadata, operation, positive_terminal)
-
-      metadata = native_metadata()
-      FakeUpstream.set_mode(fixture.upstream, native_completed("resp_synthetic_gate_retained", [output]))
-      {client, opener} = send_socket_turn!(client, native_payload(setup, metadata, SocketSupport.native_text_input("synthetic second opener")))
-      retained = opener["response"]["id"]
-      assert generation_count(fixture) == admitted_count + 1
-      assert_active_anchor!(client.codex_session_id, retained)
-      selected = hold_socket_generation!(client, controlled_generation_payload(setup, metadata, operation, retained))
-      assert_handoff_contract!(selected.summary, operation, mode)
-      before = ProviderCreditsFixtures.before_read_barrier!(fixture, setup.identity.id, read_relation: :account_quota_windows, query_predicate: &final_read_query?/1)
-      send(selected.sender, {:provider_credits_owner_release, selected.reference})
-      assert %{phase: :before_final_read} = ProviderCreditsFixtures.await_before_read!(before)
-      ProviderCreditsFixtures.commit_policy_and_release!(before, false)
-      {client, denied} = receive_client_terminal(selected.client)
-      assert denied["type"] in ["error", "response.failed"]
-      assert generation_count(fixture) == admitted_count + 1
-      assert_active_anchor!(client.codex_session_id, retained)
-      assert {:ok, %{lifecycle_id: ^lifecycle}} = :erpc.call(fixture.peer.node, UpstreamWebsocketSession, :live_connection, [client.upstream_session], @budget)
-      assert_unsent_attempt!(selected.summary.attempt_id)
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
-      close_client!(client)
+      assert_remote_socket_generation_honors_final_read_revocation!(unquote(mode), unquote(operation))
     end
+  end
+
+  defp assert_remote_socket_generation_honors_final_read_revocation!(mode, operation) do
+    fixture = open!(allow_provider_credits: true)
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :b, :legacy_windowless)
+    metadata = native_metadata()
+    configure_runtime_mode!(setup, mode)
+    client = open_owned_socket!(fixture, setup)
+    output = synthetic_assistant_item("msg_synthetic_gate_anchor")
+    anchor = "resp_synthetic_gate_anchor"
+    FakeUpstream.set_mode(fixture.upstream, native_completed(anchor, [output]))
+    {client, terminal} = send_socket_turn!(client, native_payload(setup, metadata, SocketSupport.native_text_input("synthetic opener")))
+    assert terminal["type"] == "response.completed"
+    assert generation_count(fixture) == 1
+    assert {:ok, connection} = :erpc.call(fixture.peer.node, UpstreamWebsocketSession, :live_connection, [client.upstream_session], @budget)
+    lifecycle = connection.lifecycle_id
+    assert_active_anchor!(client.codex_session_id, anchor)
+
+    FakeUpstream.set_mode(fixture.upstream, generation_reply(operation, "resp_synthetic_gate_positive"))
+    payload = controlled_generation_payload(setup, metadata, operation, anchor)
+    positive = hold_socket_generation!(client, payload)
+    assert_handoff_contract!(positive.summary, operation, mode)
+    send(positive.sender, {:provider_credits_owner_release, positive.reference})
+    {client, positive_terminal} = receive_client_terminal(positive.client)
+    assert positive_terminal["type"] == "response.completed"
+    assert generation_count(fixture) == 2
+    {client, admitted_count} = complete_positive_control!(client, fixture, setup, metadata, operation, positive_terminal)
+
+    metadata = native_metadata()
+    FakeUpstream.set_mode(fixture.upstream, native_completed("resp_synthetic_gate_retained", [output]))
+    {client, opener} = send_socket_turn!(client, native_payload(setup, metadata, SocketSupport.native_text_input("synthetic second opener")))
+    retained = opener["response"]["id"]
+    assert generation_count(fixture) == admitted_count + 1
+    assert_active_anchor!(client.codex_session_id, retained)
+    selected = hold_socket_generation!(client, controlled_generation_payload(setup, metadata, operation, retained))
+    assert_handoff_contract!(selected.summary, operation, mode)
+    before = ProviderCreditsFixtures.before_read_barrier!(fixture, setup.identity.id, read_relation: :account_quota_windows, query_predicate: &final_read_query?/1)
+    send(selected.sender, {:provider_credits_owner_release, selected.reference})
+    assert %{phase: :before_final_read} = ProviderCreditsFixtures.await_before_read!(before)
+    ProviderCreditsFixtures.commit_policy_and_release!(before, false)
+    {client, denied} = receive_client_terminal(selected.client)
+    assert denied["type"] in ["error", "response.failed"]
+    assert generation_count(fixture) == admitted_count + 1
+    assert_active_anchor!(client.codex_session_id, retained)
+    assert {:ok, %{lifecycle_id: ^lifecycle}} = :erpc.call(fixture.peer.node, UpstreamWebsocketSession, :live_connection, [client.upstream_session], @budget)
+    assert_unsent_attempt!(selected.summary.attempt_id)
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+    close_client!(client)
   end
 
   for mode <- [:full, :lite], revoke? <- [false, true] do
     @tag credits_negative: true
     test "T3 real Socket suspended replay uses its actual capability and final read #{mode} revoke=#{revoke?}" do
-      fixture = open!(allow_provider_credits: true)
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :b, :legacy_windowless)
-      mode = unquote(mode)
-      configure_runtime_mode!(setup, mode)
-      client = open_owned_socket!(fixture, setup)
-      release_ref = make_ref()
-      FakeUpstream.set_mode(fixture.upstream, FakeUpstream.websocket_close_without_terminal_barrier(notify: self(), release_ref: release_ref, code: 1001, reason: "synthetic replay cut"))
-      payload = native_payload(setup, native_metadata(), [%{"type" => "function_call_output", "call_id" => "call_synthetic_replay", "output" => "synthetic"}])
-      client = send_client_frame(client, payload)
-      assert_receive {:fake_upstream_websocket_barrier, :before_close, handler, ^release_ref}, @budget
-      assert :erpc.call(fixture.peer.node, :sys, :get_state, [client.owner], @budget).active_turn.descriptor.replay_generation == 0
-      close_client!(client)
-      assert :erpc.call(fixture.peer.node, :sys, :get_state, [client.owner], @budget).suspended_replay.provisional_status == :armed
-      send(handler, {:fake_upstream_release_websocket, release_ref})
-      assert generation_count(fixture) == 1
-      client = reconnect_owned_socket!(fixture, setup, client)
-      FakeUpstream.set_mode(fixture.upstream, native_completed("resp_synthetic_replay_positive", []))
-      selected = hold_socket_generation!(client, payload)
-      assert selected.summary.native_replay?
-      assert selected.summary.capability_phase == nil
-      assert selected.summary.serving_mode == Atom.to_string(mode)
-      assert :erpc.call(fixture.peer.node, :sys, :get_state, [client.owner], @budget).suspended_replay.provisional_status == :committed_not_started
-      before = ProviderCreditsFixtures.before_read_barrier!(fixture, setup.identity.id, read_relation: :account_quota_windows, query_predicate: &final_read_query?/1)
-      send(selected.sender, {:provider_credits_owner_release, selected.reference})
-      assert %{phase: :before_final_read} = ProviderCreditsFixtures.await_before_read!(before)
-      ProviderCreditsFixtures.commit_policy_and_release!(before, not unquote(revoke?))
-      {client, terminal} = receive_client_terminal(selected.client)
-
-      if unquote(revoke?) do
-        assert terminal["type"] in ["error", "response.failed"]
-        assert generation_count(fixture) == 1
-        assert_unsent_attempt!(selected.summary.attempt_id)
-      else
-        assert terminal["type"] == "response.completed"
-        assert generation_count(fixture) == 2
-        connections = fixture.upstream |> FakeUpstream.physical_receipts() |> Enum.filter(&(&1.kind == :generation)) |> Enum.map(& &1.connection_id)
-        assert connections == [1, 2]
-      end
-
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
-      close_client!(client)
+      assert_suspended_socket_replay_uses_actual_capability!(unquote(mode), unquote(revoke?))
     end
+  end
+
+  defp assert_suspended_socket_replay_uses_actual_capability!(mode, revoke?) do
+    fixture = open!(allow_provider_credits: true)
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :b, :legacy_windowless)
+    configure_runtime_mode!(setup, mode)
+    client = open_owned_socket!(fixture, setup)
+    release_ref = make_ref()
+    FakeUpstream.set_mode(fixture.upstream, FakeUpstream.websocket_close_without_terminal_barrier(notify: self(), release_ref: release_ref, code: 1001, reason: "synthetic replay cut"))
+    payload = native_payload(setup, native_metadata(), [%{"type" => "function_call_output", "call_id" => "call_synthetic_replay", "output" => "synthetic"}])
+    client = send_client_frame(client, payload)
+    assert_receive {:fake_upstream_websocket_barrier, :before_close, handler, ^release_ref}, @budget
+    assert :erpc.call(fixture.peer.node, :sys, :get_state, [client.owner], @budget).active_turn.descriptor.replay_generation == 0
+    close_client!(client)
+    assert :erpc.call(fixture.peer.node, :sys, :get_state, [client.owner], @budget).suspended_replay.provisional_status == :armed
+    send(handler, {:fake_upstream_release_websocket, release_ref})
+    assert generation_count(fixture) == 1
+    client = reconnect_owned_socket!(fixture, setup, client)
+    FakeUpstream.set_mode(fixture.upstream, native_completed("resp_synthetic_replay_positive", []))
+    selected = hold_socket_generation!(client, payload)
+    assert selected.summary.native_replay?
+    assert selected.summary.capability_phase == nil
+    assert selected.summary.serving_mode == Atom.to_string(mode)
+    assert :erpc.call(fixture.peer.node, :sys, :get_state, [client.owner], @budget).suspended_replay.provisional_status == :committed_not_started
+    before = ProviderCreditsFixtures.before_read_barrier!(fixture, setup.identity.id, read_relation: :account_quota_windows, query_predicate: &final_read_query?/1)
+    send(selected.sender, {:provider_credits_owner_release, selected.reference})
+    assert %{phase: :before_final_read} = ProviderCreditsFixtures.await_before_read!(before)
+    ProviderCreditsFixtures.commit_policy_and_release!(before, not revoke?)
+    {client, terminal} = receive_client_terminal(selected.client)
+
+    if revoke? do
+      assert terminal["type"] in ["error", "response.failed"]
+      assert generation_count(fixture) == 1
+      assert_unsent_attempt!(selected.summary.attempt_id)
+    else
+      assert terminal["type"] == "response.completed"
+      assert generation_count(fixture) == 2
+      connections = fixture.upstream |> FakeUpstream.physical_receipts() |> Enum.filter(&(&1.kind == :generation)) |> Enum.map(& &1.connection_id)
+      assert connections == [1, 2]
+    end
+
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+    close_client!(client)
   end
 
   for mode <- [:full, :lite] do
@@ -534,54 +585,58 @@ defmodule CodexPooler.Gateway.Runtime.ProviderCreditsDispatchTest do
   for revocation <- [:none, :policy, :credential_epoch] do
     @tag credits_negative: true
     test "accounted multipart transcribe final read binds forced model and rejects #{revocation}" do
-      fixture = open!(allow_provider_credits: true)
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :legacy_windowless, model: "synthetic-unrelated-host", upstream_model: "synthetic-host-provider")
-      configure_runtime_mode!(setup, :full)
-      FakeUpstream.set_mode(fixture.upstream, {:json, 200, %{"text" => "synthetic transcript"}})
-      upload = synthetic_upload!()
-      reference = make_ref()
-      gate = hold_inserted_attempt!(fixture, setup.identity.id, reference)
-      task = Task.async(fn -> Sandbox.unboxed_run(Repo, fn -> ProviderCreditsDispatchSupport.transcribe(setup.authorization, upload) end) end)
-      Agent.update(fixture.keeper, &%{&1 | workers: [task.pid | &1.workers]})
-      assert_receive {:provider_credits_accounted_attempt, ^reference, executor, attempt_id}, @budget
-      assert node(executor) == node()
-      attempt = Repo.get!(CodexPooler.Accounting.Attempt, attempt_id)
-      assert attempt.upstream_identity_id == setup.identity.id
-      assert Repo.get!(CodexPooler.Accounting.Request, attempt.request_id).requested_model == "gpt-4o-transcribe"
-      before = ProviderCreditsFixtures.before_read_barrier!(fixture, setup.identity.id, read_relation: :account_quota_windows, query_predicate: &final_read_query?/1)
-      send(executor, {:provider_credits_attempt_release, reference})
-      assert %{phase: :before_final_read} = ProviderCreditsFixtures.await_before_read!(before)
-
-      case unquote(revocation) do
-        :policy ->
-          ProviderCreditsFixtures.commit_policy_and_release!(before, false)
-
-        :credential_epoch ->
-          metadata = CredentialFencing.advance_credential_epoch(Repo.get!(UpstreamIdentity, setup.identity.id))
-          Postgrex.query!(before.connection, "UPDATE upstream_identities SET metadata = $1 WHERE id = $2", [metadata, Ecto.UUID.dump!(setup.identity.id)])
-          ProviderCreditsFixtures.commit_policy_and_release!(before, true)
-
-        :none ->
-          ProviderCreditsFixtures.commit_policy_and_release!(before, true)
-      end
-
-      result = Task.await(task, @budget)
-      stop_attempt_hold!(gate)
-
-      if unquote(revocation) == :none do
-        assert {:ok, %{status: 200}} = result
-        assert [captured] = Enum.filter(FakeUpstream.requests(fixture.upstream), &(&1.path == "/backend-api/transcribe"))
-        refute captured.body =~ "synthetic-host-provider"
-        refute captured.body =~ "gpt-4o-transcribe"
-        assert Repo.reload!(attempt).status == "succeeded"
-      else
-        assert {:error, %{status: 503}} = result
-        refute Enum.any?(FakeUpstream.requests(fixture.upstream), &(&1.path == "/backend-api/transcribe"))
-        assert_unsent_attempt!(attempt_id)
-      end
-
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+      assert_multipart_transcribe_final_read_binds_forced_model!(unquote(revocation))
     end
+  end
+
+  defp assert_multipart_transcribe_final_read_binds_forced_model!(revocation) do
+    fixture = open!(allow_provider_credits: true)
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :legacy_windowless, model: "synthetic-unrelated-host", upstream_model: "synthetic-host-provider")
+    configure_runtime_mode!(setup, :full)
+    FakeUpstream.set_mode(fixture.upstream, {:json, 200, %{"text" => "synthetic transcript"}})
+    upload = synthetic_upload!()
+    reference = make_ref()
+    gate = hold_inserted_attempt!(fixture, setup.identity.id, reference)
+    task = Task.async(fn -> Sandbox.unboxed_run(Repo, fn -> ProviderCreditsDispatchSupport.transcribe(setup.authorization, upload) end) end)
+    Agent.update(fixture.keeper, &%{&1 | workers: [task.pid | &1.workers]})
+    assert_receive {:provider_credits_accounted_attempt, ^reference, executor, attempt_id}, @budget
+    assert node(executor) == node()
+    attempt = Repo.get!(CodexPooler.Accounting.Attempt, attempt_id)
+    assert attempt.upstream_identity_id == setup.identity.id
+    assert Repo.get!(CodexPooler.Accounting.Request, attempt.request_id).requested_model == "gpt-4o-transcribe"
+    before = ProviderCreditsFixtures.before_read_barrier!(fixture, setup.identity.id, read_relation: :account_quota_windows, query_predicate: &final_read_query?/1)
+    send(executor, {:provider_credits_attempt_release, reference})
+    assert %{phase: :before_final_read} = ProviderCreditsFixtures.await_before_read!(before)
+
+    case revocation do
+      :policy ->
+        ProviderCreditsFixtures.commit_policy_and_release!(before, false)
+
+      :credential_epoch ->
+        metadata = CredentialFencing.advance_credential_epoch(Repo.get!(UpstreamIdentity, setup.identity.id))
+        Postgrex.query!(before.connection, "UPDATE upstream_identities SET metadata = $1 WHERE id = $2", [metadata, Ecto.UUID.dump!(setup.identity.id)])
+        ProviderCreditsFixtures.commit_policy_and_release!(before, true)
+
+      :none ->
+        ProviderCreditsFixtures.commit_policy_and_release!(before, true)
+    end
+
+    result = Task.await(task, @budget)
+    stop_attempt_hold!(gate)
+
+    if revocation == :none do
+      assert {:ok, %{status: 200}} = result
+      assert [captured] = Enum.filter(FakeUpstream.requests(fixture.upstream), &(&1.path == "/backend-api/transcribe"))
+      refute captured.body =~ "synthetic-host-provider"
+      refute captured.body =~ "gpt-4o-transcribe"
+      assert Repo.reload!(attempt).status == "succeeded"
+    else
+      assert {:error, %{status: 503}} = result
+      refute Enum.any?(FakeUpstream.requests(fixture.upstream), &(&1.path == "/backend-api/transcribe"))
+      assert_unsent_attempt!(attempt_id)
+    end
+
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
   end
 
   @tag credits_negative: true
@@ -665,84 +720,96 @@ defmodule CodexPooler.Gateway.Runtime.ProviderCreditsDispatchTest do
   for credits <- [:full, :unknown], policy <- [true, false] do
     @tag credits_negative: true
     test "R5 bound pending reset cannot send a credit-possible probe #{credits} #{policy}" do
-      fixture = open!(allow_provider_credits: unquote(policy))
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :weekly_credit_only)
-      request = request(fixture, setup, :http_json, :full)
-      {request, _redemption} = pending_request(fixture, setup, request, unquote(credits))
-      assert {:error, %{reason: :provider_credits_policy_denied, started: false}} = execute(request, nil)
-      ws = %{request | request_options: RequestOptions.for_websocket(request.request_options), provider_credits_context: %{request.provider_credits_context | transport: :native_websocket}}
-      assert {:error, %{reason: :provider_credits_policy_denied, started: false}} = execute(ws, nil)
-
-      UnboxedFixture.run_unboxed(fn ->
-        identity = Repo.get!(UpstreamIdentity, setup.identity.id)
-        assert identity.metadata["saved_reset_redemption"]["phase"] == "consumed_pending_probe"
-        assert identity.metadata["saved_reset_redemption"]["probe"]["token"] == request.provider_credits_context.reset_probe.token
-      end)
-
-      assert generation_count(fixture) == 0
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+      assert_bound_pending_reset_cannot_send_credit_probe!(unquote(policy), unquote(credits))
     end
+  end
+
+  defp assert_bound_pending_reset_cannot_send_credit_probe!(policy, credits) do
+    fixture = open!(allow_provider_credits: policy)
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :weekly_credit_only)
+    request = request(fixture, setup, :http_json, :full)
+    {request, _redemption} = pending_request(fixture, setup, request, credits)
+    assert {:error, %{reason: :provider_credits_policy_denied, started: false}} = execute(request, nil)
+    ws = %{request | request_options: RequestOptions.for_websocket(request.request_options), provider_credits_context: %{request.provider_credits_context | transport: :native_websocket}}
+    assert {:error, %{reason: :provider_credits_policy_denied, started: false}} = execute(ws, nil)
+
+    UnboxedFixture.run_unboxed(fn ->
+      identity = Repo.get!(UpstreamIdentity, setup.identity.id)
+      assert identity.metadata["saved_reset_redemption"]["phase"] == "consumed_pending_probe"
+      assert identity.metadata["saved_reset_redemption"]["probe"]["token"] == request.provider_credits_context.reset_probe.token
+    end)
+
+    assert generation_count(fixture) == 0
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
   end
 
   for mode <- [:full, :lite], credits <- [:full, :unknown] do
     @tag credits_negative: true
     test "R5 remote reused owner cannot confirm the pending identity with #{credits} credits #{mode}" do
-      fixture = open!(allow_provider_credits: true)
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :b, :included)
-      {request, _owner, upstream_session} = owned_request(fixture, setup, unquote(mode))
-      assert {:ok, warmup} = execute(request, nil)
-      lifecycle = warmup.upstream_websocket_connection.lifecycle_id
-      {request, _redemption} = pending_request(fixture, setup, request, unquote(credits))
-      assert {:error, %{reason: :provider_credits_policy_denied, started: false}} = execute(request, nil)
-      sibling = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :windowless_credit_only, model: "synthetic-independent-credit")
-      assert sibling.identity.id != setup.identity.id
-      assert {:ok, independent} = execute(request(fixture, sibling, :http_json, unquote(mode)), nil)
-      assert admission(independent).capacity_basis == :provider_credits
-      refute admission(independent).non_credit_guarded_probe
-      assert generation_count(fixture) == 2
-      assert {:ok, %{lifecycle_id: ^lifecycle}} = :erpc.call(fixture.peer.node, UpstreamWebsocketSession, :live_connection, [upstream_session], @budget)
-
-      UnboxedFixture.run_unboxed(fn ->
-        identity = Repo.get!(UpstreamIdentity, setup.identity.id)
-        assert identity.metadata["saved_reset_redemption"]["phase"] == "consumed_pending_probe"
-        assert identity.metadata["saved_reset_redemption"]["probe"]["token"] == request.provider_credits_context.reset_probe.token
-      end)
-
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+      assert_remote_reused_owner_cannot_confirm_pending_identity!(unquote(mode), unquote(credits))
     end
+  end
+
+  defp assert_remote_reused_owner_cannot_confirm_pending_identity!(mode, credits) do
+    fixture = open!(allow_provider_credits: true)
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :b, :included)
+    {request, _owner, upstream_session} = owned_request(fixture, setup, mode)
+    assert {:ok, warmup} = execute(request, nil)
+    lifecycle = warmup.upstream_websocket_connection.lifecycle_id
+    {request, _redemption} = pending_request(fixture, setup, request, credits)
+    assert {:error, %{reason: :provider_credits_policy_denied, started: false}} = execute(request, nil)
+    sibling = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :windowless_credit_only, model: "synthetic-independent-credit")
+    assert sibling.identity.id != setup.identity.id
+    assert {:ok, independent} = execute(request(fixture, sibling, :http_json, mode), nil)
+    assert admission(independent).capacity_basis == :provider_credits
+    refute admission(independent).non_credit_guarded_probe
+    assert generation_count(fixture) == 2
+    assert {:ok, %{lifecycle_id: ^lifecycle}} = :erpc.call(fixture.peer.node, UpstreamWebsocketSession, :live_connection, [upstream_session], @budget)
+
+    UnboxedFixture.run_unboxed(fn ->
+      identity = Repo.get!(UpstreamIdentity, setup.identity.id)
+      assert identity.metadata["saved_reset_redemption"]["phase"] == "consumed_pending_probe"
+      assert identity.metadata["saved_reset_redemption"]["probe"]["token"] == request.provider_credits_context.reset_probe.token
+    end)
+
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
   end
 
   for mode <- [:full, :lite], transport <- [:http_json, :http_sse, :native_websocket, :bridged_websocket] do
     @tag credits_negative: true
     test "R6 actual safe probe receipt confirms only its #{transport} #{mode} contract" do
-      fixture = open!()
-      setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :weekly_credit_only)
-      configure_runtime_mode!(setup, unquote(mode))
-      consume_pending!(fixture, setup)
-      selected = request(fixture, setup, unquote(transport), unquote(mode))
-      {selected, _redemption} = pending_request(fixture, setup, selected, :none, actual_consume: true)
-      assert {:ok, result} = execute(selected, nil)
-      if unquote(transport) == :http_sse, do: assert(drain_http(result) =~ "response.completed")
-      receipt = admission(result)
-      assert receipt.non_credit_guarded_probe
-
-      UnboxedFixture.run_unboxed(fn ->
-        context = selected_context(setup, selected, receipt)
-        SideEffects.before_finalize_success(context, context.request_options)
-        confirmed = Repo.reload!(setup.identity).metadata["saved_reset_redemption"]
-        assert confirmed["phase"] == "confirmed_by_upstream"
-        assert confirmed["non_credit_confirmation"]["scope"]["serving_mode"] == Atom.to_string(unquote(mode))
-        assert confirmed["non_credit_confirmation"]["scope"]["transport"] == Atom.to_string(unquote(transport))
-      end)
-
-      followup = request(fixture, setup, unquote(transport), unquote(mode))
-      assert {:ok, resumed} = execute(followup, nil)
-      if unquote(transport) == :http_sse, do: assert(drain_http(resumed) =~ "response.completed")
-      assert admission(resumed).capacity_basis == :recovered_included
-      refute admission(resumed).non_credit_guarded_probe
-      assert generation_count(fixture) == 2
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 1
+      assert_safe_probe_receipt_confirms_only_its_contract!(unquote(mode), unquote(transport))
     end
+  end
+
+  defp assert_safe_probe_receipt_confirms_only_its_contract!(mode, transport) do
+    fixture = open!()
+    setup = ProviderCreditsFixtures.runtime_setup!(fixture, :a, :weekly_credit_only)
+    configure_runtime_mode!(setup, mode)
+    consume_pending!(fixture, setup)
+    selected = request(fixture, setup, transport, mode)
+    {selected, _redemption} = pending_request(fixture, setup, selected, :none, actual_consume: true)
+    assert {:ok, result} = execute(selected, nil)
+    if transport == :http_sse, do: assert(drain_http(result) =~ "response.completed")
+    receipt = admission(result)
+    assert receipt.non_credit_guarded_probe
+
+    UnboxedFixture.run_unboxed(fn ->
+      context = selected_context(setup, selected, receipt)
+      SideEffects.before_finalize_success(context, context.request_options)
+      confirmed = Repo.reload!(setup.identity).metadata["saved_reset_redemption"]
+      assert confirmed["phase"] == "confirmed_by_upstream"
+      assert confirmed["non_credit_confirmation"]["scope"]["serving_mode"] == Atom.to_string(mode)
+      assert confirmed["non_credit_confirmation"]["scope"]["transport"] == Atom.to_string(transport)
+    end)
+
+    followup = request(fixture, setup, transport, mode)
+    assert {:ok, resumed} = execute(followup, nil)
+    if transport == :http_sse, do: assert(drain_http(resumed) =~ "response.completed")
+    assert admission(resumed).capacity_basis == :recovered_included
+    refute admission(resumed).non_credit_guarded_probe
+    assert generation_count(fixture) == 2
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 1
   end
 
   @tag credits_negative: true
@@ -939,32 +1006,36 @@ defmodule CodexPooler.Gateway.Runtime.ProviderCreditsDispatchTest do
   for mode <- [:full, :lite], transport <- [:http_sse, :native_websocket, :bridged_websocket], enabled <- [true, false], model <- ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"] do
     @tag credits_negative: true
     test "fresh WHAM finite credits admit actual #{model} #{transport} #{mode} enabled=#{enabled}" do
-      fixture = open!(allow_provider_credits: unquote(enabled))
-      setup = luna_setup!(fixture, :a, model: unquote(model))
-      selected = request(fixture, setup, unquote(transport), unquote(mode))
-
-      if unquote(enabled) do
-        assert {:ok, result} = execute(selected, nil)
-        receipt = admission(result)
-        assert receipt.capacity_basis == :provider_credits
-        refute receipt.non_credit_guarded_probe
-        assert receipt.context.serving_mode == unquote(mode)
-        assert receipt.context.transport == unquote(transport)
-        assert receipt.context.upstream_model == unquote(model)
-        assert receipt.context.upstream_identity_id == setup.identity.id
-        if unquote(transport) == :http_sse, do: assert(drain_http(result) =~ "response.completed")
-        assert generation_count(fixture) == 1
-        assert [generation] = Enum.filter(FakeUpstream.requests(fixture.upstream), &(&1.path == @endpoint))
-        assert generation.json["model"] == unquote(model)
-      else
-        assert {:error, %{reason: :provider_credits_policy_denied, started: false, reason_codes: reasons}} = execute(selected, nil)
-        assert "provider_credits_disabled" in reasons
-        assert generation_count(fixture) == 0
-      end
-
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
-      UnboxedFixture.run_unboxed(fn -> refute Repo.reload!(setup.identity).metadata["saved_reset_redemption"] end)
+      assert_fresh_wham_finite_credits_admit_model!(unquote(enabled), unquote(model), unquote(transport), unquote(mode))
     end
+  end
+
+  defp assert_fresh_wham_finite_credits_admit_model!(enabled, model, transport, mode) do
+    fixture = open!(allow_provider_credits: enabled)
+    setup = luna_setup!(fixture, :a, model: model)
+    selected = request(fixture, setup, transport, mode)
+
+    if enabled do
+      assert {:ok, result} = execute(selected, nil)
+      receipt = admission(result)
+      assert receipt.capacity_basis == :provider_credits
+      refute receipt.non_credit_guarded_probe
+      assert receipt.context.serving_mode == mode
+      assert receipt.context.transport == transport
+      assert receipt.context.upstream_model == model
+      assert receipt.context.upstream_identity_id == setup.identity.id
+      if transport == :http_sse, do: assert(drain_http(result) =~ "response.completed")
+      assert generation_count(fixture) == 1
+      assert [generation] = Enum.filter(FakeUpstream.requests(fixture.upstream), &(&1.path == @endpoint))
+      assert generation.json["model"] == model
+    else
+      assert {:error, %{reason: :provider_credits_policy_denied, started: false, reason_codes: reasons}} = execute(selected, nil)
+      assert "provider_credits_disabled" in reasons
+      assert generation_count(fixture) == 0
+    end
+
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+    UnboxedFixture.run_unboxed(fn -> refute Repo.reload!(setup.identity).metadata["saved_reset_redemption"] end)
   end
 
   for mode <- [:full, :lite] do
@@ -1231,42 +1302,46 @@ defmodule CodexPooler.Gateway.Runtime.ProviderCreditsDispatchTest do
   for mode <- [:full, :lite], boundary <- [:other_model, :short, :monthly, :mixed, :windowless, :codex_source, :unlimited, :weekly_primary_extra] do
     @tag credits_negative: true
     test "Mint final admission distinguishes usable #{boundary} permission from malformed windows #{mode}" do
-      fixture = open!(allow_provider_credits: true)
-      setup = luna_setup!(fixture, :a)
-      state = %{short: :short_credit_only, monthly: :monthly_credit_only, mixed: :mixed_credit_only, windowless: :windowless_credit_only}[unquote(boundary)] || :weekly_credit_only
-      usage = ProviderCreditsFixtures.usage_payload(state, credits: if(unquote(boundary) == :unlimited, do: :unlimited, else: :fractional)) |> Map.put("rate_limit_reset_credits", %{"available_count" => 0})
-      usage = if unquote(boundary) == :weekly_primary_extra, do: usage |> put_in(["rate_limit", "primary_window"], get_in(usage, ["rate_limit", "secondary_window"])), else: usage
-      routes = ProviderCreditsFixtures.usage_routes(usage)
-      routes = if unquote(boundary) == :codex_source, do: routes |> Map.put("/api/codex/usage", {404, %{}}) |> Map.put("/backend-api/wham/usage", {404, %{}}), else: routes |> Map.put("/api/codex/usage", {404, %{}}) |> Map.put("/backend-api/codex/usage", {404, %{}})
-      FakeUpstream.set_mode(fixture.upstream, {:path_json, routes})
-
-      identity =
-        UnboxedFixture.run_unboxed(fn ->
-          assert {:ok, identity} = PoolReconciliation.refresh_quota_from_usage(Repo.reload!(setup.identity), setup.assignment)
-          assert {:ok, facts} = CapacityFactsStore.load(identity.metadata)
-          assert facts.source_kind == if(unquote(boundary) == :codex_source, do: :codex_usage, else: :wham_usage)
-          assert facts.credit_permission == if(unquote(boundary) == :weekly_primary_extra, do: :unknown, else: :available)
-          identity
-        end)
-
-      FakeUpstream.set_mode(fixture.upstream, native_completed("resp_synthetic_credit_permission", []))
-      model = if unquote(boundary) == :other_model, do: UnboxedFixture.run_unboxed(fn -> Repo.update!(Ecto.Changeset.change(setup.model, upstream_model_id: "gpt-6-astra")) end), else: setup.model
-      selected = request(fixture, %{setup | identity: identity, model: model}, :native_websocket, unquote(mode))
-
-      if unquote(boundary) == :weekly_primary_extra do
-        assert {:error, %{reason: :provider_credits_policy_denied, started: false}} = execute(selected, nil)
-        assert generation_count(fixture) == 0
-      else
-        assert {:ok, response} = execute(selected, nil)
-        assert admission(response).capacity_basis == :provider_credits
-        assert admission(response).context.upstream_model == model.upstream_model_id
-        assert generation_count(fixture) == 1
-        assert [generation] = Enum.filter(FakeUpstream.requests(fixture.upstream), &(&1.path == @endpoint))
-        assert generation.json["model"] == model.upstream_model_id
-      end
-
-      assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
+      assert_final_admission_distinguishes_permission_from_malformed_windows!(unquote(boundary), unquote(mode))
     end
+  end
+
+  defp assert_final_admission_distinguishes_permission_from_malformed_windows!(boundary, mode) do
+    fixture = open!(allow_provider_credits: true)
+    setup = luna_setup!(fixture, :a)
+    state = %{short: :short_credit_only, monthly: :monthly_credit_only, mixed: :mixed_credit_only, windowless: :windowless_credit_only}[boundary] || :weekly_credit_only
+    usage = ProviderCreditsFixtures.usage_payload(state, credits: if(boundary == :unlimited, do: :unlimited, else: :fractional)) |> Map.put("rate_limit_reset_credits", %{"available_count" => 0})
+    usage = if boundary == :weekly_primary_extra, do: usage |> put_in(["rate_limit", "primary_window"], get_in(usage, ["rate_limit", "secondary_window"])), else: usage
+    routes = ProviderCreditsFixtures.usage_routes(usage)
+    routes = if boundary == :codex_source, do: routes |> Map.put("/api/codex/usage", {404, %{}}) |> Map.put("/backend-api/wham/usage", {404, %{}}), else: routes |> Map.put("/api/codex/usage", {404, %{}}) |> Map.put("/backend-api/codex/usage", {404, %{}})
+    FakeUpstream.set_mode(fixture.upstream, {:path_json, routes})
+
+    identity =
+      UnboxedFixture.run_unboxed(fn ->
+        assert {:ok, identity} = PoolReconciliation.refresh_quota_from_usage(Repo.reload!(setup.identity), setup.assignment)
+        assert {:ok, facts} = CapacityFactsStore.load(identity.metadata)
+        assert facts.source_kind == if(boundary == :codex_source, do: :codex_usage, else: :wham_usage)
+        assert facts.credit_permission == if(boundary == :weekly_primary_extra, do: :unknown, else: :available)
+        identity
+      end)
+
+    FakeUpstream.set_mode(fixture.upstream, native_completed("resp_synthetic_credit_permission", []))
+    model = if boundary == :other_model, do: UnboxedFixture.run_unboxed(fn -> Repo.update!(Ecto.Changeset.change(setup.model, upstream_model_id: "gpt-6-astra")) end), else: setup.model
+    selected = request(fixture, %{setup | identity: identity, model: model}, :native_websocket, mode)
+
+    if boundary == :weekly_primary_extra do
+      assert {:error, %{reason: :provider_credits_policy_denied, started: false}} = execute(selected, nil)
+      assert generation_count(fixture) == 0
+    else
+      assert {:ok, response} = execute(selected, nil)
+      assert admission(response).capacity_basis == :provider_credits
+      assert admission(response).context.upstream_model == model.upstream_model_id
+      assert generation_count(fixture) == 1
+      assert [generation] = Enum.filter(FakeUpstream.requests(fixture.upstream), &(&1.path == @endpoint))
+      assert generation.json["model"] == model.upstream_model_id
+    end
+
+    assert FakeUpstream.physical_counts(fixture.upstream).consume == 0
   end
 
   defp luna_setup!(fixture, pool, opts \\ []) do

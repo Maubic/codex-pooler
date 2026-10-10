@@ -77,8 +77,8 @@ defmodule CodexPoolerWeb.McpModernContractTest do
       assert response["error"]["message"] == "MCP bearer token is required"
     end
 
-    test "Given modern metadata without client capabilities and no authentication When posted Then invalid params precedes authentication",
-         %{conn: conn} do
+    test "Given modern metadata without client capabilities and authentication When posted Then invalid params is returned",
+         %{conn: conn, raw_token: raw_token} do
       request =
         discovery_request(%{
           "io.modelcontextprotocol/protocolVersion" => @modern_version
@@ -86,6 +86,7 @@ defmodule CodexPoolerWeb.McpModernContractTest do
 
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> modern_discovery_conn()
         |> post("/mcp", CodexPooler.JSON.encode!(request))
 
@@ -93,8 +94,8 @@ defmodule CodexPoolerWeb.McpModernContractTest do
       assert response["error"]["code"] == -32_602
     end
 
-    test "Given a modern protocol header without modern metadata When posted Then header mismatch precedes authentication",
-         %{conn: conn} do
+    test "Given a modern protocol header without modern metadata When posted Then header mismatch is returned",
+         %{conn: conn, raw_token: raw_token} do
       request = %{
         "jsonrpc" => "2.0",
         "id" => "discover-1",
@@ -104,6 +105,7 @@ defmodule CodexPoolerWeb.McpModernContractTest do
 
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> modern_discovery_conn()
         |> post("/mcp", CodexPooler.JSON.encode!(request))
 
@@ -131,7 +133,7 @@ defmodule CodexPoolerWeb.McpModernContractTest do
     end
 
     test "Given an unsupported metadata version When posted Then only the supported versions are returned",
-         %{conn: conn} do
+         %{conn: conn, raw_token: raw_token} do
       caller_version = "caller-supplied-version-marker"
 
       request =
@@ -142,6 +144,7 @@ defmodule CodexPoolerWeb.McpModernContractTest do
 
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> modern_discovery_conn()
         |> post("/mcp", CodexPooler.JSON.encode!(request))
 
@@ -153,7 +156,7 @@ defmodule CodexPoolerWeb.McpModernContractTest do
     end
 
     test "Given an unsupported protocol header without metadata When posted Then only the supported versions are returned",
-         %{conn: conn} do
+         %{conn: conn, raw_token: raw_token} do
       caller_version = "caller-header-version-marker"
       request_id = "header-only-version"
 
@@ -166,6 +169,7 @@ defmodule CodexPoolerWeb.McpModernContractTest do
 
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> json_rpc_conn()
         |> put_req_header("mcp-protocol-version", caller_version)
         |> post("/mcp", CodexPooler.JSON.encode!(request))
@@ -182,10 +186,11 @@ defmodule CodexPoolerWeb.McpModernContractTest do
       refute response |> CodexPooler.JSON.encode!() |> String.contains?(caller_version)
     end
 
-    test "Given a matched modern version without Mcp-Method When posted Then header mismatch precedes authentication",
-         %{conn: conn} do
+    test "Given a matched modern version without Mcp-Method When posted Then header mismatch is returned",
+         %{conn: conn, raw_token: raw_token} do
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> json_rpc_conn()
         |> put_req_header("mcp-protocol-version", @modern_version)
         |> post("/mcp", CodexPooler.JSON.encode!(discovery_request()))
@@ -194,10 +199,11 @@ defmodule CodexPoolerWeb.McpModernContractTest do
       assert response["error"]["code"] == -32_020
     end
 
-    test "Given an untrusted origin without authentication When posted Then origin rejection remains first",
-         %{conn: conn} do
+    test "Given an untrusted origin with authentication When posted Then origin is rejected",
+         %{conn: conn, raw_token: raw_token} do
       conn =
         conn
+        |> put_req_header("authorization", "Bearer #{raw_token}")
         |> modern_discovery_conn()
         |> put_req_header("origin", "https://untrusted.example")
         |> post("/mcp", CodexPooler.JSON.encode!(discovery_request()))

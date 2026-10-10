@@ -1179,6 +1179,60 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
     {server, port}
   end
 
+  def capture_public_endpoint_ownership!(server) do
+    %{processes: processes, sockets: sockets} = capture_public_endpoint_identity!(server)
+
+    %{
+      processes: Enum.map(processes, &{&1, Process.monitor(&1)}),
+      sockets: Enum.map(sockets, &{&1, Port.monitor(&1)})
+    }
+  end
+
+  # Identities, unlike monitor references, can be checked from ExUnit's separate
+  # on_exit process. A replacement listener may already own the numeric TCP port.
+  def capture_public_endpoint_identity!(server) do
+    listener = ThousandIsland.Server.listener_pid(server)
+    assert is_pid(listener)
+    %{listener_sockets: sockets} = :sys.get_state(listener)
+    assert sockets != []
+    assert Enum.all?(sockets, fn {_id, socket} -> is_port(socket) end)
+    processes = [server | endpoint_child_pids(server)]
+    assert listener in processes
+
+    %{
+      processes: processes,
+      sockets: Enum.map(sockets, fn {_id, socket} -> socket end)
+    }
+  end
+
+  def assert_public_endpoint_identity_released!(%{processes: processes, sockets: sockets}) do
+    Enum.each(processes, fn pid -> refute Process.alive?(pid) end)
+    Enum.each(sockets, fn socket -> assert Port.info(socket) == nil end)
+    :ok
+  end
+
+  def assert_public_endpoint_released!(%{processes: processes, sockets: sockets}) do
+    for {pid, ref} <- processes do
+      refute Process.alive?(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 15_000
+    end
+
+    for {socket, ref} <- sockets do
+      assert Port.info(socket) == nil
+      assert_receive {:DOWN, ^ref, :port, ^socket, _reason}, 15_000
+    end
+
+    :ok
+  end
+
+  defp endpoint_child_pids(server) do
+    Enum.flat_map(Supervisor.which_children(server), fn
+      {_id, child, :supervisor, _modules} when is_pid(child) -> [child | endpoint_child_pids(child)]
+      {_id, child, _type, _modules} when is_pid(child) -> [child]
+      _other -> []
+    end)
+  end
+
   def public_websocket_connect!(port, setup, turn_state, path \\ "/backend-api/codex/responses") do
     {conn, websocket, ref, _response_headers} =
       public_websocket_connect_with_headers!(port, setup, turn_state, path)
@@ -1575,18 +1629,30 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
     end
   end
 
+  @spec receive_socket_push(map()) :: tuple()
   def receive_socket_push(state) do
-    receive do
-      {:codex_response_chunk, task_pid, frame} ->
-        result = CodexResponsesSocket.handle_info({:codex_response_chunk, task_pid, frame}, state)
+    await_socket_push(state, System.monotonic_time(:millisecond) + @detection_timeout_ms)
+  end
 
-        if internal_control_frame?(frame) do
-          receive_socket_push(state)
-        else
-          result
+  defp await_socket_push(state, deadline) do
+    receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_socket_push(state, deadline)
+
+      {:codex_response_chunk, _task_pid, frame} = message ->
+        case CodexResponsesSocket.handle_info(message, state) do
+          {:push, _push, state} = result ->
+            if internal_control_frame?(frame), do: await_socket_push(state, deadline), else: result
+
+          {:ok, state} ->
+            await_socket_push(state, deadline)
+
+          result ->
+            result
         end
     after
-      @detection_timeout_ms -> flunk("expected websocket response chunk")
+      max(deadline - System.monotonic_time(:millisecond), 0) -> flunk("expected websocket response chunk")
     end
   end
 
@@ -1612,20 +1678,31 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
   # the delivery completion the socket schedules for itself while handling the
   # result is processed, so the task receives its delivery acknowledgement and
   # exits. The turn must have pushed its terminal first, as on a real socket.
+  @spec receive_socket_turn_done(map(), non_neg_integer()) :: tuple()
   def receive_socket_turn_done(state, timeout_ms \\ @detection_timeout_ms) do
-    receive do
-      {:websocket_response_activity, pid, token} ->
-        {:ok, state} =
-          CodexResponsesSocket.handle_info({:websocket_response_activity, pid, token}, state)
+    await_socket_turn_done(state, System.monotonic_time(:millisecond) + timeout_ms)
+  end
 
-        receive_socket_turn_done(state, timeout_ms)
+  defp await_socket_turn_done(state, deadline) do
+    receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_socket_turn_done(state, deadline)
+
+      {:websocket_response_activity, _pid, _token} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_socket_turn_done(state, deadline)
+
+      {:direct_request_cleanup, _pid, _ref, _receipt} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_socket_turn_done(state, deadline)
 
       {:codex_response_done, pid, result} ->
         {:codex_response_done, pid, result}
         |> CodexResponsesSocket.handle_info(state)
         |> complete_scheduled_socket_delivery(pid)
     after
-      timeout_ms -> flunk("expected websocket response completion")
+      max(deadline - System.monotonic_time(:millisecond), 0) -> flunk("expected websocket response completion")
     end
   end
 

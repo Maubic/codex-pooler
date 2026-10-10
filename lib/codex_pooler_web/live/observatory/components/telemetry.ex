@@ -1,6 +1,8 @@
 defmodule CodexPoolerWeb.Observatory.Components.Telemetry do
   use Phoenix.Component
 
+  import CodexPoolerWeb.CoreComponents, only: [icon: 1]
+
   alias CodexPoolerWeb.Observatory.Components.Section
 
   attr :overview, :map, required: true
@@ -9,104 +11,150 @@ defmodule CodexPoolerWeb.Observatory.Components.Telemetry do
 
   def telemetry(assigns) do
     ~H"""
-    <section
-      id="observatory-overview"
-      class="observatory-card overflow-hidden"
-      aria-labelledby="observatory-overview-title"
-    >
+    <.overview_strip overview={@overview} />
+    <div class="mt-6">
+      <.model_distribution models={@models} window={@window} />
+    </div>
+    """
+  end
+
+  attr :overview, :map, required: true
+
+  def overview_strip(assigns) do
+    ~H"""
+    <section id="observatory-overview" aria-labelledby="observatory-overview-title">
       <h2 id="observatory-overview-title" class="sr-only">Usage overview</h2>
 
-      <dl id="observatory-overview-facts" class="divide-y divide-base-300/70">
-        <div id="observatory-fact-success" class="observatory-fact observatory-fact-lead">
-          <dt class="observatory-fact-label">Success rate</dt>
-          <dd class="observatory-fact-value-row">
-            <span class="observatory-fact-value font-mono tabular-nums">{text(
+      <dl id="observatory-overview-facts" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div id="observatory-fact-success" class="observatory-kpi">
+          <dt class="observatory-kpi-label">
+            <span class="observatory-kpi-icon bg-success/15 text-success">
+              <.icon name="hero-check-circle" class="size-4" />
+            </span>
+            Success rate <.grade_badge id="observatory-success-grade" grade={Map.get(Map.get(@overview, :success_rate, %{}), :grade)} />
+          </dt>
+          <dd class="observatory-kpi-value-row">
+            <span class="observatory-kpi-value">{text(
               @overview,
               :success_rate,
               :measure,
               :value,
               "Unavailable"
-            )}<span class="observatory-fact-unit">{text(@overview, :success_rate, :measure, :unit, "")}</span></span>
+            )}<span class="observatory-kpi-unit">{text(@overview, :success_rate, :measure, :unit, "")}</span></span>
             <span
+              :if={trend_direction(@overview, :success_rate) != "unavailable"}
               id="observatory-success-trend"
               data-role="observatory-trend"
               data-direction={trend_direction(@overview, :success_rate)}
-              class={[
-                "observatory-trend font-mono tabular-nums",
-                trend_class(@overview, :success_rate)
-              ]}
+              class={["observatory-trend tabular-nums", trend_class(@overview, :success_rate)]}
             >
               {trend_text(@overview, :success_rate)}
             </span>
           </dd>
-          <dd class="observatory-fact-detail">
+          <dd class="observatory-kpi-detail">
             {text(@overview, :success_rate, :detail, "No details available")}
-          </dd>
-          <dd
-            id="observatory-success-minibar"
-            class="observatory-minibar"
-            role="progressbar"
-            aria-label="Success rate"
-            aria-valuemin="0"
-            aria-valuemax="100"
-            aria-valuenow={number_value(@overview, :success_rate, :minibar)}
-          >
-            <span
-              class="block h-full bg-success"
-              style={"width: #{percent(@overview, :success_rate, :minibar)}%"}
-            ></span>
           </dd>
         </div>
 
-        <div id="observatory-fact-cache" class="observatory-fact">
-          <dt class="observatory-fact-label">Cache rate</dt>
-          <dd class="observatory-fact-value-row">
-            <span class="observatory-fact-value font-mono tabular-nums">{text(
+        <div id="observatory-fact-cache" class="observatory-kpi">
+          <dt class="observatory-kpi-label">
+            <span class="observatory-kpi-icon bg-info/15 text-info">
+              <.icon name="hero-circle-stack" class="size-4" />
+            </span>
+            Cache rate <.grade_badge id="observatory-cache-grade" grade={Map.get(Map.get(@overview, :cache_rate, %{}), :grade)} />
+          </dt>
+          <dd class="observatory-kpi-value-row">
+            <span class="observatory-kpi-value">{text(
               @overview,
               :cache_rate,
               :measure,
               :value,
               "Unavailable"
-            )}<span class="observatory-fact-unit">{text(@overview, :cache_rate, :measure, :unit, "")}</span></span>
+            )}<span class="observatory-kpi-unit">{text(@overview, :cache_rate, :measure, :unit, "")}</span></span>
             <span
+              :if={trend_direction(@overview, :cache_rate) != "unavailable"}
               id="observatory-cache-trend"
               data-role="observatory-trend"
               data-direction={trend_direction(@overview, :cache_rate)}
-              class={["observatory-trend font-mono tabular-nums", trend_class(@overview, :cache_rate)]}
+              class={["observatory-trend tabular-nums", trend_class(@overview, :cache_rate)]}
             >
               {trend_text(@overview, :cache_rate)}
             </span>
           </dd>
-          <dd class="observatory-fact-detail">
+          <dd class="observatory-kpi-detail">
             {text(@overview, :cache_rate, :detail, "No cache details available")}
           </dd>
         </div>
 
-        <div id="observatory-fact-cost" class="observatory-fact">
-          <dt class="observatory-fact-label">Cost</dt>
-          <dd class="observatory-fact-value font-mono tabular-nums">
-            {text(@overview, :cost, :settled, :label, "Unavailable")}
+        <div id="observatory-fact-cost" class="observatory-kpi">
+          <dt class="observatory-kpi-label">
+            <span class="observatory-kpi-icon bg-primary/15 text-primary">
+              <.icon name="hero-banknotes" class="size-4" />
+            </span>
+            Cost
+          </dt>
+          <dd class="observatory-kpi-value-row">
+            <span class="observatory-kpi-value">{text(@overview, :cost, :settled, :label, "Unavailable")}</span>
           </dd>
-          <dd class="observatory-fact-detail">
+          <dd class="observatory-kpi-detail">
             {text(@overview, :cost, :detail, "Cost details unavailable")}
           </dd>
         </div>
 
-        <div id="observatory-fact-tokens" class="observatory-fact">
-          <dt class="observatory-fact-label">Tokens</dt>
-          <dd class="observatory-fact-value font-mono tabular-nums">
-            {text(@overview, :tokens, :value, "Unavailable")}
+        <div id="observatory-fact-tokens" class="observatory-kpi">
+          <dt class="observatory-kpi-label">
+            <span class="observatory-kpi-icon bg-base-200 text-base-content/70">
+              <.icon name="hero-chart-bar" class="size-4" />
+            </span>
+            Tokens
+          </dt>
+          <dd class="observatory-kpi-value-row">
+            <span class="observatory-kpi-value">{text(@overview, :tokens, :value, "Unavailable")}</span>
           </dd>
-          <dd class="observatory-fact-detail">
+          <dd class="observatory-kpi-detail">
             {text(@overview, :tokens, :detail, "No token details available")}
           </dd>
         </div>
       </dl>
     </section>
+    """
+  end
 
+  attr :id, :string, required: true
+  attr :grade, :any, default: nil
+
+  defp grade_badge(%{grade: %{label: _label, tone: _tone}} = assigns) do
+    ~H"""
+    <span
+      id={@id}
+      data-role="observatory-grade"
+      data-tone={@grade.tone}
+      class={[
+        "ml-auto inline-flex h-4.5 items-center whitespace-nowrap rounded-full px-2 text-[10px] font-semibold uppercase leading-none tracking-[0.04em]",
+        grade_class(@grade.tone)
+      ]}
+    >
+      {@grade.label}
+    </span>
+    """
+  end
+
+  defp grade_badge(assigns), do: ~H""
+
+  defp grade_class(:success), do: "bg-success/15 text-success"
+  defp grade_class(:info), do: "bg-info/15 text-info"
+  defp grade_class(:warning), do: "bg-warning/15 text-warning"
+  defp grade_class(:error), do: "bg-error/15 text-error"
+  defp grade_class(_tone), do: "bg-base-300 text-base-content/70"
+
+  attr :models, :list, required: true
+  attr :window, :string, default: nil
+
+  def model_distribution(assigns) do
+    ~H"""
     <section
       id="observatory-models"
-      class="mt-6 grid gap-4"
+      class="grid min-w-0 content-start gap-4"
       aria-labelledby="observatory-models-title"
     >
       <Section.divider id="observatory-models-title" label="Model Distribution" suffix={@window} />
@@ -120,14 +168,11 @@ defmodule CodexPoolerWeb.Observatory.Components.Telemetry do
           <div class="flex min-w-0 items-baseline justify-between gap-3">
             <span class="min-w-0 truncate text-sm font-semibold leading-5 text-base-content">
               {safe_model_label(model)}
-              <span class="ml-0.5 text-xs font-normal text-base-content/55">
+              <span class="ml-0.5 text-xs font-normal text-base-content/70">
                 {model_requests(model)}
               </span>
             </span>
-            <span
-              class="shrink-0 text-xs font-medium leading-4 tabular-nums"
-              style={"color: #{model_color(model)}"}
-            >
+            <span class="shrink-0 text-xs font-medium leading-4 tabular-nums text-base-content">
               {model_share(model)}
             </span>
           </div>
@@ -146,14 +191,8 @@ defmodule CodexPoolerWeb.Observatory.Components.Telemetry do
             ></span>
           </div>
           <div class="flex items-baseline justify-between gap-3">
-            <span
-              class="observatory-metric min-w-0 truncate tabular-nums"
-              style={"color: #{model_color(model)}"}
-            >{safe_model_tokens(model)}<span class="text-base-content/45"> tks</span></span>
-            <span
-              class="observatory-metric shrink-0 tabular-nums"
-              style={"color: #{model_color(model)}"}
-            ><span class="text-base-content/45">$</span>{model_cost(model)}</span>
+            <span class="observatory-metric min-w-0 truncate tabular-nums text-base-content">{safe_model_tokens(model)}<span class="text-base-content/70"> tks</span></span>
+            <span class="observatory-metric shrink-0 tabular-nums text-base-content"><span class="text-base-content/70">$</span>{model_cost(model)}</span>
           </div>
         </li>
       </ol>
@@ -234,23 +273,6 @@ defmodule CodexPoolerWeb.Observatory.Components.Telemetry do
       _direction -> "unavailable"
     end
   end
-
-  defp number_value(map, parent, key) do
-    map
-    |> numeric_value(parent, key)
-    |> round()
-  end
-
-  defp percent(map, parent, key), do: numeric_value(map, parent, key) |> format_percent()
-
-  defp numeric_value(map, parent, key) when is_map(map) do
-    map
-    |> Map.get(parent, %{})
-    |> Map.get(key, 0)
-    |> clamp_percent()
-  end
-
-  defp numeric_value(_map, _parent, _key), do: 0
 
   defp bar_percent(model) when is_map(model) do
     model

@@ -7,12 +7,14 @@ defmodule CodexPooler.Catalog.Sync.Persistence do
 
   alias CodexPooler.Catalog.{Model, SyncRun}
   alias CodexPooler.Catalog.Sync.{Discovery, PreservedSources}
+  alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
   alias Ecto.Multi
 
   @active "active"
   @failed "failed"
+  @running "running"
   @stale "stale"
   @succeeded "succeeded"
   @suppressed "suppressed"
@@ -30,12 +32,13 @@ defmodule CodexPooler.Catalog.Sync.Persistence do
     grouped = aggregate_models(discovered)
     seen_exposed_ids = Map.keys(grouped)
 
-    failed_assignment_ids =
-      Enum.map(failed_sources, fn {source, _reason} -> source.assignment.id end)
+    unread_assignment_ids =
+      Enum.map(assignments, & &1.assignment.id) -- Enum.map(successful_assignments, & &1.assignment.id)
 
-    partial? = failed_assignment_ids != []
+    partial? = unread_assignment_ids != []
 
     Multi.new()
+    |> Multi.run(:owned_run, fn repo, _changes -> lock_owned_run(repo, run) end)
     |> then(fn multi ->
       Enum.reduce(grouped, multi, fn {_exposed_id, aggregate}, multi ->
         # Reason: per-model Multi step preserves aggregate-specific rollback context.
@@ -57,7 +60,7 @@ defmodule CodexPooler.Catalog.Sync.Persistence do
         repo,
         run,
         seen_exposed_ids,
-        failed_assignment_ids,
+        unread_assignment_ids,
         timestamp
       )
     end)
@@ -72,7 +75,7 @@ defmodule CodexPooler.Catalog.Sync.Persistence do
       upserted_count = count_model_changes(changes)
       stale_marked_count = Map.fetch!(changes, :stale_marked_count)
 
-      run
+      changes.owned_run
       |> SyncRun.changeset(%{
         status: @succeeded,
         finished_at: timestamp,
@@ -83,6 +86,7 @@ defmodule CodexPooler.Catalog.Sync.Persistence do
           "source_assignment_count" => length(assignments),
           "successful_source_assignment_count" => length(successful_assignments),
           "failed_source_assignment_count" => length(failed_sources),
+          "skipped_source_assignment_count" => length(unread_assignment_ids) - length(failed_sources),
           "failed_assignments" =>
             Enum.map(failed_sources, fn {source, reason} ->
               %{
@@ -104,27 +108,44 @@ defmodule CodexPooler.Catalog.Sync.Persistence do
 
         {:ok, %{sync_run: changes.sync_run, models: models, partial?: partial?}}
 
+      {:error, :owned_run, reason, _changes} ->
+        {:error, reason}
+
       {:error, _operation, reason, _changes} ->
         fail_sync_run(run, reason)
     end
   end
 
   @spec fail_sync_run(SyncRun.t(), term()) ::
-          {:error, SyncRun.t(), map()} | {:error, Ecto.Changeset.t()}
+          {:error, SyncRun.t(), map()} | {:error, Ecto.Changeset.t() | map()}
   def fail_sync_run(%SyncRun{} = run, reason) do
-    run
-    |> SyncRun.changeset(%{
-      status: @failed,
-      finished_at: now(),
-      error_message: sanitize_sync_error(reason)
-    })
-    |> Repo.update()
+    Repo.transact(fn ->
+      with {:ok, owned_run} <- lock_owned_run(Repo, run) do
+        owned_run
+        |> SyncRun.changeset(%{
+          status: @failed,
+          finished_at: now(),
+          error_message: sanitize_sync_error(reason)
+        })
+        |> Repo.update()
+      end
+    end)
     |> case do
       {:ok, sync_run} ->
         {:error, sync_run, catalog_error(:catalog_sync_failed, sync_run.error_message)}
 
-      {:error, changeset} ->
-        {:error, changeset}
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp lock_owned_run(repo, %SyncRun{id: id, pool_id: pool_id}) do
+    with %Pool{} <- repo.one(from pool in Pool, where: pool.id == ^pool_id, lock: "FOR NO KEY UPDATE"),
+         %SyncRun{status: @running} = owned_run <- repo.one(from run in SyncRun, where: run.id == ^id and run.pool_id == ^pool_id, lock: "FOR UPDATE") do
+      {:ok, owned_run}
+    else
+      _lost_claim ->
+        {:error, catalog_error(:catalog_sync_superseded, "catalog sync no longer owns a running claim")}
     end
   end
 
@@ -184,7 +205,7 @@ defmodule CodexPooler.Catalog.Sync.Persistence do
          repo,
          run,
          seen_exposed_ids,
-         failed_assignment_ids,
+         unread_assignment_ids,
          timestamp
        ) do
     lower_seen = Enum.map(seen_exposed_ids, &String.downcase/1)
@@ -202,7 +223,7 @@ defmodule CodexPooler.Catalog.Sync.Persistence do
             fragment(
               "NOT (COALESCE(?->'source_assignment_ids', '[]'::jsonb) \\?| ?)",
               model.metadata,
-              type(^failed_assignment_ids, {:array, :string})
+              type(^unread_assignment_ids, {:array, :string})
             )
 
     {count, _rows} =

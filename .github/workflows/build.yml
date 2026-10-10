@@ -20,8 +20,188 @@ permissions:
   statuses: read
 
 jobs:
-  build:
+  select:
     if: github.event_name != 'status' || (github.event.context == 'continuous-integration/drone/push' && github.event.state == 'success')
+    runs-on: ubuntu-24.04
+    outputs:
+      ready: ${{ steps.publication.outputs.ready }}
+      release_tag: ${{ steps.prepare.outputs.release_tag }}
+      revision: ${{ steps.revision.outputs.sha }}
+      version: ${{ steps.publication.outputs.version }}
+      image_action: ${{ steps.publication.outputs.image_action }}
+
+    steps:
+      - name: Checkout publication coordinator
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Select published release and exact revision
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "${RUNNER_TEMP}/release-list.json"
+          node scripts/verification/release-publish-trigger.mjs \
+            "$GITHUB_EVENT_NAME" "$GITHUB_EVENT_PATH" "${RUNNER_TEMP}/release-list.json" "$GITHUB_OUTPUT"
+
+      - name: Record deferred publication
+        if: steps.prepare.outputs.publish != 'true'
+        env:
+          REASON: ${{ steps.prepare.outputs.reason }}
+        run: echo "Publication deferred - ${REASON}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Checkout release source
+        if: steps.prepare.outputs.publish == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ steps.prepare.outputs.release_tag }}
+
+      - name: Resolve checked-out revision
+        if: steps.prepare.outputs.publish == 'true'
+        id: revision
+        env:
+          EXPECTED_REVISION: ${{ steps.prepare.outputs.revision }}
+        run: |
+          set -euo pipefail
+          revision=$(git rev-parse HEAD)
+          [[ "$revision" == "$EXPECTED_REVISION" ]] || { echo "Release tag changed revision"; exit 1; }
+          echo "sha=$revision" >>"$GITHUB_OUTPUT"
+
+      - name: Checkout publication policy
+        if: steps.prepare.outputs.publish == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          path: .release-policy
+          sparse-checkout: |
+            scripts/verification/release-publish-guard.mjs
+            scripts/verification/release-publish-trigger.mjs
+            test/scripts/release_publish_guard_test.mjs
+            test/scripts/release_publish_trigger_test.mjs
+            test/scripts/release_publish_workflow_test.mjs
+            test/scripts/support/registry_fetch_route.mjs
+            .github/workflows/build.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Verify publication policy
+        if: steps.prepare.outputs.publish == 'true'
+        run: node --test .release-policy/test/scripts/release_publish_*_test.mjs
+
+      - name: Require verified revision and select monotonic release aliases
+        if: steps.prepare.outputs.publish == 'true'
+        id: publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.prepare.outputs.release_tag }}
+          REVISION: ${{ steps.revision.outputs.sha }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${REVISION}/status" > "${RUNNER_TEMP}/release-status.json"
+          ci_state=$(jq -r '[.statuses[] | select(.context == "continuous-integration/drone/push")][0].state // "pending"' "${RUNNER_TEMP}/release-status.json")
+          case "$ci_state" in
+            success) ;;
+            pending)
+              echo "Publication deferred - waiting for Drone on ${REVISION}" >> "$GITHUB_STEP_SUMMARY"
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              exit 0 ;;
+            *) echo "Required revision check failed: $ci_state"; exit 1 ;;
+          esac
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "${RUNNER_TEMP}/release-list.json"
+          node .release-policy/scripts/verification/release-publish-guard.mjs --registry "$RELEASE_TAG" "${RUNNER_TEMP}/registry-aliases.json"
+          node .release-policy/scripts/verification/release-publish-guard.mjs \
+            "$RELEASE_TAG" "$REVISION" "${RUNNER_TEMP}/release-status.json" "${RUNNER_TEMP}/release-list.json" "${RUNNER_TEMP}/registry-aliases.json" "$GITHUB_OUTPUT"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+  image:
+    needs: select
+    if: needs.select.outputs.ready == 'true' && needs.select.outputs.image_action == 'build'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            slug: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            slug: arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ needs.select.outputs.release_tag }}
+
+      - name: Verify the checked-out revision
+        env:
+          EXPECTED_REVISION: ${{ needs.select.outputs.revision }}
+        run: |
+          set -euo pipefail
+          revision=$(git rev-parse HEAD)
+          [[ "$revision" == "$EXPECTED_REVISION" ]] || { echo "Release tag changed revision"; exit 1; }
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/icoretech/codex-pooler
+          flavor: latest=false
+          labels: |
+            org.opencontainers.image.title=Codex Pooler
+            org.opencontainers.image.description=Managed pools of Codex accounts with OpenAI-compatible client routes
+            org.opencontainers.image.source=https://github.com/icoretech/codex-pooler
+            org.opencontainers.image.documentation=https://github.com/icoretech/codex-pooler/blob/main/README.md
+            org.opencontainers.image.vendor=iCoreTech, Inc.
+            org.opencontainers.image.revision=${{ needs.select.outputs.revision }}
+            org.opencontainers.image.version=${{ needs.select.outputs.version }}
+          tags: type=raw,value=${{ needs.select.outputs.version }}
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the platform image by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          pull: true
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.slug }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.slug }},ignore-error=true
+          provenance: false
+          outputs: type=image,name=ghcr.io/icoretech/codex-pooler,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export the platform digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload the platform digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.slug }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [select, image]
+    if: ${{ !cancelled() && needs.select.result == 'success' && needs.select.outputs.ready == 'true' && (needs.image.result == 'success' || needs.image.result == 'skipped') }}
     runs-on: ubuntu-24.04
     concurrency:
       group: release-image-publication
@@ -113,30 +293,9 @@ jobs:
             "$RELEASE_TAG" "$REVISION" "${RUNNER_TEMP}/release-status.json" "${RUNNER_TEMP}/release-list.json" "${RUNNER_TEMP}/registry-aliases.json" "$GITHUB_OUTPUT"
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        if: steps.publication.outputs.ready == 'true' && steps.publication.outputs.image_action == 'build'
-        uses: docker/setup-qemu-action@v4
-
       - name: Set up Docker Buildx
         if: steps.publication.outputs.ready == 'true'
         uses: docker/setup-buildx-action@v4
-
-      - name: Extract metadata for Docker
-        if: steps.publication.outputs.ready == 'true' && steps.publication.outputs.image_action == 'build'
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/icoretech/codex-pooler
-          flavor: latest=false
-          labels: |
-            org.opencontainers.image.title=Codex Pooler
-            org.opencontainers.image.description=Managed pools of Codex accounts with OpenAI-compatible client routes
-            org.opencontainers.image.source=https://github.com/icoretech/codex-pooler
-            org.opencontainers.image.documentation=https://github.com/icoretech/codex-pooler/blob/main/README.md
-            org.opencontainers.image.vendor=iCoreTech, Inc.
-            org.opencontainers.image.revision=${{ steps.revision.outputs.sha }}
-            org.opencontainers.image.version=${{ steps.publication.outputs.version }}
-          tags: ${{ steps.publication.outputs.docker_tags }}
 
       - name: Login to GitHub Container Registry
         if: steps.publication.outputs.ready == 'true'
@@ -146,20 +305,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
+      - name: Download the platform digests
         if: steps.publication.outputs.ready == 'true' && steps.publication.outputs.image_action == 'build'
-        id: build
-        uses: docker/build-push-action@v7
+        uses: actions/download-artifact@v8
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          pull: true
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Publish the multi-architecture image
+        if: steps.publication.outputs.ready == 'true' && steps.publication.outputs.image_action == 'build'
+        id: manifest
+        env:
+          IMAGE_TAGS: ${{ steps.publication.outputs.image_tags }}
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/digests"
+          digests=(*)
+          [[ "${#digests[@]}" -eq 2 ]] || { echo "Expected one digest per platform"; exit 1; }
+          sources=()
+          for digest in "${digests[@]}"; do
+            sources+=("ghcr.io/icoretech/codex-pooler@sha256:${digest}")
+          done
+          tag_args=()
+          first_tag=""
+          while IFS= read -r tag; do
+            [[ -z "$tag" ]] && continue
+            tag_args+=(--tag "$tag")
+            first_tag="${first_tag:-$tag}"
+          done <<< "$IMAGE_TAGS"
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+          digest=$(docker buildx imagetools inspect "$first_tag" --format '{{.Manifest.Digest}}')
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "Unexpected image digest: $digest"; exit 1; }
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Recover aliases from the existing immutable image
         if: steps.publication.outputs.ready == 'true' && steps.publication.outputs.image_action == 'reuse'
@@ -181,7 +359,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.prepare.outputs.release_tag }}
           VERSION: ${{ steps.publication.outputs.version }}
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest || steps.publication.outputs.image_digest }}
+          IMAGE_DIGEST: ${{ steps.manifest.outputs.digest || steps.publication.outputs.image_digest }}
           IMAGE_TAGS: ${{ steps.publication.outputs.image_tags }}
         run: |
           set -euo pipefail
@@ -191,7 +369,7 @@ jobs:
 
           mkdir -p "${asset_dir}/scripts/self-host"
           cp README.md docker-compose.yml .env.example "${asset_dir}/"
-          cp scripts/self-host/generate-env.sh "${asset_dir}/scripts/self-host/"
+          cp scripts/self-host/generate-env.sh scripts/self-host/totp-upgrade-preflight.sh scripts/self-host/totp-upgrade-preflight.exs "${asset_dir}/scripts/self-host/"
 
           tar -C dist -czf "dist/${asset_base}.tar.gz" "${asset_base}"
 
@@ -223,3 +401,16 @@ jobs:
             dist/codex-pooler-image-digests-*.txt \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
+
+      - name: Wake the Helm chart update
+        if: steps.publication.outputs.ready == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.HELM_WAKE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "HELM_WAKE_TOKEN is not configured; the chart repository will notice the image on its own schedule." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh workflow run wake-renovate.yml --repo icoretech/helm

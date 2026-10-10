@@ -142,19 +142,25 @@ defmodule CodexPooler.Accounting.ObservatoryContractTest do
              {:error, @unauthorized}
   end
 
-  test "refresh executes four bounded projections and returns at most twelve outcomes" do
+  test "refresh executes three bounded projections and returns the two hundred newest scoped outcomes" do
     pool = pool_fixture()
     api_key = dashboard_api_key_fixture(pool)
     model = model_fixture(pool, %{exposed_model_id: "gpt-observatory-bounded"})
     upper_bound = ~U[2026-07-17 12:00:00Z]
 
-    for offset <- 1..13 do
+    for offset <- 1..201 do
       pool
       |> timed_request(api_key, DateTime.add(upper_bound, -offset), %{
         model_id: model.id,
         status: "succeeded"
       })
     end
+
+    other_api_key = dashboard_api_key_fixture(pool)
+    other_pool = pool_fixture()
+
+    timed_request(pool, other_api_key, DateTime.add(upper_bound, -1), %{status: "failed"})
+    timed_request(other_pool, api_key, DateTime.add(upper_bound, -1), %{status: "failed"})
 
     {{:ok, projection}, events} =
       collect_repo_query_events(fn ->
@@ -169,20 +175,29 @@ defmodule CodexPooler.Accounting.ObservatoryContractTest do
 
     assert length(events) == 3
     assert length(events) <= 8
-    assert projection.totals.requests.total == 13
-    assert length(projection.outcomes) == 12
+    assert projection.totals.requests.total == 201
+    assert length(projection.outcomes) == 200
+    assert Enum.all?(projection.outcomes, &(&1.model == model.exposed_model_id and &1.status == "succeeded"))
 
     assert Enum.map(projection.outcomes, &DateTime.to_unix(&1.timestamp)) ==
-             Enum.map(1..12, &(upper_bound |> DateTime.add(-&1) |> DateTime.to_unix()))
+             Enum.map(1..200, &(upper_bound |> DateTime.add(-&1) |> DateTime.to_unix()))
 
     assert Enum.all?(projection.outcomes, fn outcome ->
              Map.keys(outcome) |> Enum.sort() ==
                [
+                 :actual_service_tier,
+                 :cached_input_tokens,
+                 :client,
                  :code,
                  :cost,
                  :endpoint_class,
+                 :input_tokens,
                  :model,
+                 :output_tokens,
+                 :reasoning_effort,
+                 :requested_service_tier,
                  :response_status_code,
+                 :service_tier,
                  :status,
                  :timestamp,
                  :total_tokens

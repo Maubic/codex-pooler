@@ -1,10 +1,8 @@
 defmodule CodexPoolerWeb.Runtime.AttemptMetadataShapeTest do
-  # The persisted shape of a completed attempt, pinned on every transport and both serving modes. The key lists
-  # below were measured on the unmodified tree, then extended by exactly what the end_turn class and the stream
-  # timing add: a `stream_timing` map on an upstream HTTP SSE attempt (relayed native and `/v1`, and the collected
-  # non-streaming `/v1` body) and an `end_turn` field on the delivery receipt of a pushed `response.completed`.
-  # Websocket attempts gain no timing and no other key; no request row changes at all. A future field has to be
-  # added here with its own test, which is the point of pinning the full lists.
+  # Pin the complete persisted attempt and request shapes on every transport and both serving modes.
+  # HTTP SSE attempts carry stream timing, and native HTTP SSE also carries bounded primitive observation
+  # metadata. A pushed response.completed has an end_turn delivery class. Websocket attempts have no stream
+  # timing or native SSE observation; every new field must be added here with its own exact assertion.
   use CodexPoolerWeb.ConnCase, async: false
 
   import Ecto.Query
@@ -33,7 +31,7 @@ defmodule CodexPoolerWeb.Runtime.AttemptMetadataShapeTest do
   @websocket_receipt ~w(end_turn frames_after_visible highest_frame_class outcome pushed_at terminal_class transport)
   @timing ~w(connection first_event_ms first_visible_ms headers_ms)
 
-  @native_http_attempt ~w(content_type downstream_delivery provider_credits_admission reasoning routing status_code stream_timing usage_observation)
+  @native_http_attempt ~w(content_type downstream_delivery native_sse_observation provider_credits_admission reasoning routing status_code stream_timing usage_observation)
   @v1_sse_attempt ~w(content_type downstream_delivery provider_credits_admission public_openai_responses_stream reasoning routing status_code stream_timing usage_observation)
   @v1_json_attempt ~w(content_type provider_credits_admission reasoning routing status_code stream_timing usage_observation)
   @websocket_attempt ~w(content_type downstream_delivery provider_credits_admission reasoning routing status_code upstream_transport upstream_websocket_connection)
@@ -44,7 +42,7 @@ defmodule CodexPoolerWeb.Runtime.AttemptMetadataShapeTest do
   @v1_websocket_request ~w(api_key codex_session_id codex_session_key effective_model endpoint key_prefix openai_compatibility pricing quota_decision request_bytes requested_model requested_stream reservation reservation_snapshot_inputs routing transport)
 
   for mode <- ["full", "lite"] do
-    test "#{mode} native HTTP SSE attempt: only stream_timing and the receipt's end_turn are new" do
+    test "#{mode} native HTTP SSE attempt pins observation, timing, delivery and request metadata" do
       upstream = start_upstream(FakeUpstream.sse_stream(events(false), done: false))
       setup = serving_setup(upstream, unquote(mode))
       conn = build_conn() |> auth(setup)
@@ -54,6 +52,17 @@ defmodule CodexPoolerWeb.Runtime.AttemptMetadataShapeTest do
 
       {request, attempt} = settled_rows(setup)
       assert_keys(attempt.response_metadata, @native_http_attempt)
+
+      assert attempt.response_metadata["native_sse_observation"] == %{
+               "version" => 1,
+               "overflow_count" => 0,
+               "last_limit_bytes" => nil,
+               "discarding" => false,
+               "residue_bytes" => 0,
+               "discard_carry_bytes" => 0,
+               "terminal_observed" => true
+             }
+
       assert_keys(attempt.response_metadata["downstream_delivery"], @http_receipt)
       assert_keys(attempt.response_metadata["stream_timing"], @timing)
       assert_keys(request.request_metadata, @native_request)

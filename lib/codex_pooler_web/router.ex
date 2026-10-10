@@ -147,6 +147,7 @@ defmodule CodexPoolerWeb.Router do
     post "/images/generations", V1.ImagesController, :generations
     post "/images/edits", V1.ImagesController, :edits
 
+    post "/decisions", V1.UnsupportedController, :unsupported_post
     post "/images/variations", V1.UnsupportedController, :unsupported_post
     post "/content_provenance_checks", V1.UnsupportedController, :unsupported_post
     post "/embeddings", V1.UnsupportedController, :unsupported_post

@@ -9,7 +9,7 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
     AlertIncident
   }
 
-  alias CodexPooler.Alerts.Delivery.{AttemptLifecycle, WebhookPayload, WebhookSigning}
+  alias CodexPooler.Alerts.Delivery.{AttemptLifecycle, Execution, WebhookDestination, WebhookPayload, WebhookSigning, WebhookTransport}
   alias CodexPooler.InstanceSettings.AppSecretCrypto
   alias CodexPooler.Platform.OutboundHTTP
   alias CodexPooler.Repo
@@ -35,6 +35,7 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
   def deliver_incident_to_channel(incident_id, channel_id, attempt_number, opts)
       when is_binary(incident_id) and is_binary(channel_id) and is_integer(attempt_number) do
     timestamp = timestamp(opts)
+    execution = Keyword.get_lazy(opts, :delivery_execution, &Execution.new/0)
 
     with {:ok, incident} <- fetch_incident(incident_id),
          {:ok, channel} <- fetch_channel(channel_id),
@@ -48,14 +49,15 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
              channel,
              attempt_number,
              timestamp,
-             base_metadata(incident, channel)
+             base_metadata(incident, channel),
+             execution
            ) do
       deliver_after_pending_attempt(
         pending_attempt,
         incident,
         channel,
         endpoint_url,
-        {timestamp, Keyword.get(opts, :retry_attempt, attempt_number)}
+        {execution, Keyword.get(opts, :retry_attempt, attempt_number)}
       )
     else
       {:discard, code, message} ->
@@ -80,7 +82,7 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
           message
         )
 
-      {:error, %Ecto.Changeset{}} = error ->
+      {:error, _reason} = error ->
         error
     end
   rescue
@@ -107,7 +109,7 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
          incident,
          channel,
          endpoint_url,
-         {timestamp, retry_attempt}
+         {execution, retry_attempt}
        ) do
     case recover_signing_secret(channel) do
       {:ok, signing_secret} ->
@@ -117,29 +119,33 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
           channel,
           endpoint_url,
           signing_secret,
-          {timestamp, retry_attempt}
+          {execution, retry_attempt}
         )
 
       {:failure, code, message} ->
-        AttemptLifecycle.finalize_failed_attempt(
-          attempt,
-          timestamp,
-          @delivery_adapter,
-          code,
-          message,
-          retryable: false
-        )
+        Execution.storage(execution, fn ->
+          AttemptLifecycle.finalize_failed_attempt(
+            attempt,
+            DateTime.utc_now(),
+            @delivery_adapter,
+            code,
+            message,
+            retryable: false
+          )
+        end)
     end
   rescue
     error ->
-      AttemptLifecycle.finalize_failed_attempt(
-        attempt,
-        timestamp,
-        @delivery_adapter,
-        "alert_webhook_delivery_exception",
-        exception_message(error),
-        retryable: false
-      )
+      Execution.storage(execution, fn ->
+        AttemptLifecycle.finalize_failed_attempt(
+          attempt,
+          DateTime.utc_now(),
+          @delivery_adapter,
+          "alert_webhook_delivery_exception",
+          exception_message(error),
+          retryable: false
+        )
+      end)
   end
 
   defp deliver_pending_attempt(
@@ -148,7 +154,7 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
          channel,
          endpoint_url,
          signing_secret,
-         {timestamp, retry_attempt}
+         {execution, retry_attempt}
        ) do
     %{event_id: event_id, body: body} = WebhookPayload.encode(incident, channel, attempt)
     attempt_id = attempt.id
@@ -162,26 +168,30 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
       {"x-codex-pooler-signature", signature}
     ]
 
-    endpoint_url
-    |> post_webhook(body, headers)
-    |> record_delivery_result(
-      attempt,
-      incident,
-      channel,
-      event_id,
-      byte_size(body),
-      {timestamp, retry_attempt}
-    )
+    result = Execution.run(execution, fn -> post_webhook(endpoint_url, body, headers, execution) end)
+
+    Execution.storage(execution, fn ->
+      record_delivery_result(result, attempt, incident, channel, event_id, byte_size(body), {DateTime.utc_now(), retry_attempt})
+    end)
   end
 
-  defp post_webhook(url, body, headers) do
-    OutboundHTTP.post(url,
+  # Only status is consumed. Drain through Req's streaming parser without
+  # retaining body chunks; framing errors and the absolute deadline still apply.
+  defp discard_response_body({:data, _data}, acc), do: {:cont, acc}
+
+  defp post_webhook(url, body, headers, execution) do
+    remaining = max(Execution.remaining(execution), 1)
+    request = Req.new(url: url, adapter: WebhookTransport) |> Req.Request.put_private(:webhook_execution, execution)
+
+    OutboundHTTP.post(request,
       body: body,
       headers: headers,
       decode_body: false,
-      receive_timeout: @receive_timeout_ms,
+      into: &discard_response_body/2,
+      receive_timeout: min(@receive_timeout_ms, remaining),
+      request_timeout: remaining,
       retry: false,
-      finch: OutboundHTTP.pool_options_for_url(url)
+      redirect: false
     )
   rescue
     exception in [
@@ -239,6 +249,27 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
       response_status_code: status,
       next_retry_at: next_retry_at(timestamp, retry_attempt, retryable),
       response_metadata: response_metadata(incident, channel, event_id, body_bytes, status)
+    )
+  end
+
+  defp record_delivery_result({:error, %WebhookDestination.Error{reason: reason}}, attempt, incident, channel, event_id, body_bytes, {timestamp, retry_attempt}) do
+    retryable = reason == :unresolved and retry_attempt < AlertDeliveryAttempt.fixed_max_attempts()
+    code = "alert_webhook_destination_#{reason}"
+
+    AttemptLifecycle.finalize_failed_attempt(attempt, timestamp, @delivery_adapter, code, "webhook destination is unavailable",
+      retryable: retryable,
+      response_metadata: response_metadata(incident, channel, event_id, body_bytes, nil),
+      next_retry_at: next_retry_at(timestamp, retry_attempt, retryable)
+    )
+  end
+
+  defp record_delivery_result({:error, :delivery_timeout}, attempt, incident, channel, event_id, body_bytes, {timestamp, retry_attempt}) do
+    retryable = retry_attempt < AlertDeliveryAttempt.fixed_max_attempts()
+
+    AttemptLifecycle.finalize_failed_attempt(attempt, timestamp, @delivery_adapter, "alert_webhook_delivery_timeout", "webhook delivery deadline exceeded; outcome unknown",
+      retryable: retryable,
+      next_retry_at: next_retry_at(timestamp, retry_attempt, retryable),
+      response_metadata: Map.put(response_metadata(incident, channel, event_id, body_bytes, nil), "delivery_outcome", "unknown")
     )
   end
 
@@ -405,6 +436,9 @@ defmodule CodexPooler.Alerts.Delivery.WebhookDelivery do
   defp reason_code(_evidence), do: nil
 
   defp retryable_http_status?(status), do: status in @retryable_statuses or status in 500..599
+
+  defp http_failure_message(status) when status in 300..399,
+    do: "webhook endpoint returned a redirect"
 
   defp http_failure_message(status) when status in @permanent_statuses,
     do: "webhook endpoint rejected the alert notification"

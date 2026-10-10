@@ -5,6 +5,8 @@ defmodule CodexPooler.Catalog.Sync do
 
   import Ecto.Query
 
+  require Logger
+
   alias CodexPooler.Catalog.Sync.{Discovery, Persistence}
   alias CodexPooler.Catalog.SyncRun
   alias CodexPooler.Events
@@ -19,6 +21,7 @@ defmodule CodexPooler.Catalog.Sync do
   @assignment_active AssignmentStatus.active_status()
   @assignment_eligible AssignmentStatus.eligible_status()
   @identity_active IdentityStatus.active_status()
+  @identity_model_routable IdentityStatus.model_routable_statuses()
   @secret_active "active"
   @secret_kind "access_token"
   @cancelled "cancelled"
@@ -42,10 +45,10 @@ defmodule CodexPooler.Catalog.Sync do
     trigger_kind = Keyword.get(opts, :trigger_kind, "manual")
     fetcher = Keyword.get(opts, :fetcher, &Discovery.fetch_models_for_assignment/1)
 
-    assignments = list_catalog_sync_assignments(pool_id)
+    assignments = list_catalog_source_assignments(pool_id, @identity_model_routable)
 
     result =
-      if assignments == [] do
+      if Enum.all?(assignments, &(&1.identity.status != @identity_active)) do
         {:ok, %{sync_runs: [], models: [], skipped?: true}}
       else
         run_catalog_sync(pool_id, trigger_kind, assignments, fetcher)
@@ -60,6 +63,10 @@ defmodule CodexPooler.Catalog.Sync do
 
   @spec list_catalog_sync_assignments(pool_ref()) :: [map()]
   def list_catalog_sync_assignments(pool_or_id) do
+    list_catalog_source_assignments(pool_or_id, [@identity_active])
+  end
+
+  defp list_catalog_source_assignments(pool_or_id, identity_statuses) do
     pool_id = pool_id(pool_or_id)
 
     PoolUpstreamAssignment
@@ -73,7 +80,7 @@ defmodule CodexPooler.Catalog.Sync do
       [assignment, identity, _secret],
       assignment.pool_id == ^pool_id and assignment.status == ^@assignment_active and
         assignment.eligibility_status == ^@assignment_eligible and
-        identity.status == ^@identity_active
+        identity.status in ^identity_statuses
     )
     |> order_by([assignment, _identity, _secret], asc: assignment.created_at)
     |> select([assignment, identity, _secret], %{assignment: assignment, identity: identity})
@@ -132,9 +139,33 @@ defmodule CodexPooler.Catalog.Sync do
     started_at = now()
     {:ok, _summary} = cleanup_stale_sync_runs(started_at)
 
-    with :ok <- ensure_no_running_sync(pool_id, trigger_kind, started_at),
-         {:ok, run} <- create_sync_run(pool_id, trigger_kind, started_at) do
+    with {:ok, run} <- claim_sync_run(pool_id, trigger_kind, started_at) do
       discover_and_persist_catalog(run, assignments, fetcher)
+    end
+  end
+
+  defp claim_sync_run(pool_id, trigger_kind, started_at) do
+    Repo.transact(fn ->
+      with %Pool{} <- Repo.one(from pool in Pool, where: pool.id == ^pool_id, lock: "FOR NO KEY UPDATE"),
+           :ok <- ensure_no_running_sync(pool_id, trigger_kind, started_at),
+           {:ok, run} <- create_sync_run(pool_id, trigger_kind, started_at) do
+        {:ok, {:claimed, run}}
+      else
+        nil ->
+          {:error, catalog_error(:pool_not_found, "pool was not found")}
+
+        {:error, %{code: :catalog_sync_in_progress}} = error ->
+          # The refusal is returned after commit so its cancelled run survives.
+          {:ok, {:refused, error}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end)
+    |> case do
+      {:ok, {:claimed, run}} -> {:ok, run}
+      {:ok, {:refused, error}} -> error
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -161,7 +192,11 @@ defmodule CodexPooler.Catalog.Sync do
   defp catalog_sync_in_progress_error({:error, reason}), do: {:error, reason}
 
   defp discover_and_persist_catalog(run, assignments, fetcher) do
-    case Discovery.discover_models(assignments, fetcher) do
+    # Refreshing sources remain authoritative until read successfully. Keep
+    # their prior listings while avoiding catalog I/O during credential rotation.
+    readable_assignments = Enum.filter(assignments, &(&1.identity.status == @identity_active))
+
+    case Discovery.discover_models(readable_assignments, fetcher) do
       {:ok, successful_assignments, failed_sources, discovered} ->
         Persistence.persist_catalog(
           run,
@@ -174,6 +209,20 @@ defmodule CodexPooler.Catalog.Sync do
       {:error, reason} ->
         Persistence.fail_sync_run(run, reason)
     end
+  catch
+    kind, reason ->
+      stacktrace = __STACKTRACE__
+      fail_claim_after_exception(run)
+      :erlang.raise(kind, reason, stacktrace)
+  end
+
+  defp fail_claim_after_exception(%SyncRun{id: id} = run) do
+    Persistence.fail_sync_run(run, "model catalog sync failed unexpectedly")
+    :ok
+  catch
+    _kind, _reason ->
+      Logger.warning("catalog sync exception finalization failed sync_run_id=#{id}")
+      :ok
   end
 
   defp create_sync_run(pool_id, trigger_kind, started_at) do

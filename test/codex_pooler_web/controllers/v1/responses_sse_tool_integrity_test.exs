@@ -9,7 +9,7 @@ defmodule CodexPoolerWeb.V1.ResponsesSSEToolIntegrityTest do
   alias CodexPooler.Gateway.Persistence.BridgeSessionAlias
   alias CodexPooler.Repo
 
-  for transport <- [:http, :bridge], kind <- ["function_call", "custom_tool_call"], scenario <- [:missing_done, :wrong_index, :wrong_id, :missing_index, :string_index, :orphan_done, :parallel_pending] do
+  for transport <- [:http, :bridge], kind <- ["function_call", "custom_tool_call"], scenario <- [:missing_done, :wrong_index, :wrong_id, :missing_index, :string_index, :orphan_done, :parallel_pending, :failed_done, :incomplete_done] do
     @tag transport: transport, kind: kind, scenario: scenario
     test "#{transport} #{kind} #{scenario} fails instead of completing", %{transport: transport, kind: kind, scenario: scenario} do
       if transport == :bridge do
@@ -34,6 +34,8 @@ defmodule CodexPoolerWeb.V1.ResponsesSSEToolIntegrityTest do
           :string_index -> [{"response.output_item.added", %{added | "output_index" => "0"}}, delta]
           :orphan_done -> [{"response.output_item.done", done}, delta]
           :parallel_pending -> [{"response.output_item.added", added}, delta, {"response.output_item.added", %{added | "output_index" => 1, "item" => %{item | "id" => "tool_other", "call_id" => "call_other"}}}, {"response.output_item.done", done}]
+          :failed_done -> [{"response.output_item.added", added}, delta, {"response.output_item.done", put_in(done, ["item", "status"], "failed")}]
+          :incomplete_done -> [{"response.output_item.added", added}, delta, {"response.output_item.done", put_in(done, ["item", "status"], "incomplete")}]
         end
 
       events = events ++ [completed([Map.put(item, field, "{}")])]
@@ -81,6 +83,47 @@ defmodule CodexPoolerWeb.V1.ResponsesSSEToolIntegrityTest do
       healthy = build_conn() |> auth(setup) |> maybe_session(transport) |> post("/v1/responses", %{"model" => setup.model.exposed_model_id, "input" => "synthetic next request", "stream" => true})
       assert List.last(event_types(healthy.resp_body)) == "response.completed"
       assert FakeUpstream.count(upstream) == 2
+    end
+  end
+
+  # The provider marks a call the model stopped writing `incomplete` and ends the response `response.incomplete`; that
+  # terminal keeps its outcome. Only a `response.completed` after an unfinished call becomes the sanitized failure.
+  for transport <- [:http, :bridge], kind <- ["function_call", "custom_tool_call"] do
+    @tag transport: transport, kind: kind
+    test "#{transport} #{kind} incomplete done status keeps the provider's incomplete terminal", %{transport: transport, kind: kind} do
+      if transport == :bridge do
+        CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled)
+        Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, true)
+      end
+
+      field = if kind == "function_call", do: "arguments", else: "input"
+      delta_type = if kind == "function_call", do: "response.function_call_arguments.delta", else: "response.custom_tool_call_input.delta"
+      item = %{"id" => "tool_fixture", "call_id" => "call_fixture", "type" => kind, "name" => "lookup", field => "{"}
+      incomplete = Map.put(item, "status", "incomplete")
+
+      events = [
+        {"response.output_item.added", %{"type" => "response.output_item.added", "output_index" => 0, "item" => %{item | field => ""}}},
+        {delta_type, %{"type" => delta_type, "output_index" => 0, "item_id" => "tool_fixture", "delta" => "{"}},
+        {"response.output_item.done", %{"type" => "response.output_item.done", "output_index" => 0, "item" => incomplete}},
+        {"response.incomplete", %{"type" => "response.incomplete", "response" => %{"id" => "resp_integrity_fixture", "status" => "incomplete", "incomplete_details" => %{"reason" => "max_output_tokens"}, "output" => [incomplete], "usage" => %{"input_tokens" => 5457, "output_tokens" => 3, "total_tokens" => 5460}}}}
+      ]
+
+      upstream = start_upstream(FakeUpstream.sse_stream(events, done: false))
+      setup = gateway_setup(upstream)
+      conn = build_conn() |> auth(setup) |> maybe_session(transport) |> post("/v1/responses", %{"model" => setup.model.exposed_model_id, "input" => "synthetic integrity request", "stream" => true})
+
+      assert conn.status == 200
+      types = event_types(conn.resp_body)
+      assert List.last(types) == "response.incomplete"
+      assert "response.output_item.done" in types
+      refute "error" in types
+      refute "response.completed" in types
+      assert conn.resp_body =~ ~s("reason":"max_output_tokens")
+      assert [captured] = FakeUpstream.requests(upstream)
+      assert captured.method == if(transport == :http, do: "POST", else: "WEBSOCKET")
+      assert [request] = Repo.all(from(r in Request, where: r.pool_id == ^setup.pool.id))
+      assert request.status == "succeeded"
+      assert request.last_error_code == nil
     end
   end
 

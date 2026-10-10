@@ -4,9 +4,181 @@ defmodule CodexPooler.Platform.RelayShutdownOrderTest do
   alias CodexPooler.Gateway.Transports.Streaming.DeferredStreamRegistry
   alias CodexPooler.Gateway.Transports.Websocket.{ActivityRegistry, RolloutDrain}
   alias CodexPooler.Release
+  alias CodexPooler.Telemetry.{Relay, RelayEvent}
   alias CodexPooler.Telemetry.RelayRuntime
   alias CodexPooler.TestAppEnv
   alias Ecto.Adapters.SQL.Sandbox
+
+  for invalid <- [:missing_parent, :parent_is_file] do
+    test "#{invalid} marker preflight leaves the real consumer able to claim", context do
+      assert_invalid_marker_can_still_claim(context, unquote(invalid))
+    end
+  end
+
+  test "an owned read-only marker keeps its inode, ownership and content across repeated shutdown", context do
+    root = marker_directory!()
+    marker = Path.join(root, "draining")
+    File.write!(marker, "existing marker")
+    File.chmod!(marker, 0o444)
+    original = File.stat!(marker)
+    File.chmod!(root, 0o500)
+    runtime = start_paused_runtime(context)
+
+    for _ <- 1..2 do
+      assert %{remaining: remaining} =
+               Release.prepare_shutdown(
+                 relay: runtime,
+                 marker: marker,
+                 budget_ms: 1000,
+                 drain: fn remaining ->
+                   assert :sys.get_state(runtime).quiesced?
+                   assert File.read!(marker) == "existing marker"
+                   assert Map.take(File.stat!(marker), [:inode, :uid, :gid, :mode]) == Map.take(original, [:inode, :uid, :gid, :mode])
+                   %{remaining: remaining}
+                 end
+               )
+
+      assert remaining in 1..1000
+      assert File.ls!(root) == ["draining"]
+    end
+  end
+
+  test "filesystem changes after preflight remain a visible post-quiesce failure", context do
+    root = marker_directory!()
+    directory = Path.join(root, "parent")
+    File.mkdir!(directory)
+    marker = Path.join(directory, "draining")
+    parent = self()
+
+    runtime =
+      start_supervised!(
+        {RelayRuntime,
+         enabled: true,
+         role: "web",
+         name: nil,
+         start_paused: true,
+         claim_fun: fn limit, owner ->
+           send(parent, {:real_claim_held, self()})
+
+           receive do
+             :release_claim -> Relay.claim(limit, owner)
+           after
+             15_000 -> raise "relay claim not released"
+           end
+         end}
+      )
+
+    Sandbox.allow(Repo, context.sandbox_owner, runtime)
+    callbacks = :sys.get_state(runtime).callbacks
+    :ok = Relay.refresh_heartbeat("relay-runtime")
+    assert {:ok, row} = Relay.insert("pre_attempt_release", %{}, 1)
+    send(runtime, :drain)
+    assert_receive {:real_claim_held, ^runtime}
+
+    task =
+      Task.async(fn ->
+        try do
+          Release.prepare_shutdown(relay: runtime, marker: marker, budget_ms: 1000, drain: fn _ -> flunk("changed filesystem must not drain") end)
+        rescue
+          error -> {:failed, error.__struct__}
+        end
+      end)
+
+    monitor = Process.monitor(task.pid)
+    await_gate_closed(callbacks, System.monotonic_time(:millisecond) + 15_000)
+    refute File.exists?(marker)
+    assert File.ls!(directory) == []
+    File.rmdir!(directory)
+    File.write!(directory, "replaced after preflight")
+    send(runtime, :release_claim)
+    assert {:failed, MatchError} = Task.await(task, 15_000)
+    assert_receive {:DOWN, ^monitor, :process, _, :normal}
+    state = :sys.get_state(runtime)
+    assert state.quiesced?
+    assert Repo.get!(RelayEvent, row.id).claimed_by == state.owner
+    refute File.exists?(marker)
+    CodexPooler.TestDiagnostics.puts("marker-preflight postcheck_filesystem_change=true quiesced=true marker=false failure_visible=true")
+  end
+
+  test "existing marker preflight preserves its metadata before quiesce completes", context do
+    root = marker_directory!()
+    marker = Path.join(root, "draining")
+    File.write!(marker, "existing marker")
+    File.chmod!(marker, 0o444)
+    File.chmod!(root, 0o500)
+    File.touch!(marker, 1_600_000_000)
+    original = File.stat!(marker, time: :posix)
+    runtime = start_paused_runtime(context)
+    callbacks = :sys.get_state(runtime).callbacks
+    :ok = :sys.suspend(runtime)
+
+    task = Task.async(fn -> Release.prepare_shutdown(relay: runtime, marker: marker, budget_ms: 1000, drain: fn remaining -> %{remaining: remaining} end) end)
+    monitor = Process.monitor(task.pid)
+
+    try do
+      await_gate_closed(callbacks, System.monotonic_time(:millisecond) + 15_000)
+      assert Map.take(File.stat!(marker, time: :posix), [:inode, :uid, :gid, :mode, :mtime]) == Map.take(original, [:inode, :uid, :gid, :mode, :mtime])
+      assert File.read!(marker) == "existing marker"
+      assert File.ls!(root) == ["draining"]
+    after
+      :sys.resume(runtime)
+    end
+
+    assert %{remaining: remaining} = Task.await(task)
+    assert remaining in 1..1000
+    assert_receive {:DOWN, ^monitor, :process, _, :normal}
+    assert File.stat!(marker, time: :posix).mtime > original.mtime
+  end
+
+  defp assert_invalid_marker_can_still_claim(context, invalid) do
+    root = marker_directory!()
+    parent = Path.join(root, "parent")
+    if invalid == :parent_is_file, do: File.write!(parent, "unrelated")
+    marker = Path.join(parent, "draining")
+    previous = TestAppEnv.restore_on_exit(OperationalStatus, [])
+    Application.put_env(:codex_pooler, OperationalStatus, Keyword.put(previous, :drain_marker_path, marker))
+    runtime = start_real_consumer(context)
+    before = :sys.get_state(runtime)
+    :ok = Relay.refresh_heartbeat("relay-runtime")
+    assert {:ok, row} = Relay.insert("pre_attempt_release", %{}, 1)
+
+    failure =
+      try do
+        Release.prepare_shutdown(relay: runtime, marker: marker, budget_ms: 1000, drain: fn _ -> flunk("invalid marker must not drain") end)
+        :no_error
+      rescue
+        error -> {:error, error.__struct__}
+      end
+
+    assert match?({:error, _}, failure)
+    refute :sys.get_state(runtime).quiesced?
+    refute :ets.lookup(before.callbacks, :quiesced) == [{:quiesced, true}]
+    refute OperationalStatus.marker_draining?()
+    send(runtime, :drain)
+    state = :sys.get_state(runtime)
+    assert Repo.get!(RelayEvent, row.id).claimed_by == state.owner
+    assert File.ls!(root) == if(invalid == :parent_is_file, do: ["parent"], else: [])
+    CodexPooler.TestDiagnostics.puts("marker-preflight failure=#{invalid} quiesced=false marker=false actual_relay_claim=true")
+  end
+
+  defp marker_directory! do
+    root = Path.join(System.tmp_dir!(), "marker-preflight-#{Ecto.UUID.generate()}")
+
+    on_exit(fn ->
+      File.chmod(root, 0o700)
+      File.rm_rf!(root)
+      refute File.exists?(root)
+    end)
+
+    File.mkdir!(root)
+    root
+  end
+
+  defp start_real_consumer(context) do
+    runtime = start_supervised!({RelayRuntime, enabled: true, role: "web", name: nil, start_paused: true})
+    Sandbox.allow(Repo, context.sandbox_owner, runtime)
+    runtime
+  end
 
   test "supervised consumer restart under readiness marker cannot claim", context do
     marker = Path.join(System.tmp_dir!(), "relay-restart-#{Ecto.UUID.generate()}")

@@ -11,6 +11,38 @@ defmodule CodexPooler.Accounts.OperatorLifecycleTest do
   import CodexPooler.AccountsFixtures
   import CodexPooler.PoolerFixtures, only: [pool_fixture: 1]
 
+  test "operator mutations treat malformed ids like missing ids without writes" do
+    %{user: owner} = bootstrap_owner_fixture()
+    %{user: admin} = operator_fixture(owner, %{"password_change_required" => "false"})
+    attrs = %{"password_mode" => "generated", "send_email" => "false"}
+    operations = [:update_operator, :deactivate_operator, :reactivate_operator, :reset_operator_password, :resend_operator_temporary_password]
+    before_rows = {Repo.all(User), Repo.all(Session), Repo.all(AuditEvent)}
+
+    for operation <- operations do
+      expected = apply(Accounts, operation, [owner, Ecto.UUID.generate(), attrs, %{}])
+      assert expected == {:error, :invalid_operator}
+
+      for id <- ["not-a-uuid", "", String.duplicate("z", 36)] do
+        result =
+          try do
+            apply(Accounts, operation, [owner, id, attrs, %{}])
+          rescue
+            Ecto.Query.CastError -> :cast_error
+          end
+
+        assert result == expected
+
+        for actor <- [nil, Scope.for_user(admin)] do
+          assert apply(Accounts, operation, [actor, id, attrs, %{}]) == {:error, :operator_management_denied}
+          assert apply(Accounts, operation, [actor, owner.id, attrs, %{}]) == {:error, :operator_management_denied}
+        end
+      end
+    end
+
+    unchanged? = before_rows == {Repo.all(User), Repo.all(Session), Repo.all(AuditEvent)}
+    assert unchanged?
+  end
+
   describe "operator lifecycle contract" do
     @tag :operator_lifecycle
     test "exports the expected public operator lifecycle APIs" do

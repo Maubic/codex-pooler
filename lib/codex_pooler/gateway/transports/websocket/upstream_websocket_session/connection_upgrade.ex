@@ -298,8 +298,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Conn
           Mint.Types.headers()
         ) ::
           {:ok, Mint.HTTP.t(), Mint.WebSocket.t()} | {:error, Mint.HTTP.t(), term()}
-  # Mint's Dialyzer contract narrows a status-101 websocket creation to success,
-  # but the runtime boundary can still reject mismatched refs, headers, or state.
+  # Dialyzer reads `Mint.WebSocket.new/4` as always failing: Mint's contract returns the opaque `Mint.WebSocket.t()`,
+  # which does not meet the plain struct its success typing builds, so only the error tuple survives. The success
+  # clause is the one every established upstream websocket takes, and Mint does refuse a mismatched nonce or
+  # extension, so both clauses stay and the no-match warning is silenced.
   @dialyzer {:no_match, new_websocket: 3}
   defp new_websocket(conn, ref, response_headers) do
     case Mint.WebSocket.new(conn, ref, 101, response_headers) do
@@ -308,13 +310,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Conn
     end
   end
 
-  # Keep the defensive error branch paired with new_websocket/3 even though
-  # Dialyzer inherits Mint's narrowed status-101 success type.
+  # Dialyzer inherits new_websocket/3's error-only reading, so it takes the success clause below, and the two helpers
+  # only that clause calls, for unreachable code; every established upstream websocket runs them.
   #
   # The state carries the frames decoded from `upgrade_data` under `:upgrade_frames` (absent when there are none);
   # the session takes them out right after the connection is established and settles them before it writes the
   # request (findings#304).
   @dialyzer {:no_match, finish_connection: 6}
+  @dialyzer {:no_unused, [decode_upgrade_data: 2, put_upgrade_frames: 2]}
   defp finish_connection(state, key, conn, ref, response_headers, upgrade_data) do
     case new_websocket(conn, ref, response_headers) do
       {:ok, conn, websocket} ->
@@ -441,7 +444,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.Conn
         handle_upgrade_message(conn, ref, deadline, request_caller, response, message)
     after
       max(deadline_ms - clock.(), 0) ->
-        {:error, :upstream_websocket_upgrade_timeout}
+        {:error, conn, :upstream_websocket_upgrade_timeout}
     end
   end
 

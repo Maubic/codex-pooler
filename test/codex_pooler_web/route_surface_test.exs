@@ -82,6 +82,7 @@ defmodule CodexPoolerWeb.RouteSurfaceTest do
                {:post, "/v1/batches"},
                {:post, "/v1/chat/completions"},
                {:post, "/v1/content_provenance_checks"},
+               {:post, "/v1/decisions"},
                {:post, "/v1/embeddings"},
                {:post, "/v1/files"},
                {:post, "/v1/fine_tuning/jobs"},
@@ -228,6 +229,7 @@ defmodule CodexPoolerWeb.RouteSurfaceTest do
     ]
 
     unsupported_routes = [
+      {:post, "/v1/decisions"},
       {:post, "/v1/images/variations"},
       {:post, "/v1/content_provenance_checks"},
       {:post, "/v1/embeddings"},

@@ -67,6 +67,35 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay do
     end
   end
 
+  @doc "Speed level 1..3: normal, fast (priority), ultrafast (a separate tier, never an alias of priority)."
+  def speed_level(log) do
+    cond do
+      ultrafast_tier?(log) -> 3
+      speed_tier_mode(log) == :fast -> 2
+      true -> 1
+    end
+  end
+
+  def speed_level_title(log) do
+    cond do
+      speed_level(log) == 3 -> "Ultrafast"
+      speed_level(log) == 2 -> "Fast (priority tier)"
+      priority_unapplied?(log) -> "Normal speed (priority requested, not applied by the upstream)"
+      true -> "Normal speed"
+    end
+  end
+
+  defp ultrafast_tier?(%{cost: %{pricing_availability: "priced"}, service_tier: tier}) when is_binary(tier), do: ServiceTier.canonicalize(tier) == "ultrafast"
+  defp ultrafast_tier?(log) when is_map(log), do: pricing_basis_tier(log) == "ultrafast"
+  defp ultrafast_tier?(_log), do: false
+
+  defp priority_unapplied?(log) when is_map(log) do
+    requested = ServiceTier.canonicalize(Map.get(log, :requested_service_tier))
+    is_binary(requested) and fast_service_tier?(requested) and is_nil(speed_tier_mode(log))
+  end
+
+  defp priority_unapplied?(_log), do: false
+
   def speed_tier_label(%{cost: %{status: "priced", pricing_availability: "priced"}}), do: "Priced at priority tier"
   def speed_tier_label(%{}), do: "Priority tier"
 

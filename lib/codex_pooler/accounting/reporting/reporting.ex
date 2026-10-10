@@ -7,6 +7,7 @@ defmodule CodexPooler.Accounting.Reporting do
 
   alias CodexPooler.Accounting.{DailyRollup, DailyRollupCoverage, LedgerEntry}
   alias CodexPooler.Accounting.Reporting.ModelUsage
+  alias CodexPooler.Accounting.Reporting.StatsUsage
   alias CodexPooler.Repo
 
   @settlement "settlement"
@@ -165,6 +166,9 @@ defmodule CodexPooler.Accounting.Reporting do
         }
     )
   end
+
+  @spec stats_usage_for_pool_ids([Ecto.UUID.t()], :hour | :day, DateTime.t(), DateTime.t()) :: StatsUsage.result()
+  defdelegate stats_usage_for_pool_ids(pool_ids, granularity, started_at, ended_at), to: StatsUsage, as: :query
 
   @spec settlement_usage_buckets_for_pool_ids(
           [Ecto.UUID.t()],
@@ -527,7 +531,7 @@ defmodule CodexPooler.Accounting.Reporting do
   defp select_settlement_bucket(query, :hour) do
     select(query, [entry], %{
       pool_id: entry.pool_id,
-      bucket: fragment("date_trunc('hour', ?)", entry.occurred_at),
+      bucket: fragment("date_trunc('hour', ?, 'UTC')", entry.occurred_at),
       request_count: entry.request_count,
       usage_status: entry.usage_status,
       input_tokens: entry.input_tokens,
@@ -542,7 +546,7 @@ defmodule CodexPooler.Accounting.Reporting do
   defp select_settlement_bucket(query, :day) do
     select(query, [entry], %{
       pool_id: entry.pool_id,
-      bucket: fragment("date_trunc('day', ?)", entry.occurred_at),
+      bucket: fragment("date_trunc('day', ?, 'UTC')", entry.occurred_at),
       request_count: entry.request_count,
       usage_status: entry.usage_status,
       input_tokens: entry.input_tokens,

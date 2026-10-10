@@ -320,12 +320,9 @@ defmodule CodexPoolerWeb.OnboardingLive.Invite do
     }
   end
 
-  # The websocket provider block the Codex client page documents, with the
-  # deployment's public origin in place of the page's placeholder host. From
-  # Codex 0.156.0 an env_key provider reads the Pool catalog only through an
-  # absolute model_catalog_url with api_key_model_discovery enabled; earlier
-  # releases ignore both keys. `name = "OpenAI"` is what enables Codex's
-  # OpenAI-family behaviour (remote compaction, request compression).
+  # Use the documented websocket provider with the deployment's public origin.
+  # The explicit catalog URL selects the Pool catalog, and the native provider
+  # name preserves Codex backend features.
   defp codex_config_toml(origin) do
     """
     model_provider = "codex-pooler-ws"
@@ -338,9 +335,6 @@ defmodule CodexPoolerWeb.OnboardingLive.Invite do
     wire_api = "responses"
     supports_websockets = true
     requires_openai_auth = true
-
-    [features]
-    api_key_model_discovery = true
     """
     |> String.trim_trailing()
   end

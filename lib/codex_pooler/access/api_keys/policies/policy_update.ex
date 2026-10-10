@@ -79,6 +79,7 @@ defmodule CodexPooler.Access.APIKeys.PolicyUpdate do
            # Read under the writer lock, so a field the caller omitted keeps
            # the value committed before this update and never a stale copy.
            previous_bindings = PolicyPersistence.list_policy_bindings(previous_api_key.id),
+           :ok <- validate_edit_revision(attrs, previous_api_key, previous_bindings),
            {:ok, policy_attrs, policy_inputs} <-
              update_api_key_policy_attrs(
                scope,
@@ -102,6 +103,16 @@ defmodule CodexPooler.Access.APIKeys.PolicyUpdate do
          }}
       end
     end)
+  end
+
+  defp validate_edit_revision(attrs, api_key, bindings) do
+    expected = Map.get(attrs, :expected_edit_revision, Map.get(attrs, "expected_edit_revision", :not_supplied))
+
+    if expected == :not_supplied or expected == PolicyPersistence.edit_revision(api_key, bindings) do
+      :ok
+    else
+      {:error, Errors.access_error(:api_key_edit_conflict, "API key changed while this form was open. Close and reopen Edit before saving.")}
+    end
   end
 
   defp persist_policy_update(api_key, update_attrs, policy_inputs, transition) do

@@ -414,7 +414,8 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStreamTest do
         assert state.codex_responses_sse_block_state.skip_leading_lf?
 
         assert {"", state} = DownstreamStream.normalize_data("\n", endpoint, opts, state)
-        assert state.codex_responses_sse_block_state == StreamProtocol.new_sse_block_state()
+        assert %{buffer: "", carry: "", skip_leading_lf?: false, discarding?: false, overflow_count: 0, last_limit_bytes: nil} = state.codex_responses_sse_block_state
+        assert DownstreamStream.terminal_outcome(state) == :completed
       end
     end
 
@@ -432,7 +433,11 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStreamTest do
                  state
                )
 
-      assert state.codex_responses_sse_block_state == StreamProtocol.new_sse_block_state()
+      assert %{buffer: "", carry: "", discarding?: true, overflow_count: 1, last_limit_bytes: 8_388_608} = state.codex_responses_sse_block_state
+      assert DownstreamStream.terminal_outcome(state) == nil
+      assert {"suffix\n\n", state} = DownstreamStream.normalize_data("suffix\n\n", "/backend-api/codex/responses", opts, state)
+      assert %{buffer: "", carry: "", discarding?: false, overflow_count: 1, last_limit_bytes: 8_388_608} = state.codex_responses_sse_block_state
+      assert DownstreamStream.terminal_outcome(state) == nil
 
       assert_receive {[:codex_pooler, :gateway, :stream_buffer, :oversized], %{bytes: bytes, count: 1, max_bytes: 8_388_608},
                       %{

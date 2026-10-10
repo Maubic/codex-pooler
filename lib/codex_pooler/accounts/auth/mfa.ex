@@ -14,20 +14,39 @@ defmodule CodexPooler.Accounts.MFA do
   @totp_period_seconds 30
   @totp_digits 6
 
+  @invalid_totp_key_message "CODEX_POOLER_TOTP_ENCRYPTION_KEY must be 32 raw bytes or base64-encoded 32 bytes"
+
+  @spec validate_totp_encryption_key!(term()) :: :ok
+  def validate_totp_encryption_key!(value) when is_binary(value) and byte_size(value) == 32, do: :ok
+
+  def validate_totp_encryption_key!(value) when is_binary(value) do
+    case Base.decode64(value) do
+      {:ok, decoded} when byte_size(decoded) == 32 -> :ok
+      _invalid -> raise @invalid_totp_key_message
+    end
+  end
+
+  def validate_totp_encryption_key!(_value), do: raise(@invalid_totp_key_message)
+
   @spec enable_totp_for_user(User.t()) :: {:ok, map()} | {:error, term()}
   def enable_totp_for_user(%User{} = user) do
-    secret = generate_totp_secret()
-    encrypted_secret = encrypt_totp_secret!(secret)
-    now = DateTime.utc_now()
-
     Repo.transaction(fn ->
+      # The user exists before its first setting, so this also serializes initial enrollment.
+      Repo.one!(from u in User, where: u.id == ^user.id, lock: "FOR UPDATE")
       existing = Repo.get_by(TOTPSetting, user_id: user.id)
+
+      if existing && existing.status == "active", do: Repo.rollback(:totp_already_enabled)
+
+      secret = generate_totp_secret()
+      encrypted_secret = encrypt_totp_secret!(secret)
+      now = DateTime.utc_now()
       recovery_generation = if existing, do: existing.recovery_generation + 1, else: 1
 
       setting_changes = %{
         secret_ciphertext: encrypted_secret,
         secret_key_version: totp_key_version(),
         recovery_generation: recovery_generation,
+        last_used_step: nil,
         status: "active",
         enrolled_at: now,
         verified_at: now,
@@ -82,28 +101,51 @@ defmodule CodexPooler.Accounts.MFA do
     totp_code(secret, DateTime.utc_now())
   end
 
-  @spec verify_second_factor(User.t(), term(), term(), map()) :: :ok | {:error, atom()}
-  def verify_second_factor(%User{} = user, totp_code, recovery_code, metadata) do
-    setting = Repo.get_by(TOTPSetting, user_id: user.id, status: "active")
+  # Internal trusted clock, sampled after locking; browser/facade callers cannot supply it.
+  @type verification_option :: {:clock, (-> DateTime.t())}
 
+  @spec verify_second_factor(User.t(), term(), term(), map()) :: :ok | {:error, atom()}
+  @spec verify_second_factor(User.t(), term(), term(), map(), [verification_option()]) :: :ok | {:error, atom()}
+  def verify_second_factor(%User{} = user, totp_code, recovery_code, metadata, opts \\ []) do
+    Repo.transaction(fn ->
+      user = Repo.one(from u in User, where: u.id == ^user.id, lock: "FOR UPDATE")
+
+      unless match?(%User{status: "active", deleted_at: nil}, user), do: Repo.rollback(:invalid_credentials)
+
+      setting = Repo.get_by(TOTPSetting, user_id: user.id, status: "active")
+
+      case verify_setting(user, setting, totp_code, recovery_code, metadata, opts) do
+        :ok -> :ok
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+    |> case do
+      {:ok, :ok} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp verify_setting(_user, nil, _totp_code, _recovery_code, _metadata, _opts), do: :ok
+
+  defp verify_setting(user, setting, totp_code, recovery_code, metadata, opts) do
     cond do
-      is_nil(setting) ->
+      normalize_totp_code(totp_code) != "" -> consume_totp_code(setting, totp_code, opts)
+      normalize_recovery_code(recovery_code) != "" -> consume_recovery_code(user, setting, recovery_code, metadata)
+      true -> {:error, :totp_required}
+    end
+  end
+
+  defp consume_totp_code(setting, code, opts) do
+    secret = decrypt_totp_secret!(setting.secret_ciphertext)
+    now = Keyword.get(opts, :clock, &DateTime.utc_now/0).()
+
+    case matching_totp_step(secret, code, now) do
+      step when is_integer(step) and (is_nil(setting.last_used_step) or step > setting.last_used_step) ->
+        setting |> change(last_used_step: step, verified_at: now, updated_at: now) |> Repo.update!()
         :ok
 
-      normalize_totp_code(totp_code) != "" ->
-        secret = decrypt_totp_secret!(setting.secret_ciphertext)
-
-        if valid_totp_code?(secret, totp_code) do
-          :ok
-        else
-          {:error, :invalid_totp_code}
-        end
-
-      normalize_recovery_code(recovery_code) != "" ->
-        consume_recovery_code(user, setting, recovery_code, metadata)
-
-      true ->
-        {:error, :totp_required}
+      _ ->
+        {:error, :invalid_totp_code}
     end
   end
 
@@ -194,11 +236,19 @@ defmodule CodexPooler.Accounts.MFA do
         configured
 
       is_binary(configured) ->
+        :ok = validate_totp_encryption_key!(configured)
         Base.decode64!(configured)
 
-      true ->
+      local_totp_key_fallback?() ->
         :crypto.hash(:sha256, "codex-pooler-local-totp-key")
+
+      true ->
+        raise @invalid_totp_key_message
     end
+  end
+
+  defp local_totp_key_fallback? do
+    Code.ensure_loaded?(Mix) and function_exported?(Mix, :env, 0) and Mix.env() in [:dev, :test]
   end
 
   defp encrypt_totp_secret!(secret) do
@@ -243,13 +293,13 @@ defmodule CodexPooler.Accounts.MFA do
     Enum.join([left, mid, right], "-")
   end
 
-  defp valid_totp_code?(secret, code) do
+  defp matching_totp_step(secret, code, now) do
     normalized = normalize_totp_code(code)
-    now = DateTime.utc_now()
 
-    Enum.any?(-1..1, fn offset ->
-      expected = totp_code(secret, DateTime.add(now, offset * @totp_period_seconds, :second))
-      Plug.Crypto.secure_compare(expected, normalized)
+    # Pick the newest matching step before checking consumption, including rare code collisions.
+    Enum.find_value([1, 0, -1], fn offset ->
+      at = DateTime.add(now, offset * @totp_period_seconds, :second)
+      if Plug.Crypto.secure_compare(totp_code(secret, at), normalized), do: div(DateTime.to_unix(at), @totp_period_seconds)
     end)
   end
 

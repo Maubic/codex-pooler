@@ -28,10 +28,12 @@ defmodule CodexPooler.Platform.InstancePresence do
   `nonode@nohost` name proves nothing without a slot (`superseded?/1`). Presence is
   therefore safe to miss and never safe to invent.
 
-  The candidate window is eight heartbeat intervals and exceeds the rollout
-  drain budget. It is not an outage-safety guarantee. Recovery requires a
-  fresh observer; modern attempts additionally require exact death evidence.
-  Unreachable executions remain unknown and retain the six-hour fallback.
+  The 120-second candidate window is independent of the configured drain
+  budget, which may be longer. Recovery requires a fresh observer and separate
+  execution authority: live evidence vetoes recovery; unknown modern execution
+  needs supersession or a recorded forwarded-generation end. Durable terminal
+  proofs have their own recovery path. Legacy attempts retain weaker presence
+  checks, and unresolved work retains the six-hour stale-reservation fallback.
   """
 
   import Ecto.Query

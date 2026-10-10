@@ -584,18 +584,64 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
     }
   end
 
+  @spec receive_socket_push(map(), non_neg_integer()) :: tuple()
   def receive_socket_push(state, timeout_ms) do
-    receive do
-      {:codex_response_chunk, task_pid, frame} ->
-        result = CodexResponsesSocket.handle_info({:codex_response_chunk, task_pid, frame}, state)
+    await_socket_push(state, System.monotonic_time(:millisecond) + timeout_ms)
+  end
 
-        if StreamProtocol.internal_control_event?(frame) do
-          receive_socket_push(state, timeout_ms)
-        else
-          result
+  defp await_socket_push(state, deadline) do
+    receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_socket_push(state, deadline)
+
+      {:codex_response_chunk, _task_pid, frame} = message ->
+        case CodexResponsesSocket.handle_info(message, state) do
+          {:push, _push, state} = result ->
+            if StreamProtocol.internal_control_event?(frame), do: await_socket_push(state, deadline), else: result
+
+          {:ok, state} ->
+            await_socket_push(state, deadline)
+
+          result ->
+            result
         end
     after
-      timeout_ms -> flunk("expected websocket response chunk")
+      max(deadline - System.monotonic_time(:millisecond), 0) -> flunk("expected websocket response chunk")
+    end
+  end
+
+  # Drive setup callbacks until this provider's exact held boundary is reached;
+  # frames and results remain for the caller's existing assertions.
+  @spec receive_socket_upstream_barrier!(map(), {atom(), atom() | non_neg_integer(), reference()}, non_neg_integer()) :: {map(), pid()}
+  def receive_socket_upstream_barrier!(state, {tag, _phase, release_ref} = barrier, timeout_ms)
+      when tag in [:fake_upstream_chunk_barrier, :fake_upstream_timeout_barrier, :fake_upstream_websocket_barrier] and is_reference(release_ref) do
+    await_socket_upstream_barrier!(state, barrier, System.monotonic_time(:millisecond) + timeout_ms)
+  end
+
+  defp await_socket_upstream_barrier!(state, {tag, phase, release_ref} = barrier, deadline) do
+    receive do
+      {^tag, ^phase, provider, ^release_ref} when is_pid(provider) ->
+        {state, provider}
+
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        assert is_pid(state.native_response_steering)
+        await_socket_upstream_barrier!(state, barrier, deadline)
+
+      {:websocket_response_activity, _pid, _token} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_socket_upstream_barrier!(state, barrier, deadline)
+
+      {:websocket_owner_cleanup_witness, _correlation, _epoch, _task, _witness} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_socket_upstream_barrier!(state, barrier, deadline)
+
+      {:direct_request_cleanup, _pid, _ref, _receipt} = message ->
+        assert {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_socket_upstream_barrier!(state, barrier, deadline)
+    after
+      max(deadline - System.monotonic_time(:millisecond), 0) -> flunk("expected upstream websocket barrier #{tag} at #{phase}")
     end
   end
 
@@ -736,6 +782,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport do
 
   defp receive_native_turn_message(timeout_ms) do
     receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message -> message
       {:codex_response_chunk, _task_pid, _frame} = message -> message
       {:websocket_owner_frame, _, _, _, _} = message -> message
       {:websocket_owner_frame, _, _, _} = message -> message

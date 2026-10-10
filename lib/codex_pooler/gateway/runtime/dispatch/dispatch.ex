@@ -138,8 +138,13 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch do
         |> Map.put(:attempted_capacity_candidates, attempted_advice_candidates(context, attempted_id))
         |> Map.delete(:route_filter_dropped)
 
+      # The retry narrows the candidates and the capacity to what is left, never
+      # the saved-reset cohort: a redemption claim locks that cohort and refuses
+      # a consume while any account of it carries an applied consume younger
+      # than the protection period or one still being verified, including the
+      # account just attempted (findings#331).
       route_state =
-        %{context.route_state | candidates: remaining, saved_reset_auto_capacity: remaining, saved_reset_auto_cohort: remaining, extensions: extensions}
+        %{context.route_state | candidates: remaining, saved_reset_auto_capacity: remaining, extensions: extensions}
         |> RouteState.refresh_quota_snapshots()
         |> RouteState.preload_routing_snapshots(context.auth, context.model, context.request_options)
 

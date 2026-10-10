@@ -444,7 +444,7 @@ defmodule CodexPooler.Access.APIKeys do
   end
 
   def rotate_api_key(%Scope{} = scope, api_key_id) when is_binary(api_key_id),
-    do: APIKey |> Repo.get(api_key_id) |> then(&rotate_api_key(scope, &1))
+    do: api_key_id |> fetch_api_key_by_id() |> then(&rotate_api_key(scope, &1))
 
   def rotate_api_key(%Scope{}, _api_key),
     do: {:error, Errors.access_error(:api_key_not_found, "api key was not found")}
@@ -515,7 +515,7 @@ defmodule CodexPooler.Access.APIKeys do
   end
 
   def delete_api_key(%Scope{} = scope, api_key_id) when is_binary(api_key_id),
-    do: APIKey |> Repo.get(api_key_id) |> then(&delete_api_key(scope, &1))
+    do: api_key_id |> fetch_api_key_by_id() |> then(&delete_api_key(scope, &1))
 
   def delete_api_key(%Scope{}, _api_key),
     do: {:error, Errors.access_error(:api_key_not_found, "api key was not found")}
@@ -860,7 +860,23 @@ defmodule CodexPooler.Access.APIKeys do
     )
   end
 
-  defp prepare_lifecycle_status_transition(api_key_or_id, to_status) do
+  defp fetch_api_key_by_id(api_key_id) do
+    case Ecto.UUID.cast(api_key_id) do
+      {:ok, id} -> Repo.get(APIKey, id)
+      :error -> nil
+    end
+  end
+
+  defp prepare_lifecycle_status_transition(api_key_id, to_status) when is_binary(api_key_id) do
+    case Ecto.UUID.cast(api_key_id) do
+      {:ok, id} -> do_prepare_lifecycle_status_transition(id, to_status)
+      :error -> {:error, Errors.access_error(:api_key_not_found, "api key was not found")}
+    end
+  end
+
+  defp prepare_lifecycle_status_transition(api_key, to_status), do: do_prepare_lifecycle_status_transition(api_key, to_status)
+
+  defp do_prepare_lifecycle_status_transition(api_key_or_id, to_status) do
     case RuntimeAuthorization.prepare_status_transition(api_key_or_id, to_status) do
       {:error, %{code: :api_key_missing}} ->
         {:error, Errors.access_error(:api_key_not_found, "api key was not found")}

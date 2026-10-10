@@ -73,7 +73,7 @@ defmodule CodexPooler.Platform.Readiness do
   def check(opts \\ []) do
     now_ms = Keyword.get(opts, :now_ms, System.monotonic_time(:millisecond))
 
-    case probe(opts) do
+    case schema_status(opts) do
       :ok ->
         record_success(now_ms)
         :ready
@@ -129,7 +129,9 @@ defmodule CodexPooler.Platform.Readiness do
   # node ever been ready" fact is explicit rather than encoded as a sentinel.
   defp initial_state, do: %{ever_ready?: false, last_success_ms: 0}
 
-  defp probe(opts) do
+  @doc "Checks the image-required schema without accepting a previous success or connectivity grace."
+  @spec schema_status(keyword()) :: :ok | {:error, :schema | :connectivity, class()}
+  def schema_status(opts \\ []) do
     with {:ok, versions} <- expected_versions(opts) do
       {statement, params, required} = probe_statement(versions)
 

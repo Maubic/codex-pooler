@@ -44,10 +44,55 @@ test("publication queues every pending release and recovery steps also run for r
 		step("Require verified revision and select monotonic release aliases"),
 		/sleep |deadline=/,
 	);
-	assert.match(step("Build and push Docker image"), /image_action == 'build'/);
+	assert.match(
+		workflow,
+		/ {2}image:\n {4}needs: select\n {4}if: needs\.select\.outputs\.ready == 'true' && needs\.select\.outputs\.image_action == 'build'\n/,
+	);
 	assert.match(
 		step("Recover aliases from the existing immutable image"),
 		/image_action == 'reuse'/,
+	);
+});
+
+test("each platform is built natively and only the publish job tags the merged index", () => {
+	assert.match(workflow, /runner: ubuntu-24\.04-arm/);
+	assert.doesNotMatch(workflow, /setup-qemu-action/);
+	const build = step("Build and push the platform image by digest");
+	assert.match(build, /platforms: \$\{\{ matrix\.platform \}\}/);
+	assert.match(build, /push-by-digest=true,name-canonical=true,push=true/);
+	assert.match(
+		build,
+		/cache-to: type=gha,mode=max,scope=\$\{\{ matrix\.slug \}\},ignore-error=true/,
+		"a cache export failure must not fail a publication",
+	);
+	assert.doesNotMatch(build, /\n\s+tags:/, "a platform image is never tagged");
+	assert.match(workflow, / {2}publish:\n {4}needs: \[select, image\]\n/);
+	const publish = workflow.slice(workflow.indexOf("  publish:\n"));
+	assert.match(publish, /group: release-image-publication\n\s+queue: max/);
+	assert.doesNotMatch(
+		workflow.slice(0, workflow.indexOf("  publish:\n")),
+		/imagetools create/,
+		"only the publish job may tag",
+	);
+	const merge = step("Publish the multi-architecture image");
+	assert.match(merge, /image_action == 'build'/);
+	assert.match(merge, /Expected one digest per platform/);
+	assert.match(merge, /imagetools create/);
+});
+
+test("waking the chart repository follows the image and never blocks publication", () => {
+	const wake = step("Wake the Helm chart update");
+	assert.match(wake, /if: steps\.publication\.outputs\.ready == 'true'\n/);
+	assert.match(wake, /continue-on-error: true/);
+	assert.match(wake, /HELM_WAKE_TOKEN/);
+	assert.match(
+		wake,
+		/gh workflow run wake-renovate\.yml --repo icoretech\/helm/,
+	);
+	assert.ok(
+		workflow.indexOf("- name: Wake the Helm chart update") >
+			workflow.indexOf("- name: Upload release assets"),
+		"the wake must come after the image and its release assets",
 	);
 });
 
@@ -60,6 +105,8 @@ test("the actual release packaging step produces a readable archive, checksum an
 		"docker-compose.yml",
 		".env.example",
 		"scripts/self-host/generate-env.sh",
+		"scripts/self-host/totp-upgrade-preflight.sh",
+		"scripts/self-host/totp-upgrade-preflight.exs",
 	])
 		writeFileSync(join(root, file), `sample ${file}\n`);
 	const digest = `sha256:${"a".repeat(64)}`;
@@ -79,6 +126,17 @@ test("the actual release packaging step produces a readable archive, checksum an
 		encoding: "utf8",
 	});
 	assert.match(files, /scripts\/self-host\/generate-env.sh/);
+	for (const extension of ["sh", "exs"]) {
+		const file = `scripts/self-host/totp-upgrade-preflight.${extension}`;
+		assert.ok(files.split("\n").includes(`${base}/${file}`));
+		assert.equal(
+			execFileSync("tar", ["-xOzf", `dist/${base}.tar.gz`, `${base}/${file}`], {
+				cwd: root,
+				encoding: "utf8",
+			}),
+			readFileSync(join(root, file), "utf8"),
+		);
+	}
 	assert.match(files, /\.env.example/);
 	execFileSync("sha256sum", ["-c", `${base}.tar.gz.sha256`], {
 		cwd: join(root, "dist"),

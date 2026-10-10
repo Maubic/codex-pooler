@@ -1,9 +1,8 @@
 defmodule CodexPoolerWeb.McpController do
   use CodexPoolerWeb, :controller
 
-  alias CodexPooler.MCP
   alias CodexPooler.MCP.{ToolDispatch, ToolRegistry}
-  alias CodexPoolerWeb.Mcp.{Envelope, Headers, Protocol}
+  alias CodexPoolerWeb.Mcp.{Authentication, Envelope, Headers, Protocol}
 
   @allow "POST, OPTIONS"
   @server_name "codex-pooler"
@@ -24,7 +23,7 @@ defmodule CodexPoolerWeb.McpController do
          {:ok, message} <- read_message(conn),
          :ok <- validate_message(message),
          {:ok, era} <- ensure_protocol_version(conn, message),
-         {:ok, auth} <- authenticate(conn) do
+         {:ok, auth} <- Authentication.authenticate(conn) do
       dispatch_message(conn, message, auth, era)
     else
       {:error, status, body} when is_map(body) -> send_json_rpc_body(conn, status, body)
@@ -184,40 +183,6 @@ defmodule CodexPoolerWeb.McpController do
   end
 
   defp legacy_protocol_version?(version), do: version in Protocol.legacy_protocol_versions()
-
-  defp authenticate(conn) do
-    conn
-    |> bearer_token()
-    |> MCP.authenticate_token()
-    |> case do
-      {:ok, auth} -> {:ok, auth}
-      {:error, reason} -> mcp_auth_error(reason)
-    end
-  end
-
-  defp bearer_token(conn) do
-    with [authorization | _rest] <- get_req_header(conn, "authorization"),
-         "Bearer " <> token <- authorization do
-      String.trim(token)
-    else
-      _other -> nil
-    end
-  end
-
-  defp mcp_auth_error(%{code: code, message: message})
-       when code in [
-              :mcp_service_disabled,
-              :mcp_account_disabled,
-              :mcp_operator_deleted,
-              :mcp_operator_disabled,
-              :mcp_operator_password_change_required
-            ] do
-    {:error, 403, -32_000, message, nil}
-  end
-
-  defp mcp_auth_error(_reason) do
-    {:error, 401, -32_000, "MCP bearer token is required", nil}
-  end
 
   defp read_message(%Plug.Conn{private: %{mcp_json_parse_error: true}}) do
     {:error, 400, -32_700, "parse error", nil}

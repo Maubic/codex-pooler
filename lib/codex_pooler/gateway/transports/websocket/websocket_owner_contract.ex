@@ -10,6 +10,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract do
   alias CodexPooler.Gateway.Transports.Websocket.OwnerDefaults
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.CloseDiagnostics
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV9
 
   @type owner_key :: Ecto.UUID.t()
   @type owner_token :: Ecto.UUID.t()
@@ -17,7 +18,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract do
   @type downstream_epoch :: pos_integer()
   @type owner_turn_id :: pid()
   @type encoded_text_frame :: binary()
-  @type upstream_request :: WebsocketOwnerRequestV8.t()
+  @type upstream_request :: WebsocketOwnerRequestV8.t() | WebsocketOwnerRequestV9.t()
 
   @type owner_error ::
           :owner_unavailable
@@ -77,7 +78,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract do
   @type upstream_closed_signal :: %{
           required(:cause) => CloseDiagnostics.cause(),
           required(:lifecycle_id) => Ecto.UUID.t(),
-          required(:generation) => pos_integer()
+          required(:generation) => pos_integer(),
+          optional(:steering_peer_close) => {pid(), integer(), binary()}
         }
   @type upstream_closed_message ::
           {:websocket_owner_upstream_closed, correlation_id(), downstream_epoch(), upstream_closed_signal()}
@@ -403,21 +405,31 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract do
   The part of an upstream session's connection close signal the owner passes
   on to its downstream: a cause from
   `CloseDiagnostics.anchor_invalidating_causes/0`, the closed connection's
-  lifecycle id and its generation (findings#270). Anything else is refused.
+  lifecycle id and its generation (findings#270). A bounded native steering
+  peer-close detail may accompany the signal; invalid optional details are
+  discarded without losing the valid connection lifecycle signal.
 
   The cause is checked at run time against `CloseDiagnostics`, never against a
   copy of its list: a module attribute read from that module would make this
   contract a compile-connected dependency of it.
   """
   @spec upstream_closed_signal(term()) :: {:ok, upstream_closed_signal()} | :error
-  def upstream_closed_signal(%{cause: cause, lifecycle_id: lifecycle_id, generation: generation})
+  def upstream_closed_signal(%{cause: cause, lifecycle_id: lifecycle_id, generation: generation} = signal)
       when is_atom(cause) and is_binary(lifecycle_id) and is_integer(generation) and generation > 0 do
     if CloseDiagnostics.anchor_invalidating_cause?(cause) and uuid?(lifecycle_id),
-      do: {:ok, %{cause: cause, lifecycle_id: lifecycle_id, generation: generation}},
+      do: keep_steering_peer_close(Map.take(signal, [:cause, :lifecycle_id, :generation]), Map.fetch(signal, :steering_peer_close)),
       else: :error
   end
 
   def upstream_closed_signal(_signal), do: :error
+
+  defp keep_steering_peer_close(signal, :error), do: {:ok, signal}
+
+  defp keep_steering_peer_close(%{cause: :peer_close_frame} = signal, {:ok, {lane, code, reason} = detail}) when is_pid(lane) and code in 1000..4999 and is_binary(reason) and byte_size(reason) <= 123 do
+    if String.valid?(reason), do: {:ok, Map.put(signal, :steering_peer_close, detail)}, else: {:ok, signal}
+  end
+
+  defp keep_steering_peer_close(signal, _detail), do: {:ok, signal}
 
   @doc """
   The owner's instruction to its attached downstream that the upstream

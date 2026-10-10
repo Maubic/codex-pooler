@@ -1,4 +1,4 @@
-const HOLD_MS = 1000;
+const HOLD_MS = 500;
 const DRAIN_MS = 150;
 export const HOLD_RING_CIRCUMFERENCE = 75.4;
 

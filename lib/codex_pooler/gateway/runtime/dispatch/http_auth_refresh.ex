@@ -9,7 +9,10 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.HttpAuthRefresh do
   # only the last candidate finalizes a retryable public 503; a client-facing
   # 401 stays reserved for the Pooler's own API-key rejection.
 
+  import Ecto.Query
+
   alias CodexPooler.Accounting
+  alias CodexPooler.Accounting.{Attempt, Request}
   alias CodexPooler.Accounting.FailureResponse
   alias CodexPooler.Gateway.Runtime.Dispatch.AuthRefresh
   alias CodexPooler.Gateway.Runtime.Dispatch.ContentFilterBindingRefusal
@@ -22,6 +25,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.HttpAuthRefresh do
   alias CodexPooler.Gateway.Runtime.Finalization.SideEffects
   alias CodexPooler.Gateway.Runtime.Routing.DispatchLifecycle
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes
+  alias CodexPooler.Repo
 
   @compact_endpoint "/backend-api/codex/responses/compact"
   @error_kind "http_auth_refresh"
@@ -102,8 +106,15 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.HttpAuthRefresh do
     end
   end
 
-  defp record_metadata(context, metadata),
-    do: AuthRefresh.record_metadata(context, metadata, :merge_http_auth_refresh_metadata)
+  defp record_metadata(context, metadata) do
+    case AuthRefresh.record_metadata(context, metadata, :merge_http_auth_refresh_metadata) do
+      {:ok, refreshed_context} -> {:ok, refreshed_context}
+      {:error, reason} -> finalize_retry_accounting_failure(context, reason, :merge_http_auth_refresh_metadata)
+    end
+  rescue
+    error in [Postgrex.Error, DBConnection.ConnectionError] ->
+      finalize_retry_accounting_failure(context, error, :merge_http_auth_refresh_metadata)
+  end
 
   defp finish_refresh_follower(context, response) do
     if failover?(context) do
@@ -281,12 +292,37 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.HttpAuthRefresh do
         ContentFilterBindingRefusal.finalize_retry(context)
 
       {:error, reason} ->
-        FailureResponse.accounting_failure(
-          :create_same_identity_http_retry_attempt,
-          context.reserved.request,
-          context.attempt,
-          reason
-        )
+        finalize_retry_accounting_failure(context, reason)
+    end
+  rescue
+    error in [Postgrex.Error, DBConnection.ConnectionError] ->
+      finalize_retry_accounting_failure(context, error)
+  end
+
+  defp finalize_retry_accounting_failure(context, reason, operation \\ :create_same_identity_http_retry_attempt) do
+    {:error, error} = FailureResponse.accounting_failure(operation, context.reserved.request, context.attempt, reason)
+    attrs = SettlementAttrs.failure(context, error.status, error.code, error.message, %{}, latency_ms: elapsed_ms(context.started), before_finalize: fn -> complete_failed_retry_if_current(context) end)
+    _cleanup = cleanup_retry_accounting(context, attrs)
+    {:error, error}
+  end
+
+  defp cleanup_retry_accounting(context, attrs) do
+    AttemptSettlement.finalize_failure(context.reserved.request, context.attempt, attrs, context.request_options.runtime.session_owner_witness)
+  rescue
+    error in [Postgrex.Error, DBConnection.ConnectionError] ->
+      FailureResponse.accounting_failure(:cleanup_http_auth_refresh_accounting, context.reserved.request, context.attempt, error)
+  end
+
+  # The finalizer holds the request and attempt locks here. A later attempt or
+  # terminal writer owns its own state; cleanup must not replace that work.
+  defp complete_failed_retry_if_current(context) do
+    request = Repo.get!(Request, context.reserved.request.id)
+    latest_id = Repo.one(from attempt in Attempt, where: attempt.request_id == ^request.id, order_by: [desc: attempt.attempt_number], limit: 1, select: attempt.id)
+
+    if request.status in ["accepted", "in_progress"] and is_nil(request.completed_at) and latest_id == context.attempt.id do
+      DispatchLifecycle.neutral_completion(context)
+    else
+      {:error, :stale_http_auth_refresh_cleanup}
     end
   end
 

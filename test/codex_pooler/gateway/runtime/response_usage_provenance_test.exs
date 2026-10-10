@@ -6,6 +6,34 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageProvenanceTest d
   @usage %{"input_tokens" => 10, "output_tokens" => 2, "total_tokens" => 12}
   @nested %{"input_tokens" => 1_000, "output_tokens" => 200, "total_tokens" => 1_200}
 
+  test "reasoning is a subset of output across JSON, SSE and websocket aggregates" do
+    for output <- [0, 2], reasoning <- Enum.uniq([0, output, output + 1]), shape <- [:flat, :nested] do
+      usage = %{@usage | "output_tokens" => output, "total_tokens" => 10 + output}
+
+      usage =
+        case shape do
+          :flat -> Map.put(usage, "reasoning_tokens", reasoning)
+          :nested -> Map.put(usage, "output_tokens_details", %{"reasoning_tokens" => reasoning})
+        end
+
+      response = %{"status" => "completed", "usage" => usage}
+      event = %{"type" => "response.completed", "response" => response}
+
+      for parsed <- [
+            ResponseUsage.from_json(CodexPooler.JSON.encode!(response)),
+            ResponseUsage.from_sse(sse(event)),
+            ResponseUsage.from_websocket_body(CodexPooler.JSON.encode!(event))
+          ] do
+        if reasoning <= output do
+          assert %{status: "usage_known", reasoning_tokens: ^reasoning, output_tokens: ^output} = parsed
+        else
+          assert %{status: "usage_unknown", source: "invalid_usage_tokens"} = parsed
+          refute Map.has_key?(parsed, :reasoning_tokens)
+        end
+      end
+    end
+  end
+
   test "complete envelopes cannot borrow counters from null, arrays or nested fields" do
     for event <- [
           %{"usage" => nil, "other" => @nested},

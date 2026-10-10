@@ -641,6 +641,7 @@ defmodule CodexPooler.CatalogTest do
                "source_assignment_count" => 2,
                "successful_source_assignment_count" => 1,
                "failed_source_assignment_count" => 1,
+               "skipped_source_assignment_count" => 0,
                "failed_assignments" => [
                  %{
                    "assignment_id" => failed_assignment.id,

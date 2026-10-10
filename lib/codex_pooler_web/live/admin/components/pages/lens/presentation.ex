@@ -68,21 +68,21 @@ defmodule CodexPoolerWeb.Admin.LensPresentation do
             </thead>
             <tbody>
               <tr :for={attempt <- @history.attempts} id={"model-history-attempt-#{attempt.id}"}>
-                <td class="max-lg:col-span-2 max-lg:col-start-2 max-lg:row-start-1 max-lg:sm:col-span-1 max-lg:sm:col-start-2">
+                <td class="max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-1 max-lg:sm:col-span-1 max-lg:sm:col-start-1">
                   <.link navigate={~p"/admin/request-logs?#{%{selected_request_id: attempt.request_id}}"} class="link link-hover">Attempt {attempt.attempt_number}</.link><div class="text-xs text-base-content/60">{Calendar.strftime(attempt.started_at, "%m-%d %H:%M:%S")}</div>
                 </td>
-                <td class="min-w-0 max-lg:col-span-2 max-lg:col-start-2 max-lg:row-start-2 max-lg:sm:col-start-3 max-lg:sm:row-start-1">
+                <td class="min-w-0 max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-2 max-lg:sm:col-start-2 max-lg:sm:row-start-1">
                   {attempt.pool_name}
                   <div class="text-xs text-base-content/60">{attempt.upstream_label || "Unavailable"}</div>
                 </td>
-                <td class="max-lg:col-span-2 max-lg:col-start-2 max-lg:row-start-3 max-lg:sm:col-span-1 max-lg:sm:col-start-2 max-lg:sm:row-start-2">
+                <td class="max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-3 max-lg:sm:col-span-1 max-lg:sm:col-start-1 max-lg:sm:row-start-2">
                   <div class="text-xs"><span class="lg:sr-only">Sent: </span>{attempt.sent_model || "Unavailable"}</div><div class="text-xs"><span class="lg:sr-only">First report: </span>{attempt.served_model || "No model reported"}</div>
                 </td>
-                <td class="text-xs max-lg:col-span-2 max-lg:col-start-2 max-lg:row-start-4 max-lg:sm:col-start-3 max-lg:sm:row-start-2"><span class="lg:sr-only">Changed to: </span>{fact(attempt, "first_conflicting_model") || "Unavailable"}</td>
-                <td class="max-lg:col-span-2 max-lg:col-start-2 max-lg:row-start-5 max-lg:sm:col-span-1 max-lg:sm:col-start-2 max-lg:sm:row-start-3">
+                <td class="text-xs max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-4 max-lg:sm:col-start-2 max-lg:sm:row-start-2"><span class="lg:sr-only">Changed to: </span>{fact(attempt, "first_conflicting_model") || "Unavailable"}</td>
+                <td class="max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-5 max-lg:sm:col-span-1 max-lg:sm:col-start-1 max-lg:sm:row-start-3">
                   <div class="text-xs"><span :if={fact(attempt, "terminal_model")} class="lg:sr-only">Final report: </span>{fact(attempt, "terminal_model") || "No final model reported"}</div><div class="text-xs text-base-content/60">{fact(attempt, "terminal_status") || if(attempt.model_observation, do: "No final event recorded", else: "Not collected")}</div>
                 </td>
-                <td class="max-lg:col-span-2 max-lg:col-start-2 max-lg:row-start-6 max-lg:sm:col-start-3 max-lg:sm:row-start-3">
+                <td class="max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-6 max-lg:sm:col-start-2 max-lg:sm:row-start-3">
                   <div><span class="lg:sr-only">Recording: </span>{fact(attempt, "coverage") || "Not collected"}</div><div class={if(fact(attempt, "conflict") == true, do: "text-warning", else: "text-base-content/60")}>{conflict_label(fact(attempt, "conflict"))}</div>
                 </td>
               </tr>

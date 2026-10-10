@@ -7,6 +7,38 @@ defmodule CodexPooler.QuotasTest do
   @observed_at ~U[2026-09-07 10:00:00Z]
   @reset_at ~U[2026-09-07 11:00:00Z]
 
+  for {label, balance, expected} <- [
+        {"integer overflow", 9_223_372_036_854_775_808, nil},
+        {"string overflow", "9223372036854775808", nil},
+        {"float overflow", 1.0e20, nil},
+        {"exponent overflow", "1e20", nil},
+        {"integer maximum", 9_223_372_036_854_775_807, 9_223_372_036_854_775_807},
+        {"string maximum", "9223372036854775807", 9_223_372_036_854_775_807},
+        {"zero", 0, 0},
+        {"float rounding", 12.5, 13},
+        {"string rounding", "12.4", 12}
+      ] do
+    test "usage credit #{label} preserves windows with a storable balance" do
+      payload = Map.put(usage_payload(), "credits", %{"balance" => unquote(balance)})
+      assert {:ok, [evidence]} = Quotas.parse_codex_usage_payload(payload, @observed_at)
+      assert evidence.active_limit == unquote(expected)
+      assert evidence.credits == unquote(expected)
+      assert evidence.reset_at == @reset_at
+      assert Decimal.equal?(evidence.used_percent, 40)
+    end
+  end
+
+  for field <- [:credits, :active_limit] do
+    test "direct evidence rejects #{field} above the bigint boundary" do
+      assert {:ok, [evidence]} = Quotas.parse_codex_usage_payload(usage_payload(), @observed_at)
+      oversized = Map.put(evidence, unquote(field), 9_223_372_036_854_775_808)
+      assert {:error, errors} = Evidence.validate(oversized)
+      assert Map.has_key?(errors, unquote(field))
+      assert {:error, errors} = Evidence.new(Map.from_struct(oversized), @observed_at)
+      assert Map.has_key?(errors, unquote(field))
+    end
+  end
+
   test "normalizes string attributes and validates the resulting account evidence" do
     attrs = %{
       "window_kind" => " PRIMARY ",

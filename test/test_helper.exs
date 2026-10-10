@@ -35,6 +35,8 @@ ExUnit.start(
 )
 
 :ok = CodexPooler.TestDurationGuard.start!()
+# Writes each test file's wall time when `make test-fast` (or the caller) names an export file; see TestFileDurations.
+:ok = CodexPooler.TestFileDurations.start!()
 ExUnit.after_suite(fn _stats -> CodexPooler.TestProfiles.verify_loaded_unix_files!() end)
 
 # The cache process can start while the reset test database is still being

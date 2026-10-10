@@ -3,7 +3,7 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots do
 
   alias CodexPooler.Access.APIKey
   alias CodexPooler.Catalog.{Model, SyncRun}
-  alias CodexPooler.Dev.Seeds.DocsScreenshots.{Inventory, Traffic}
+  alias CodexPooler.Dev.Seeds.DocsScreenshots.{Inventory, Observatory, Presentation, Traffic}
   alias CodexPooler.Dev.Seeds.Full
   alias CodexPooler.Pools.{ModelServingOverride, Pool}
   alias CodexPooler.Repo
@@ -83,11 +83,14 @@ defmodule CodexPooler.Dev.Seeds.DocsScreenshots do
         audit_events: audit_events
       })
       |> Inventory.expand!()
+      |> Presentation.apply!()
 
-    Map.merge(result, %{
+    result
+    |> Map.merge(%{
       request_logs: Traffic.seed!(result),
       catalog_sync_runs: seed_catalog_sync_runs!(result.pools, result.models)
     })
+    |> Observatory.apply!()
   end
 
   defp update_pools!(pools) do

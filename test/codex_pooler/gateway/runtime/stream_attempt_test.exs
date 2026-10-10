@@ -3,6 +3,39 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamAttemptTest do
 
   alias CodexPooler.Gateway.Runtime.Streaming.StreamAttempt
 
+  test "retryable first events keep the same decision at every byte boundary" do
+    for type <- ["response.failed", "response.incomplete", "error"], ending <- ["\n", "\r\n"] do
+      code = if type == "response.incomplete", do: "stream_incomplete", else: "server_error"
+      payload = if type == "error", do: %{"type" => type, "error" => %{"code" => code}}, else: %{"type" => type, "response" => %{"error" => %{"code" => code}}}
+      block = "event: " <> type <> ending <> "data: " <> CodexPooler.JSON.encode!(payload) <> ending <> ending
+      assert {{:retry, expected}, _} = StreamAttempt.classify_first_event(block, StreamAttempt.first_event_state())
+
+      for offset <- 1..(byte_size(block) - 1) do
+        <<first::binary-size(^offset), rest::binary>> = block
+        {decision, state} = StreamAttempt.classify_first_event(first, StreamAttempt.first_event_state())
+        {actual, _} = if decision == :buffered, do: StreamAttempt.classify_first_event(rest, state), else: {decision, state}
+        assert actual == {:retry, expected}, "first-event decision changed for #{type} at offset #{offset}"
+      end
+    end
+  end
+
+  test "partial and malformed EOF candidates stay buffered without invented terminal codes" do
+    for bytes <- ["event: response.failed\n", "event: error\ndata: {", "event: response.incomplete\ndata: not-json"] do
+      assert {:buffered, state} = StreamAttempt.classify_first_event(bytes, StreamAttempt.first_event_state())
+      assert {:buffered, eof_state} = StreamAttempt.classify_first_event("", state)
+      refute eof_state.classified?
+      assert byte_size(eof_state.buffer) == byte_size(bytes)
+    end
+  end
+
+  test "complete data JSON without delimiter and direct JSON retain existing classification" do
+    json = CodexPooler.JSON.encode!(%{"type" => "error", "error" => %{"code" => "server_error"}})
+
+    for bytes <- [json, "event: error\ndata: " <> json] do
+      assert {{:retry, %{code: "server_error"}}, _} = StreamAttempt.classify_first_event(bytes, StreamAttempt.first_event_state())
+    end
+  end
+
   describe "classify_first_event/2" do
     test "buffers incomplete first SSE events before writing" do
       state = StreamAttempt.first_event_state()

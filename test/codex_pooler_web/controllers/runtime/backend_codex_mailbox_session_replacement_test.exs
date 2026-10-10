@@ -24,6 +24,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxSessionReplacementTest do
   @detection_budget 15_000
 
   @negative_mutations [:legacy_reason, :nonexpiry_close, :old_token_close, :earlier_creation, :foreign_key, :wrong_model, :epoch, :changed_prefix, :retry_window]
+  # A comprehension expands and compiles a test's body once per generated test, so a loop that generates more than a few tests keeps
+  # the scenario in a private function below it and each generated test is one call.
   for mode <- ["full", "lite"], {carrier, state} <- [{:http, :same_session}, {:http, :replacement_fresh}, {:http, :replacement_engaged}, {:ws_direct, :replacement_fresh}, {:ws_owner, :replacement_fresh}] ++ Enum.map(@negative_mutations, &{:http, {:negative, &1}}) do
     replacement? = state != :same_session
 
@@ -40,168 +42,174 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxSessionReplacementTest do
     if mutation, do: @tag(mailbox_replacement_negative: true)
     @tag mode: mode, carrier: carrier, replacement?: replacement?, engaged?: state == :replacement_engaged, mutation: mutation
     test "#{mode} #{carrier} mailbox continuation #{inspect(state)}", context do
-      # provenance: synthetic_adversarial; positive expiry cases use HTTP
-      # settlement, real lease renewal and a database-observed deadline crossing.
-      # The nonexpiry control seeds idle retirement inputs for the actual cleanup writer.
-      output = %{"type" => "reasoning", "id" => "rs_synthetic_mailbox", "summary" => [], "encrypted_content" => "synthetic_reasoning"}
-      completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_mailbox_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
-      first_stream = FakeUpstream.sse_stream([{"response.output_item.done", %{"type" => "response.output_item.done", "item" => output}}, {"response.completed", completed}])
-      remaining = List.duplicate(FakeUpstream.sse_stream([{"response.completed", completed}]), if(context.engaged?, do: 2, else: 1))
-      upstream = start_upstream(FakeUpstream.strict_sequence([first_stream | remaining]))
-      setup = gateway_setup(upstream, compact?: true)
-      CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
-      Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, context.carrier == :ws_owner)
-      set_model_serving_mode!(model_serving_scope(), setup, context.mode)
-      thread = Ecto.UUID.generate()
-      Process.put({__MODULE__, :include_turn_state_header}, context.carrier != :http)
-      input = native_text_input("synthetic")
-      payload = payload(setup, thread, input)
+      assert_mailbox_continuation!(context)
+    end
+  end
 
-      Process.put({GatewayControllerHelpers, :owner_liveness_test_options}, %{bridge_owner_lease_ttl_seconds: 30, session_lease_heartbeat_test_observer: self()})
-      first_response = send_request(setup, thread, payload, context.mode)
-      assert first_response.status == 200
-      assert_receive {:session_lease_heartbeat, :started, heartbeat}, @detection_budget
-      monitor = Process.monitor(heartbeat)
-      assert_receive {:session_lease_heartbeat, :stopped, ^heartbeat}, @detection_budget
-      assert_receive {:DOWN, ^monitor, :process, ^heartbeat, _reason}, @detection_budget
+  # Reason: the body of a generated test; its branches select the matrix case.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp assert_mailbox_continuation!(context) do
+    # provenance: synthetic_adversarial; positive expiry cases use HTTP
+    # settlement, real lease renewal and a database-observed deadline crossing.
+    # The nonexpiry control seeds idle retirement inputs for the actual cleanup writer.
+    output = %{"type" => "reasoning", "id" => "rs_synthetic_mailbox", "summary" => [], "encrypted_content" => "synthetic_reasoning"}
+    completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_mailbox_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+    first_stream = FakeUpstream.sse_stream([{"response.output_item.done", %{"type" => "response.output_item.done", "item" => output}}, {"response.completed", completed}])
+    remaining = List.duplicate(FakeUpstream.sse_stream([{"response.completed", completed}]), if(context.engaged?, do: 2, else: 1))
+    upstream = start_upstream(FakeUpstream.strict_sequence([first_stream | remaining]))
+    setup = gateway_setup(upstream, compact?: true)
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, context.carrier == :ws_owner)
+    set_model_serving_mode!(model_serving_scope(), setup, context.mode)
+    thread = Ecto.UUID.generate()
+    Process.put({__MODULE__, :include_turn_state_header}, context.carrier != :http)
+    input = native_text_input("synthetic")
+    payload = payload(setup, thread, input)
 
-      first = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id)
-      attempt = Repo.get_by!(Attempt, request_id: first.id)
-      turn = Repo.get_by!(CodexTurn, request_id: first.id)
-      session = Repo.get!(CodexSession, turn.codex_session_id)
-      assert {first.status, attempt.status, turn.status} == {"succeeded", "succeeded", "succeeded"}
-      assert attempt.transport == "http_sse"
-      assert first.request_metadata["native_http_claim_arm"] == "opening"
-      assert get_in(attempt.response_metadata, ["native_http_mailbox_prefix", "output_item_done_count"]) == 1
-      assert_settled_once!(first.id)
+    Process.put({GatewayControllerHelpers, :owner_liveness_test_options}, %{bridge_owner_lease_ttl_seconds: 30, session_lease_heartbeat_test_observer: self()})
+    first_response = send_request(setup, thread, payload, context.mode)
+    assert first_response.status == 200
+    assert_receive {:session_lease_heartbeat, :started, heartbeat}, @detection_budget
+    monitor = Process.monitor(heartbeat)
+    assert_receive {:session_lease_heartbeat, :stopped, ^heartbeat}, @detection_budget
+    assert_receive {:DOWN, ^monitor, :process, ^heartbeat, _reason}, @detection_budget
 
-      if context.mutation == :nonexpiry_close do
-        # Retired-session cleanup is a real nonexpiry close writer. Its inputs
-        # are an idle, alias-free fixture whose lease has already been retired.
-        ttl = OperationalSettings.current().expired_alias_ttl_seconds
-        {:ok, %{rows: [[now]]}} = Repo.query("SELECT clock_timestamp()")
-        Repo.delete_all(from(l in BridgeOwnerLease, where: l.codex_session_id == ^session.id))
-        Repo.delete_all(from(a in BridgeSessionAlias, where: a.codex_session_id == ^session.id))
-        Repo.update_all(from(s in CodexSession, where: s.id == ^session.id), set: [owner_lease_expires_at: DateTime.add(now, -ttl - 1, :second)])
-        assert {:ok, %{closed_retired_sessions: 1}} = RuntimeCleanup.cleanup_expired(now)
-        closed = Repo.get!(CodexSession, session.id)
-        assert closed.status == "closed"
-        assert is_nil(closed.close_reason)
-      else
-        if context.replacement? do
-          # Only the idle, completed fixture lease is shortened through the real
-          # renewal API. The request's pre-dispatch acquisition retains 30 seconds.
-          options = RequestOptions.build([bridge_owner_lease_ttl_seconds: 1], @path, %{})
-          assert {:ok, renewed} = SessionContinuity.renew_owner_token(session, session.owner_lease_token, options)
-          lease = Repo.get_by!(BridgeOwnerLease, codex_session_id: session.id, status: "active")
-          assert renewed.owner_lease_expires_at == lease.expires_at
-          assert DateTime.diff(lease.expires_at, lease.renewed_at, :microsecond) == 1_000_000
-          await_expiry!(session.id, System.monotonic_time(:millisecond) + @detection_budget)
-        end
-      end
+    first = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id)
+    attempt = Repo.get_by!(Attempt, request_id: first.id)
+    turn = Repo.get_by!(CodexTurn, request_id: first.id)
+    session = Repo.get!(CodexSession, turn.codex_session_id)
+    assert {first.status, attempt.status, turn.status} == {"succeeded", "succeeded", "succeeded"}
+    assert attempt.transport == "http_sse"
+    assert first.request_metadata["native_http_claim_arm"] == "opening"
+    assert get_in(attempt.response_metadata, ["native_http_mailbox_prefix", "output_item_done_count"]) == 1
+    assert_settled_once!(first.id)
 
-      control =
-        if context.engaged? do
-          document = payload["client_metadata"]["x-codex-turn-metadata"] |> CodexPooler.JSON.decode!() |> Map.put("turn_id", "synthetic_independent_control") |> CodexPooler.JSON.encode!()
-          independent = %{payload | "input" => native_text_input("synthetic independent control"), "client_metadata" => %{"x-codex-turn-metadata" => document}}
-          assert send_request(setup, thread, independent, context.mode).status == 200
-          control = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id and r.id != ^first.id)
-          control_turn = Repo.get_by!(CodexTurn, request_id: control.id)
-          assert control_turn.codex_session_id != session.id
-          assert control_turn.status == "succeeded"
-          refute Map.has_key?(control.request_metadata, "client_resend")
-          assert_settled_once!(control.id)
-          control
-        end
-
-      mailbox = %{"type" => "agent_message", "author" => "/root/worker", "recipient" => "/root", "content" => [%{"type" => "input_text", "text" => "synthetic update"}]}
-      continuation = Map.put(payload, "input", input ++ [Map.put(output, "content", nil), mailbox])
-
-      continuation =
-        if context.mutation do
-          {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
-          assert {:ok, replacement} = SessionContinuity.start_codex_session(auth, RequestOptions.for_websocket(%{session_key: session.session_key}))
-          assert replacement.id != session.id
-          mutate_replacement!(context.mutation, setup, session, replacement, first, continuation)
-        else
-          continuation
-        end
-
-      before = pool_counts(setup.pool.id)
-      trace = start_admission_trace!()
-      {response, logs} = with_info_log(fn -> send_carrier_request(setup, thread, continuation, context.mode, context.carrier) end)
-      calls = stop_admission_trace!(trace)
-      assert Map.get(calls, {FailedPredecessorResend, :resolve, 2}, 0) >= 1
-
-      if context.mutation == :wrong_model do
-        assert Map.get(calls, {ClientRetry, :mailbox_check_for_session, 7}, 0) == 0
-      else
-        assert Map.get(calls, {ClientRetry, :mailbox_check_for_session, 7}, 0) >= 1
-      end
-
-      assert Map.get(calls, {ClientRetry, :preflight_snapshot, 4}, 0) == 0
-      assert Map.get(calls, {ClientRetry, :lock_eligible_predecessor!, 4}, 0) == 0
-      status = carrier_status(response)
-      await_completed_pool!(setup.pool.id, System.monotonic_time(:millisecond) + @detection_budget)
-      old_session = Repo.get!(CodexSession, session.id)
-      sessions = Repo.all(from s in CodexSession, where: s.pool_id == ^setup.pool.id)
-
+    if context.mutation == :nonexpiry_close do
+      # Retired-session cleanup is a real nonexpiry close writer. Its inputs
+      # are an idle, alias-free fixture whose lease has already been retired.
+      ttl = OperationalSettings.current().expired_alias_ttl_seconds
+      {:ok, %{rows: [[now]]}} = Repo.query("SELECT clock_timestamp()")
+      Repo.delete_all(from(l in BridgeOwnerLease, where: l.codex_session_id == ^session.id))
+      Repo.delete_all(from(a in BridgeSessionAlias, where: a.codex_session_id == ^session.id))
+      Repo.update_all(from(s in CodexSession, where: s.id == ^session.id), set: [owner_lease_expires_at: DateTime.add(now, -ttl - 1, :second)])
+      assert {:ok, %{closed_retired_sessions: 1}} = RuntimeCleanup.cleanup_expired(now)
+      closed = Repo.get!(CodexSession, session.id)
+      assert closed.status == "closed"
+      assert is_nil(closed.close_reason)
+    else
       if context.replacement? do
-        assert old_session.status == "closed"
-        assert DateTime.compare(old_session.owner_lease_expires_at, old_session.closed_at) in [:lt, :eq]
-        assert length(sessions) == 2
-        replacement = Enum.find(sessions, &(&1.id != session.id))
-        assert replacement.session_key == session.session_key
-        if context.mutation == :earlier_creation, do: assert(DateTime.compare(replacement.created_at, old_session.closed_at) == :lt), else: assert(DateTime.compare(replacement.created_at, old_session.closed_at) in [:gt, :eq])
-      else
-        assert length(sessions) == 1
-        assert old_session.status == "active"
+        # Only the idle, completed fixture lease is shortened through the real
+        # renewal API. The request's pre-dispatch acquisition retains 30 seconds.
+        options = RequestOptions.build([bridge_owner_lease_ttl_seconds: 1], @path, %{})
+        assert {:ok, renewed} = SessionContinuity.renew_owner_token(session, session.owner_lease_token, options)
+        lease = Repo.get_by!(BridgeOwnerLease, codex_session_id: session.id, status: "active")
+        assert renewed.owner_lease_expires_at == lease.expires_at
+        assert DateTime.diff(lease.expires_at, lease.renewed_at, :microsecond) == 1_000_000
+        await_expiry!(session.id, System.monotonic_time(:millisecond) + @detection_budget)
+      end
+    end
+
+    control =
+      if context.engaged? do
+        document = payload["client_metadata"]["x-codex-turn-metadata"] |> CodexPooler.JSON.decode!() |> Map.put("turn_id", "synthetic_independent_control") |> CodexPooler.JSON.encode!()
+        independent = %{payload | "input" => native_text_input("synthetic independent control"), "client_metadata" => %{"x-codex-turn-metadata" => document}}
+        assert send_request(setup, thread, independent, context.mode).status == 200
+        control = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id and r.id != ^first.id)
+        control_turn = Repo.get_by!(CodexTurn, request_id: control.id)
+        assert control_turn.codex_session_id != session.id
+        assert control_turn.status == "succeeded"
+        refute Map.has_key?(control.request_metadata, "client_resend")
+        assert_settled_once!(control.id)
+        control
       end
 
-      terminal_predecessor? = String.contains?(logs, "resend_disposition=terminal_predecessor")
+    mailbox = %{"type" => "agent_message", "author" => "/root/worker", "recipient" => "/root", "content" => [%{"type" => "input_text", "text" => "synthetic update"}]}
+    continuation = Map.put(payload, "input", input ++ [Map.put(output, "content", nil), mailbox])
 
-      if status == 409 do
-        if is_nil(context.mutation), do: assert(terminal_predecessor?)
-        assert FakeUpstream.count(upstream) == 1
-        assert Repo.aggregate(from(l in RequestClientRetryLink, where: l.predecessor_request_id == ^first.id), :count) == 0
-        assert Repo.aggregate(from(r in Request, where: r.pool_id == ^setup.pool.id), :count) == 1
-        assert_settled_once!(first.id)
-      end
-
-      CodexPooler.TestDiagnostics.puts(fn ->
-        CodexPooler.JSON.encode!(%{scenario: "mailbox_session_replacement", carrier: context.carrier, mode: context.mode, mutation: context.mutation, replacement: context.replacement?, engaged: context.engaged?, actual_expiry_observed: context.replacement? and context.mutation != :nonexpiry_close, nonexpiry_writer: if(context.mutation == :nonexpiry_close, do: "retired_session_cleanup"), status: status, terminal_predecessor: terminal_predecessor?, sessions: length(sessions), physical_dispatches: FakeUpstream.count(upstream), original_settlements: 1, admission_calls: Enum.map(calls, fn {{module, function, arity}, count} -> %{module: Atom.to_string(module), function: Atom.to_string(function), arity: arity, count: count} end)})
-      end)
-
+    continuation =
       if context.mutation do
-        assert status == 409
-        assert pool_counts(setup.pool.id) == before
-        assert FakeUpstream.count(upstream) == 1
-
-        stage =
-          case context.mutation do
-            :epoch -> "authorization"
-            :changed_prefix -> "witness"
-            :retry_window -> "verified"
-            _authority -> "session"
-          end
-
-        assert logs =~ "mailbox_check=#{stage}"
+        {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
+        assert {:ok, replacement} = SessionContinuity.start_codex_session(auth, RequestOptions.for_websocket(%{session_key: session.session_key}))
+        assert replacement.id != session.id
+        mutate_replacement!(context.mutation, setup, session, replacement, first, continuation)
       else
-        assert status == 200, "mailbox admission must succeed after verified output and session lifecycle; terminal_predecessor=#{terminal_predecessor?}"
-        refute terminal_predecessor?
-        admitted = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id and fragment("?->'client_resend'->>'predecessor_request_id'", r.request_metadata) == ^first.id)
-        admitted_turn = Repo.get_by!(CodexTurn, request_id: admitted.id)
-        assert admitted.status == "succeeded"
-        assert admitted_turn.codex_session_id != session.id == context.replacement?
-        assert admitted.request_metadata["client_resend"]["predecessor_request_id"] == first.id
-        assert Repo.aggregate(from(l in RequestClientRetryLink, where: l.predecessor_request_id == ^first.id and l.successor_request_id == ^admitted.id), :count) == 1
-        assert_settled_once!(admitted.id)
-        expected_dispatches = if control, do: 3, else: 2
-        assert FakeUpstream.count(upstream) == expected_dispatches
-        assert Repo.aggregate(from(r in Request, where: r.pool_id == ^setup.pool.id), :count) == expected_dispatches
-        assert Repo.aggregate(from(a in Attempt, join: r in Request, on: r.id == a.request_id, where: r.pool_id == ^setup.pool.id), :count) == expected_dispatches
-        assert Repo.aggregate(from(l in LedgerEntry, join: r in Request, on: r.id == l.request_id, where: r.pool_id == ^setup.pool.id and l.entry_kind == "settlement"), :count) == expected_dispatches
+        continuation
       end
+
+    before = pool_counts(setup.pool.id)
+    trace = start_admission_trace!()
+    {response, logs} = with_info_log(fn -> send_carrier_request(setup, thread, continuation, context.mode, context.carrier) end)
+    calls = stop_admission_trace!(trace)
+    assert Map.get(calls, {FailedPredecessorResend, :resolve, 2}, 0) >= 1
+
+    if context.mutation == :wrong_model do
+      assert Map.get(calls, {ClientRetry, :mailbox_check_for_session, 7}, 0) == 0
+    else
+      assert Map.get(calls, {ClientRetry, :mailbox_check_for_session, 7}, 0) >= 1
+    end
+
+    assert Map.get(calls, {ClientRetry, :preflight_snapshot, 4}, 0) == 0
+    assert Map.get(calls, {ClientRetry, :lock_eligible_predecessor!, 4}, 0) == 0
+    status = carrier_status(response)
+    await_completed_pool!(setup.pool.id, System.monotonic_time(:millisecond) + @detection_budget)
+    old_session = Repo.get!(CodexSession, session.id)
+    sessions = Repo.all(from s in CodexSession, where: s.pool_id == ^setup.pool.id)
+
+    if context.replacement? do
+      assert old_session.status == "closed"
+      assert DateTime.compare(old_session.owner_lease_expires_at, old_session.closed_at) in [:lt, :eq]
+      assert length(sessions) == 2
+      replacement = Enum.find(sessions, &(&1.id != session.id))
+      assert replacement.session_key == session.session_key
+      if context.mutation == :earlier_creation, do: assert(DateTime.compare(replacement.created_at, old_session.closed_at) == :lt), else: assert(DateTime.compare(replacement.created_at, old_session.closed_at) in [:gt, :eq])
+    else
+      assert length(sessions) == 1
+      assert old_session.status == "active"
+    end
+
+    terminal_predecessor? = String.contains?(logs, "resend_disposition=terminal_predecessor")
+
+    if status == 409 do
+      if is_nil(context.mutation), do: assert(terminal_predecessor?)
+      assert FakeUpstream.count(upstream) == 1
+      assert Repo.aggregate(from(l in RequestClientRetryLink, where: l.predecessor_request_id == ^first.id), :count) == 0
+      assert Repo.aggregate(from(r in Request, where: r.pool_id == ^setup.pool.id), :count) == 1
+      assert_settled_once!(first.id)
+    end
+
+    CodexPooler.TestDiagnostics.puts(fn ->
+      CodexPooler.JSON.encode!(%{scenario: "mailbox_session_replacement", carrier: context.carrier, mode: context.mode, mutation: context.mutation, replacement: context.replacement?, engaged: context.engaged?, actual_expiry_observed: context.replacement? and context.mutation != :nonexpiry_close, nonexpiry_writer: if(context.mutation == :nonexpiry_close, do: "retired_session_cleanup"), status: status, terminal_predecessor: terminal_predecessor?, sessions: length(sessions), physical_dispatches: FakeUpstream.count(upstream), original_settlements: 1, admission_calls: Enum.map(calls, fn {{module, function, arity}, count} -> %{module: Atom.to_string(module), function: Atom.to_string(function), arity: arity, count: count} end)})
+    end)
+
+    if context.mutation do
+      assert status == 409
+      assert pool_counts(setup.pool.id) == before
+      assert FakeUpstream.count(upstream) == 1
+
+      stage =
+        case context.mutation do
+          :epoch -> "authorization"
+          :changed_prefix -> "witness"
+          :retry_window -> "verified"
+          _authority -> "session"
+        end
+
+      assert logs =~ "mailbox_check=#{stage}"
+    else
+      assert status == 200, "mailbox admission must succeed after verified output and session lifecycle; terminal_predecessor=#{terminal_predecessor?}"
+      refute terminal_predecessor?
+      admitted = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id and fragment("?->'client_resend'->>'predecessor_request_id'", r.request_metadata) == ^first.id)
+      admitted_turn = Repo.get_by!(CodexTurn, request_id: admitted.id)
+      assert admitted.status == "succeeded"
+      assert admitted_turn.codex_session_id != session.id == context.replacement?
+      assert admitted.request_metadata["client_resend"]["predecessor_request_id"] == first.id
+      assert Repo.aggregate(from(l in RequestClientRetryLink, where: l.predecessor_request_id == ^first.id and l.successor_request_id == ^admitted.id), :count) == 1
+      assert_settled_once!(admitted.id)
+      expected_dispatches = if control, do: 3, else: 2
+      assert FakeUpstream.count(upstream) == expected_dispatches
+      assert Repo.aggregate(from(r in Request, where: r.pool_id == ^setup.pool.id), :count) == expected_dispatches
+      assert Repo.aggregate(from(a in Attempt, join: r in Request, on: r.id == a.request_id, where: r.pool_id == ^setup.pool.id), :count) == expected_dispatches
+      assert Repo.aggregate(from(l in LedgerEntry, join: r in Request, on: r.id == l.request_id, where: r.pool_id == ^setup.pool.id and l.entry_kind == "settlement"), :count) == expected_dispatches
     end
   end
 
@@ -209,55 +217,58 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexMailboxSessionReplacementTest do
     @tag mailbox_replacement_negative: true
     @tag slow: "observes real lease expiry and holds unrelated replacement generation at a provider frame barrier"
     test "#{mode} active unrelated replacement work is refused without an extra dispatch" do
-      mode = unquote(mode)
-      output = %{"type" => "reasoning", "id" => "rs_synthetic_active", "summary" => [], "encrypted_content" => "synthetic_reasoning"}
-      completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_active_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
-      ref = make_ref()
-      first_stream = FakeUpstream.sse_stream([{"response.output_item.done", %{"type" => "response.output_item.done", "item" => output}}, {"response.completed", completed}])
-      control_stream = FakeUpstream.barrier_sse_stream([{"response.created", %{"type" => "response.created", "response" => %{"id" => "resp_synthetic_control"}}}, {"response.completed", completed}], notify: self(), release_ref: ref, barrier_after: 1)
-      upstream = start_upstream(FakeUpstream.strict_sequence([first_stream, control_stream]))
-      setup = gateway_setup(upstream, compact?: true)
-      set_model_serving_mode!(model_serving_scope(), setup, mode)
-      thread = Ecto.UUID.generate()
-      input = native_text_input("synthetic")
-      opening = payload(setup, thread, input)
-      Process.put({GatewayControllerHelpers, :owner_liveness_test_options}, %{bridge_owner_lease_ttl_seconds: 30, session_lease_heartbeat_test_observer: self()})
-      assert send_request(setup, thread, opening, mode).status == 200
-      assert_receive {:session_lease_heartbeat, :started, heartbeat}, @detection_budget
-      monitor = Process.monitor(heartbeat)
-      assert_receive {:session_lease_heartbeat, :stopped, ^heartbeat}, @detection_budget
-      assert_receive {:DOWN, ^monitor, :process, ^heartbeat, _}, @detection_budget
-      original = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id)
-      old_turn = Repo.get_by!(CodexTurn, request_id: original.id)
-      old = Repo.get!(CodexSession, old_turn.codex_session_id)
-      assert {:ok, _} = SessionContinuity.renew_owner_token(old, old.owner_lease_token, RequestOptions.for_websocket(%{bridge_owner_lease_ttl_seconds: 1}))
-      await_expiry!(old.id, System.monotonic_time(:millisecond) + @detection_budget)
-      document = opening["client_metadata"]["x-codex-turn-metadata"] |> CodexPooler.JSON.decode!() |> Map.put("turn_id", "synthetic_live_control") |> CodexPooler.JSON.encode!()
-      control_payload = %{opening | "input" => native_text_input("synthetic unrelated live control"), "client_metadata" => %{"x-codex-turn-metadata" => document}}
-      control = Task.async(fn -> send_request(setup, thread, control_payload, mode) end)
-      control_monitor = Process.monitor(control.pid)
-      on_exit(fn -> if Process.alive?(control.pid), do: Process.exit(control.pid, :kill) end)
-      assert_receive {:fake_upstream_chunk_barrier, 1, handler, ^ref}, @detection_budget
-      on_exit(fn -> send(handler, {:fake_upstream_release_chunk, ref}) end)
-      live = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id and r.id != ^original.id)
-      live_turn = Repo.get_by!(CodexTurn, request_id: live.id)
-      assert live_turn.codex_session_id != old.id
-      assert live_turn.status == "in_progress"
-      before = pool_counts(setup.pool.id)
-      mailbox = %{"type" => "agent_message", "author" => "/root/worker", "recipient" => "/root", "content" => [%{"type" => "input_text", "text" => "synthetic update"}]}
-      continuation = %{opening | "input" => input ++ [output, mailbox]}
-      {refusal, logs} = with_info_log(fn -> send_request(setup, thread, continuation, mode) end)
-      assert refusal.status == 409
-      assert logs =~ "mailbox_check=session"
-      assert pool_counts(setup.pool.id) == before
-      assert FakeUpstream.count(upstream) == 2
-      send(handler, {:fake_upstream_release_chunk, ref})
-      assert Task.await(control, @detection_budget).status == 200
-      assert_receive {:DOWN, ^control_monitor, :process, _, :normal}, @detection_budget
-      assert_settled_once!(original.id)
-      assert_settled_once!(live.id)
-      assert Repo.aggregate(from(l in RequestClientRetryLink, where: l.predecessor_request_id == ^original.id), :count) == 0
+      assert_active_unrelated_work_refused!(unquote(mode))
     end
+  end
+
+  defp assert_active_unrelated_work_refused!(mode) do
+    output = %{"type" => "reasoning", "id" => "rs_synthetic_active", "summary" => [], "encrypted_content" => "synthetic_reasoning"}
+    completed = %{"type" => "response.completed", "response" => %{"id" => "resp_synthetic_active_complete", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 10, "output_tokens" => 1, "total_tokens" => 11}}}
+    ref = make_ref()
+    first_stream = FakeUpstream.sse_stream([{"response.output_item.done", %{"type" => "response.output_item.done", "item" => output}}, {"response.completed", completed}])
+    control_stream = FakeUpstream.barrier_sse_stream([{"response.created", %{"type" => "response.created", "response" => %{"id" => "resp_synthetic_control"}}}, {"response.completed", completed}], notify: self(), release_ref: ref, barrier_after: 1)
+    upstream = start_upstream(FakeUpstream.strict_sequence([first_stream, control_stream]))
+    setup = gateway_setup(upstream, compact?: true)
+    set_model_serving_mode!(model_serving_scope(), setup, mode)
+    thread = Ecto.UUID.generate()
+    input = native_text_input("synthetic")
+    opening = payload(setup, thread, input)
+    Process.put({GatewayControllerHelpers, :owner_liveness_test_options}, %{bridge_owner_lease_ttl_seconds: 30, session_lease_heartbeat_test_observer: self()})
+    assert send_request(setup, thread, opening, mode).status == 200
+    assert_receive {:session_lease_heartbeat, :started, heartbeat}, @detection_budget
+    monitor = Process.monitor(heartbeat)
+    assert_receive {:session_lease_heartbeat, :stopped, ^heartbeat}, @detection_budget
+    assert_receive {:DOWN, ^monitor, :process, ^heartbeat, _}, @detection_budget
+    original = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id)
+    old_turn = Repo.get_by!(CodexTurn, request_id: original.id)
+    old = Repo.get!(CodexSession, old_turn.codex_session_id)
+    assert {:ok, _} = SessionContinuity.renew_owner_token(old, old.owner_lease_token, RequestOptions.for_websocket(%{bridge_owner_lease_ttl_seconds: 1}))
+    await_expiry!(old.id, System.monotonic_time(:millisecond) + @detection_budget)
+    document = opening["client_metadata"]["x-codex-turn-metadata"] |> CodexPooler.JSON.decode!() |> Map.put("turn_id", "synthetic_live_control") |> CodexPooler.JSON.encode!()
+    control_payload = %{opening | "input" => native_text_input("synthetic unrelated live control"), "client_metadata" => %{"x-codex-turn-metadata" => document}}
+    control = Task.async(fn -> send_request(setup, thread, control_payload, mode) end)
+    control_monitor = Process.monitor(control.pid)
+    on_exit(fn -> if Process.alive?(control.pid), do: Process.exit(control.pid, :kill) end)
+    assert_receive {:fake_upstream_chunk_barrier, 1, handler, ^ref}, @detection_budget
+    on_exit(fn -> send(handler, {:fake_upstream_release_chunk, ref}) end)
+    live = Repo.one!(from r in Request, where: r.pool_id == ^setup.pool.id and r.id != ^original.id)
+    live_turn = Repo.get_by!(CodexTurn, request_id: live.id)
+    assert live_turn.codex_session_id != old.id
+    assert live_turn.status == "in_progress"
+    before = pool_counts(setup.pool.id)
+    mailbox = %{"type" => "agent_message", "author" => "/root/worker", "recipient" => "/root", "content" => [%{"type" => "input_text", "text" => "synthetic update"}]}
+    continuation = %{opening | "input" => input ++ [output, mailbox]}
+    {refusal, logs} = with_info_log(fn -> send_request(setup, thread, continuation, mode) end)
+    assert refusal.status == 409
+    assert logs =~ "mailbox_check=session"
+    assert pool_counts(setup.pool.id) == before
+    assert FakeUpstream.count(upstream) == 2
+    send(handler, {:fake_upstream_release_chunk, ref})
+    assert Task.await(control, @detection_budget).status == 200
+    assert_receive {:DOWN, ^control_monitor, :process, _, :normal}, @detection_budget
+    assert_settled_once!(original.id)
+    assert_settled_once!(live.id)
+    assert Repo.aggregate(from(l in RequestClientRetryLink, where: l.predecessor_request_id == ^original.id), :count) == 0
   end
 
   defp start_admission_trace! do

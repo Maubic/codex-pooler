@@ -14,6 +14,7 @@ defmodule CodexPooler.Accounting.RequestLogsClientCancelledTest do
     rows = %{
       cancelled_websocket: request_fixture(context, %{status: "failed", last_error_code: "client_disconnected", response_status_code: 499, transport: "websocket"}),
       cancelled_stream: request_fixture(context, %{status: "failed", last_error_code: "client_disconnected", response_status_code: 200, transport: "http_sse"}),
+      timeout: request_fixture(context, %{status: "failed", last_error_code: "client_disconnected", response_status_code: 499, transport: "websocket", request_metadata: %{"downstream_interruption" => %{"origin" => "server", "cause" => "idle_timeout"}}}),
       drained: request_fixture(context, %{status: "failed", last_error_code: "owner_drained", response_status_code: 499, transport: "websocket"}),
       recovered: request_fixture(context, %{status: "failed", last_error_code: "dead_execution_recovered", response_status_code: 499}),
       uncoded: request_fixture(context, %{status: "failed", last_error_code: nil, response_status_code: 502}),
@@ -30,7 +31,7 @@ defmodule CodexPooler.Accounting.RequestLogsClientCancelledTest do
     assert items[rows.cancelled_websocket.id].display_status == "client_cancelled"
     assert items[rows.cancelled_stream.id].display_status == "client_cancelled"
 
-    for key <- [:drained, :recovered, :uncoded] do
+    for key <- [:timeout, :drained, :recovered, :uncoded] do
       assert items[rows[key].id].display_status == "failed", "#{key} must show failed"
     end
 
@@ -39,12 +40,12 @@ defmodule CodexPooler.Accounting.RequestLogsClientCancelledTest do
 
   test "client_cancelled selects the class, and false keeps every other failure, 499 cuts and uncoded failures included", %{pool: pool, rows: rows} do
     assert listed_ids(pool, client_cancelled: true) == ids(rows, [:cancelled_websocket, :cancelled_stream])
-    assert listed_ids(pool, status: "failed", client_cancelled: false) == ids(rows, [:drained, :recovered, :uncoded])
-    assert listed_ids(pool, client_cancelled: false) == ids(rows, [:drained, :recovered, :uncoded, :succeeded])
+    assert listed_ids(pool, status: "failed", client_cancelled: false) == ids(rows, [:timeout, :drained, :recovered, :uncoded])
+    assert listed_ids(pool, client_cancelled: false) == ids(rows, [:timeout, :drained, :recovered, :uncoded, :succeeded])
   end
 
   test "status alone keeps matching the recorded status, the reading every other caller relies on", %{pool: pool, rows: rows} do
-    assert listed_ids(pool, status: "failed") == ids(rows, [:cancelled_websocket, :cancelled_stream, :drained, :recovered, :uncoded])
+    assert listed_ids(pool, status: "failed") == ids(rows, [:cancelled_websocket, :cancelled_stream, :timeout, :drained, :recovered, :uncoded])
   end
 
   test "the scoped detail read carries the class too", %{pool: pool, rows: rows} do

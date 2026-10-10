@@ -186,12 +186,12 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawer do
     <div
       id={@row.id}
       data-role={@row[:role] || "request-log-detail-field"}
-      class="grid gap-1 rounded-box bg-base-200/60 px-3 py-2"
+      class="grid min-w-0 gap-1 rounded-box bg-base-200/60 px-3 py-2"
     >
       <dt class="text-xs font-semibold uppercase tracking-wide text-base-content/45">
         {@row.label}
       </dt>
-      <dd class={["break-words text-base-content/80", @row[:mono] && "font-mono text-xs tabular-nums"]}>
+      <dd class={["min-w-0 [overflow-wrap:anywhere] text-base-content/80", @row[:mono] && "font-mono text-xs tabular-nums"]}>
         {Format.safe_text(@row.value)}
       </dd>
     </div>

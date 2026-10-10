@@ -13,6 +13,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   alias CodexPooler.Gateway.Denials
   alias CodexPooler.Gateway.Payloads.NativeCodexTurnMetadata
   alias CodexPooler.Gateway.Payloads.NativeHttpTurnIdentity
+  alias CodexPooler.Gateway.Payloads.NativeTurnContinuation
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.RequestOptions.ResetProbe
   alias CodexPooler.Gateway.Payloads.TranscriptionPayload
@@ -1122,13 +1123,17 @@ defmodule CodexPooler.Gateway.Runtime.Service do
         replay_intent_result(:fresh, authorization_binding, nil)
 
       :none ->
-        classify_client_retry_intent(
-          locked_session,
-          authorization.api_key,
-          model,
-          context,
-          authorization_binding
-        )
+        if fresh_postcompaction_user_turn?(context, preflight) do
+          replay_intent_result(:fresh, authorization_binding, nil)
+        else
+          classify_client_retry_intent(
+            locked_session,
+            authorization.api_key,
+            model,
+            context,
+            authorization_binding
+          )
+        end
 
       {:active_generation_zero, lifecycle} ->
         replay_intent_result(:active_reattach, authorization_binding, lifecycle)
@@ -1156,6 +1161,34 @@ defmodule CodexPooler.Gateway.Runtime.Service do
         reject_replay_intent(context, locked_session, reason)
     end
   end
+
+  # The absence of a bare opener is meaningful only inside the authenticated
+  # replay transaction, after its active/armed lifecycle check. Keep the bare
+  # claim: fresh reservation, including concurrent duplicates, remains the
+  # authority that decides whether another generation may start.
+  defp fresh_postcompaction_user_turn?(%{endpoint: "/backend-api/codex/responses", request_options: %RequestOptions{native_compaction_admission: nil, continuity: %{previous_response_id: nil}} = options} = context, scope) do
+    with claim when is_binary(claim) <- options.continuity.request_claim_key,
+         :opening <- NativeTurnContinuation.turn_role(context.payload),
+         "turn" <- NativeTurnContinuation.request_kind(context.payload, options) do
+      scope = %{
+        original_request_claim: claim,
+        codex_session_id: scope.codex_session_id,
+        semantic_turn_digest: scope.semantic_turn_digest,
+        pool_id: scope.pool_id,
+        api_key_id: scope.api_key_id,
+        api_key_runtime_epoch: scope.api_key_runtime_epoch,
+        model_id: scope.model_id,
+        requested_model: context.requested_model,
+        endpoint: context.endpoint
+      }
+
+      Accounting.postcompaction_user_progress?(scope, Map.get(options.extra, :native_turn_position))
+    else
+      _not_user_progress -> false
+    end
+  end
+
+  defp fresh_postcompaction_user_turn?(_context, _scope), do: false
 
   # An unanchored resend may meet a predecessor whose executor is proven dead:
   # the preflight lets the claim recover it and take its place instead of

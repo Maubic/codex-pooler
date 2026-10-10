@@ -85,22 +85,21 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
 
   # The same fallback when the turn's first request delivered nothing: the
   # provider failed it at its first event, and the websocket resend chained
-  # onto it was cut before any output. The native HTTP claim walk steps over
-  # both zero-output requests instead of judging them (findings#212 row
-  # 212-50), so the fallback is served under the claim derived from the cut
-  # resend without a link, once; one more identical HTTPS resend after it was
-  # served is another chained successor.
+  # onto it was cut before any output. The verified provider terminal enters
+  # the resend resolver, which follows the existing chain and links the HTTP
+  # fallback to the cut resend. Its claim remains derived from that resend;
+  # one more identical HTTPS resend is another chained successor.
   for mode <- ["full", "lite"] do
     @tag serving_mode: mode
-    test "websocket direct #{mode}: the HTTPS fallback after a zero-output websocket chain steps over it and is served once", ctx do
+    test "websocket direct #{mode}: the HTTPS fallback after a zero-output websocket chain links to the cut resend and is served once", ctx do
       measured = run_direct_chain(ctx.serving_mode, :server_error, :https_twice)
       CodexPooler.TestDiagnostics.puts(fn -> "https fallback zero-output direct #{ctx.serving_mode}: #{inspect(measured)}" end)
 
       assert measured.cut_resend == {"failed", "client_disconnected", nil, :no_entitlement}
       assert measured.first_resend == {200, "response.completed"}
       assert measured.requests == [{"failed", "server_error", "websocket"}, {"failed", "client_disconnected", "websocket"}, {"succeeded", nil, "http_sse"}, {"succeeded", nil, "http_sse"}]
-      assert measured.links == [{0, 1}, {2, 3}]
-      assert measured.client_resend == [nil, 0, nil, 2]
+      assert measured.links == [{0, 1}, {1, 2}, {2, 3}]
+      assert measured.client_resend == [nil, 0, 1, 2]
       assert measured.fallback_claim == :derived_from_cut_resend
       assert measured.generations == [[0], [0], [0], [0]]
       assert measured.recorded_settlements == [1, 1, 1, 1]
@@ -295,8 +294,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.ResendChainSecondHopTest 
     error in [ExUnit.AssertionError, RuntimeError] -> {:socket_closed, Exception.message(error)}
   end
 
-  # The fallback's claim: the one derived from the cut resend, when the HTTP
-  # walk stepped over the chain without linking to it.
+  # The fallback's deterministic claim is derived from the cut resend,
+  # whether the HTTP walk steps over it or resolves it as a linked successor.
   defp fallback_claim([first, cut, fallback | _]) do
     {:ok, from_first} = ClientRetry.deterministic_failed_predecessor_claim(first.correlation_id, first.id)
     {:ok, from_cut} = ClientRetry.deterministic_failed_predecessor_claim(from_first, cut.id)

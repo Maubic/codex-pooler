@@ -10,6 +10,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
   alias CodexPooler.Accounting.PreAttemptRelease
   alias CodexPooler.Accounting.RequestLifecycle.{DeadExecutionResendRecovery, TurnClaimRelease}
   alias CodexPooler.Accounting.RequestLogFacts
+  alias CodexPooler.Events
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn}
   alias CodexPooler.Gateway.Persistence.SessionContinuity
@@ -102,6 +103,45 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
     end)
     |> finalize_marker_transaction()
   end
+
+  @doc "Completes an exact timeout receipt after the existing cleanup settled its own generation."
+  @spec record_settled_downstream_idle_timeout(OwnerCleanup.t() | map(), String.t()) :: {:ok, :ok | :stale} | {:error, term()}
+  def record_settled_downstream_idle_timeout(witness, client_activity) do
+    Repo.transaction(fn ->
+      session_id = Map.fetch!(witness, :session_id)
+      session = codex_session_for_update(session_id)
+      turn = Repo.one(from t in CodexTurn, where: t.request_id == ^witness.request_id, lock: "FOR UPDATE")
+      request = request_for_update(witness.request_id)
+      attempt = latest_attempt_for_update(witness.request_id)
+
+      with %CodexSession{} <- session,
+           %CodexTurn{codex_session_id: ^session_id} <- turn,
+           %Request{status: "failed", last_error_code: "client_disconnected"} <- request,
+           %Attempt{network_error_code: "client_disconnected"} <- attempt,
+           true <- admitted_attempt_matches?(attempt, witness),
+           true <- settled_idle_identity_matches?(session, request, witness) do
+        Accounting.Metadata.record_downstream_idle_timeout(request, attempt, client_activity)
+        request
+      else
+        _stale -> :stale
+      end
+    end)
+    |> case do
+      {:ok, %Request{} = request} ->
+        Events.broadcast_request_logs(request.pool_id, "request_metadata_updated", %{request_id: request.id, status: request.status})
+        Events.broadcast_usage(request.pool_id, "usage_updated", %{request_id: request.id, status: request.status, usage_status: request.usage_status})
+        {:ok, :ok}
+
+      result ->
+        result
+    end
+  end
+
+  defp settled_idle_identity_matches?(session, request, %OwnerCleanup{} = witness),
+    do: session.owner_lease_token == witness.owner_lease_token and session.owner_instance_id == witness.owner_instance_id and request_owner_matches?(request, witness)
+
+  defp settled_idle_identity_matches?(session, request, receipt),
+    do: direct_receipt_matches?(session, request, receipt) and pre_attempt_owner_clause(session, request, receipt) == :matched
 
   # A claim-only row that gave its claim up (findings#206 rows 206-419/206-420)
   # still answers to the receipt bound at claim time, which names that claim.
@@ -1025,17 +1065,21 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.Interruption do
         in_progress_turns
         |> Enum.flat_map(&interrupt_turn!(&1, opts, reason, now, caller_owned_transaction?))
 
-      session
-      |> Ecto.Changeset.change(%{
-        status: next_status,
-        disconnected_at: now,
-        closed_at: if(next_status == @session_closed, do: now, else: nil),
-        close_reason: nil,
-        owner_lease_expires_at: lease_expires_at,
-        last_heartbeat_at: now,
-        updated_at: now
-      })
-      |> Repo.update!()
+      # Same-key replacement already retired this row under its ownership
+      # locks. Finalize its turns without reopening it beside the successor.
+      if session.status != @session_closed do
+        session
+        |> Ecto.Changeset.change(%{
+          status: next_status,
+          disconnected_at: now,
+          closed_at: if(next_status == @session_closed, do: now, else: nil),
+          close_reason: nil,
+          owner_lease_expires_at: lease_expires_at,
+          last_heartbeat_at: now,
+          updated_at: now
+        })
+        |> Repo.update!()
+      end
 
       interruption_result(length(in_progress_turns), interrupted_outcomes)
     else

@@ -8,6 +8,8 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Pools.Routing, as: PoolRouting
   alias CodexPoolerWeb.GatewayControllerHelpers
+  alias CodexPoolerWeb.Mcp.Authentication
+  alias CodexPoolerWeb.Plugs.BackendFilesMultipartGuard
   alias CodexPoolerWeb.Plugs.RuntimeIngress.{CompressedBody, Firewall, Path}
   alias CodexPoolerWeb.Plugs.RuntimeIngress.Firewall.Decision
   alias CodexPoolerWeb.V1.UnsupportedRoutes
@@ -54,49 +56,68 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
     conn
     |> put_json_parser_context(settings, :mcp)
     |> enforce_mcp_firewall(settings)
+    |> authenticate_mcp_request()
     |> admit_mcp_request()
     |> prepare_mcp_body(settings)
   end
 
   defp route_request(conn, path) do
-    cond do
-      path.scope == :runtime ->
-        settings = operational_settings(conn)
+    if path.scope == :runtime do
+      settings = operational_settings(conn)
 
-        conn
-        |> put_json_parser_context(settings, json_parse_error_scope(conn))
-        |> enforce_firewall(settings)
-        |> reject_pruned_runtime_helper()
-        |> authenticate_v1_request()
-        |> reject_unsupported_v1_request()
-        |> authenticate_protected_backend_json_request()
-        |> enforce_image_generation_permission()
-        |> enforce_audio_transcription_permission()
-        |> maybe_decode_compressed_body(settings)
-
-      json_request?(conn) ->
-        put_json_parser_context(conn, operational_settings(conn), :passthrough)
-
-      true ->
-        conn
+      conn
+      |> put_json_parser_context(settings, json_parse_error_scope(conn))
+      |> enforce_firewall(settings)
+      |> reject_pruned_runtime_helper()
+      |> authenticate_v1_request()
+      |> reject_unsupported_v1_request()
+      |> authenticate_protected_backend_json_request()
+      |> enforce_image_generation_permission()
+      |> enforce_audio_transcription_permission()
+      |> BackendFilesMultipartGuard.call([])
+      |> maybe_decode_compressed_body(settings)
+    else
+      conn
     end
   end
 
-  @spec send_parse_error(Plug.Conn.t()) :: Plug.Conn.t()
-  def send_parse_error(conn) do
-    send_runtime_error(conn, %{
-      status: 400,
-      code: "invalid_request",
-      message: "request body must be valid JSON"
-    })
+  @spec handle_parser_error(Plug.Conn.t(), Exception.t()) :: {:ok, Plug.Conn.t()} | :unhandled
+  def handle_parser_error(conn, %Plug.Parsers.ParseError{}) do
+    send_scoped_parser_error(conn, 400, "invalid_request", "request body could not be parsed", -32_700)
   end
 
-  @spec send_mcp_parse_error(Plug.Conn.t()) :: Plug.Conn.t()
-  def send_mcp_parse_error(conn), do: send_mcp_error(conn, 400, -32_700, "parse error")
+  def handle_parser_error(conn, %Plug.Conn.InvalidQueryError{}) do
+    send_scoped_parser_error(conn, 400, "invalid_request", "request query is invalid", -32_600)
+  end
 
-  @spec mcp_request?(Plug.Conn.t() | term()) :: boolean()
-  def mcp_request?(%Plug.Conn{} = conn), do: Path.fetch(conn).scope == :mcp
-  def mcp_request?(_conn), do: false
+  def handle_parser_error(conn, %Plug.Parsers.RequestTooLargeError{}) do
+    case {Path.fetch(conn).scope, Enum.any?(get_req_header(conn, "content-type"), &json_content_type?/1)} do
+      {:passthrough, _json?} ->
+        :unhandled
+
+      {_scope, true} ->
+        limit = operational_settings(conn).max_decompressed_body_bytes
+        message = "decompressed request body exceeds the #{limit}-byte limit; ask the operator to increase ingress.max_decompressed_body_bytes in System > Firewall before retrying"
+        send_scoped_parser_error(conn, 413, "decompressed_request_too_large", message, -32_600)
+
+      {_scope, false} ->
+        send_scoped_parser_error(conn, 413, "request_too_large", "request body is too large", -32_600)
+    end
+  end
+
+  defp send_scoped_parser_error(conn, status, code, message, mcp_code) do
+    case Path.fetch(conn).scope do
+      :runtime ->
+        {:ok, send_runtime_error(conn, status, code, message)}
+
+      :mcp ->
+        message = if mcp_code == -32_700, do: "parse error", else: message
+        {:ok, send_mcp_error(conn, status, mcp_code, message)}
+
+      :passthrough ->
+        :unhandled
+    end
+  end
 
   defp enforce_mcp_firewall(conn, settings) do
     case Firewall.evaluate(conn, settings) do
@@ -108,6 +129,17 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
         send_mcp_firewall_error(conn, decision)
     end
   end
+
+  defp authenticate_mcp_request(%Plug.Conn{halted: true} = conn), do: conn
+
+  defp authenticate_mcp_request(%Plug.Conn{method: "POST"} = conn) do
+    case Authentication.authenticate(conn) do
+      {:ok, auth} -> put_private(conn, :codex_pooler_mcp_auth, auth)
+      {:error, status, code, message, nil} -> send_mcp_error(conn, status, code, message)
+    end
+  end
+
+  defp authenticate_mcp_request(conn), do: conn
 
   defp admit_mcp_request(%Plug.Conn{halted: true} = conn), do: conn
 
@@ -184,16 +216,6 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
     end
   end
 
-  defp json_request?(conn) do
-    conn
-    |> get_req_header("content-type")
-    |> List.first()
-    |> case do
-      nil -> false
-      content_type -> json_content_type?(content_type)
-    end
-  end
-
   defp json_parse_error_scope(conn) do
     if protected_backend_json_request?(conn), do: :protected_backend, else: :passthrough
   end
@@ -247,6 +269,10 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
       |> Map.merge(path_params)
 
     %{conn | body_params: body_params, params: params, query_params: query_params}
+  rescue
+    error in Plug.Conn.InvalidQueryError ->
+      {:ok, conn} = handle_parser_error(conn, error)
+      conn
   end
 
   defp make_empty_if_unfetched(%Plug.Conn.Unfetched{}), do: %{}
@@ -394,6 +420,18 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
 
   defp enforce_audio_transcription_permission(conn), do: conn
 
+  @spec authenticated_multipart_media_request?(Plug.Conn.t()) :: boolean()
+  def authenticated_multipart_media_request?(%Plug.Conn{method: "POST", private: %{runtime_api_auth: %{api_key: _key, pool: _pool}}} = conn) do
+    Path.decoded_segments(conn) in [
+      ["backend-api", "transcribe"],
+      ["v1", "files"],
+      ["v1", "audio", "transcriptions"],
+      ["v1", "images", "edits"]
+    ]
+  end
+
+  def authenticated_multipart_media_request?(_conn), do: false
+
   @spec protected_backend_json_request?(Plug.Conn.t() | term()) :: boolean()
   def protected_backend_json_request?(%Plug.Conn{method: method} = conn) when method in ["POST", "PUT", "PATCH", "DELETE"] do
     path_info = Path.decoded_segments(conn)
@@ -434,6 +472,10 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
       {:error, reason, conn} -> send_runtime_error(conn, reason)
       {:error, reason} -> send_runtime_error(conn, reason)
     end
+  rescue
+    error in Plug.Conn.InvalidQueryError ->
+      {:ok, conn} = handle_parser_error(conn, error)
+      conn
   end
 
   defp send_pruned_runtime_helper_absent(conn) do

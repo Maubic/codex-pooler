@@ -5,7 +5,7 @@ defmodule CodexPooler.MixProject do
     [
       app: :codex_pooler,
       # x-release-please-start-version
-      version: "0.10.9",
+      version: "0.12.3",
       # x-release-please-end
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -13,7 +13,7 @@ defmodule CodexPooler.MixProject do
       test_coverage: [tool: Six, minimum_coverage: 85.0, threshold: 85],
       aliases: aliases(),
       deps: deps(),
-      dialyzer: [plt_add_apps: [:ex_unit, :mix]],
+      dialyzer: [plt_add_apps: [:ex_unit, :mix], ignore_warnings: "dialyzer_ignore.exs", list_unused_filters: true],
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader]
     ]
@@ -32,6 +32,7 @@ defmodule CodexPooler.MixProject do
   def cli do
     [
       preferred_envs: [
+        "test.partition_weights": :test,
         "test.product": :test,
         "test.tooling": :test,
         "test.unix": :test,
@@ -73,9 +74,9 @@ defmodule CodexPooler.MixProject do
       {:esbuild, "== 0.10.0", runtime: Mix.env() == :dev},
       {:tailwind, "== 0.5.1", runtime: Mix.env() == :dev},
       {:heroicons, github: "tailwindlabs/heroicons", tag: "v2.2.0", sparse: "optimized", app: false, compile: false, depth: 1},
-      {:swoosh, "== 1.28.1"},
+      {:swoosh, "== 1.29.0"},
       {:gen_smtp, "== 1.3.0"},
-      {:req, "== 0.7.4"},
+      {:req, "== 0.7.5"},
       # Finch 0.24 closes an HTTP/1 connection after a request or response error before pooling it.
       # Mint 1.11 no longer closes one after a receive timeout, so an older Finch would pool it with the
       # abandoned response still pending and write the next request behind it. Keep Finch >= 0.24 with Mint >= 1.11.
@@ -132,6 +133,7 @@ defmodule CodexPooler.MixProject do
       # say nothing about it, so an unformatted line reached CI and failed the
       # build after the whole suite had already passed locally.
       "quality.format": ["format --check-formatted"],
+      "quality.test_cleanup": ["cmd elixir dev_support/check_test_listener_cleanup.exs"],
       "quality.xref": [
         "compile --warnings-as-errors",
         "xref graph --format plain --label compile-connected --fail-above 0 --no-compile"
@@ -140,6 +142,7 @@ defmodule CodexPooler.MixProject do
       "quality.dialyzer": ["compile --warnings-as-errors", "dialyzer --no-compile"],
       "quality.security": ["sobelow --exit --threshold medium --skip"],
       quality: [
+        "quality.test_cleanup",
         "quality.format",
         "quality.xref",
         "quality.credo",

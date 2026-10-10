@@ -10,6 +10,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   alias CodexPooler.Accounting.NativeContentFilterRetry
 
   alias CodexPooler.Accounting.{
+    Attempt,
     ClientRetry,
     Metadata,
     NativeTurnProgress,
@@ -55,7 +56,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   @spec mailbox_admission_session_ids(mailbox_admission_auth(), Model.t(), map()) :: [Ecto.UUID.t()]
   def mailbox_admission_session_ids(%{pool: pool, api_key: api_key}, %Model{} = model, opts) do
     session = attr(opts, :codex_session)
-    claims = [attr(opts, :correlation_id), attr(opts, :original_request_claim), attr(opts, :native_http_steered_claim) | List.wrap(attr(opts, :websocket_compaction_claims))] |> Enum.filter(&is_binary/1) |> Enum.uniq()
+    claims = [attr(opts, :correlation_id), attr(opts, :original_request_claim), attr(opts, :native_http_steered_claim) | List.wrap(attr(opts, :websocket_compaction_claims)) ++ List.wrap(attr(opts, :native_http_tool_claims))] |> Enum.filter(&is_binary/1) |> Enum.uniq()
 
     scope = %{
       pool_id: pool.id,
@@ -402,7 +403,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
         ClientRetry.insert_link!(%Request{id: id}, request, timestamp)
 
       _payload_claim ->
-        :ok
+        if List.wrap(attr(opts, :native_http_tool_claims)) != [], do: ClientRetry.insert_link!(%Request{id: id}, request, timestamp), else: :ok
     end
   end
 
@@ -487,6 +488,8 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   # inserts exactly as before, so an unfenceable first request is never taxed
   # with the policy's anchored/entitlement refusals.
   defp native_turn_resend_claim!(%CodexSession{} = session, context) do
+    context = native_http_tool_root!(context)
+
     case websocket_compaction_successor(session, context) do
       {claim, %{} = client_resend} ->
         {claim, client_resend, nil}
@@ -501,6 +504,55 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
             {claim, client_resend} = walk_native_turn_chain(session, context, context.correlation_id, 0)
             {claim, client_resend, nil}
         end
+    end
+  end
+
+  # Called only after the canonical session lock and current key authorization.
+  # Compaction alternatives intentionally fail open; tool aliases must not.
+  defp native_http_tool_root!(context) do
+    case attr(context.opts, :native_http_tool_claims) do
+      claims when is_list(claims) and length(claims) in 1..4 ->
+        roots = native_http_tool_roots(context, claims)
+
+        case roots do
+          [] ->
+            context
+
+          [request] ->
+            verify_imported_tool_root!(request, context)
+            %{context | correlation_id: request.correlation_id}
+
+          _ambiguous ->
+            Repo.rollback(duplicate_request_error(:invalid_predecessor))
+        end
+
+      claims when claims in [nil, []] ->
+        context
+
+      _invalid ->
+        Repo.rollback(duplicate_request_error(:invalid_predecessor))
+    end
+  end
+
+  defp native_http_tool_roots(context, claims) do
+    Repo.all(
+      from request in Request,
+        where: request.pool_id == ^context.pool.id and request.api_key_id == ^context.api_key.id and request.model_id == ^context.model.id and request.endpoint == ^context.endpoint and request.correlation_id in ^claims,
+        select: request
+    )
+  end
+
+  defp verify_imported_tool_root!(%Request{correlation_id: claim, transport: transport}, %{correlation_id: claim}) when transport in ["http_sse", "http_json"], do: :ok
+
+  defp verify_imported_tool_root!(request, context) do
+    with %ClientRetry.OriginalWitness{} = witness <- attr(context.opts, :native_client_retry_witness),
+         true <- ClientRetry.original_witness_eligible?(request),
+         true <- witness.auth_epoch == context.api_key.runtime_revocation_epoch,
+         true <- request.native_client_retry_auth_epoch == context.api_key.runtime_revocation_epoch,
+         true <- ClientRetry.witness_matches?(request.native_client_retry_digest, witness.digest, witness.alternates) do
+      :ok
+    else
+      _unproved -> Repo.rollback(duplicate_request_error(:authorization_changed))
     end
   end
 
@@ -595,7 +647,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
       %Request{} = predecessor ->
         :ok = retire_forwarded_chain!(predecessor)
 
-        if unfinished_http_mailbox_predecessor?(predecessor, context) or delivered_provider_output?(predecessor) do
+        if unfinished_http_mailbox_predecessor?(predecessor, context) or websocket_resend_predecessor?(predecessor) or delivered_provider_output?(predecessor) do
           resolve_native_turn_resend!(session, context, claim)
         else
           step_over_native_turn_predecessor(session, context, claim, predecessor, depth)
@@ -613,6 +665,19 @@ defmodule CodexPooler.Accounting.RequestLifecycle.Reservation do
   end
 
   defp unfinished_http_mailbox_predecessor?(_predecessor, _context), do: false
+
+  # A live websocket cannot prove zero output; its existing lifecycle fence
+  # must judge the fallback. A retryable terminal uses the verified linked
+  # policy whether it followed model output or only lifecycle/error frames.
+  defp websocket_resend_predecessor?(%Request{transport: "websocket", completed_at: nil}), do: true
+
+  defp websocket_resend_predecessor?(%Request{transport: "websocket", status: "failed", completed_at: %DateTime{}} = request) do
+    turn = Repo.get_by(CodexTurn, request_id: request.id)
+    attempt = if turn && turn.final_attempt_id, do: Repo.get(Attempt, turn.final_attempt_id)
+    ClientRetry.verified_provider_terminal_failure?(turn, request, attempt)
+  end
+
+  defp websocket_resend_predecessor?(_predecessor), do: false
 
   # With owner forwarding on, the owner's client-retry preflight chains a
   # websocket resend onto a request of this turn (`client-retry-v1:`), outside

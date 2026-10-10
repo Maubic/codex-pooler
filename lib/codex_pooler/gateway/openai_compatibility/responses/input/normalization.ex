@@ -4,6 +4,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   alias CodexPooler.Gateway.OpenAICompatibility.Error
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Audio
   alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.InstructionLifter
+  alias CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation
   alias CodexPooler.Gateway.Payloads.CompactionTrigger
   alias CodexPooler.Gateway.Payloads.ToolResultShape
 
@@ -12,6 +13,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
     additional_tools
     agent_message
     web_search_call
+    configuration_update
     message
     reasoning
     compaction
@@ -221,7 +223,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   end
 
   defp normalize_input_items(input) do
-    with :ok <- validate_input_image_details(input) do
+    with :ok <- Validation.validate_input_updates(input),
+         :ok <- validate_input_image_details(input) do
       normalize_valid_input_items(input)
     end
   end
@@ -355,6 +358,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   # `Input.AgentMessage` owns its exact shape and refuses every other form.
   defp normalize_input_item(%{"type" => "agent_message"} = item), do: {:ok, item}
 
+  # Keep the measured item untouched, including malformed `content: ""` shapes, so its validator names the missing
+  # reasoning field instead of silently turning it into a message.
+  defp normalize_input_item(%{"type" => "configuration_update"} = item), do: {:ok, item}
+
   # A replayed hosted web search; `Input.WebSearchCall` owns its exact shape.
   defp normalize_input_item(%{"type" => "web_search_call"} = item), do: {:ok, item}
 
@@ -366,12 +373,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
 
   defp normalize_input_item(%{"role" => "assistant", "tool_calls" => tool_calls} = item)
        when is_list(tool_calls) do
-    with {:ok, parent_metadata_passthrough} <- optional_metadata_passthrough(item) do
-      normalize_assistant_tool_calls(
-        tool_calls,
-        Map.get(item, "metadata"),
-        parent_metadata_passthrough
-      )
+    with {:ok, parent_metadata_passthrough} <- optional_metadata_passthrough(item),
+         {:ok, tool_calls} <- normalize_assistant_tool_calls(tool_calls, Map.get(item, "metadata"), parent_metadata_passthrough),
+         {:ok, messages} <- normalize_assistant_tool_message(item) do
+      {:ok, messages ++ tool_calls}
     end
   end
 
@@ -498,6 +503,17 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
       {:error, Error.invalid_request("input item shape is not translatable", "input")}
     end
   end
+
+  defp normalize_input_item(_item),
+    do: {:error, Error.invalid_request("input item shape is not translatable", "input")}
+
+  defp normalize_assistant_tool_message(%{"content" => content} = item) when content not in [nil, "", []] do
+    with {:ok, message} <- normalize_input_item(Map.delete(item, "tool_calls")) do
+      {:ok, [message]}
+    end
+  end
+
+  defp normalize_assistant_tool_message(_item), do: {:ok, []}
 
   defp normalize_assistant_tool_calls(tool_calls, parent_metadata, parent_metadata_passthrough) do
     tool_calls
@@ -668,10 +684,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   defp tool_output(%{"content" => %{"output" => output}}) when is_binary(output),
     do: {:ok, output}
 
-  defp tool_output(%{"content" => _content}),
+  defp tool_output(_item),
     do: {:error, Error.invalid_request("input item shape is not translatable", "input")}
-
-  defp tool_output(_item), do: {:ok, ""}
 
   defp normalize_tool_output_part(part) when is_binary(part) do
     {:ok, %{"type" => "input_text", "text" => part}}

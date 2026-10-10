@@ -1,27 +1,30 @@
 defmodule CodexPooler.Gateway.Metadata.CatalogRepresentationTest do
   use ExUnit.Case, async: true
 
+  alias CodexPooler.CodexCatalogShapes
   alias CodexPooler.Gateway.Metadata.CatalogRepresentation
   alias CodexPooler.Gateway.Payloads.RequestOptions
 
-  # findings#258 row 258-102: the catalog fetch and the turn select the
+  # The catalog fetch and the turn select the
   # representation from the same `User-Agent`, so the version table is read
   # from the package version a Codex build writes there.
   defp codex(version), do: "codex_cli_rs/#{version} (Linux 6.8.0; x86_64) unknown"
 
   describe "version table" do
     test "clients whose every build prefers the instructions template get the template-only entry" do
-      for version <- ["0.148.0", "0.153.4", "0.160.2", "0.161.0", "0.161.0-alpha.1", "0.200.0", "1.0.0", "0.148.0-alpha.1"] do
+      samples = CodexCatalogShapes.version_samples()
+
+      for version <- ["0.148.0", samples.before, samples.after, samples.after <> "-alpha.1", "1.0.0", "0.148.0-alpha.1"] do
         assert CatalogRepresentation.for_user_agent(codex(version)) == :instructions_template, version
       end
     end
 
-    # findings#258 row 258-34: the clients whose catalog decode contract
-    # CodexModelDecodeContract mirrors (0.154.0 through 0.160.1) also lose the
+    # The clients whose catalog decode contract
+    # CodexModelDecodeContract mirrors also lose the
     # entries they would fail to decode; the representation is otherwise the
     # template-only one.
     test "clients inside the verified decode window get the decode-checked template-only entry" do
-      for version <- ["0.154.0", "0.154.0-alpha.6.2", "0.155.0", "0.155.1", "0.156.0", "0.156.0-alpha.18", "0.156.1", "0.157.0", "0.157.0-alpha.1", "0.157.0-alpha.11.1", "0.157.1", "0.158.0", "0.158.0-alpha.1", "0.158.0-alpha.15.4", "0.159.0", "0.159.0-alpha.13", "0.159.3", "0.160.0", "0.160.0-alpha.4", "0.160.1"] do
+      for version <- CodexCatalogShapes.version_samples().checked do
         assert CatalogRepresentation.for_user_agent(codex(version)) == :decode_checked, version
       end
     end
@@ -39,21 +42,20 @@ defmodule CodexPooler.Gateway.Metadata.CatalogRepresentationTest do
 
   describe "for_user_agent/1" do
     test "reads the package version Codex puts after its originator" do
+      samples = CodexCatalogShapes.version_samples()
+
       for user_agent <- [
-            "codex_cli_rs/0.156.0 (Mac OS 26.0.0; arm64) xterm-256color",
-            "codex_exec/0.156.0 (Linux 6.10.14-linuxkit; aarch64) unknown",
-            "Codex Desktop/0.155.0-alpha.16 (Mac OS 26.0.0; arm64) unknown (Codex Desktop; 26.917.11455)",
-            "codex_vscode/0.154.0-alpha.6.2 (Windows 10.0.26100; x86_64) unknown (Code; 1.104.0)",
-            "codex_cli_rs/0.156.1",
-            "codex_exec/0.157.0 (Linux; aarch64)",
-            "codex_exec/0.157.1 (Linux; aarch64)",
-            "codex_exec/0.158.0 (Linux; aarch64)",
-            "codex_exec/0.160.1 (Linux; aarch64)"
+            "codex_cli_rs/#{samples.current} (Mac OS 26.0.0; arm64) xterm-256color",
+            "codex_exec/#{samples.current} (Linux 6.10.14-linuxkit; aarch64) unknown",
+            "Codex Desktop/#{samples.current}-alpha.1 (Mac OS 26.0.0; arm64) unknown (Codex Desktop; 1.0.0)",
+            "codex_vscode/#{samples.current}-alpha.1.2 (Windows 10.0.26100; x86_64) unknown (Code; 1.104.0)",
+            "codex_cli_rs/#{samples.current}",
+            "codex_exec/#{samples.current} (Linux; aarch64)"
           ] do
         assert CatalogRepresentation.for_user_agent(user_agent) == :decode_checked, user_agent
       end
 
-      for user_agent <- ["codex_cli_rs/0.148.0", "codex_cli_rs/0.153.4 (Linux; x86_64)", "codex_exec/0.160.2 (Linux; aarch64)"] do
+      for user_agent <- ["codex_cli_rs/0.148.0", "codex_cli_rs/#{samples.before} (Linux; x86_64)", "codex_exec/#{samples.after} (Linux; aarch64)"] do
         assert CatalogRepresentation.for_user_agent(user_agent) == :instructions_template, user_agent
       end
     end

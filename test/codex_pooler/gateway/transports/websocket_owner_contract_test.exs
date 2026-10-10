@@ -398,6 +398,21 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContractTest do
       end
     end
 
+    test "preserves only bounded peer close authority on its actual peer-close signal" do
+      signal = %{cause: :peer_close_frame, lifecycle_id: Ecto.UUID.generate(), generation: 2}
+      detail = {self(), 1000, "synthetic close"}
+      expected = Map.put(signal, :steering_peer_close, detail)
+      assert WebsocketOwnerContract.upstream_closed_signal(expected) == {:ok, expected}
+      assert WebsocketOwnerContract.upstream_closed_message?({:websocket_owner_upstream_closed, "corr-close", 2, expected})
+
+      for invalid <- [{nil, 1000, ""}, {self(), 999, ""}, {self(), 5000, ""}, {self(), 1000, <<255>>}, {self(), 1000, String.duplicate("x", 124)}, {self(), 1000, nil}] do
+        assert WebsocketOwnerContract.upstream_closed_signal(Map.put(signal, :steering_peer_close, invalid)) == {:ok, signal}
+        refute WebsocketOwnerContract.upstream_closed_message?({:websocket_owner_upstream_closed, "corr-close", 2, Map.put(signal, :steering_peer_close, invalid)})
+      end
+
+      assert WebsocketOwnerContract.upstream_closed_signal(%{expected | cause: :transport_closed}) == {:ok, %{signal | cause: :transport_closed}}
+    end
+
     test "refuses a cause the session never reports to its subscriber" do
       for cause <- [:request_key_changed, :owner_drained, :unknown_close_cause, "peer_close_frame", nil] do
         assert WebsocketOwnerContract.upstream_closed_signal(%{cause: cause, lifecycle_id: Ecto.UUID.generate(), generation: 1}) == :error

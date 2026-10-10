@@ -736,6 +736,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RoutingTes
                  state
                )
 
+      state = receive_native_response_steering_prepared!(state)
+
       [response_task_pid] = MapSet.to_list(state.tasks)
 
       state =

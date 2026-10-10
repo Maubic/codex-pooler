@@ -3,8 +3,13 @@ defmodule CodexPooler.TestProfiles do
   File selection for application and repository-tooling test runs.
 
   Selection happens before Mix requires test modules. Mixed application files
-  contribute only their Unix-tagged tests to the tooling profile.
+  contribute only their Unix-tagged tests to the tooling profile. An unfocused
+  `--partitions N` run of the product or tooling profile gets only its own
+  partition's files, dealt by recorded duration (`CodexPooler.TestPartitions`)
+  instead of by position.
   """
+
+  alias CodexPooler.TestPartitions
 
   @tooling_patterns ~w(
     test/codex_pooler/dev/**/*_test.exs
@@ -55,7 +60,17 @@ defmodule CodexPooler.TestProfiles do
     cond do
       focused? and profile == :unix -> filters(:unix) ++ args
       focused? -> args
-      true -> filters(profile) ++ args ++ files(profile)
+      true -> filters(profile) ++ unfocused(profile, args)
+    end
+  end
+
+  # The unix profile keeps Mix's own deal; the other two take `--partitions` out and name only this partition's files.
+  defp unfocused(:unix, args), do: args ++ files(:unix)
+
+  defp unfocused(profile, args) do
+    case TestPartitions.select(profile, args, files(profile)) do
+      {:partition, remaining, assigned} -> remaining ++ assigned
+      :unpartitioned -> args ++ files(profile)
     end
   end
 

@@ -31,123 +31,149 @@ defmodule CodexPooler.Upstreams.SavedResets.ProviderCreditsTriggerMatrixTest do
   @consume "/api/codex/rate-limit-reset-credits/consume"
   @endpoint "/backend-api/codex/responses"
 
+  # A comprehension expands and compiles a test's body once per generated test, so a loop that generates more than a few tests keeps
+  # the scenario in a private function below it and each generated test is one call.
   for policy <- [true, false], credits <- [:full, :none, :unknown] do
     test "gateway exhausted recovery follows usable credits with #{credits} credits and policy #{policy}" do
-      %{fake: fake, identity: identity, input: input} = arrangement(:exhausted, unquote(policy), unquote(credits))
-      SavedResetConfirmationFixtures.confirm_automatic_pressure!(identity, usage_url: FakeUpstream.url(fake) <> "/api/codex/usage")
-      restored = ProviderCreditsFixtures.usage_payload(:included, credits: unquote(credits))
-      restored = if unquote(credits) == :unknown, do: Map.delete(restored, "credits"), else: restored
-      FakeUpstream.set_mode(fake, routes(restored))
-
-      if unquote(policy) and unquote(credits) == :full do
-        assert {:ok, [{_assignment, chosen}], options, _state} = filter(input)
-        assert chosen.id == identity.id
-        assert options.routing.quota_decision["capacity_basis"] == "provider_credits"
-        assert FakeUpstream.physical_counts(fake).consume == 0
-        refute Repo.reload!(identity).metadata["saved_reset_redemption"]
-      else
-        capture_log(fn -> filter(input) end)
-        first_phase = Repo.reload!(identity).metadata["saved_reset_redemption"]["phase"]
-        assert first_phase == if(unquote(credits) == :full, do: "confirmed_by_quota", else: "consumed_pending_probe")
-        assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(Repo.reload!(identity), hd(input.candidates) |> elem(0))
-        Convergence.converge(refreshed)
-        assert {:ok, [{_assignment, chosen}], options, _state} = filter(FilterInput.put_candidates(input, [{hd(input.candidates) |> elem(0), Repo.reload!(identity)}]))
-        assert chosen.id == identity.id
-        assert options.routing.quota_decision["capacity_basis"] == "recovered_included"
-        assert FakeUpstream.physical_counts(fake).consume == 1
-        assert Repo.reload!(identity).metadata["saved_reset_redemption"]["phase"] == "confirmed_by_quota"
-      end
-
-      assert FakeUpstream.physical_counts(fake).http_generation == 0
+      assert_exhausted_recovery_follows_usable_credits!(unquote(policy), unquote(credits))
     end
 
     @tag credits_negative: true
     test "operator credit policy alone creates no trigger with #{credits} credits and policy #{policy}" do
-      %{fake: fake, input: input} = arrangement(:included, unquote(policy), unquote(credits))
-      assert {:ok, _candidates, _options, _state} = filter(input)
-      assert FakeUpstream.physical_counts(fake).consume == 0
-      assert FakeUpstream.physical_counts(fake).http_generation == 0
+      assert_operator_policy_alone_creates_no_trigger!(unquote(policy), unquote(credits))
     end
+  end
+
+  defp assert_exhausted_recovery_follows_usable_credits!(policy, credits) do
+    %{fake: fake, identity: identity, input: input} = arrangement(:exhausted, policy, credits)
+    SavedResetConfirmationFixtures.confirm_automatic_pressure!(identity, usage_url: FakeUpstream.url(fake) <> "/api/codex/usage")
+    restored = ProviderCreditsFixtures.usage_payload(:included, credits: credits)
+    restored = if credits == :unknown, do: Map.delete(restored, "credits"), else: restored
+    FakeUpstream.set_mode(fake, routes(restored))
+
+    if policy and credits == :full do
+      assert {:ok, [{_assignment, chosen}], options, _state} = filter(input)
+      assert chosen.id == identity.id
+      assert options.routing.quota_decision["capacity_basis"] == "provider_credits"
+      assert FakeUpstream.physical_counts(fake).consume == 0
+      refute Repo.reload!(identity).metadata["saved_reset_redemption"]
+    else
+      capture_log(fn -> filter(input) end)
+      first_phase = Repo.reload!(identity).metadata["saved_reset_redemption"]["phase"]
+      assert first_phase == if(credits == :full, do: "confirmed_by_quota", else: "consumed_pending_probe")
+      assert {:ok, refreshed} = PoolReconciliation.refresh_quota_from_usage(Repo.reload!(identity), hd(input.candidates) |> elem(0))
+      Convergence.converge(refreshed)
+      assert {:ok, [{_assignment, chosen}], options, _state} = filter(FilterInput.put_candidates(input, [{hd(input.candidates) |> elem(0), Repo.reload!(identity)}]))
+      assert chosen.id == identity.id
+      assert options.routing.quota_decision["capacity_basis"] == "recovered_included"
+      assert FakeUpstream.physical_counts(fake).consume == 1
+      assert Repo.reload!(identity).metadata["saved_reset_redemption"]["phase"] == "confirmed_by_quota"
+    end
+
+    assert FakeUpstream.physical_counts(fake).http_generation == 0
+  end
+
+  defp assert_operator_policy_alone_creates_no_trigger!(policy, credits) do
+    %{fake: fake, input: input} = arrangement(:included, policy, credits)
+    assert {:ok, _candidates, _options, _state} = filter(input)
+    assert FakeUpstream.physical_counts(fake).consume == 0
+    assert FakeUpstream.physical_counts(fake).http_generation == 0
   end
 
   for trigger <- [:threshold, :last_call, :exhausted], policy <- [true, false], fence <- [:none, :disabled, :reserve, :expiration, :cooldown], credits <- [:full, :none, :unknown] do
     @tag credits_negative: true
     test "R9 scheduled #{trigger} preserves #{fence} fence with #{credits} credits and policy #{policy}" do
-      %{fake: fake, identity: identity, assignment: assignment, now: now} = arrangement(unquote(trigger), unquote(policy), unquote(credits))
-      identity = apply_fence(identity, unquote(fence))
-      if unquote(trigger) == :exhausted, do: SavedResetConfirmationFixtures.confirm_automatic_pressure!(identity, usage_url: FakeUpstream.url(fake) <> "/api/codex/usage")
-
-      capture_log(fn ->
-        assert {:ok, result} = SavedResetRedemption.redeem_scheduled_expiry(assignment, identity.id, started_at: now)
-        assert result.applied? == (unquote(fence) == :none)
-      end)
-
-      assert FakeUpstream.physical_counts(fake).consume == if(unquote(fence) == :none, do: 1, else: 0)
+      assert_scheduled_trigger_preserves_fence!(unquote(trigger), unquote(policy), unquote(credits), unquote(fence))
     end
+  end
+
+  defp assert_scheduled_trigger_preserves_fence!(trigger, policy, credits, fence) do
+    %{fake: fake, identity: identity, assignment: assignment, now: now} = arrangement(trigger, policy, credits)
+    identity = apply_fence(identity, fence)
+    if trigger == :exhausted, do: SavedResetConfirmationFixtures.confirm_automatic_pressure!(identity, usage_url: FakeUpstream.url(fake) <> "/api/codex/usage")
+
+    capture_log(fn ->
+      assert {:ok, result} = SavedResetRedemption.redeem_scheduled_expiry(assignment, identity.id, started_at: now)
+      assert result.applied? == (fence == :none)
+    end)
+
+    assert FakeUpstream.physical_counts(fake).consume == if(fence == :none, do: 1, else: 0)
   end
 
   for policy <- [true, false], credits <- [:full, :none, :unknown], fence <- [:none, :compatible_sibling, :incompatible_sibling, :durable_pin, :target_circuit, :sibling_circuit, :natural_reset, :freshness, :corroboration, :reserve, :cooldown] do
     @tag credits_negative: true
     test "R9 request-driven threshold preserves #{fence} with #{credits} credits policy #{policy}" do
-      fixture = gateway_threshold_arrangement(unquote(policy), unquote(credits), unquote(fence))
-      %{fake: fake, setup: setup} = fixture
-      original = Repo.reload!(setup.identity).metadata["saved_reset_redemption"]
-      before = FakeUpstream.physical_counts(fake).consume
-      result = capture_log_result(fn -> runtime_execute(setup, fixture.payload) end)
-      assert_threshold_result!(result, fixture, unquote(fence))
-      applied? = unquote(fence) in [:none, :incompatible_sibling, :durable_pin]
-      assert FakeUpstream.physical_counts(fake).consume - before == if(applied?, do: 1, else: 0)
-      if fixture.sibling, do: assert(FakeUpstream.physical_counts(fixture.sibling.fake).consume == 0)
-
-      if applied? do
-        redemption = Repo.reload!(setup.identity).metadata["saved_reset_redemption"]
-        assert redemption["trigger_kind"] == "gateway_auto"
-        assert redemption["trigger_detail"] == "threshold"
-        assert redemption["phase"] == "confirmed_by_quota"
-        assert FakeUpstream.physical_counts(fake).http_generation == 1
-        assert [consume] = Enum.filter(FakeUpstream.physical_receipts(fake), &(&1.kind == :consume))
-        assert [generation] = Enum.filter(FakeUpstream.physical_receipts(fake), &(&1.kind == :generation))
-        assert confirmation = Enum.find(FakeUpstream.physical_receipts(fake), &(&1.kind == :usage and &1.ordinal > consume.ordinal))
-        assert consume.ordinal < confirmation.ordinal and confirmation.ordinal < generation.ordinal
-      else
-        assert Repo.reload!(setup.identity).metadata["saved_reset_redemption"] == original
-      end
-
-      assert Repo.reload!(setup.identity).allow_provider_credits == unquote(policy)
+      assert_request_driven_threshold_preserves_fence!(unquote(policy), unquote(credits), unquote(fence))
     end
+  end
+
+  defp assert_request_driven_threshold_preserves_fence!(policy, credits, fence) do
+    fixture = gateway_threshold_arrangement(policy, credits, fence)
+    %{fake: fake, setup: setup} = fixture
+    original = Repo.reload!(setup.identity).metadata["saved_reset_redemption"]
+    before = FakeUpstream.physical_counts(fake).consume
+    result = capture_log_result(fn -> runtime_execute(setup, fixture.payload) end)
+    assert_threshold_result!(result, fixture, fence)
+    applied? = fence in [:none, :incompatible_sibling, :durable_pin]
+    assert FakeUpstream.physical_counts(fake).consume - before == if(applied?, do: 1, else: 0)
+    if fixture.sibling, do: assert(FakeUpstream.physical_counts(fixture.sibling.fake).consume == 0)
+
+    if applied? do
+      redemption = Repo.reload!(setup.identity).metadata["saved_reset_redemption"]
+      assert redemption["trigger_kind"] == "gateway_auto"
+      assert redemption["trigger_detail"] == "threshold"
+      assert redemption["phase"] == "confirmed_by_quota"
+      assert FakeUpstream.physical_counts(fake).http_generation == 1
+      assert [consume] = Enum.filter(FakeUpstream.physical_receipts(fake), &(&1.kind == :consume))
+      assert [generation] = Enum.filter(FakeUpstream.physical_receipts(fake), &(&1.kind == :generation))
+      assert confirmation = Enum.find(FakeUpstream.physical_receipts(fake), &(&1.kind == :usage and &1.ordinal > consume.ordinal))
+      assert consume.ordinal < confirmation.ordinal and confirmation.ordinal < generation.ordinal
+    else
+      assert Repo.reload!(setup.identity).metadata["saved_reset_redemption"] == original
+    end
+
+    assert Repo.reload!(setup.identity).allow_provider_credits == policy
   end
 
   for policy <- [true, false], credits <- [:full, :none, :unknown], phase <- [:failed, :reblocked, :expired] do
     @tag credits_negative: true
     test "R8 terminal #{phase} recovery retains its latch through selection and final admission with #{credits} credits policy #{policy}" do
-      fixture = terminal_recovery_arrangement(unquote(policy), unquote(credits), unquote(phase))
-      %{fake: fake, setup: setup} = fixture
-      redemption = Repo.reload!(setup.identity).metadata["saved_reset_redemption"]
-      latch = RedemptionLifecycle.gateway_auto_latch(redemption, DateTime.utc_now())
-      serves? = unquote(policy) and unquote(credits) == :full
-      assert_terminal_credit_result!(setup, fixture.payload, fake, serves?)
-      assert Repo.reload!(setup.identity).metadata["saved_reset_redemption"] == redemption
-      assert RedemptionLifecycle.gateway_auto_latch(redemption, DateTime.utc_now()) == latch
-      assert FakeUpstream.physical_counts(fake).consume == terminal_consume_count(unquote(phase))
-      assert FakeUpstream.physical_counts(fake).http_generation == if(serves?, do: 3, else: 0)
-      assert Repo.aggregate(Attempt, :count) == if(serves?, do: 2, else: 0)
+      assert_terminal_recovery_retains_latch!(unquote(policy), unquote(credits), unquote(phase))
     end
+  end
+
+  defp assert_terminal_recovery_retains_latch!(policy, credits, phase) do
+    fixture = terminal_recovery_arrangement(policy, credits, phase)
+    %{fake: fake, setup: setup} = fixture
+    redemption = Repo.reload!(setup.identity).metadata["saved_reset_redemption"]
+    latch = RedemptionLifecycle.gateway_auto_latch(redemption, DateTime.utc_now())
+    serves? = policy and credits == :full
+    assert_terminal_credit_result!(setup, fixture.payload, fake, serves?)
+    assert Repo.reload!(setup.identity).metadata["saved_reset_redemption"] == redemption
+    assert RedemptionLifecycle.gateway_auto_latch(redemption, DateTime.utc_now()) == latch
+    assert FakeUpstream.physical_counts(fake).consume == terminal_consume_count(phase)
+    assert FakeUpstream.physical_counts(fake).http_generation == if(serves?, do: 3, else: 0)
+    assert Repo.aggregate(Attempt, :count) == if(serves?, do: 2, else: 0)
   end
 
   for policy <- [true, false], credits <- [:full, :unknown] do
     @tag credits_negative: true
     test "R4 R5 pending reset with #{credits} credits never claims a confirmation probe with policy #{policy}" do
-      %{fake: fake, identity: identity, input: input, now: now} = arrangement(:exhausted, unquote(policy), unquote(credits))
-      identity = pending_identity(identity, now)
-      input = FilterInput.put_candidates(input, [{hd(input.candidates) |> elem(0), identity}])
-      capture_log(fn -> assert {:error, _error} = filter(input) end)
-      assert FakeUpstream.physical_counts(fake).consume == 0
-      assert FakeUpstream.physical_counts(fake).http_generation == 0
-      snapshot = RoutingQuotaSnapshot.load_by_identity_ids([identity.id], now)[identity.id]
-      refute CapacityAssessment.guarded_probe_permitted?(snapshot)
-      assert Repo.reload!(identity).metadata["saved_reset_redemption"]["phase"] == "consumed_pending_probe"
-      assert RedemptionLifecycle.probe_holder(Repo.reload!(identity).metadata["saved_reset_redemption"]) == nil
+      assert_pending_reset_never_claims_confirmation_probe!(unquote(policy), unquote(credits))
     end
+  end
+
+  defp assert_pending_reset_never_claims_confirmation_probe!(policy, credits) do
+    %{fake: fake, identity: identity, input: input, now: now} = arrangement(:exhausted, policy, credits)
+    identity = pending_identity(identity, now)
+    input = FilterInput.put_candidates(input, [{hd(input.candidates) |> elem(0), identity}])
+    capture_log(fn -> assert {:error, _error} = filter(input) end)
+    assert FakeUpstream.physical_counts(fake).consume == 0
+    assert FakeUpstream.physical_counts(fake).http_generation == 0
+    snapshot = RoutingQuotaSnapshot.load_by_identity_ids([identity.id], now)[identity.id]
+    refute CapacityAssessment.guarded_probe_permitted?(snapshot)
+    assert Repo.reload!(identity).metadata["saved_reset_redemption"]["phase"] == "consumed_pending_probe"
+    assert RedemptionLifecycle.probe_holder(Repo.reload!(identity).metadata["saved_reset_redemption"]) == nil
   end
 
   for policy <- [true, false] do
@@ -210,22 +236,26 @@ defmodule CodexPooler.Upstreams.SavedResets.ProviderCreditsTriggerMatrixTest do
 
   for policy <- [true, false], restored_shape <- [:included, :windowless_included] do
     test "C24 matching reset descriptor distinguishes #{restored_shape} restoration with policy #{policy}" do
-      now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
-      %{identity: identity} = arrangement(:exhausted, unquote(policy), :none, now: DateTime.add(now, -2, :second))
-      identity = pending_identity(identity, DateTime.add(now, -1, :second))
-      identity = identity |> Ecto.Changeset.change(metadata: put_in(identity.metadata, ["saved_reset_redemption", "included_window_descriptors"], [%{"window_kind" => "secondary", "window_minutes" => 10_080}])) |> Repo.update!()
-      payload = ProviderCreditsFixtures.usage_payload(unquote(restored_shape), now: now, credits: :none)
-      ProviderCreditsFixtures.persist_usage!(identity, payload, now)
-      proof_at = DateTime.add(now, 1, :microsecond)
-      ProviderCreditsFixtures.persist_usage!(Repo.reload!(identity), ProviderCreditsFixtures.usage_payload(unquote(restored_shape), now: proof_at, credits: :none), proof_at)
+      assert_matching_reset_descriptor_distinguishes_restoration!(unquote(policy), unquote(restored_shape))
+    end
+  end
 
-      if unquote(restored_shape) == :included do
-        assert {:ok, :confirmed_by_quota} = Convergence.converge(identity, proof_at)
-        assert Repo.reload!(identity).metadata["saved_reset_redemption"]["phase"] == "confirmed_by_quota"
-      else
-        assert {:ok, :unchanged} = Convergence.converge(identity, proof_at)
-        assert Repo.reload!(identity).metadata["saved_reset_redemption"]["phase"] == "consumed_pending_probe"
-      end
+  defp assert_matching_reset_descriptor_distinguishes_restoration!(policy, restored_shape) do
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    %{identity: identity} = arrangement(:exhausted, policy, :none, now: DateTime.add(now, -2, :second))
+    identity = pending_identity(identity, DateTime.add(now, -1, :second))
+    identity = identity |> Ecto.Changeset.change(metadata: put_in(identity.metadata, ["saved_reset_redemption", "included_window_descriptors"], [%{"window_kind" => "secondary", "window_minutes" => 10_080}])) |> Repo.update!()
+    payload = ProviderCreditsFixtures.usage_payload(restored_shape, now: now, credits: :none)
+    ProviderCreditsFixtures.persist_usage!(identity, payload, now)
+    proof_at = DateTime.add(now, 1, :microsecond)
+    ProviderCreditsFixtures.persist_usage!(Repo.reload!(identity), ProviderCreditsFixtures.usage_payload(restored_shape, now: proof_at, credits: :none), proof_at)
+
+    if restored_shape == :included do
+      assert {:ok, :confirmed_by_quota} = Convergence.converge(identity, proof_at)
+      assert Repo.reload!(identity).metadata["saved_reset_redemption"]["phase"] == "confirmed_by_quota"
+    else
+      assert {:ok, :unchanged} = Convergence.converge(identity, proof_at)
+      assert Repo.reload!(identity).metadata["saved_reset_redemption"]["phase"] == "consumed_pending_probe"
     end
   end
 

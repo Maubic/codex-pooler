@@ -1060,6 +1060,15 @@ defmodule CodexPooler.Gateway.Websocket do
 
   def interrupt_websocket_owner_turn(_session, _token, _downstream, _interrupt, _opts), do: {:error, :owner_unavailable}
 
+  @spec steer_websocket_owner_turn(CodexSession.t() | nil, String.t() | nil, WebsocketOwnerSession.downstream() | nil, CodexPooler.Gateway.Transports.Websocket.ResponseSteer.t(), opts()) :: :ok | {:error, WebsocketOwnerContract.owner_error() | :remote_steer_v1_unsupported | :stale_owner}
+  def steer_websocket_owner_turn(%CodexSession{} = session, token, downstream, steer, opts)
+      when is_binary(token) and is_map(downstream) and is_map(steer) do
+    opts = websocket_request_options(opts)
+    WebsocketOwnerForwarder.steer_turn(session, token, downstream, steer, opts |> owner_forwarder_opts() |> Keyword.put_new(:timeout, WebsocketOwnerContract.default_downstream_send_timeout_ms()))
+  end
+
+  def steer_websocket_owner_turn(_session, _token, _downstream, _steer, _opts), do: {:error, :owner_unavailable}
+
   @spec preflight_websocket_owner_reconnect(
           CodexSession.t(),
           binary(),

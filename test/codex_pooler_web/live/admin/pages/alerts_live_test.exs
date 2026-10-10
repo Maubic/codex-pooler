@@ -638,7 +638,7 @@ defmodule CodexPoolerWeb.Admin.AlertsLiveTest do
            )
 
     assert has_element?(view, "#alert-incident-#{incident.id}")
-    assert has_element?(view, "#alert-incident-card-#{incident.id}")
+    refute has_element?(view, "#alert-incident-card-#{incident.id}")
 
     assert has_element?(
              view,
@@ -709,8 +709,6 @@ defmodule CodexPoolerWeb.Admin.AlertsLiveTest do
 
     assert has_element?(view, "#alert-incident-acknowledge-#{incident.id}", "Acknowledge")
     assert has_element?(view, "#alert-incident-resolve-#{incident.id}", "Resolve")
-    assert has_element?(view, "#alert-incident-card-acknowledge-#{incident.id}", "Acknowledge")
-    assert has_element?(view, "#alert-incident-card-resolve-#{incident.id}", "Resolve")
     refute html =~ raw_dedupe_key
     refute html =~ raw_prompt
 
@@ -723,7 +721,6 @@ defmodule CodexPoolerWeb.Admin.AlertsLiveTest do
     assert acknowledged.acknowledged_at
     assert has_element?(view, "#alert-incident-row-#{incident.id}-state", "Acknowledged")
     refute has_element?(view, "#alert-incident-acknowledge-#{incident.id}")
-    refute has_element?(view, "#alert-incident-card-acknowledge-#{incident.id}")
     assert has_element?(view, "#alert-incident-resolve-#{incident.id}", "Resolve")
 
     assert audit_event("alert_incident.acknowledge", incident.id).actor_user_id == scope.user.id
@@ -743,14 +740,7 @@ defmodule CodexPoolerWeb.Admin.AlertsLiveTest do
              "No pending actions"
            )
 
-    assert has_element?(
-             view,
-             "#alert-incident-card-#{incident.id}-actions-resolved",
-             "No pending actions"
-           )
-
     refute has_element?(view, "#alert-incident-resolve-#{incident.id}")
-    refute has_element?(view, "#alert-incident-card-resolve-#{incident.id}")
 
     resolve_audit = audit_event("alert_incident.resolve", incident.id)
     assert resolve_audit.actor_user_id == scope.user.id
@@ -762,7 +752,7 @@ defmodule CodexPoolerWeb.Admin.AlertsLiveTest do
     refute audit_payload =~ raw_prompt
   end
 
-  test "incident delivery attempts render safe details on desktop and mobile surfaces", %{
+  test "incident delivery attempts render safe details on one ledger table", %{
     conn: conn,
     scope: scope
   } do
@@ -870,7 +860,7 @@ defmodule CodexPoolerWeb.Admin.AlertsLiveTest do
              "latest failed"
            )
 
-    for prefix <- ["alert-incident-row", "alert-incident-card"] do
+    for prefix <- ["alert-incident-row"] do
       assert has_element?(
                view,
                "##{prefix}-#{incident.id}-delivery-attempt-#{failed_attempt.id}",

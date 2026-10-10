@@ -35,6 +35,7 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
 
   @tag :fake_upstream_strict_contract
   test "native websocket success cannot be satisfied by an SSE-derived shortcut" do
+    # provenance: synthetic_adversarial
     mode =
       FakeUpstream.strict_sequence([
         FakeUpstream.expect_request(
@@ -47,11 +48,31 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
         )
       ])
 
-    assert_raise ArgumentError,
-                 ~r/native websocket expectation requires websocket_text_frames/,
-                 fn ->
-                   start_resources(mode)
-                 end
+    assert_raise ArgumentError, fn -> start_resources(mode) end
+  end
+
+  @tag :fake_upstream_strict_contract
+  test "native websocket expectations reject non-native response modes without narrowing HTTP modes" do
+    {:ok, fake} = FakeUpstream.start_link(FakeUpstream.json_response(%{}))
+    on_exit(fn -> FakeUpstream.stop(fake) end)
+
+    # The native frame boundary rejects HTTP and SSE modes, whether finite or repeating.
+    sse = FakeUpstream.sse_stream([{"response.completed", %{"type" => "response.completed", "response" => %{}}}])
+    paced = FakeUpstream.delayed_sse_stream([{"response.completed", %{"type" => "response.completed", "response" => %{}}}], interval_ms: 1)
+
+    for mode <- [FakeUpstream.json_response(%{}), sse, paced] do
+      expectation = native_expectation(mode)
+      # provenance: synthetic_adversarial
+      assert_raise ArgumentError, fn -> FakeUpstream.set_mode(fake, FakeUpstream.strict_sequence([expectation])) end
+      assert_raise ArgumentError, fn -> FakeUpstream.set_mode(fake, FakeUpstream.repeat_last([expectation])) end
+      # provenance: synthetic_adversarial
+      assert_raise ArgumentError, fn -> FakeUpstream.start_link(FakeUpstream.strict_sequence([expectation])) end
+    end
+
+    # Only a native websocket expectation is held to it: the same SSE mode answers an HTTP expectation.
+    http_expectation = FakeUpstream.expect_request(method: "POST", path: "/backend-api/codex/responses", respond: sse)
+    # provenance: synthetic_adversarial
+    assert :ok = FakeUpstream.set_mode(fake, FakeUpstream.strict_sequence([http_expectation]))
   end
 
   @tag :fake_upstream_strict_contract
@@ -331,6 +352,28 @@ defmodule CodexPooler.FakeUpstreamWebsocketContractTest do
     assert FakeUpstream.websocket_connection_count(upstream) == 1
     assert [^connection_id] = FakeUpstream.websocket_connection_ids(upstream)
   end
+
+  test "retiring a dead provider tail preserves reached unreleased holds and refuses a live or foreign handler" do
+    release_ref = make_ref()
+    {upstream, session} = start_resources(FakeUpstream.barrier_websocket_frames([completed_event("retired-tail")], notify: self(), release_ref: release_ref))
+    request = websocket_request(upstream)
+    task = Task.async(fn -> UpstreamWebsocketSession.request(session, request) end)
+    assert_receive {:fake_upstream_frame_barrier, 0, handler, ^release_ref}, 2_000
+    assert {:error, :handler_alive} = FakeUpstream.retire_frame_barriers(upstream, release_ref, handler)
+    {foreign, foreign_monitor} = spawn_monitor(fn -> :ok end)
+    assert_receive {:DOWN, ^foreign_monitor, :process, ^foreign, :normal}, 2_000
+    assert {:error, :handler_mismatch} = FakeUpstream.retire_frame_barriers(upstream, release_ref, foreign)
+    handler_monitor = Process.monitor(handler)
+    Process.exit(handler, :kill)
+    assert_receive {:DOWN, ^handler_monitor, :process, ^handler, :killed}, 2_000
+    assert :ok = FakeUpstream.retire_frame_barriers(upstream, release_ref, handler)
+    assert {:error, %{transport_failure: %{"phase" => "receive", "transport_signal" => "tcp_closed", "text_frame_count" => 0, "terminal_seen" => false}}} = Task.await(task, 2_000)
+    assert_raise ExUnit.AssertionError, ~r/missing_required_acknowledgement.*0/s, fn -> FakeUpstream.verify!(upstream) end
+    assert :ok = FakeUpstream.release_frame(upstream, release_ref)
+    assert :ok = FakeUpstream.verify!(upstream)
+  end
+
+  defp native_expectation(mode), do: FakeUpstream.expect_request(method: "WEBSOCKET", path: "/backend-api/codex/responses", respond: mode)
 
   defp start_resources(mode) do
     {:ok, upstream} = FakeUpstream.start_link(mode)

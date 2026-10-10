@@ -13,11 +13,25 @@ defmodule CodexPooler.Accounting.AttemptFinalizationDeliveryReceiptTest do
 
   alias CodexPooler.Accounting
   alias CodexPooler.Accounting.Attempt
+  alias CodexPooler.Gateway.Persistence.{BridgeOwnerLease, CodexSession, CodexTurn}
+  alias CodexPooler.Gateway.Runtime.Finalization.ExpiredOwnerGenerationCleanup, as: Cleanup
   alias CodexPooler.Gateway.Websocket.DeliveryReceipt
+  alias CodexPooler.Platform.ExecutionIdentity
+  alias CodexPooler.Platform.InstancePresence.Identity
   alias CodexPooler.UnboxedFixture
   alias Ecto.Adapters.SQL.Sandbox
 
   import CodexPoolerWeb.Runtime.BackendCodexTestSupport, only: [cleanup_unboxed_pool!: 1]
+
+  setup context do
+    if context[:unboxed_writers] do
+      CodexPooler.DataCase.stop_sandbox(context.sandbox_owner, context.sandbox_settings_cache)
+      on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+      :ok = Sandbox.mode(Repo, :auto)
+    end
+
+    :ok
+  end
 
   test "a receipt recorded before the attempt's finalization survives it" do
     %{attempt: attempt, request: request} = websocket_attempt!()
@@ -46,9 +60,28 @@ defmodule CodexPooler.Accounting.AttemptFinalizationDeliveryReceiptTest do
     assert metadata["attempt_marker"] == "finalization"
   end
 
-  for first <- [:receipt, :finalizer] do
-    @tag first: first
-    test "independent PostgreSQL #{first} before the other writer preserves the receipt and final metadata", %{first: first} do
+  test "a socket receipt recorded before retry finalization survives the stale caller struct" do
+    %{attempt: attempt} = websocket_attempt!()
+    receipt = aborted_partial_receipt()
+    assert :ok = DeliveryReceipt.record(%{attempt_id: attempt.id, request_id: attempt.request_id}, receipt)
+    assert {:ok, saved} = Accounting.record_retryable_attempt_failure(attempt, retry_attrs())
+    assert saved.response_metadata["downstream_delivery"] == receipt
+    assert saved.response_metadata["attempt_marker"] == "retry"
+  end
+
+  test "retry finalization's explicit delivery receipt retains existing precedence" do
+    %{attempt: attempt} = websocket_attempt!()
+    assert :ok = DeliveryReceipt.persist(attempt.id, aborted_partial_receipt())
+    reported = DeliveryReceipt.build(%{outcome: "aborted", frames_after_visible: 8, write_failure: "closed"})
+    attrs = Map.put(retry_attrs(), :attempt_metadata, %{"downstream_delivery" => reported, "attempt_marker" => "retry"})
+    assert {:ok, saved} = Accounting.record_retryable_attempt_failure(attempt, attrs)
+    assert saved.response_metadata["downstream_delivery"] == reported
+  end
+
+  for {first, second} <- [{:receipt, :finalizer}, {:finalizer, :receipt}, {:receipt, :retry}, {:retry, :receipt}, {:witness, :retry}, {:retry, :witness}] do
+    @tag :unboxed_writers
+    @tag first: first, second: second
+    test "independent PostgreSQL #{first} then #{second} preserves both writers' metadata", %{first: first, second: second} do
       holder = String.to_atom("receipt-order-fixture-#{System.unique_integer([:positive])}")
       # The unlinked holder survives an assertion failure long enough for the
       # pre-registered exact committed-graph cleanup; it is stopped afterward.
@@ -75,31 +108,42 @@ defmodule CodexPooler.Accounting.AttemptFinalizationDeliveryReceiptTest do
               fixture
             end)
 
-          fixture
+          if :witness in [first, second], do: authorize_witness!(fixture), else: fixture
         end)
 
       supervisor = start_supervised!(Task.Supervisor)
       parent = self()
       release = make_ref()
+      handler = {__MODULE__, release}
+      on_exit(fn -> :telemetry.detach(handler) end)
+      :ok = :telemetry.attach(handler, [:codex_pooler, :repo, :query], &__MODULE__.hold_attempt_write/4, nil)
       receipt = aborted_partial_receipt()
       first_task = start_ordered_writer(supervisor, fixture, receipt, first, parent, release, true)
       first_monitor = Process.monitor(first_task.pid)
       assert_receive {:ordered_writer_ready, ^first, first_backend, first_pid}, 15_000
-      second = if first == :receipt, do: :finalizer, else: :receipt
       second_task = start_ordered_writer(supervisor, fixture, receipt, second, parent, release, false)
       second_monitor = Process.monitor(second_task.pid)
-      assert_receive {:ordered_writer_ready, ^second, second_backend, _second_pid}, 15_000
+      assert_receive {:ordered_writer_blocked, ^second, second_backend, second_pid}, 15_000
       assert first_backend != second_backend
-      await_backend_blocked!(second_backend, first_backend, System.monotonic_time(:millisecond) + 15_000)
       send(first_pid, {:release_ordered_writer, release})
       assert {:ok, _result} = Task.await(first_task, 15_000)
+      send(second_pid, {:release_ordered_writer, release})
       assert {:ok, _result} = Task.await(second_task, 15_000)
       assert_receive {:DOWN, ^first_monitor, :process, _pid, :normal}, 15_000
       assert_receive {:DOWN, ^second_monitor, :process, _pid, :normal}, 15_000
       stored = UnboxedFixture.run_unboxed(fn -> Repo.get!(Attempt, fixture.attempt.id) end)
-      assert stored.status == "failed"
-      assert stored.response_metadata["downstream_delivery"] == receipt
-      assert stored.response_metadata["attempt_marker"] == "finalization"
+
+      if :witness in [first, second] do
+        assert {:ok, %{"phase" => "ended", "end_kind" => "serialized_connection_closed"} = ended} = Cleanup.read(stored)
+        assert Cleanup.scope(ended) == Cleanup.scope(fixture.witness)
+        assert stored.response_metadata["downstream_delivery"] == receipt
+      else
+        assert stored.response_metadata["downstream_delivery"] == receipt
+      end
+
+      assert stored.status == if(:retry in [first, second], do: "retryable_failed", else: "failed")
+      assert stored.response_metadata["attempt_marker"] == if(:retry in [first, second], do: "retry", else: "finalization")
+      CodexPooler.TestDiagnostics.puts("attempt metadata writer_order=#{first}->#{second} backend_ids=#{first_backend},#{second_backend} attempt_nowait=55P03 actual_writer_lock_timeout=55P03 metadata_preserved=true")
     end
   end
 
@@ -107,28 +151,79 @@ defmodule CodexPooler.Accounting.AttemptFinalizationDeliveryReceiptTest do
     context = %{fixture: fixture, receipt: receipt, kind: kind, parent: parent, release: release, hold?: hold?}
 
     Task.Supervisor.async_nolink(supervisor, fn ->
-      Sandbox.unboxed_run(Repo, fn -> ordered_transaction(context) end)
+      Sandbox.unboxed_run(Repo, fn -> run_ordered_statement(context) end)
     end)
   end
 
-  defp ordered_transaction(context), do: Repo.transaction(fn -> run_ordered_statement(context) end)
-
   defp run_ordered_statement(context) do
     [[backend]] = Repo.query!("SELECT pg_backend_pid()").rows
-    if not context.hold?, do: send(context.parent, {:ordered_writer_ready, context.kind, backend, self()})
-
-    result =
-      case context.kind do
-        :receipt -> assert :ok = DeliveryReceipt.persist(context.fixture.attempt.id, context.receipt)
-        :finalizer -> assert {:ok, _finalized} = Accounting.finalize_request(context.fixture.request, context.fixture.attempt, interrupted_attrs())
-      end
 
     if context.hold? do
-      send(context.parent, {:ordered_writer_ready, context.kind, backend, self()})
+      Process.put({__MODULE__, :hold_write}, {context, backend})
+    else
+      assert_attempt_locked!(context.fixture.attempt.id)
+      Repo.query!("SET lock_timeout = '250ms'")
+
+      try do
+        assert {:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}} = write_result(context)
+      after
+        Repo.query!("SET lock_timeout = 0")
+      end
+
+      send(context.parent, {:ordered_writer_blocked, context.kind, backend, self()})
       await_ordered_release(context.release)
     end
 
-    result
+    write_result(context)
+  end
+
+  defp write_result(context) do
+    perform_write(context)
+  rescue
+    error in Postgrex.Error -> {:error, error}
+  end
+
+  defp perform_write(%{kind: :witness, fixture: fixture}), do: Cleanup.record_end(fixture.witness, "serialized_connection_closed")
+
+  defp perform_write(context) do
+    Repo.transaction(fn ->
+      case context.kind do
+        :receipt ->
+          persist_receipt!(context)
+
+        :finalizer ->
+          assert {:ok, _finalized} = Accounting.finalize_request(context.fixture.request, context.fixture.attempt, interrupted_attrs())
+
+        :retry ->
+          assert {:ok, _attempt} = Accounting.record_retryable_attempt_failure(context.fixture.attempt, retry_attrs())
+      end
+    end)
+  end
+
+  defp persist_receipt!(context) do
+    case DeliveryReceipt.persist(context.fixture.attempt.id, context.receipt) do
+      :ok -> :ok
+      {:error, error} -> Repo.rollback(error)
+    end
+  end
+
+  def hold_attempt_write(_event, _measurements, %{source: "attempts", query: "UPDATE" <> _}, _config) do
+    case Process.delete({__MODULE__, :hold_write}) do
+      {context, backend} ->
+        send(context.parent, {:ordered_writer_ready, context.kind, backend, self()})
+        await_ordered_release(context.release)
+
+      nil ->
+        :ok
+    end
+  end
+
+  def hold_attempt_write(_event, _measurements, _metadata, _config), do: :ok
+
+  defp assert_attempt_locked!(attempt_id) do
+    assert_raise Postgrex.Error, ~r/55P03/, fn ->
+      Repo.transaction(fn -> Repo.one!(from a in Attempt, where: a.id == ^attempt_id, lock: "FOR UPDATE NOWAIT") end)
+    end
   end
 
   defp await_ordered_release(release) do
@@ -136,23 +231,6 @@ defmodule CodexPooler.Accounting.AttemptFinalizationDeliveryReceiptTest do
       {:release_ordered_writer, ^release} -> :ok
     after
       15_000 -> Repo.rollback(:ordered_writer_release_missing)
-    end
-  end
-
-  defp await_backend_blocked!(waiter, blocker, deadline) do
-    blockers =
-      UnboxedFixture.run_unboxed(fn ->
-        [[blocked_by]] = Repo.query!("SELECT pg_blocking_pids($1)", [waiter]).rows
-        blocked_by
-      end)
-
-    if blocker not in blockers do
-      assert System.monotonic_time(:millisecond) < deadline, "independent finalizer/receipt statement never reached its actual row lock"
-
-      receive do
-      after
-        5 -> await_backend_blocked!(waiter, blocker, deadline)
-      end
     end
   end
 
@@ -170,6 +248,23 @@ defmodule CodexPooler.Accounting.AttemptFinalizationDeliveryReceiptTest do
     %{attempt: attempt, request: reserved.request, setup: setup}
   end
 
+  defp authorize_witness!(fixture) do
+    %{setup: setup, attempt: attempt, request: request} = fixture
+    clock = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    expired = DateTime.add(clock, -1, :second)
+    token = Ecto.UUID.generate()
+    owner = Identity.local()
+    session = Repo.insert!(%CodexSession{pool_id: setup.pool.id, api_key_id: setup.api_key.id, session_key: "sample-retry-witness-#{Ecto.UUID.generate()}", status: "active", owner_instance_id: owner.node_name, owner_instance_boot_id: owner.boot_id, owner_lease_token: token, owner_lease_expires_at: expired, last_heartbeat_at: expired, created_at: clock, updated_at: clock})
+    Repo.insert!(%BridgeOwnerLease{codex_session_id: session.id, pool_id: setup.pool.id, api_key_id: setup.api_key.id, lease_token: token, owner_instance_id: owner.node_name, owner_instance_boot_id: owner.boot_id, status: "active", acquired_at: expired, renewed_at: expired, expires_at: expired, metadata: %{}, created_at: clock, updated_at: clock})
+    Repo.insert!(%CodexTurn{codex_session_id: session.id, request_id: request.id, turn_sequence: 1, transport_kind: "websocket", status: "in_progress", started_at: clock, created_at: clock, updated_at: clock})
+    cleanup = %{session_id: session.id, owner_instance_id: owner.node_name, owner_lease_token: token, request_id: request.id, attempt_id: attempt.id, replay_generation: 0, downstream_epoch: 1, native_replay_binding: nil}
+    state = %{codex_session_id: session.id, owner_lease_token: token, process_generation: 1, producer_identity: ExecutionIdentity.producer(), upstream_pid: self(), pending_handoff: nil, suspended_replay: nil, pending_admissions: %{}, active_turn: %{cleanup_witness: cleanup, task_pid: self(), task_ref: make_ref(), pending_result: nil, admission_request_id: request.id, admission_attempt_id: attempt.id, downstream: %{epoch: 1}, terminal_forwarded?: false, task_settled?: false}}
+    candidate = %{session_id: session.id, owner_instance_id: owner.node_name, owner_lease_token: token, owner_lease_expires_at: expired}
+    assert {:ok, witness} = Cleanup.within_deadline(System.monotonic_time(:millisecond) + 15_000, fn -> Cleanup.authorize(state, candidate) end)
+    assert :ok = DeliveryReceipt.persist(attempt.id, aborted_partial_receipt())
+    Map.put(fixture, :witness, witness)
+  end
+
   defp aborted_partial_receipt do
     DeliveryReceipt.build(%{outcome: "aborted", terminal_class: nil, pushed_at: nil, frames_after_visible: 4, transport: "websocket", highest_frame_class: "part_added"})
   end
@@ -182,5 +277,9 @@ defmodule CodexPooler.Accounting.AttemptFinalizationDeliveryReceiptTest do
       attempt_metadata: %{"attempt_marker" => "finalization"},
       usage: %{status: "usage_unknown", source: "unavailable"}
     }
+  end
+
+  defp retry_attrs do
+    %{response_status_code: 503, last_error_code: "server_error", attempt_metadata: %{"attempt_marker" => "retry"}}
   end
 end

@@ -1307,6 +1307,33 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuityLockingTest do
   end
 
   describe "session continuity expired-session frozen boundary" do
+    test "frozen membership rejects a dynamic session selection even with the old UUID parameter" do
+      fixture = unboxed_expired_replacement_fixture()
+
+      # The frozen parameter is present, but the dynamic branch also discovers
+      # the replacement. Execute the harmless read to prove the extra row.
+      dynamic_ids = from session in CodexSession, where: session.session_key == ^fixture.session_key, select: session.id
+
+      widened =
+        from session in CodexSession,
+          where: session.id in ^[fixture.session.id] or session.id in subquery(dynamic_ids),
+          select: session.id
+
+      rediscovered =
+        from session in CodexSession,
+          where: session.id in ^[fixture.session.id] and session.id in subquery(dynamic_ids),
+          select: session.id
+
+      for {query, expected_ids} <- [{widened, [fixture.session.id, fixture.replacement.id]}, {rediscovered, [fixture.session.id]}] do
+        {ids, events} = capture_detailed_repo_queries(fn -> Sandbox.unboxed_run(Repo, fn -> Repo.all(query) end) end)
+        assert Enum.sort(ids) == Enum.sort(expected_ids)
+        event = Enum.find(events, &(&1.source == "codex_sessions" and &1.operation == "SELECT"))
+        assert event
+        assert uuid_params(event.params) == [fixture.session.id]
+        assert_raise ExUnit.AssertionError, fn -> assert_frozen_membership!(event, fixture.session.id) end
+      end
+    end
+
     @tag :session_continuity_frozen
     test "close_for_key freezes the old id while a replacement blocks on the partial unique index" do
       fixture = unboxed_expired_replacement_fixture()
@@ -1842,13 +1869,34 @@ defmodule CodexPooler.Gateway.Persistence.SessionContinuityLockingTest do
     assert dependent_events != []
 
     Enum.each(dependent_events, fn event ->
-      assert uuid_params(event.params) == [frozen_session_id]
-      refute String.contains?(String.upcase(event.query), " IN (SELECT")
+      assert_frozen_membership!(event, frozen_session_id)
     end)
 
     events
     |> Enum.filter(&(&1.operation == "SELECT" and &1.for_update?))
     |> Enum.each(fn event -> assert ordered_primary_key_lock?(event.query) end)
+  end
+
+  defp assert_frozen_membership!(event, frozen_session_id) do
+    assert uuid_params(event.params) == [frozen_session_id]
+    relation = Regex.escape(event.source)
+    [_, binding] = Regex.run(~r/\b(?:FROM|UPDATE) "#{relation}" AS (\w+)/, event.query)
+    column = if event.source == "codex_sessions", do: "id", else: "codex_session_id"
+
+    # Membership must begin with the dependent row's bound frozen array, alone
+    # or narrowed by AND. Merely finding the UUID elsewhere is insufficient.
+    membership = ~r/\bWHERE \(*#{binding}\."#{column}" = ANY\(\$(\d+)\)(?=\s+AND|\)*\s*$)/
+    match = Regex.run(membership, event.query)
+    assert match, "dependent row membership must be restricted to the frozen array"
+    [_, parameter] = match
+    ids = Enum.at(event.params, String.to_integer(parameter) - 1)
+    assert is_list(ids)
+    assert uuid_params(ids) == [frozen_session_id]
+
+    relations = Regex.scan(~r/\b(?:FROM|JOIN) "([^"]+)"/, event.query) |> Enum.map(&List.last/1)
+    subquery_relations = if event.operation == "SELECT", do: tl(relations), else: relations
+    allowed = if event.source == "bridge_owner_leases" and event.operation == "UPDATE", do: ["codex_turns", "attempts"], else: []
+    assert Enum.all?(subquery_relations, &(&1 in allowed)), "dependent queries must not rediscover session membership"
   end
 
   defp assert_frozen_replacement_state!(fixture) do

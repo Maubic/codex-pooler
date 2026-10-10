@@ -231,6 +231,9 @@ defmodule CodexPooler.Gateway.Websocket.DirectCleanup do
   @spec interrupt(receipt(), String.t()) :: interrupt_result()
   defdelegate interrupt(receipt, reason), to: Interruption, as: :interrupt_direct_request
 
+  @spec record_settled_downstream_idle_timeout(receipt() | map(), String.t()) :: term()
+  defdelegate record_settled_downstream_idle_timeout(receipt, client_activity), to: Interruption
+
   # Called by the response task itself after it rescued an exception. The
   # task settles its own pending admission first (idempotent) so the receipt
   # lookup cannot wait on a readiness call only this process could make, then

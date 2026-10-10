@@ -153,6 +153,206 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
     end)
   end
 
+  for {shape, item} <- [{"string", "synthetic"}, {"null", nil}, {"number", 1}, {"nested array", []}, {"boolean", true}] do
+    @tag :input_entry_shape
+    test "Responses rejects a #{shape} input array entry" do
+      assert {:error, %{status: 400, code: "invalid_request", param: "input", message: "input item shape is not translatable"}} =
+               Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [unquote(Macro.escape(item))]})
+    end
+  end
+
+  @tag :input_entry_shape
+  test "Responses preserves valid typed input array entries" do
+    input = [%{"type" => "message", "role" => "user", "content" => [%{"type" => "input_text", "text" => "synthetic"}]}]
+    assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => input})
+    assert result.payload["input"] == input
+  end
+
+  for call_count <- [0, 2], content_shape <- [:string, :parts] do
+    @tag :assistant_tool_text
+    test "Responses preserves #{content_shape} assistant text before #{call_count} tool calls" do
+      content = if unquote(content_shape) == :string, do: "synthetic assistant text", else: [%{"type" => "text", "text" => "synthetic assistant text"}]
+      calls = for index <- Enum.take(1..2, unquote(call_count)), do: %{"id" => "call_#{index}", "type" => "function", "function" => %{"name" => "lookup", "arguments" => "{}"}}
+      item = %{"role" => "assistant", "content" => content, "tool_calls" => calls, "phase" => "commentary", "metadata" => %{"turn_id" => "synthetic-turn"}}
+
+      assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [item]})
+      assert [message | function_calls] = result.payload["input"]
+      assert message == %{"type" => "message", "role" => "assistant", "content" => [%{"type" => "output_text", "text" => "synthetic assistant text"}], "phase" => "commentary", "metadata" => item["metadata"]}
+      assert Enum.map(function_calls, & &1["type"]) == List.duplicate("function_call", unquote(call_count))
+      assert Enum.map(function_calls, & &1["call_id"]) == Enum.map(calls, & &1["id"])
+      assert Enum.all?(function_calls, &(&1["metadata"] == item["metadata"]))
+    end
+  end
+
+  @tag :assistant_tool_text
+  test "Responses keeps empty assistant tool-call content and native replay behavior" do
+    call = %{"id" => "call_empty_content", "type" => "function", "function" => %{"name" => "lookup", "arguments" => "{}"}}
+    expected_call = %{"type" => "function_call", "call_id" => call["id"], "name" => "lookup", "arguments" => "{}"}
+
+    for content <- [:absent, nil, "", []] do
+      item = %{"role" => "assistant", "tool_calls" => [call]}
+      item = if content == :absent, do: item, else: Map.put(item, "content", content)
+      assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [item]})
+      assert result.payload["input"] == [expected_call]
+    end
+
+    native = [%{"type" => "message", "role" => "assistant", "content" => [%{"type" => "output_text", "text" => "synthetic native text"}]}, expected_call]
+    assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => native})
+    assert result.payload["input"] == native
+  end
+
+  @tag :assistant_tool_text
+  test "Responses refuses malformed assistant content beside tool calls" do
+    for content <- [1, %{}, [%{"type" => "text", "text" => nil}]] do
+      assert {:error, %{status: 400, code: "invalid_request", param: "input"}} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [%{"role" => "user", "content" => "synthetic"}, %{"role" => "assistant", "content" => content, "tool_calls" => []}]})
+    end
+  end
+
+  for id_field <- ["tool_call_id", "call_id"], output_present? <- [false, true] do
+    @tag :tool_content_presence
+    test "Responses refuses tool #{id_field} without content with output_present=#{output_present?}" do
+      item = %{"role" => "tool", unquote(id_field) => "call_content_presence"}
+      item = if unquote(output_present?), do: Map.put(item, "output", "synthetic output"), else: item
+      assert {:error, %{status: 400, code: "invalid_request", param: "input"}} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [item]})
+    end
+  end
+
+  @tag :tool_content_presence
+  test "Responses preserves present tool content including explicit null and native output" do
+    for {content, output} <- [{nil, ""}, {"", ""}, {"synthetic output", "synthetic output"}, {%{"output" => "synthetic output", "exit_code" => 0}, "synthetic output"}, {%{"output" => ""}, ""}, {[%{"type" => "text", "text" => "synthetic output"}], [%{"type" => "input_text", "text" => "synthetic output"}]}] do
+      item = %{"role" => "tool", "tool_call_id" => "call_content_presence", "content" => content, "output" => "ignored top-level output"}
+      assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [item]})
+      assert result.payload["input"] == [%{"type" => "function_call_output", "call_id" => "call_content_presence", "output" => output}]
+    end
+
+    native = %{"type" => "function_call_output", "call_id" => "call_content_presence", "output" => "synthetic native output"}
+    assert {:ok, result} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => [native]})
+    assert result.payload["input"] == [native]
+  end
+
+  @tag :tool_content_presence
+  test "Chat retains its missing and null tool content refusal and valid string contract" do
+    item = %{"role" => "tool", "tool_call_id" => "call_content_presence", "output" => "synthetic output"}
+
+    for message <- [item, Map.put(item, "content", nil)] do
+      assert {:error, %{status: 400, code: "invalid_request", param: "messages"}} = Chat.coerce(%{"model" => "gpt-fixture-text", "messages" => [message]})
+    end
+
+    for content <- ["", "synthetic output"] do
+      assert {:ok, result} = Chat.coerce(%{"model" => "gpt-fixture-text", "messages" => [Map.put(item, "content", content)]})
+      assert hd(result.payload["input"])["output"] == [%{"type" => "input_text", "text" => content}]
+    end
+  end
+
+  for source <- ["messages", "input"], lifted? <- [false, true] do
+    @tag :chat_top_level_instructions
+    test "Chat #{source} preserves top-level instructions with lifted=#{lifted?}" do
+      messages = if(unquote(lifted?), do: [%{"role" => "system", "content" => "synthetic system"}, %{"role" => "developer", "content" => "synthetic developer"}], else: []) ++ [%{"role" => "user", "content" => "synthetic user"}]
+      payload = %{"model" => "gpt-fixture-text", unquote(source) => messages, "instructions" => "synthetic top"}
+      assert {:ok, result} = Chat.coerce(payload)
+      assert result.payload["instructions"] == if(unquote(lifted?), do: "synthetic top\nsynthetic system\nsynthetic developer", else: "synthetic top")
+      assert Enum.map(result.payload["input"], & &1["role"]) == ["user"]
+    end
+  end
+
+  @tag :chat_top_level_instructions
+  test "Chat preserves absent null and empty instructions behavior with lifted text" do
+    for source <- ["messages", "input"], instructions <- [:absent, nil, ""] do
+      payload = %{"model" => "gpt-fixture-text", source => [%{"role" => "system", "content" => "synthetic system"}, %{"role" => "developer", "content" => "synthetic developer"}, %{"role" => "user", "content" => "synthetic user"}]}
+      payload = if instructions == :absent, do: payload, else: Map.put(payload, "instructions", instructions)
+      assert {:ok, result} = Chat.coerce(payload)
+      assert result.payload["instructions"] == "synthetic system\nsynthetic developer"
+    end
+  end
+
+  @tag :chat_top_level_instructions
+  test "Chat messages preserves explicit null and empty instructions like input fallback" do
+    for instructions <- [nil, ""] do
+      assert {:ok, result} = Chat.coerce(%{"model" => "gpt-fixture-text", "messages" => [%{"role" => "user", "content" => "synthetic user"}], "instructions" => instructions})
+      assert Map.fetch(result.payload, "instructions") == {:ok, instructions}
+    end
+  end
+
+  for layout <- [:flat, :namespace], root <- [:absent, nil, true, 7, "schema", [], %{"type" => "string"}] do
+    tool = %{"type" => "function", "name" => "strict_root_fixture", "strict" => true}
+    tool = if root == :absent, do: tool, else: Map.put(tool, "parameters", root)
+
+    @tag :strict_root_diagnostic
+    test "Responses strict #{layout} root #{inspect(root)} reports its indexed parameters path" do
+      tool = unquote(Macro.escape(tool))
+      {tools, param} = if unquote(layout) == :flat, do: {[%{"type" => "web_search"}, tool], "tools.1.parameters"}, else: {[%{"type" => "namespace", "name" => "fixture_namespace", "description" => "Synthetic namespace", "tools" => [%{"type" => "custom", "name" => "custom_fixture"}, tool]}], "tools.0.tools.1.parameters"}
+      assert {:error, %{status: 400, code: "invalid_function_parameters", param: ^param}} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => "synthetic", "tools" => tools})
+    end
+  end
+
+  @tag :strict_root_diagnostic
+  test "strict root diagnostics preserve malformed tools and non-strict boundaries" do
+    strict = %{"type" => "function", "name" => "strict_root_fixture", "strict" => true, "parameters" => nil}
+    malformed = [Map.put(strict, "name", ""), Map.delete(strict, "name"), Map.put(strict, "name", 1), Map.put(strict, "type", "unknown"), Map.put(strict, "unexpected", true), %{"type" => "function", "function" => Map.drop(strict, ["type"])}, %{"type" => "namespace", "name" => "fixture_namespace", "description" => "", "tools" => [strict]}]
+
+    for tool <- malformed do
+      assert {:error, %{status: 400, code: "invalid_request", param: "tools"}} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => "synthetic", "tools" => [tool]})
+    end
+
+    for tool <- [Map.delete(strict, "strict"), strict |> Map.put("strict", false) |> Map.delete("parameters")] do
+      assert {:error, %{status: 400, code: "invalid_request", param: "tools"}} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => "synthetic", "tools" => [tool]})
+    end
+
+    assert {:ok, _} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => "synthetic", "tools" => [strict |> Map.put("strict", false) |> Map.put("parameters", true)]})
+  end
+
+  @tag :strict_root_diagnostic
+  test "supported translated Chat object and typed invalid roots retain their existing path" do
+    for {root, expected} <- [{%{"type" => "object", "properties" => %{}, "required" => [], "additionalProperties" => false}, :ok}, {%{"type" => "string"}, :strict_error}, {nil, :shape_error}, {:absent, :shape_error}] do
+      function = %{"name" => "strict_root_fixture", "strict" => true}
+      function = if root == :absent, do: function, else: Map.put(function, "parameters", root)
+      result = Chat.coerce(%{"model" => "gpt-fixture-text", "messages" => [%{"role" => "user", "content" => "synthetic"}], "tools" => [%{"type" => "function", "function" => function}]})
+
+      case expected do
+        :ok -> assert {:ok, _} = result
+        :strict_error -> assert {:error, %{code: "invalid_function_parameters", param: "tools.0.parameters"}} = result
+        :shape_error -> assert {:error, %{code: "invalid_request", param: "tools"}} = result
+      end
+    end
+  end
+
+  for surface <- [:responses, :chat_messages, :chat_fallback], lifted? <- [false, true], {shape, instructions} <- [{"integer", 1}, {"float", 1.5}, {"boolean", true}, {"object", %{}}, {"array", []}, {"message array", [%{"role" => "developer", "content" => "synthetic"}]}] do
+    @tag :instructions_type_contract
+    test "#{surface} refuses #{shape} instructions before lifted=#{lifted?} normalization" do
+      input = if(unquote(lifted?), do: [%{"role" => "system", "content" => "synthetic system"}, %{"role" => "developer", "content" => "synthetic developer"}], else: []) ++ [%{"role" => "user", "content" => "synthetic user"}]
+      input_field = if unquote(surface) == :chat_messages, do: "messages", else: "input"
+      payload = %{"model" => "gpt-fixture-text", input_field => input, "instructions" => unquote(Macro.escape(instructions))}
+      adapter = if unquote(surface) == :responses, do: Responses, else: Chat
+
+      for result <- [adapter.validate(payload), adapter.coerce(payload)] do
+        assert {:error, %{status: 400, code: "invalid_request", param: "instructions", message: "instructions must be a string or null"}} = result
+      end
+    end
+  end
+
+  @tag :instructions_type_contract
+  test "Responses and Chat preserve valid instructions and lifted ordering" do
+    for surface <- [:responses, :chat_messages, :chat_fallback], lifted? <- [false, true], instructions <- [:absent, nil, "", "synthetic top"] do
+      input = if(lifted?, do: [%{"role" => "system", "content" => "synthetic system"}, %{"role" => "developer", "content" => "synthetic developer"}], else: []) ++ [%{"role" => "user", "content" => "synthetic user"}]
+      input_field = if surface == :chat_messages, do: "messages", else: "input"
+      payload = %{"model" => "gpt-fixture-text", input_field => input}
+      payload = if instructions == :absent, do: payload, else: Map.put(payload, "instructions", instructions)
+      adapter = if surface == :responses, do: Responses, else: Chat
+      assert {:ok, result} = adapter.coerce(payload)
+
+      expected =
+        cond do
+          lifted? and instructions == "synthetic top" -> "synthetic top\nsynthetic system\nsynthetic developer"
+          lifted? -> "synthetic system\nsynthetic developer"
+          instructions == :absent -> if(surface == :chat_fallback, do: "", else: :absent)
+          true -> instructions
+        end
+
+      assert Map.get(result.payload, "instructions", :absent) == expected
+      assert Enum.map(result.payload["input"], & &1["role"]) == ["user"]
+    end
+  end
+
   @tag :responses_coercion
   test "string Responses input coerces to a backend-compatible input_text message" do
     assert {:ok, result} =
@@ -5021,7 +5221,6 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
            "parameters" => %{"type" => "object", "properties" => %{}}
          }, %{"type" => "function", "name" => "lookup_fixture"}},
         {%{"type" => "custom", "name" => "custom_fixture"}, %{"type" => "custom", "name" => "custom_fixture"}},
-        {%{"type" => "programmatic_tool_calling"}, %{"type" => "programmatic_tool_calling"}},
         {%{"type" => "image_generation"}, %{"type" => "image_generation"}}
       ]
 
@@ -5044,8 +5243,6 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
         flat_function_tool("lookup_fixture", non_strict_tool_schema(), false)
         |> Map.put("defer_loading", false),
         %{"type" => "custom", "name" => "custom_fixture"},
-        %{"type" => "programmatic_tool_calling"},
-        %{"type" => "web_search_preview"},
         %{"type" => "web_search"},
         %{"type" => "web_search"},
         %{"type" => "image_generation"}
@@ -5055,9 +5252,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
         %{"type" => "custom", "name" => "custom_fixture"},
         %{"type" => "web_search"},
         %{"type" => "function", "name" => "lookup_fixture"},
-        %{"type" => "programmatic_tool_calling"},
         %{"type" => "image_generation"},
-        %{"type" => "web_search_preview"},
         %{"type" => "function", "name" => "lookup_fixture"},
         %{"type" => "web_search"}
       ]
@@ -5100,7 +5295,6 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
         direct_custom,
         namespace,
         %{"type" => "programmatic_tool_calling"},
-        %{"type" => "web_search_preview"},
         %{"type" => "web_search"},
         %{"type" => "image_generation"}
       ]
@@ -5209,6 +5403,19 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
            "type" => "allowed_tools",
            "mode" => "auto",
            "tools" => [%{"type" => "web_search", "name" => "web"}]
+         }, base_tools, nil},
+        # Refused by the Codex backend on Full, the only mode an allowed_tools choice serves (findings#333).
+        {"declared programmatic_tool_calling member",
+         %{
+           "type" => "allowed_tools",
+           "mode" => "auto",
+           "tools" => [%{"type" => "programmatic_tool_calling"}]
+         }, base_tools, nil},
+        {"web_search_preview member",
+         %{
+           "type" => "allowed_tools",
+           "mode" => "auto",
+           "tools" => [%{"type" => "web_search_preview"}]
          }, base_tools, nil},
         {"namespace member",
          %{
@@ -5354,19 +5561,25 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
       end)
     end
 
-    test "Responses accepts only the exact programmatic hosted tool and tool choice" do
+    # The declaration passes the adapter (a Lite manifest accepts it; a Full request is refused once the serving mode is
+    # resolved, `PayloadNormalizer.validate/2`), while a type-only choice naming it is refused on every mode: the Codex
+    # backend refuses the tool on Full and Lite refuses an object choice (findings#333).
+    test "Responses accepts only the exact programmatic hosted tool and refuses a choice naming it" do
       hosted_tool = %{"type" => "programmatic_tool_calling"}
 
       payload = %{
         "model" => "gpt-fixture-text",
         "input" => "synthetic input",
-        "tools" => [hosted_tool],
-        "tool_choice" => hosted_tool
+        "tools" => [hosted_tool]
       }
 
       assert {:ok, result} = Responses.coerce(payload)
       assert result.payload["tools"] == [hosted_tool]
-      assert result.payload["tool_choice"] == hosted_tool
+
+      assert {:error, %{status: 400, code: "invalid_request", param: "tool_choice"}} =
+               payload
+               |> Map.put("tool_choice", hosted_tool)
+               |> Responses.coerce()
 
       for invalid_tool <- [
             %{"type" => "programmatic_tool_calling", "unexpected" => true},
@@ -5687,7 +5900,6 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
 
     test "Responses allows only exact safe passthrough built-in tool shapes" do
       for tool <- [
-            %{"type" => "web_search_preview"},
             %{
               "type" => "web_search",
               "external_web_access" => false
@@ -5725,6 +5937,8 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
 
     test "Responses rejects unsupported hosted built-in and deferred tools" do
       rejected_tools = [
+        # The Codex backend refuses the tool type (findings#333); never rewritten to `web_search`.
+        %{"type" => "web_search_preview"},
         %{"type" => "web_search_preview", "search_context_size" => "low"},
         %{"type" => "web_search", "external_web_access" => "true"},
         %{
@@ -6365,7 +6579,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
                "model" => "gpt-fixture-text",
                "input" => "synthetic input",
                "tools" => [
-                 %{"type" => "web_search_preview"},
+                 %{"type" => "web_search"},
                  flat_function_tool("lookup_nested_object", %{
                    "type" => "object",
                    "additionalProperties" => false,

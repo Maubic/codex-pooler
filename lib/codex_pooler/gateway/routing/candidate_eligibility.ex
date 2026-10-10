@@ -112,7 +112,7 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
 
   @type candidate :: {PoolUpstreamAssignment.t(), UpstreamIdentity.t()}
   @type gateway_error :: Contracts.gateway_error()
-  @type quota_decision :: %{optional(String.t()) => term()}
+  @type quota_decision :: %{optional(String.t()) => term(), optional(:route_filter_exclusions) => %{optional(Ecto.UUID.t()) => CodexPooler.Gateway.Runtime.Dispatch.RouteState.filter_exclusion()}}
   @type payload :: map()
   @type pool_ref :: Pool.t() | Model.t() | Ecto.UUID.t()
   @type model_visibility_hydration :: %{

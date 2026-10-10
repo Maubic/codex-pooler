@@ -411,9 +411,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SocketLifecycleTest do
       })
 
     assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
-
-    assert_receive {:fake_upstream_timeout_barrier, :mid_stream, _upstream_pid, ^release_ref},
-                   @connection_shutdown_timeout_ms
+    {state, _upstream_pid} = receive_socket_upstream_barrier!(state, {:fake_upstream_timeout_barrier, :mid_stream, release_ref}, @connection_shutdown_timeout_ms)
 
     assert {:push, {:text, created}, state} = receive_socket_push(state)
     assert %{"type" => "response.created"} = CodexPooler.JSON.decode!(created)
@@ -706,7 +704,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SocketLifecycleTest do
         assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
 
         assert {:push, {:text, frame}, state} =
-                 receive_socket_done(state, @large_websocket_frame_timeout)
+                 receive_socket_turn_done(state, @large_websocket_frame_timeout)
 
         assert CodexPooler.JSON.decode!(frame) == %{
                  "type" => "error",
@@ -776,7 +774,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SocketLifecycleTest do
     assert %{"id" => "resp_websocket_output_reset"} = CodexPooler.JSON.decode!(first_frame)
     assert state.native_turn_output_task_pids == state.tasks
 
-    assert {:ok, state} = receive_socket_done(state, @large_websocket_frame_timeout)
+    assert {:ok, state} = receive_socket_turn_done(state, @large_websocket_frame_timeout)
     assert state.native_turn_output_task_pids == MapSet.new()
 
     FakeUpstream.set_mode(upstream, FakeUpstream.websocket_sse_then_close([]))
@@ -790,7 +788,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SocketLifecycleTest do
         "generate" => true
       })
 
-    {error_frame, logs} =
+    {{error_frame, state}, logs} =
       capture_native_turn_warning(fn ->
         assert {:ok, state} =
                  CodexResponsesSocket.handle_in({second_payload, [opcode: :text]}, state)
@@ -798,10 +796,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SocketLifecycleTest do
         assert state.native_turn_output_task_pids == MapSet.new()
 
         assert {:push, {:text, error_frame}, state} =
-                 receive_socket_done(state, @large_websocket_frame_timeout)
+                 receive_socket_turn_done(state, @large_websocket_frame_timeout)
 
         assert state.native_turn_output_task_pids == MapSet.new()
-        error_frame
+        {error_frame, state}
       end)
 
     assert %{"type" => "error", "error" => %{"code" => "upstream_request_failed"}} =
@@ -916,8 +914,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SocketLifecycleTest do
           })
 
         assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
+        deadline = System.monotonic_time(:millisecond) + @large_websocket_frame_timeout
+        assert {:push, {:text, frame}, state} = receive_socket_push(state, max(deadline - System.monotonic_time(:millisecond), 0))
+        assert %{"id" => "resp_websocket_logging_success"} = CodexPooler.JSON.decode!(frame)
 
-        assert {:ok, state} = receive_socket_done(state, @large_websocket_frame_timeout)
+        assert {:ok, state} = receive_socket_turn_done(state, max(deadline - System.monotonic_time(:millisecond), 0))
         assert MapSet.size(state.tasks) == 0
         assert :ok = CodexResponsesSocket.terminate(:closed, state)
       end)
@@ -1322,20 +1323,31 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.SocketLifecycleTest do
   # Feeds the socket its direct-cleanup receipts until the one carrying the
   # attempt id has been accepted, so a later terminate can attribute the turn.
   defp await_direct_attempt_receipt(state) do
+    case Enum.find_value(Map.get(state, :direct_cleanup_receipts, %{}), fn {_pid, receipt} -> Map.get(receipt, :attempt_id) end) do
+      nil -> await_direct_attempt_receipt(state, System.monotonic_time(:millisecond) + @connection_shutdown_timeout_ms)
+      attempt_id -> {state, attempt_id}
+    end
+  end
+
+  defp await_direct_attempt_receipt(state, deadline) do
     receive do
+      {:native_response_steering_prepare, _caller, _ref, _context, _callbacks} = message ->
+        {:ok, state} = CodexResponsesSocket.handle_info(message, state)
+        await_direct_attempt_receipt(state, deadline)
+
       {:websocket_response_activity, _pid, _token} = message ->
         {:ok, state} = CodexResponsesSocket.handle_info(message, state)
-        await_direct_attempt_receipt(state)
+        await_direct_attempt_receipt(state, deadline)
 
       {:direct_request_cleanup, _pid, _ref, receipt} = message ->
         {:ok, state} = CodexResponsesSocket.handle_info(message, state)
 
         case Map.get(receipt, :attempt_id) do
-          nil -> await_direct_attempt_receipt(state)
+          nil -> await_direct_attempt_receipt(state, deadline)
           attempt_id -> {state, attempt_id}
         end
     after
-      @connection_shutdown_timeout_ms -> flunk("expected the direct cleanup attempt receipt")
+      max(deadline - System.monotonic_time(:millisecond), 0) -> flunk("expected the direct cleanup attempt receipt")
     end
   end
 

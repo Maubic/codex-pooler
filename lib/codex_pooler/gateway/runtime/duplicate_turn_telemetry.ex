@@ -1,13 +1,17 @@
 defmodule CodexPooler.Gateway.Runtime.DuplicateTurnTelemetry do
   @moduledoc false
 
-  # A `409 duplicate_turn` refusal is client-visible, but none of the stages
-  # that answer it writes a request row for the refused request: the replay
-  # preflight, the owner-forwarded replay preflight refusing a resend of the
-  # turn its owner holds, the websocket and native HTTP turn claims, the native
-  # replay dispatch, and the client-retry and compaction-retry claims. Request-log
+  # A `409 duplicate_turn` refusal is client-visible. None of the stages counted
+  # here writes a request row for the refused request: the replay preflight, the
+  # owner-forwarded replay preflight refusing a resend of the turn its owner
+  # holds, the websocket and native HTTP turn claims, the native replay
+  # dispatch, and the client-retry and compaction-retry claims. Request-log
   # counts, admin stats and every other database-derived signal therefore never
   # see one, and the only trace was an info-level log line (findings#225).
+  # A guided content-filter retry that dispatch refuses for its binding
+  # (`Dispatch.ContentFilterBindingRefusal`) is answered `409 duplicate_turn`
+  # too, but it is an admitted request with a row (409,
+  # `invalid_content_filter_retry_binding`) and is not counted.
   #
   # This counter makes each refusal countable where operators already look.
   # Labels are the refusing stage and the transport class, both closed sets.

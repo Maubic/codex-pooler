@@ -24,6 +24,29 @@ defmodule CodexPooler.Access.APIKeys.PolicyPersistence do
           | {:error, term()}
           | {:error, term(), term(), term()}
 
+  @edit_fields ~w(id pool_id display_name status dashboard_access max_active_requests expires_at allowed_model_identifiers enforced_model_identifier enforced_reasoning_effort maximum_reasoning_effort enforced_service_tier metadata)a
+  @binding_edit_fields ~w(binding_scope model_identifier status max_requests_per_minute max_tokens_per_day max_tokens_per_week max_input_tokens_per_request max_output_tokens_per_request)a
+
+  @doc """
+  A content precondition for whole-form edits. Credentials, usage touches and
+  binding row identities/timestamps are not fields the operator form writes.
+  Every binding writer holds the key lock while replacing its binding values.
+  """
+  @spec edit_revision(APIKey.t(), [APIKeyPolicyBinding.t()]) :: String.t()
+  def edit_revision(%APIKey{} = api_key, bindings) do
+    key_values =
+      api_key
+      |> Map.take(@edit_fields)
+      |> Map.update!(:allowed_model_identifiers, fn
+        nil -> nil
+        models -> Enum.sort(Enum.uniq(models))
+      end)
+
+    binding_values = bindings |> Enum.map(&Map.take(&1, @binding_edit_fields)) |> Enum.sort()
+    content = :erlang.term_to_binary({:api_key_edit, 1, key_values, binding_values}, [:deterministic])
+    :sha256 |> :crypto.hash(content) |> Base.encode16(case: :lower)
+  end
+
   @spec create_api_key(map(), [map()], String.t(), DateTime.t()) :: create_result()
   def create_api_key(api_key_attrs, policy_inputs, raw_key, timestamp) do
     Repo.transaction(fn ->

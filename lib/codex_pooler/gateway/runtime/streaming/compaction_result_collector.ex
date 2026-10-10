@@ -260,11 +260,11 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
               state
             )
 
-          {:error, %{compaction_invalid_reason: reason_code} = gateway_error} ->
+          {:error, %{compaction_invalid_reason: reason_code, status: client_status} = gateway_error} ->
             case Finalization.finalize_stream_failure(
                    "",
                    {:terminal_stream_failure, saved_terminal_failure(state, reason_code)},
-                   response_context,
+                   %{response_context | client_response_status: client_status},
                    state
                  ) do
               {:ok, _finalized} -> {:error, gateway_error}
@@ -704,9 +704,18 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.CompactionResultCollector do
         "reason_code=#{reason_code} " <>
         "param_state=#{param_state}" <>
         if(is_nil(param), do: "", else: " param=#{param}") <>
-        " elapsed_ms=#{elapsed_ms(collection)}"
+        " elapsed_ms=#{elapsed_ms(collection)}" <>
+        " compaction_invalid_reason=#{invalid_reason_code(reason)}" <>
+        provider_log_fields(collection.provider_failure || witness)
     end)
   end
+
+  defp provider_log_fields(%{} = failure) do
+    " provider_terminal_type=#{failure.event_type || "provider_terminal"}" <>
+      " upstream_error_code=#{provider_terminal_reason_code(failure)}"
+  end
+
+  defp provider_log_fields(_absent), do: ""
 
   defp log_provider_terminal(collection, failure, elapsed_ms, terminal_source, status \\ nil) do
     {param_state, param} = provider_param(failure, collection.provider_terminal_param_state)

@@ -15,7 +15,7 @@ Use this page when you need to answer:
 
 The page is metadata-only. It shows Pool names, counts, routing settings, usage totals, safe status labels, and links to related admin pages. It does not show prompts, responses, files, audio, images, websocket frames, raw bearer tokens, raw Pool API keys, upstream secrets, or Codex `auth.json` contents.
 
-![Pools page overview](/operators/pools/pools-overview.png)
+[![Pools page overview](/operators/pools/pools-overview.png)](/operators/pools/pools-overview.png)
 
 ## What a Pool Controls
 
@@ -58,21 +58,21 @@ The metric cards at the top summarize the visible Pool scope for the current ope
       <td>Count of Pool API keys linked to the visible Pools. These are runtime client credentials, not operator login credentials.</td>
     </tr>
     <tr>
-      <td>Requests 5h</td>
-      <td>Runtime request count for the last five hours across the visible Pools.</td>
+      <td>Requests 24h</td>
+      <td>Runtime request count for the selected traffic window across the visible Pools. The label follows the window: 1h, 5h, 24h (the default), or 7d.</td>
     </tr>
     <tr>
-      <td>TPS 5h</td>
-      <td>Tokens per second for the same recent usage window. It is computed from total tokens divided by cumulative request latency, so it is a throughput signal, not a wall-clock request rate.</td>
+      <td>TPS 24h</td>
+      <td>Tokens per second for the same traffic window. It is computed from total tokens divided by cumulative request latency, so it is a throughput signal, not a wall-clock request rate.</td>
     </tr>
   </tbody>
 </table>
 
-The search box filters Pool cards by text. The status dropdown filters the card list by Pool lifecycle state.
+The search box filters Pool cards by text. The status dropdown filters the card list by Pool lifecycle state. The traffic dropdown picks the window for the request, throughput, cost and chart figures: the last hour, 5 hours, 24 hours (the default), or 7 days.
 
 ## Pool Cards
 
-Each Pool appears as a card. The card header contains the Pool name, the routing strategy badge, the lifecycle status badge, and the dotted action menu.
+Each Pool appears as a card. The card header contains the Pool name with its routing strategy underneath, three compatibility icons (`/v1` compatibility, image generation, and audio transcription), the lifecycle status badge, and the dotted action menu.
 
 The lifecycle states are:
 
@@ -99,15 +99,15 @@ The lifecycle states are:
   </tbody>
 </table>
 
-The routing strategy badge shows the ordering policy used after hard eligibility checks. For the default `Bridge ring` strategy, Codex Pooler spreads requests across eligible upstreams while still honoring continuity, prompt-cache locality, quota evidence, and recent demotions.
+The routing strategy label shows the ordering policy used after hard eligibility checks. For the default `Bridge ring` strategy, Codex Pooler spreads requests across eligible upstreams while still honoring continuity, prompt-cache locality, quota evidence, and recent demotions.
 
 ## Traffic 24h
 
-The chart shows Pool traffic for the last 24 hours:
+The chart shows Pool traffic for the selected window, the last 24 hours by default. Its title and the footer labels follow the traffic dropdown:
 
 1. orange bars show token volume by hour
 2. the blue line shows request count by hour
-3. the total above the chart shows 24 hour token and request totals
+3. the total above the chart shows token and request totals for the window
 4. the empty state appears when no traffic exists in that window
 
 The chart is a quick health and shape check. Use it to spot traffic bursts, quiet periods, and obvious changes in request volume before moving to Stats or Request logs for deeper investigation.
@@ -136,25 +136,25 @@ The footer is a compact navigation row for the main related records.
       <td>the API keys page filtered to this Pool</td>
     </tr>
     <tr>
-      <td>Requests 5h</td>
-      <td>Runtime requests received by this Pool during the last five hours</td>
+      <td>Req/TPS 24h</td>
+      <td>Runtime requests received by this Pool in the selected window, followed by its tokens per second</td>
       <td>the Request logs page filtered to this Pool</td>
     </tr>
     <tr>
-      <td>TPS 5h</td>
-      <td>Tokens per second over the recent usage window</td>
-      <td>informational only</td>
+      <td>Cost 24h</td>
+      <td>Settled cost of this Pool's requests in the selected window. It is a reporting estimate, not a provider invoice.</td>
+      <td>the Stats page filtered to this Pool</td>
     </tr>
   </tbody>
 </table>
 
-The labels link to the related page. The numeric values stay plain text so the card reads like a metric summary.
+Each footer cell links to the related page and is highlighted on hover.
 
 ## Action Menu
 
 Open the dotted menu on a Pool card for management actions.
 
-![Pool card action menu](/operators/pools/pools-card-action-menu.png)
+[![Pool card action menu](/operators/pools/pools-card-action-menu.png)](/operators/pools/pools-card-action-menu.png)
 
 The current actions are:
 
@@ -191,7 +191,7 @@ Use archive before delete when you need to retire a Pool but keep historical req
 
 Click `Create Pool` to open the Pool configuration dialog.
 
-![Create Pool details step](/operators/pools/pools-create-dialog-details.png)
+[![Create Pool details step](/operators/pools/pools-create-dialog-details.png)](/operators/pools/pools-create-dialog-details.png)
 
 The create dialog is a four-step wizard:
 
@@ -208,7 +208,7 @@ The dialog footer includes a Docs link on the left and the action buttons on the
 
 The Routing step controls how the Pool chooses among eligible upstream accounts.
 
-![Create Pool routing step](/operators/pools/pools-create-dialog-routing.png)
+[![Create Pool routing step](/operators/pools/pools-create-dialog-routing.png)](/operators/pools/pools-create-dialog-routing.png)
 
 Routing settings are split into selection policy, continuity, and compatibility.
 
@@ -230,7 +230,7 @@ Routing settings are split into selection policy, continuity, and compatibility.
 
 `Allow /v1 compatibility` enables OpenAI-style `/v1` compatibility routes for clients that use that surface.
 
-Codex Pooler preserves accepted tool-output text through the existing protocol adapters. There is no Pool compression setting or savings display. Full and Lite retain their existing tool-manifest and request-normalization behavior; neither minifies or summarizes accepted tool-output text.
+Codex Pooler preserves accepted tool-output text through the protocol adapters. There is no Pool compression setting or savings display. Full and Lite keep their own tool-manifest and request-normalization behavior; neither minifies or summarizes accepted tool-output text.
 
 `Allow image generation` controls these exact authenticated POST routes:
 
@@ -283,11 +283,11 @@ Instance owners use the card menu's `Edit` action to update an existing Pool. Th
 
 An assigned instance admin sees a separate `Models` action for an assigned active Pool. It opens only the Models panel, where the admin can review and save serving modes for that Pool. Details, routing, lifecycle status, upstream assignments, API-key assignments, and delete actions are not exposed through this path. The save is guarded by the assigned Pool scope and records the normal model-serving audit event.
 
-![Edit Pool details step](/operators/pools/pools-edit-dialog-details.png)
+[![Edit Pool details step](/operators/pools/pools-edit-dialog-details.png)](/operators/pools/pools-edit-dialog-details.png)
 
 The edit Details step includes the Pool name and lifecycle status. Status is the safest way to retire or pause a Pool without deleting historical metadata. The dialog edits active Pools only: to bring back a disabled or archived Pool, use `Reactivate` from its card menu, then edit it.
 
-![Edit Pool routing step](/operators/pools/pools-edit-dialog-routing.png)
+[![Edit Pool routing step](/operators/pools/pools-edit-dialog-routing.png)](/operators/pools/pools-edit-dialog-routing.png)
 
 The edit Routing step uses the same routing controls as create. Changes apply to new runtime work after the Pool is saved. In-flight requests and already-open streams keep the routing state they started with.
 
@@ -297,7 +297,7 @@ The owner `Edit` dialog and the assigned-admin `Models` dialog both use the `Mod
 
 For what Lite and Full actually change on the outgoing request, and what they deliberately leave alone, see [Responses Lite and Full](/reference/responses-lite-vs-full/).
 
-![Edit Pool model serving modes step](/operators/pools/pools-edit-dialog-models.png)
+[![Edit Pool model serving modes step](/operators/pools/pools-edit-dialog-models.png)](/operators/pools/pools-edit-dialog-models.png)
 
 Use `Auto` unless a provider-specific requirement calls for an override:
 
@@ -340,7 +340,7 @@ Serving modes are database-backed Pool configuration. There is no global environ
 
 ### Codex Catalog Entries Left Out
 
-Codex reads the whole Pool catalog as one document: a single entry it cannot decode (a required field missing or null, an unknown enumeration value, a fractional number where it expects an integer) makes it discard every entry and fall back to the catalog bundled with the Codex release. For Codex releases whose catalog decoder Codex Pooler has been verified against, 0.154.0 through 0.158.0, the catalog is checked entry by entry and an entry that release cannot decode is left out, so the client keeps every other Pool model. The version is the one in the Codex `User-Agent` (`codex_cli_rs/0.156.1 (...)`, `Codex Desktop/0.155.0-alpha.16 (...)`), which Codex sends on the catalog request and on every turn; the `client_version` query parameter is not read. Prereleases count by their whole version, so `0.155.0-alpha.16` is judged as 0.155.0. Newer and older releases, `/v1/models`, and clients whose `User-Agent` is not a Codex build's receive the catalog unchecked, because the decoder rules are not known to hold for them.
+Codex reads the whole Pool catalog as one document: a single entry it cannot decode (a required field missing or null, an unknown enumeration value, a fractional number where it expects an integer) makes it discard every entry and fall back to the catalog bundled with the Codex release. For Codex clients covered by the decoder contract, the catalog is checked entry by entry and an entry that release cannot decode is left out, so the client keeps every other Pool model. The version is the one in the Codex `User-Agent`, which Codex sends on the catalog request and on every turn; the `client_version` query parameter is not read. Prereleases count by their whole version. Clients outside that contract, `/v1/models`, and clients whose `User-Agent` is not a Codex build's receive the catalog unchecked, because the decoder rules are not known to hold for them.
 
 A left-out model is not advertised to that client, so it is missing from the Codex model picker. It stays routable: a request that names the model is routed and served as usual, because routing does not read the served catalog.
 
@@ -361,7 +361,7 @@ When a Pool is not behaving as expected, check it in this order:
 3. confirm the Pool has active upstream assignments
 4. confirm those upstreams are not paused, disabled, archived, or reauth-required
 5. confirm the requested model and route shape are supported by the assigned upstreams
-6. inspect recent Requests 5h, TPS 5h, and Traffic 24h for changes in load
+6. inspect Requests, TPS, and the Traffic chart for changes in load, switching the traffic window to compare recent hours with the last day or week
 7. open Request logs filtered from the card footer for request-level metadata
 8. for tool-output delivery questions, compare the selected transport, serving mode, request outcome, and attempt outcome; request logs do not retain tool-output content
 9. for explicit Full failures, inspect `upstream_status` for non-rate-limit 4xx and for 5xx or `upstream_rate_limited` for 429, the upstream status, and the three bounded serving-mode labels, which are what identify the failure as a Full one, before selecting `Auto` or `Lite`

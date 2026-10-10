@@ -21,6 +21,34 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLiveEditRoundTripTest do
 
   setup :register_and_log_in_user
 
+  for change <- [:pause, :narrow] do
+    test "stale edit refuses another operator's #{change} and keeps the draft", %{conn: conn, scope: scope} do
+      pool = pool!(scope, "stale-edit")
+      {:ok, %{api_key: key}} = Access.create_api_key(scope, pool, %{display_name: "Stale key", model_mode: "selected_models", allowed_model_identifiers: ["gpt-alpha", "gpt-beta"]})
+      {:ok, stale, _} = live(conn, ~p"/admin/api-keys")
+      stale |> element("#edit-api-key-#{key.id}") |> render_click()
+
+      case unquote(change) do
+        :pause ->
+          {:ok, other, _} = live(conn, ~p"/admin/api-keys")
+          render_hook(other, "disable_api_key", %{"id" => key.id})
+
+        :narrow ->
+          {:ok, _} = Access.update_api_key_with_policy(scope, key.id, %{model_mode: "selected_models", allowed_model_identifiers: ["gpt-alpha"]})
+      end
+
+      before = Repo.get!(APIKey, key.id)
+      html = stale |> element("#api-key-form") |> render_submit(%{"api_key" => %{"display_name" => "Draft name", "stored_edit_revision" => "forged"}})
+      conflict? = String.contains?(html, "API key changed while this form was open")
+      unchanged? = Repo.get!(APIKey, key.id) == before
+      assert conflict?
+      assert unchanged?
+      assert has_element?(stale, "#api-key-form")
+      assert has_element?(stale, "#api-key-review-errors", "Close and reopen Edit before saving")
+      assert has_element?(stale, "#api-key-submit[disabled]")
+    end
+  end
+
   describe "operator notes" do
     test "an edit of a key without a note leaves the note empty", %{conn: conn, scope: scope} do
       pool = pool!(scope, "notes-empty")

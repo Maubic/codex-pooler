@@ -323,7 +323,7 @@ defmodule CodexPooler.Accounting.Rollups do
   @hourly_model_usage_rebuild_sql """
   WITH source AS MATERIALIZED (
     SELECT
-      date_trunc('hour', entry.occurred_at) AS bucket_started_at,
+      date_trunc('hour', entry.occurred_at AT TIME ZONE 'UTC') AS bucket_started_at,
       entry.id AS ledger_entry_id,
       entry.occurred_at,
       entry.created_at,
@@ -403,8 +403,8 @@ defmodule CodexPooler.Accounting.Rollups do
   ),
   deleted AS (
     DELETE FROM public.hourly_model_usage_rollups AS rollup
-    WHERE rollup.bucket_started_at >= $1
-      AND rollup.bucket_started_at < $2
+    WHERE rollup.bucket_started_at >= ($1::timestamptz AT TIME ZONE 'UTC')
+      AND rollup.bucket_started_at < ($2::timestamptz AT TIME ZONE 'UTC')
       AND rollup.updated_at <= $3
       AND NOT EXISTS (
         SELECT 1

@@ -97,6 +97,17 @@ defmodule CodexPoolerWeb.Admin.RequestLogDetailDrawerLiveTest do
     refute has_element?(view, "#request-log-detail-request-id")
   end
 
+  test "preserves a long unbroken correlation id in the drawer", %{conn: conn, scope: scope} do
+    pool = create_pool!(scope, %{slug: "long-correlation-drawer", name: "Sample Pool"})
+    correlation_id = "sample-turn:" <> String.duplicate("a", 128)
+    %{request: request} = request_log_fixture(pool, %{correlation_id: correlation_id})
+
+    view = open_selected_request(conn, pool, request)
+
+    assert has_element?(view, "#request-log-detail-sidebar header p", correlation_id)
+    assert has_element?(view, "#request-log-detail-correlation-id dd", correlation_id)
+  end
+
   test "reasoning rows say what was not set and when the backend chose the model default", %{
     conn: conn,
     scope: scope

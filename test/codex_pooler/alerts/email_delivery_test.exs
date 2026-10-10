@@ -6,7 +6,6 @@ defmodule CodexPooler.Alerts.Delivery.EmailDeliveryTest do
   alias CodexPooler.Alerts.Delivery.AttemptLifecycle
   alias CodexPooler.Alerts.Delivery.EmailDelivery
   alias CodexPooler.Alerts.Schemas.AlertDeliveryAttempt
-  alias CodexPooler.Jobs.AlertDeliveryWorker
   alias CodexPooler.Mailer
   alias CodexPooler.Repo
 
@@ -70,10 +69,8 @@ defmodule CodexPooler.Alerts.Delivery.EmailDeliveryTest do
                )
     end
 
-    args = %{"alert_incident_id" => incident.id, "alert_channel_id" => channel.id}
-
     assert {:error, %{retryable: true}} =
-             AlertDeliveryWorker.perform(%Oban.Job{args: args, attempt: 1})
+             EmailDelivery.deliver_incident_to_channel(incident.id, channel.id, 6, retry_attempt: 1)
 
     id =
       Repo.one!(
@@ -86,7 +83,7 @@ defmodule CodexPooler.Alerts.Delivery.EmailDeliveryTest do
     assert attempt.attempt_number == 6
     assert attempt.max_attempts == 5
     assert DateTime.diff(attempt.next_retry_at, attempt.completed_at, :second) == 60
-    assert :ok = AlertDeliveryWorker.perform(%Oban.Job{args: args, attempt: 5})
+    assert {:ok, _} = EmailDelivery.deliver_incident_to_channel(incident.id, channel.id, 7, retry_attempt: 5)
 
     terminal =
       Repo.one!(

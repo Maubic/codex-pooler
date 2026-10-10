@@ -8,6 +8,77 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
   @receipt_detection_timeout_ms 15_000
   @receipt_poll_interval_ms 20
 
+  test "nested make uses fixture commands despite real parent command-line overrides" do
+    fixture = start_fixture!()
+    tripwire = Path.join(fixture.directory, "parent-command")
+    parent_makefile = Path.join(fixture.directory, "parent.mk")
+    flags_path = Path.join(fixture.directory, "parent-flags")
+
+    File.write!(tripwire, """
+    #!/bin/sh
+    printf '%s\\n' "$1" > "${TEST_FAST_ACCEPTANCE_DIR}/parent-tripwire-$1"
+    exit 71
+    """)
+
+    File.chmod!(tripwire, 0o700)
+
+    File.write!(parent_makefile, """
+    .PHONY: flags
+    flags:
+    \t@printf '%s\\n' "$$MAKEFLAGS" "$${MAKEOVERRIDES-}" "$${MFLAGS-}" "$${GNUMAKEFLAGS-}" > "$$PARENT_FLAGS_PATH"
+    """)
+
+    assert {_output, 0} =
+             System.cmd("make", ["--no-print-directory", "-f", parent_makefile, "flags", "N=4", "TEST_FAST_COMMAND=#{tripwire} run", "TEST_FAST_DROP_COMMAND=#{tripwire} drop"],
+               cd: fixture.directory,
+               env: [{"MAKEFLAGS", nil}, {"MAKEOVERRIDES", nil}, {"MFLAGS", nil}, {"GNUMAKEFLAGS", nil}, {"PARENT_FLAGS_PATH", flags_path}],
+               stderr_to_stdout: true
+             )
+
+    [flags, overrides, legacy_flags, gnu_flags, ""] = flags_path |> File.read!() |> String.split("\n")
+    assert flags =~ "TEST_FAST_COMMAND="
+    inherited = [{"MAKEFLAGS", flags}, {"MAKEOVERRIDES", overrides}, {"MFLAGS", legacy_flags}, {"GNUMAKEFLAGS", gnu_flags}]
+    previous = Enum.map(inherited, fn {key, _value} -> {key, System.get_env(key)} end)
+
+    {output, exit_code} = with_environment(inherited, fn -> run_make(fixture, 4, TEST_FAST_RELEASE: "1") end)
+
+    refute File.exists?(Path.join(fixture.directory, "parent-tripwire-run")), "parent command-line override bypassed the synthetic run command"
+    refute File.exists?(Path.join(fixture.directory, "parent-tripwire-drop")), "parent command-line override bypassed the synthetic drop command"
+    assert exit_code == 0, output
+    assert output =~ "test-fast: PASS (4/4 partitions)"
+    assert Enum.map(previous, fn {key, _value} -> {key, System.get_env(key)} end) == previous
+    started = await_receipts!(fixture.directory, "run-", 4)
+    dropped = await_receipts!(fixture.directory, "drop-", 4)
+    assert MapSet.new(dropped) == rename_receipts(started, "run-", "drop-")
+  end
+
+  test "nested make temporary files belong to its fixture and preserve an unrelated canary" do
+    canary_fixture = start_fixture!()
+    canary = Path.join(canary_fixture.directory, "canary")
+    File.write!(canary, "unrelated fixture")
+    ambient_tmpdir = System.get_env("TMPDIR")
+
+    for extra_env <- [[], [TMPDIR: canary_fixture.directory]] do
+      fixture = start_fixture!()
+
+      assert {output, 0} = run_make(fixture, 4, [TEST_FAST_RELEASE: "1", TEST_FAST_WRITE_FILE_DURATIONS: "1 2 3 4"] ++ extra_env)
+      assert output =~ "test-fast: PASS (4/4 partitions)"
+      started = await_receipts!(fixture.directory, "run-", 4)
+      dropped = await_receipts!(fixture.directory, "drop-", 4)
+      assert_owned_temporary_paths(fixture, started)
+
+      Enum.each(dropped, fn receipt ->
+        assert fixture.directory |> Path.join("tmp-audit-#{receipt}") |> File.read!() |> String.split("\n") |> hd() == fixture.directory
+      end)
+
+      assert System.get_env("TMPDIR") == ambient_tmpdir
+      remove_fixture!(fixture)
+      refute File.exists?(fixture.directory)
+      assert File.read!(canary) == "unrelated fixture"
+      assert File.dir?(canary_fixture.directory)
+    end
+  end
+
   test "test-fast starts EPMD before partition processes" do
     fixture = start_fixture!()
     epmd_port = available_tcp_port()
@@ -46,7 +117,7 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
       contents = File.read!(Path.join(fixture.directory, receipt))
 
       assert contents =~ "schedulers=3"
-      assert contents =~ "erl_flags=+sbwt none +S 3:3"
+      assert contents =~ "erl_flags=+hmbs 1000000 +sbwt none +S 3:3"
       assert contents =~ ~r/candidates=\S+\/duration-[1-4]\.tsv/
     end)
 
@@ -71,6 +142,7 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
 
     dropped = await_receipts!(fixture.directory, "drop-", 8)
     assert MapSet.new(dropped) == rename_receipts(started, "run-", "drop-")
+    assert_owned_temporary_paths(fixture, started)
   end
 
   test "a failing partition is attributed, propagated, and cleaned" do
@@ -108,11 +180,94 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
     [namespace] = started |> Enum.map(&(&1 |> String.split("-") |> Enum.at(1))) |> Enum.uniq()
 
     assert confirm_rounds(fixture, namespace) == [
-             "namespace=#{namespace} partition=1 erl_flags=+S 2:2 candidates=set args=test/a_test.exs:3 test/b_test.exs:9"
+             "namespace=#{namespace} partition=1 erl_flags=+hmbs 1000000 +S 2:2 candidates=set args=test/a_test.exs:3 test/b_test.exs:9"
            ]
 
     dropped = await_receipts!(fixture.directory, "drop-", 2)
     assert MapSet.new(dropped) == rename_receipts(started, "run-", "drop-")
+  end
+
+  test "each partition writes its file durations to a file of its own inside the invocation's temporary directory and nothing is printed by default" do
+    fixture = start_fixture!()
+
+    assert {output, 0} = run_make(fixture, 2, TEST_FAST_RELEASE: "1", TEST_FAST_WRITE_FILE_DURATIONS: "1 2")
+
+    refute output =~ "file durations"
+    assert output =~ "test-fast: PASS (2/2 partitions)"
+
+    fixture.directory
+    |> await_receipts!("run-", 2)
+    |> Enum.each(fn receipt ->
+      contents = File.read!(Path.join(fixture.directory, receipt))
+      [_receipt, partition] = Regex.run(~r/partition=(\d)/, contents)
+      assert contents =~ ~r/file_durations=\S*codex-pooler-test-fast\.\w+\/files-#{partition}\.tsv$/
+    end)
+  end
+
+  test "TEST_FAST_PRINT_FILE_DURATIONS=1 prints every partition's file durations after the partition results and before the final PASS" do
+    fixture = start_fixture!()
+
+    assert {output, 0} = run_make(fixture, 2, TEST_FAST_RELEASE: "1", TEST_FAST_WRITE_FILE_DURATIONS: "1 2", TEST_FAST_PRINT_FILE_DURATIONS: "1")
+
+    assert String.split(output, "\n", trim: true) |> Enum.drop_while(&(&1 != "test-fast: partition 2/2 PASS")) |> Enum.reject(&String.starts_with?(&1, "test-fast: partition 2/2:")) == [
+             "test-fast: partition 2/2 PASS",
+             "test-fast: file durations partition 1/2 v1 max_cases=8 run_ms=100 async_ms=10 (sync_ms async_ms path)",
+             "  1250 0 test/p1_sync_test.exs",
+             "  0 175 test/p1_async_test.exs",
+             "test-fast: file durations partition 2/2 v1 max_cases=8 run_ms=200 async_ms=20 (sync_ms async_ms path)",
+             "  2250 0 test/p2_sync_test.exs",
+             "  0 275 test/p2_async_test.exs",
+             "test-fast: PASS (2/2 partitions)"
+           ]
+  end
+
+  test "the printed file durations are what the partition weights task reads back" do
+    fixture = start_fixture!()
+
+    assert {output, 0} = run_make(fixture, 2, TEST_FAST_RELEASE: "1", TEST_FAST_WRITE_FILE_DURATIONS: "1 2", TEST_FAST_PRINT_FILE_DURATIONS: "1")
+
+    assert CodexPooler.TestPartitionWeights.parse(output) == [
+             %{partition: {1, 2}, max_cases: 8, run_ms: 100, async_ms: 10, files: %{"test/p1_sync_test.exs" => {1250, 0}, "test/p1_async_test.exs" => {0, 175}}},
+             %{partition: {2, 2}, max_cases: 8, run_ms: 200, async_ms: 20, files: %{"test/p2_sync_test.exs" => {2250, 0}, "test/p2_async_test.exs" => {0, 275}}}
+           ]
+  end
+
+  test "a partition that wrote no export is reported when the durations are printed and does not fail the run" do
+    fixture = start_fixture!()
+
+    assert {output, 0} = run_make(fixture, 2, TEST_FAST_RELEASE: "1", TEST_FAST_WRITE_FILE_DURATIONS: "1", TEST_FAST_PRINT_FILE_DURATIONS: "1")
+
+    assert output =~ "test-fast: file durations partition 1/2 v1 max_cases=8 run_ms=100 async_ms=10"
+    assert output =~ "\ntest-fast: file durations partition 2/2 none recorded\n"
+    assert output =~ "test-fast: PASS (2/2 partitions)"
+  end
+
+  test "a failing partition prints no file durations" do
+    fixture = start_fixture!()
+
+    assert {output, exit_code} =
+             run_make(fixture, 2, TEST_FAST_RELEASE: "1", TEST_FAST_WRITE_FILE_DURATIONS: "1 2", TEST_FAST_PRINT_FILE_DURATIONS: "1", TEST_FAST_FAIL_PARTITION: "2")
+
+    assert exit_code != 0
+    assert output =~ "test-fast: FAIL (1/2 partitions)"
+    refute output =~ "file durations"
+  end
+
+  test "the re-measurement of duration candidates does not inherit a partition's export file" do
+    fixture = start_fixture!()
+
+    assert {_output, 0} =
+             run_make(fixture, 2,
+               TEST_FAST_RELEASE: "1",
+               TEST_FAST_WRITE_FILE_DURATIONS: "1 2",
+               TEST_FAST_PRINT_FILE_DURATIONS: "1",
+               TEST_FAST_CANDIDATES: "test/a_test.exs:3",
+               TEST_FAST_CANDIDATE_PARTITION: "1"
+             )
+
+    started = await_receipts!(fixture.directory, "run-", 2)
+    [namespace] = started |> Enum.map(&(&1 |> String.split("-") |> Enum.at(1))) |> Enum.uniq()
+    assert fixture.directory |> Path.join("confirm-env-#{namespace}") |> File.read!() == "file_durations=unset\n"
   end
 
   for summary <- ["", "Result: 0 tests", "Result: 1/2 passed", "Result: 0 tests, 2 excluded", "Result: 2 passed, 1 invalid"] do
@@ -133,6 +288,7 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
       started = await_receipts!(fixture.directory, "run-", 2)
       dropped = await_receipts!(fixture.directory, "drop-", 2)
       assert MapSet.new(dropped) == rename_receipts(started, "run-", "drop-")
+      assert_owned_temporary_paths(fixture, started)
     end
   end
 
@@ -216,6 +372,7 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
 
       dropped = await_receipts!(fixture.directory, "drop-", 2)
       assert MapSet.new(dropped) == rename_receipts(started, "run-", "drop-")
+      assert_owned_temporary_paths(fixture, started)
     end
   end
 
@@ -226,9 +383,11 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
         "codex-pooler-test-fast-acceptance-#{System.unique_integer([:positive])}"
       )
 
-    File.mkdir_p!(directory)
     helper_path = Path.join(directory, "test-fast-child")
     release_path = Path.join(directory, "release")
+    fixture = %{directory: directory, helper_path: helper_path, release_path: release_path}
+    on_exit(fn -> remove_fixture!(fixture) end)
+    File.mkdir_p!(directory)
 
     File.write!(helper_path, """
     #!/bin/bash
@@ -238,6 +397,9 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
     namespace="${CODEX_POOLER_TEST_RUN_NAMESPACE:?missing run namespace}"
     partition="${MIX_TEST_PARTITION:?missing partition}"
     receipt="${TEST_FAST_ACCEPTANCE_DIR}/${phase}-${namespace}-${partition}"
+
+    printf '%s\\n' "${TMPDIR:-}" "${CODEX_POOLER_TEST_DURATION_CANDIDATES:-}" "${CODEX_POOLER_TEST_FILE_DURATIONS:-}" \
+      > "${TEST_FAST_ACCEPTANCE_DIR}/tmp-audit-${phase}-${namespace}-${partition}"
 
     if [ "$phase" = "drop" ]; then
       printf 'namespace=%s partition=%s\n' "$namespace" "$partition" > "$receipt"
@@ -251,6 +413,8 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
       printf 'namespace=%s partition=%s erl_flags=%s candidates=%s args=%s\n' \
         "$namespace" "$partition" "${ERL_FLAGS:-}" "${CODEX_POOLER_TEST_DURATION_CANDIDATES:+set}" "$*" \
         >> "${TEST_FAST_ACCEPTANCE_DIR}/confirm-${namespace}"
+
+      printf 'file_durations=%s\n' "${CODEX_POOLER_TEST_FILE_DURATIONS:-unset}" >> "${TEST_FAST_ACCEPTANCE_DIR}/confirm-env-${namespace}"
 
       if [ -n "${TEST_FAST_CONFIRM_KEEP:-}" ]; then
         printf '%s\tsynthetic still over its limit\n' "$TEST_FAST_CONFIRM_KEEP" > "$CODEX_POOLER_TEST_DURATION_CANDIDATES"
@@ -267,8 +431,18 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
       schedulers="$(elixir -e 'IO.write(System.schedulers_online())')"
     fi
 
-    printf 'namespace=%s partition=%s schedulers=%s erl_flags=%s candidates=%s\n' \
-      "$namespace" "$partition" "$schedulers" "${ERL_FLAGS:-}" "${CODEX_POOLER_TEST_DURATION_CANDIDATES:-}" > "$receipt"
+    printf 'namespace=%s partition=%s schedulers=%s erl_flags=%s candidates=%s file_durations=%s\n' \
+      "$namespace" "$partition" "$schedulers" "${ERL_FLAGS:-}" "${CODEX_POOLER_TEST_DURATION_CANDIDATES:-}" "${CODEX_POOLER_TEST_FILE_DURATIONS:-}" > "$receipt"
+
+    # The export CodexPooler.TestFileDurations writes at the end of a partition: a header, then path, sync_ms and async_ms
+    # separated by tabs. TEST_FAST_WRITE_FILE_DURATIONS lists the partitions that write one.
+    case " ${TEST_FAST_WRITE_FILE_DURATIONS:-} " in
+      *" $partition "*)
+        printf '# codex-pooler test file durations v1 max_cases=8 run_ms=%s00 async_ms=%s0\n' "$partition" "$partition" > "$CODEX_POOLER_TEST_FILE_DURATIONS"
+        printf 'test/p%s_sync_test.exs\t%s250\t0\n' "$partition" "$partition" >> "$CODEX_POOLER_TEST_FILE_DURATIONS"
+        printf 'test/p%s_async_test.exs\t0\t%s75\n' "$partition" "$partition" >> "$CODEX_POOLER_TEST_FILE_DURATIONS"
+        ;;
+    esac
 
     if [ -n "${TEST_FAST_CANDIDATES:-}" ] && [ "${TEST_FAST_CANDIDATE_PARTITION:-}" = "$partition" ]; then
       printf '%s\tsynthetic candidate\n' $TEST_FAST_CANDIDATES > "$CODEX_POOLER_TEST_DURATION_CANDIDATES"
@@ -310,12 +484,44 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
 
     File.chmod!(helper_path, 0o700)
 
-    on_exit(fn ->
-      File.touch(release_path)
-      File.rm_rf!(directory)
-    end)
+    fixture
+  end
 
-    %{directory: directory, helper_path: helper_path, release_path: release_path}
+  defp remove_fixture!(fixture) do
+    File.touch(fixture.release_path)
+    File.rm_rf!(fixture.directory)
+    refute File.exists?(fixture.directory)
+  end
+
+  defp assert_owned_temporary_paths(fixture, receipts) do
+    Enum.each(receipts, fn receipt ->
+      [tmpdir, candidates, durations, ""] = fixture.directory |> Path.join("tmp-audit-#{receipt}") |> File.read!() |> String.split("\n")
+      assert tmpdir == fixture.directory
+      log_dir = Path.dirname(candidates)
+      assert Path.dirname(log_dir) == fixture.directory
+      assert Path.basename(log_dir) =~ ~r/^codex-pooler-test-fast\.[A-Za-z0-9]+$/
+      assert Path.dirname(durations) == log_dir
+      refute File.exists?(log_dir)
+    end)
+  end
+
+  defp with_environment(environment, callback) do
+    previous = Enum.map(environment, fn {key, _value} -> {key, System.get_env(key)} end)
+    on_exit(fn -> apply_environment(previous) end)
+
+    try do
+      apply_environment(environment)
+      callback.()
+    after
+      apply_environment(previous)
+    end
+  end
+
+  defp apply_environment(environment) do
+    Enum.each(environment, fn
+      {key, nil} -> System.delete_env(key)
+      {key, value} -> System.put_env(key, value)
+    end)
   end
 
   defp available_tcp_port do
@@ -395,19 +601,33 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
   end
 
   # The recipe generates its own run namespace and gives each child its own
-  # partition and candidate file. Clearing the invoking test run's values keeps
-  # this acceptance identical with or without a namespace, which every focused
-  # run sets.
+  # partition, candidate file and file durations export. Clearing the invoking
+  # test run's values keeps this acceptance identical with or without a
+  # namespace, which every focused run sets, and when `make test-fast` itself
+  # runs this module: a tooling partition has its own export file, and the CI
+  # step sets TEST_FAST_PRINT_FILE_DURATIONS for every make it runs.
+  # Parent command-line assignments travel through MAKEFLAGS and override
+  # environment mocks. Each fixture also owns its children's temporary root,
+  # separate from the outer test runner's invocation logs.
   defp make_env(fixture, extra_env) do
-    [
-      {"CODEX_POOLER_TEST_RUN_NAMESPACE", nil},
-      {"MIX_TEST_PARTITION", nil},
-      {"CODEX_POOLER_TEST_DURATION_CANDIDATES", nil},
-      {"TEST_FAST_ACCEPTANCE_DIR", fixture.directory},
-      {"TEST_FAST_COMMAND", "#{fixture.helper_path} run"},
-      {"TEST_FAST_DROP_COMMAND", "#{fixture.helper_path} drop"}
-      | Enum.map(extra_env, fn {key, value} -> {Atom.to_string(key), value} end)
-    ]
+    extra =
+      extra_env
+      |> Enum.map(fn {key, value} -> {Atom.to_string(key), value} end)
+      |> Enum.reject(fn {key, _value} -> key in ~w(MAKEFLAGS MAKEOVERRIDES MFLAGS GNUMAKEFLAGS TMPDIR) end)
+
+    cleared =
+      for key <- ~w(MAKEFLAGS MAKEOVERRIDES MFLAGS GNUMAKEFLAGS CODEX_POOLER_TEST_RUN_NAMESPACE MIX_TEST_PARTITION CODEX_POOLER_TEST_DURATION_CANDIDATES CODEX_POOLER_TEST_FILE_DURATIONS TEST_FAST_PRINT_FILE_DURATIONS),
+          not List.keymember?(extra, key, 0),
+          do: {key, nil}
+
+    cleared ++
+      [
+        {"TMPDIR", fixture.directory},
+        {"TEST_FAST_ACCEPTANCE_DIR", fixture.directory},
+        {"TEST_FAST_COMMAND", "#{fixture.helper_path} run"},
+        {"TEST_FAST_DROP_COMMAND", "#{fixture.helper_path} drop"}
+        | extra
+      ]
   end
 
   defp signal_term(pid) when is_integer(pid) do

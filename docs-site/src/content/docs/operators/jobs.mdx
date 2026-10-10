@@ -17,9 +17,9 @@ Use this page when you need to answer:
 
 The page is metadata-only. It shows worker names, queue names, safe target labels, state, attempt counts, timestamps, and sanitized failure summaries. It does not show raw prompts, generated content, uploaded file contents, websocket frames, credentials, upstream secret material, provider payloads, or raw job args that contain private material.
 
-![System jobs overview](/operators/jobs/jobs-overview.png)
+[![System jobs overview](/operators/jobs/jobs-overview.png)](/operators/jobs/jobs-overview.png)
 
-The screenshot in this guide redacts live target values from the explorer table. Authorized owners see safe operator labels in production, but public docs should not publish production account or Pool identifiers.
+The screenshots in this guide use synthetic example data. Authorized owners see safe operator labels for their own accounts and Pools in production.
 
 ## Worker Cards
 
@@ -96,6 +96,21 @@ The current worker groups are:
       <td>Cleans expired runtime state.</td>
       <td>Every 15 minutes, plus manual enqueue.</td>
     </tr>
+    <tr>
+      <td>Request replay cleanup</td>
+      <td>Removes expired request replay records.</td>
+      <td>Every minute. The card does not expose `Enqueue Now`.</td>
+    </tr>
+    <tr>
+      <td>OpenAI status polling</td>
+      <td>Polls the OpenAI status feed and stores metadata-only incident state for the admin incident banner and the OpenAI incidents page. The run is cancelled while **OpenAI status polling** is turned off on the System page's Gateway tab.</td>
+      <td>Every 5 minutes. The card does not expose `Enqueue Now`.</td>
+    </tr>
+    <tr>
+      <td>OpenAI status retention</td>
+      <td>Removes old terminal OpenAI incidents in bounded batches.</td>
+      <td>Daily at 00:00 UTC. The card does not expose `Enqueue Now`.</td>
+    </tr>
   </tbody>
 </table>
 
@@ -169,7 +184,7 @@ Activity labels are:
   </tbody>
 </table>
 
-Markers can represent accounts, direct identities, Pools, API keys, or rollup dates. If a target has a safe avatar email, the UI shows its avatar. If not, the marker uses a compact glyph from the target label. For example, a rollup target can appear as a short `R` plus digit glyph because the target label is based on the rollup date.
+Markers can represent accounts, direct identities, Pools, API keys, or rollup dates. If a target has a safe avatar email, the UI shows its avatar. If not, the marker uses a compact glyph from the target label, such as `EP` for an account or `BA` for an API key. A marker with a red ring has an unresolved failure. A rollup target can appear as a short `R` plus digit glyph because the target label is based on the rollup date.
 
 Click a `Needs attention` marker to open the latest failure panel for that target. The panel is hidden by default, and the selected failure is tracked in the page URL so LiveView refreshes can keep it open. The panel shows target label, worker label, failure title, failed time, attempts, and a sanitized diagnostic message. Close it from the panel `x` button or click the same marker again.
 
@@ -198,16 +213,12 @@ The filter row narrows the explorer table.
       <td>Limits rows to one worker module.</td>
     </tr>
     <tr>
-      <td>Queue</td>
-      <td>Limits rows to one Oban queue.</td>
-    </tr>
-    <tr>
       <td>Completed visibility</td>
       <td>Hides completed rows by default. Include completed rows when you need recent successful history.</td>
     </tr>
     <tr>
-      <td>Target kind</td>
-      <td>Advanced filter for target type, such as Pool, account, API key, or rollup.</td>
+      <td>Target</td>
+      <td>Limits rows by target type, such as Pool, account, API key, or rollup.</td>
     </tr>
     <tr>
       <td>Target id</td>
@@ -232,7 +243,7 @@ The explorer table shows matching job rows. Completed rows are hidden by default
   <tbody>
     <tr>
       <td>Job</td>
-      <td>Worker module, job id, queue, and state.</td>
+      <td>Worker name, job id, and state.</td>
     </tr>
     <tr>
       <td>Target</td>

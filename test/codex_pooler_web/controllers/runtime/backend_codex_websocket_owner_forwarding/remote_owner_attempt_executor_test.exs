@@ -71,9 +71,15 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteOwne
         session_header_source: "x-session-id"
       )
 
+    socket_state_key = make_ref()
+    Process.put(socket_state_key, state)
+
     try do
       payload = websocket_payload(setup, "remote attempt executor")
       assert {:ok, state} = CodexResponsesSocket.handle_in({payload, [opcode: :text]}, state)
+      Process.put(socket_state_key, state)
+      state = receive_native_response_steering_prepared!(state)
+      Process.put(socket_state_key, state)
 
       # The owner node holds the upstream turn before its terminal: the attempt
       # is open and its executor is still running.
@@ -112,7 +118,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.RemoteOwne
       assert_receive {:fake_upstream_websocket_barrier, :before_close, close_pid, ^release_ref}, 15_000
       send(close_pid, {:fake_upstream_release_websocket, release_ref})
     after
-      CodexResponsesSocket.terminate(:closed, state)
+      CodexResponsesSocket.terminate(:closed, Process.delete(socket_state_key))
     end
   end
 

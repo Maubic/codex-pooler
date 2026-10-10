@@ -2664,6 +2664,37 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizerTest do
       end
     end
 
+    # findings#333: the Codex backend refuses the `programmatic_tool_calling` tool type on Full and accepts it in a Lite
+    # manifest. A public `/v1` declaration is refused once the serving mode is known; a native one is relayed.
+    test "refuses a public programmatic_tool_calling declaration on Full only" do
+      endpoint = "/backend-api/codex/responses"
+      payload = %{"model" => "sample-model", "input" => native_text_input("synthetic"), "tools" => [%{"type" => "programmatic_tool_calling"}]}
+
+      public = fn mode ->
+        mode
+        |> serving_mode_opts()
+        |> RequestOptions.build(endpoint, payload)
+        |> RequestOptions.mark_openai_compatibility_origin("/v1/responses", endpoint)
+      end
+
+      assert {:error, %{status: 400, code: "invalid_request", param: "tools"}} = PayloadNormalizer.validate(payload, public.("full"))
+      assert :ok = PayloadNormalizer.validate(payload, public.("lite"))
+      assert :ok = PayloadNormalizer.validate(payload, RequestOptions.build(serving_mode_opts("full"), endpoint, payload))
+      assert :ok = PayloadNormalizer.validate(Map.put(payload, "tools", [%{"type" => "web_search"}]), public.("full"))
+    end
+
+    test "strips metadata with the other upstream-unsupported controls on every transport" do
+      endpoint = "/backend-api/codex/responses"
+      payload = %{"model" => "sample-model", "input" => native_text_input("synthetic"), "metadata" => %{"label" => "synthetic"}}
+
+      for mode <- ["full", "lite"], transport <- ["http", "websocket"] do
+        options = RequestOptions.build(serving_mode_opts(mode), endpoint, payload)
+        options = if transport == "websocket", do: RequestOptions.for_websocket(options, payload), else: options
+        assert {:ok, encoded} = PayloadNormalizer.upstream_payload(payload, %Model{upstream_model_id: "provider-model"}, endpoint, options)
+        refute Map.has_key?(CodexPooler.JSON.decode!(encoded), "metadata"), "#{mode} #{transport}"
+      end
+    end
+
     test "keeps malformed named function choices rejected in Lite" do
       endpoint = "/backend-api/codex/responses"
 

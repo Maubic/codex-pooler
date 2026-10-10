@@ -277,7 +277,7 @@ defmodule CodexPooler.Platform.OutboundHTTPTest do
     assert FakeUpstream.count(target) == 1
   end
 
-  # Req 0.7.4 hashes the complete `finch:` pool option tuple into one Finch
+  # Req hashes the complete `finch:` pool option tuple into one Finch
   # instance under `Req.FinchSupervisor`; `pool_timeout`, `receive_timeout`,
   # `request_timeout`, and `pool_strategy` are per-request options outside the
   # hash. `pool_max_idle_time` stays unset, so every distinct tuple keeps its

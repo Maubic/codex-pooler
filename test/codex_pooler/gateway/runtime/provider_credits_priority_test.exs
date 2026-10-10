@@ -30,6 +30,32 @@ defmodule CodexPooler.Gateway.Runtime.ProviderCreditsPriorityTest do
   @endpoint "/backend-api/codex/responses"
   @consume "/api/codex/rate-limit-reset-credits/consume"
 
+  for permission <- [:positive_drift, :finite_zero, :opt_out] do
+    test "real reconciliation #{permission} controls final credit dispatch without included capacity" do
+      {fake, setup} = arrangement(:weekly_credit_only, unquote(permission) != :opt_out, bank: 0, auto: false)
+      payload = usage(:weekly_credit_only, credits: :full)
+      second_credits = if unquote(permission) == :finite_zero, do: %{"balance" => "0", "has_credits" => false, "unlimited" => false}, else: %{"balance" => "0.25", "has_credits" => true, "unlimited" => false}
+      {:path_json, replies} = routes(payload)
+      replies = Map.put(replies, "/backend-api/codex/usage", {200, Map.put(payload, "credits", second_credits)})
+      FakeUpstream.set_mode(fake, {:path_json, replies})
+      setup = reconcile(setup, fake)
+
+      if unquote(permission) == :positive_drift do
+        assert {:ok, %{status: 200}} = execute(setup)
+        attempt = Repo.one!(Attempt)
+        assert attempt.pool_upstream_assignment_id == setup.assignment.id
+        assert attempt.response_metadata["provider_credits_admission"]["capacity_basis"] == "provider_credits"
+        assert FakeUpstream.physical_counts(fake).http_generation == 1
+      else
+        assert {:error, _error} = execute(setup)
+        assert Repo.aggregate(Attempt, :count) == 0
+        assert FakeUpstream.physical_counts(fake).http_generation == 0
+      end
+
+      assert FakeUpstream.physical_counts(fake).consume == 0
+    end
+  end
+
   for refusal_clock <- [:same, :newer] do
     test "controller selects usable credits when below-limit included sibling has a #{refusal_clock} runtime account refusal" do
       {credit_fake, setup} = arrangement(:weekly_credit_only, true, bank: 2, auto: true)

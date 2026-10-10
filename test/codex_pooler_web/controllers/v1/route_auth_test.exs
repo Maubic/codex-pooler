@@ -435,6 +435,7 @@ defmodule CodexPoolerWeb.V1.RouteAuthTest do
 
     test "unsupported route registry lists the SDK-probed endpoint shapes exactly" do
       assert @unsupported_routes == [
+               {:post, "/v1/decisions"},
                {:post, "/v1/images/variations"},
                {:post, "/v1/content_provenance_checks"},
                {:post, "/v1/embeddings"},
@@ -496,6 +497,54 @@ defmodule CodexPoolerWeb.V1.RouteAuthTest do
       end
 
       assert_no_gateway_side_effects()
+    end
+
+    test "Decisions classifier requests are refused without dispatch or accounting", %{conn: conn} do
+      upstream = start_upstream(FakeUpstream.json_response(%{"id" => "must_not_dispatch"}))
+      setup = gateway_setup(upstream)
+
+      conn =
+        conn
+        |> auth(setup)
+        |> post("/v1/decisions", %{
+          "model" => "gpt-6-luna",
+          "input" => Jason.encode!(%{"value" => "synthetic"}),
+          "questions" => [
+            %{"type" => "predicate", "name" => "matches", "instructions" => "Does the value match?"},
+            %{"type" => "choice", "name" => "category", "instructions" => "Choose a category.", "choices" => [%{"value" => "a"}, %{"value" => "b"}]},
+            %{"type" => "score", "name" => "rating", "instructions" => "Rate the input.", "levels" => [%{"label" => "low"}, %{"label" => "high"}]}
+          ]
+        })
+
+      assert_openai_error(conn, 404,
+        code: "unsupported_endpoint",
+        message: "Unsupported OpenAI /v1 endpoint"
+      )
+
+      assert FakeUpstream.requests(upstream) == []
+      assert_no_gateway_side_effects()
+      assert Repo.aggregate(LedgerEntry, :count) == 0
+    end
+
+    test "encoded Decisions routes reject invalid compressed bodies before decompression", %{conn: conn} do
+      setup = active_api_key_fixture()
+
+      conn =
+        conn
+        |> auth(setup)
+        |> put_req_header("accept", "text/event-stream")
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("content-encoding", "gzip")
+        |> post("/v1/%64ecisions", "not-gzip-or-json")
+
+      assert_openai_error(conn, 404,
+        code: "unsupported_endpoint",
+        message: "Unsupported OpenAI /v1 endpoint"
+      )
+
+      assert get_resp_header(conn, "content-type") |> Enum.join() =~ "application/json"
+      assert_no_gateway_side_effects()
+      assert Repo.aggregate(LedgerEntry, :count) == 0
     end
 
     test "unsupported POST routes preserve auth and compatibility gates before oversized parsing",

@@ -1114,6 +1114,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     refute body =~ "synthetic terminal detail"
   end
 
+  for {delivery, surface} <- [
+        {:relay, :unmapped},
+        {:relay, :native},
+        {:relay, :public},
+        {:collect_full_history, :native},
+        {:collect_compaction, :native}
+      ] do
+    @tag delivery: delivery, surface: surface
+    test "#{surface} #{delivery} without a steering lane treats the reserved provider error as an ordinary terminal", ctx do
+      assert_unsteered_native_lane_error!(ctx.delivery, ctx.surface)
+    end
+  end
+
   @tag :websocket_owner_regression
   test "RED-R01 response.done followed by clean close completes before close classification" do
     frame =
@@ -6080,10 +6093,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     assert_receive {:DOWN, ^supervisor_monitor, :process, _, :shutdown}, @message_detection_timeout_ms
 
     # Nothing orders the request task against the fake's shutdown, so its outcome depends on how far it got: it was
-    # answered before the connection closed, or it sent its frame and decoded the close, or its reads lagged behind the
-    # whole shutdown: one read returned the upgrade response together with the close frame, which the upgrade does not
-    # decode, and the end of the connection then came before its send (the send found it closed) or after it (the
-    # receive saw it). A node shared with other suites produced the send-phase one (findings#303 row 303-7, Drone 1809).
+    # answered before the connection closed, or it decoded the close (a close frame in the same read as the upgrade
+    # response is decoded behind the 101 and fails the request before its payload is written), or its reads lagged
+    # behind the whole shutdown and the end of the connection reached it before a close frame it had read: before its
+    # send (the send found it closed) or after it (the receive saw it). A node shared with other suites produced the
+    # send-phase one (findings#303 row 303-7, Drone 1809).
     case Task.await(request_task, @message_detection_timeout_ms) do
       {:ok, %{terminal: "response.completed", status: 200}} -> :ok
       {:error, %{reason: :upstream_websocket_closed_before_terminal}} -> :ok
@@ -6270,6 +6284,60 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
       |> then(&struct(websocket_request(FakeUpstream.url(upstream)), &1))
 
     UpstreamWebsocketSession.request(session, request)
+  end
+
+  defp assert_unsteered_native_lane_error!(delivery, surface) do
+    error = %{"type" => "error", "status" => 400, "error" => %{"type" => "invalid_request_error", "code" => "unsupported_native_inflight_message", "message" => "synthetic ordinary request refusal"}}
+    refused = FakeUpstream.websocket_sse_then_close([error], code: 1000, reason: "")
+    warmup = if delivery == :collect_compaction, do: [strict_websocket_turn(websocket_success_without_id(), websocket_connection_ordinal: 1)], else: []
+    # provenance: synthetic_adversarial
+    upstream = start_upstream(FakeUpstream.strict_sequence(warmup ++ [strict_websocket_turn(refused, websocket_connection_ordinal: 1)]))
+    session = start_supervised!(Supervisor.child_spec({UpstreamWebsocketSession, []}, restart: :temporary))
+    monitor = Process.monitor(session)
+    parent = self()
+    request = %{websocket_request(FakeUpstream.url(upstream), @held_timeouts) | payload: CodexPooler.JSON.encode!(%{"type" => "response.create"})}
+
+    if delivery == :collect_compaction do
+      warmup_request = CodexPooler.ProviderCreditsDispatchSupport.wire_request!(%{request | effective_serving_mode: "full"})
+      assert {:ok, %{terminal: "response.completed"}} = UpstreamWebsocketSession.request(session, warmup_request)
+    end
+
+    mapper =
+      case surface do
+        :public -> &StreamProtocol.normalize_public_openai_responses_json_message/1
+        :native -> &StreamProtocol.canonicalize_native_codex_responses_json_message/1
+        :unmapped -> nil
+      end
+
+    writer = if delivery == :relay, do: fn frame, discriminator -> send(parent, {:ordinary_refusal_frame, frame, discriminator.terminal}) end
+    payload = if delivery == :collect_full_history, do: full_history_compaction_payload(), else: request.payload
+    request = %{request | websocket_delivery_mode: delivery, effective_serving_mode: "full", message_mapper: mapper, writer: writer, payload: payload}
+    request = CodexPooler.ProviderCreditsDispatchSupport.wire_request!(request)
+    assert is_nil(request.native_response_steering)
+
+    assert {:ok, %{terminal: "error", status: 200, upstream_error_code: "unsupported_native_inflight_message"} = result} = UpstreamWebsocketSession.request(session, request)
+    assert result.provider_credits_admission.capacity_basis == :windowless_provider_permission
+    assert result.body == "data: #{CodexPooler.JSON.encode!(error)}\n\n"
+    refute Map.has_key?(result, :native_response_steering_finalized)
+
+    if delivery == :relay do
+      assert_receive {:ordinary_refusal_frame, frame, "error"}, @message_detection_timeout_ms
+      assert CodexPooler.JSON.decode!(frame) == error
+      refute_received {:ordinary_refusal_frame, _frame, _terminal}
+    else
+      refute_received {:ordinary_refusal_frame, _frame, _terminal}
+    end
+
+    assert Process.alive?(session)
+    state = :sys.get_state(session)
+    refute Map.has_key?(state, :conn)
+    refute Map.has_key?(state, :native_response_steering_receive)
+    assert FakeUpstream.physical_counts(upstream).websocket_generation == 1 + length(warmup)
+    assert FakeUpstream.physical_counts(upstream).http_generation == 0
+    assert FakeUpstream.websocket_steers(upstream) == []
+    assert :ok = FakeUpstream.verify!(upstream)
+    assert :ok = UpstreamWebsocketSession.close(session)
+    assert_receive {:DOWN, ^monitor, :process, ^session, :normal}, @message_detection_timeout_ms
   end
 
   defp maybe_append_terminal_frame(frames, type)
@@ -6481,7 +6549,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     state = :sys.get_state(session)
 
     assert lifecycle_from_state(state) == expected_lifecycle
-    assert Enum.sort(Map.keys(state)) == [:generation, :lifecycle_id]
   end
 
   defp assert_connection_metadata(result, lifecycle, reused, reconnected) do
@@ -7518,7 +7585,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSessionTest 
     state = :sys.get_state(session)
 
     assert lifecycle_from_state(state) == expected_lifecycle
-    assert Enum.sort(Map.keys(state)) == [:connection_close_subscriber, :generation, :lifecycle_id]
     assert state.connection_close_subscriber == self()
   end
 

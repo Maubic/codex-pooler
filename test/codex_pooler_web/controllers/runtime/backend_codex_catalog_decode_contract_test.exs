@@ -1,8 +1,8 @@
 defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
-  # findings#258 row 258-34: the released Codex client decodes the whole
+  # The released Codex client decodes the whole
   # `/models` body as one `ModelsResponse`, so one entry it cannot decode makes
   # it discard every entry and fall back to its bundled catalog. A client
-  # inside the verified decode window (0.154.0 through 0.160.1) is served the
+  # inside the verified decode window is served the
   # catalog without that entry, the omission is logged with the model slug and
   # field names only, and its turns name the ETag of that same body. Clients
   # outside the window and `/v1/models` keep the unchecked catalog.
@@ -19,7 +19,6 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
   alias CodexPooler.Repo
 
   @broken_slug "gpt-catalog-undecodable"
-  @user_agent "codex_cli_rs/0.158.0 (Mac OS 26.0.0; arm64) xterm-256color"
 
   test "a client inside the verified window is served every entry but the one it cannot decode", %{conn: conn} do
     upstream = start_upstream(FakeUpstream.json_response(%{"data" => []}))
@@ -27,7 +26,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
     good_slug = setup.model.exposed_model_id
 
     for path <- ["/backend-api/codex/models", "/backend-api/codex/v1/models"],
-        version <- ["0.156.1", "0.157.0", "0.157.0-alpha.11.1", "0.157.1", "0.158.0", "0.158.0-alpha.15.4", "0.159.0", "0.159.3", "0.160.0", "0.160.0-alpha.4", "0.160.1"] do
+        version <- CodexCatalogShapes.version_samples().checked do
       log =
         capture_log(fn ->
           response = conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent(version)) |> get(path, %{"client_version" => version})
@@ -43,7 +42,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
       refute log =~ "Synthetic #{@broken_slug}", path
     end
 
-    for version <- ["0.160.2", "0.161.0", "0.161.0-alpha.1", "0.153.4", "0.146.1", ""] do
+    samples = CodexCatalogShapes.version_samples()
+
+    for version <- [samples.after, samples.after <> "-alpha.1", samples.before, "0.146.1", ""] do
       response = conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent(version)) |> get("/backend-api/codex/models", %{"client_version" => version})
       assert response |> json_response(200) |> Map.fetch!("models") |> Enum.map(& &1["slug"]) |> Enum.sort() == Enum.sort([good_slug, @broken_slug]), version
     end
@@ -69,19 +70,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
       )
 
     setup = catalog_setup(upstream)
+    samples = CodexCatalogShapes.version_samples()
 
     capture_log(fn ->
       models =
         conn
         |> recycle()
         |> auth(setup)
-        |> put_req_header("user-agent", @user_agent)
-        |> get("/backend-api/codex/models", %{"client_version" => "0.158.0"})
+        |> put_req_header("user-agent", user_agent(samples.current))
+        |> get("/backend-api/codex/models", %{"client_version" => samples.current})
 
       assert [catalog_etag] = get_resp_header(models, "etag")
 
       unchecked =
-        conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent("0.160.2")) |> get("/backend-api/codex/models", %{"client_version" => "0.160.2"}) |> get_resp_header("etag")
+        conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent(samples.after)) |> get("/backend-api/codex/models", %{"client_version" => samples.after}) |> get_resp_header("etag")
 
       refute unchecked == [catalog_etag]
 
@@ -89,7 +91,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
         conn
         |> recycle()
         |> auth(setup)
-        |> put_req_header("user-agent", @user_agent)
+        |> put_req_header("user-agent", user_agent(samples.current))
         |> post("/backend-api/codex/responses", %{
           "model" => setup.model.exposed_model_id,
           "input" => native_text_input("synthetic catalog decode contract turn"),
@@ -107,7 +109,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
     source = CodexCatalogShapes.synced_source(setup.model.exposed_model_id) |> put_in(["model_messages", "content_filter_guidance"], "Synthetic guidance")
     setup.model |> Ecto.Changeset.change(metadata: %{"source_assignment_ids" => [setup.assignment.id], "source_assignment_models" => %{setup.assignment.id => source}}) |> Repo.update!()
 
-    for version <- ["0.160.1", "0.160.0-alpha.4"] do
+    samples = CodexCatalogShapes.version_samples()
+
+    for version <- [samples.current, samples.current <> "-alpha.1.2"] do
       for path <- ["/backend-api/codex/models", "/backend-api/codex/v1/models"] do
         catalog = conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent(version)) |> get(path, %{"client_version" => version})
         body = json_response(catalog, 200)
@@ -125,7 +129,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
     end
   end
 
-  # findings#206 row 206-444: the model every `gateway_setup/2` test routes to
+  # The model every `gateway_setup/2` test routes to
   # is a catalog entry the released client decodes, so a test sending an
   # in-window `User-Agent` computes its ETag from a body that still lists it.
   test "the default gateway fixture model is a decodable catalog entry for every client", %{conn: conn} do
@@ -134,7 +138,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
 
     log =
       capture_log(fn ->
-        for version <- ["0.156.1", "0.154.0", "0.157.0", "0.157.1", "0.158.0", "0.159.3", "0.160.1", "0.146.1"] do
+        for version <- CodexCatalogShapes.version_samples().checked ++ ["0.146.1"] do
           body = conn |> recycle() |> auth(setup) |> put_req_header("user-agent", user_agent(version)) |> get("/backend-api/codex/models", %{"client_version" => version}) |> json_response(200)
 
           assert [entry] = body["models"], version
@@ -147,7 +151,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexCatalogDecodeContractTest do
   end
 
   # The catalog fetch selects its representation from the Codex build's
-  # `User-Agent`, exactly as its turns do (findings#258 row 258-102).
+  # `User-Agent`, exactly as its turns do.
   defp user_agent(""), do: "codex_cli_rs"
   defp user_agent(version), do: "codex_cli_rs/#{version} (Mac OS 26.0.0; arm64) xterm-256color"
 

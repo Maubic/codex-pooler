@@ -593,9 +593,11 @@ defmodule CodexPooler.Accounts.OperatorManagement do
   defp get_operator_target(%User{} = user), do: {:ok, user}
 
   defp get_operator_target(operator_id) when is_binary(operator_id) do
-    case Repo.get(User, operator_id) do
-      %User{deleted_at: nil} = user -> {:ok, user}
-      _user -> {:error, :invalid_operator}
+    with {:ok, operator_id} <- Ecto.UUID.cast(operator_id),
+         %User{deleted_at: nil} = user <- Repo.get(User, operator_id) do
+      {:ok, user}
+    else
+      _ -> {:error, :invalid_operator}
     end
   end
 

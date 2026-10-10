@@ -223,6 +223,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.AccountingReservation do
       native_http_input_count: native_http_input_count(native_http_claim),
       native_http_semantic_turn_key: native_http_semantic_turn_key(native_http_claim),
       websocket_compaction_claims: websocket_compaction_claims(native_http_claim),
+      native_http_tool_claims: native_http_tool_claims(native_http_claim),
       native_http_steered_claim: native_http_steered_claim(native_http_claim),
       native_http_turn_progress: native_http_turn_progress(native_http_claim),
       native_http_turn_position: native_http_turn_position(native_http_claim),
@@ -466,6 +467,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.AccountingReservation do
     do: semantic_turn_key
 
   defp native_http_semantic_turn_key(:none), do: nil
+
+  defp native_http_tool_claims({:ok, %{arm: :tool_continuation, tool_continuation_claims: claims}}), do: claims
+  defp native_http_tool_claims(_claim), do: []
 
   defp websocket_compaction_claims({:ok, %{websocket_compaction_claims: claims}}) when is_list(claims), do: claims
   defp websocket_compaction_claims(_native_http_claim), do: []

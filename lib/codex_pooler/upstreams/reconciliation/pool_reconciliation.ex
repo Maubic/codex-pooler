@@ -677,11 +677,26 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
         %PoolUpstreamAssignment{} = assignment,
         opts \\ []
       ) do
+    case refresh_quota_and_probe_from_usage(identity, assignment, opts) do
+      {:ok, updated_identity, _probe} -> {:ok, updated_identity}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # The same refresh, also returning the Usage API receipt it persisted. The
+  # saved-reset redemption records the receipt's first post-consume reading as
+  # the provider reported it, because the evidence store can keep that reading
+  # out of the stored window.
+  @doc false
+  @spec refresh_quota_and_probe_from_usage(UpstreamIdentity.t(), PoolUpstreamAssignment.t(), keyword()) ::
+          {:ok, UpstreamIdentity.t(), UsageProbe.Result.t()} | {:error, term()}
+  def refresh_quota_and_probe_from_usage(%UpstreamIdentity{} = identity, %PoolUpstreamAssignment{} = assignment, opts \\ []) do
     observed_at = Keyword.get(opts, :observed_at, now())
 
     case UsageProbe.fetch_from_identity(identity, assignment, observed_at, opts) do
       {:ok, %UsageProbe.Result{credential_fence: fence} = probe} when not is_nil(fence) ->
-        apply_refresh_usage_success(identity, probe, fence)
+        with {:ok, updated_identity} <- apply_refresh_usage_success(identity, probe, fence),
+             do: {:ok, updated_identity, probe}
 
       {:error, {:definitive_provider_auth_rejected, fence}} ->
         apply_refresh_usage_rejection(identity, fence)

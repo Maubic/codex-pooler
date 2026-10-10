@@ -7,6 +7,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesSequence
+  alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesTerminalOutput
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesToolCompletion
 
   @type summary_state :: %{
@@ -41,6 +42,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
           required(:custom_tool_namespaces) => map(),
           required(:sequence) => PublicResponsesSequence.state(),
           required(:tool_completion) => PublicResponsesToolCompletion.state(),
+          required(:terminal_output) => PublicResponsesTerminalOutput.state(),
           required(:summary) => summary_state(),
           required(:passthrough?) => boolean(),
           required(:passthrough_terminal) => nil,
@@ -65,6 +67,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
       custom_tool_namespaces: custom_tool_namespaces,
       sequence: PublicResponsesSequence.new_state(),
       tool_completion: PublicResponsesToolCompletion.new_state(),
+      terminal_output: PublicResponsesTerminalOutput.new_state(),
       summary: new_summary(),
       passthrough?: false,
       passthrough_terminal: nil,
@@ -493,7 +496,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
 
   defp normalize_public_block("response.output_item.done", decoded, state) do
     {block, state, emitted?} = emit_public_sse("response.output_item.done", decoded, state)
-    {block, if(emitted?, do: state |> record_item_done() |> record_item_relayed(), else: state)}
+    {block, if(emitted?, do: state |> record_item_done() |> record_item_relayed() |> record_terminal_output(decoded, block), else: state)}
   end
 
   defp normalize_public_block(type, decoded, state) when is_binary(type) do
@@ -540,8 +543,13 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
     {terminal, %{state | terminal_failure: failure}, true}
   end
 
+  # A completed or incomplete terminal the provider closed with an empty
+  # output lists the items the stream delivered in its done events, as the
+  # Responses contract carries them (findings#335); the prefix below still
+  # sees the provider's terminal.
   defp emit_public_terminal_block(type, decoded, source_terminal_outcome, state) do
     {prefix, state} = terminal_prefix(type, decoded, state)
+    decoded = PublicResponsesTerminalOutput.fill(type, decoded, state.terminal_output)
     {terminal, state, emitted?} = emit_public_sse(type, decoded, state)
 
     state =
@@ -1105,6 +1113,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
         created?: false,
         text_delta?: false,
         items_relayed?: false,
+        terminal_output: PublicResponsesTerminalOutput.new_state(),
         passthrough?: false,
         passthrough_terminal: nil
     }
@@ -1132,6 +1141,12 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
   end
 
   defp record_item_relayed(state), do: %{state | items_relayed?: true}
+
+  # The item the client received in the done event, for a terminal the
+  # provider sends with an empty output (findings#335).
+  defp record_terminal_output(state, decoded, block) do
+    %{state | terminal_output: PublicResponsesTerminalOutput.observe(state.terminal_output, decoded, IO.iodata_length(block))}
+  end
 
   defp record_text_done(state, decoded) do
     text_bytes = decoded |> decoded_string("text") |> safe_byte_size()

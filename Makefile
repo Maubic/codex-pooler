@@ -97,6 +97,14 @@ precommit:
 test-db-prune:
 	@MIX_ENV=test $(MIX) codex_pooler.test.prune_databases
 
+# Every partition VM starts with `+hmbs 1000000`, a minimum binary virtual heap of one million words (the VM default is 46,422), and
+# the caller's ERL_FLAGS follow it, so they can override it. With the default, the compile of a large test file (the 17 KB file that
+# expands one body 72 times, a 12,500-line controller test) spends most of its time in garbage collections forced by the virtual
+# binary heap: the compile cycle of the partitions that hold such files is 27-41% shorter with the flag. Test VMs only.
+# Each partition writes the wall time of every test file it ran to its own file (CodexPooler.TestFileDurations).
+# With TEST_FAST_PRINT_FILE_DURATIONS=1 a passing run prints those files after the partition results, which is how
+# a saved CI log carries the duration of every test file: mix test.partition_weights turns such a log into the
+# weights mix test.product and mix test.tooling deal their partitions by (test/partition_weights.tsv).
 test-fast:
 	@partitions="$(N)"; \
 	if [[ ! "$$partitions" =~ ^[0-9]+$$ ]] || (( 10#$$partitions < 1 || 10#$$partitions > 4 )); then \
@@ -126,7 +134,7 @@ test-fast:
 	logical_cpus=$$((10#$$logical_cpus)); \
 	schedulers_per_partition=$$((logical_cpus / partitions)); \
 	if [ "$$schedulers_per_partition" -lt 1 ]; then schedulers_per_partition=1; fi; \
-	partition_erl_flags="$${ERL_FLAGS:+$${ERL_FLAGS} }+S $$schedulers_per_partition:$$schedulers_per_partition"; \
+	partition_erl_flags="+hmbs 1000000 $${ERL_FLAGS:+$${ERL_FLAGS} }+S $$schedulers_per_partition:$$schedulers_per_partition"; \
 	echo "test-fast: scheduler budget $$logical_cpus logical CPUs, $$schedulers_per_partition per partition"; \
 	run_namespace=$$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n'); \
 	if [[ ! "$$run_namespace" =~ ^[0-9a-f]{16}$$ ]]; then \
@@ -219,6 +227,19 @@ test-fast:
 		if [ "$$total" -gt 20 ]; then echo "  ... and $$((total - 20)) more"; fi; \
 		return 0; \
 	}; \
+	file_duration_report() { \
+		local partition file; \
+		[ "$${TEST_FAST_PRINT_FILE_DURATIONS:-}" = "1" ] || return 0; \
+		for partition in $$(seq 1 "$$partitions"); do \
+			file="$$log_dir/files-$$partition.tsv"; \
+			if [ -s "$$file" ]; then \
+				awk -F '\t' -v partition="$$partition" -v total="$$partitions" 'NR == 1 { header = $$0; sub(/^# codex-pooler test file durations /, "", header); print "test-fast: file durations partition " partition "/" total " " header " (sync_ms async_ms path)"; next } { print "  " $$2 " " $$3 " " $$1 }' "$$file"; \
+			else \
+				echo "test-fast: file durations partition $$partition/$$partitions none recorded"; \
+			fi; \
+		done; \
+		return 0; \
+	}; \
 	confirm_durations() { \
 		local round rc total locations; \
 		locations=($$(duration_locations "$$log_dir"/duration-*.tsv)); \
@@ -228,7 +249,6 @@ test-fast:
 		for round in 1 2 3; do \
 			(ERL_FLAGS="$$partition_erl_flags" CODEX_POOLER_TEST_RUN_NAMESPACE="$$run_namespace" MIX_TEST_PARTITION=1 CODEX_POOLER_TEST_DURATION_CANDIDATES="$$log_dir/confirm-$$round.tsv" $(TEST_FAST_COMMAND) "$${locations[@]}") > "$$log_dir/confirm-$$round.log" 2>&1 & \
 			pids[1]=$$!; \
-			while child_running "$${pids[1]}"; do sleep 0.1; done; \
 			if wait "$${pids[1]}"; then rc=0; else rc=$$?; fi; \
 			pids[1]=""; \
 			if [ "$$rc" -ne 0 ]; then \
@@ -251,13 +271,12 @@ test-fast:
 	trap 'interrupt 143' TERM; \
 	for partition in $$(seq 1 "$$partitions"); do \
 		logs[$$partition]="$$log_dir/partition-$$partition.log"; \
-		(ERL_FLAGS="$$partition_erl_flags" CODEX_POOLER_TEST_RUN_NAMESPACE="$$run_namespace" MIX_TEST_PARTITION="$$partition" CODEX_POOLER_TEST_DURATION_CANDIDATES="$$log_dir/duration-$$partition.tsv" $(TEST_FAST_COMMAND) --partitions $$partitions) > "$${logs[$$partition]}" 2>&1 & \
+		(ERL_FLAGS="$$partition_erl_flags" CODEX_POOLER_TEST_RUN_NAMESPACE="$$run_namespace" MIX_TEST_PARTITION="$$partition" CODEX_POOLER_TEST_DURATION_CANDIDATES="$$log_dir/duration-$$partition.tsv" CODEX_POOLER_TEST_FILE_DURATIONS="$$log_dir/files-$$partition.tsv" $(TEST_FAST_COMMAND) --partitions $$partitions) > "$${logs[$$partition]}" 2>&1 & \
 		pids[$$partition]=$$!; \
 	done; \
 	failures=0; \
 	for partition in $$(seq 1 "$$partitions"); do \
 		pid=$${pids[$$partition]}; \
-		while child_running "$$pid"; do sleep 0.1; done; \
 		if wait "$$pid"; then \
 			if awk '/^Result: / { result=$$0 } END { exit !(result ~ /^Result: [1-9][0-9]* passed( \([^)]*\))?(, [0-9]+ (skipped|excluded))*$$/) }' "$${logs[$$partition]}"; then \
 				results[$$partition]=0; \
@@ -278,6 +297,7 @@ test-fast:
 	done; \
 	if [ "$$failures" -eq 0 ]; then \
 		duration_report "$${logs[@]}"; \
+		file_duration_report; \
 		confirm_durations || exit 1; \
 		echo "test-fast: PASS ($$partitions/$$partitions partitions)"; \
 		exit 0; \

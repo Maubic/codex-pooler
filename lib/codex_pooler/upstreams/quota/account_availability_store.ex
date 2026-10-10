@@ -110,6 +110,21 @@ defmodule CodexPooler.Upstreams.Quota.AccountAvailabilityStore do
   @spec clear(map() | nil) :: map()
   def clear(metadata), do: metadata |> normalize_metadata() |> Map.delete(@metadata_key)
 
+  @doc """
+  Moves a valid snapshot recorded at `from_epoch` to `to_epoch` and leaves
+  every other value as it is. A token refresh renews the credential of the same
+  provider account, and the provider's availability describes that account, so
+  the refresh carries it (findings#334). Only the epoch changes: the state and
+  `observed_at` stay byte for byte, and the freshness rules still read them.
+  """
+  @spec carry_forward(map(), pos_integer(), pos_integer()) :: map()
+  def carry_forward(metadata, from_epoch, to_epoch) when is_map(metadata) and is_integer(to_epoch) and to_epoch > 0 do
+    case load(metadata) do
+      {:ok, %Snapshot{credential_epoch: ^from_epoch}} -> put_in(metadata, [@metadata_key, "credential_epoch"], to_epoch)
+      _absent_invalid_or_other_epoch -> metadata
+    end
+  end
+
   defp preserve_current_blocked?(
          metadata,
          %AccountAvailability{state: :unknown},

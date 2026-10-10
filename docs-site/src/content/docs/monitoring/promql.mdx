@@ -11,11 +11,19 @@ Replace `namespace="example-app"` and `job="codex-pooler-app"` with your target 
 
 Application metrics come from Codex Pooler. Container metrics require kubelet/cAdvisor, and `kube_*` metrics require kube-state-metrics.
 
+## Reading latency percentiles
+
+Latency histograms produce interpolated estimates, not exact request durations. Endpoint and routed-request histograms have finite buckets through 300 seconds; admission, repository-query and admin-reload/build histograms have finite buckets through 60 seconds. Subsecond buckets preserve low-latency resolution; higher bounds include 10, 15, 30 and 60 seconds and, for endpoint/route durations, 120 and 300 seconds.
+
+Observations above the top finite bound still contribute to the `+Inf` bucket, count and sum. If p95 falls in that bucket, `histogram_quantile` reports the top finite bound: 300 or 60 seconds. That value is not an upper bound on individual observations. Long-lived streams and operator-configured waits can exceed these ranges; inspect request timings or the overflow share when the percentile reaches the ceiling. An observation exactly on a finite boundary belongs to that bucket, and interpolation can place the estimate below that boundary. Floating-point unit conversion can place a nominal boundary value in the adjacent bucket.
+
+Aggregate histogram buckets before calculating a percentile; do not average per-pod percentiles. Keep one bucket schema across the selected pods: during a rolling change of bucket bounds, old and new pods expose different `le` series, so compare homogeneous pod cohorts until the rollout and query window contain only the new schema.
+
 ## Traffic and latency
 
 ### HTTP request rate
 
-Requests per second by method and HTTP status class. This describes HTTP responses, not error frames within an already-open WebSocket.
+All HTTP requests observed by Phoenix endpoint instrumentation, per second by method and HTTP status class. This includes `/healthz` and `/readyz` probes, `/metrics` scrapes when enabled, and unmatched endpoint traffic. Successful and failed HTTP responses contribute; this is not a count of successful gateway turns or error frames within an already-open WebSocket.
 
 ```promql
 sum by (method, status_class) (
@@ -25,7 +33,11 @@ sum by (method, status_class) (
 
 ### Endpoint latency p95
 
-Seconds at the 95th percentile for application HTTP requests. Long-lived or streamed requests can have different duration patterns from short endpoints.
+Seconds at the 95th percentile for the same endpoint population, including probes and enabled metrics scrapes. On a low-traffic pod, probes and scrapes can dominate the sample population. Long-lived or streamed requests can have different duration patterns from short endpoints.
+
+The dashboard's **Slowest Routes p95** uses router-dispatch stop observations for matched routes, including `/healthz`, `/readyz`, and enabled `/metrics` scrapes. Unmatched endpoint requests do not enter those route series. Its population and timing boundary differ from the endpoint histogram.
+
+**Queries / Request** divides repository-query rate by the total endpoint-request rate, including probes and enabled scrapes in the denominator. Those requests can also issue repository queries, so the ratio does not mean queries per gateway turn. Repository-query role coverage still applies: see [database timings](#database-timings).
 
 ```promql
 histogram_quantile(0.95,
@@ -127,7 +139,9 @@ sum by (transport, route_class) (
 
 ### Stream buffer truncations
 
-Retained stream bodies reduced to a bounded suffix. This is distinct from the oversized-buffer counter.
+One event per retained body when an append first exceeds the 65,536-byte retention limit, including an exact-limit body followed by overflow. Later appends and compaction do not emit another event. This is distinct from oversized incomplete-buffer events.
+
+The **Stream Buffer Size p95** first-crossing series measures retained bytes including that crossing append. It depends on chunking and does not measure total stream size, peak memory or the current suffix. Truncated observations remain raw: the histogram has a 2 MiB top finite bucket, and a percentile falling in `+Inf` reports 2 MiB even when crossing sizes are larger. Oversized observations use a separate histogram whose measurements saturate at 128 MiB while its raw telemetry events remain unchanged. Both percentiles are interpolated estimates, not upper bounds on actual sizes.
 
 ```promql
 sum by (transport, route_class) (
@@ -137,9 +151,11 @@ sum by (transport, route_class) (
 
 ## Database timings
 
+Repository-query rates and timings cover scraped application pods. In a split-role deployment, `OBAN_MODE=worker` and `OBAN_MODE=scheduler` run no Prometheus reporter, so their query activity is omitted. An empty graph for that share means it is not measured, not that those roles performed no queries. With `OBAN_MODE=all`, co-located job queries are included.
+
 ### Repository query rate
 
-Queries per second from each scraped application pod. Worker/scheduler queries are not exported by those roles.
+Queries per second from each scraped application pod.
 
 ```promql
 sum by (pod) (

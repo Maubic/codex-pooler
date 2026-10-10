@@ -178,6 +178,7 @@ defmodule CodexPoolerWeb.Runtime.AnchoredOwnerDrainSupport do
 
       message
       when elem(message, 0) in [
+             :native_response_steering_prepare,
              :websocket_owner_cleanup_witness,
              :websocket_owner_frame,
              :websocket_owner_output_commit_probe,

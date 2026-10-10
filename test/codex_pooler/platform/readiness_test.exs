@@ -80,6 +80,24 @@ defmodule CodexPooler.Platform.ReadinessTest do
     assert Readiness.check() == :ready
   end
 
+  test "strict schema status never accepts cached connectivity grace" do
+    assert Readiness.check() == :ready
+    assert Readiness.check(sql_probe: UnreachableProbe) == {:ready, :degraded, "DBConnection.ConnectionError"}
+    assert Readiness.schema_status(sql_probe: UnreachableProbe) == {:error, :connectivity, "DBConnection.ConnectionError"}
+  end
+
+  test "a missing middle migration fails containment even with a newer applied version" do
+    %{rows: [[version]]} = Repo.query!("SELECT min(version) FROM schema_migrations")
+    Repo.query!("DELETE FROM schema_migrations WHERE version = $1", [version])
+    assert Readiness.schema_status() == {:error, :schema, "migrations_missing"}
+  end
+
+  test "duplicate packaged migration versions fail strict schema status", %{tmp_dir: tmp_dir} do
+    File.write!(Path.join(tmp_dir, "123_one.exs"), "")
+    File.write!(Path.join(tmp_dir, "123_two.exs"), "")
+    assert Readiness.schema_status(migrations_path: tmp_dir) == {:error, :schema, "migration_files_malformed"}
+  end
+
   test "an applied schema newer than this image stays ready" do
     # A rollout migrates before it replaces pods, so the pods still serving the
     # previous release see versions they do not carry. Containment, not

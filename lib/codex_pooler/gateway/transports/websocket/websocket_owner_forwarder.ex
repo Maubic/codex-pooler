@@ -18,8 +18,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   alias CodexPooler.Gateway.Transports.Websocket.CompactionRetrySubmitHold
   alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
+  alias CodexPooler.Gateway.Transports.Websocket.OwnerErrorVocabulary
   alias CodexPooler.Gateway.Transports.Websocket.RemoteReconnectControlV2
   alias CodexPooler.Gateway.Transports.Websocket.ResponseInterrupt
+  alias CodexPooler.Gateway.Transports.Websocket.ResponseSteer
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerAdmissionControlV1
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
@@ -28,9 +30,18 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV5
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV7
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV8
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequestV9
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.Logger, as: OwnerLogger
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketRequestCallbacks
   alias CodexPooler.Repo
+
+  # A submitted turn's progress, as its owner's upstream session reports it
+  # (`track_request_progress/1`): nothing written yet, its payload started to
+  # leave (or a frame of it arrived), or taken back from a dead owner.
+  @unsent 0
+  @started 1
+  @claimed 2
 
   @restore_downstream_keys [:correlation_id, :epoch, :pid]
   @stable_downstream_keys [:active_turn_reconnect? | @restore_downstream_keys]
@@ -152,7 +163,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
           CodexSession.t(),
           binary(),
           WebsocketOwnerSession.downstream(),
-          UpstreamWebsocketSession.Request.t() | WebsocketOwnerRequestV8.t(),
+          UpstreamWebsocketSession.Request.t() | WebsocketOwnerRequestV8.t() | WebsocketOwnerRequestV9.t(),
           submit_opts()
         ) ::
           submitted_request_result()
@@ -167,11 +178,11 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
       )
       when is_binary(owner_lease_token) and is_map(downstream) and
              is_struct(request) and
-             request.__struct__ in [UpstreamWebsocketSession.Request, WebsocketOwnerRequestV8] do
+             request.__struct__ in [UpstreamWebsocketSession.Request, WebsocketOwnerRequestV8, WebsocketOwnerRequestV9] do
     with :ok <- SessionContinuity.validate_owner_token(session, owner_lease_token),
          {:ok, owner} <- resolve_owner(session, opts) do
       opts =
-        if match?(%WebsocketOwnerRequestV8{request: %WebsocketOwnerRequestV4{}}, request) do
+        if match?(%WebsocketOwnerRequestV8{request: %WebsocketOwnerRequestV4{}}, request) or match?(%WebsocketOwnerRequestV9{request: %WebsocketOwnerRequestV8{request: %WebsocketOwnerRequestV4{}}}, request) do
           Keyword.put(opts, :replay_owner_lease_token, owner_lease_token)
         else
           opts
@@ -909,6 +920,25 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
 
   def remote_submit_request_v8(_session_id, _downstream, _envelope), do: {:error, :owner_unavailable}
 
+  @spec remote_submit_request_v9(binary(), WebsocketOwnerSession.downstream(), WebsocketOwnerRequestV9.t()) :: submitted_request_result()
+  def remote_submit_request_v9(session_id, downstream, %WebsocketOwnerRequestV9{} = envelope) do
+    with :ok <- WebsocketOwnerRequestV9.validate(envelope),
+         :ok <- refuse_abandoned_submission(session_id, downstream),
+         {:ok, {owner, downstream, opts}} <- gated_owner(envelope.request.request, session_id, downstream),
+         {:ok, request} <- WebsocketRequestCallbacks.materialize(envelope, nil),
+         :ok <- refuse_abandoned_submission(session_id, downstream) do
+      submit_gated_owner(owner, session_id, downstream, request, envelope.request.request, opts)
+    else
+      {:error, {:invalid_field, _field}} -> {:error, :owner_unavailable}
+      {:error, {:unknown_fields, _fields}} -> {:error, :owner_unavailable}
+      {:error, {:invalid_owner_request, _reason}} -> {:error, :owner_unavailable}
+      {:error, :upstream_identity_not_found} -> {:error, :owner_unavailable}
+      {:error, _reason} = error -> error
+    end
+  catch
+    :exit, _reason -> {:error, :owner_crashed}
+  end
+
   defp gated_owner(request, session_id, downstream) when is_struct(request, WebsocketOwnerRequest) or is_struct(request, WebsocketOwnerRequestV5) do
     opts = remote_submission_opts(request, session_id, downstream)
 
@@ -1122,6 +1152,43 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
     end
   end
 
+  @spec steer_turn(CodexSession.t(), binary(), WebsocketOwnerSession.downstream(), ResponseSteer.t(), submit_opts()) :: :ok | {:error, WebsocketOwnerContract.owner_error() | :remote_steer_v1_unsupported | :stale_owner}
+  def steer_turn(%CodexSession{} = session, token, downstream, steer, opts \\ [])
+      when is_binary(token) and is_map(downstream) and is_map(steer) and is_list(opts) do
+    downstream = Map.take(downstream, [:pid, :epoch, :correlation_id])
+
+    with :ok <- SessionContinuity.validate_owner_token(session, token),
+         {:ok, owner} <- resolve_owner(session, opts) do
+      case owner do
+        {:local, _instance} -> remote_steer_turn_v1(session.id, downstream, steer)
+        {:remote, node, _instance} -> steer_remote_turn(node, session.id, downstream, steer, opts)
+      end
+    end
+  end
+
+  @spec steer_remote_turn(node(), binary(), WebsocketOwnerSession.downstream(), ResponseSteer.t(), submit_opts()) :: :ok | {:error, WebsocketOwnerContract.owner_error() | :remote_steer_v1_unsupported}
+  def steer_remote_turn(node, session_id, downstream, steer, opts) do
+    timeout = Keyword.get(opts, :timeout, WebsocketOwnerContract.default_forward_timeout_ms())
+    args = [session_id, Map.take(downstream, [:pid, :epoch, :correlation_id]), steer]
+
+    opts
+    |> node_client()
+    |> safe_remote_call(node, __MODULE__, :remote_steer_turn_v1, args, timeout)
+    |> case do
+      :ok -> :ok
+      {:error, :remote_steer_v1_unsupported} = unsupported -> unsupported
+      {:error, reason} -> if WebsocketOwnerContract.owner_error?(reason), do: {:error, reason}, else: {:error, :owner_crashed}
+      _unsafe -> {:error, :owner_crashed}
+    end
+  end
+
+  @spec remote_steer_turn_v1(binary(), WebsocketOwnerSession.downstream(), ResponseSteer.t()) :: :ok | {:error, WebsocketOwnerContract.owner_error()}
+  def remote_steer_turn_v1(session_id, downstream, steer) do
+    with {:ok, owner} <- WebsocketOwnerSession.lookup(session_id), do: WebsocketOwnerSession.steer_turn(owner, downstream, steer)
+  catch
+    :exit, _reason -> {:error, :owner_crashed}
+  end
+
   @doc false
   @spec remote_detach_previsible_downstream_v1(binary(), WebsocketOwnerSession.downstream()) ::
           :suspended | :detached | :not_previsible | {:error, WebsocketOwnerContract.owner_error()}
@@ -1315,6 +1382,30 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
 
     if result == {:error, :owner_forward_timeout} do
       case request.request do
+        %WebsocketOwnerRequestV4{} = replay -> reconcile_remote_v4_timeout(node, session_id, replay, opts)
+        _ordinary -> best_effort_abandon_turn(node, session_id, downstream, opts)
+      end
+    end
+
+    result
+  end
+
+  defp dispatch_submit_request({:local, _instance}, session_id, downstream, %WebsocketOwnerRequestV9{} = request, _opts), do: remote_submit_request_v9(session_id, downstream, request)
+
+  defp dispatch_submit_request({:remote, node, _instance}, session_id, downstream, %WebsocketOwnerRequestV9{} = request, opts) do
+    submitter = self()
+
+    watcher =
+      case request.request.request do
+        %WebsocketOwnerRequestV4{} = replay -> start_remote_replay_cancellation_watcher(submitter, node, session_id, replay, opts)
+        _ordinary -> start_remote_cancellation_watcher(submitter, node, session_id, downstream, opts)
+      end
+
+    result = call_remote_submission(node, :remote_submit_request_v9, [session_id, downstream, request], opts)
+    stop_remote_cancellation_watcher(watcher, submitter)
+
+    if result == {:error, :owner_forward_timeout} do
+      case request.request.request do
         %WebsocketOwnerRequestV4{} = replay -> reconcile_remote_v4_timeout(node, session_id, replay, opts)
         _ordinary -> best_effort_abandon_turn(node, session_id, downstream, opts)
       end
@@ -1526,61 +1617,122 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
          submission_notification?,
          opts
        ) do
-    {request, visibility} = track_request_visibility(request)
+    {tracked_request, progress} = track_request_progress(request)
 
     do_submit_remote_owner_request(
       owner_pid,
       codex_session_id,
       downstream,
-      request,
+      {request, tracked_request},
       submission_notification?,
-      visibility,
+      progress,
       opts
     )
   end
 
+  # An owner that dies under the submission hands its turn to a replacement
+  # owner only while the turn's payload never started to leave: once the
+  # upstream session reported the write, or a frame of the turn arrived, the
+  # provider may be running it, and the turn settles `owner_crashed` instead
+  # of reaching the provider a second time (findings#327, the rule of
+  # findings#325 row 325-6). A session that reaches its write after the claim
+  # ends the request unsent, whether or not the turn is then handed over; a
+  # client socket's turn never is (`takeover_reaches_client?/1`). Every
+  # decision logs one `websocket owner exit fence` line (findings#329 row J).
   defp do_submit_remote_owner_request(
          owner_pid,
          codex_session_id,
          downstream,
-         request,
+         {request, tracked_request},
          submission_notification?,
-         visibility,
+         progress,
          opts
        ) do
     with :ok <- refuse_abandoned_submission(opts) do
       WebsocketOwnerSession.submit_request(
         owner_pid,
         downstream,
-        request,
+        tracked_request,
         submission_notification?
       )
     end
   catch
     :exit, reason ->
-      if bound_reset_probe?(request) or Process.alive?(owner_pid) or
-           :atomics.get(visibility, 1) == 1 or
-           not recoverable_owner_exit?(reason) do
-        {:error, :owner_crashed}
-      else
-        with {:ok, {replacement_pid, replacement_downstream, replacement_session}} <-
-               recover_remote_owner(
-                 codex_session_id,
-                 downstream,
-                 opts,
-                 :replace_unavailable_lease
-               ),
-             :ok <- notify_recovered_runtime(replacement_session, replacement_downstream),
-             :ok <- refuse_abandoned_submission(opts) do
-          WebsocketOwnerSession.submit_request(
-            replacement_pid,
-            replacement_downstream,
-            request,
-            submission_notification?
-          )
-        end
+      fence = %{request: request, codex_session_id: codex_session_id, owner_exit: owner_exit_class(reason)}
+
+      case owner_exit_decision(request, owner_pid, reason, progress, submission_notification?) do
+        :takeover ->
+          take_over_turn(fence, downstream, submission_notification?, opts)
+
+        {:settled, why} ->
+          :ok = log_owner_exit_fence(fence, :settled, why)
+          {:error, :owner_crashed}
       end
   end
+
+  # The checks run in this order, so the claim is taken only from a turn whose
+  # owner died of a recoverable exit and that is no bound reset probe.
+  defp owner_exit_decision(request, owner_pid, reason, progress, submission_notification?) do
+    cond do
+      bound_reset_probe?(request) -> {:settled, :reset_probe}
+      # Defensive: a local owner's submit call exits only once that owner is gone.
+      Process.alive?(owner_pid) -> {:settled, :owner_alive}
+      not recoverable_owner_exit?(reason) -> {:settled, :exit_not_recoverable}
+      not claim_unsent_request(progress) -> {:settled, :payload_started}
+      not takeover_reaches_client?(submission_notification?) -> {:settled, :socket_turn}
+      true -> :takeover
+    end
+  end
+
+  defp take_over_turn(%{request: request, codex_session_id: codex_session_id} = fence, downstream, submission_notification?, opts) do
+    with {:ok, {replacement_pid, replacement_downstream, replacement_session}} <-
+           recover_remote_owner(
+             codex_session_id,
+             downstream,
+             opts,
+             :replace_unavailable_lease
+           ),
+         :ok <- notify_recovered_runtime(replacement_session, replacement_downstream),
+         :ok <- refuse_abandoned_submission(opts) do
+      :ok = log_owner_exit_fence(fence, :takeover, :payload_unsent)
+
+      WebsocketOwnerSession.submit_request(
+        replacement_pid,
+        replacement_downstream,
+        request,
+        submission_notification?
+      )
+    else
+      {:error, refusal} = refused ->
+        :ok = log_owner_exit_fence(fence, :settled, :takeover_refused, fence_refusal(refusal))
+        refused
+    end
+  end
+
+  defp log_owner_exit_fence(%{request: request, codex_session_id: codex_session_id, owner_exit: owner_exit}, decision, reason, refusal \\ nil) do
+    OwnerLogger.owner_exit_fence(decision, reason, owner_exit,
+      refusal: refusal,
+      codex_session_id: codex_session_id,
+      request_id: request.request_id,
+      attempt_id: request.attempt_id
+    )
+  end
+
+  # A refused takeover's reason, from the owner error vocabulary, read at run
+  # time; anything outside it is `other`.
+  defp fence_refusal(refusal) when is_atom(refusal) do
+    if refusal in OwnerErrorVocabulary.owner_errors(), do: refusal, else: :other
+  end
+
+  defp fence_refusal(_refusal), do: :other
+
+  # How the owner went, as its submit call's exit carries it: a fixed class,
+  # never the exit term itself.
+  defp owner_exit_class({reason, {GenServer, :call, _details}}), do: owner_exit_class(reason)
+  defp owner_exit_class(reason) when reason in [:killed, :noproc, :normal, :shutdown, :owner_crashed], do: reason
+  defp owner_exit_class({:shutdown, _details}), do: :shutdown
+  defp owner_exit_class({_error, [_frame | _frames]}), do: :exception
+  defp owner_exit_class(_reason), do: :other
 
   defp submit_collect_owner_request(owner_pid, downstream, request, submission_notification?) do
     WebsocketOwnerSession.submit_request(
@@ -1593,6 +1745,17 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
     :exit, _reason -> {:error, :owner_crashed}
   end
 
+  # Only a client socket's response task asks for the owner's submission
+  # notification (`Service.execute_prepared_websocket_response_for_socket/4`),
+  # and a socket closes `1011` on its owner's crash
+  # (`DownstreamSession.handle_monitor_down/3`, findings#276), long before a
+  # replacement owner can answer: the takeover of a socket's turn reached
+  # nobody, and the client's resend on a new socket sent the turn to the
+  # provider a second time (findings#328). Such a turn settles `owner_crashed`
+  # and the resend is its one send. The HTTP bridge's relay takes the
+  # replacement's frames, so its turn is still handed over.
+  defp takeover_reaches_client?(submission_notification?), do: not submission_notification?
+
   defp recoverable_owner_exit?({reason, {GenServer, :call, _details}}),
     do: recoverable_owner_exit?(reason)
 
@@ -1600,23 +1763,45 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   defp recoverable_owner_exit?({:shutdown, _details}), do: false
   defp recoverable_owner_exit?(_reason), do: true
 
-  defp track_request_visibility(%UpstreamWebsocketSession.Request{} = request) do
-    visibility = :atomics.new(1, [])
-    observer = request.frame_observer
+  # Both observers run in the owner's upstream session process, on the owner's
+  # node, where this submission runs too: the frame observer for every frame
+  # the provider sends, the payload write observer once, before the payload can
+  # leave. One compare-and-swap decides between the write and a resubmission
+  # (`claim_unsent_request/1`): a write that finds the turn claimed is refused.
+  defp track_request_progress(%UpstreamWebsocketSession.Request{} = request) do
+    progress = :atomics.new(1, [])
+    frame_observer = request.frame_observer
+    payload_write_observer = request.payload_write_observer
 
-    tracked_observer = fn frame, decoded ->
-      unless StreamProtocol.internal_control_event?(decoded),
-        do: :atomics.put(visibility, 1, 1)
+    tracked_frame_observer = fn frame, decoded ->
+      unless StreamProtocol.internal_control_event?(decoded), do: mark_started(progress)
 
       cond do
-        is_function(observer, 2) -> observer.(frame, decoded)
-        is_function(observer, 1) -> observer.(frame)
+        is_function(frame_observer, 2) -> frame_observer.(frame, decoded)
+        is_function(frame_observer, 1) -> frame_observer.(frame)
         true -> :ok
       end
     end
 
-    {%{request | frame_observer: tracked_observer}, visibility}
+    tracked_payload_write_observer = fn ->
+      case :atomics.compare_exchange(progress, 1, @unsent, @started) do
+        @claimed -> :refused
+        _unsent_or_started -> observe_payload_write(payload_write_observer)
+      end
+    end
+
+    {%{request | frame_observer: tracked_frame_observer, payload_write_observer: tracked_payload_write_observer}, progress}
   end
+
+  defp mark_started(progress) do
+    _previous = :atomics.compare_exchange(progress, 1, @unsent, @started)
+    :ok
+  end
+
+  defp observe_payload_write(observer) when is_function(observer, 0), do: observer.()
+  defp observe_payload_write(_no_observer), do: :ok
+
+  defp claim_unsent_request(progress), do: :atomics.compare_exchange(progress, 1, @unsent, @claimed) == :ok
 
   defp bound_reset_probe?(%UpstreamWebsocketSession.Request{
          reset_probe: %ResetProbe{} = probe
@@ -2159,8 +2344,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
 
   defp normalize_returned_remote_failure({:error, reason}, module, function, args) do
     cond do
-      missing_remote_submit_v8?(reason, module, function, args) ->
-        log_protocol_incompatibility(:v8)
+      missing_remote_submit_v8?(reason, module, function, args) or missing_remote_submit_v9?(reason, module, function, args) ->
+        log_protocol_incompatibility(if(missing_remote_submit_v9?(reason, module, function, args), do: :v9, else: :v8))
         {:error, :owner_unavailable}
 
       unsupported = unsupported_remote_cancel(reason, module, function, args) ->
@@ -2229,6 +2414,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
           | :remote_abandon_v1_unsupported
           | :remote_take_over_v1_unsupported
           | :remote_interrupt_v1_unsupported
+          | :remote_steer_v1_unsupported
   def normalize_remote_failure(kind, reason, module, function, args) do
     case normalize_protocol_failure(kind, reason, module, function, args) do
       nil -> normalize_remote_transport_failure(reason)
@@ -2238,8 +2424,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
 
   defp normalize_protocol_failure(:error, reason, module, function, args) do
     cond do
-      missing_remote_submit_v8?(reason, module, function, args) ->
-        log_protocol_incompatibility(:v8)
+      missing_remote_submit_v8?(reason, module, function, args) or missing_remote_submit_v9?(reason, module, function, args) ->
+        log_protocol_incompatibility(if(missing_remote_submit_v9?(reason, module, function, args), do: :v9, else: :v8))
         :owner_unavailable
 
       unsupported = unsupported_remote_cancel(reason, module, function, args) ->
@@ -2257,8 +2443,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
   defp normalize_protocol_failure(kind, reason, module, function, args)
        when kind in [:exit, :throw] do
     cond do
-      missing_remote_submit_v8?(reason, module, function, args) ->
-        log_protocol_incompatibility(:v8)
+      missing_remote_submit_v8?(reason, module, function, args) or missing_remote_submit_v9?(reason, module, function, args) ->
+        log_protocol_incompatibility(if(missing_remote_submit_v9?(reason, module, function, args), do: :v9, else: :v8))
         :owner_unavailable
 
       missing_remote_reconnect_control_v1?(reason, module, function, args) ->
@@ -2323,6 +2509,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
 
   defp missing_remote_submit_v8?(_reason, _module, _function, _args), do: false
 
+  defp missing_remote_submit_v9?({:exception, :undef, [{module, :remote_submit_request_v9, remote_args, _location} | _stack]}, module, :remote_submit_request_v9, args), do: remote_args == args and length(remote_args) == 3
+  defp missing_remote_submit_v9?(_reason, _module, _function, _args), do: false
+
   # An owner node that predates a versioned cancel entrypoint answers `undef`;
   # its caller then falls back to the legacy detach.
   defp unsupported_remote_cancel(reason, module, function, args) do
@@ -2331,6 +2520,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
       missing_remote_abandon_v1?(reason, module, function, args) -> :remote_abandon_v1_unsupported
       missing_remote_take_over_v1?(reason, module, function, args) -> :remote_take_over_v1_unsupported
       missing_remote_interrupt_v1?(reason, module, function, args) -> :remote_interrupt_v1_unsupported
+      missing_remote_steer_v1?(reason, module, function, args) -> :remote_steer_v1_unsupported
       true -> nil
     end
   end
@@ -2375,6 +2565,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
 
   defp missing_remote_interrupt_v1?(_reason, _module, _function, _args), do: false
 
+  defp missing_remote_steer_v1?({:exception, :undef, [{module, :remote_steer_turn_v1, remote_args, _location} | _stack]}, module, :remote_steer_turn_v1, args), do: remote_args == args and length(remote_args) == 3
+  defp missing_remote_steer_v1?(_reason, _module, _function, _args), do: false
+
   defp missing_remote_reconnect_control_v1?(
          {:exception, :undef, [{module, :remote_reconnect_control_v1, remote_args, _location} | _stack]},
          module,
@@ -2403,12 +2596,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder do
     )
   end
 
-  defp log_protocol_incompatibility(:v8) do
+  defp log_protocol_incompatibility(version) when version in [:v8, :v9] do
     require Logger
 
     Logger.warning(
       "websocket owner protocol incompatible event=owner_protocol_incompatible " <>
-        "boundary=submit protocol=v8 " <>
+        "boundary=submit protocol=#{version} " <>
         "canonical_error=owner_unavailable"
     )
   end

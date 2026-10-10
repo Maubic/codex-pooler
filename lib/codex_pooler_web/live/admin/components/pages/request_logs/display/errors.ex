@@ -19,7 +19,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay.Errors do
         cond do
           quota_exhaustion_error?(error) -> "quota exhausted"
           quota_evidence_unavailable?(error) -> "quota evidence unavailable"
-          true -> format_single_error(error)
+          true -> retained_refusal_label(error, datetime_preferences) || format_single_error(error)
         end
       end)
 
@@ -109,6 +109,26 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay.Errors do
   end
 
   defp format_reset_at(reset_at, _datetime_preferences), do: to_string(reset_at)
+
+  defp retained_refusal_label(error, preferences) do
+    with code when code in ["usage_limit_reached", "usage_limit_exceeded"] <- error_field(error, :retained_refusal_code),
+         {:ok, observed} <- diagnostic_datetime(error_field(error, :retained_refusal_observed_at)),
+         {:ok, reset} <- diagnostic_datetime(error_field(error, :retained_refusal_reset_at)),
+         :lt <- DateTime.compare(observed, reset) do
+      "feature refusal retained (#{code}); observed #{format_reset_at(observed, preferences)}; resets #{format_reset_at(reset, preferences)}"
+    else
+      _invalid -> nil
+    end
+  end
+
+  defp diagnostic_datetime(value) when is_binary(value) and byte_size(value) <= 32 do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, 0} -> {:ok, datetime}
+      _invalid -> :error
+    end
+  end
+
+  defp diagnostic_datetime(_value), do: :error
 
   defp format_single_error(%{code: code}) when is_binary(code) and code != "",
     do: code

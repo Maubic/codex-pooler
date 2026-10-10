@@ -201,6 +201,47 @@ defmodule CodexPooler.Catalog.SyncBoundaryTest do
     assert Repo.aggregate(from(m in Model, where: m.pool_id == ^pool.id), :count) == 1
   end
 
+  for kind <- [:error, :throw, :exit] do
+    test "catchable discovery #{kind} finalizes its own claim and preserves the original failure" do
+      assert_catchable_failure(unquote(kind))
+    end
+  end
+
+  defp assert_catchable_failure(kind) do
+    pool = pool_fixture()
+    provider = upstream(%{"models" => [%{"id" => "sample-recovered"}]})
+    source = source(pool, FakeUpstream.url(provider))
+    private_reason = String.duplicate("synthetic-private-detail", 500)
+
+    caught =
+      try do
+        Sync.sync_pool_catalog(pool,
+          fetcher: fn _ ->
+            case kind do
+              :error -> raise ArgumentError, private_reason
+              :throw -> throw(private_reason)
+              :exit -> exit(private_reason)
+            end
+          end
+        )
+      catch
+        caught_kind, reason -> {caught_kind, reason, __STACKTRACE__}
+      end
+
+    assert {^kind, reason, [{__MODULE__, _, _, _} | _]} = caught
+    original_preserved? = if kind == :error, do: match?(%ArgumentError{message: ^private_reason}, reason), else: reason == private_reason
+    assert original_preserved?
+    assert [run] = Repo.all(from r in SyncRun, where: r.pool_id == ^pool.id)
+    assert run.status == "failed"
+    assert %DateTime{} = run.finished_at
+    assert run.error_message == "model catalog sync failed unexpectedly"
+    assert Repo.aggregate(from(m in Model, where: m.pool_id == ^pool.id), :count) == 0
+    assert is_nil(Repo.reload!(source.assignment).last_successful_sync_at)
+    assert {:ok, %{models: [model]}} = Sync.sync_pool_catalog(pool)
+    assert model.exposed_model_id == "sample-recovered"
+    assert length(FakeUpstream.requests(provider)) == 1
+  end
+
   defp source(pool, url) do
     source = upstream_assignment_fixture(pool, %{assignment_metadata: %{"base_url" => url}})
 

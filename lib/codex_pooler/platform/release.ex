@@ -8,12 +8,63 @@ defmodule CodexPooler.Release do
       bin/codex_pooler eval "CodexPooler.Release.migrate()"
   """
 
+  alias CodexPooler.Accounts.LegacyTOTPRecovery
   alias CodexPooler.Catalog
   alias CodexPooler.Gateway.Transports.Websocket.RolloutDrain
   alias CodexPooler.Platform.Readiness
   alias CodexPooler.Telemetry.RelayRuntime
 
   @app :codex_pooler
+
+  @doc "Re-encrypts legacy fallback TOTP rows offline using the configured private destination key."
+  @spec reencrypt_legacy_totp() :: :ok
+  def reencrypt_legacy_totp do
+    if Enum.any?(Application.started_applications(), fn {app, _description, _version} -> app == @app end) do
+      raise "totp_maintenance failed reason=serving_application_started"
+    end
+
+    totp_maintenance(:reencrypt)
+  end
+
+  @doc "Authenticates all stored TOTP ciphertext with the configured private key without changing rows."
+  @spec verify_totp_encryption() :: :ok
+  def verify_totp_encryption do
+    totp_maintenance(:verify)
+  end
+
+  defp totp_maintenance(operation) do
+    case totp_maintenance_result(operation) do
+      {:ok, %{rows: rows}} -> IO.puts("totp_maintenance operation=#{operation} rows=#{rows} result=ok")
+      {:error, code} -> raise "totp_maintenance failed reason=#{code}"
+    end
+  end
+
+  defp totp_maintenance_result(operation) do
+    load_app()
+    config = Application.get_env(@app, CodexPooler.Accounts, [])
+
+    with_task_repo_config(CodexPooler.Repo, :totp_maintenance, fn ->
+      outcome =
+        Ecto.Migrator.with_repo(CodexPooler.Repo, fn _repo -> run_totp_operation(operation, config) end)
+
+      case outcome do
+        {:ok, result, _apps} -> result
+        {:error, _reason} -> {:error, :database_failed}
+      end
+    end)
+  rescue
+    # Release eval prints raised exception payloads. Never forward configuration,
+    # crypto arguments or database exception details from this secret-bearing task.
+    _error -> {:error, :maintenance_failed}
+  catch
+    _kind, _reason -> {:error, :maintenance_failed}
+  end
+
+  defp run_totp_operation(:reencrypt, config) do
+    LegacyTOTPRecovery.reencrypt(Keyword.get(config, :totp_encryption_key), Keyword.get(config, :totp_key_version), System.get_env("CODEX_POOLER_TOTP_OFFLINE_ACK"))
+  end
+
+  defp run_totp_operation(:verify, config), do: LegacyTOTPRecovery.verify(Keyword.get(config, :totp_encryption_key))
 
   @doc "Quiesces relay claims before readiness withdrawal within the existing drain budget."
   @spec prepare_shutdown(keyword()) :: map()
@@ -42,6 +93,8 @@ defmodule CodexPooler.Release do
             "drain marker path must name the marker file (default source: CODEX_POOLER_DRAIN_MARKER_PATH)"
     end
 
+    preflight_marker!(marker)
+
     :ok =
       RelayRuntime.quiesce(
         Keyword.get(opts, :relay, RelayRuntime),
@@ -59,6 +112,35 @@ defmodule CodexPooler.Release do
       )
 
     drain.(remaining)
+  end
+
+  defp preflight_marker!(marker) do
+    case File.stat(marker, time: :posix) do
+      {:ok, stat} ->
+        # Check timestamp permission without changing the observed mtime or
+        # creating a marker if it disappears. Owners can touch read-only files.
+        unchanged_time = %{stat | atime: :undefined, ctime: :undefined, mode: :undefined, uid: :undefined, gid: :undefined}
+        File.write_stat!(marker, unchanged_time, time: :posix)
+
+      {:error, :enoent} ->
+        preflight_marker_directory!(marker)
+
+      {:error, reason} ->
+        raise File.Error, reason: reason, action: "stat", path: marker
+    end
+  end
+
+  defp preflight_marker_directory!(marker) do
+    # Probe the same filesystem without publishing the readiness marker. The
+    # directory may still change later; never quiesce after a failed preflight.
+    probe = Path.join(Path.dirname(marker), ".codex-pooler-drain-check-#{Ecto.UUID.generate()}")
+    file = File.open!(probe, [:write, :exclusive])
+
+    try do
+      :ok = File.close(file)
+    after
+      File.rm!(probe)
+    end
   end
 
   @doc """
@@ -90,7 +172,8 @@ defmodule CodexPooler.Release do
   @task_application_names %{
     migrate: "codex_pooler_migrate",
     rollback: "codex_pooler_migrate",
-    import_openai_pricing: "codex_pooler_pricing_import"
+    import_openai_pricing: "codex_pooler_pricing_import",
+    totp_maintenance: "codex_pooler_totp_maintenance"
   }
 
   def migrate do
@@ -125,7 +208,7 @@ defmodule CodexPooler.Release do
   end
 
   @doc false
-  @spec repo_config_for_task(keyword(), :migrate | :rollback | :import_openai_pricing) ::
+  @spec repo_config_for_task(keyword(), :migrate | :rollback | :import_openai_pricing | :totp_maintenance) ::
           keyword()
   def repo_config_for_task(repo_config, task) when is_list(repo_config) do
     parameters =

@@ -42,7 +42,7 @@ defmodule CodexPooler.Gateway.Routing.RouteLifecycle do
            selection.assignment,
            selection.route_class,
            demotion_reason,
-           selection.circuit_admission || :none
+           completion_admission(selection)
          ) do
       {:ok, _state} -> {:ok, demotion_reason}
       {:error, reason} -> lifecycle_failure(:record_route_circuit_failure, reason)
@@ -81,7 +81,7 @@ defmodule CodexPooler.Gateway.Routing.RouteLifecycle do
            model,
            selection.assignment,
            selection.route_class,
-           selection.circuit_admission || :none
+           completion_admission(selection)
          ) do
       {:ok, _state} -> :ok
       {:error, reason} -> lifecycle_failure(:record_route_circuit_neutral_completion, reason)
@@ -107,7 +107,7 @@ defmodule CodexPooler.Gateway.Routing.RouteLifecycle do
            model,
            selection.assignment,
            selection.route_class,
-           selection.circuit_admission || :none
+           completion_admission(selection)
          ) do
       {:ok, _state} -> :ok
       {:error, reason} -> lifecycle_failure(:record_route_circuit_success, reason)
@@ -117,6 +117,11 @@ defmodule CodexPooler.Gateway.Routing.RouteLifecycle do
   defp lifecycle_failure(operation, reason) do
     FailureResponse.accounting_failure(operation, nil, nil, reason)
   end
+
+  defp completion_admission(%RoutingSelection{circuit_admission: :probe, circuit_state: state}),
+    do: CircuitState.completion_admission(state)
+
+  defp completion_admission(selection), do: selection.circuit_admission || :none
 
   defp route_lifecycle_failure_code(%{code: code}) when is_binary(code), do: code
   defp route_lifecycle_failure_code(%{code: code}) when is_atom(code), do: Atom.to_string(code)

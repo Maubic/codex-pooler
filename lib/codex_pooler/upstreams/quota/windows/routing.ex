@@ -570,6 +570,34 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
     }
   end
 
+  defp diagnostic_window_exclusion(window, windows, timestamp) do
+    exclusion = window_exclusion(window, timestamp)
+
+    if retained_feature_refusal?(window, windows, timestamp) do
+      Map.merge(exclusion, %{
+        message: "a provider usage-limit refusal is retained until this feature window resets",
+        retained_refusal_code: window.metadata["rate_limit_error_code"],
+        retained_refusal_observed_at: DateTime.to_iso8601(window.observed_at),
+        retained_refusal_reset_at: DateTime.to_iso8601(window.reset_at)
+      })
+    else
+      exclusion
+    end
+  end
+
+  defp retained_feature_refusal?(%Quota.AccountQuotaWindow{quota_scope: "feature", observed_at: %DateTime{}, reset_at: %DateTime{}, metadata: %{"rate_limit_error_code" => code}} = window, windows, timestamp)
+       when code in ["usage_limit_reached", "usage_limit_exceeded"] do
+    group = Enum.filter(windows, &(quota_group_key(&1) == quota_group_key(window)))
+
+    window.source in ["codex_response_headers", "codex_rate_limit_event", "codex_rate_limit_error"] and
+      DateTime.compare(window.observed_at, timestamp) != :gt and
+      Evidence.current_freshness_state(window, timestamp) == "stale" and
+      not Evidence.expired?(window, timestamp) and
+      Enum.all?(group, &(&1.source != "codex_usage_api" and not fresh_window?(&1, timestamp)))
+  end
+
+  defp retained_feature_refusal?(_window, _windows, _timestamp), do: false
+
   @spec window_reason_codes(Quota.AccountQuotaWindow.t(), DateTime.t()) :: [String.t()]
   def window_reason_codes(%Quota.AccountQuotaWindow{} = window, timestamp \\ now()) do
     []
@@ -667,7 +695,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
       exclusions:
         Enum.map(
           applicable_unusable_windows(selection, timestamp),
-          &window_exclusion(&1, timestamp)
+          &diagnostic_window_exclusion(&1, selection.windows, timestamp)
         )
     }
   end
@@ -862,7 +890,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
     quota_primary_missing_exclusion()
   end
 
-  defp quota_routing_exclusions(%{blocked_windows: blocked_windows}, timestamp, false)
+  defp quota_routing_exclusions(%{blocked_windows: blocked_windows, windows: all_windows}, timestamp, false)
        when is_list(blocked_windows) do
     case blocked_windows do
       [] ->
@@ -874,7 +902,7 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
         ]
 
       windows ->
-        Enum.map(windows, &window_exclusion(&1, timestamp))
+        Enum.map(windows, &diagnostic_window_exclusion(&1, all_windows, timestamp))
     end
   end
 

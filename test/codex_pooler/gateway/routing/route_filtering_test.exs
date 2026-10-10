@@ -1044,11 +1044,14 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
         {result, _log} = with_info_log(fn -> RouteFiltering.filter_candidates(input) end)
         assert consume_count(upstream) == 1
 
+        # The reset is pending and no guarded probe was claimed, so the account
+        # cannot send until its quota confirms the reset: the threshold arm is
+        # refused on quota reread after the redemption, never re-admitted on the
+        # reading from before it (findings#331).
         if unquote(mode) == "blocked" do
           assert {:error, %{status: 503, code: "quota_exhausted", non_credit_recovery_outcome: "pending"}} = result
         else
-          assert {:ok, [{assignment, _identity}], _options} = result
-          assert assignment.id == target.assignment.id
+          assert {:error, %{status: 503, code: "quota_evidence_unavailable", non_credit_recovery_outcome: "pending", candidate_exclusions: [%{reasons: [%{"reason_codes" => ["saved_reset_probe_pending"]}]}]}} = result
         end
 
         refute get_in(Repo.reload!(target.identity).metadata, ["saved_reset_redemption", "probe"])

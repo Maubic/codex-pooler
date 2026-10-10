@@ -21,15 +21,17 @@ defmodule CodexPooler.Gateway.Transports.Websocket.ActivityDrain do
   def drain(%{token: token, pid: pid}, deadline_ms, policy, registry) do
     monitor = Process.monitor(pid)
 
-    outcome =
+    try do
       case ActivityRegistry.status(token, name: registry) do
         {:finished, outcome} -> outcome
         {:active, _status} -> await(token, monitor, deadline_ms, policy, registry)
         :unknown -> :failed
       end
-
-    Process.demonitor(monitor, [:flush])
-    outcome
+    catch
+      :exit, _reason -> :failed
+    after
+      Process.demonitor(monitor, [:flush])
+    end
   end
 
   defp await(token, monitor, deadline_ms, policy, registry) do

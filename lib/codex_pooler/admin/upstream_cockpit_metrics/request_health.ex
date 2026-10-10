@@ -110,24 +110,32 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
   end
 
   # Grouped by error code as well, a bounded vocabulary, so each row is
-  # classified by `RequestOutcome.client_cancelled?/2`.
+  # classified by `RequestOutcome.client_cancelled?/1`.
   defp daily_counts(base_query) do
+    cancelled = RequestOutcome.client_cancelled_condition()
+
     base_query
-    |> group_by([request], [fragment("DATE(?)", request.admitted_at), request.status, request.last_error_code])
+    |> group_by([request], [fragment("DATE(? AT TIME ZONE 'UTC')", request.admitted_at), request.status, request.last_error_code])
+    |> group_by(^cancelled)
     |> select([request], %{
-      date: type(fragment("DATE(?)", request.admitted_at), :date),
+      date: type(fragment("DATE(? AT TIME ZONE 'UTC')", request.admitted_at), :date),
       status: request.status,
       last_error_code: request.last_error_code,
       count: count(request.id)
     })
+    |> select_merge(^%{client_cancelled?: cancelled})
     |> Repo.all()
   end
 
   defp recent_status_counts(base_query, start_24h) do
+    cancelled = RequestOutcome.client_cancelled_condition()
+
     base_query
     |> where([request], request.admitted_at >= ^start_24h)
     |> group_by([request], [request.status, request.last_error_code])
+    |> group_by(^cancelled)
     |> select([request], %{status: request.status, last_error_code: request.last_error_code, count: count(request.id)})
+    |> select_merge(^%{client_cancelled?: cancelled})
     |> Repo.all()
   end
 
@@ -388,6 +396,8 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
   end
 
   defp event_walk(attempts, limit) do
+    cancelled = RequestOutcome.client_cancelled_condition()
+
     from(attempt in attempts,
       join: request in Request,
       as: :request,
@@ -403,6 +413,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.RequestHealth do
         last_error_code: request.last_error_code
       }
     )
+    |> select_merge(^%{client_cancelled?: cancelled})
   end
 
   # Both walks keep a request that failed or has a second attempt. A client

@@ -58,6 +58,58 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocket.FinalRefusalResendTest do
     assert :ok = FakeUpstream.verify!(upstream)
   end
 
+  # The provider's websocket words a validation refusal without a code (findings#336); the first answer relays the code
+  # and the supported values its text reads as, and the resend is answered with that same error, never a dispatch.
+  @tag :websocket_direct
+  test "the resend of a turn refused with a validation wording gets the same code and supported values, never a dispatch" do
+    CodexPooler.TestAppEnv.restore_on_exit(:websocket_owner_forwarding_enabled, false)
+    Application.put_env(:codex_pooler, :websocket_owner_forwarding_enabled, false)
+
+    # provenance: observed findings#336 direct websocket probe (2026-10-07, gpt-6-luna, a `reasoning.effort` the enum does not hold)
+    refusal =
+      CodexPooler.JSON.encode!(%{
+        "type" => "error",
+        "status" => 400,
+        "error" => %{
+          "code" => nil,
+          "message" => "Invalid response.create payload: Invalid value: 'zz_probe_effort'. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'.",
+          "param" => nil,
+          "type" => "invalid_request_error"
+        }
+      })
+
+    upstream = start_upstream(FakeUpstream.strict_sequence([strict_native_request(1, FakeUpstream.websocket_text_frames([refusal]))]))
+
+    setup = gateway_setup(upstream)
+    _revision = set_model_serving_mode!(model_serving_scope(), setup, "lite")
+    turn_state = Ecto.UUID.generate()
+    raw_payload = CodexPooler.JSON.encode!(native_turn_payload(Ecto.UUID.generate(), setup.model.exposed_model_id))
+    port = start_public_endpoint!()
+
+    original = send_and_receive_terminal!(port, setup, turn_state, raw_payload)
+
+    assert original == %{
+             "type" => "error",
+             "status" => 400,
+             "error" => %{
+               "type" => "invalid_request_error",
+               "code" => "invalid_value",
+               "param" => nil,
+               "message" => "upstream rejected the request (invalid_value); supported values: none, minimal, low, medium, high, xhigh, max"
+             }
+           }
+
+    assert [%Request{id: request_id}] = pool_requests(setup.pool.id)
+    await_settled!(request_id, System.monotonic_time(:millisecond) + @timeout_ms)
+
+    resend = send_and_receive_terminal!(port, setup, turn_state, raw_payload)
+
+    assert resend == original
+    assert [%Request{id: ^request_id, status: "failed"}] = pool_requests(setup.pool.id)
+    assert FakeUpstream.count(upstream) == 1
+    assert :ok = FakeUpstream.verify!(upstream)
+  end
+
   # The same turn resent over HTTPS, the released client's fallback after its
   # websocket retries fail (findings#254 row 254-130): the opening request
   # carries the websocket request's witness (row 232-231), so it finds the

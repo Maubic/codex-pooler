@@ -55,9 +55,11 @@ defmodule CodexPooler.MCP do
   @spec get_operator_token(User.t(), Ecto.UUID.t()) ::
           {:ok, OperatorMCPKey.t()} | {:error, mcp_error()}
   def get_operator_token(%User{id: operator_id}, key_id) when is_binary(key_id) do
-    case Repo.get_by(OperatorMCPKey, id: key_id, operator_id: operator_id) do
-      %OperatorMCPKey{} = key -> {:ok, key}
-      nil -> {:error, error(:mcp_token_missing, "MCP token was not found")}
+    with {:ok, key_id} <- Ecto.UUID.cast(key_id),
+         %OperatorMCPKey{} = key <- Repo.get_by(OperatorMCPKey, id: key_id, operator_id: operator_id) do
+      {:ok, key}
+    else
+      _ -> {:error, error(:mcp_token_missing, "MCP token was not found")}
     end
   end
 

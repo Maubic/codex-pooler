@@ -928,6 +928,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "All HTTP requests observed by Phoenix endpoint instrumentation, including /healthz and /readyz probes, /metrics scrapes when enabled, and unmatched endpoint traffic. Successful and failed HTTP responses contribute; this is not a count of successful gateway turns.",
       "fieldConfig": {
         "defaults": {
           "unit": "reqps",
@@ -979,6 +980,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "p95 duration of all HTTP requests observed by Phoenix endpoint instrumentation, including /healthz and /readyz probes, /metrics scrapes when enabled, and unmatched endpoint traffic. Probes and scrapes can dominate a low-traffic pod's sample population; this is not gateway-only latency. Histogram quantiles are interpolated estimates with a 300 s top finite bucket; a quantile in +Inf is reported as 300 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1030,7 +1032,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Top active routes by p95 latency. The active-route filter avoids stale NaN/empty legend rows when a route has no observations in the current interval.",
+      "description": "Top matched routes with router-dispatch stop observations by p95 latency, including /healthz and /readyz probes and /metrics scrapes when enabled. These route series exclude unmatched endpoint requests and differ from endpoint totals. The active-route filter avoids stale NaN/empty legend rows when a route has no observations in the current interval. Histogram quantiles are interpolated estimates with a 300 s top finite bucket; a quantile in +Inf is reported as 300 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1082,6 +1084,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Oversized incomplete-buffer events and retained-body first crossing events. A retained body emits once when an append first exceeds 65,536 bytes, including an exact-limit body followed by overflow; later growth does not emit again.",
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -1119,7 +1122,7 @@
         {
           "expr": "sum by (buffer, transport, route_class, endpoint) (rate(codex_pooler_gateway_stream_buffer_truncated_count{namespace=\"$namespace\", pod=~\"${pod:regex}\"}[$__rate_interval]))",
           "refId": "",
-          "legendFormat": "truncated {{transport}} {{route_class}} {{endpoint}}",
+          "legendFormat": "first crossing {{transport}} {{route_class}} {{endpoint}}",
           "range": true,
           "instant": false,
           "editorMode": "code"
@@ -1141,7 +1144,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "p95 observed oversized and truncated stream-buffer payload size. Oversized observations saturate at 128 MiB for histogram export, so a value at that ceiling means 128 MiB or larger. The saturation changes telemetry only, not stream-buffer handling or the raw telemetry event.",
+      "description": "Interpolated p95 of two distinct observations: retained bytes including the append at the first crossing of 65,536 bytes, once per body, and oversized incomplete-buffer bytes. First-crossing size depends on chunking; it is not total stream size, peak memory or current suffix size. Truncated observations remain raw, with a 2 MiB top finite bucket; a quantile in +Inf reports 2 MiB even when crossings are larger. Oversized histogram measurements saturate at 128 MiB; the raw oversized telemetry event is unchanged. Neither percentile is an upper bound on actual sizes.",
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
@@ -1179,7 +1182,7 @@
         {
           "expr": "histogram_quantile(0.95, sum by (le, buffer, transport, route_class, endpoint) (rate(codex_pooler_gateway_stream_buffer_truncated_bytes_bucket{namespace=\"$namespace\", pod=~\"${pod:regex}\"}[$__rate_interval])))",
           "refId": "",
-          "legendFormat": "truncated p95 {{transport}} {{route_class}} {{endpoint}}",
+          "legendFormat": "first crossing p95 {{transport}} {{route_class}} {{endpoint}}",
           "range": true,
           "instant": false,
           "editorMode": "code"
@@ -1337,7 +1340,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Time requests spent waiting in local admission queues before execution or timeout.",
+      "description": "Time requests spent waiting in local admission queues before execution or timeout. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1470,6 +1473,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -1521,6 +1525,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Repository queries divided by all HTTP requests observed by Phoenix endpoint instrumentation. The denominator includes /healthz and /readyz probes, /metrics scrapes when enabled, and unmatched endpoint traffic, so this is not queries per gateway turn. Probes and scrapes can also issue repository queries. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -1572,7 +1577,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Top Ecto query sources by safe source and SQL command. Source falls back to a sanitized table identifier for raw SQL when available.",
+      "description": "Top Ecto query sources by safe source and SQL command. Source falls back to a sanitized table identifier for raw SQL when available. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -1624,6 +1629,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1675,6 +1681,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1726,6 +1733,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
+      "description": "Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1777,7 +1785,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Source-less queries that could not be mapped to a safe Ecto source or table identifier. Use this to spot unclassified raw SQL or telemetry source-attribution gaps.",
+      "description": "Source-less queries that could not be mapped to a safe Ecto source or table identifier. Use this to spot unclassified raw SQL or telemetry source-attribution gaps. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -1829,7 +1837,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "SQL command mix across repository queries. Useful for spotting unexpected write or transaction churn during incidents.",
+      "description": "SQL command mix across repository queries. Useful for spotting unexpected write or transaction churn during incidents. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries.",
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -1881,7 +1889,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Database connection checkout pressure by safe source and command.",
+      "description": "Database connection checkout pressure by safe source and command. Split-role coverage: OBAN_MODE=web includes only queries on scraped web pods; OBAN_MODE=worker and scheduler run no Prometheus reporter, so their query activity is omitted. OBAN_MODE=all includes co-located job queries. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -2155,7 +2163,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "p95 duration for full admin stats dashboard builds. Pair spikes here with hot query source and DB queue panels to identify expensive stats reload paths.",
+      "description": "p95 duration for full admin stats dashboard builds. Pair spikes here with hot query source and DB queue panels to identify expensive stats reload paths. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -2259,7 +2267,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "p95 admin request-log reload duration by bounded stage and scope. Pair spikes with DB queue, hot safe query source, and pg_stat_statements evidence when validating request-log read-path remediation.",
+      "description": "p95 admin request-log reload duration by bounded stage and scope. Pair spikes with DB queue, hot safe query source, and pg_stat_statements evidence when validating request-log read-path remediation. Histogram quantiles are interpolated estimates with a 60 s top finite bucket; a quantile in +Inf is reported as 60 s even when observations are longer.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -2592,7 +2600,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Client-visible 409 duplicate_turn refusals, by bounded refusing stage and transport class. runtime_replay_preflight is the replay preflight judging a resend against its predecessor's lifecycle; owner_replay_preflight is the owner-forwarded preflight refusing a resend of the turn the session's owner still holds (a new turn refused by a busy owner gets the owner's own refusal and is not counted); websocket_turn_claim and native_http_turn_claim refuse a second reservation of a turn already claimed; native_replay_dispatch, client_retry_claim and compaction_retry_claim refuse a replay or retry whose binding or claim no longer holds. None of them writes a request row for the refused request, so request logs, admin stats and every database-derived error count miss them: this panel is where they are counted. The reason is in the matching replay rejection log line; its vocabulary is open, so it is not a label.",
+      "description": "Client-visible 409 duplicate_turn refusals, by bounded refusing stage and transport class. runtime_replay_preflight is the replay preflight judging a resend against its predecessor's lifecycle; owner_replay_preflight is the owner-forwarded preflight refusing a resend of the turn the session's owner still holds (a new turn refused by a busy owner gets the owner's own refusal and is not counted); websocket_turn_claim and native_http_turn_claim refuse a second reservation of a turn already claimed; native_replay_dispatch, client_retry_claim and compaction_retry_claim refuse a replay or retry whose binding or claim does not hold. None of them writes a request row for the refused request, so request logs, admin stats and every database-derived error count miss them: this panel is where they are counted. The reason is in the matching replay rejection log line; its vocabulary is open, so it is not a label. A guided content-filter retry that dispatch refuses because its account binding does not hold is also answered 409 duplicate_turn, but it is an admitted request: its row records 409 and invalid_content_filter_retry_binding, and this panel does not count it.",
       "fieldConfig": {
         "defaults": {
           "unit": "ops",

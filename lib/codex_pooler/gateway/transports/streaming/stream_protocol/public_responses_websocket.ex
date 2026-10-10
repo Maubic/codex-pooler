@@ -9,6 +9,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponses
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesSequence
+  alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesTerminalOutput
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponsesToolCompletion
   alias CodexPooler.Gateway.Websocket.Adapter
 
@@ -17,6 +18,7 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
           required(:terminal_latched?) => boolean(),
           required(:overflow_latched?) => boolean(),
           required(:tool_completion) => PublicResponsesToolCompletion.state(),
+          optional(:terminal_output) => PublicResponsesTerminalOutput.state(),
           optional(:stream_id) => String.t(),
           optional(:custom_tool_namespaces) => map()
         }
@@ -29,7 +31,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
   @spec new_state(String.t() | nil) :: state()
   def new_state(stream_id \\ nil)
 
-  def new_state(nil), do: Map.put(PublicResponsesSequence.new_state(), :tool_completion, PublicResponsesToolCompletion.new_state())
+  def new_state(nil) do
+    PublicResponsesSequence.new_state()
+    |> Map.put(:tool_completion, PublicResponsesToolCompletion.new_state())
+    |> Map.put(:terminal_output, PublicResponsesTerminalOutput.new_state())
+  end
 
   def new_state(stream_id) when is_binary(stream_id) do
     new_state(nil)
@@ -77,9 +83,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
           type
           |> PublicResponses.normalize_terminal_errors(normalized)
           |> Responses.restore_custom_tool_call_namespaces(Map.get(state, :custom_tool_namespaces, %{}))
+          |> then(&PublicResponsesTerminalOutput.fill(type, &1, terminal_output(state)))
           |> maybe_put_stream_id(stream_id)
 
-        {:push, CodexPooler.JSON.encode!(normalized), state}
+        encoded = CodexPooler.JSON.encode!(normalized)
+        {:push, encoded, record_terminal_output(state, type, normalized, encoded)}
 
       {:drop, _state} ->
         {:drop, previous_state}
@@ -88,6 +96,19 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
         {:error, sequence_exhausted(), state}
     end
   end
+
+  # The items the turn's done events delivered, for a completed or incomplete
+  # terminal the provider sends with an empty output (findings#335). A state
+  # built before the field existed starts empty; a terminal releases them.
+  defp terminal_output(state), do: Map.get(state, :terminal_output) || PublicResponsesTerminalOutput.new_state()
+
+  defp record_terminal_output(state, "response.output_item.done", event, encoded),
+    do: Map.put(state, :terminal_output, PublicResponsesTerminalOutput.observe(terminal_output(state), event, byte_size(encoded)))
+
+  defp record_terminal_output(state, type, _event, _encoded) when type in ["response.completed", "response.incomplete", "response.failed", "error"],
+    do: Map.put(state, :terminal_output, PublicResponsesTerminalOutput.new_state())
+
+  defp record_terminal_output(state, _type, _event, _encoded), do: state
 
   defp pending_source_error?(%{"type" => "error"}, tracker),
     do: match?({:error, _}, PublicResponsesToolCompletion.completion_verdict(tracker))

@@ -68,6 +68,131 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
   alias CodexPooler.Pools.ModelServingOverride
   alias CodexPooler.Repo
 
+  for mode <- ~w(full lite) do
+    @tag :input_entry_shape
+    test "real HTTP Responses refuses non-object input entries before effects in #{mode}" do
+      upstream = start_upstream(issue_241_completed_response("input_entry_shape"))
+      setup = gateway_setup(upstream)
+      put_public_model_serving_mode!(setup, unquote(mode))
+      port = start_public_endpoint!()
+
+      for item <- ["synthetic", nil, 1, [], true], stream <- [false, true] do
+        {headers, body} = curl_json_request!(port, setup.authorization, %{"model" => setup.model.exposed_model_id, "input" => [item], "stream" => stream}, "/v1/responses")
+        assert String.starts_with?(headers, "HTTP/1.1 400")
+        assert %{"error" => %{"type" => "invalid_request_error", "code" => "invalid_request", "param" => "input", "message" => "input item shape is not translatable"}} = CodexPooler.JSON.decode!(body)
+        assert FakeUpstream.count(upstream) == 0
+        assert Repo.aggregate(Request, :count) == 0
+        assert Repo.aggregate(Attempt, :count) == 0
+        assert Repo.aggregate(LedgerEntry, :count) == 0
+      end
+    end
+
+    @tag :input_entry_shape
+    @tag :v1_websocket
+    test "public Responses websocket refuses non-object input entries before effects in #{mode}" do
+      upstream = start_upstream(issue_241_completed_response("input_entry_shape"))
+      setup = gateway_setup(upstream)
+      put_public_model_serving_mode!(setup, unquote(mode))
+      port = start_public_endpoint!()
+
+      for item <- ["synthetic", nil, 1, [], true] do
+        {conn, websocket, ref, _headers} = public_v1_websocket_connect!(port, setup, "input-entry-#{System.unique_integer([:positive])}", [{"openai-beta", "responses_websockets=2026-02-06"}])
+
+        try do
+          payload = CodexPooler.JSON.encode!(%{"type" => "response.create", "model" => setup.model.exposed_model_id, "input" => [item], "stream" => true})
+          {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, payload)
+          {_conn, _websocket, frame} = public_websocket_receive_text!(conn, websocket, ref)
+          assert %{"type" => "error", "status" => 400, "error" => %{"type" => "invalid_request_error", "code" => "invalid_request", "param" => "input", "message" => "input item shape is not translatable"}} = CodexPooler.JSON.decode!(frame)
+          assert FakeUpstream.count(upstream) == 0
+          assert Repo.aggregate(Request, :count) == 0
+          assert Repo.aggregate(Attempt, :count) == 0
+          assert Repo.aggregate(LedgerEntry, :count) == 0
+        after
+          Mint.HTTP.close(conn)
+        end
+      end
+    end
+  end
+
+  for mode <- ~w(full lite), transport <- [:http, :websocket], call_count <- [0, 2] do
+    @tag :assistant_tool_text
+    test "#{transport} Responses preserves assistant text before #{call_count} calls in #{mode}" do
+      terminal = %{"type" => "response.completed", "response" => %{"id" => "resp_assistant_text", "object" => "response", "status" => "completed", "output" => [], "usage" => %{"input_tokens" => 2, "output_tokens" => 1, "total_tokens" => 3}}}
+      upstream_mode = if unquote(transport) == :http, do: FakeUpstream.sse_stream([terminal]), else: FakeUpstream.websocket_text_frames([CodexPooler.JSON.encode!(terminal)])
+      upstream = start_upstream(upstream_mode)
+      setup = gateway_setup(upstream)
+      put_public_model_serving_mode!(setup, unquote(mode))
+      port = start_public_endpoint!()
+      calls = for index <- Enum.take(1..2, unquote(call_count)), do: %{"id" => "call_#{index}", "type" => "function", "function" => %{"name" => "lookup", "arguments" => "{}"}}
+      outputs = Enum.map(calls, &%{"type" => "function_call_output", "call_id" => &1["id"], "output" => "synthetic result"})
+      input = [%{"role" => "user", "content" => "synthetic question"}, %{"role" => "assistant", "content" => "synthetic assistant text", "tool_calls" => calls}] ++ outputs ++ [%{"role" => "user", "content" => "synthetic followup"}]
+      payload = %{"model" => setup.model.exposed_model_id, "input" => input, "tools" => [%{"type" => "function", "name" => "lookup", "parameters" => %{"type" => "object", "properties" => %{}}}]}
+
+      if unquote(transport) == :http do
+        {headers, body} = curl_json_request!(port, setup.authorization, payload, "/v1/responses")
+        assert String.starts_with?(headers, "HTTP/1.1 200")
+        assert CodexPooler.JSON.decode!(body)["status"] == "completed"
+      else
+        {conn, websocket, ref, _headers} = public_v1_websocket_connect!(port, setup, "assistant-text-#{System.unique_integer([:positive])}", [{"openai-beta", "responses_websockets=2026-02-06"}])
+
+        try do
+          {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(Map.merge(payload, %{"type" => "response.create", "stream" => true})))
+          {_conn, _websocket, frame} = receive_public_websocket_until_completed!(conn, websocket, ref)
+          assert CodexPooler.JSON.decode!(frame)["type"] == "response.completed"
+        after
+          Mint.HTTP.close(conn)
+        end
+      end
+
+      assert [captured] = FakeUpstream.requests(upstream)
+      forwarded = Enum.reject(captured.json["input"], &(&1["type"] == "additional_tools"))
+      assert Enum.map(forwarded, & &1["type"]) == ["message", "message"] ++ List.duplicate("function_call", unquote(call_count)) ++ List.duplicate("function_call_output", unquote(call_count)) ++ ["message"]
+      assert Enum.at(forwarded, 1)["content"] == [%{"type" => "output_text", "text" => "synthetic assistant text"}]
+      assert Enum.at(forwarded, 1)["role"] == "assistant"
+      assert Map.has_key?(captured.json, "tools") == (unquote(mode) == "full")
+    end
+  end
+
+  for mode <- ~w(full lite), transport <- [:http, :websocket] do
+    @tag :tool_content_presence
+    test "#{transport} Responses refuses missing tool content before effects in #{mode}" do
+      upstream = start_upstream(issue_241_completed_response("tool_content_presence"))
+      setup = gateway_setup(upstream)
+      put_public_model_serving_mode!(setup, unquote(mode))
+      port = start_public_endpoint!()
+
+      for id_field <- ["tool_call_id", "call_id"], output_present? <- [false, true] do
+        item = %{"role" => "tool", id_field => "call_content_presence"}
+        item = if output_present?, do: Map.put(item, "output", "synthetic output"), else: item
+        payload = %{"model" => setup.model.exposed_model_id, "input" => [item]}
+
+        error =
+          if unquote(transport) == :http do
+            {headers, body} = curl_json_request!(port, setup.authorization, payload, "/v1/responses")
+            assert String.starts_with?(headers, "HTTP/1.1 400")
+            CodexPooler.JSON.decode!(body)["error"]
+          else
+            {conn, websocket, ref, _headers} = public_v1_websocket_connect!(port, setup, "tool-content-#{System.unique_integer([:positive])}", [{"openai-beta", "responses_websockets=2026-02-06"}])
+
+            try do
+              {conn, websocket} = public_websocket_send_text!(conn, websocket, ref, CodexPooler.JSON.encode!(Map.merge(payload, %{"type" => "response.create", "stream" => true})))
+              {_conn, _websocket, frame} = public_websocket_receive_text!(conn, websocket, ref)
+              assert %{"type" => "error", "status" => 400, "error" => error} = CodexPooler.JSON.decode!(frame)
+              error
+            after
+              Mint.HTTP.close(conn)
+            end
+          end
+
+        assert %{"type" => "invalid_request_error", "code" => "invalid_request", "param" => "input"} = error
+        assert FakeUpstream.count(upstream) == 0
+        assert Repo.aggregate(Request, :count) == 0
+        assert Repo.aggregate(Attempt, :count) == 0
+        assert Repo.aggregate(LedgerEntry, :count) == 0
+      end
+    end
+  end
+
   for mode <- ~w(full lite), stream <- [false, true] do
     @tag :access_programs
     test "POST /v1/responses rejects malformed access programs before effects in #{mode} with stream=#{stream}", %{conn: conn} do
@@ -2677,8 +2802,8 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     invalid_cases = [
       {"input", put_programmatic_payload_item(payload, 0, "unexpected", true)},
       {"input", put_programmatic_payload_item(payload, 1, "caller", %{"type" => "program"})},
-      {"tools", put_programmatic_payload_tool(payload, 0, "unexpected", true)},
-      {"tools", put_programmatic_payload_tool(payload, 1, "output_schema", [])}
+      {"tools", Map.update!(payload, "tools", &[%{"type" => "programmatic_tool_calling", "unexpected" => true} | &1])},
+      {"tools", put_programmatic_payload_tool(payload, 0, "output_schema", [])}
     ]
 
     counts = durable_accounting_counts()
@@ -3305,7 +3430,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
 
     refute Map.has_key?(captured.json, "tools")
     refute Map.has_key?(captured.json, "instructions")
-    refute Map.has_key?(captured.json, "max_output_tokens")
+    assert captured.json["max_output_tokens"] == 64_000
   end
 
   # `/v1/responses` goes through the same payload normalizer as the native route: a Full request that omits `instructions` is sent upstream
@@ -4048,8 +4173,6 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     tools = [
       function_tool,
       custom_tool,
-      %{"type" => "programmatic_tool_calling"},
-      %{"type" => "web_search_preview"},
       %{"type" => "web_search"},
       %{"type" => "image_generation"}
     ]
@@ -4058,9 +4181,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
       %{"type" => "custom", "name" => custom_tool["name"]},
       %{"type" => "web_search"},
       %{"type" => "function", "name" => function_tool["name"]},
-      %{"type" => "programmatic_tool_calling"},
       %{"type" => "image_generation"},
-      %{"type" => "web_search_preview"},
       %{"type" => "function", "name" => function_tool["name"]},
       %{"type" => "web_search"}
     ]
@@ -12051,13 +12172,15 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     end
   end
 
+  # A stateless replay of a programmatic turn: the program and its output items, and the function tool the program
+  # called. The hosted `programmatic_tool_calling` tool and a choice naming it are not declared: the Codex backend refuses
+  # the tool on Full and the choice on every mode (findings#333, `responses_refused_request_fields_test.exs`).
   defp programmatic_tool_payload(model, sentinels) do
     %{
       "model" => model,
       "store" => true,
       "input" => programmatic_tool_items(sentinels),
       "tools" => [
-        %{"type" => "programmatic_tool_calling"},
         %{
           "type" => "function",
           "name" => "lookup_programmatic_fixture",
@@ -12068,8 +12191,7 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
             "x-opaque-programmatic-schema" => sentinels.schema
           }
         }
-      ],
-      "tool_choice" => %{"type" => "programmatic_tool_calling"}
+      ]
     }
   end
 

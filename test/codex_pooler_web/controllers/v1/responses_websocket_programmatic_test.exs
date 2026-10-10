@@ -595,19 +595,15 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketProgrammaticTest do
       assert get_in(captured.json, ["input", Access.at(1), "caller", "type"]) == "program"
       assert get_in(captured.json, ["input", Access.at(2), "caller", "type"]) == "direct"
 
-      assert captured.json["tools"] |> Enum.map(& &1["type"]) == [
-               "programmatic_tool_calling",
-               "function"
-             ]
+      assert captured.json["tools"] |> Enum.map(& &1["type"]) == ["function"]
+      refute Map.has_key?(captured.json, "tool_choice")
 
-      assert captured.json["tool_choice"]["type"] == "programmatic_tool_calling"
-
-      assert get_in(captured.json, ["tools", Access.at(1), "allowed_callers"]) == [
+      assert get_in(captured.json, ["tools", Access.at(0), "allowed_callers"]) == [
                "direct",
                "programmatic"
              ]
 
-      assert is_map(get_in(captured.json, ["tools", Access.at(1), "output_schema"]))
+      assert is_map(get_in(captured.json, ["tools", Access.at(0), "output_schema"]))
 
       assert_receive {Events,
                       %{
@@ -4112,8 +4108,9 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketProgrammaticTest do
       "store" => true,
       "generate" => true,
       "input" => programmatic_input_items(),
+      # The hosted `programmatic_tool_calling` tool and a choice naming it are not declared: the Codex backend refuses the
+      # tool on Full and the choice on every mode (findings#333).
       "tools" => [
-        %{"type" => "programmatic_tool_calling"},
         %{
           "type" => "function",
           "name" => "lookup_fixture",
@@ -4121,8 +4118,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketProgrammaticTest do
           "allowed_callers" => ["direct", "programmatic"],
           "output_schema" => %{"$id" => "PROGRAMMATIC_SCHEMA_SENTINEL", "type" => "object"}
         }
-      ],
-      "tool_choice" => %{"type" => "programmatic_tool_calling"}
+      ]
     }
   end
 
@@ -4419,8 +4415,6 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketProgrammaticTest do
           "syntax" => "lark"
         }
       },
-      %{"type" => "programmatic_tool_calling"},
-      %{"type" => "web_search_preview"},
       %{"type" => "web_search"},
       %{"type" => "image_generation"}
     ]
@@ -4431,9 +4425,7 @@ defmodule CodexPoolerWeb.V1.ResponsesWebsocketProgrammaticTest do
       %{"type" => "custom", "name" => "custom_allowed_fixture"},
       %{"type" => "web_search"},
       %{"type" => "function", "name" => "lookup_allowed_fixture"},
-      %{"type" => "programmatic_tool_calling"},
       %{"type" => "image_generation"},
-      %{"type" => "web_search_preview"},
       %{"type" => "function", "name" => "lookup_allowed_fixture"},
       %{"type" => "web_search"}
     ]

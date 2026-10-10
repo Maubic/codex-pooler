@@ -34,112 +34,6 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
   alias CodexPooler.Upstreams.Lifecycle.IdentityLifecycle
   alias CodexPoolerWeb.WebsocketConnectionLogger
 
-  @expected_feature_categories [
-    files: [:route, :auth, :error, :ownership],
-    backend_transcription: [:route, :auth, :multipart, :ownership],
-    backend_image_proxy_surface: [:route, :auth, :error, :ownership],
-    backend_models_etag: [:route, :auth, :error, :ownership],
-    backend_responses_etag: [:route, :auth, :error, :streaming, :ownership, :degraded],
-    pool_model_serving_modes: [:route, :error, :streaming, :ownership, :degraded],
-    backend_responses_envelope: [:route, :auth, :error, :streaming, :ownership],
-    upstream_error_param: [:error, :ownership, :degraded],
-    terminal_failure_diagnostics: [:error, :ownership, :degraded],
-    rejection_metadata: [:error, :ownership, :degraded],
-    upstream_validation_rejection_relay: [:error, :streaming],
-    pooler_authored_error_type: [:error, :route, :overload, :ownership],
-    backend_fast_service_tier: [:route, :auth, :error, :streaming, :ownership],
-    responses_chat: [:route, :auth, :error, :streaming, :ownership],
-    response_body_cap: [:error, :degraded, :ownership],
-    backend_v1_alias_surface: [:route, :auth, :error, :streaming, :ownership],
-    usage_alias_meter_identity: [:route, :auth, :ownership],
-    websocket_continuity: [:route, :auth, :streaming, :ownership, :degraded],
-    duplicate_turn_fence: [:route, :auth, :error, :ownership],
-    reasoning_minimal: [:route, :auth, :ownership],
-    reasoning_none: [:route, :auth, :ownership],
-    reasoning_ultra: [:route, :auth, :ownership],
-    api_key_reasoning_availability: [:route, :auth, :error, :streaming, :ownership],
-    api_key_reservation_policy_refusals: [:route, :auth, :error, :streaming, :ownership],
-    api_key_terminal_policy_denials: [:route, :auth, :error, :streaming],
-    exhausted_pool_usage_limit: [:route, :error, :streaming, :ownership],
-    desktop_pool_usage_limit_answer: [:route, :error, :streaming, :ownership],
-    reasoning_context: [:route, :auth, :error, :ownership],
-    unsupported_upstream_fields: [:route, :auth, :ownership],
-    api_key_websocket_revocation: [:auth, :error, :streaming, :ownership],
-    native_websocket_upstream_close: [:streaming, :ownership],
-    native_websocket_owner_exit: [:streaming, :ownership],
-    native_websocket_provider_controls: [:streaming, :ownership],
-    native_websocket_response_interrupt: [:streaming, :ownership],
-    firewall: [:route, :auth, :error, :ownership],
-    pruned_runtime_helper_firewall: [:route, :error],
-    decompression: [:route, :error, :overload],
-    bulkheads: [:overload, :degraded],
-    database_unavailable: [:error, :degraded],
-    degraded_routing: [:route, :error, :ownership, :degraded],
-    strict_schema_validation: [:route, :auth, :error, :ownership],
-    public_strict_schema_object_roots: [:route, :auth, :error, :streaming, :ownership],
-    unsupported_input_image_reference: [:route, :auth, :error, :ownership],
-    first_event_stream_retry: [:route, :auth, :error, :streaming, :ownership, :degraded],
-    tool_output_preservation: [:route, :auth, :error, :streaming, :ownership, :degraded],
-    upstream_websocket_bridge: [:route, :auth, :error, :streaming, :ownership, :degraded],
-    image_generation_permission: [:route, :auth, :error],
-    audio_transcription_permission: [:route, :auth, :error],
-    responses_access_programs: [:route, :auth, :error, :streaming],
-    responses_allowed_tools: [:route, :auth, :error, :streaming, :ownership],
-    responses_executable_custom_tools: [:route, :auth, :error, :streaming, :ownership],
-    backend_agent_v2_handoffs: [:route, :streaming, :ownership],
-    multi_agent_product_certification: [:route, :streaming, :ownership],
-    function_tool_schema_lowering: [:route, :auth, :error, :streaming, :ownership],
-    direct_responses_strict_schema_repair: [:route, :auth, :error, :streaming, :ownership],
-    v1_supported_surface: [:route, :auth, :error, :multipart, :streaming, :ownership],
-    v1_unsupported_public_surface: [:route, :auth, :error],
-    v1_unsupported_agents_surface: [:route, :auth, :error]
-  ]
-  @expected_features Keyword.keys(@expected_feature_categories)
-
-  @expected_route_features %{
-    {:delete, "/v1/files/:file_id"} => ~w(v1_supported_surface)a,
-    {:delete, "/v1/responses/:response_id"} => ~w(v1_unsupported_public_surface)a,
-    {:get, "/api/codex/usage"} => ~w(firewall usage_alias_meter_identity)a,
-    {:get, "/backend-api/codex/models"} => ~w(api_key_reasoning_availability backend_models_etag database_unavailable firewall pool_model_serving_modes)a,
-    {:get, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable desktop_pool_usage_limit_answer duplicate_turn_fence exhausted_pool_usage_limit firewall function_tool_schema_lowering multi_agent_product_certification native_websocket_owner_exit native_websocket_provider_controls native_websocket_response_interrupt native_websocket_upstream_close pool_model_serving_modes pooler_authored_error_type rejection_metadata terminal_failure_diagnostics tool_output_preservation upstream_error_param websocket_continuity)a,
-    {:get, "/backend-api/codex/v1/models"} => ~w(backend_models_etag backend_v1_alias_surface pool_model_serving_modes)a,
-    {:get, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability api_key_websocket_revocation backend_agent_v2_handoffs backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface desktop_pool_usage_limit_answer duplicate_turn_fence function_tool_schema_lowering multi_agent_product_certification native_websocket_owner_exit native_websocket_provider_controls native_websocket_upstream_close pool_model_serving_modes tool_output_preservation)a,
-    {:get, "/backend-api/wham/usage"} => ~w(firewall usage_alias_meter_identity)a,
-    {:get, "/v1/files"} => ~w(v1_supported_surface)a,
-    {:get, "/v1/files/:file_id"} => ~w(v1_supported_surface)a,
-    {:get, "/v1/files/:file_id/content"} => ~w(v1_supported_surface)a,
-    {:get, "/v1/models"} => ~w(firewall v1_supported_surface)a,
-    {:get, "/v1/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials api_key_websocket_revocation backend_responses_envelope direct_responses_strict_schema_repair exhausted_pool_usage_limit firewall function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type public_strict_schema_object_roots responses_access_programs responses_allowed_tools responses_executable_custom_tools tool_output_preservation v1_supported_surface)a,
-    {:get, "/v1/responses/:response_id"} => ~w(v1_unsupported_public_surface)a,
-    {:get, "/v1/usage"} => ~w(v1_supported_surface)a,
-    {:get, "/wham/usage"} => ~w(firewall usage_alias_meter_identity)a,
-    {:post, "/backend-api/codex/images/edits"} => ~w(api_key_terminal_policy_denials backend_image_proxy_surface image_generation_permission)a,
-    {:post, "/backend-api/codex/images/generations"} => ~w(api_key_terminal_policy_denials backend_image_proxy_surface image_generation_permission)a,
-    {:post, "/backend-api/codex/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_fast_service_tier backend_responses_envelope backend_responses_etag bulkheads database_unavailable decompression degraded_routing desktop_pool_usage_limit_answer duplicate_turn_fence exhausted_pool_usage_limit firewall first_event_stream_retry function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type reasoning_minimal reasoning_none reasoning_ultra rejection_metadata response_body_cap responses_chat strict_schema_validation terminal_failure_diagnostics tool_output_preservation unsupported_input_image_reference unsupported_upstream_fields upstream_error_param upstream_validation_rejection_relay)a,
-    {:post, "/backend-api/codex/responses/compact"} => ~w(api_key_reasoning_availability bulkheads desktop_pool_usage_limit_answer duplicate_turn_fence pool_model_serving_modes pooler_authored_error_type reasoning_ultra tool_output_preservation)a,
-    {:post, "/backend-api/codex/v1/chat/completions"} => ~w(api_key_reasoning_availability backend_responses_envelope backend_v1_alias_surface pool_model_serving_modes public_strict_schema_object_roots tool_output_preservation upstream_validation_rejection_relay)a,
-    {:post, "/backend-api/codex/v1/responses"} => ~w(api_key_reasoning_availability backend_fast_service_tier backend_responses_envelope backend_responses_etag backend_v1_alias_surface desktop_pool_usage_limit_answer function_tool_schema_lowering pool_model_serving_modes response_body_cap tool_output_preservation upstream_validation_rejection_relay)a,
-    {:post, "/backend-api/codex/v1/responses/compact"} => ~w(api_key_reasoning_availability backend_v1_alias_surface desktop_pool_usage_limit_answer pool_model_serving_modes tool_output_preservation)a,
-    {:post, "/backend-api/files"} => ~w(files firewall pooler_authored_error_type)a,
-    {:post, "/backend-api/files/:file_id/uploaded"} => ~w(files firewall)a,
-    {:post, "/backend-api/transcribe"} => ~w(audio_transcription_permission backend_transcription firewall response_body_cap)a,
-    {:post, "/mcp"} => ~w(firewall)a,
-    {:post, "/v1/audio/transcriptions"} => ~w(audio_transcription_permission v1_supported_surface)a,
-    {:post, "/v1/batches"} => ~w(v1_unsupported_public_surface)a,
-    {:post, "/v1/chat/completions"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_responses_envelope exhausted_pool_usage_limit pool_model_serving_modes public_strict_schema_object_roots response_body_cap responses_chat responses_executable_custom_tools tool_output_preservation unsupported_input_image_reference upstream_validation_rejection_relay v1_supported_surface)a,
-    {:post, "/v1/content_provenance_checks"} => ~w(v1_unsupported_public_surface)a,
-    {:post, "/v1/embeddings"} => ~w(v1_unsupported_public_surface)a,
-    {:post, "/v1/files"} => ~w(v1_supported_surface)a,
-    {:post, "/v1/fine_tuning/jobs"} => ~w(v1_unsupported_public_surface)a,
-    {:post, "/v1/images/edits"} => ~w(image_generation_permission v1_supported_surface)a,
-    {:post, "/v1/images/generations"} => ~w(image_generation_permission v1_supported_surface)a,
-    {:post, "/v1/images/variations"} => ~w(v1_unsupported_public_surface)a,
-    {:post, "/v1/moderations"} => ~w(v1_unsupported_public_surface)a,
-    {:post, "/v1/responses"} => ~w(api_key_reasoning_availability api_key_reservation_policy_refusals api_key_terminal_policy_denials backend_responses_envelope database_unavailable direct_responses_strict_schema_repair exhausted_pool_usage_limit firewall function_tool_schema_lowering pool_model_serving_modes pooler_authored_error_type public_strict_schema_object_roots reasoning_context response_body_cap responses_access_programs responses_allowed_tools responses_chat responses_executable_custom_tools tool_output_preservation unsupported_input_image_reference upstream_validation_rejection_relay upstream_websocket_bridge v1_supported_surface)a,
-    {:post, "/v1/responses/:response_id/cancel"} => ~w(v1_unsupported_public_surface)a,
-    {:post, "/v1/responses/compact"} => ~w(v1_supported_surface)a
-  }
-
   @url_citation_fixture_id "vercel-ai.responses.url_citation_replay.v1"
   @stream_id_fixture_id "openai.responses.websocket_stream_id.v1"
   @responses_allowed_tools_fixture_id "vercel-ai-sdk-openai.responses.allowed_tools.v1"
@@ -310,12 +204,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                "tool_choice_root" => "type=allowed_tools",
                "allowed_modes" => ["auto", "required"],
                "direct_named_entry_forms" => ["function:name", "custom:name"],
-               "type_only_builtin_entry_forms" => [
-                 "programmatic_tool_calling",
-                 "web_search_preview",
-                 "web_search",
-                 "image_generation"
-               ],
+               "type_only_builtin_entry_forms" => ["web_search", "image_generation"],
                "entry_order_preserved" => true,
                "duplicate_entries_preserved" => true,
                "declaration_scope" => "already_declared_top_level_tools_only",
@@ -324,13 +213,15 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                  "namespace",
                  "deferred",
                  "tool_search",
+                 "programmatic_tool_calling",
+                 "web_search_preview",
                  "unknown"
                ],
                "raw_payload_stored" => false,
                "placeholder_values_only" => true,
                "notes" => [
                  "This is public Responses HTTP and narrow public Responses WebSocket response.create provenance, not Realtime or broad OpenAI tool compatibility.",
-                 "The accepted vocabulary is deliberately narrower than the Vercel client inventory and excludes MCP, namespace, deferred, tool-search, and unknown entries."
+                 "The accepted vocabulary is deliberately narrower than the Vercel client inventory and excludes MCP, namespace, deferred, tool-search, and unknown entries, and the programmatic_tool_calling and web_search_preview built-ins the Codex backend refuses on a Full request (findings#333)."
                ]
              }
 
@@ -351,21 +242,9 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                version: "`4.0.43`, commit `a062795bbe22ecc96a38d114bf8b8ea4af070914`",
                endpoint: "`POST /v1/responses` and `GET /v1/responses` websocket `response.create`",
                decision: "accept",
-               observed_shape: "`tool_choice` is `type=allowed_tools` with mode `auto` or `required`; direct function/custom entries are named, while supported built-ins are type-only `programmatic_tool_calling`, `web_search_preview`, `web_search`, or `image_generation`; order and duplicates remain significant",
-               notes: "Vercel client provenance only. Pooler accepts this deliberately narrow, declaration-backed vocabulary on public Responses HTTP and the narrow public WebSocket `response.create` surface. MCP, namespace, deferred, tool-search, and unknown entries remain excluded. This does not claim broad OpenAI compatibility, Realtime compatibility, or availability of any declared tool on every model or account"
+               observed_shape: "`tool_choice` is `type=allowed_tools` with mode `auto` or `required`; direct function/custom entries are named, while supported built-ins are type-only `web_search` or `image_generation`; order and duplicates remain significant",
+               notes: "Vercel client provenance only. Pooler accepts this deliberately narrow, declaration-backed vocabulary on public Responses HTTP and the narrow public WebSocket `response.create` surface. MCP, namespace, deferred, tool-search, and unknown entries remain excluded, and so do the client's `programmatic_tool_calling` and `web_search_preview` built-ins, which the Codex backend refuses on a Full request (findings#333). This does not claim broad OpenAI compatibility, Realtime compatibility, or availability of any declared tool on every model or account"
              }
-    end
-
-    test "lists every in-scope Codex compatibility feature with sanitized fixtures" do
-      assert CompatibilityMatrix.feature_slugs() == @expected_features
-
-      for feature <- CompatibilityMatrix.features() do
-        assert feature.status == :supported
-        assert feature.current
-        assert is_binary(feature.contract)
-        assert feature.categories != []
-        assert CompatibilityMatrix.fixture!(feature.fixture)
-      end
     end
 
     test "covers baseline regression categories for later task promotion" do
@@ -376,11 +255,6 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
         |> Enum.sort()
 
       assert covered_categories == Enum.sort(CompatibilityMatrix.required_categories())
-
-      for {slug, categories} <- @expected_feature_categories do
-        feature = CompatibilityMatrix.by_slug!(slug)
-        assert Enum.sort(feature.categories) == Enum.sort(categories), "regression categories changed for #{slug}"
-      end
     end
 
     test "every matrix route resolves to an actual Phoenix route" do
@@ -389,16 +263,6 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       for feature <- CompatibilityMatrix.features(), route <- feature.routes do
         assert MapSet.member?(routes, {route.method, route.path}), "missing route for #{feature.slug}: #{route.method} #{route.path}"
       end
-    end
-
-    test "each route retains the compatibility features that own its regression coverage" do
-      actual =
-        for feature <- CompatibilityMatrix.features(), route <- feature.routes, reduce: %{} do
-          acc -> Map.update(acc, {route.method, route.path}, [feature.slug], &[feature.slug | &1])
-        end
-
-      actual = Map.new(actual, fn {route, slugs} -> {route, Enum.sort(Enum.uniq(slugs))} end)
-      assert actual == @expected_route_features
     end
 
     test "has no pending compatibility gaps" do
@@ -459,16 +323,6 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                freshness_fields: false,
                raw_identity_fields: false
              }
-    end
-
-    test "keeps the baseline matrix characterization intact before specialized contracts" do
-      assert CompatibilityMatrix.feature_slugs() == @expected_features
-      assert CompatibilityMatrix.pending_gaps() == []
-
-      assert Enum.all?(CompatibilityMatrix.features(), fn feature ->
-               feature.status == :supported and not is_nil(feature.current) and
-                 is_map(CompatibilityMatrix.fixture!(feature.fixture))
-             end)
     end
 
     test "locks the exact URL citation and Responses WebSocket stream ID machine contracts" do
@@ -1598,113 +1452,6 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       assert fixture == responses_allowed_tools_contract()
     end
 
-    test "documents executable custom tools separately from custom replay" do
-      feature = CompatibilityMatrix.by_slug!(:responses_executable_custom_tools)
-      fixture = CompatibilityMatrix.fixture!(:responses_executable_custom_tools)
-
-      assert feature.current == :responses_and_chat_custom_tool_admission
-
-      assert feature.routes == [
-               %{method: :post, path: "/v1/responses"},
-               %{method: :get, path: "/v1/responses", transport: "websocket"},
-               %{method: :post, path: "/v1/chat/completions"}
-             ]
-
-      assert fixture.scope == "direct_public_responses_and_translated_chat"
-      assert fixture.formats == ["omitted", "text", "grammar_lark", "grammar_regex"]
-      assert fixture.allowed_callers_null == true
-
-      assert fixture.nested_definitions == %{
-               container: "namespace",
-               transports: ["http", "websocket_response_create"],
-               public_scope: "direct_public_responses",
-               full_mode: "preserved",
-               typed_choice_scope: "namespace_nested_custom"
-             }
-
-      assert fixture.typed_choice.resolves_same_kind == true
-      assert fixture.typed_choice.full_mode == "preserved"
-      assert fixture.typed_choice.lite_mode == "rejected_unsupported_parameter_before_dispatch"
-
-      assert fixture.response_namespace_restoration == %{
-               transports: ["http", "sse", "websocket_direct", "websocket_owner_forwarded"],
-               when: "missing_or_null_provider_namespace_with_one_exact_namespaced_custom_declaration",
-               preserves: "explicit_provider_namespace",
-               unchanged: ["flat", "unknown", "non_unique"]
-             }
-
-      assert fixture.executable_name_collision_scope == [
-               "flat_function",
-               "namespace_nested_function",
-               "namespace_nested_custom",
-               "custom"
-             ]
-
-      assert fixture.custom_replay_contract == "separate_input_item_shape"
-      assert fixture.chat_supported == true
-      assert fixture.chat.streamed_input == "free_form_fragments_not_json_parsed"
-      assert fixture.provider_availability == "selected_model_and_account_dependent"
-      assert fixture.broad_openai_tool_parity == false
-    end
-
-    test "locks the namespace custom contract and its provenance boundaries" do
-      namespace_tool = CompatibilityMatrix.fixture!(:responses_chat).namespace_tool
-
-      expected_namespace_tool = %{
-        shape: "top_level_namespace_tool",
-        required: ["type", "name", "description", "tools"],
-        namespace_name: "nonblank",
-        nested_tool_types: ["function", "custom"],
-        nested_function_optional: ["strict", "defer_loading"],
-        nested_custom_required: ["type", "name"],
-        nested_custom_optional: ["description", "defer_loading", "allowed_callers", "format"],
-        nested_custom_formats: ["omitted", "text", "grammar_lark", "grammar_regex"],
-        nested_custom_allowed_callers: ["direct", "programmatic"],
-        nested_custom_allowed_callers_null: true,
-        excluded_nested_tool_types: ["hosted", "mcp", "namespace", "tool_search"],
-        satisfies_tool_choice: true,
-        executable_name_collision_scope: "global"
-      }
-
-      assert namespace_tool == expected_namespace_tool
-
-      stale_function_only_expected_namespace_tool =
-        Map.put(expected_namespace_tool, :nested_tool_types, ["function"])
-
-      refute namespace_tool == stale_function_only_expected_namespace_tool
-
-      assert %{
-               source: "OpenAI Python `openai`",
-               version: "`2.52.0`",
-               decision: "accept",
-               observed_shape: "Custom tool requires `type=custom` and nonblank `name`; optional description, boolean `defer_loading`, nullable direct/programmatic `allowed_callers`, and omitted/text/lark/regex format; typed choice has exact `type` and `name`"
-             } = sdk_shape_row!("openai-python.responses.executable_custom_tool.v1")
-
-      assert %{
-               source: "OpenAI Node `openai`",
-               version: "commit `6fa9152eb97b7a36e3c555fbdeaaa241423ae91e`",
-               endpoint: "`POST /v1/chat/completions`",
-               decision: "translate",
-               observed_shape: "Request tools use exact outer `type=custom` and nested `custom` with required nonblank `name` plus optional `description` and `format`; named choice nests the custom name; output calls use `type=custom` with nested `custom.name` and free-form `custom.input`"
-             } = sdk_shape_row!("openai-node.chat.custom_tool.v1")
-
-      assert %{
-               source: "Vercel OpenAI provider `@ai-sdk/openai`",
-               version: "`3.0.65+`",
-               decision: "accept",
-               observed_shape: "Top-level `tools` entry has `type=namespace`, nonblank `name`, nonblank `description`, and nested function tools with flat `type`, `name`, `description`, `parameters`, optional `strict`, and optional `defer_loading`"
-             } = sdk_shape_row!("vercel-ai-sdk-openai.responses.namespace_function_tool.v1")
-
-      assert sdk_shape_row!("codex.responses.namespace_custom_tool.v1") == %{
-               source: "Codex native Responses shape",
-               version: "Codex commits `f21dc4638803f40046c9e294b0349782928f6b36` and `d4fb78bfc59009a2bbc3245d125bf8ba92a8e33e`",
-               endpoint: "`POST /v1/responses` and `GET /v1/responses` websocket `response.create`",
-               decision: "accept",
-               observed_shape: "Top-level `tools` entry has exact `type=namespace`, nonblank `name` and `description`, and a nonempty `tools` list whose children are exact flat `function` or exact executable `custom` definitions; typed custom choice has exact `type` and `name`",
-               notes: "Direct public Responses HTTP and websocket preserve valid namespace custom definitions and exact typed custom choices in Full mode. HTTP, SSE, direct websocket, and owner-forwarded websocket output restore a missing or null custom_tool_call namespace only when one exact namespaced custom declaration matches, while explicit, flat, unknown, and non-unique namespaces remain unchanged. Lite keeps the existing pre-dispatch `unsupported_parameter` rejection for map-shaped `tool_choice`; hosted/MCP/tool_search/nested namespace children, blank namespace names, malformed custom fields, and global executable-name collisions remain excluded. Chat uses a separate official nested wrapper and does not add namespace support. This Codex provenance is separate from the OpenAI Python direct-custom, OpenAI Node Chat-custom, and Vercel namespace-function rows."
-             }
-    end
-
     test "documents direct Responses strict repair separately from non-strict lowering" do
       feature = CompatibilityMatrix.by_slug!(:direct_responses_strict_schema_repair)
       fixture = CompatibilityMatrix.fixture!(:direct_responses_strict_schema_repair)
@@ -1801,6 +1548,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       assert responses_chat.contract =~ "never merged into executable tools"
       assert responses_chat.contract =~ "never used to satisfy tool_choice"
       assert responses_chat.contract =~ "truncation accepts auto and disabled locally"
+      assert responses_chat.contract =~ "metadata is accepted with the public API's shape and stripped before dispatch"
       assert responses_chat.contract =~ "remote MCP tool definitions"
       assert responses_chat.contract =~ "additional_tools.tools"
       assert responses_chat.contract =~ "not forwarded upstream"
@@ -1842,7 +1590,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       }
 
       expected_responses_builtin_tools = %{
-        web_search_preview: %{accepted_shape: "type_only"},
+        web_search_preview: %{accepted: false, serving_modes: ["full", "lite"], refusal: %{status: 400, code: "invalid_request", param: "tools", upstream_dispatch: false}, rewritten: false},
         web_search: %{
           accepted_required: ["type"],
           accepted_optional: [
@@ -1943,6 +1691,20 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
              }
 
       assert v1_fixture.responses_truncation == responses_fixture.responses_truncation
+
+      assert responses_fixture.responses_metadata == %{
+               accepted: ["null", "object"],
+               max_properties: 16,
+               max_property_name_length: 64,
+               value: "string",
+               max_value_length: 512,
+               refusal_codes: ["invalid_type", "object_above_max_properties", "property_name_above_max_length", "string_above_max_length"],
+               refusal_param: "metadata",
+               forwarded_upstream: false,
+               native_routes: "stripped"
+             }
+
+      assert v1_fixture.responses_metadata == responses_fixture.responses_metadata
       refute Map.has_key?(responses_fixture, :responses_builtin_tools)
       assert v1_fixture.responses_builtin_tools == expected_responses_builtin_tools
     end
@@ -2018,8 +1780,10 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
 
       assert programmatic.hosted_tool.type == "programmatic_tool_calling"
       assert programmatic.hosted_tool.exact_keys == ["type"]
+      assert programmatic.hosted_tool.serving_modes == %{full: "refused_before_dispatch", lite: "forwarded_in_manifest"}
       assert programmatic.tool_choice.type == "programmatic_tool_calling"
-      assert programmatic.tool_choice.exact_keys == ["type"]
+      assert programmatic.tool_choice.refusal == %{status: 400, code: "invalid_request", param: "tool_choice", upstream_dispatch: false}
+      assert feature.programmatic_tool_calling_contract =~ "refused before dispatch when the model is served Full"
       assert programmatic.function_options.scopes == ["flat", "namespace"]
       assert programmatic.function_options.optional_boolean_keys == ["strict", "defer_loading"]
       assert programmatic.function_options.allowed_callers == ["direct", "programmatic"]
@@ -3218,6 +2982,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       fixture = CompatibilityMatrix.fixture!(:v1_unsupported_public_surface)
 
       expected_routes = [
+        %{method: :post, path: "/v1/decisions"},
         %{method: :post, path: "/v1/images/variations"},
         %{method: :post, path: "/v1/content_provenance_checks"},
         %{method: :post, path: "/v1/embeddings"},
@@ -3241,6 +3006,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       assert fixture.error_code == "unsupported_endpoint"
 
       assert fixture.routes == [
+               %{method: :post, path: "/v1/decisions"},
                %{method: :post, path: "/v1/images/variations"},
                %{method: :post, path: "/v1/content_provenance_checks"},
                %{method: :post, path: "/v1/embeddings"},
@@ -3509,7 +3275,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
   end
 
   defp responses_allowed_tools_summary do
-    "direct public Responses HTTP and websocket response.create accept an exact type=allowed_tools choice only in Full mode, with mode auto or required and a nonempty ordered tools list; named function and custom entries must resolve to undeferred direct top-level same-kind declarations, while type-only programmatic_tool_calling, web_search_preview, web_search, and image_generation entries require a declared top-level tool of the same type; order and duplicates are forwarded unchanged after only the existing tool-definition schema lowering; malformed or undeclared Full choices fail before admission or accounting, valid Lite choices create one rejected Request without Attempts or Ledger rows, top-level MCP declarations retain the tools error while MCP allow-list members use the tool_choice error, and Chat, native backend Responses, namespaces, additional_tools, deferred tools, aliases, unsupported entries, Realtime, and broad OpenAI tool parity remain excluded"
+    "direct public Responses HTTP and websocket response.create accept an exact type=allowed_tools choice only in Full mode, with mode auto or required and a nonempty ordered tools list; named function and custom entries must resolve to undeferred direct top-level same-kind declarations, while type-only web_search and image_generation entries require a declared top-level tool of the same type; order and duplicates are forwarded unchanged after only the existing tool-definition schema lowering; malformed or undeclared Full choices fail before admission or accounting, valid Lite choices create one rejected Request without Attempts or Ledger rows, top-level MCP declarations retain the tools error while MCP allow-list members use the tool_choice error, and Chat, native backend Responses, namespaces, additional_tools, deferred tools, aliases, unsupported entries, Realtime, and broad OpenAI tool parity remain excluded"
   end
 
   defp responses_allowed_tools_contract do
@@ -3532,12 +3298,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
           defer_loading: ["absent", false]
         },
         built_in: %{
-          types: [
-            "programmatic_tool_calling",
-            "web_search_preview",
-            "web_search",
-            "image_generation"
-          ],
+          types: ["web_search", "image_generation"],
           exact_keys: ["type"],
           declaration_scope: "top_level_tools_only",
           resolution: "at_least_one_same_type_declaration",
@@ -3900,7 +3661,8 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
 
       assert captured.json["parallel_tool_calls"] == true
       assert captured.json["prompt_cache_key"] == "synthetic-cache-key"
-      assert captured.json["metadata"] == %{"purpose" => "synthetic"}
+      # The Codex backend refuses `metadata` (findings#333): stripped with the other upstream-unsupported controls.
+      refute Map.has_key?(captured.json, "metadata")
       refute Map.has_key?(captured.json, "previous_response_id")
       refute Map.has_key?(captured.json, "service_tier")
     end

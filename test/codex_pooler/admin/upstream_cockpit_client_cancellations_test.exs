@@ -4,6 +4,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitClientCancellationsTest do
   import CodexPooler.AccountsFixtures
   import CodexPooler.PoolerFixtures
 
+  alias CodexPooler.Accounting.RequestOutcome
   alias CodexPooler.Accounts.Scope
   alias CodexPooler.Admin.UpstreamCockpitMetrics
   alias CodexPooler.Pools
@@ -125,6 +126,19 @@ defmodule CodexPooler.Admin.UpstreamCockpitClientCancellationsTest do
     refute plain.id in Enum.map(rows, & &1.id)
   end
 
+  test "idle cutoffs remain failed in aggregate health and recent events", %{scope: scope, identity: identity, fixture: fixture, now: now} do
+    metadata = %{"downstream_interruption" => %{"origin" => "server", "cause" => "idle_timeout", "client_activity" => "unknown"}}
+    timeout = insert_request!(fixture, %{status: "failed", admitted_at: DateTime.add(now, -30, :second), transport: "websocket", response_status_code: 499, last_error_code: "client_disconnected", request_metadata: metadata})
+    insert_request!(fixture, %{status: "failed", admitted_at: DateTime.add(now, -30, :second), transport: "websocket", response_status_code: 499, last_error_code: "client_disconnected"})
+    health = UpstreamCockpitMetrics.request_health(scope, identity, now)
+    assert health.kpis.failed_requests_24h == 1
+    assert health.kpis.client_cancelled_requests_24h == 1
+    assert health.kpis.failure_rate_24h == 100.0
+    assert %{rows: [row]} = UpstreamCockpitMetrics.recent_request_events(scope, identity, 10)
+    assert row.id == timeout.id
+    refute RequestOutcome.client_cancelled?(row)
+  end
+
   defp insert_request!(%{pool: pool, api_key: api_key, assignment: assignment}, attrs) do
     admitted_at = Map.fetch!(attrs, :admitted_at)
     completed_at = DateTime.add(admitted_at, 1, :second)
@@ -136,6 +150,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitClientCancellationsTest do
         status: status,
         transport: Map.get(attrs, :transport, "http_json"),
         response_status_code: Map.get(attrs, :response_status_code, 200),
+        request_metadata: Map.get(attrs, :request_metadata, %{}),
         last_error_code: Map.get(attrs, :last_error_code)
       })
       |> Ecto.Changeset.change(%{admitted_at: admitted_at, completed_at: completed_at})

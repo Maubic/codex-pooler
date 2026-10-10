@@ -244,6 +244,58 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamRelayTest do
                    @relay_timeout
   end
 
+  for shape <- [:advanced, :legacy] do
+    test "#{shape} write failure cancels once and finalizes the accepted state once" do
+      assert_write_failure_state!(unquote(shape))
+    end
+  end
+
+  defp assert_write_failure_state!(shape) do
+    parent = self()
+    ref = make_ref()
+    response = async_response(ref, fn ^ref -> send(parent, :write_failure_cancelled) end)
+    initial = %{accepted: 0}
+    expected = %{accepted: if(shape == :advanced, do: 2, else: 1)}
+
+    task =
+      Task.async(fn ->
+        send(self(), {ref, {:data, "before"}})
+        send(self(), {ref, {:data, "partial"}})
+        send(self(), {ref, :done})
+
+        StreamRelay.run(
+          initial,
+          response,
+          Map.merge(handlers(), %{
+            write_chunk: fn
+              state, "before" ->
+                {:ok, %{state | accepted: 1}}
+
+              state, "partial" ->
+                if shape == :advanced, do: {:error, :closed, %{state | accepted: 2}}, else: {:error, :closed}
+            end,
+            before_finalize_failure: fn state, {:chunk, :closed} ->
+              send(parent, {:failure_hook_state, state})
+              {:ok, state, ""}
+            end,
+            finalize_success: fn _body -> flunk("write failure must not finalize successfully") end,
+            finalize_failure: fn body, reason, state ->
+              send(parent, {:write_failure_finalized, body, reason, state})
+              {:error, reason}
+            end,
+            first_event_retry: fn _state, _body, _failure -> flunk("write failure must not retry") end
+          })
+        )
+      end)
+
+    assert Task.await(task, @relay_timeout) == {:error, {:chunk, :closed}}
+    assert_receive :write_failure_cancelled, @relay_timeout
+    assert_receive {:failure_hook_state, ^expected}, @relay_timeout
+    assert_receive {:write_failure_finalized, "before", {:chunk, :closed}, ^expected}, @relay_timeout
+    refute_received :write_failure_cancelled
+    refute_received {:write_failure_finalized, _, _, _}
+  end
+
   test "falls back to legacy finalizers when callbacks do not accept state" do
     parent = self()
     ref = make_ref()

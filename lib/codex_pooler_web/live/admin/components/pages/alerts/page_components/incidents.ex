@@ -121,173 +121,102 @@ defmodule CodexPoolerWeb.Admin.AlertsPageComponents.Incidents do
         <div
           :if={@incidents != []}
           id="alerts-incident-table-scroll-region"
-          class="hidden overflow-x-auto lg:block"
+          class="lg:overflow-x-auto"
         >
-          <table id="alerts-incident-table" class="table min-w-[84rem]">
+          <table
+            id="alerts-incident-table"
+            class="admin-ledger-table table table-sm admin-log-table lg:min-w-[60rem]"
+          >
+            <caption class="sr-only">Alert incidents</caption>
+            <colgroup>
+              <col />
+              <col style="width: 12rem;" />
+              <col style="width: 11rem;" />
+              <col style="width: 9rem;" />
+              <col style="width: 14rem;" />
+            </colgroup>
             <thead>
               <tr>
-                <th>Incident</th>
-                <th>Impacted Pools</th>
-                <th class="text-center">Severity</th>
-                <th class="text-center">State</th>
-                <th>Delivery</th>
-                <th class="text-right">Last seen</th>
-                <th class="text-right">Actions</th>
+                <th class="whitespace-nowrap">Incident</th>
+                <th class="whitespace-nowrap">Status</th>
+                <th class="whitespace-nowrap">Delivery</th>
+                <th class="whitespace-nowrap">Last seen</th>
+                <th class="whitespace-nowrap text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
               <tr
                 :for={incident <- @incidents}
                 id={"alert-incident-#{incident.id}"}
-                class="text-sm transition-colors hover:bg-base-200/80"
+                class="transition-colors hover:bg-base-200/60"
                 data-role="alert-incident-row"
                 data-alert-anchor-id={"alert-incident-#{incident.id}"}
               >
-                <td class="min-w-72">
+                <td class="min-w-0 align-middle max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-1 max-lg:sm:col-span-1">
                   <div class="grid min-w-0 gap-1">
                     <span
                       id={"alert-incident-row-#{incident.id}-reason"}
                       data-role="incident-reason"
-                      class="font-semibold text-base-content"
+                      class="text-[0.82rem] font-semibold leading-tight text-base-content"
                     >
                       {incident.reason_title}
                     </span>
                     <span
-                      id={"alert-incident-row-#{incident.id}-kind"}
-                      data-role="incident-kind"
-                      class="text-xs text-base-content/60"
-                    >
-                      {incident.rule_kind_label}
-                    </span>
-                    <span
                       id={"alert-incident-row-#{incident.id}-detail"}
                       data-role="incident-detail"
-                      class="text-xs leading-5 text-base-content/55"
+                      title={incident.reason_detail}
+                      class="line-clamp-3 text-xs leading-4 text-base-content/55"
                     >
                       {incident.reason_detail}
                     </span>
+                    <div class="flex flex-wrap items-center gap-1">
+                      <span
+                        id={"alert-incident-row-#{incident.id}-kind"}
+                        data-role="incident-kind"
+                        class="inline-flex h-4.5 items-center whitespace-nowrap rounded-full bg-base-200 px-2 text-[10px] font-medium leading-none text-base-content/65"
+                      >
+                        {incident.rule_kind_label}
+                      </span>
+                      <.impacted_pool_list incident={incident} prefix="alert-incident-row" />
+                    </div>
                   </div>
                 </td>
-                <td class="min-w-64">
-                  <.impacted_pool_list
-                    incident={incident}
-                    prefix="alert-incident-row"
-                  />
-                </td>
-                <td class="text-center">
-                  <span
-                    id={"alert-incident-row-#{incident.id}-severity"}
-                    data-role="incident-severity"
-                    class={severity_chip_class(incident.severity)}
-                  >
-                    {incident.severity_label}
-                  </span>
-                </td>
-                <td class="text-center">
-                  <span
-                    id={"alert-incident-row-#{incident.id}-state"}
-                    data-role="incident-state"
-                    class={AdminBadges.status_chip_class(incident.state)}
-                  >
-                    {incident.state_label}
-                  </span>
+                <td class="align-middle max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-2 max-lg:sm:col-span-1 max-lg:sm:col-start-2 max-lg:sm:row-start-1 max-lg:sm:justify-self-end">
+                  <div class="flex flex-wrap items-center gap-1 max-lg:sm:justify-end">
+                    <span
+                      id={"alert-incident-row-#{incident.id}-state"}
+                      data-role="incident-state"
+                      class={[incident_chip_base(), AdminBadges.status_chip_class(incident.state)]}
+                    >
+                      <.icon name={state_icon(incident.state)} class="size-3 shrink-0" />{incident.state_label}
+                    </span>
+                    <span
+                      id={"alert-incident-row-#{incident.id}-severity"}
+                      data-role="incident-severity"
+                      class={[incident_chip_base(), severity_chip_class(incident.severity)]}
+                    >
+                      <.icon name={severity_icon(incident.severity)} class="size-3 shrink-0" />{incident.severity_label}
+                    </span>
+                  </div>
                 </td>
                 <td
                   id={"alert-incident-row-#{incident.id}-delivery"}
-                  class="min-w-64 text-xs text-base-content/70"
+                  class="min-w-0 align-middle text-xs max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-4 max-lg:mt-1 max-lg:sm:col-span-1 max-lg:sm:row-start-3"
                 >
-                  <.incident_delivery_summary
-                    incident={incident}
-                    prefix="alert-incident-row"
-                  />
+                  <.incident_delivery_summary incident={incident} prefix="alert-incident-row" />
                 </td>
                 <td
                   id={"alert-incident-row-#{incident.id}-last-seen"}
-                  class="text-right font-mono text-xs tabular-nums text-base-content/60"
+                  class="whitespace-nowrap align-middle text-xs tabular-nums text-base-content/65 max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-3 max-lg:mt-1 max-lg:sm:col-span-1 max-lg:sm:row-start-2"
                 >
                   {format_datetime(incident.last_seen_at)}
                 </td>
-                <td class="text-right">
-                  <.incident_action_controls
-                    incident={incident}
-                    prefix="alert-incident"
-                  />
+                <td class="align-middle max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-5 max-lg:mt-2 max-lg:sm:row-start-4">
+                  <.incident_action_controls incident={incident} prefix="alert-incident" />
                 </td>
               </tr>
             </tbody>
           </table>
-        </div>
-
-        <div :if={@incidents != []} id="alerts-incident-cards" class="grid gap-3 lg:hidden">
-          <article
-            :for={incident <- @incidents}
-            id={"alert-incident-card-#{incident.id}"}
-            class="rounded-box border border-base-300 bg-base-100 p-4"
-          >
-            <div class="flex flex-wrap items-start justify-between gap-3">
-              <div class="grid min-w-0 gap-1">
-                <h3
-                  id={"alert-incident-card-#{incident.id}-reason"}
-                  class="font-semibold text-base-content"
-                >
-                  {incident.reason_title}
-                </h3>
-                <p
-                  id={"alert-incident-card-#{incident.id}-kind"}
-                  class="text-xs text-base-content/60"
-                >
-                  {incident.rule_kind_label}
-                </p>
-              </div>
-              <div class="flex flex-wrap gap-2">
-                <span
-                  id={"alert-incident-card-#{incident.id}-severity"}
-                  data-role="incident-severity"
-                  class={severity_chip_class(incident.severity)}
-                >
-                  {incident.severity_label}
-                </span>
-                <span
-                  id={"alert-incident-card-#{incident.id}-state"}
-                  data-role="incident-state"
-                  class={AdminBadges.status_chip_class(incident.state)}
-                >
-                  {incident.state_label}
-                </span>
-              </div>
-            </div>
-            <p
-              id={"alert-incident-card-#{incident.id}-detail"}
-              class="mt-3 text-sm leading-6 text-base-content/65"
-            >
-              {incident.reason_detail}
-            </p>
-            <div class="mt-3 grid gap-3 text-sm">
-              <.impacted_pool_list
-                incident={incident}
-                prefix="alert-incident-card"
-              />
-              <div
-                id={"alert-incident-card-#{incident.id}-delivery"}
-                class="text-xs text-base-content/70"
-              >
-                <.incident_delivery_summary
-                  incident={incident}
-                  prefix="alert-incident-card"
-                />
-              </div>
-              <p
-                id={"alert-incident-card-#{incident.id}-last-seen"}
-                class="font-mono text-xs text-base-content/55"
-              >
-                Last seen {format_datetime(incident.last_seen_at)}
-              </p>
-              <.incident_action_controls
-                incident={incident}
-                prefix="alert-incident-card"
-              />
-            </div>
-          </article>
         </div>
       </AdminComponents.admin_surface>
     </div>
@@ -310,36 +239,32 @@ defmodule CodexPoolerWeb.Admin.AlertsPageComponents.Incidents do
     <div
       id={"#{@prefix}-#{@incident.id}-impacted-pools"}
       data-role="incident-impacted-pools"
-      class="grid gap-1"
+      class="contents"
     >
-      <p
+      <span
         :if={@incident.impacted_pools == []}
         id={"#{@prefix}-#{@incident.id}-no-visible-impacted-pools"}
         data-role="incident-no-visible-impacted-pools"
-        class="text-xs text-base-content/55"
+        class="text-[11px] text-base-content/55"
       >
         No visible impacted Pools
-      </p>
-      <ul :if={@incident.impacted_pools != []} class="grid gap-1">
-        <li
-          :for={pool <- @incident.impacted_pools}
-          id={"#{@prefix}-#{@incident.id}-impacted-pool-#{pool.id}"}
-          data-role="incident-impacted-pool"
-          class="grid min-w-0 gap-0.5"
-        >
-          <span data-role="incident-impacted-pool-name" class="truncate font-medium text-base-content">
-            {pool.name}
-          </span>
-        </li>
-      </ul>
-      <p
+      </span>
+      <span
+        :for={pool <- @incident.impacted_pools}
+        id={"#{@prefix}-#{@incident.id}-impacted-pool-#{pool.id}"}
+        data-role="incident-impacted-pool"
+        class="inline-flex h-4.5 max-w-40 items-center rounded-full border border-base-300 px-2 text-[10px] font-medium leading-none text-base-content/70"
+      >
+        <span data-role="incident-impacted-pool-name" class="truncate">{pool.name}</span>
+      </span>
+      <span
         :if={@incident.hidden_impacted_pool_count > 0}
         id={"#{@prefix}-#{@incident.id}-hidden-pool-count"}
         data-role="incident-hidden-pool-count"
-        class="text-xs font-medium text-warning"
+        class="text-[11px] font-medium text-warning"
       >
         {hidden_pool_count_label(@incident.hidden_impacted_pool_count)}
-      </p>
+      </span>
     </div>
     """
   end
@@ -349,7 +274,7 @@ defmodule CodexPoolerWeb.Admin.AlertsPageComponents.Incidents do
 
   def incident_action_controls(assigns) do
     ~H"""
-    <div id={"#{@prefix}-#{@incident.id}-actions"} class="flex flex-wrap justify-end gap-2">
+    <div id={"#{@prefix}-#{@incident.id}-actions"} class="flex flex-wrap justify-end gap-2 lg:flex-nowrap">
       <AdminComponents.action_button
         :if={@incident.state == AlertIncident.open_state()}
         id={incident_action_id(@prefix, @incident.id, "acknowledge")}
@@ -383,23 +308,27 @@ defmodule CodexPoolerWeb.Admin.AlertsPageComponents.Incidents do
 
   def incident_delivery_summary(assigns) do
     ~H"""
-    <div class="grid gap-2">
-      <p id={"#{@prefix}-#{@incident.id}-delivery-label"} data-role="incident-delivery-label">
+    <div class="grid gap-1.5">
+      <p
+        id={"#{@prefix}-#{@incident.id}-delivery-label"}
+        data-role="incident-delivery-label"
+        class={[@incident.delivery_summary.attempts == [] && "text-base-content/50"]}
+      >
         {@incident.delivery_summary.label}
       </p>
       <ul
         :if={@incident.delivery_summary.attempts != []}
         id={"#{@prefix}-#{@incident.id}-delivery-attempts"}
         data-role="incident-delivery-attempts"
-        class="grid gap-2"
+        class="grid gap-1.5"
       >
         <li
           :for={attempt <- @incident.delivery_summary.attempts}
           id={"#{@prefix}-#{@incident.id}-delivery-attempt-#{attempt.id}"}
           data-role="incident-delivery-attempt"
-          class="rounded-box border border-base-300 bg-base-200/60 p-2"
+          class="grid gap-0.5"
         >
-          <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="flex flex-wrap items-center gap-1.5">
             <span
               data-role="incident-delivery-attempt-channel"
               class="font-medium text-base-content/80"
@@ -408,7 +337,7 @@ defmodule CodexPoolerWeb.Admin.AlertsPageComponents.Incidents do
             </span>
             <span
               data-role="incident-delivery-attempt-status"
-              class={AdminBadges.status_chip_class(attempt.status)}
+              class={[incident_chip_base(), AdminBadges.status_chip_class(attempt.status)]}
             >
               {attempt.status_label}
             </span>
@@ -416,21 +345,28 @@ defmodule CodexPoolerWeb.Admin.AlertsPageComponents.Incidents do
           <p
             id={"#{@prefix}-#{@incident.id}-delivery-attempt-#{attempt.id}-meta"}
             data-role="incident-delivery-attempt-meta"
-            class="mt-1 font-mono text-[0.68rem] text-base-content/55"
+            class="text-[11px] leading-4 tabular-nums text-base-content/55"
           >
             Delivery attempt {attempt.attempt_number} · {format_datetime(attempt.attempted_at || attempt.completed_at)}
           </p>
-          <dl
-            :if={attempt.details != []}
-            id={"#{@prefix}-#{@incident.id}-delivery-attempt-#{attempt.id}-details"}
-            data-role="incident-delivery-attempt-details"
-            class="mt-2 grid gap-1 text-[0.68rem]"
-          >
-            <div :for={detail <- attempt.details} class="grid grid-cols-[7rem_minmax(0,1fr)] gap-2">
-              <dt class="text-base-content/45">{detail.label}</dt>
-              <dd class="min-w-0 break-words font-mono text-base-content/65">{detail.value}</dd>
-            </div>
-          </dl>
+          <details :if={attempt.details != []} class="text-[11px] leading-4 text-base-content/55">
+            <summary class="w-fit cursor-pointer select-none text-base-content/60 hover:text-base-content">
+              Details
+            </summary>
+            <dl
+              id={"#{@prefix}-#{@incident.id}-delivery-attempt-#{attempt.id}-details"}
+              data-role="incident-delivery-attempt-details"
+              class="mt-1 grid gap-0.5"
+            >
+              <div
+                :for={detail <- attempt.details}
+                class="grid grid-cols-[6rem_minmax(0,1fr)] gap-2"
+              >
+                <dt class="text-base-content/45">{detail.label}</dt>
+                <dd class="min-w-0 break-words text-base-content/70">{detail.value}</dd>
+              </div>
+            </dl>
+          </details>
         </li>
       </ul>
     </div>
@@ -519,6 +455,19 @@ defmodule CodexPoolerWeb.Admin.AlertsPageComponents.Incidents do
   defp incident_filter_icon_class(_option), do: "text-base-content/60"
 
   def severity_chip_class(severity), do: AdminBadges.alert_severity_chip_class(severity)
+
+  defp incident_chip_base,
+    do: "inline-flex h-4.5 items-center gap-1 whitespace-nowrap rounded-full px-2 text-[10px] font-semibold uppercase leading-none tracking-[0.04em]"
+
+  defp state_icon("open"), do: "hero-bell-alert"
+  defp state_icon("acknowledged"), do: "hero-hand-raised"
+  defp state_icon("resolved"), do: "hero-check-circle"
+  defp state_icon(_state), do: "hero-question-mark-circle"
+
+  defp severity_icon("critical"), do: "hero-exclamation-circle"
+  defp severity_icon("warning"), do: "hero-exclamation-triangle"
+  defp severity_icon("info"), do: "hero-information-circle"
+  defp severity_icon(_severity), do: "hero-minus-circle"
 
   def format_datetime(nil), do: "not recorded"
 

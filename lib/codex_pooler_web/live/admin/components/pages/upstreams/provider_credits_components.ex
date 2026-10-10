@@ -223,7 +223,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.ProviderCreditsComponents 
   @spec assign_observed_percent(map()) :: map()
   defp assign_observed_percent(%{summary: %{balance_state: :finite, observed_baseline_label: baseline, observed_percent: %Decimal{coef: coefficient} = percent}} = assigns)
        when is_binary(baseline) and baseline != "" and is_integer(coefficient) do
-    value = percent |> Decimal.round(3, :down) |> Decimal.to_string(:normal)
+    places = if Decimal.eq?(percent, 0) or Decimal.eq?(percent, 100), do: 0, else: 1
+    value = percent |> Decimal.round(places, :down) |> Decimal.to_string(:normal)
 
     assigns
     |> assign(:percent_value, value)

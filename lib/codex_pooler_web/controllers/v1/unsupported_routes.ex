@@ -7,6 +7,14 @@ defmodule CodexPoolerWeb.V1.UnsupportedRoutes do
     %{
       method: "POST",
       router_method: :post,
+      router_path: "/decisions",
+      action: :unsupported_post,
+      path_info: ["v1", "decisions"],
+      sample_path: "/v1/decisions"
+    },
+    %{
+      method: "POST",
+      router_method: :post,
       router_path: "/images/variations",
       action: :unsupported_post,
       path_info: ["v1", "images", "variations"],

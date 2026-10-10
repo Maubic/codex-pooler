@@ -1,9 +1,72 @@
 defmodule CodexPooler.Quotas.CodexParsersAdditionalIdentityTest do
   use ExUnit.Case, async: true
 
+  alias CodexPooler.Quotas.{CapacityFacts, WindowClassifier}
   alias CodexPooler.Quotas.Evidence.CodexParsers
 
   @observed_at ~U[2026-08-25 10:00:00Z]
+
+  for slot <- ["primary", "secondary"],
+      {label, duration} <- [{"missing", :missing}, {"null", nil}, {"text", "bad"}, {"zero", 0}, {"negative", -1}, {"fractional", 18_000.5}, {"numeric string", "18000"}, {"maximum plus one", 31_536_001}, {"oversized", 9_223_372_036_854_775_808}] do
+    test "legacy #{slot} #{label} duration cannot create quota evidence" do
+      assert_invalid_legacy_duration(unquote(slot), unquote(duration))
+    end
+  end
+
+  for {slot, duration, kind, minutes} <- [
+        {"primary", 18_000, "primary", 300},
+        {"secondary", 604_800, "secondary", 10_080},
+        {"primary", 604_800, "secondary", 10_080},
+        {"primary", 1, "primary", 1},
+        {"primary", 61, "primary", 2},
+        {"primary", 31_536_000, "primary", 525_600}
+      ] do
+    test "legacy #{slot} explicit #{duration} seconds preserves its duration" do
+      payload = legacy_duration_payload(unquote(slot), unquote(duration))
+      assert {:ok, %{windows: [], account_availability: nil}} = CodexParsers.parse_codex_usage_result(payload, @observed_at)
+      assert [window] = CodexParsers.legacy_usage_windows_for_strict_result(payload, @observed_at)
+      assert {window.window_kind, window.window_minutes} == {unquote(kind), unquote(minutes)}
+      assert window.metadata["limit_window_seconds"] == unquote(duration)
+      assert window.reset_at == DateTime.add(@observed_at, 900)
+    end
+  end
+
+  test "legacy missing duration drops only the invalid window and additional meter" do
+    payload = legacy_duration_payload("primary", 18_000)
+    malformed = legacy_duration_payload("secondary", :missing)["rate_limit"]["secondary_window"]
+
+    payload =
+      payload
+      |> put_in(["rate_limit", "secondary_window"], malformed)
+      |> Map.put("additional_rate_limits", [%{"limit_name" => "sample-model", "metered_feature" => "sample_meter", "rate_limit" => %{"secondary_window" => malformed}}])
+
+    assert {:ok, [window]} = CodexParsers.parse_codex_usage_payload(payload, @observed_at)
+    assert {window.quota_key, window.window_kind, window.window_minutes} == {"account", "primary", 300}
+    refute WindowClassifier.saved_reset_window?(window)
+  end
+
+  test "plan-bearing incomplete strict receipts do not borrow legacy duration evidence" do
+    payload = Map.put(legacy_duration_payload("primary", 18_000), "plan_type", "sample_plan")
+    assert {:ok, %{windows: [], account_availability: availability}} = CodexParsers.parse_codex_usage_result(payload, @observed_at)
+    assert availability.basis == :conflict
+    assert CodexParsers.legacy_usage_windows_for_strict_result(payload, @observed_at) == []
+  end
+
+  defp assert_invalid_legacy_duration(slot, duration) do
+    payload = legacy_duration_payload(slot, duration)
+    assert {:ok, strict} = CodexParsers.parse_codex_usage_result(payload, @observed_at)
+    assert strict.windows == []
+    assert strict.account_availability == nil
+    refute CapacityFacts.authority_observed?(strict.capacity_facts)
+    assert CodexParsers.legacy_usage_windows_for_strict_result(payload, @observed_at) == []
+    assert {:error, %{code: :upstream_quota_unusable}} = CodexParsers.parse_codex_usage_payload(payload, @observed_at)
+  end
+
+  defp legacy_duration_payload(slot, duration) do
+    window = %{"used_percent" => 25, "reset_at" => @observed_at |> DateTime.add(900) |> DateTime.to_unix()}
+    window = if duration == :missing, do: window, else: Map.put(window, "limit_window_seconds", duration)
+    %{"rate_limit" => %{"#{slot}_window" => window}}
+  end
 
   test "windows-only compatibility accepts legacy selected windows while strict results reject them" do
     legacy_payload = %{

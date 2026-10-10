@@ -16,9 +16,9 @@ Use this page when you need to answer:
 
 Only instance owners can manage operators. Instance admins work inside their assigned Pool scope and do not manage local operator accounts.
 
-![Operators page overview](/operators/operators/operators-overview.png)
+[![Operators page overview](/operators/operators/operators-overview.png)](/operators/operators/operators-overview.png)
 
-The screenshots in this guide redact live operator identity values. The production UI shows authorized owners operator emails and display names, but public docs should not publish them.
+The screenshots in this guide use synthetic example operators. The production UI shows authorized owners the emails and display names of their own operators.
 
 ## Filters
 
@@ -43,29 +43,25 @@ The top filters narrow the table.
   </tbody>
 </table>
 
-## Operator Table
+## Operator Cards
 
-The table shows local account state.
+Each operator appears as a card that shows local account state.
 
 <table>
   <thead>
     <tr>
-      <th>Column</th>
+      <th>Card area</th>
       <th>Meaning</th>
     </tr>
   </thead>
   <tbody>
     <tr>
-      <td>Operator</td>
-      <td>Display name, email, and avatar metadata.</td>
-    </tr>
-    <tr>
-      <td>Status</td>
-      <td>Active or disabled lifecycle state.</td>
+      <td>Header</td>
+      <td>Avatar, display name, email, and role badge. A `You` marker identifies your own account. The dotted menu holds the edit, deactivate/reactivate, and password reset actions.</td>
     </tr>
     <tr>
       <td>TOTP</td>
-      <td>Whether two-factor authentication is active for the account.</td>
+      <td>Whether two-factor authentication is active for the account (`Enabled`) or still needs setup (`Not set up`).</td>
     </tr>
     <tr>
       <td>Password policy</td>
@@ -73,11 +69,19 @@ The table shows local account state.
     </tr>
     <tr>
       <td>Last login</td>
-      <td>Most recent recorded browser sign-in time.</td>
+      <td>Most recent recorded browser sign-in time, or `not yet`.</td>
     </tr>
     <tr>
-      <td>Actions</td>
-      <td>Dotted menu for edit, deactivate/reactivate, and password reset actions.</td>
+      <td>Joined</td>
+      <td>When the account was created.</td>
+    </tr>
+    <tr>
+      <td>Status</td>
+      <td>Active or disabled lifecycle state.</td>
+    </tr>
+    <tr>
+      <td>Pools</td>
+      <td>Number of Pools an instance admin is assigned to, or `All Pools` for an owner. Open it to see the Pool names.</td>
     </tr>
   </tbody>
 </table>
@@ -115,7 +119,7 @@ For a full side-by-side breakdown of what each role can do on every admin page, 
 
 Click `Create operator` to open the local account dialog.
 
-![Create operator dialog](/operators/operators/operators-create-dialog.png)
+[![Create operator dialog](/operators/operators/operators-create-dialog.png)](/operators/operators/operators-create-dialog.png)
 
 The dialog asks for:
 
@@ -132,7 +136,7 @@ The temporary password is shown only once after creation when it needs to be cop
 
 ## Action Menu
 
-Open the dotted menu on an operator row for lifecycle actions.
+Open the dotted menu on an operator card for lifecycle actions.
 
 ![Operator action menu](/operators/operators/operators-action-menu.png)
 

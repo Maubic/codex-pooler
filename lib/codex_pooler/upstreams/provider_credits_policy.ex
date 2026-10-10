@@ -84,7 +84,7 @@ defmodule CodexPooler.Upstreams.ProviderCreditsPolicy do
         evaluate_legacy(snapshot.allow_provider_credits, assessment)
 
       true ->
-        reasons = Enum.uniq(assessment.reason_codes ++ ["provider_credit_capacity_unverified"])
+        reasons = Enum.uniq(assessment.reason_codes ++ ["provider_credit_capacity_unverified", CapacityAssessment.credit_unavailability_reason(snapshot, context)])
         decision(assessment, false, :none, reasons, qualification)
     end
   end

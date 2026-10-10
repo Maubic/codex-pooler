@@ -128,8 +128,11 @@ if config_env() == :prod do
 
   config :codex_pooler, Oban, oban_runtime_config
 
+  totp_encryption_key = System.get_env("CODEX_POOLER_TOTP_ENCRYPTION_KEY")
+  CodexPooler.Accounts.MFA.validate_totp_encryption_key!(totp_encryption_key)
+
   config :codex_pooler, CodexPooler.Accounts,
-    totp_encryption_key: System.get_env("CODEX_POOLER_TOTP_ENCRYPTION_KEY"),
+    totp_encryption_key: totp_encryption_key,
     totp_key_version: System.get_env("CODEX_POOLER_TOTP_KEY_VERSION", "v1")
 
   upstream_secret_key = System.get_env("CODEX_POOLER_UPSTREAM_SECRET_KEY")
@@ -140,11 +143,10 @@ if config_env() == :prod do
     upstream_secret_key_version: System.get_env("CODEX_POOLER_UPSTREAM_SECRET_KEY_VERSION", "v1")
 
   secret_key_base =
-    System.get_env("SECRET_KEY_BASE") ||
-      raise """
-      environment variable SECRET_KEY_BASE is missing.
-      You can generate one by calling: mix phx.gen.secret
-      """
+    case System.get_env("SECRET_KEY_BASE") do
+      value when is_binary(value) and byte_size(value) >= 64 -> value
+      _invalid -> raise "SECRET_KEY_BASE must be at least 64 bytes"
+    end
 
   host = System.get_env("PHX_HOST") || "example.com"
 

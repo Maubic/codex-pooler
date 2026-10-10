@@ -233,6 +233,34 @@ defmodule CodexPooler.Gateway.Websocket.AdapterTest do
                 }}
     end
 
+    # provenance: the attempt metadata a native websocket turn records for the codeless frames observed in the
+    # findings#333 and findings#336 direct probes (the class is the code the text read as; the provider sent none)
+    test "a websocket refusal whose text read as a relayable code is rebuilt with that code, as the first answer relayed it" do
+      for {metadata, expected} <- [
+            {%{"rejection_message_class" => "invalid_value", "rejection_supported_values_state" => "present", "rejection_supported_values" => ["low", "high"]}, %{"code" => "invalid_value", "param" => nil, "message" => "upstream rejected the request (invalid_value); supported values: low, high"}},
+            {%{"rejection_message_class" => "invalid_value", "rejection_error_param" => "reasoning.effort", "rejection_supported_values_state" => "unparseable"}, %{"code" => "invalid_value", "param" => "reasoning.effort", "message" => "upstream rejected parameter reasoning.effort (invalid_value)"}},
+            {%{"rejection_message_class" => "invalid_type", "rejection_error_param" => "parallel_tool_calls"}, %{"code" => "invalid_type", "param" => "parallel_tool_calls", "message" => "upstream rejected parameter parallel_tool_calls (invalid_type)"}},
+            {%{"rejection_message_class" => "unsupported_parameter", "rejection_error_param" => "metadata"}, %{"code" => "unsupported_parameter", "param" => "metadata", "message" => "upstream rejected parameter metadata (unsupported_parameter)"}}
+          ] do
+        base = %{"rejection_upstream_status" => 400, "rejection_error_type" => "invalid_request_error"}
+
+        assert Adapter.recorded_final_refusal_error(Map.merge(base, metadata)) == {:ok, Map.put(expected, "type", "invalid_request_error")}, inspect(metadata)
+      end
+    end
+
+    test "the provider's own code wins over a recorded text class, and a class that is no relayable code adds none" do
+      base = %{"rejection_upstream_status" => 400, "rejection_error_type" => "invalid_request_error"}
+
+      assert {:ok, %{"code" => "unknown_parameter"}} =
+               Adapter.recorded_final_refusal_error(Map.merge(base, %{"rejection_error_code" => "unknown_parameter", "rejection_message_class" => "invalid_value"}))
+
+      for class <- ["unsupported_tool_type", "zz_unknown"] do
+        assert Adapter.recorded_final_refusal_error(Map.put(base, "rejection_message_class", class)) ==
+                 {:ok, %{"type" => "invalid_request_error", "code" => "invalid_request", "param" => nil, "message" => "upstream rejected the request (invalid_request)"}},
+               class
+      end
+    end
+
     test "a refusal the client retries, or one recorded without its status, is not replayed" do
       for metadata <- [
             %{"rejection_upstream_status" => 429, "rejection_error_type" => "invalid_request_error"},

@@ -24,7 +24,8 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
              measure: %{value: "90.0", unit: "%"},
              detail: "9 succeeded · 1 failed",
              minibar: 90.0,
-             trend: %{label: "not available", tone: :neutral, direction: :unavailable}
+             trend: %{label: "not available", tone: :neutral, direction: :unavailable},
+             grade: %{label: "Fair", tone: :warning}
            }
 
     assert model.overview.cache_rate.detail == "20 of 80 input tokens served from cache"
@@ -46,15 +47,15 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
 
     # Cards reuse the chart palette by rank so a model's tint matches its column:
     # top-5 get the model colors, the rest fold into the muted "Other" color.
-    other = "color-mix(in oklab, var(--color-base-content) 40%, transparent)"
+    other = "var(--admin-chart-other-models)"
 
     assert Enum.map(model.models, & &1.color) ==
              [
                "var(--color-primary)",
                "var(--color-info)",
                "var(--color-warning)",
-               "var(--color-accent)",
-               "var(--color-secondary)"
+               "var(--color-reset-bank)",
+               "var(--admin-chart-requests)"
              ] ++ List.duplicate(other, 7)
 
     chart = model.traffic.chart
@@ -101,7 +102,7 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
              "var(--color-primary)",
              "var(--color-info)",
              "var(--color-warning)",
-             "color-mix(in oklab, var(--color-base-content) 40%, transparent)",
+             "var(--admin-chart-other-models)",
              "var(--color-success)"
            ]
 
@@ -145,7 +146,7 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
     assert cost_series["data"] == Enum.map(fallback_rows, & &1.cost_usd)
     assert Enum.sum(Enum.map(fallback_rows, & &1.total)) == 130
 
-    assert length(model.outcomes) == 12
+    assert length(model.outcomes) == 200
     assert Enum.all?(model.outcomes, &(&1.status.data_status in ["ok", "warn", "err", "neutral"]))
 
     assert Enum.all?(
@@ -161,10 +162,13 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
     assert Enum.all?(
              model.outcomes,
              &(Map.keys(&1) |> Enum.sort() == [
+                 :client,
                  :code,
                  :cost,
+                 :effort,
                  :endpoint,
                  :model,
+                 :speed_level,
                  :status,
                  :timestamp,
                  :tokens
@@ -237,6 +241,42 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
     refute inspect(model) =~ "raw-outcome-metadata"
   end
 
+  test "rate cards are graded into tiers at their floors" do
+    success = fn succeeded, total ->
+      projection = complete_projection()
+      requests = %{total: total, succeeded: succeeded, failed: total - succeeded, in_progress: 0}
+      put_in(projection, [:totals, :requests], requests)
+    end
+
+    grade = fn projection -> Presentation.build(projection).overview.success_rate.grade end
+
+    assert grade.(success.(99, 100)) == %{label: "Excellent", tone: :success}
+    assert grade.(success.(98, 100)) == %{label: "Good", tone: :info}
+    assert grade.(success.(95, 100)) == %{label: "Good", tone: :info}
+    assert grade.(success.(94, 100)) == %{label: "Fair", tone: :warning}
+    assert grade.(success.(90, 100)) == %{label: "Fair", tone: :warning}
+    assert grade.(success.(89, 100)) == %{label: "Poor", tone: :error}
+
+    cache = fn cached ->
+      projection = complete_projection()
+      put_in(projection, [:totals, :tokens], %{input: 100, cached_input: cached, output: 40, reasoning: 0, total: 140})
+    end
+
+    cache_grade = fn projection -> Presentation.build(projection).overview.cache_rate.grade end
+
+    assert cache_grade.(cache.(80)) == %{label: "Excellent", tone: :success}
+    assert cache_grade.(cache.(50)) == %{label: "Good", tone: :info}
+    assert cache_grade.(cache.(25)) == %{label: "Fair", tone: :warning}
+    assert cache_grade.(cache.(24)) == %{label: "Low", tone: :neutral}
+  end
+
+  test "a rate with no figure has no grade" do
+    model = Presentation.build(zero_projection())
+
+    assert model.overview.success_rate.grade == nil
+    assert model.overview.cache_rate.grade == nil
+  end
+
   defp complete_projection do
     %{
       window: %{
@@ -278,7 +318,7 @@ defmodule CodexPoolerWeb.Observatory.PresentationTest do
         %{bucket_index: 1, label: "model-2", total_tokens: 10},
         %{bucket_index: 0, label: "model-3", total_tokens: 5}
       ],
-      outcomes: Enum.map(1..13, &outcome(&1))
+      outcomes: Enum.map(1..205, &outcome(&1))
     }
   end
 

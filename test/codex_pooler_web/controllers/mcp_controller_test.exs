@@ -838,7 +838,7 @@ defmodule CodexPoolerWeb.McpControllerTest do
   end
 
   describe "MCP bearer authentication" do
-    test "missing bearer token is rejected after valid protocol negotiation", %{conn: conn} do
+    test "missing bearer token is rejected before protocol negotiation", %{conn: conn} do
       conn =
         conn
         |> json_rpc_conn()
@@ -848,6 +848,7 @@ defmodule CodexPoolerWeb.McpControllerTest do
 
       assert response["error"]["code"] == -32_000
       assert response["error"]["message"] == "MCP bearer token is required"
+      assert match?(%Plug.Conn.Unfetched{}, conn.body_params)
     end
 
     test "invalid bearer token and Pool API keys do not authenticate MCP", %{conn: conn} do

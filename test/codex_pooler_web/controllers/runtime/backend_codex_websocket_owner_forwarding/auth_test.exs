@@ -393,18 +393,25 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.AuthTest d
 
       {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
       {:ok, state} = owner_socket(auth, "ws-owner-auth-failover-#{@mode}-#{refresh_status}", "owner-auth-failover-#{@mode}-#{refresh_status}")
+      socket_state_key = make_ref()
+      Process.put(socket_state_key, state)
 
       try do
         assert {:ok, owner_pid} = WebsocketOwnerSession.lookup(state.codex_session.id)
         assert {:ok, state} = CodexResponsesSocket.handle_in({websocket_payload(setup, "owner auth failover"), [opcode: :text]}, state)
+        Process.put(socket_state_key, state)
+        state = receive_native_response_steering_prepared!(state)
+        Process.put(socket_state_key, state)
 
         assert_receive {:fake_upstream_timeout_barrier, :before_headers, upstream_pid, ^release_ref}, @detection_timeout_ms
         if refresh_status == "noop", do: assert({:ok, _identity} = IdentityLifecycle.update_upstream_identity(setup.identity, %{status: "paused"}))
         send(upstream_pid, {:fake_upstream_release_timeout, release_ref})
 
         assert {:push, {:text, frame}, state} = receive_owner_socket_push(state)
+        Process.put(socket_state_key, state)
         assert CodexPooler.JSON.decode!(frame)["id"] == "resp_owner_auth_failover_#{refresh_status}"
-        assert {:ok, _state} = receive_socket_done(state)
+        assert {:ok, state} = receive_socket_done(state)
+        Process.put(socket_state_key, state)
         assert {:ok, ^owner_pid} = WebsocketOwnerSession.lookup(state.codex_session.id)
 
         assert [request] = request_logs(setup.pool.id)
@@ -423,7 +430,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.AuthTest d
         assert :ok = FakeUpstream.verify!(second_upstream)
         refute inspect({request.request_metadata, first_attempt.response_metadata}) =~ "refresh-token-owner-ws-failover-do-not-leak"
       after
-        CodexResponsesSocket.terminate(:closed, state)
+        CodexResponsesSocket.terminate(:closed, Process.delete(socket_state_key))
       end
     end
   end
@@ -468,14 +475,20 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.AuthTest d
       {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
       turn_state = "owner-auth-last-candidate-#{@mode}-#{refresh_status}"
       {:ok, state} = owner_socket(auth, "ws-#{turn_state}", turn_state)
+      socket_state_key = make_ref()
+      Process.put(socket_state_key, state)
 
       try do
         assert {:ok, state} = CodexResponsesSocket.handle_in({websocket_payload(setup, "owner auth last candidate"), [opcode: :text]}, state)
+        Process.put(socket_state_key, state)
+        state = receive_native_response_steering_prepared!(state)
+        Process.put(socket_state_key, state)
         assert_receive {:fake_upstream_timeout_barrier, :before_headers, upstream_pid, ^release_ref}, @detection_timeout_ms
         :ok = put_refresh_state!(setup.identity, @refresh)
         send(upstream_pid, {:fake_upstream_release_timeout, release_ref})
 
-        assert {_state, frames} = collect_native_turn_frames!(state)
+        assert {state, frames} = collect_native_turn_frames!(state)
+        Process.put(socket_state_key, state)
 
         assert %{
                  "type" => "error",
@@ -499,7 +512,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.AuthTest d
 
         assert :ok = FakeUpstream.verify!(upstream)
       after
-        CodexResponsesSocket.terminate(:closed, state)
+        CodexResponsesSocket.terminate(:closed, Process.delete(socket_state_key))
       end
     end
   end

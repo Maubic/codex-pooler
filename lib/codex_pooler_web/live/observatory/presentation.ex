@@ -3,6 +3,8 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
   Builds the bounded, holder-facing render model for the API Key Observatory.
   """
 
+  alias CodexPooler.Accounting.ClientIdentity
+  alias CodexPoolerWeb.Admin.RequestLogsDisplay
   alias CodexPoolerWeb.Observatory.Presentation.Safety
 
   @endpoint_classes ["responses", "chat_completions", "completions", "embeddings"]
@@ -28,7 +30,7 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
           map(get(p, :trends))
         ),
       models: models(get(p, :models), non_negative(get(tokens, :total))),
-      outcomes: outcomes(get(p, :outcomes)),
+      outcomes: build_outcomes(get(p, :outcomes)),
       traffic: traffic(get(p, :buckets), get(p, :model_buckets), get(p, :models), tokens)
     }
   end
@@ -63,14 +65,16 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
           success_detail,
           Safety.trend(get(trends, :success_rate), :percentage_points),
           if(cancelled > 0, do: success_detail, else: "not available")
-        ),
+        )
+        |> with_grade(:success),
       cache_rate:
         rate(
           cached,
           input,
           cache_detail(cached, input),
           Safety.trend(get(trends, :cache_rate), :percentage_points)
-        ),
+        )
+        |> with_grade(:cache),
       cost: %{
         settled: settled,
         estimated: estimated,
@@ -82,6 +86,25 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
         detail: request_detail(total)
       }
     }
+  end
+
+  # Qualitative tiers for the two rate cards. The cut-offs are generic reading
+  # aids, not service levels: a request log that fails one in ten is poor for
+  # anyone, while a low cache rate only says the prompts share little prefix.
+  @success_tiers [{99.0, "Excellent", :success}, {95.0, "Good", :info}, {90.0, "Fair", :warning}]
+  @cache_tiers [{80.0, "Excellent", :success}, {50.0, "Good", :info}, {25.0, "Fair", :warning}]
+
+  defp with_grade(%{percent: percent} = rate, kind), do: Map.put(rate, :grade, grade(kind, percent))
+
+  defp grade(_kind, nil), do: nil
+  defp grade(:success, percent), do: tier(percent, @success_tiers, {"Poor", :error})
+  defp grade(:cache, percent), do: tier(percent, @cache_tiers, {"Low", :neutral})
+
+  defp tier(percent, tiers, {label, tone}) do
+    case Enum.find(tiers, fn {floor, _label, _tone} -> percent >= floor end) do
+      {_floor, label, tone} -> %{label: label, tone: tone}
+      nil -> %{label: label, tone: tone}
+    end
   end
 
   defp request_detail(1), do: "1 request"
@@ -118,10 +141,10 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
     "var(--color-primary)",
     "var(--color-info)",
     "var(--color-warning)",
-    "var(--color-accent)",
-    "var(--color-secondary)"
+    "var(--color-reset-bank)",
+    "var(--admin-chart-requests)"
   ]
-  @chart_other_color "color-mix(in oklab, var(--color-base-content) 40%, transparent)"
+  @chart_other_color "var(--admin-chart-other-models)"
   @chart_cost_color "var(--color-success)"
   @max_chart_models 5
 
@@ -276,8 +299,8 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
         cost_label: money_amount(non_negative(get(row, :cost_micros))),
         bar_percent: model_bar_percent(share),
         # Same palette + rank order as the traffic chart columns, so a model's
-        # card tint matches its bar/line in the chart (top-5 colored, rest folded
-        # into the muted "Other" color).
+        # distribution bar matches its chart series (top-5 colored, rest folded
+        # into the "Other" color).
         color: Enum.at(@chart_model_colors, index, @chart_other_color),
         shine_delay: shine_delay(index)
       }
@@ -299,24 +322,67 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
   # banked-reset life bars in the upstream cockpit.
   defp shine_delay(index), do: Float.round(rem(index, 6) * 0.4, 2)
 
-  defp outcomes(value) when is_list(value), do: Enum.take(value, 12) |> Enum.map(&outcome/1)
-  defp outcomes(_value), do: []
+  @doc "Builds one bounded page of safe holder-facing outcomes."
+  @spec build_outcomes(term()) :: [map()]
+  def build_outcomes(value) when is_list(value), do: Enum.take(value, 200) |> Enum.map(&outcome/1)
+  def build_outcomes(_value), do: []
 
   defp outcome(value) do
     row = map(value)
     tokens = non_negative(get(row, :total_tokens))
     code = Safety.sanitize_code(get(row, :code))
+    cost = cost(get(row, :cost), ["settled", "estimated"])
 
     %{
+      client: ClientIdentity.from_kind(get(get(row, :client), :kind)),
       code: code,
-      cost: cost(get(row, :cost), ["settled", "estimated"]),
+      cost: cost,
+      effort: Safety.sanitize_text(get(row, :reasoning_effort), nil),
       endpoint: endpoint(get(row, :endpoint_class)),
       model: Safety.sanitize_text(get(row, :model), "Unknown model"),
+      speed_level: speed_level(row, cost),
       status: status(get(row, :status), code),
       timestamp: outcome_timestamp(get(row, :timestamp)),
-      tokens: %{total: tokens, label: token_label(tokens)}
+      tokens: tokens(row, tokens)
     }
   end
+
+  # The admin request log's speed rule, fed from the same recorded tiers: a
+  # priced request counts at the tier it was priced at, an unpriced one at the
+  # tier the pricing rule would use.
+  defp speed_level(row, cost) do
+    RequestLogsDisplay.speed_level(%{
+      cost: %{pricing_availability: if(cost.status == "settled", do: "priced", else: "unpriced")},
+      service_tier: get(row, :service_tier),
+      requested_service_tier: get(row, :requested_service_tier),
+      actual_service_tier: get(row, :actual_service_tier),
+      metadata: nil
+    })
+  end
+
+  defp tokens(row, total) do
+    input = get(row, :input_tokens)
+    cached = get(row, :cached_input_tokens)
+    output = get(row, :output_tokens)
+    base = %{total: total, label: outcome_token_label(total), cache_percentage_label: nil}
+
+    if valid_token_counts?([get(row, :total_tokens), input, cached, output]) and total > 0 and input + output == total and cached <= input do
+      %{base | cache_percentage_label: cache_percentage_label(cached, input)}
+    else
+      base
+    end
+  end
+
+  defp valid_token_counts?(counts), do: Enum.all?(counts, &(is_integer(&1) and &1 >= 0))
+
+  defp cache_percentage_label(0, input) when input > 0, do: "(0% cached)"
+
+  defp cache_percentage_label(cached, input) when input > 0 do
+    rate = Float.round(cached / input * 100, 1)
+    "(#{rate}% cached)"
+  end
+
+  defp cache_percentage_label(_cached, _input), do: nil
 
   # A client cancellation (`RequestOutcome`) is not a failure: it names no reason.
   defp status("client_cancelled", _code), do: status("client_cancelled")
@@ -376,11 +442,12 @@ defmodule CodexPoolerWeb.Observatory.Presentation do
   defp token_label(value) when value < 999_950_000, do: "#{Float.round(value / 1_000_000, 1)}M"
   defp token_label(value), do: "#{Float.round(value / 1_000_000_000, 1)}B"
 
+  defp outcome_token_label(value), do: value |> token_label() |> String.replace("K", "k")
+
   defp money_label(micros),
     do: :io_lib.format("$~.2f", [micros / 1_000_000]) |> IO.iodata_to_binary()
 
-  # Money without the currency glyph, so the model card can tint the amount but
-  # leave the "$" a neutral color to keep it legible.
+  # Money without the currency glyph, so the model row can mute the unit.
   defp money_amount(micros),
     do: :io_lib.format("~.2f", [micros / 1_000_000]) |> IO.iodata_to_binary()
 

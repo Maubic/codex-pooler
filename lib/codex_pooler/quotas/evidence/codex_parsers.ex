@@ -20,6 +20,9 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
   alias CodexPooler.Quotas.Evidence.Descriptors
 
   @window_kinds ~w(primary secondary)
+  @max_credit_balance 9_223_372_036_854_775_807
+  @max_legacy_window_seconds 31_536_000
+  @max_storable_window_seconds 2_147_483_647 * 60
 
   @type usage_result :: %{
           required(:windows) => [Evidence.t()],
@@ -289,7 +292,7 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
          "reset_at" => reset_at
        }) do
     is_integer(used_percent) and used_percent in 0..100 and
-      is_integer(limit_window_seconds) and limit_window_seconds > 0 and
+      is_integer(limit_window_seconds) and limit_window_seconds in 1..@max_storable_window_seconds and
       is_integer(reset_after_seconds) and reset_after_seconds >= 0 and
       is_integer(reset_at) and reset_at > 0
   end
@@ -536,7 +539,7 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
   defp usage_window_attrs(kind, %{} = window, credits, observed_at, descriptor, validation) do
     with true <- valid_window_for?(window, validation),
          {:ok, used_percent} <- finite_percent(window["used_percent"]) do
-      window_minutes = usage_window_minutes(kind, window)
+      window_minutes = usage_window_minutes(window)
       reset_at = usage_window_reset_at(window, observed_at)
 
       %{}
@@ -577,8 +580,12 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
 
   defp valid_window_for?(window, :strict), do: valid_usage_window?(window)
 
-  defp valid_window_for?(window, :legacy),
-    do: match?({:ok, _percent}, finite_percent(window["used_percent"]))
+  defp valid_window_for?(window, :legacy) do
+    seconds = window["limit_window_seconds"]
+
+    is_integer(seconds) and seconds in 1..@max_legacy_window_seconds and
+      match?({:ok, _percent}, finite_percent(window["used_percent"]))
+  end
 
   # Account windows treat an absolute reset as canonical even when the provider
   # includes a matching countdown. Model weekly windows deliberately keep the
@@ -637,13 +644,7 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
   defp canonical_meter_token(%Evidence{} = evidence),
     do: present_string(evidence.raw_metered_feature) || present_string(evidence.raw_limit_id)
 
-  defp usage_window_minutes(kind, window) do
-    case integer_or_nil(window["limit_window_seconds"]) do
-      seconds when is_integer(seconds) and seconds > 0 -> div(seconds + 59, 60)
-      _missing when kind == "secondary" -> 10_080
-      _missing -> 300
-    end
-  end
+  defp usage_window_minutes(%{"limit_window_seconds" => seconds}), do: div(seconds + 59, 60)
 
   defp weekly_window?(%{} = window), do: integer_or_nil(window["limit_window_seconds"]) == 604_800
   defp weekly_window?(_window), do: false
@@ -660,12 +661,12 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
   def codex_usage_credits(%{"balance" => balance}), do: codex_credit_balance(balance)
   def codex_usage_credits(_credits), do: nil
 
-  defp codex_credit_balance(balance) when is_integer(balance) and balance >= 0, do: balance
+  defp codex_credit_balance(balance) when is_integer(balance) and balance >= 0 and balance <= @max_credit_balance, do: balance
 
   defp codex_credit_balance(balance) when is_float(balance) do
     cond do
       balance == 0 -> 0
-      balance > 0 -> round(balance)
+      balance > 0 -> codex_credit_balance(round(balance))
       true -> nil
     end
   end
@@ -679,12 +680,11 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
 
       match?({_, ""}, Integer.parse(balance)) ->
         {value, ""} = Integer.parse(balance)
-        if value >= 0, do: value
+        codex_credit_balance(value)
 
       true ->
         case Float.parse(balance) do
-          {value, ""} when value == 0 -> 0
-          {value, ""} when value > 0 -> round(value)
+          {value, ""} -> codex_credit_balance(value)
           _invalid -> nil
         end
     end

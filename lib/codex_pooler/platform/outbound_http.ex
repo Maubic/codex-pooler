@@ -14,8 +14,8 @@ defmodule CodexPooler.Platform.OutboundHTTP do
   Every pooled outbound caller needs the bound, not only gateway traffic: the gateway
   (through `TransportEnvelope.req_timeout_options/1`), provider usage probes,
   token refresh, saved-reset redemption, model catalog discovery, the pricing
-  feed import, the OpenAI status feed, and alert webhooks. Presigned file
-  upload PUTs use the one-shot `PinnedUpload` adapter and close the connection
+  feed import and the OpenAI status feed. Alert webhooks and presigned file
+  upload PUTs use destination-pinned one-shot adapters and close the connection
   after each attempt. The less often a pooled caller runs, the longer its
   connection sits idle and the more likely an egress device has forgotten it.
 
@@ -50,6 +50,12 @@ defmodule CodexPooler.Platform.OutboundHTTP do
   `https_proxy` and uses CONNECT. Req starts one Finch instance per distinct
   `finch:` pool option tuple; the optional proxy and any caller-specific
   connect timeout therefore join the live idle bound in the pool key.
+
+  Allowed redirects use Req's status-specific method policy: 301 and 302
+  change POST to GET; 303 changes methods other than GET and HEAD to GET,
+  dropping the body, body options, and content headers when the method changes.
+  307 and 308 preserve the method and body. Presigned file uploads disable
+  redirects, so neither their signed destination nor their PUT method is rewritten.
 
   `pool_max_idle_time` stays unset, so no instance is ever stopped: stopping an
   idle per-origin pool can race a request that has just looked it up, and stale
@@ -203,7 +209,7 @@ defmodule CodexPooler.Platform.OutboundHTTP do
 
   # This one-shot adapter owns its pinned Mint connection and proxy selection;
   # Finch options and pool selection have no consumer on this path.
-  defp attach_proxy_selection(%Req.Request{adapter: CodexPooler.Gateway.Transports.PinnedUpload} = request), do: request
+  defp attach_proxy_selection(%Req.Request{adapter: adapter} = request) when adapter in [CodexPooler.Gateway.Transports.PinnedUpload, CodexPooler.Alerts.Delivery.WebhookTransport], do: request
 
   defp attach_proxy_selection(%Req.Request{} = request) do
     finch_options =

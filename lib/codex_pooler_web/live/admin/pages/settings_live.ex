@@ -183,6 +183,12 @@ defmodule CodexPoolerWeb.Admin.SettingsLive do
            |> assign(totp_enabled?: true, totp_setup: setup)
            |> put_flash(:info, "TOTP enabled. Save the setup details now.")}
 
+        {:error, :totp_already_enabled} ->
+          {:noreply,
+           socket
+           |> assign(totp_enabled?: true, totp_setup: nil)
+           |> put_flash(:info, "TOTP is already enabled")}
+
         {:error, _reason} ->
           {:noreply, put_flash(socket, :error, "TOTP setup failed")}
       end

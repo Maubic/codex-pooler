@@ -50,7 +50,8 @@ defmodule CodexPooler.Gateway.Payloads.InputShape do
         unsupported_input_file_error()
 
       true ->
-        searchable_value |> Map.values() |> Enum.find_value(&find_unsupported_media/1)
+        unsupported_tool_output_image(value) ||
+          searchable_value |> Map.values() |> Enum.find_value(&find_unsupported_media/1)
     end
   end
 
@@ -59,6 +60,29 @@ defmodule CodexPooler.Gateway.Payloads.InputShape do
   end
 
   defp find_unsupported_media(_value), do: nil
+
+  # Only direct typed content parts are images. Arbitrary tool JSON, nested
+  # objects and strings remain opaque even when they contain image-like keys.
+  defp unsupported_tool_output_image(%{"type" => type, "output" => output}) when type in ["function_call_output", "custom_tool_call_output"] and is_list(output) do
+    Enum.find_value(output, fn
+      %{"type" => "input_image", "image_url" => image_url} when is_binary(image_url) ->
+        if svg_data_url?(image_url), do: unsupported_input_image_error()
+
+      _part ->
+        nil
+    end)
+  end
+
+  defp unsupported_tool_output_image(_value), do: nil
+
+  defp svg_data_url?(image_url) do
+    image_url
+    |> String.trim()
+    |> String.split([";", ","], parts: 2)
+    |> hd()
+    |> String.downcase()
+    |> Kernel.==("data:image/svg+xml")
+  end
 
   defp unsupported_input_image_file_id?(%{"type" => "input_image", "file_id" => file_id})
        when is_binary(file_id),

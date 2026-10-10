@@ -334,7 +334,7 @@ defmodule CodexPooler.MCP.PrivacyMatrixTest do
           capacity_basis: :provider_credits,
           qualification: :unverified,
           routing_usable: false,
-          reason_codes: ["provider_credits_disabled", sentinel, "provider_credits_disabled"],
+          reason_codes: ["provider_credits_disabled", sentinel, "provider_credits_disabled", "provider_credit_window_mismatch"],
           scope: %{model: sentinel, transport: sentinel},
           raw_facts: sentinel,
           access_token: sentinel
@@ -343,7 +343,7 @@ defmodule CodexPooler.MCP.PrivacyMatrixTest do
 
       projected = PrivacyMatrix.project!(entity, source)
       assert projected.allow_provider_credits == false
-      assert projected.capacity_decision == %{capacity_basis: "provider_credits", qualification: "unverified", routing_usable: false, reason_codes: ["provider_credits_disabled"], scope: "account"}
+      assert projected.capacity_decision == %{capacity_basis: "provider_credits", qualification: "unverified", routing_usable: false, reason_codes: ["provider_credits_disabled", "provider_credit_window_mismatch"], scope: "account"}
       text_row = Map.update!(projected.capacity_decision, :reason_codes, &Enum.join(&1, ", "))
       text = ReadableText.detail("capacity", text_row, [{:capacity_basis, "basis"}, {:qualification, "qualification"}, {:scope, "scope"}, {:reason_codes, "reasons"}])
       assert text =~ "basis=provider_credits"

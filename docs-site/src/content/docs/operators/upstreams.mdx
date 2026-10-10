@@ -16,7 +16,7 @@ Use this page when you need to answer:
 
 The page is metadata-only after linking or import. It shows operator labels, workspace and plan badges, safe status labels, quota-window evidence, token counters, assignment counts, sanitized subject references when needed, and links to related logs. It does not show prompts, responses, files, websocket frames, bearer tokens, refresh tokens, provider cookies, OAuth provider payloads, raw OpenAI user subjects, or stored Codex `auth.json` contents.
 
-![Upstreams page overview](/operators/upstreams/upstreams-overview.png)
+[![Upstreams page overview](/operators/upstreams/upstreams-overview.png)](/operators/upstreams/upstreams-overview.png)
 
 ## What an Upstream Controls
 
@@ -37,11 +37,13 @@ Routing still happens at request time. A visible active upstream can be skipped 
 
 The page header exposes the account onboarding actions as separate buttons:
 
-1. `OAuth`, for linking a new upstream account through OpenAI authorization without handling `auth.json`
+[![Upstreams page header with the Link, Invite, and Import actions](/operators/upstreams/upstreams-page-actions-menu.png)](/operators/upstreams/upstreams-page-actions-menu.png)
+
+1. `Link`, for linking a new upstream account through OpenAI authorization without handling `auth.json`. The dialog asks for a Pool, then offers `via OAuth (browser)` or `via Device Code`
 2. `Invite`, for onboarding a person who will provide or operate an account through the browser UI
 3. `Import`, for adding an account from Codex CLI or Codex Desktop `auth.json` credentials
 
-Prefer `OAuth` for new operator-managed upstream accounts when browser authorization is practical. It stores resulting credential material through encrypted upstream secret storage and keeps the admin surface metadata-only.
+Prefer `Link` for new operator-managed upstream accounts when browser authorization is practical. It stores resulting credential material through encrypted upstream secret storage and keeps the admin surface metadata-only.
 
 Invite onboarding and the OAuth device-code fallback use OpenAI's Codex device-code authorization. This setup is only for those device-code paths; browser OAuth linking does not depend on it. Before using an invite or fallback flow, a personal ChatGPT account should have `Enable device code authorization for Codex` enabled in ChatGPT Settings > Security. Workspace-managed accounts may need a workspace admin to enable device-code login for Codex in workspace permissions. If OpenAI blocks device-code approval, the invite or fallback flow may remain pending but the upstream will not become ready.
 
@@ -49,9 +51,9 @@ The search box filters upstream cards by account label or safe metadata. The Poo
 
 ## Account Cards
 
-Each account appears as a card. The header shows the operator label, workspace badge, plan badge, and dotted action menu. Clicking the account label opens the upstream cockpit.
+Each account appears as a card. The header shows the operator label with a workspace chip when the account has a workspace label, the access-token expiry underneath, the plan badge (for example `Pro 200`), and the dotted action menu. Clicking the account label opens the upstream cockpit.
 
-The card body is split into status, token burn, quota windows, and footer metrics.
+The card body is split into status, token burn, quota windows, provider credits, banked resets, and footer metrics.
 
 <table>
   <thead>
@@ -78,21 +80,25 @@ The card body is split into status, token burn, quota windows, and footer metric
       <td>Compact lifecycle-aware runtime routing readiness summary. It separates identity lifecycle, Pool assignment, credential freshness, and quota evidence so operators can see why this account is likely eligible or blocked before request-specific checks.</td>
     </tr>
     <tr>
-      <td>Saved resets</td>
-      <td>Compact reported saved-reset count badge, plus a short status row for active or unresolved recovery. The badge appears only when at least one saved reset is available; an unresolved status can remain after the count reaches zero. <code>View status</code> opens the saved-reset dialog. The card's <code>Saved resets</code> dropdown action also opens that dialog for policy editing and the latest account result.</td>
+      <td>Credits</td>
+      <td>Provider-credit row: the credit balance as a percentage of its observed baseline, the local policy (<code>Enabled</code> or <code>Disabled</code>), and the balance. It appears only for a positive or unlimited balance. Opening the row opens the provider-credit policy dialog. See <a href="#use-provider-credits">Use provider credits</a>.</td>
+    </tr>
+    <tr>
+      <td>Banked resets</td>
+      <td>Five-segment meter of the reported saved resets with an <code>x3</code>-style count, the auto-redeem state (<code>Auto redeem active</code> or <code>inactive</code>), and the next expiry. The meter appears only when at least one saved reset is available; a short status row for active or unresolved recovery can remain after the count reaches zero. <code>View status</code> opens the saved-reset dialog. Opening the meter or the card's <code>Saved resets</code> dropdown action also opens that dialog for policy editing and the latest account result.</td>
     </tr>
     <tr>
       <td>Pools</td>
       <td>How many Pools currently assign this upstream account.</td>
     </tr>
     <tr>
-      <td>5m tokens</td>
+      <td>Tokens/5m</td>
       <td>Recent token volume observed for this upstream over the short rolling window.</td>
     </tr>
   </tbody>
 </table>
 
-The included account percentage follows the provider's reported usage window and remains separate from the credit balance, including when included quota reaches 100% used. The provider-credit summary retains the current observed balance and, only when a finite observed baseline exists, a distinct credit-balance percentage truncated to three decimal places with a decimal point, such as `99.976%`. Its progress value and accessible label use the same precision. That retained baseline is not a provider-reported original allowance, total capacity or spending permission; the striped credit meter is an observation, not evidence of active debit. Disabling credit admission keeps the balance visible. The Credits row is hidden for explicit zero and for unknown/unreported balances; these remain distinct facts in the policy dialog. Finite positive balances and explicit Unlimited display independently of plan labels, and unlimited or windowless balances without a baseline receive no fabricated `100%`. Provider credit units are not currency and must not be compared directly with the monetary balance shown in ChatGPT billing.
+The included account percentage follows the provider's reported usage window and remains separate from the credit balance, including when included quota reaches 100% used. The provider-credit summary retains the current observed balance and, only when a finite observed baseline exists, a distinct credit-balance percentage truncated to one decimal place with a decimal point, such as `99.9%` (exactly 0 and 100 show as `0%` and `100%`). Its progress value and accessible label use the same precision. That retained baseline is not a provider-reported original allowance, total capacity or spending permission; the striped credit meter is an observation, not evidence of active debit. Disabling credit admission keeps the balance visible. The Credits row is hidden for explicit zero and for unknown/unreported balances; these remain distinct facts in the policy dialog. Finite positive balances and explicit Unlimited display independently of plan labels, and unlimited or windowless balances without a baseline receive no fabricated `100%`. Provider credit units are not currency and must not be compared directly with the monetary balance shown in ChatGPT billing.
 
 Fresh reset-bearing windows remain the normal authority for quota readiness. When the provider reports no account windows, independently attested ordinary provider permission can still serve requests without inventing a quota window or identifying the billing source. A standalone provider-credit summary instead shows the observed finite balance, **Unlimited**, or **Balance unavailable**, separately from local policy and request availability; no missing denominator, percentage, duration or reset time is invented.
 
@@ -121,7 +127,7 @@ An accepted banked reset and confirmed included restoration are different events
 
 ## Saved resets
 
-Account cards show a compact saved-reset count badge only when sanitized usage observations report at least one available reset. Common cockpit labels are `N saved resets`, `No saved resets`, `Saved resets unavailable`, and `Saved resets not reported`. When sanitized saved-reset observations include expiration metadata, the badge title, cockpit summary, and saved-reset dialog also show the next expiration time. The count badge and the card dropdown action `Saved resets` open the saved-reset dialog.
+Account cards show the banked-resets meter only when sanitized usage observations report at least one available reset. Common cockpit labels are `N saved resets`, `No saved resets`, `Saved resets unavailable`, and `Saved resets not reported`. When sanitized saved-reset observations include expiration metadata, the badge title, cockpit summary, and saved-reset dialog also show the next expiration time. The meter and the card dropdown action `Saved resets` open the saved-reset dialog.
 
 Click a future expiration countdown in the saved-reset dialog or upstream cockpit, or choose **Download reset calendar** from the cockpit's **Actions**, to download an iCalendar (`.ics`) file containing all reported upcoming banked-reset expirations for that upstream. Each calendar event includes the upstream label, the exact expiration time and a link back to the account. Times are exported in UTC; your calendar displays them in its selected timezone, including daylight-saving changes. Expired and unknown dates are not exported. The file is a snapshot: importing it does not subscribe to updates, and redeeming a reset later does not remove its imported event. The export uses your existing operator access and does not require a Google Calendar or other calendar-provider integration.
 
@@ -168,6 +174,8 @@ Auto redemption is a per-upstream opt-in policy available from the account-card 
 For already-authorized blocked-request recovery, Codex Pooler prefers an eligible account whose saved reset has the earliest reliable future expiration. Priority requires fresh, authoritative and complete expiration evidence for that account. Equal deadlines and accounts with unknown or unreliable expiration evidence retain their original relative order. Expiration priority is considered only after the existing eligibility checks; it creates no new permission to spend a reset. Included capacity and independently valid ordinary provider permission remain first, enabled usable provider credits next, and banked-reset recovery last. This preference selects an account, not the globally earliest physical credit, and does not change manual account selection, threshold recovery or scheduled rescue.
 
 Automatic recovery coordinates only the compatible accounts considered together for that request; separate partially overlapping groups are not treated as one global lock. After any applied redemption, automatic work observes a fixed thirty-minute protection period and waits for definitive evidence before another automatic consume. The system may also preserve a successful near-limit route when another compatible account has fresh usable capacity. Stale, incomplete, incompatible, disabled, or non-routeable evidence never creates that veto. Hard quota exhaustion keeps its original behavior, and only continuations whose pin is durably verifiable — a resolved prior-response anchor or file affinity — bypass the veto; a websocket-bound continuation or a newly started session on its first turn keeps its route but does not bypass it. Manual and scheduled work can record recovery state, while routine automated recovery remains centrally visible in Jobs.
+
+Request-driven automatic redemption spends at most one saved reset per request, whichever trigger redeems it. Once a request has redeemed an account's saved reset, with its quota verification pending or the reset confirmed, none of its later checks of its accounts redeems another. That includes a retry over the accounts the request has left and the check of accounts it first left out. A request that no account can then serve is answered with the retryable `503`, which carries no reset time, rather than the Pool's usage limit, because the redeemed account's return is not known.
 
 Two circuit fences keep automatic recovery conservative without changing circuit policy. The existing circuit-eligible capacity fence applies only to threshold-pressure recovery: a compatible sibling that is still circuit-eligible and has fresh usable quota preserves the successful route and prevents a reset. The transient-circuit fence is separate. It applies to both gateway-auto triggers — blocked long-window exhaustion and threshold pressure — when a compatible sibling was excluded only by circuit state and still has usable quota. Both triggers wait for one attempt-owned failed half-open recovery before a saved reset can proceed; an open circuit with a future recovery boundary, a pending half-open probe, or a circuit that has closed during revalidation keeps the reset unspent.
 
@@ -238,7 +246,7 @@ Common upstream states are:
 
 Readiness is intentionally conservative. Missing, stale, unknown, malformed, credential-mismatched, or exhausted quota evidence can keep an account out of routing even when the card still exists and the account is assigned to a Pool. A no-window account is routeable only through the narrow provider-attested state described above.
 
-When every observation of a quota window has gone stale, for example because usage reads keep failing, the card shows the last value reported for the cycle that is still running. An observation whose reset time has already passed describes a cycle that has ended, so it never sets the displayed value while another observation of the same window reports a reset in the future. An observation whose reset time passed more than 30 days ago is ignored by the card, readiness, alerts and routing, and the scheduled runtime cleanup deletes it, so a window the provider no longer reports eventually leaves the card instead of showing its last value indefinitely. Readiness, alerts and routing stop reading a model or additional-limit window sooner when the provider stops reporting it: once its reset time has passed and the account's usage reads have kept arriving for a full freshness window after it was last reported, it no longer keeps the account off the model, while the observation itself is kept, and reported as above, until the cleanup deletes it. A model or additional-limit window that only the account's responses report, and that the usage read does not list, can be refreshed only by traffic on that account: once it is older than the freshness window and its last value was below the limit, routing no longer waits for it, and the provider's refusal decides when it has run out since; a window last seen at its limit keeps blocking until its reset. Whether the cleanup has already run makes no difference to what Codex Pooler shows or routes. Saved-reset automatic-confirmation state keeps an observation only while that state still refers to a reset less than 30 days old.
+When every observation of a quota window has gone stale, for example because usage reads keep failing, the card shows the last value reported for the cycle that is still running. An observation whose reset time has already passed describes a cycle that has ended, so it never sets the displayed value while another observation of the same window reports a reset in the future. An observation whose reset time passed more than 30 days ago is ignored by the card, readiness, alerts and routing, and the scheduled runtime cleanup deletes it, so a window the provider stops reporting eventually leaves the card instead of showing its last value indefinitely. Readiness, alerts and routing stop reading a model or additional-limit window sooner when the provider stops reporting it: once its reset time has passed and the account's usage reads have kept arriving for a full freshness window after it was last reported, it stops keeping the account off the model, while the observation itself is kept, and reported as above, until the cleanup deletes it. A model or additional-limit window that only the account's responses report, and that the usage read does not list, can be refreshed only by traffic on that account: once it is older than the freshness window and its last value was below the limit, routing stops waiting for it, and the provider's refusal decides when it has run out since; a window last seen at its limit keeps blocking until its reset. Whether the cleanup has already run makes no difference to what Codex Pooler shows or routes. Saved-reset automatic-confirmation state keeps an observation only while that state still refers to a reset less than 30 days old.
 
 ### Provider-Requested Polling Pauses
 
@@ -265,7 +273,7 @@ An account whose usage reads are paused can look like an account whose evidence 
 
 Click `Import` to open the upstream credentials dialog when an existing Codex `auth.json` is the right source of account credentials.
 
-![Import auth.json dialog](/operators/upstreams/upstreams-import-auth-json-dialog.png)
+[![Import auth.json dialog](/operators/upstreams/upstreams-import-auth-json-dialog.png)](/operators/upstreams/upstreams-import-auth-json-dialog.png)
 
 The import dialog asks for:
 
@@ -284,7 +292,7 @@ The dialog footer keeps docs on the left and the submit actions on the right. `C
 ## OpenAI OAuth Upstream Linking
 
 OpenAI OAuth upstream linking is an authenticated admin workflow. Use
-`OAuth` on `/admin/upstreams` to link a new OpenAI upstream account to a selected Pool. Use
+`Link` on `/admin/upstreams` to link a new OpenAI upstream account to a selected Pool. Use
 `/admin/upstreams/:id` to relink or reconnect the exact upstream identity shown
 in the cockpit. Relink checks the returned account and workspace claims against
 the target identity before replacing encrypted credential material. When OpenAI
@@ -307,7 +315,7 @@ use a separate browser profile, before completing the link or relink.
 The browser manual callback workflow is:
 
 1. open the OAuth link or relink dialog
-2. choose `Browser`
+2. choose `via OAuth (browser)`
 3. open the generated OpenAI authorization URL
 4. complete OpenAI authorization in the browser
 5. paste the resulting returned browser URL back into the admin dialog
@@ -427,7 +435,7 @@ Safe OAuth troubleshooting codes:
 
 Open the dotted menu on an upstream card for account actions.
 
-![Upstream card action menu](/operators/upstreams/upstreams-card-action-menu.png)
+[![Upstream card action menu](/operators/upstreams/upstreams-card-action-menu.png)](/operators/upstreams/upstreams-card-action-menu.png)
 
 The current actions are:
 
@@ -456,6 +464,14 @@ The current actions are:
       <td>Requests a token-refresh job for the account. Use this when freshness evidence is stale or recovery instructions ask for it.</td>
     </tr>
     <tr>
+      <td>Provider credits</td>
+      <td>Opens the provider-credit policy dialog, where the <a href="#use-provider-credits">Use provider credits</a> admission policy is saved for the upstream.</td>
+    </tr>
+    <tr>
+      <td>Saved resets</td>
+      <td>Opens the saved-reset dialog with the bank inventory, auto-redemption policy, and the latest account result.</td>
+    </tr>
+    <tr>
       <td>Replace auth.json</td>
       <td>Appears for recovery states that can accept replacement account credentials.</td>
     </tr>
@@ -472,13 +488,13 @@ The current actions are:
 
 Some actions are disabled or hidden depending on the account state. For example, `Reactivate` is not useful while an account is already active, and recovery actions only appear when the account is in a recovery-eligible state. A disabled action states why in its tooltip; on a narrow screen, where there is no hover, the reason also shows as a line under the action.
 
-Accounts deleted by older releases appear under `Any status` and `Deleted` so an operator can remove them using the same `Delete` action. They remain unavailable for routing and recovery actions. Requests already in progress finish before physical removal; large histories are cleaned up in the background. The account shows `Deletion in progress` until it disappears, or `Deletion failed - retry Delete` if cleanup needs another attempt. Permanent deletion cannot be undone.
+Accounts that are marked deleted without a permanent removal request appear under `Any status` and `Deleted`, so an operator can remove them using the same `Delete` action. They remain unavailable for routing and recovery actions. Requests already in progress finish before physical removal; large histories are cleaned up in the background. The account shows `Deletion in progress` until it disappears, or `Deletion failed - retry Delete` if cleanup needs another attempt. Permanent deletion cannot be undone.
 
 ## Rename Dialog
 
 `Rename` opens a small account dialog.
 
-![Rename upstream account dialog](/operators/upstreams/upstreams-rename-dialog.png)
+[![Rename upstream account dialog](/operators/upstreams/upstreams-rename-dialog.png)](/operators/upstreams/upstreams-rename-dialog.png)
 
 The label is the operator-facing name used in cards and related metadata. It is not the provider account ID, not a Pool API key, and not secret material. Use labels that make operations clear without embedding private customer or credential details.
 
@@ -486,17 +502,28 @@ The label is the operator-facing name used in cards and related metadata. It is 
 
 Clicking an account label opens the upstream cockpit.
 
-![Upstream cockpit overview](/operators/upstreams/upstreams-cockpit-overview.png)
+[![Upstream cockpit overview](/operators/upstreams/upstreams-cockpit-overview.png)](/operators/upstreams/upstreams-cockpit-overview.png)
 
-The cockpit is the focused detail view for one account. The top summary shows identity state, quota posture, request posture, saved reset status, stored account identifier hash, lifecycle badges, token freshness, and quota freshness. It also exposes `OAuth relink` for reconnecting the selected upstream identity through OpenAI OAuth, `Redeem saved reset` when manual redemption is available, and the saved-reset auto-redemption policy controls.
+The cockpit is the focused detail view for one account, titled `Upstream health`. The left column identifies the account and lists what can be done to it:
+
+1. the identity card shows the label, lifecycle state, plan badge, how the account was linked, the stored account identifier hash, the sanitized subject reference, and the workspace
+2. `Vitals` shows access-token expiry, token refresh state, when authentication was last verified, and the age of the quota refresh and quota evidence
+3. `Actions` lists `Refresh token`, `OAuth relink` for reconnecting the selected upstream identity through OpenAI OAuth, `Replace auth.json`, `Pause` or `Reactivate`, `Redeem saved reset` when manual redemption is available, `Download reset calendar`, `Rename`, `Reinvite account`, and `Delete account`. An action that does not apply to the current state is dimmed and marked `unavailable`
+
+The right column shows how the account serves traffic:
+
+1. `Routing lanes` shows a readiness verdict, then one lane per Pool assignment. Each lane passes assignment, health, quota, and circuit gates, and shows its share of the account's successful requests over seven days
+2. `Quota & banked resets` shows the account's quota windows, the provider-credit row, the banked-reset meter, and the auto-redemption policy
+3. `Request health` shows the request facts and the daily chart described below
+4. `Recent activity` lists failed requests and account changes, with links to Request logs, Audit logs, and Jobs
 
 Saved-reset manual redemption is available from the cockpit and from the account-card saved-reset dialog. The summary metric shows the reported count, the actions area shows `Redeem saved reset` when manual redemption is available, and the saved-reset policy form controls auto redemption, trigger mode, near-limit threshold, natural reset buffer, and resets to keep.
 
 For each current reset expiration, the bank shows `banked` only when the upstream reported a valid grant time. When that time is unavailable, it shows `seen` for Codex Pooler's first discovery of the expiration and uses that discovery only as the display fallback. It never estimates a grant date from the expiration date.
 
-Use it when the card says an account is degraded, stale, exhausted, or needs recovery. The detail page provides more space for assignment posture, quota health, recent events, and related links without exposing raw account secrets.
+Use it when the card says an account is degraded, stale, exhausted, or needs recovery. The detail page provides more space for routing lanes, quota health, recent events, and related links without exposing raw account secrets.
 
-Request health covers the traffic routed through the account over the last seven days. The facts row shows the last 24 hours: requests, failed requests, requests cancelled by the client, and the failure rate. Requests the client cancelled are counted on their own: they are not failures of the account and are not part of the failure rate, which is computed over the other requests. Request posture turns degraded when that rate exceeds 5%, and failed when every request that was not cancelled by the client failed. The daily chart shows succeeded, failed and cancelled requests as separate bars, and the error breakdown lists the five most frequent failure codes without client cancellations. Recent activity lists failed and retried requests; a request the client cancelled appears there only when it was retried. See [Request logs](/operators/request-logs/#client-cancelled) for what counts as a client cancellation.
+Request health covers the traffic routed through the account over the last seven days. The facts row shows the last 24 hours: requests, failed requests, requests cancelled by the client, and the failure rate. Requests the client cancelled are counted on their own: they are not failures of the account and are not part of the failure rate, which is computed over the other requests. The routing verdict reports the request posture: degraded when that rate exceeds 5%, and failed when every request that was not cancelled by the client failed. The daily chart shows succeeded, failed and cancelled requests as separate bars, and the error breakdown lists the five most frequent failure codes without client cancellations. Recent activity lists failed and retried requests; a request the client cancelled appears there only when it was retried. See [Request logs](/operators/request-logs/#client-cancelled) for what counts as a client cancellation.
 
 ## Operational Checklist
 

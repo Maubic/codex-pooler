@@ -6,9 +6,103 @@ defmodule CodexPooler.RuntimeConfigTest do
     "SECRET_KEY_BASE" => String.duplicate("a", 64),
     "PHX_SERVER" => "false",
     "PORT" => "4101",
-    "CODEX_POOLER_TOTP_ENCRYPTION_KEY" => "example-totp-key",
+    "CODEX_POOLER_TOTP_ENCRYPTION_KEY" => Base.encode64(:binary.copy(<<1>>, 32)),
     "CODEX_POOLER_UPSTREAM_SECRET_KEY" => String.duplicate("r", 32)
   }
+
+  @tag :endpoint_key_contract
+  test "production refuses missing empty and short endpoint secrets with value-free diagnostics" do
+    observations =
+      for {shape, value} <- [missing: nil, empty: "", one_byte: "x", short: Base.encode16(:crypto.strong_rand_bytes(32)) |> binary_part(0, 63)] do
+        observed =
+          with_env(Map.put(@required_env, "SECRET_KEY_BASE", value), fn ->
+            try do
+              Config.Reader.read!("config/runtime.exs", env: :prod)
+              %{shape: shape, refused: false, safe_message: false}
+            rescue
+              error -> %{shape: shape, refused: true, safe_message: Exception.message(error) == "SECRET_KEY_BASE must be at least 64 bytes"}
+            end
+          end)
+
+        observed
+      end
+
+    assert Enum.all?(observations, &(&1.refused and &1.safe_message)), inspect(observations)
+  end
+
+  @tag :endpoint_key_contract
+  test "production preserves endpoint secrets at and above the byte boundary" do
+    for key <- [Base.encode16(:crypto.strong_rand_bytes(32)), Base.encode16(:crypto.strong_rand_bytes(33)) |> binary_part(0, 65), String.duplicate("é", 32)] do
+      with_env(Map.put(@required_env, "SECRET_KEY_BASE", key), fn ->
+        config = Config.Reader.read!("config/runtime.exs", env: :prod)
+        unchanged? = config[:codex_pooler][CodexPoolerWeb.Endpoint][:secret_key_base] == key
+        assert unchanged?
+      end)
+    end
+  end
+
+  @tag :endpoint_key_contract
+  test "development and test runtime do not require an endpoint secret override" do
+    with_env(Map.put(@required_env, "SECRET_KEY_BASE", nil), fn ->
+      for environment <- [:dev, :test] do
+        config = Config.Reader.read!("config/runtime.exs", env: environment)
+        refute Keyword.has_key?(config[:codex_pooler][CodexPoolerWeb.Endpoint], :secret_key_base)
+      end
+    end)
+  end
+
+  @tag :totp_key_contract
+  test "production rejects absent empty malformed and wrong-size TOTP encryption keys without exposing values" do
+    for {shape, value} <- [missing: nil, empty: "", malformed: "synthetic-invalid-key", short: Base.encode64(:crypto.strong_rand_bytes(31)), long: Base.encode64(:crypto.strong_rand_bytes(33))] do
+      observed =
+        with_env(Map.put(@required_env, "CODEX_POOLER_TOTP_ENCRYPTION_KEY", value), fn ->
+          try do
+            Config.Reader.read!("config/runtime.exs", env: :prod)
+            %{shape: shape, refused: false, safe_message: false}
+          rescue
+            error -> %{shape: shape, refused: true, safe_message: Exception.message(error) == "CODEX_POOLER_TOTP_ENCRYPTION_KEY must be 32 raw bytes or base64-encoded 32 bytes"}
+          end
+        end)
+
+      assert observed == %{shape: shape, refused: true, safe_message: true}
+    end
+  end
+
+  @tag :totp_key_contract
+  test "production retains a valid encoded TOTP key and its version unchanged" do
+    key = Base.encode64(:crypto.strong_rand_bytes(32))
+
+    with_env(Map.merge(@required_env, %{"CODEX_POOLER_TOTP_ENCRYPTION_KEY" => key, "CODEX_POOLER_TOTP_KEY_VERSION" => "synthetic-v2"}), fn ->
+      config = Config.Reader.read!("config/runtime.exs", env: :prod)
+      accounts = config[:codex_pooler][CodexPooler.Accounts]
+      same_key? = accounts[:totp_encryption_key] == key
+      assert same_key?
+      assert accounts[:totp_key_version] == "synthetic-v2"
+    end)
+  end
+
+  @tag :totp_key_contract
+  test "production retains a legacy raw 32-byte TOTP key unchanged" do
+    key = :crypto.strong_rand_bytes(32)
+    # Environment values cannot contain NUL; a printable raw key exercises the existing branch.
+    key = Base.encode16(key) |> binary_part(0, 32)
+
+    with_env(Map.put(@required_env, "CODEX_POOLER_TOTP_ENCRYPTION_KEY", key), fn ->
+      config = Config.Reader.read!("config/runtime.exs", env: :prod)
+      unchanged? = config[:codex_pooler][CodexPooler.Accounts][:totp_encryption_key] == key
+      assert unchanged?
+    end)
+  end
+
+  @tag :totp_key_contract
+  test "development and test runtime configuration keep their local TOTP fallback" do
+    with_env(Map.put(@required_env, "CODEX_POOLER_TOTP_ENCRYPTION_KEY", nil), fn ->
+      for environment <- [:dev, :test] do
+        config = Config.Reader.read!("config/runtime.exs", env: environment)
+        refute Keyword.has_key?(config[:codex_pooler], CodexPooler.Accounts)
+      end
+    end)
+  end
 
   test "instance slot is explicit, bounded and never inferred from hostname" do
     for value <- [nil, "", "00000000-0000-0000-0000-000000000001/app"] do

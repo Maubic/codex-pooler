@@ -112,6 +112,8 @@ defmodule CodexPooler.AccountingTestSupport do
         "accounting-pricing-#{System.unique_integer([:positive])}.json"
       )
 
+    ExUnit.Callbacks.on_exit(fn -> File.rm!(path) end)
+
     prices = Map.new(prices, fn {key, value} -> {key, json_number(value)} end)
 
     File.write!(

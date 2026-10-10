@@ -27,8 +27,9 @@ defmodule CodexPooler.Quotas.CapacityFactsTest do
     base = %{"rate_limit" => %{"allowed" => true, "limit_reached" => false}, "credits" => %{"balance" => "0.125", "has_credits" => true, "unlimited" => false}}
     assert parse(base).credit_permission == :unknown
     assert parse(Map.put(base, "spend_control", %{"reached" => false})).credit_permission == :available
+    assert parse(Map.put(base, "spend_control", nil)) == parse(base)
 
-    for spend <- [nil, %{"reached" => "false"}, %{}] do
+    for spend <- [%{"reached" => "false"}, %{}] do
       facts = parse(Map.put(base, "spend_control", spend))
       assert facts.included_permission == :unknown
       assert facts.credit_permission == :unknown
@@ -119,6 +120,53 @@ defmodule CodexPooler.Quotas.CapacityFactsTest do
       refute facts.credit_permission == :available
       refute facts.included_permission == :available
     end
+  end
+
+  # The provider's current usage receipt key for key (synthetic values): a live
+  # receipt carries every one of these keys, and the provider schema makes
+  # `credits`, `credits.balance` and `spend_control` nullable.
+  @captured_receipt %{
+    "user_id" => "user-synthetic-0001",
+    "account_id" => "00000000-0000-4000-8000-000000000001",
+    "email" => "member@example.test",
+    "plan_type" => "go",
+    "rate_limit" => %{
+      "allowed" => true,
+      "limit_reached" => false,
+      "primary_window" => %{"used_percent" => 37, "limit_window_seconds" => 2_592_000, "reset_after_seconds" => 3_600, "reset_at" => DateTime.to_unix(~U[2026-10-01 13:00:00Z])},
+      "secondary_window" => nil
+    },
+    "code_review_rate_limit" => nil,
+    "additional_rate_limits" => nil,
+    "credits" => %{"has_credits" => true, "unlimited" => false, "overage_limit_reached" => false, "balance" => "125.5", "approx_local_messages" => [10, 20], "approx_cloud_messages" => [1, 2]},
+    "spend_control" => %{"reached" => false, "individual_limit" => nil},
+    "rate_limit_reached_type" => nil,
+    "rate_limit_reset_credits" => %{"available_count" => 0, "applicable_available_count" => 0},
+    "model_usage" => %{},
+    "promo" => nil
+  }
+
+  test "a captured allowed receipt keeps its included permission when the provider nulls a nullable credit or spend field" do
+    facts = parse(@captured_receipt)
+    assert {facts.denial_category, facts.included_permission, facts.credit_permission} == {:none, :available, :available}
+    assert [%{window_kind: "primary", window_minutes: 43_200, used_percent: "37"}] = facts.account_windows
+
+    member = put_in(@captured_receipt, ["credits"], %{@captured_receipt["credits"] | "has_credits" => false, "balance" => nil})
+
+    for receipt <- [member, Map.put(@captured_receipt, "spend_control", nil), Map.put(@captured_receipt, "credits", nil)] do
+      facts = parse(receipt)
+      assert {facts.denial_category, facts.included_permission, facts.credit_permission} == {:none, :available, :unknown}
+      assert [%{window_kind: "primary", window_minutes: 43_200}] = facts.account_windows
+    end
+
+    for unlimited <- [false, true] do
+      credits = %{member["credits"] | "unlimited" => unlimited}
+      assert parse(put_in(member, ["credits"], credits)) == parse(put_in(member, ["credits"], Map.delete(credits, "balance")))
+    end
+
+    denied = member |> put_in(["rate_limit", "allowed"], false) |> put_in(["rate_limit", "limit_reached"], true) |> Map.put("rate_limit_reached_type", %{"type" => "workspace_member_usage_limit_reached"})
+    facts = parse(denied)
+    assert {facts.denial_category, facts.included_permission, facts.credit_permission} == {:workspace_limit, :unknown, :unavailable}
   end
 
   defp window_payload(seconds) do

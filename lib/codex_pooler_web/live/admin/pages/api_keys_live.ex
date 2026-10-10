@@ -506,6 +506,12 @@ defmodule CodexPoolerWeb.Admin.ApiKeysLive do
          |> assign(:editing_api_key, nil)
          |> load_api_keys(reset_form: true)}
 
+      {:error, %{code: :api_key_edit_conflict, message: message}} ->
+        {:noreply,
+         socket
+         |> assign_api_key_wizard_state(api_key_params)
+         |> assign(api_key_wizard_step: "review", api_key_review_errors: [message])}
+
       {:error, reason} ->
         {:noreply,
          socket

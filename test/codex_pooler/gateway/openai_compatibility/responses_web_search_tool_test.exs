@@ -98,12 +98,14 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ResponsesWebSearchToolTest do
       end
     end
 
-    test "still refuses search_context_size and user_location on web_search_preview, which stays type only" do
-      for option <- [%{"search_context_size" => "low"}, %{"user_location" => @location}, %{"search_content_types" => ["text"]}] do
-        assert {:error, @refusal} = coerce([Map.merge(%{"type" => "web_search_preview"}, option)])
-      end
+    # The provider refuses the tool type itself (findings#333): every shape is refused, the type-only one included, and
+    # none is rewritten to `web_search`.
+    test "refuses web_search_preview in every shape" do
+      refusal = %{@refusal | message: "web_search_preview tools are not supported; declare web_search"}
 
-      assert {:ok, %{payload: %{"tools" => [%{"type" => "web_search_preview"}]}}} = coerce([%{"type" => "web_search_preview"}])
+      for option <- [%{}, %{"search_context_size" => "low"}, %{"user_location" => @location}, %{"search_content_types" => ["text"]}] do
+        assert {:error, ^refusal} = coerce([Map.merge(%{"type" => "web_search_preview"}, option)])
+      end
     end
   end
 

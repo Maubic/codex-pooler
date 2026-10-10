@@ -7,6 +7,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   alias CodexPooler.Accounting.ClientRetry
   alias CodexPooler.Gateway.Runtime.Finalization.ResponseUsage
+  alias CodexPooler.Gateway.Runtime.NativeResponseSteering
   alias CodexPooler.Gateway.Runtime.Streaming.BufferTelemetry
   alias CodexPooler.Gateway.Runtime.Streaming.ModelDeclarationObserver
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl
@@ -21,6 +22,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.UpstreamErrorParam
   alias CodexPooler.Gateway.Transports.TransportFailureReason
+  alias CodexPooler.Gateway.Transports.Websocket.DiagnosticTaxonomy
   alias CodexPooler.Gateway.Transports.Websocket.ForwardedOwnerRequestHandoff
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission.Binding
@@ -35,6 +37,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   alias CodexPooler.Gateway.Transports.Websocket.NativeReplayAdmission
   alias CodexPooler.Gateway.Transports.Websocket.OrdinarySuccessResult
   alias CodexPooler.Gateway.Transports.Websocket.ResponseInterrupt
+  alias CodexPooler.Gateway.Transports.Websocket.ResponseSteer
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.CloseDiagnostics
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.ConnectionUpgrade
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession.ReceiveState
@@ -122,7 +125,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
              required(:cause) => CloseDiagnostics.cause(),
              required(:lifecycle_id) => Ecto.UUID.t(),
              required(:generation) => pos_integer(),
-             required(:connection_requests) => pos_integer()
+             required(:connection_requests) => pos_integer(),
+             optional(:steering_peer_close) => {pid(), integer(), binary()}
            }}
 
   # `connection_close_subscriber: pid` names the one process that learns when
@@ -194,6 +198,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   def interrupt(pid, %{response_id: response_id, mode: mode} = interrupt)
       when is_pid(pid) and is_binary(response_id) and is_binary(mode) do
     send(pid, {:upstream_websocket_interrupt, interrupt})
+    :ok
+  end
+
+  @spec steer(pid(), ResponseSteer.t()) :: :ok
+  def steer(pid, %{} = steer) when is_pid(pid) do
+    send(pid, {:upstream_websocket_steer, steer})
     :ok
   end
 
@@ -463,13 +473,21 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   def handle_call({:request, %Request{} = request}, {caller_pid, _tag}, state)
       when is_pid(caller_pid) do
     key = request_key(request)
+    state = drain_pending_native_steering(state)
+    state = Map.delete(state, :native_response_steering_receive)
     caller_monitor = Process.monitor(caller_pid)
 
-    try do
-      {:ok, result, state} =
-        request_on_connection(state, key, request, {caller_pid, caller_monitor})
+    {lane, owner} = request_native_steering(request)
 
-      {:reply, result, maybe_schedule_keepalive(state)}
+    try do
+      case NativeResponseSteering.select_request(lane, request.request_id, request.attempt_id, self(), owner) do
+        :ok ->
+          {:ok, result, state} = request_on_connection(state, key, request, {caller_pid, caller_monitor})
+          {:reply, result, maybe_schedule_keepalive(state)}
+
+        {:error, reason} ->
+          {:reply, {:error, %{reason: reason, body: "", headers: [], started: false}}, state}
+      end
     after
       Process.demonitor(caller_monitor, [:flush])
     end
@@ -815,6 +833,45 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     end
   end
 
+  def handle_info({:upstream_websocket_steer, steer}, %{conn: _conn, native_response_steering_receive: receive_state} = state) do
+    case write_steer(state, receive_state, steer) do
+      {:ok, state, receive_state} -> {:noreply, Map.put(state, :native_response_steering_receive, receive_state)}
+      {:error, state} -> {:noreply, close_state(state)}
+    end
+  end
+
+  def handle_info({:upstream_websocket_steer, _steer}, state) do
+    :ok = ResponseSteer.log(:session_idle, interrupt_topology(state))
+    {:noreply, state}
+  end
+
+  def handle_info({:upstream_websocket_steering_frames, frames}, state), do: {:noreply, handle_async_frames(state, frames, :idle)}
+
+  def handle_info({:upstream_websocket_cancel_steering, lane, {request_id, attempt_id}, _reason}, %{native_response_steering_receive: %ReceiveState{native_response_steering: lane, request_id: request_id, attempt_id: attempt_id} = receive_state} = state) do
+    if receive_state.steering_requested? or receive_state.steering_successor?,
+      do: {:noreply, close_state(state)},
+      else: {:noreply, Map.delete(state, :native_response_steering_receive)}
+  end
+
+  def handle_info({:upstream_websocket_cancel_steering, _lane, _identity, _reason}, state), do: {:noreply, state}
+
+  def handle_info({:upstream_websocket_release_steering, lane, {request_id, attempt_id}}, %{native_response_steering_receive: %ReceiveState{native_response_steering: lane, request_id: request_id, attempt_id: attempt_id, steering_requested?: false, steering_successor?: false}} = state) do
+    state = Map.delete(state, :native_response_steering_receive)
+
+    state =
+      case Map.get(state, :native_response_steering_current_request) do
+        %Request{request_id: ^request_id, attempt_id: ^attempt_id} = request ->
+          if request_native_steering_lane(request) == lane, do: Map.delete(state, :native_response_steering_current_request), else: state
+
+        _other_request ->
+          state
+      end
+
+    {:noreply, state}
+  end
+
+  def handle_info({:upstream_websocket_release_steering, _lane, _identity}, state), do: {:noreply, state}
+
   # An interrupt that reaches a session with no turn in flight names a response
   # that already ended, or one that never ran here.
   def handle_info({:upstream_websocket_interrupt, _interrupt}, state) do
@@ -876,6 +933,27 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   defp routing_hint_header?(_header), do: false
 
+  defp drain_pending_native_steering(%{conn: conn, native_response_steering_receive: %ReceiveState{steering_requested?: true}} = state) do
+    socket = Mint.HTTP.get_socket(conn)
+
+    receive do
+      {:upstream_websocket_steering_frames, frames} ->
+        state |> handle_async_frames(frames, :idle) |> drain_pending_native_steering()
+
+      {tag, ^socket, _data_or_reason} = message when tag in [:tcp, :ssl, :tcp_error, :ssl_error] ->
+        {:noreply, state} = handle_info(message, state)
+        drain_pending_native_steering(state)
+
+      {tag, ^socket} = message when tag in [:tcp_closed, :ssl_closed] ->
+        {:noreply, state} = handle_info(message, state)
+        drain_pending_native_steering(state)
+    after
+      0 -> state
+    end
+  end
+
+  defp drain_pending_native_steering(state), do: state
+
   defp request_on_connection(state, key, %Request{} = request, request_caller) do
     reused_connection? = reusable_connection?(state, key)
     reconnect_pending? = Map.get(state, :reconnect_pending?, false)
@@ -933,6 +1011,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       request_id: request.request_id,
       attempt_id: request.attempt_id,
       native_client_retry_observation: request.native_client_retry_observation,
+      native_response_steering: request_native_steering_lane(request),
       # Tolerant access: during a rolling deploy an owner-forwarded request may
       # have been built by a replica that predates this field. nil keeps the
       # pre-provenance classification semantics for that request instead of
@@ -1002,6 +1081,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
        ) do
     case ensure_connection(state, key, url, headers, timeouts, request_caller(receive_state)) do
       {:ok, state} ->
+        {lane, owner} = request_native_steering(request)
+        state = Map.put(state, :native_response_steering_owner, owner)
+        state = if is_pid(lane), do: Map.put(state, :native_response_steering_current_request, %{request | headers: [], writer: nil, frame_observer: nil, payload: native_steering_model_payload(request.payload)}), else: Map.delete(state, :native_response_steering_current_request)
         {upgrade_frames, state} = Map.pop(state, :upgrade_frames, [])
 
         case settle_upgrade_frames(state, receive_state, upgrade_frames, connection_usage) do
@@ -1146,6 +1228,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     {:halt, {:terminal, state, receive_state, "error"}} =
       handle_text_frame(state, receive_state, terminal, decoded, mapped, mapped_decoded)
 
+    # The guard's own refusal: the provider never received the request, so the
+    # connection stays usable and is not retired like after a provider refusal.
+    receive_state = %{receive_state | provider_refusal?: false}
+
     {{:ok, result}, state} =
       finish_receive_result({:terminal, state, receive_state, "error"})
 
@@ -1224,12 +1310,14 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
          :ok <- require_live_request_caller(receive_state),
          {:ok, request} <- authorize_forwarded_generation(request, receipt),
          :ok <- require_live_request_caller(receive_state),
+         :ok <- observe_payload_write(request),
          {state, receive_state} <- begin_connection_request(state, receive_state, connection_usage),
          {:ok, state, consumed_phase} <- consume_request_capability(state, request),
          :ok <- require_live_request_caller(receive_state),
          :ok <- trace_physical_send(:physical_send_started, request, :started),
          {:ok, state} <- send_text(state, request.payload),
          :ok <- trace_physical_send(:physical_send_finished, request, :ok) do
+      receive_state = %{receive_state | provider_credits_admission: receipt}
       {:ok, result, state} = await_sent_request(state, receive_state)
       {result, state} = retain_first_compact_result(result, state, request)
       {result, state} = retain_ordinary_success_result(result, state, request)
@@ -1251,7 +1339,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       {:error, %{reason: :provider_credits_policy_denied} = denial} ->
         {:ok, {:error, Map.merge(denial, %{body: "", headers: []})}, state}
 
-      {:error, :owner_unavailable} ->
+      {:error, reason} when reason in [:owner_unavailable, :payload_write_refused] ->
         {:ok, {:error, %{reason: :owner_unavailable, body: "", headers: [], started: false}}, state}
 
       {:error, state} ->
@@ -1276,6 +1364,50 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp require_live_request_caller(receive_state),
     do: if(request_caller_down?(receive_state), do: {:error, :client_disconnected}, else: :ok)
 
+  # The forwarder that submitted the request through an owner learns here,
+  # before the payload can leave, that it is about to (findings#327): an owner
+  # that dies from now on may have handed the turn to the provider, so the
+  # forwarder settles it instead of submitting it to a replacement owner. A
+  # refusal means the forwarder already took the turn back from a dead owner,
+  # so this request ends unsent, with one line (findings#329 row J). A failing
+  # observer is logged and the write goes ahead, as a failing frame observer
+  # is.
+  defp observe_payload_write(%Request{payload_write_observer: observer} = request) when is_function(observer, 0) do
+    case run_payload_write_observer(observer) do
+      :ok ->
+        :ok
+
+      :refused ->
+        Logger.info(
+          "upstream websocket payload write refused reason_code=turn_claimed " <>
+            "request_id=#{DiagnosticTaxonomy.safe_correlator(request.request_id)} " <>
+            "attempt_id=#{DiagnosticTaxonomy.safe_correlator(request.attempt_id)}"
+        )
+
+        {:error, :payload_write_refused}
+    end
+  end
+
+  defp observe_payload_write(%Request{}), do: :ok
+
+  defp run_payload_write_observer(observer) do
+    case observer.() do
+      :ok -> :ok
+      _refused -> :refused
+    end
+  rescue
+    exception -> report_payload_write_observer_failure(:error, exception.__struct__)
+  catch
+    kind, _reason when kind in [:throw, :exit] -> report_payload_write_observer_failure(kind, nil)
+  end
+
+  defp report_payload_write_observer_failure(failure_kind, exception_class) do
+    Logger.warning(
+      "upstream websocket payload write observer failed operation=observe_payload_write " <>
+        "failure_kind=#{failure_kind} exception_class=#{exception_class || "none"}"
+    )
+  end
+
   defp authorize_forwarded_generation(%Request{forwarded_owner: owner} = request, receipt) when is_pid(owner),
     do: WebsocketOwnerSession.authorize_generation_send(owner, request, receipt)
 
@@ -1295,6 +1427,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   defp retain_first_compact_result(response, state, _request), do: {response, state}
+
+  defp retain_ordinary_success_result({:ok, %{native_response_steering_finalized: _finalized}} = result, state, _request), do: {result, state}
+  defp retain_ordinary_success_result({:ok, %{native_response_steering_terminal_failure: _reason}} = result, state, _request), do: {result, state}
 
   defp retain_ordinary_success_result(result, state, request) do
     case OrdinarySuccessResult.from_response(request, result, connection_lifecycle_state(state)) do
@@ -1406,8 +1541,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   defp normalized_forwarded_serving_mode("full"), do: {:ok, :full}
   defp normalized_forwarded_serving_mode("lite"), do: {:ok, :lite}
-  defp normalized_forwarded_serving_mode(:full), do: {:ok, :full}
-  defp normalized_forwarded_serving_mode(:lite), do: {:ok, :lite}
   defp normalized_forwarded_serving_mode(_mode), do: {:error, :invalid_serving_mode}
 
   # A consumed compaction is collected only when the provider completed it. A
@@ -1721,6 +1854,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
       {:upstream_websocket_interrupt, interrupt} ->
         handle_interrupt_message(state, receive_state, interrupt)
+
+      {:upstream_websocket_steer, steer} ->
+        case write_steer(state, receive_state, steer) do
+          {:ok, state, receive_state} -> receive_events(state, receive_state)
+          {:error, state} -> finish_receive_result({:failure, state, receive_state, :upstream_websocket_session_unavailable})
+        end
+
+      {:upstream_websocket_cancel_steering, lane, {request_id, attempt_id}, reason} when lane == receive_state.native_response_steering and request_id == receive_state.request_id and attempt_id == receive_state.attempt_id ->
+        finish_receive_result({:failure, state, receive_state, reason})
     after
       max(receive_state.receive_deadline_ms - System.monotonic_time(:millisecond), 0) ->
         result =
@@ -1742,6 +1884,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
                )
            }}
 
+        result = finalize_native_steering_failure(result, receive_state)
         {result, invalidate_state(state)}
     end
   end
@@ -1803,6 +1946,40 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   defp interrupt_topology(state), do: if(Map.get(state, :admission_topology) == :forwarded, do: :owner, else: :direct)
+
+  @spec request_native_steering(Request.t()) :: {pid() | nil, pid() | nil}
+  defp request_native_steering(request) do
+    case Map.get(request, :native_response_steering) do
+      {lane, owner} when is_pid(lane) and is_pid(owner) -> {lane, owner}
+      lane when is_pid(lane) -> {lane, nil}
+      nil -> {nil, nil}
+    end
+  end
+
+  defp request_native_steering_lane(request), do: elem(request_native_steering(request), 0)
+
+  defp write_steer(state, %ReceiveState{native_response_steering: lane, delivery: %Delivery{mode: :relay}, message_mapper: mapper} = receive_state, steer) when is_pid(lane) do
+    if public_openai_responses_mapper?(mapper) do
+      :ok = ResponseSteer.log(:not_relay, interrupt_topology(state))
+      {:ok, state, receive_state}
+    else
+      with :ok <- NativeResponseSteering.activate(lane, self(), Map.get(state, :native_response_steering_owner)),
+           {:ok, state} <- send_text(state, ResponseSteer.frame(steer)) do
+        :ok = ResponseSteer.log(:written, interrupt_topology(state))
+        {:ok, state, %{receive_state | steering_requested?: true, steering_targets: Enum.take([steer.previous_response_id | receive_state.steering_targets], 64)}}
+      else
+        _refused ->
+          :ok = ResponseSteer.log(:session_unavailable, interrupt_topology(state))
+          NativeResponseSteering.closed(lane, {receive_state.request_id, receive_state.attempt_id}, :owner_unavailable)
+          {:error, state}
+      end
+    end
+  end
+
+  defp write_steer(state, receive_state, _steer) do
+    :ok = ResponseSteer.log(:not_relay, interrupt_topology(state))
+    {:ok, state, receive_state}
+  end
 
   defp request_caller_down?(%ReceiveState{
          request_caller_pid: request_caller_pid,
@@ -1866,7 +2043,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     |> Enum.reduce_while({:continue, state, receive_state}, &handle_part/2)
     |> case do
       {:continue, state, receive_state} ->
-        {transport_error_result(state, receive_state, reason), close_state(state)}
+        result = finalize_native_steering_failure(transport_error_result(state, receive_state, reason), receive_state)
+        {result, close_state(state)}
 
       halted ->
         {result, state} = finish_receive_result(halted)
@@ -1949,6 +2127,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
            )
        }}
 
+    result = finalize_native_steering_failure(result, receive_state)
     {result, close_state(state)}
   end
 
@@ -2000,12 +2179,26 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # gives its trailing frames (icoretech/codex-pooler-findings#203). Every other
   # failure retires or invalidates the connection and carries no trailing frames.
   # The error result is built from the pre-drain state, like the terminal's.
+  defp finish_failure_result(state, %ReceiveState{steering_successor?: true, native_lane_error?: false} = receive_state, reason, _trailing_frames) do
+    failure = %{body: receive_body(receive_state), response_usage: receive_model_usage(receive_state), reason: reason, headers: Map.get(state, :headers, []), websocket_frame_headers: receive_state.websocket_frame_headers, transport_failure: transport_failure_metadata(reason, state, receive_state, phase: failure_phase(reason))}
+    failure = put_native_steering_terminal_result(receive_state, failure)
+    {{:error, failure}, close_state(state)}
+  end
+
+  defp finish_failure_result(state, %ReceiveState{native_lane_error?: true} = receive_state, _reason, _trailing_frames) do
+    result = %{body: receive_body(receive_state), terminal: "error", status: 200, headers: Map.get(state, :headers, []), response_usage: receive_model_usage(receive_state), upstream_error_code: "unsupported_native_inflight_message", websocket_frame_headers: receive_state.websocket_frame_headers, provider_credits_admission: receive_state.provider_credits_admission}
+    result = put_native_steering_terminal_result(receive_state, result)
+    complete_native_steering_original(state, receive_state, result)
+    {code, close_reason} = receive_state.native_lane_peer_close || {1000, ""}
+    NativeResponseSteering.peer_close(receive_state.native_response_steering, code, close_reason)
+    {{:ok, result}, close_state(state)}
+  end
+
   defp finish_failure_result(state, receive_state, reason, trailing_frames) do
     next_state =
-      if receive_state.termination_source == :upstream_terminal_event and
-           not exhausted_connection?(receive_state),
-         do: drain_trailing_frames(state, trailing_frames, :retryable_first_frame),
-         else: retire_exhausted_connection(state, receive_state)
+      if receive_state.termination_source == :upstream_terminal_event and not exhausted_connection?(receive_state),
+        do: drain_trailing_frames(state, trailing_frames, :retryable_first_frame),
+        else: retire_exhausted_connection(state, receive_state)
 
     {{:error,
       %{
@@ -2018,6 +2211,26 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
         transport_failure: transport_failure_metadata(reason, state, receive_state, phase: failure_phase(reason)),
         native_client_retry_observation: final_client_retry_observation(receive_state)
       }}, next_state}
+  end
+
+  # Only an actual steer can introduce a provider-driven successor before
+  # the owner's normal terminal/task-result arbitration ends.
+  defp complete_native_steering_original(state, %ReceiveState{steering_requested?: true, steering_successor?: false} = receive_state, result) do
+    if owner = Map.get(state, :native_response_steering_owner),
+      do: WebsocketOwnerSession.complete_steering_original(owner, receive_state.request_id, result)
+  end
+
+  defp complete_native_steering_original(_state, _receive_state, _result), do: :ok
+
+  defp finalize_native_steering_failure({:error, failure}, %ReceiveState{steering_successor?: true} = receive_state), do: {:error, put_native_steering_terminal_result(receive_state, failure)}
+
+  defp finalize_native_steering_failure(result, _receive_state), do: result
+
+  defp put_native_steering_terminal_result(receive_state, result) do
+    case NativeResponseSteering.terminal(receive_state.native_response_steering, receive_state.request_id, result) do
+      {:ok, finalized, acknowledgement} -> result |> Map.put(:native_response_steering_finalized, finalized) |> Map.put(:native_response_steering_acknowledgement, acknowledgement)
+      {:error, reason} -> Map.put(result, :native_response_steering_terminal_failure, reason)
+    end
   end
 
   # A peer may coalesce its Close with the terminal frame in a single TCP write,
@@ -2050,10 +2263,104 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
       }
       |> maybe_put_success_response_id(terminal, receive_state.response_id)
 
-    state = drain_trailing_frames(state, trailing_frames, :terminal)
+    {result, state} = retain_native_steering_terminal(state, receive_state, result)
+
+    state = finish_native_steering_connection(state, receive_state, result, trailing_frames)
+
     state = if receive_state.public_tool_completion_reason, do: close_and_signal(state, :invalidated, &invalidate_state/1), else: state
 
     {{:ok, result}, maybe_retire_exhausted_connection(state, receive_state)}
+  end
+
+  defp finish_native_steering_connection(state, receive_state, result, trailing_frames) do
+    case result do
+      %{native_response_steering_finalized: {:error, %{code: "gateway_accounting_failed"}}} ->
+        NativeResponseSteering.peer_close(receive_state.native_response_steering, 1011, "")
+        close_state(state)
+
+      %{native_response_steering_finalized: {:error, _failure}} ->
+        close_state(state)
+
+      %{native_response_steering_finalized: {:ok, %{stale_generation?: true}}} ->
+        close_state(state)
+
+      %{native_response_steering_terminal_failure: _reason} ->
+        NativeResponseSteering.peer_close(receive_state.native_response_steering, 1011, "")
+        close_state(state)
+
+      _result ->
+        drain_native_steering_terminal_frames(state, receive_state, trailing_frames)
+    end
+  end
+
+  defp drain_native_steering_terminal_frames(state, receive_state, trailing_frames) do
+    cond do
+      receive_state.steering_accepted? -> handle_async_frames(state, trailing_frames, :idle)
+      receive_state.steering_requested? or receive_state.steering_successor? -> defer_native_steering_frames(state, trailing_frames)
+      true -> drain_trailing_frames(state, trailing_frames, :terminal)
+    end
+  end
+
+  defp retain_native_steering_terminal(state, receive_state, result) do
+    if is_pid(receive_state.native_response_steering) do
+      result = result |> Map.put(:provider_credits_admission, receive_state.provider_credits_admission) |> Map.put(:upstream_websocket_connection, upstream_websocket_connection(state, %{reused: receive_state.connection_use == :reused, reconnected: false}))
+
+      result = native_steering_success_receipt(state, receive_state, result)
+
+      result =
+        if receive_state.steering_requested? or receive_state.steering_successor? do
+          result = put_native_steering_terminal_result(receive_state, result)
+
+          complete_native_steering_original(state, receive_state, result)
+
+          result
+        else
+          result
+        end
+
+      idle = %{receive_state | body: RetainedBody.empty(), response_usage: nil, request_caller_pid: nil, request_caller_monitor: nil, terminal_upstream_error_code: nil, terminal_upstream_error_param: nil}
+      state = apply_native_steering_success(state, result)
+      {result, Map.put(state, :native_response_steering_receive, idle)}
+    else
+      {result, state}
+    end
+  end
+
+  defp defer_native_steering_frames(state, []), do: state
+
+  defp defer_native_steering_frames(state, frames) do
+    send(self(), {:upstream_websocket_steering_frames, frames})
+    state
+  end
+
+  defp native_steering_success_receipt(state, receive_state, result) do
+    if request = Map.get(state, :native_response_steering_current_request) do
+      request = %{request | request_id: receive_state.request_id, attempt_id: receive_state.attempt_id}
+
+      case OrdinarySuccessResult.from_response(request, {:ok, result}, connection_lifecycle_state(state)) do
+        {:ok, receipt} -> Map.put(result, :ordinary_success_result, receipt)
+        :error -> result
+      end
+    else
+      result
+    end
+  end
+
+  defp apply_native_steering_success(state, %{native_response_steering_finalized: {:ok, %{stale_generation?: true}}}), do: state
+
+  defp apply_native_steering_success(state, %{native_response_steering_finalized: {:ok, %{}}, native_response_steering_acknowledgement: {:ok, %Binding{topology: %Direct{}} = binding, %OrdinarySuccessResult{} = receipt}}) do
+    state = Map.put(state, :ordinary_success_result, receipt)
+    {:reply, _reply, state} = handle_call({:arm_compact, binding, System.system_time(:millisecond) + NativeCompactionAdmission.reservation_ttl_ms(), receipt}, nil, state)
+    state
+  end
+
+  defp apply_native_steering_success(state, _acknowledgement), do: state
+
+  defp native_steering_model_payload(payload) do
+    case CodexPooler.JSON.decode(payload) do
+      {:ok, %{"model" => model}} -> CodexPooler.JSON.encode!(%{"model" => model})
+      _invalid -> "{}"
+    end
   end
 
   # Drains the frames decoded behind a halting frame through the idle path and,
@@ -2073,10 +2380,39 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp coalesced_close_code(_code), do: "invalid"
 
   defp maybe_retire_exhausted_connection(state, receive_state) do
-    if exhausted_connection?(receive_state),
-      do: retire_exhausted_connection(state, receive_state),
-      else: state
+    cond do
+      exhausted_connection?(receive_state) -> retire_exhausted_connection(state, receive_state)
+      receive_state.provider_refusal? and Map.has_key?(state, :conn) -> retire_refused_connection(state)
+      true -> state
+    end
   end
+
+  # The provider refuses a request it will not generate for with the wrapped
+  # `{"type": "error", "status": 400, ...}` frame and, for the refusals it
+  # sends before validating the payload (an unsupported parameter or tool
+  # type, an anchor it cannot resolve), answers nothing more on that
+  # connection and drops it without a Close frame about 3 s later (direct
+  # probe 2026-10-06, findings#333, Full and Lite). A request sent on it in
+  # that window is lost: it failed `502 upstream_request_failed` when the drop
+  # came. The connection is retired at the refusal, so the next request of
+  # the socket opens a fresh one; an anchor that connection produced is lost
+  # with it, as the provider's drop loses it.
+  defp retire_refused_connection(state) do
+    lifecycle = connection_lifecycle_state(state)
+
+    Logger.info(
+      "websocket connection retirement decision " <>
+        "reason_code=provider_refusal " <>
+        "lifecycle_id=#{lifecycle.lifecycle_id} old_generation=#{lifecycle.generation}"
+    )
+
+    close_state(state)
+  end
+
+  defp provider_refusal_frame?(%{"type" => "error"} = decoded),
+    do: Map.get(decoded, "status", Map.get(decoded, "status_code")) == 400
+
+  defp provider_refusal_frame?(_decoded), do: false
 
   defp retire_exhausted_connection(state, receive_state) do
     if exhausted_connection?(receive_state) do
@@ -2153,30 +2489,85 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # `context` is `:idle` for a read the session takes between requests and
   # `{:trailing, halt}` for frames decoded behind a halting frame of a request.
   # Only the frame that actually retires the connection supplies the close cause.
-  defp handle_async_frames(state, frames, context) do
-    Enum.reduce_while(frames, state, fn
-      {:ping, payload}, state ->
+  defp handle_async_frames(%{native_response_steering_receive: %ReceiveState{steering_accepted?: true} = receive_state} = state, [{:text, text} | trailing] = frames, context) do
+    case decode_text_frame(text) do
+      %{"type" => "response.created", "response" => %{"id" => response_id}} ->
+        receive_native_steering_successor(state, receive_state, response_id, frames)
+
+      _other ->
+        state |> handle_native_steering_idle_text(text) |> handle_async_frames(trailing, context)
+    end
+  end
+
+  defp handle_async_frames(state, [], _context), do: state
+
+  defp handle_async_frames(state, [frame | trailing], context) do
+    case frame do
+      {:ping, payload} ->
         case send_frame(state, {:pong, payload}) do
-          {:ok, state} -> {:cont, state}
-          {:error, reason, state} -> {:halt, close_async(state, context, :pong_send_failed, transport_reason: reason)}
+          {:ok, state} -> handle_async_frames(state, trailing, context)
+          {:error, reason, state} -> close_async(state, context, :pong_send_failed, transport_reason: reason)
         end
 
-      {:pong, payload}, state ->
-        {:cont, clear_matching_pong(state, payload)}
+      {:pong, payload} ->
+        handle_async_frames(clear_matching_pong(state, payload), trailing, context)
 
-      {:close, code, reason}, state ->
-        {:halt, close_async(state, context, :peer_close_frame, close_code: code, close_reason: reason)}
+      {:close, code, reason} ->
+        notify_native_steering_peer_close(state, code, reason)
 
-      {:text, _text}, state ->
-        {:cont, state}
+        close_async(state, context, :peer_close_frame, close_code: code, close_reason: reason)
 
-      {:binary, _data}, state ->
-        {:cont, state}
+      {:text, text} ->
+        handle_async_frames(handle_native_steering_idle_text(state, text), trailing, context)
 
-      {:error, reason}, state ->
-        {:halt, close_async(state, context, :frame_error, transport_reason: reason)}
-    end)
+      {:binary, _data} ->
+        handle_async_frames(state, trailing, context)
+
+      {:error, reason} ->
+        close_async(state, context, :frame_error, transport_reason: reason)
+    end
   end
+
+  defp receive_native_steering_successor(state, receive_state, response_id, frames) do
+    case NativeResponseSteering.open_successor(receive_state.native_response_steering, response_id) do
+      {:ok, prepared} ->
+        successor = %ReceiveState{writer: prepared.writer, frame_observer: prepared.frame_observer, message_mapper: receive_state.message_mapper, timeouts: receive_state.timeouts, delivery: receive_state.delivery, request_id: prepared.request_id, attempt_id: prepared.attempt_id, native_response_steering: receive_state.native_response_steering, native_codex_response_control: receive_state.native_codex_response_control, provider_credits_admission: prepared.provider_credits_admission, steering_requested?: true, steering_accepted?: false, steering_successor?: true, connection_use: :reused}
+        WebsocketRequestCallbacks.begin_request(prepared.request_id, prepared.attempt_id)
+        {_result, state} = state |> handle_frames(frames, renew_receive_deadline(successor)) |> finish_receive_result()
+        WebsocketRequestCallbacks.end_request()
+        state
+
+      {:error, _reason} ->
+        close_state(state)
+    end
+  end
+
+  defp notify_native_steering_peer_close(%{native_response_steering_receive: %ReceiveState{steering_requested?: true} = receive_state}, code, reason),
+    do: NativeResponseSteering.peer_close(receive_state.native_response_steering, code, reason)
+
+  defp notify_native_steering_peer_close(_state, _code, _reason), do: :ok
+
+  defp handle_native_steering_idle_text(%{native_response_steering_receive: %ReceiveState{} = receive_state} = state, text) do
+    decoded = decode_text_frame(text)
+    type = if is_map(decoded), do: decoded["type"]
+
+    cond do
+      type in ["response.steer.accepted", "response.steer.failed"] ->
+        receive_state = observe_steer_control(receive_state, decoded, interrupt_topology(state))
+        NativeResponseSteering.control(receive_state.native_response_steering, text)
+        Map.put(state, :native_response_steering_receive, receive_state)
+
+      ResponseSteer.native_lane_error?(decoded) ->
+        ResponseSteer.log(:native_lane_error, interrupt_topology(state), "error")
+        NativeResponseSteering.control(receive_state.native_response_steering, text)
+        state
+
+      true ->
+        state
+    end
+  end
+
+  defp handle_native_steering_idle_text(state, _text), do: state
 
   defp close_async(state, :idle, cause, details), do: close_between_requests(state, cause, details)
 
@@ -2187,7 +2578,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   defp close_async(state, {:trailing, halt}, :peer_close_frame, details) do
     lifecycle = connection_lifecycle_state(state)
     Logger.info("upstream websocket coalesced close drained reason_code=peer_close_frame halt=#{halt} close_code=#{coalesced_close_code(Keyword.get(details, :close_code))} lifecycle_id=#{lifecycle.lifecycle_id} generation=#{lifecycle.generation}")
-    close_and_signal(state, :peer_close_frame, &close_state/1)
+    close_and_signal(state, :peer_close_frame, &close_state/1, details)
   end
 
   defp close_async(state, {:trailing, _halt}, cause, details), do: close_between_requests(state, cause, details)
@@ -2197,13 +2588,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # 206-356); a close inside a request is recorded on the attempt instead.
   defp close_between_requests(state, cause, details \\ []) do
     :ok = CloseDiagnostics.log_close(state, cause, details)
-    close_and_signal(state, cause, &close_state/1)
+    close_and_signal(state, cause, &close_state/1, details)
   end
 
   # The signal is built from the state before the close, which drops the
   # connection's request count, and sent once the connection is closed.
-  defp close_and_signal(state, cause, close) do
-    signal = connection_closed_signal(state, cause)
+  defp close_and_signal(state, cause, close, details \\ []) do
+    signal = connection_closed_signal(state, cause, details)
     closed = close.(state)
     :ok = send_connection_closed_signal(signal)
     closed
@@ -2212,18 +2603,27 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # Nothing to tell without a subscriber or a live connection, for a cause
   # that ends no anchor, or for a connection that never carried a request: a
   # connection that sent nothing produced no response to anchor on.
-  defp connection_closed_signal(%{conn: _conn, connection_close_subscriber: subscriber} = state, cause)
+  defp connection_closed_signal(%{conn: _conn, connection_close_subscriber: subscriber} = state, cause, details)
        when is_pid(subscriber) do
     requests = Map.get(state, :connection_request_count, 0)
 
     if is_integer(requests) and requests > 0 and CloseDiagnostics.anchor_invalidating_cause?(cause) do
-      {subscriber, {:upstream_websocket_connection_closed, self(), %{cause: cause, lifecycle_id: state.lifecycle_id, generation: state.generation, connection_requests: requests}}}
+      signal = %{cause: cause, lifecycle_id: state.lifecycle_id, generation: state.generation, connection_requests: requests}
+      signal = put_steering_peer_close(signal, state, details)
+      {subscriber, {:upstream_websocket_connection_closed, self(), signal}}
     else
       nil
     end
   end
 
-  defp connection_closed_signal(_state, _cause), do: nil
+  defp connection_closed_signal(_state, _cause, _details), do: nil
+
+  # The lane forwards this same close asynchronously. Carry its authority on
+  # the lifecycle signal too, so an idle downstream cannot race it with 1001.
+  defp put_steering_peer_close(%{cause: :peer_close_frame} = signal, %{native_response_steering_receive: %ReceiveState{steering_requested?: true, native_response_steering: lane}}, details) when is_pid(lane),
+    do: Map.put(signal, :steering_peer_close, {lane, Keyword.get(details, :close_code) || 1000, Keyword.get(details, :close_reason) || ""})
+
+  defp put_steering_peer_close(signal, _state, _details), do: signal
 
   defp send_connection_closed_signal({subscriber, message}) do
     send(subscriber, message)
@@ -2314,10 +2714,15 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     do: {:cont, {:continue, clear_matching_pong(state, payload), receive_state}}
 
   defp handle_frame({:close, code, reason}, {:continue, state, receive_state}) do
+    if receive_state.steering_requested? and not receive_state.native_lane_error? do
+      NativeResponseSteering.peer_close(receive_state.native_response_steering, code, reason)
+    end
+
     receive_state = %{
       receive_state
       | peer_close_metadata: TransportFailureReason.peer_close_metadata(code, reason),
-        termination_source: :peer_close_frame
+        termination_source: :peer_close_frame,
+        native_lane_peer_close: if(receive_state.native_lane_error?, do: {code, reason})
     }
 
     {:halt, {:failure, state, receive_state, :upstream_websocket_closed_before_terminal}}
@@ -2438,7 +2843,17 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
         mapped_frame_text: mapped_text
       })
 
-    terminal_discriminator = TerminalDiscriminator.classify(mapped_decoded)
+    native_lane_error? = native_steering_lane_error?(receive_state, raw_decoded)
+    terminal_discriminator = if native_lane_error?, do: %TerminalDiscriminator{last_upstream_event_type: "error", last_upstream_event_class: "terminal_failure_candidate"}, else: TerminalDiscriminator.classify(mapped_decoded)
+    receive_state = observe_steer_control(receive_state, raw_decoded, interrupt_topology(state))
+
+    receive_state =
+      if native_lane_error? do
+        ResponseSteer.log(:native_lane_error, interrupt_topology(state), "error")
+        %{receive_state | native_lane_error?: true}
+      else
+        receive_state
+      end
 
     collected_text =
       collected_text(
@@ -2484,6 +2899,34 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
         end
     end
   end
+
+  # Preparing a native lane does not mean this request steered. The requested
+  # flag is set only after that lane accepts activation and the steer is sent;
+  # its pid may belong to the proxy node of a remote owner.
+  defp native_steering_lane_error?(%ReceiveState{native_response_steering: lane, steering_requested?: true, delivery: %Delivery{mode: :relay}, message_mapper: mapper}, decoded) when is_pid(lane) do
+    not public_openai_responses_mapper?(mapper) and ResponseSteer.native_lane_error?(decoded)
+  end
+
+  defp native_steering_lane_error?(_receive_state, _decoded), do: false
+
+  defp observe_steer_control(receive_state, %{"type" => "response.steer.accepted"} = decoded, topology) do
+    accepted = get_in(decoded, ["steer", "previous_response_id"]) in receive_state.steering_targets
+    id = get_in(decoded, ["steer", "id"])
+
+    if accepted and is_binary(id) and MapSet.size(receive_state.accepted_steer_ids) < 64 and not MapSet.member?(receive_state.accepted_steer_ids, id) do
+      ResponseSteer.log(:accepted, topology, "response.steer.accepted", id)
+      %{receive_state | steering_accepted?: true, accepted_steer_ids: MapSet.put(receive_state.accepted_steer_ids, id)}
+    else
+      receive_state
+    end
+  end
+
+  defp observe_steer_control(receive_state, %{"type" => "response.steer.failed"} = decoded, topology) do
+    ResponseSteer.log(:failed, topology, "response.steer.failed", get_in(decoded, ["steer", "id"]))
+    receive_state
+  end
+
+  defp observe_steer_control(receive_state, _decoded, _topology), do: receive_state
 
   defp collected_text(
          %ReceiveState{delivery: %Delivery{mode: :collect_full_history}},
@@ -2601,6 +3044,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   defp websocket_buffer_bucket(_buffer), do: nil
+
+  defp retryable_first_text_frame(_decoded, %ReceiveState{steering_successor?: true}), do: :error
 
   defp retryable_first_text_frame(
          %{} = decoded,
@@ -2743,7 +3188,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
           | terminal_upstream_error_code:
               receive_state.terminal_upstream_error_code ||
                 StreamProtocol.upstream_error_code(decoded),
-            terminal_upstream_error_param: receive_state.terminal_upstream_error_param || UpstreamErrorParam.extract(decoded)
+            terminal_upstream_error_param: receive_state.terminal_upstream_error_param || UpstreamErrorParam.extract(decoded),
+            provider_refusal?: receive_state.provider_refusal? or provider_refusal_frame?(decoded)
         }
 
       _other ->
@@ -2755,8 +3201,10 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
     do: receive_state
 
   defp maybe_put_success_response_id(result, terminal, response_id)
-       when terminal in @completed_terminals and is_binary(response_id),
+       when terminal in ["response.completed", "response.done"] and is_binary(response_id),
        do: Map.put(result, :response_id, response_id)
+
+  defp maybe_put_success_response_id(%{upstream_error_code: reason} = result, "response.incomplete", response_id) when reason in ["interrupted", "steered"] and is_binary(response_id), do: Map.put(result, :response_id, response_id)
 
   defp maybe_put_success_response_id(result, _terminal, _response_id), do: result
 
@@ -2766,6 +3214,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # (findings#270 row 270-272). Every other terminal ends the response for good.
   defp context_kept_terminal?(terminal, _upstream_error_code) when terminal in @completed_terminals, do: true
   defp context_kept_terminal?("response.incomplete", "interrupted"), do: true
+  defp context_kept_terminal?("response.incomplete", "steered"), do: true
   defp context_kept_terminal?(_terminal, _upstream_error_code), do: false
 
   @response_identity_event_types [
@@ -2950,6 +3399,8 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
 
   defp map_message(text, decoded, _mapper), do: {text, decoded}
 
+  defp sanitize_downstream_text({text, %{"type" => "error", "error" => %{"code" => "unsupported_native_inflight_message"}} = decoded}, _snapshot), do: {text, decoded}
+
   defp sanitize_downstream_text({text, %{} = decoded}, %TurnSnapshot{}) when is_binary(text) do
     case NativeCodexResponseControl.sanitize_websocket_event(decoded) do
       :unchanged -> {text, decoded}
@@ -3116,11 +3567,24 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   end
 
   defp close_state(%{conn: conn} = state) do
+    retire_socket(Mint.HTTP.get_socket(conn))
     {:ok, _conn} = Mint.HTTP.close(conn)
     close_connection_state(state)
   end
 
   defp close_state(state), do: close_connection_state(state)
+
+  defp retire_socket(socket) when is_port(socket) do
+    :inet.setopts(socket, linger: {true, 0})
+  end
+
+  # This connection is being retired. Do not wait for its queued output or
+  # a TLS close notification behind that output; active sends keep their
+  # original options. Shutdown marks TLS closed before Mint releases it.
+  defp retire_socket(socket) do
+    :ssl.setopts(socket, linger: {true, 0}, send_timeout: 50, send_timeout_close: true)
+    :ssl.shutdown(socket, :read_write)
+  end
 
   # A compaction collected on the closing connection and not confirmed yet
   # keeps its admission as the one confirmation it can still accept
@@ -3133,6 +3597,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession do
   # can still accept (`authorize_closed_connection_first_compact/4`, findings#270
   # row 270-200).
   defp close_connection_state(state) do
+    if receive_state = Map.get(state, :native_response_steering_receive), do: NativeResponseSteering.closed(receive_state.native_response_steering, {receive_state.request_id, receive_state.attempt_id}, :upstream_websocket_closed_before_terminal)
     collection = admission_state(state)
     first_compact = Map.get(state, :first_compact_result)
 

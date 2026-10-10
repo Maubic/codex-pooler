@@ -66,8 +66,10 @@ defmodule CodexPoolerWeb.Admin.IncidentsLive do
         <AdminComponents.page_header
           id="admin-incidents-page-header"
           title="OpenAI incidents"
-          description="Current and recent incidents reported by the public OpenAI status feed."
-        />
+          description="Incidents on the public OpenAI status page, refreshed by Codex Pooler."
+        >
+          <:actions><IncidentsPageComponents.feed_chip page={@incidents_page} /></:actions>
+        </AdminComponents.page_header>
         <IncidentsPageComponents.incidents_content
           page={@incidents_page}
           datetime_preferences={@datetime_preferences}

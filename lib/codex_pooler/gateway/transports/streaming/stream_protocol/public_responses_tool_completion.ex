@@ -146,6 +146,17 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.PublicResponse
 
   defp valid_done_status?(_event, :payload), do: true
 
+  # A done item completes its call only with `status` "completed" or no
+  # status. Any other value leaves the call unfinished: the callers turn a
+  # `response.completed` after it into the synthetic failure, while a
+  # provider `response.incomplete` or `response.failed` keeps its outcome.
+  # The status says only whether the model finished writing the call. The
+  # client runs function and custom tools, so the provider schema gives these
+  # items `in_progress`, `completed` and `incomplete`, and no `failed`. A tool
+  # the client fails or cancels, such as a Codex dynamic tool settled as its
+  # own failed item, reaches the provider as the next request's
+  # `function_call_output` or `custom_tool_call_output`, never as a frame of
+  # this stream, so no unsuccessful status is admitted (findings#338).
   defp valid_done_status?(%{"item" => item}, :done) when is_map(item),
     do: not Map.has_key?(item, "status") or Map.get(item, "status") == "completed"
 

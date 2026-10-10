@@ -12,6 +12,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
     Attempt,
     LedgerEntry,
     LedgerReads,
+    Metadata,
     NativeReplayClaim,
     Request,
     RequestLifecycle,
@@ -618,6 +619,7 @@ defmodule CodexPooler.Accounting.RequestReplay do
          true <- future?(entitlement.expires_at, now),
          true <- future?(session.owner_lease_expires_at, now),
          true <- future?(owner_lease.expires_at, now) do
+      request = Metadata.clear_downstream_interruption!(request)
       replay_attempt = insert_replay_attempt!(request, attempt, provisional_digest, now)
 
       entitlement =

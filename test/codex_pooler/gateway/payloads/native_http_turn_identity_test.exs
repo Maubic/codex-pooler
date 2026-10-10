@@ -4,8 +4,56 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentityTest do
   alias CodexPooler.Accounting.ClientRetry
   alias CodexPooler.Gateway.Payloads.{NativeHttpTurnIdentity, NativeMailboxContinuation, RequestOptions, WebsocketTurnIdentity}
   alias CodexPooler.Gateway.Persistence.CodexSession
+  alias CodexPooler.Gateway.Transports.Streaming.WebsocketCodec
 
   @session_id "018f60df-713f-7ca8-b9a0-0d12c508a003"
+
+  test "transport-equivalent tool continuation meets the prepared websocket claim and witness" do
+    body = payload(0) |> Map.put("stream", true) |> Map.put("store", false) |> Map.update!("input", &(&1 ++ [%{"type" => "function_call", "call_id" => "call_synthetic", "name" => "sample_tool", "arguments" => "{}"}, %{"type" => "function_call_output", "call_id" => "call_synthetic", "output" => "synthetic"}]))
+
+    for lite? <- [false, true] do
+      frame = Map.put(body, "type", "response.create")
+      frame = if lite?, do: put_in(frame, ["client_metadata", "ws_request_header_x_openai_internal_codex_responses_lite"], "true"), else: frame
+      ws_options = RequestOptions.build(%{codex_session: %CodexSession{id: @session_id}, api_key_runtime_epoch: 1}, "/backend-api/codex/responses", frame)
+      assert {:ok, prepared} = WebsocketCodec.prepare_frame(CodexPooler.JSON.encode!(frame), ws_options, fn _ -> :ok end)
+      assert {:ok, http} = NativeHttpTurnIdentity.request_claim(options(), body)
+      assert http.arm == :tool_continuation
+      equal_claim? = prepared.request_options.continuity.request_claim_key in http.tool_continuation_claims
+      assert equal_claim?, "tool continuation claim equality failed; lite=#{lite?}"
+      equal_witness? = prepared.native_client_retry_witness.digest in [http.native_client_retry_witness.digest | http.native_client_retry_witness.alternates]
+      assert equal_witness?, "tool witness equality failed; lite=#{lite?}"
+    end
+  end
+
+  test "tool aliases stay bounded and preserve semantic output, call id, anchors and unknown markers" do
+    body = Map.update!(payload(0), "input", &(&1 ++ [%{"type" => "future_tool_result", "call_id" => "call_synthetic", "result" => "synthetic"}]))
+    assert {:ok, original} = NativeHttpTurnIdentity.request_claim(options(), body)
+    assert original.arm == :tool_continuation
+    assert length(original.tool_continuation_claims) == 4
+    assert original.key == WebsocketTurnIdentity.request_claim_key(original.semantic_turn_key, body)
+
+    for framed? <- [false, true], marked? <- [false, true] do
+      variant = if framed?, do: Map.put(body, "type", "response.create"), else: body
+      variant = if marked?, do: put_in(variant, ["client_metadata", "ws_request_header_x_openai_internal_codex_responses_lite"], "true"), else: variant
+      assert {:ok, equivalent} = NativeHttpTurnIdentity.request_claim(options(), variant)
+      equal_aliases? = MapSet.new(original.tool_continuation_claims) == MapSet.new(equivalent.tool_continuation_claims)
+      assert equal_aliases?
+    end
+
+    for modified <- [put_in(body, ["input", Access.at(-1), "result"], "changed"), put_in(body, ["input", Access.at(-1), "call_id"], "call_other"), Map.put(body, "previous_response_id", "resp_synthetic_anchor")] do
+      assert {:ok, different} = NativeHttpTurnIdentity.request_claim(options(), modified)
+      disjoint? = MapSet.disjoint?(MapSet.new(original.tool_continuation_claims), MapSet.new(different.tool_continuation_claims))
+      assert disjoint?
+    end
+
+    for modified <- [Map.put(body, "type", nil), Map.put(body, "type", "unknown.create"), put_in(body, ["client_metadata", "ws_request_header_x_openai_internal_codex_responses_lite"], nil), put_in(body, ["client_metadata", "ws_request_header_x_openai_internal_codex_responses_lite"], "unknown")] do
+      assert {:ok, unknown} = NativeHttpTurnIdentity.request_claim(options(), modified)
+      assert unknown.tool_continuation_claims == [unknown.key]
+    end
+
+    assert {:ok, opener} = NativeHttpTurnIdentity.request_claim(options(), payload(0))
+    refute Map.has_key?(opener, :tool_continuation_claims)
+  end
 
   test "opening and local-summary HTTP claims attach mailbox proof without changing claim or witness bytes" do
     for window <- [0, 2] do
@@ -49,7 +97,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeHttpTurnIdentityTest do
   test "an opener and a tool continuation that gained the async workspaces name the request sent before them" do
     tool_round = &Map.update!(&1, "input", fn input -> input ++ [%{"type" => "function_call_output", "call_id" => "synthetic-call", "output" => "synthetic"}] end)
 
-    for {arm, earlier, extra} <- [{:opening, payload(0), 2}, {:tool_continuation, tool_round.(payload(0)), 1}] do
+    for {arm, earlier, extra} <- [{:opening, payload(0), 2}, {:tool_continuation, tool_round.(payload(0)), 4}] do
       later = put_in(earlier, ["client_metadata", "x-codex-turn-metadata", "workspaces"], @workspaces)
       assert {:ok, before} = NativeHttpTurnIdentity.request_claim(options(), earlier)
       assert {:ok, current} = NativeHttpTurnIdentity.request_claim(options(), later)

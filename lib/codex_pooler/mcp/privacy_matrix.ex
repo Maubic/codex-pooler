@@ -7,6 +7,8 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
   than the browser admin UI for PII-heavy fields.
   """
 
+  alias CodexPooler.Quotas.DiagnosticReasonCodes
+
   @type entity_family ::
           :operators
           | :invites
@@ -542,7 +544,7 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
       qualification: bounded_enum(value, :qualification, ~w(established provider_attested supported unverified legacy_attested not_applicable), "unverified"),
       scope: "account",
       routing_usable: fetch_summary(value, :routing_usable) == true,
-      reason_codes: bounded_capacity_reasons(fetch_summary(value, :reason_codes))
+      reason_codes: DiagnosticReasonCodes.sanitize(fetch_summary(value, :reason_codes))
     }
   end
 
@@ -557,13 +559,6 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
   end
 
   defp fetch_summary(value, key), do: Map.get(value, key, Map.get(value, Atom.to_string(key)))
-
-  defp bounded_capacity_reasons(reasons) when is_list(reasons) do
-    allowed = ~w(exhausted not_fresh expired reset_missing unknown_unusable provider_denied provider_credits_disabled provider_credit_capacity_unverified capacity_basis_unknown non_credit_capacity_unverified saved_reset_probe_pending saved_reset_recovery_unavailable)
-    reasons |> Enum.filter(&(&1 in allowed)) |> Enum.uniq() |> Enum.take(12)
-  end
-
-  defp bounded_capacity_reasons(_reasons), do: []
 
   defp fetch_field(attrs, field) do
     cond do

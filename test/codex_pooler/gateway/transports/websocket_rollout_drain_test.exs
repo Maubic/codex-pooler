@@ -4,6 +4,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrainTest do
   import CodexPooler.Gateway.Transports.WebsocketRolloutDrainSupport
   import ExUnit.CaptureLog
 
+  alias CodexPooler.Gateway.OperationalStatus
   alias CodexPooler.Gateway.Transports.Streaming.DeferredStreamRegistry
   alias CodexPooler.Gateway.Transports.Websocket.{ActivityRegistry, RolloutDrain}
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
@@ -20,6 +21,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrainTest do
     WaitingOwner
   }
 
+  alias CodexPooler.Gateway.Transports.RolloutDrainFailureSupport, as: FailureSupport
   alias CodexPooler.Gateway.Transports.WebsocketOwnerNodeHarness
 
   # Failure-detection budget for an expected message: a green run returns as
@@ -67,6 +69,199 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrainTest do
     end)
 
     {:ok, activity_registry: activity_registry, drain_name: drain_name, stream_registry: stream_registry}
+  end
+
+  test "actual activity registry exit resolves current and later drain callers", context do
+    {activity, activity_pid, _token} = FailureSupport.start_activity!(context.activity_registry)
+    {held, registry_pid} = FailureSupport.hold_call!(context.activity_registry, :status)
+    first = FailureSupport.request!(context.drain_name)
+    assert_receive {^held, :call_held, ^registry_pid, worker}, @detection_timeout_ms
+    worker_monitor = Process.monitor(worker)
+    {join, drain_pid} = FailureSupport.hold_call!(context.drain_name, :join)
+    second = FailureSupport.request!(context.drain_name)
+    assert_receive {^join, :call_held, ^drain_pid, _caller}, @detection_timeout_ms
+    send(drain_pid, {join, :release})
+    assert length(:sys.get_state(context.drain_name).active_drain.waiters) == 2
+    registry_monitor = Process.monitor(registry_pid)
+    :ok = stop_supervised({ActivityRegistry, context.activity_registry})
+    assert_receive {:DOWN, ^registry_monitor, :process, ^registry_pid, _}, @detection_timeout_ms
+    first_result = FailureSupport.result(first)
+    assert is_map(first_result)
+    assert first_result.result == :error
+    assert first_result.direct_turns_failed == 1
+    assert FailureSupport.result(second) == first_result
+    assert_receive {:DOWN, ^worker_monitor, :process, ^worker, _}, @detection_timeout_ms
+    assert :sys.get_state(context.drain_name).active_drain == nil
+    assert RolloutDrain.draining?(name: context.drain_name)
+    configure_rollout_drain_server(context.drain_name)
+    assert OperationalStatus.draining?()
+    later = FailureSupport.request!(context.drain_name) |> FailureSupport.result()
+    assert is_map(later) and later.result == :error
+    start_supervised!({ActivityRegistry, name: context.activity_registry})
+    refute ActivityRegistry.draining?(name: context.activity_registry)
+    assert OperationalStatus.draining?()
+    first_ref = first.ref
+    second_ref = second.ref
+    refute_received {^first_ref, _duplicate}
+    refute_received {^second_ref, _duplicate}
+    # A failed registry is not authority to claim the underlying activity stopped.
+    assert Process.alive?(activity_pid)
+    activity_monitor = Process.monitor(activity_pid)
+    send(activity_pid, :stop)
+    Task.await(activity, @detection_timeout_ms)
+    assert_receive {:DOWN, ^activity_monitor, :process, ^activity_pid, :normal}, @detection_timeout_ms
+  end
+
+  for {family, phase} <- [{:activity, :begin}, {:activity, :cancel}, {:activity, :complete}, {:stream, :begin}, {:stream, :complete}] do
+    test "actual #{family} registry #{phase} failure is a bounded error summary", context do
+      registry = if unquote(family) == :activity, do: context.activity_registry, else: context.stream_registry
+      {activity, activity_pid, token} = FailureSupport.start_activity!(context.activity_registry)
+
+      if unquote(phase) == :complete do
+        {_epoch, _entries} = ActivityRegistry.begin_drain(name: context.activity_registry)
+        send(activity_pid, :finish)
+        Task.await(activity, @detection_timeout_ms)
+      end
+
+      {held, registry_pid} = FailureSupport.hold_call!(registry, unquote(phase))
+      task = FailureSupport.request!(context.drain_name)
+      assert_receive {^held, :call_held, ^registry_pid, _worker}, @detection_timeout_ms
+      registry_module = if unquote(family) == :activity, do: ActivityRegistry, else: DeferredStreamRegistry
+      registry_monitor = Process.monitor(registry_pid)
+      :ok = stop_supervised({registry_module, registry})
+      assert_receive {:DOWN, ^registry_monitor, :process, ^registry_pid, _}, @detection_timeout_ms
+      result = FailureSupport.result(task)
+      assert is_map(result) and result.result == :error
+      assert :sys.get_state(context.drain_name).active_drain == nil
+      assert RolloutDrain.draining?(name: context.drain_name)
+
+      if unquote(phase) != :complete do
+        monitor = Process.monitor(activity_pid)
+        send(activity_pid, :stop)
+        Task.await(activity, @detection_timeout_ms)
+        assert_receive {:DOWN, ^monitor, :process, ^activity_pid, _}, @detection_timeout_ms
+      end
+
+      if unquote(family) == :stream and unquote(phase) == :complete, do: assert(result.direct_turns_completed == 1)
+      assert is_reference(token)
+    end
+  end
+
+  test "coordinator death preserves observed progress and fences every registered cohort worker", context do
+    {activity, activity_pid, token} = FailureSupport.start_activity!(context.activity_registry)
+    {held, registry_pid} = FailureSupport.hold_call!(context.activity_registry, :status)
+    first = FailureSupport.request!(context.drain_name)
+    assert_receive {^held, :call_held, ^registry_pid, worker}, @detection_timeout_ms
+    active = :sys.get_state(context.drain_name).active_drain
+    coordinator = active.pid
+    coordinator_monitor = Process.monitor(coordinator)
+    worker_monitor = Process.monitor(worker)
+    {join, drain_pid} = FailureSupport.hold_call!(context.drain_name, :join)
+    second = FailureSupport.request!(context.drain_name)
+    assert_receive {^join, :call_held, ^drain_pid, _caller}, @detection_timeout_ms
+    send(drain_pid, {join, :release})
+    assert length(:sys.get_state(context.drain_name).active_drain.waiters) == 2
+    Process.exit(coordinator, :kill)
+    assert_receive {:DOWN, ^coordinator_monitor, :process, ^coordinator, :killed}, @detection_timeout_ms
+    result = FailureSupport.result(first)
+    assert is_map(result) and result.result == :error
+    assert result.direct_turns_seen == 1 and result.direct_turns_failed == 1
+    assert FailureSupport.result(second) == result
+    assert_receive {:DOWN, ^worker_monitor, :process, ^worker, _}, @detection_timeout_ms
+    refute Process.alive?(worker)
+    assert :sys.get_state(context.drain_name).active_drain == nil
+    assert RolloutDrain.draining?(name: context.drain_name)
+    send(context.drain_name |> Process.whereis(), {:rollout_drain_finished, active.ref, %{result: :ok}})
+    send(context.drain_name |> Process.whereis(), {:DOWN, active.monitor, :process, coordinator, :normal})
+    assert :sys.get_state(context.drain_name).active_drain == nil
+    send(registry_pid, {held, :release})
+    :ok = ActivityRegistry.unregister(token, :failed, name: context.activity_registry)
+    monitor = Process.monitor(activity_pid)
+    send(activity_pid, :stop)
+    Task.await(activity, @detection_timeout_ms)
+    assert_receive {:DOWN, ^monitor, :process, ^activity_pid, :normal}, @detection_timeout_ms
+  end
+
+  test "coordinator killed after a completed cohort preserves that observed count", context do
+    {activity, activity_pid, _token} = FailureSupport.start_activity!(context.activity_registry)
+    {_epoch, _entries} = ActivityRegistry.begin_drain(name: context.activity_registry)
+    send(activity_pid, :finish)
+    Task.await(activity, @detection_timeout_ms)
+    {held, registry_pid} = FailureSupport.hold_call!(context.stream_registry, :complete)
+    first = FailureSupport.request!(context.drain_name)
+    assert_receive {^held, :call_held, ^registry_pid, coordinator}, @detection_timeout_ms
+    state = :sys.get_state(context.drain_name)
+    assert state.active_drain.counters.direct_turns_completed == 1
+    assert state.active_drain.pid == coordinator
+    monitor = Process.monitor(coordinator)
+    Process.exit(coordinator, :kill)
+    assert_receive {:DOWN, ^monitor, :process, ^coordinator, :killed}, @detection_timeout_ms
+    result = FailureSupport.result(first)
+    assert result.result == :error
+    assert result.direct_turns_completed == 1
+    assert result.direct_turns_failed == 0
+    assert :sys.get_state(context.drain_name).active_drain == nil
+    send(registry_pid, {held, :release})
+    later = FailureSupport.request!(context.drain_name) |> FailureSupport.result()
+    assert later.already_draining?
+    assert RolloutDrain.draining?(name: context.drain_name)
+  end
+
+  test "HTTP cohort registry exit remains contained and counts observed streaming work failed", context do
+    stream = DeferredStreamRegistry.register(%{}, name: context.stream_registry)
+    assert is_reference(stream)
+    {held, registry_pid} = FailureSupport.hold_call!(context.stream_registry, :entries)
+    task = FailureSupport.request!(context.drain_name)
+    assert_receive {^held, :call_held, ^registry_pid, worker}, @detection_timeout_ms
+    monitor = Process.monitor(worker)
+    :ok = stop_supervised({DeferredStreamRegistry, context.stream_registry})
+    summary = FailureSupport.result(task)
+    assert summary.result == :error
+    assert summary.http_streams_seen == 1
+    assert summary.http_streams_failed == 1
+    assert summary.http_streams_completed == 0
+    assert_receive {:DOWN, ^monitor, :process, ^worker, _}, @detection_timeout_ms
+  end
+
+  test "unresponsive registry is fenced inside the caller budget without reopening drain", context do
+    {held, registry_pid} = FailureSupport.hold_call!(context.activity_registry, :begin)
+    task = FailureSupport.request!(context.drain_name, owner_post_deadline_call_budget_ms: 50)
+    assert_receive {^held, :call_held, ^registry_pid, coordinator}, @detection_timeout_ms
+    monitor = Process.monitor(coordinator)
+    result = FailureSupport.result(task)
+    assert is_map(result) and result.result == :error
+    assert_receive {:DOWN, ^monitor, :process, ^coordinator, :killed}, @detection_timeout_ms
+    assert RolloutDrain.draining?(name: context.drain_name)
+    assert :sys.get_state(context.drain_name).active_drain == nil
+    send(registry_pid, {held, :release})
+  end
+
+  test "completed activity is retained when an earlier owner cohort is pending at coordinator death", context do
+    owner_key = owner_key()
+    owner = start_probe_owner!({DrainProbeOwner, key: owner_key, parent: self()})
+    {activity, activity_pid, _token} = FailureSupport.start_activity!(context.activity_registry)
+    {_epoch, _entries} = ActivityRegistry.begin_drain(name: context.activity_registry)
+    send(activity_pid, :finish)
+    Task.await(activity, @detection_timeout_ms)
+    observer = make_ref()
+    drain_pid = Process.whereis(context.drain_name)
+    :ok = :sys.install(drain_pid, {observer, &FailureSupport.observe_result/3, %{parent: self(), ref: observer}})
+    task = FailureSupport.request!(context.drain_name)
+    assert_receive {:rollout_drain_probe_started, ^owner_key}, @detection_timeout_ms
+    assert_receive {:completed_cohort_observed, ^observer}, @detection_timeout_ms
+    active = :sys.get_state(drain_pid).active_drain
+    assert active.counters.direct_turns_completed == 1
+    monitors = Enum.map(active.workers, fn {_ref, pid} -> {Process.monitor(pid), pid} end)
+    Process.exit(active.pid, :kill)
+    result = FailureSupport.result(task)
+    assert result.result == :error
+    assert result.direct_turns_completed == 1
+    assert result.direct_turns_failed == 0
+    assert result.owners_failed == 1
+    for {ref, pid} <- monitors, do: assert_receive({:DOWN, ^ref, :process, ^pid, _}, @detection_timeout_ms)
+    owner_monitor = Process.monitor(owner)
+    send(owner, {:release_rollout_drain_probe, owner_key})
+    assert_receive {:DOWN, ^owner_monitor, :process, ^owner, :normal}, @detection_timeout_ms
   end
 
   # The real `WebsocketOwnerSession`s start in this test's own owner registry (`registry:`), which
@@ -295,8 +490,9 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrainTest do
 
     refute_received {:rollout_drain_probe_started, ^survivor_key}
 
+    # The exhausted pass must not erase the error it already reported.
     assert %{
-             result: :ok,
+             result: :error,
              owners_seen: 0,
              owners_drained: 0,
              owners_failed: 0,
@@ -1181,5 +1377,64 @@ defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrainTest do
       registry when is_atom(registry) and not is_nil(registry) -> registry
       nil -> raise "the owner registry is started by this module's setup"
     end
+  end
+end
+
+defmodule CodexPooler.Gateway.Transports.Websocket.RolloutDrainShutdownFailureTest do
+  use ExUnit.Case, async: false
+  use CodexPooler.CommittedWriteGuard
+
+  import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport, only: [ensure_test_distribution_started!: 0]
+
+  alias CodexPooler.Gateway.Transports.RolloutDrainFailureSupport, as: FailureSupport
+  alias CodexPooler.Gateway.Transports.Websocket.{ActivityRegistry, RolloutDrain}
+  alias CodexPooler.PeerRegistry
+  alias CodexPoolerWeb.Runtime.UnreachableNodeSupport
+
+  @budget 15_000
+
+  setup_all do
+    ensure_test_distribution_started!()
+    peer = UnreachableNodeSupport.boot_app_peer!()
+
+    on_exit(fn ->
+      if Process.alive?(peer.peer), do: :peer.stop(peer.peer)
+      peer_name = peer.node |> Atom.to_string() |> String.split("@") |> hd() |> String.to_atom()
+      PeerRegistry.assert_peer_absent!(peer_name, peer_node: peer.node, budget_ms: @budget)
+    end)
+
+    %{peer: peer}
+  end
+
+  test "actual application stop passes prep_stop failure and terminates its owned work and listener", %{peer: peer} do
+    children = :erpc.call(peer.node, Supervisor, :which_children, [CodexPooler.Supervisor])
+    {:unreachable_node_listener, listener, :supervisor, _modules} = List.keyfind(children, :unreachable_node_listener, 0)
+    ownership = :erpc.call(peer.node, CodexPoolerWeb.Runtime.BackendCodexTestSupport, :capture_public_endpoint_identity!, [listener])
+    :ok = :erpc.call(peer.node, System, :put_env, ["CODEX_POOLER_WEBSOCKET_DRAIN_TIMEOUT_MS", "1000"])
+    {:ok, activity} = :erpc.call(peer.node, FailureSupport, :start_shutdown_activity, [self()])
+    assert_receive {:shutdown_activity_ready, ^activity}, @budget
+    supervisor = :erpc.call(peer.node, Process, :whereis, [CodexPooler.Supervisor])
+    registry = :erpc.call(peer.node, Process, :whereis, [ActivityRegistry])
+    drain = :erpc.call(peer.node, Process, :whereis, [RolloutDrain])
+    activity_monitor = Process.monitor(activity)
+    supervisor_monitor = Process.monitor(supervisor)
+    {held, ^registry} = FailureSupport.hold_call!(registry, :status)
+    observer = make_ref()
+    :ok = :sys.install(drain, {observer, &FailureSupport.observe_shutdown/3, %{parent: self()}})
+    publisher = :erpc.call(peer.node, Process, :whereis, [CodexPooler.Platform.ExecutionProofPublisher])
+    :ok = :sys.install(publisher, {make_ref(), &FailureSupport.observe_shutdown/3, %{parent: self()}})
+    task = Task.async(fn -> :erpc.call(peer.node, Application, :stop, [:codex_pooler], @budget) end)
+    assert_receive {^held, :call_held, ^registry, worker}, @budget
+    worker_monitor = Process.monitor(worker)
+    # The fault affects only the disposable peer's registry, while prep_stop drains.
+    :ok = :erpc.call(peer.node, Supervisor, :terminate_child, [CodexPooler.Supervisor, {ActivityRegistry, ActivityRegistry}])
+    assert_receive {:shutdown_drain_summary, %{result: :error, direct_turns_seen: 1, direct_turns_failed: 1}}, @budget
+    assert :ok = Task.await(task, @budget)
+    assert_receive :shutdown_proof_flush_reached, @budget
+    assert_receive {:DOWN, ^worker_monitor, :process, ^worker, _}, @budget
+    assert_receive {:DOWN, ^activity_monitor, :process, ^activity, _}, @budget
+    assert_receive {:DOWN, ^supervisor_monitor, :process, ^supervisor, _}, @budget
+    assert is_nil(:erpc.call(peer.node, Process, :whereis, [CodexPooler.Supervisor]))
+    assert :ok = :erpc.call(peer.node, CodexPoolerWeb.Runtime.BackendCodexTestSupport, :assert_public_endpoint_identity_released!, [ownership])
   end
 end

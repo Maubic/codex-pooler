@@ -16,9 +16,9 @@ defmodule CodexPoolerWeb.Admin.ProviderCreditsComponentsTest do
 
     assert text(document, "#credits-balance") == "12,497"
     assert text(document, "#credits-baseline") == "12,500"
-    assert text(document, "#credits-percent") == "99.976%"
+    assert text(document, "#credits-percent") == "99.9%"
     assert has?(document, "#credits-title + #credits-percent.text-success")
-    assert has?(document, "#credits-progress[value='99.976'][max='100'][aria-valuetext='99.976% of observed baseline'].progress-success.progress-striped")
+    assert has?(document, "#credits-progress[value='99.9'][max='100'][aria-valuetext='99.9% of observed baseline'].progress-success.progress-striped")
     assert has?(document, "#credits-policy + #credits-balance")
     assert has?(document, "#credits-progress[aria-label*='Observed'][aria-describedby='credits-baseline-description']")
     assert has?(document, "#credits-included-windows #included-weekly-progress[value='0']")
@@ -44,7 +44,7 @@ defmodule CodexPoolerWeb.Admin.ProviderCreditsComponentsTest do
     assert has?(document, "#credits[data-policy-enabled='false'][data-availability='disabled']")
     assert text(document, "#credits-policy") == "Disabled"
     assert text(document, "#credits-balance") == "12,497"
-    assert has?(document, "#credits-progress[value='99.976']")
+    assert has?(document, "#credits-progress[value='99.9']")
     assert has?(document, "#included-weekly-progress[value='0']")
   end
 
@@ -57,7 +57,7 @@ defmodule CodexPoolerWeb.Admin.ProviderCreditsComponentsTest do
     assert has?(document, "#credits[data-policy-enabled='true'][data-availability='unknown']")
     assert text(document, "#credits-policy") == "Enabled"
     assert text(document, "#credits-balance") == "12,497"
-    assert has?(document, "#credits-progress[value='99.976']")
+    assert has?(document, "#credits-progress[value='99.9']")
     assert has?(document, "#credits[title^='Provider credit capacity unverified;']")
     refute has?(document, "#credits-availability")
     refute has?(document, "#credits[data-availability='available'], #credits[data-availability='conditional']")
@@ -117,15 +117,15 @@ defmodule CodexPoolerWeb.Admin.ProviderCreditsComponentsTest do
     document = render_summary(summary)
 
     assert text(document, "#credits-balance") == "<1"
-    assert text(document, "#credits-percent") == "0.024%"
-    assert has?(document, "#credits-progress[value='0.024'][aria-valuetext='0.024% of observed baseline'].progress-error")
+    assert text(document, "#credits-percent") == "0.0%"
+    assert has?(document, "#credits-progress[value='0.0'][aria-valuetext='0.0% of observed baseline'].progress-error")
   end
 
   test "credit reference percentages truncate and use the existing quota threshold colors" do
     for {percent, displayed, tone} <- [
-          {"70.99999", "70.999", "success"},
-          {"30.99999", "30.999", "warning"},
-          {"29.99999", "29.999", "error"}
+          {"70.99999", "70.9", "success"},
+          {"30.99999", "30.9", "warning"},
+          {"29.99999", "29.9", "error"}
         ] do
       document = render_summary(%{finite_summary() | observed_percent: Decimal.new(percent)})
 
@@ -136,11 +136,18 @@ defmodule CodexPoolerWeb.Admin.ProviderCreditsComponentsTest do
     end
   end
 
-  test "finite baselines retain three decimal places for whole percentages" do
+  test "finite baselines show exactly 0 and 100 without a decimal" do
     document = render_summary(%{finite_summary() | observed_percent: Decimal.new(100)})
 
-    assert text(document, "#credits-percent") == "100.000%"
-    assert has?(document, "#credits-progress[value='100.000'][aria-valuetext='100.000% of observed baseline']")
+    assert text(document, "#credits-percent") == "100%"
+    assert has?(document, "#credits-progress[value='100'][aria-valuetext='100% of observed baseline']")
+  end
+
+  test "an observed percentage of exactly zero shows no decimal" do
+    document = render_summary(%{finite_summary() | observed_percent: Decimal.new("0.000")})
+
+    assert text(document, "#credits-percent") == "0%"
+    assert has?(document, "#credits-progress[value='0'][aria-valuetext='0% of observed baseline']")
   end
 
   test "detail values remain integer numbers while exact decimals are optional hover metadata" do

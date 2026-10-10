@@ -9,13 +9,17 @@ defmodule CodexPooler.Gateway.Routing.AccountDenialAutoRedeemInvarianceTest do
   use CodexPooler.DataCase, async: false
 
   import CodexPooler.PoolerFixtures
+  import CodexPoolerWeb.Runtime.BackendCodexTestSupport, only: [gateway_setup: 2, gateway_upstream: 4, native_text_input: 1, put_model_source_assignments!: 2]
   import ExUnit.CaptureLog
 
+  alias CodexPooler.Access
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.RequestOptions.ResetProbe
   alias CodexPooler.Gateway.Routing.CandidateEligibility.FilterInput
   alias CodexPooler.Gateway.Routing.RouteFiltering
+  alias CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback
+  alias CodexPooler.Gateway.Runtime.Dispatch.PreDispatch
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Repo
   alias CodexPooler.SavedResetConfirmationFixtures
@@ -123,6 +127,105 @@ defmodule CodexPooler.Gateway.Routing.AccountDenialAutoRedeemInvarianceTest do
       assert redeemed? == (unquote(expected) == 1)
     end
   end
+
+  # Two canonical partitions of one model, one account each: the second
+  # account's catalog source drifts in a field the partition digest covers.
+  # Both weekly windows are confirmed spent and both accounts hold banked
+  # resets. Selection finds no routable seat and keeps the older account's
+  # partition, holding the other back. Route filtering redeems the selected
+  # account and still refuses it (the reset is pending and no guarded probe is
+  # permitted), then the held-back fallback (`PartitionFallback.before_dispatch/3`)
+  # filters the held-back account, as `Service` runs the two: one request, one
+  # consume (findings#331). The fallback carries the recorded recovery into the
+  # held-back filtering, which runs no scan. Before that rule the held-back
+  # claim met the sibling consume barrier, because the redemption cohort is
+  # every runtime-compatible candidate of the model, both partitions.
+  for mode <- ["blocked", "threshold"] do
+    test "#{mode} mode, two partitions, both weekly windows spent: the held-back fallback adds no consume" do
+      %{selected: selected, held_back: held_back} = arrangement = partition_arrangement(unquote(mode))
+
+      capture_log(fn -> filter_with_held_back_partition(arrangement) end)
+
+      assert {consume_count(selected.upstream), consume_count(held_back.upstream)} == {1, 0}
+      assert redemption_code(selected.identity) == "reset"
+      assert redemption_code(held_back.identity) == nil
+    end
+  end
+
+  defp partition_arrangement(mode) do
+    selected_upstream = start_bank!()
+    held_back_upstream = start_bank!()
+    setup = gateway_setup(selected_upstream, quota?: false)
+    held_back = gateway_upstream(setup.pool, held_back_upstream, "upstream-token-held-back", compact?: false)
+    model = put_partition_sources!(setup.model, setup.assignment, held_back.assignment)
+
+    %{
+      setup: setup,
+      model: model,
+      selected: %{assignment: setup.assignment, identity: bank_identity!(setup.identity, selected_upstream, mode), upstream: selected_upstream},
+      held_back: %{assignment: held_back.assignment, identity: bank_identity!(held_back.identity, held_back_upstream, mode), upstream: held_back_upstream}
+    }
+  end
+
+  # Route filtering over the selected partition, then the held-back fallback
+  # on its refusal (`Service.filter_route_with_held_back_partition/2`), over
+  # the route state the real pre-dispatch builds.
+  defp filter_with_held_back_partition(%{setup: setup, model: model, selected: selected, held_back: held_back}) do
+    {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
+    {:ok, policy} = Access.normalize_api_key_policy(auth.api_key)
+    payload = %{"model" => model.exposed_model_id, "input" => native_text_input("route filtering")}
+    request_options = RequestOptions.build(%{api_key_policy: policy}, "/backend-api/codex/responses", payload)
+
+    assert {:ok, prepared} = PreDispatch.prepare(auth, "/backend-api/codex/responses", payload, request_options, model)
+    assert Enum.map(prepared.candidates, fn {assignment, _identity} -> assignment.id end) == [selected.assignment.id]
+    assert Enum.map(RouteState.partition_fallback(prepared.route_state), fn {assignment, _identity} -> assignment.id end) == [held_back.assignment.id]
+
+    input =
+      FilterInput.new(%{
+        auth: auth,
+        model: model,
+        endpoint: "/backend-api/codex/responses",
+        payload: payload,
+        request_options: RequestOptions.put_routing(prepared.request_options, reset_probe: ResetProbe.new()),
+        candidates: prepared.candidates
+      })
+
+    case RouteFiltering.filter_candidates_with_route_state(input, prepared.route_state) do
+      {:error, refusal} -> PartitionFallback.before_dispatch(input, prepared.route_state, refusal)
+      admitted -> admitted
+    end
+  end
+
+  defp put_partition_sources!(model, selected, held_back) do
+    model = put_model_source_assignments!(model, [selected, held_back])
+    template = get_in(model.metadata, ["source_assignment_models", selected.id])
+
+    sources = %{
+      selected.id => Map.put(template, "supports_experimental_context", false),
+      held_back.id => Map.put(template, "supports_experimental_context", true)
+    }
+
+    model
+    |> Ecto.Changeset.change(metadata: Map.put(model.metadata, "source_assignment_models", sources))
+    |> Repo.update!()
+  end
+
+  defp bank_identity!(identity, upstream, mode) do
+    identity
+    |> Ecto.Changeset.change(metadata: Map.merge(identity.metadata || %{}, saved_reset_metadata(upstream, 2)))
+    |> Repo.update!()
+    |> enable_auto_redeem!(mode)
+    |> tap(&put_quota!(&1, :weekly_exhausted))
+    |> Repo.reload!()
+  end
+
+  defp start_bank! do
+    {:ok, upstream} = FakeUpstream.start_link({:path_json, %{@consume_path => {200, %{"code" => "reset"}}, "/api/codex/usage" => {200, usage_payload(1)}}})
+    on_exit(fn -> FakeUpstream.stop(upstream) end)
+    upstream
+  end
+
+  defp redemption_code(identity), do: get_in(Repo.reload!(identity).metadata, ["saved_reset_redemption", "result", "code"])
 
   defp arrangement(mode, target_quota, sibling_quota, marker) do
     {:ok, upstream} =

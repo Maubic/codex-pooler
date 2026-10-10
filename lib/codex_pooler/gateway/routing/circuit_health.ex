@@ -243,11 +243,16 @@ defmodule CodexPooler.Gateway.Routing.CircuitHealth do
 
   def probe_stale?(_state, _settings, _now), do: false
 
-  def probe_in_flight_count(%RoutingCircuitState{metadata: metadata}) when is_map(metadata) do
-    case Map.get(metadata, @circuit_probe_in_flight_key) do
-      value when is_integer(value) and value > 0 -> value
-      _value -> 0
-    end
+  def probe_in_flight_count(%RoutingCircuitState{metadata: metadata} = state) when is_map(metadata) do
+    count =
+      case Map.get(metadata, @circuit_probe_in_flight_key) do
+        value when is_integer(value) and value > 0 -> value
+        _value -> 0
+      end
+
+    # Keep legacy anonymous slots conservative while old in-flight work drains;
+    # a count-only writer cannot erase receipts owned by the current generation.
+    if is_binary(Map.get(state, :probe_generation)), do: max(count, length(Map.get(state, :probe_admission_ids, []))), else: count
   end
 
   def probe_in_flight_count(_state), do: 0

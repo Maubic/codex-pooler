@@ -9,6 +9,7 @@
   <a href="#hermes-setup" title="Hermes Agent"><img src=".github/assets/hermes-favicon.png" alt="Hermes Agent" width="24" height="24"></a>
   <a href="#pi-setup" title="Pi"><img src=".github/assets/pi-favicon.png" alt="Pi" width="24" height="24"></a>
   <a href="#omp-setup" title="OMP"><img src=".github/assets/omp-favicon.png" alt="OMP" width="24" height="24"></a>
+  <a href="#omo-native-setup" title="OMO Native"><img src=".github/assets/omo-favicon.png" alt="OMO Native" width="24" height="24"></a>
   <a href="#cursor-setup" title="Cursor"><img src=".github/assets/cursor-favicon.png" alt="Cursor" width="24" height="24"></a>
   <a href="#kilo-code-setup" title="Kilo Code"><img src=".github/assets/kilo-favicon.png" alt="Kilo Code" width="24" height="24"></a>
   <a href="#trae-setup" title="Trae"><img src=".github/assets/trae-favicon.png" alt="Trae" width="24" height="24"></a>
@@ -28,6 +29,10 @@
   <strong>English</strong>
   ·
   <a href="README.zh-CN.md">简体中文</a>
+  ·
+  <a href="README.es.md">Español</a>
+  ·
+  <a href="README.ja.md">日本語</a>
 </p>
 
 <p align="center">
@@ -192,8 +197,9 @@ and uses a separate token; see [Operator MCP Service](#operator-mcp-service).
 | Windows | `%USERPROFILE%\.codex\config.toml` |
 
 Open `config.toml` at the path for your system and add the following. If you
-set `CODEX_HOME`, use the file in that folder instead. If the file already has
-a `[features]` section, add the setting to that section.
+set `CODEX_HOME`, use the file in that folder instead. Keep `name = "OpenAI"`
+to preserve Codex's native features. Catalog discovery is enabled by default;
+`model_catalog_url` points it at your Pool.
 
 ```toml
 model = "gpt-6.1-sol"
@@ -207,16 +213,13 @@ env_key = "CODEX_POOLER_API_KEY"
 wire_api = "responses"
 supports_websockets = true
 requires_openai_auth = true
-
-[features]
-api_key_model_discovery = true
 ```
 
 Restart Codex and choose a model available to your Pool.
 If you use Codex Desktop,
 follow the full guide to make your API key available to the app.
 
-**[Full setup & extras](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/)** — desktop setup, account settings and existing conversations.
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/codex-cli-desktop/)** — desktop setup, account settings, existing conversations and the optional custom provider name with its limitations.
 
 </details>
 
@@ -704,6 +707,53 @@ omp
 ```
 
 **[Full setup & extras](https://www.codex-pooler.com/docs/clients/omp/)** — installation, model choices and long conversations.
+
+</details>
+
+<a id="omo-native-setup"></a>
+
+<details>
+<summary><img src=".github/assets/omo-favicon.png" alt="OMO logo" width="16" height="16"> OMO Native <code>models.json</code></summary>
+
+Connect the standalone `omo` client and its bundled Senpi engine to your Pool.
+For OMO inside OpenCode, use the [OpenCode setup](#opencode-setup).
+
+| System | Configuration file |
+| --- | --- |
+| macOS / Linux | `~/.omo/agent/models.json` |
+| Windows | `%USERPROFILE%\.omo\agent\models.json` |
+
+Merge this provider into `models.json`, keeping any existing providers:
+
+```json
+{
+  "providers": {
+    "codex-pooler": {
+      "baseUrl": "https://codex-pooler.example.com/v1",
+      "api": "openai-responses",
+      "apiKey": "$CODEX_POOLER_API_KEY",
+      "authHeader": true,
+      "models": [
+        { "id": "gpt-6.1-sol", "reasoning": true, "defaultThinkingLevel": "medium", "input": ["text"] },
+        { "id": "gpt-6-luna", "reasoning": true, "defaultThinkingLevel": "low", "input": ["text"] },
+        { "id": "gpt-6-astra", "reasoning": true, "defaultThinkingLevel": "high", "input": ["text"] }
+      ]
+    }
+  }
+}
+```
+
+Keep the `$` in the API-key reference and replace the example URL with your
+Pooler's `/v1` URL. Keep only models available to your Pool. Start with Sol:
+
+```bash
+omo --provider codex-pooler --model gpt-6.1-sol --thinking medium
+```
+
+This setup covers text requests. The guide includes saved defaults and a
+no-tool connection check.
+
+**[Full setup & extras](https://www.codex-pooler.com/docs/clients/omo-native-senpi/)** — installation, model defaults and connection checks.
 
 </details>
 

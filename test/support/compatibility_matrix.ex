@@ -6,6 +6,11 @@ defmodule CodexPooler.CompatibilityMatrix do
   tests can keep supported behavior pinned.
   """
 
+  @decode_window CodexPooler.Gateway.Metadata.CodexModelDecodeContract.verified_range()
+                 |> Tuple.to_list()
+                 |> Enum.map(fn version -> version |> Tuple.to_list() |> Enum.join(".") end)
+                 |> List.to_tuple()
+
   @required_categories ~w(
     route
     auth
@@ -18,6 +23,24 @@ defmodule CodexPooler.CompatibilityMatrix do
   )a
 
   @features [
+    %{
+      slug: :client_output_limit_forwarding,
+      status: :supported,
+      current: :client_supplied_provider_output_limit,
+      categories: [:route, :error, :streaming, :ownership],
+      routes: [
+        %{method: :post, path: "/backend-api/codex/responses"},
+        %{method: :get, path: "/backend-api/codex/responses"},
+        %{method: :post, path: "/v1/responses"},
+        %{method: :get, path: "/v1/responses"},
+        %{method: :post, path: "/v1/chat/completions"}
+      ],
+      future_routes: [],
+      fixture: :client_output_limit_forwarding,
+      contract: "ordinary native and public Responses requests forward client-supplied max_output_tokens in Full and Lite over HTTP, direct and owner-forwarded websockets, and the public HTTP-to-websocket bridge; Chat converts max_completion_tokens before max_tokens; absent limits stay absent and API-key policy does not inject a provider cap; public positive-integer validation and native provider-validation passthrough remain unchanged; provider incomplete/max_output_tokens terminals retain usage accounting with one attempt and no cancellation or retry; compaction keeps its existing whitelist",
+      implementation: "lib/codex_pooler/gateway/payloads/payload_normalizer.ex",
+      tests: ["test/codex_pooler_web/controllers/v1/output_limit_forwarding_test.exs", "test/codex_pooler_web/controllers/v1/api_key_output_budget_characterization_test.exs"]
+    },
     %{
       slug: :files,
       status: :supported,
@@ -134,7 +157,7 @@ defmodule CodexPooler.CompatibilityMatrix do
           upstream_dispatch: false
         }
       },
-      contract: "backend model aliases return the same policy-visible native catalog body and deterministic weak ETag from the canonical pristine-source capability family selected by quota-routable member count, total member count, then the oldest created_at plus assignment id anchor, falling back to the largest family when none is routable, so the catalog body and ETag can change when the preferred family changes; reasoning-level-only variants inside that quota-selected capability family advertise the union from its quota-routable assignments and remain inside the native turn's canonical allowance, after which the established post-quota and post-circuit reasoning preference selects an eligible assignment that lists the effective known effort; this never crosses another capability family, changes the stable catalog body, or lets an ineligible advertiser hide a healthy fallback; when no eligible assignment lists the effort every effective candidate remains upstream-authoritative; shell_type values default, local, shell_command, and unified_exec are equivalent for partitioning, disabled is separate, and unknown, missing, or malformed values do not silently collapse, while the selected anchor's raw shell_type remains served; quota routing reads one shared candidate-identity snapshot and classifies it independently per model; API-key policy decides admission and projection before assignment selection and never clamps the request; backend Codex catalog-driven new turns use the selected capability family, while translated OpenAI Responses capacity includes all valid canonical assignments after concrete request compatibility; valid canonical hard pins may continue on their pinned partition; selected-family exhaustion and malformed-source hard pins fail before accounting or upstream work; a quota refusal of the selected family before reservation first runs its held-back families once through the same quota filtering (stale-evidence refresh included), moves the turn there when one is admitted, and otherwise refuses with both families' exclusions, the held-back ones marked, so the refusal's advice covers the whole Pool, while a connection-bound compaction and a non-quota refusal keep the selected family's refusal, and the request summary names the routable counts inside and outside the selected family, the fallback phase and outcome, or the reason no fallback was possible; cache coherence across processes or replicas is eventual after a successful Responses token is observed; the version in a Codex build's User-Agent (a first-party codex originator, or any originator, including one with a slash or longer than 64 bytes, followed by the Codex platform block) selects the instructions representation, and the catalog fetch and every Responses turn select it with the same function from that one header, so a turn's x-models-etag always names the ETag its own client's catalog fetch received; the client_version query value is ignored and the catalog response carries vary: user-agent; 0.148.0 or newer drops the mirrored base_instructions from an entry whose model_messages.instructions_template is a string, while older, 0.147.0, absent, or unparsable versions and every non-Codex agent receive the entry verbatim, and the ETag is the digest of the representation actually served; a client whose whole version is inside the window the Codex catalog decoder was verified against (0.154.0 through 0.156.1, including prereleases that report one of those whole versions) receives the decode_checked representation: the template-only entries minus every entry that client would fail to decode, because one such entry makes it discard the whole catalog; a left-out model is not advertised to that client but stays routable, and each omission is logged as codex catalog entry left out with the Pool id, the model slug and the failing field paths only"
+      contract: "backend model aliases return the same policy-visible native catalog body and deterministic weak ETag from the canonical pristine-source capability family selected by quota-routable member count, total member count, then the oldest created_at plus assignment id anchor, falling back to the largest family when none is routable, so the catalog body and ETag can change when the preferred family changes; reasoning-level-only variants inside that quota-selected capability family advertise the union from its quota-routable assignments and remain inside the native turn's canonical allowance, after which the established post-quota and post-circuit reasoning preference selects an eligible assignment that lists the effective known effort; this never crosses another capability family, changes the stable catalog body, or lets an ineligible advertiser hide a healthy fallback; when no eligible assignment lists the effort every effective candidate remains upstream-authoritative; shell_type values default, local, shell_command, and unified_exec are equivalent for partitioning, disabled is separate, and unknown, missing, or malformed values do not silently collapse, while the selected anchor's raw shell_type remains served; quota routing reads one shared candidate-identity snapshot and classifies it independently per model; API-key policy decides admission and projection before assignment selection and never clamps the request; backend Codex catalog-driven new turns use the selected capability family, while translated OpenAI Responses capacity includes all valid canonical assignments after concrete request compatibility; valid canonical hard pins may continue on their pinned partition; selected-family exhaustion and malformed-source hard pins fail before accounting or upstream work; a quota refusal of the selected family before reservation first runs its held-back families once through the same quota filtering (stale-evidence refresh included), moves the turn there when one is admitted, and otherwise refuses with both families' exclusions, the held-back ones marked, so the refusal's advice covers the whole Pool, while a connection-bound compaction and a non-quota refusal keep the selected family's refusal, and the request summary names the routable counts inside and outside the selected family, the fallback phase and outcome, or the reason no fallback was possible; cache coherence across processes or replicas is eventual after a successful Responses token is observed; the version in a Codex build's User-Agent (a first-party codex originator, or any originator, including one with a slash or longer than 64 bytes, followed by the Codex platform block) selects the instructions representation, and the catalog fetch and every Responses turn select it with the same function from that one header, so a turn's x-models-etag always names the ETag its own client's catalog fetch received; the client_version query value is ignored and the catalog response carries vary: user-agent; 0.148.0 or newer drops the mirrored base_instructions from an entry whose model_messages.instructions_template is a string, while older, 0.147.0, absent, or unparsable versions and every non-Codex agent receive the entry verbatim, and the ETag is the digest of the representation actually served; a client whose whole version is inside the window the Codex catalog decoder was verified against (including prereleases that report one of those whole versions) receives the decode_checked representation: the template-only entries minus every entry that client would fail to decode, because one such entry makes it discard the whole catalog; a left-out model is not advertised to that client but stays routable, and each omission is logged as codex catalog entry left out with the Pool id, the model slug and the failing field paths only"
     },
     %{
       slug: :backend_responses_etag,
@@ -296,11 +319,13 @@ defmodule CodexPooler.CompatibilityMatrix do
         %{method: :post, path: "/backend-api/codex/v1/responses"},
         %{method: :post, path: "/backend-api/codex/v1/chat/completions"},
         %{method: :post, path: "/v1/responses"},
-        %{method: :post, path: "/v1/chat/completions"}
+        %{method: :post, path: "/v1/chat/completions"},
+        %{method: :get, path: "/backend-api/codex/responses", transport: "websocket"},
+        %{method: :get, path: "/v1/responses", transport: "websocket"}
       ],
       future_routes: [],
       fixture: :upstream_validation_rejection_relay,
-      contract: "an ordinary Responses or Chat HTTP request whose upstream answers HTTP 400 with a direct error object of type invalid_request_error and an allowlisted parameter-validation code, or with a detail body that is exactly `Unsupported parameter: ` followed by a bounded field path (read as unsupported_parameter with that param, which is how the Codex backend refuses previous_response_id on HTTP), relays type, code, a bounded field-path param or null, and a Pooler-authored message built from code and param, never the provider message, which for unsupported_value and invalid_value may append at most 12 identifier-shaped supported values taken only from a strictly shaped trailing provider list with every earlier quoted value, including the rejected value, excluded; translated Chat Completions map the param back to the Chat field the client sent only for renames the adapter performs and the Pooler-authored message names that same Chat field under Lite and Full alike; a native streaming request receives that native JSON error envelope, served as application/json even when the upstream 400 carried no content-type, instead of an empty body while a materialized native body keeps its existing passthrough, and public /v1 Responses and Chat Completions receive the same OpenAI error object; Auto, Lite, Full relay the same bounded supported-values list from persisted attempt metadata. Any other native HTTP 400 on an ordinary Responses route (no code, another code or type, any other detail body) answers, streaming or not, the Pooler-authored error built from the sanitized code, param and type only, with the upstream code or invalid_request, instead of an empty streaming body or the provider body. A native HTTP refusal with another final 4xx on an ordinary Responses route (402 to 499 except 408 and 429; a credential 403 is refreshed before it) answers that error with status 400 under every serving mode, its message naming the upstream status, because the Codex client retries every other status; the request and attempt keep the upstream status. Every other status, compact routes, model-unavailability and misalignment projections, and websocket frames keep their existing behavior, while accounting codes, retries, routing health, and metrics are unchanged"
+      contract: "an ordinary Responses or Chat HTTP request whose upstream answers HTTP 400 with a direct error object of type invalid_request_error and an allowlisted parameter-validation code, or with a detail body that is exactly `Unsupported parameter: ` followed by a bounded field path (read as unsupported_parameter with that param, which is how the Codex backend refuses previous_response_id on HTTP), relays type, code, a bounded field-path param or null, and a Pooler-authored message built from code and param, never the provider message, which for unsupported_value and invalid_value may append at most 12 identifier-shaped supported values taken only from a strictly shaped trailing provider list with every earlier quoted value, including the rejected value, excluded; translated Chat Completions map the param back to the Chat field the client sent only for renames the adapter performs and the Pooler-authored message names that same Chat field under Lite and Full alike; a native streaming request receives that native JSON error envelope, served as application/json even when the upstream 400 carried no content-type, instead of an empty body while a materialized native body keeps its existing passthrough, and public /v1 Responses and Chat Completions receive the same OpenAI error object; Auto, Lite, Full relay the same bounded supported-values list from persisted attempt metadata. Any other native HTTP 400 on an ordinary Responses route (no code, another code or type, any other detail body) answers, streaming or not, the Pooler-authored error built from the sanitized code, param and type only, with the upstream code or invalid_request, instead of an empty streaming body or the provider body. A native HTTP refusal with another final 4xx on an ordinary Responses route (402 to 499 except 408 and 429; a credential 403 is refreshed before it) answers that error with status 400 under every serving mode, its message naming the upstream status, because the Codex client retries every other status; the request and attempt keep the upstream status. A wrapped websocket error frame of the same refusal (4xx, no code and no param, the HTTP message as text) is read for that code and field when its type is invalid_request_error: the text `Invalid response.create payload: <message>` or `[<Schema>] [<path>] [<kind>] <message>` reads as invalid_value (kind invalid_enum_value), invalid_type, unknown_parameter, missing_required_parameter or string_above_max_length with the field path the text names (an `Invalid value` message names none, so its param is null), `Unsupported parameter: <path>` reads as unsupported_parameter, a provider code or param on the frame is never replaced, and the relay (public /v1 websocket and bridged HTTP, native websocket) and the failed attempt record the same code and param the HTTP answer of the same fault carries, without the provider text. `Unsupported tool type: <type>` is not relayed on either transport and the attempt keeps its type as a bounded diagnostic identifier. Every other status, compact routes, model-unavailability and misalignment projections, and websocket text outside those templates keep their existing behavior, while accounting codes, retries, routing health, and metrics are unchanged"
     },
     %{
       slug: :pooler_authored_error_type,
@@ -355,9 +380,9 @@ defmodule CodexPooler.CompatibilityMatrix do
       chat_tool_snapshot_contract: "Chat SSE completes function arguments and custom input from matching final argument, item, and completed-response snapshots by appending only the verified missing suffix; repeated snapshots do not duplicate output; mismatched identity, shorter snapshots, or divergent prefixes emit one sanitized stream error without success/DONE and fail request/attempt accounting while retaining observed usage",
       chat_long_text_contract: "ordinary Chat messages split normalized text fields above 10 MiB into lossless UTF-8 parts inside the same message or tool result; oversized lifted instructions become one leading developer message after instruction lifting; preserve byte concatenation, role, order, media, call identity and final cache breakpoint; opaque fields and direct Responses/input fallback retain their contracts, and oversized annotated text without safe rebasing fails explicitly",
       chat_call_id_contract: "ordinary Chat history maps function/custom call identifiers above 64 UTF-8 bytes to deterministic bounded identifiers shared by calls and outputs; preserve shorter identifiers, content, ordering and independent call identity; reject mapped collisions instead of merging calls; direct Responses and input fallback retain their native identifiers without node-local mapping state",
-      programmatic_tool_calling_contract: "closed-world Responses programmatic-tool calling rejects remote MCP and unrelated hosted tools and makes no full OpenAI parity claim",
+      programmatic_tool_calling_contract: "closed-world Responses programmatic-tool calling relays program replay history; the hosted programmatic_tool_calling declaration is refused before dispatch when the model is served Full and forwarded in the Lite manifest, a type-only tool_choice naming it is refused in both modes, and it rejects remote MCP and unrelated hosted tools and makes no full OpenAI parity claim",
       hosted_shell_history_contract: "closed-key hosted-shell history replay accepts only shell_call and shell_call_output input items without executing commands or enabling shell tool declarations, local shell, remote MCP, SDK command-index accumulation, or broad hosted-tool parity",
-      contract: "Responses and chat completions proxy JSON/SSE through the shared gateway accounting path; chat completions use messages when present and fall back to top-level input only when messages is absent or empty, with omitted fallback instructions defaulting to a blank string; /v1/responses and translated /v1/chat/completions accept client service_tier fast as canonical upstream priority while retaining existing invalid-tier rejection, preserve literal provider service_tier output, and include a Chat stream tier only on chunks emitted after observation without buffering or rewriting earlier chunks; translated Chat custom definitions and named choices use the official nested wrapper, flatten into the supported Responses subset, and restore completed or streamed custom calls without parsing free-form input as JSON; /v1/responses and translated /v1/chat/completions accept prompt_cache_options and supported content-part prompt_cache_breakpoint controls as public input, while account-backed egress omits both explicit controls and preserves prompt_cache_key; Pool affinity remains exclusively keyed by prompt_cache_key; request-shaped additional_tools input items are preserved as non-executable input, never merged into executable tools, and never used to satisfy tool_choice; OpenAI Responses remote MCP tool definitions are rejected before upstream dispatch in both top-level tools and nested additional_tools.tools locations; Responses namespace tool definitions are accepted only for non-empty namespace name/description values and exact flat function or executable custom namespace children; Responses truncation accepts auto and disabled locally but is not forwarded upstream; terminal compaction_trigger backend payloads on either backend Responses alias retain the final trigger, classify streamed compaction from the request trigger independently of client declarations while ignoring unrelated additive metadata and never inspecting returned compaction items, dispatch streamed Responses compaction to /backend-api/codex/responses with compact accounting on /backend-api/codex/responses/compact, force store false, retain native client_metadata, include and tool_choice, omit prompt_cache_options, set upstream stream true for Responses compaction triggers, and adapt the compact result to backend Responses SSE; returned compaction-item normalization preserves only schema-backed string replay identity and drops other compact-result fields; direct compact aliases preserve their canonical legacy /backend-api/codex/responses/compact upstream route while omitting store, stream, and the trigger; malformed trigger placement is rejected before dispatch; public /v1/responses HTTP and Responses websocket turns accept exactly one final compaction_trigger after visible input, dispatch it through the same streamed compact bridge with compact accounting and ordinary backend Responses upstream routing, and adapt the result as public Responses JSON, SSE, or websocket events; public /v1/responses/compact remains unsupported and public /v1 Responses accepts encrypted compaction output replay items from prior remote compaction turns; native fallback provider unsupported requires an admitted failed /backend-api/codex/responses/compact request with last_error_code upstream_status, response status 404, and a matching failed attempt with upstream status 404, while local route, auth, routing, or model failures are not capability evidence; backend regular HTTP Responses and compact routes forward approved metadata headers, including request-scoped x-codex-turn-state, x-codex-window-id, x-openai-memgen-request, x-codex-guardian, and x-codex-inference-call-id, and relay upstream x-codex-turn-state response headers downstream, while public /v1 and websocket request-header lanes do not; context-overflow recovery stays client/upstream-owned with no server-side hidden replay, no server-side memory tool injection, no client store=false-to-true override policy, and no stored prompt/frame reconstruction; Hermes assistant replay may include safe assistant status metadata; OpenClaw assistant replay drops thinking metadata and normalizes text before upstream dispatch; public /v1/responses and /v1/chat/completions accept exactly five lowercase input_audio labels (wav=>audio/wav, mp3=>audio/mpeg, m4a=>audio/mp4, webm=>audio/webm, ogg=>audio/ogg), apply a 52,428,800 decoded-byte maximum and a 69,905,068 non-whitespace encoded-byte precheck, canonicalize backend input_audio to an audio_url data URL after accepted ASCII whitespace normalization, reject malformed/empty/unsupported/oversized input as sanitized invalid_request without dispatch or accounting, honor configured request-envelope rejection before adapter checks, and keep audio metadata-only outside dispatch; safe OpenAI Responses fields, prompt-cache locality, SDK-control rejection, and backend-only control stripping stay scope-specific"
+      contract: "Responses and chat completions proxy JSON/SSE through the shared gateway accounting path; chat completions use messages when present and fall back to top-level input only when messages is absent or empty, with omitted fallback instructions defaulting to a blank string; /v1/responses and translated /v1/chat/completions accept client service_tier fast as canonical upstream priority while retaining existing invalid-tier rejection, preserve literal provider service_tier output, and include a Chat stream tier only on chunks emitted after observation without buffering or rewriting earlier chunks; translated Chat custom definitions and named choices use the official nested wrapper, flatten into the supported Responses subset, and restore completed or streamed custom calls without parsing free-form input as JSON; /v1/responses and translated /v1/chat/completions accept prompt_cache_options and supported content-part prompt_cache_breakpoint controls as public input, while account-backed egress omits both explicit controls and preserves prompt_cache_key; Pool affinity remains exclusively keyed by prompt_cache_key; request-shaped additional_tools input items are preserved as non-executable input, never merged into executable tools, and never used to satisfy tool_choice; OpenAI Responses remote MCP tool definitions are rejected before upstream dispatch in both top-level tools and nested additional_tools.tools locations; Responses namespace tool definitions are accepted only for non-empty namespace name/description values and exact flat function or executable custom namespace children; Responses truncation accepts auto and disabled locally but is not forwarded upstream; metadata is accepted with the public API's shape and stripped before dispatch with the other upstream-unsupported controls; terminal compaction_trigger backend payloads on either backend Responses alias retain the final trigger, classify streamed compaction from the request trigger independently of client declarations while ignoring unrelated additive metadata and never inspecting returned compaction items, dispatch streamed Responses compaction to /backend-api/codex/responses with compact accounting on /backend-api/codex/responses/compact, force store false, retain native client_metadata, include and tool_choice, omit prompt_cache_options, set upstream stream true for Responses compaction triggers, and adapt the compact result to backend Responses SSE; returned compaction-item normalization preserves only schema-backed string replay identity and drops other compact-result fields; direct compact aliases preserve their canonical legacy /backend-api/codex/responses/compact upstream route while omitting store, stream, and the trigger; malformed trigger placement is rejected before dispatch; public /v1/responses HTTP and Responses websocket turns accept exactly one final compaction_trigger after visible input, dispatch it through the same streamed compact bridge with compact accounting and ordinary backend Responses upstream routing, and adapt the result as public Responses JSON, SSE, or websocket events; public /v1/responses/compact remains unsupported and public /v1 Responses accepts encrypted compaction output replay items from prior remote compaction turns; native fallback provider unsupported requires an admitted failed /backend-api/codex/responses/compact request with last_error_code upstream_status, response status 404, and a matching failed attempt with upstream status 404, while local route, auth, routing, or model failures are not capability evidence; backend regular HTTP Responses and compact routes forward approved metadata headers, including request-scoped x-codex-turn-state, x-codex-window-id, x-openai-memgen-request, x-codex-guardian, and x-codex-inference-call-id, and relay upstream x-codex-turn-state response headers downstream, while public /v1 and websocket request-header lanes do not; context-overflow recovery stays client/upstream-owned with no server-side hidden replay, no server-side memory tool injection, no client store=false-to-true override policy, and no stored prompt/frame reconstruction; Hermes assistant replay may include safe assistant status metadata; OpenClaw assistant replay drops thinking metadata and normalizes text before upstream dispatch; public /v1/responses and /v1/chat/completions accept exactly five lowercase input_audio labels (wav=>audio/wav, mp3=>audio/mpeg, m4a=>audio/mp4, webm=>audio/webm, ogg=>audio/ogg), apply a 52,428,800 decoded-byte maximum and a 69,905,068 non-whitespace encoded-byte precheck, canonicalize backend input_audio to an audio_url data URL after accepted ASCII whitespace normalization, reject malformed/empty/unsupported/oversized input as sanitized invalid_request without dispatch or accounting, honor configured request-envelope rejection before adapter checks, and keep audio metadata-only outside dispatch; safe OpenAI Responses fields, prompt-cache locality, SDK-control rejection, and backend-only control stripping stay scope-specific"
     },
     %{
       slug: :response_body_cap,
@@ -782,6 +807,20 @@ defmodule CodexPooler.CompatibilityMatrix do
       contract: "with owner forwarding off or on, the session's owner on this node or on another, and the Pool serving the model Full or Lite, a native backend websocket hands the released Codex client's response.interrupt (a provider response id and a bounded mode, rebuilt from those two fields alone) to the upstream session that carries the running turn, which writes it only while the response it names runs there as a relayed turn; the provider's answer (response.interrupt.accepted, response.output_item.interrupted for an item it had open, the terminal response.incomplete with reason interrupted) reaches the client unchanged, the interrupted request settles succeeded with the usage it generated and a delivery receipt naming incomplete_reason interrupted, and the follow-up the client anchors on the interrupted response is a later request of its turn on the same connection, in the serving mode the interrupted request was served in; every interrupt the provider cannot apply (a malformed frame, no running turn, another response, a response already ended, a collected compaction, another downstream's turn, an owner node of an earlier release) is dropped with one line naming where and no frame, since an error frame would end the client's turn; a compaction the provider itself ends interrupted is answered with a reason the client retries; the public /v1 websocket keeps refusing the frame type"
     },
     %{
+      slug: :native_websocket_response_steer,
+      status: :supported,
+      current: :connection_bound_steering_with_independent_successors,
+      categories: [:error, :streaming, :ownership],
+      routes: [
+        %{method: :get, path: "/backend-api/codex/responses", transport: :websocket},
+        %{method: :get, path: "/backend-api/codex/v1/responses", transport: :websocket},
+        %{method: :get, path: "/v1/responses", transport: :websocket, behavior: :refused_control}
+      ],
+      future_routes: [],
+      fixture: :native_websocket_response_steer,
+      contract: "native backend websocket response.steer carries type, a provider previous_response_id, and an input list to the same upstream connection that holds the named response, with owner forwarding off or through the local or remote session owner, in Full and Lite; provider response.steer.accepted and response.steer.failed, the unsupported_native_inflight_message error, and its Close are relayed without synthesized acceptance or a serving-mode guess; acceptance alone creates no request or guaranteed immediate successor, and tools remain client-owned; each actual unsolicited successor response.created retains the connection while opening an independent reservation, request, attempt, provider usage settlement, and downstream delivery receipt; response.incomplete with reason steered settles as a successfully served request without retry or failure, and a normally completed predecessor remains independently settled; public /v1/responses steering stays 400 invalid_request on type, and native steering is distinct from HTTP steered continuation and response.interrupt"
+    },
+    %{
       slug: :firewall,
       status: :supported,
       current: :explicit_forwarded_client_policy,
@@ -854,6 +893,9 @@ defmodule CodexPooler.CompatibilityMatrix do
       current: :retryable_503_before_dispatch,
       categories: [:error, :degraded],
       routes: [
+        %{method: :get, path: "/api/codex/usage"},
+        %{method: :get, path: "/wham/usage"},
+        %{method: :get, path: "/backend-api/wham/usage"},
         %{method: :get, path: "/backend-api/codex/models"},
         %{method: :get, path: "/backend-api/codex/responses", transport: :websocket},
         %{method: :post, path: "/backend-api/codex/responses"},
@@ -1011,6 +1053,32 @@ defmodule CodexPooler.CompatibilityMatrix do
       contract: "public Responses HTTP JSON/SSE and websocket response.create preserve access_programs in Full and Lite; its optional cyber key accepts standard, daybreak_blue, or daybreak_red, while malformed objects, unknown keys, and invalid selections fail before dispatch; the provider remains authoritative for account and model entitlement"
     },
     %{
+      slug: :responses_configuration_updates,
+      status: :supported,
+      current: :ordered_configuration_update_forwarding,
+      categories: [:route, :auth, :error, :streaming, :ownership],
+      routes: [
+        %{method: :post, path: "/v1/responses"},
+        %{method: :get, path: "/v1/responses", transport: :websocket}
+      ],
+      future_routes: [],
+      fixture: :responses_configuration_updates,
+      contract: "public Responses HTTP JSON/SSE and websocket response.create accept configuration_update with exactly type and reasoning, where reasoning contains exactly a string effort; preserve the item and its input order through Full/Lite normalization and continuation replay without lifting it into instructions or applying request-level effort aliases; missing fields, wrong types, and unknown keys reject locally with indexed client parameters, while effort enum, selected-model support, consecutive updates, and compaction restrictions remain provider-authoritative and use the existing sanitized validation-rejection relay; Vercel message-level reasoningEffortUpdate uses an empty system message and allowSystemInMessages true at the client API, serializing only type and reasoning rather than a content field; shape acceptance proves neither an effort effect nor cache behavior"
+    },
+    %{
+      slug: :responses_async_tools,
+      status: :supported,
+      current: :boolean_async_tool_and_call_preservation,
+      categories: [:route, :auth, :error, :streaming, :ownership],
+      routes: [
+        %{method: :post, path: "/v1/responses"},
+        %{method: :get, path: "/v1/responses", transport: :websocket}
+      ],
+      future_routes: [],
+      fixture: :responses_async_tools,
+      contract: "public Responses accepts optional boolean async on otherwise-valid flat function/custom declarations, accepted namespace members but not the namespace wrapper, and replayed function_call/custom_tool_call items; true and false retain their exact value and omission stays absent through Full/Lite declarations, client-sent additional_tools/tool_search_output manifests, continuation replay, and HTTP JSON/SSE or websocket call output; a non-boolean rejects locally as invalid_type at its indexed async path and a namespace wrapper rejects as unknown_parameter; Lite has no local async special case, so an intermittent provider unsupported_value refusal on tools follows the existing sanitized rejection relay; admission never executes tools or creates a gateway-owned scheduler"
+    },
+    %{
       slug: :responses_allowed_tools,
       status: :supported,
       current: :declaration_backed_full_mode_choice,
@@ -1021,7 +1089,7 @@ defmodule CodexPooler.CompatibilityMatrix do
       ],
       future_routes: [],
       fixture: :responses_allowed_tools,
-      contract: "direct public Responses HTTP and websocket response.create accept an exact type=allowed_tools choice only in Full mode, with mode auto or required and a nonempty ordered tools list; named function and custom entries must resolve to undeferred direct top-level same-kind declarations, while type-only programmatic_tool_calling, web_search_preview, web_search, and image_generation entries require a declared top-level tool of the same type; order and duplicates are forwarded unchanged after only the existing tool-definition schema lowering; malformed or undeclared Full choices fail before admission or accounting, valid Lite choices create one rejected Request without Attempts or Ledger rows, top-level MCP declarations retain the tools error while MCP allow-list members use the tool_choice error, and Chat, native backend Responses, namespaces, additional_tools, deferred tools, aliases, unsupported entries, Realtime, and broad OpenAI tool parity remain excluded"
+      contract: "direct public Responses HTTP and websocket response.create accept an exact type=allowed_tools choice only in Full mode, with mode auto or required and a nonempty ordered tools list; named function and custom entries must resolve to undeferred direct top-level same-kind declarations, while type-only web_search and image_generation entries require a declared top-level tool of the same type; order and duplicates are forwarded unchanged after only the existing tool-definition schema lowering; malformed or undeclared Full choices fail before admission or accounting, valid Lite choices create one rejected Request without Attempts or Ledger rows, top-level MCP declarations retain the tools error while MCP allow-list members use the tool_choice error, and Chat, native backend Responses, namespaces, additional_tools, deferred tools, aliases, unsupported entries, Realtime, and broad OpenAI tool parity remain excluded"
     },
     %{
       slug: :responses_executable_custom_tools,
@@ -1035,7 +1103,7 @@ defmodule CodexPooler.CompatibilityMatrix do
       ],
       future_routes: [],
       fixture: :responses_executable_custom_tools,
-      contract: "direct public Responses HTTP and websocket response.create accept executable custom tools with an exact nonblank name, optional description and defer_loading, nullable direct/programmatic allowed_callers, and omitted, text, lark-grammar, or regex-grammar input format; the same exact custom definition is accepted as a child of a nonblank namespace with a nonempty tool list alongside exact flat function children; translated Chat Completions accepts the official nested custom definition with nonblank name and optional description or format plus the official nested named custom choice, flattens both into the Responses request, and projects completed JSON and streamed custom_tool_call input back into the Chat custom shape without parsing free-form input as JSON; an exact typed custom choice resolves only a declared custom tool of the same name and kind, including a namespace child, is preserved in Full mode, and is rejected before upstream dispatch in Lite mode with unsupported_parameter for tool_choice; that Lite rejection is serving-mode driven and covers map-shaped tool_choice other than an exact nonblank named function choice on any lane dispatching to backend Responses; named function choices, including translated Chat choices, and string choices such as auto are preserved in both modes; executable names are collision-free across flat functions, namespace children, and custom tools; malformed and unrelated tool families remain rejected, custom replay is a separate input-item contract, provider execution availability depends on the selected model and upstream account, and no broad OpenAI tool parity is claimed"
+      contract: "direct public Responses HTTP and websocket response.create accept executable custom tools with an exact nonblank name, optional description and boolean defer_loading or async, nullable direct/programmatic allowed_callers, and omitted, text, lark-grammar, or regex-grammar input format; the same exact custom definition is accepted as a child of a nonblank namespace with a nonempty tool list alongside exact flat function children; translated Chat Completions accepts the official nested custom definition with nonblank name and optional description or format plus the official nested named custom choice, flattens both into the Responses request, and projects completed JSON and streamed custom_tool_call input back into the Chat custom shape without parsing free-form input as JSON; an exact typed custom choice resolves only a declared custom tool of the same name and kind, including a namespace child, is preserved in Full mode, and is rejected before upstream dispatch in Lite mode with unsupported_parameter for tool_choice; that Lite rejection is serving-mode driven and covers map-shaped tool_choice other than an exact nonblank named function choice on any lane dispatching to backend Responses; named function choices, including translated Chat choices, and string choices such as auto are preserved in both modes; executable names are collision-free across flat functions, namespace children, and custom tools; malformed and unrelated tool families remain rejected, custom replay is a separate input-item contract, provider execution availability depends on the selected model and upstream account, and no broad OpenAI tool parity is claimed"
     },
     %{
       slug: :backend_agent_v2_handoffs,
@@ -1117,7 +1185,8 @@ defmodule CodexPooler.CompatibilityMatrix do
       future_routes: [],
       fixture: :v1_supported_surface,
       contract:
-        "Public Responses SSE and direct or owner-forwarded websockets require real source-correlated output_item.done for every announced function/custom tool before success; argument/input done and terminal snapshots cannot discharge an open obligation. Invalid correlation or pending tools yield one canonical server_error, private upstream_stream_error settlement with observed provider usage once, preserved prior deltas, no fabricated done, no postvisible replay and no successful invalid alias. Valid terminal-only snapshots retain accepted omitted IDs/statuses; native and collected non-streaming contracts remain unchanged. Prior successful aliases remain durable but retired producing generations refuse anchored continuation before fresh acquisition or dispatch; a fresh unanchored turn can recover on the same downstream socket. " <>
+        "Public Responses SSE and direct or owner-forwarded websockets require real source-correlated output_item.done for every announced function/custom tool before success; argument/input done and terminal snapshots cannot discharge an open obligation. Invalid correlation or pending tools yield one canonical server_error, private upstream_stream_error settlement with observed provider usage once, preserved prior deltas, no fabricated done, no postvisible replay and no successful invalid alias. A correlated done discharges its tool only with status completed or no status; incomplete, in_progress, failed and malformed statuses leave it pending, so a following response.completed yields that server_error while a provider response.incomplete keeps its outcome, and a tool the client fails or cancels arrives only as the next request's tool output item. Valid terminal-only snapshots retain accepted omitted IDs/statuses; native and collected non-streaming contracts remain unchanged. Prior successful aliases remain durable but retired producing generations refuse anchored continuation before fresh acquisition or dispatch; a fresh unanchored turn can recover on the same downstream socket. " <>
+          "A streamed response.completed or response.incomplete whose output the provider sent empty or absent carries the items the stream delivered in response.output_item.done, ordered by output_index with the ids the done events carried, on POST /v1/responses SSE (upstream HTTP SSE or bridged onto the upstream websocket) and on the GET /v1/responses websocket (direct or owner-forwarded), in Full and Lite; a non-empty terminal output is relayed as sent, an item is never taken from response.output_item.added, and the native backend routes relay the provider's terminal unchanged. " <>
           "Images accepts gpt-image-2.5-flare and gpt-image-2.5-sunburst alongside legacy identifiers, sends basic generation and edits to native Codex Images with the requested image model, routes masked edits through eligible Full Responses hosts with an explicit image tool choice and rejects masks before dispatch/accounting when no Full host is available, accepts GPT Image 2.5 dated snapshots, xhigh/max quality and bounded custom dimensions without promising provider adherence, and restricts configurable input_fidelity to gpt-image-1/1.5; " <>
           "Native Images preserve available aggregate usage but resolve prices only for the requested image model, never the account/routing carrier; separate standard/batch text/image rates remain validated non-snapshot metadata and do not enable the Batch API; " <>
           "Audio transcription accepts gpt-transcribe only as a caller alias for canonical gpt-4o-transcribe, accepts decoded keywords and languages as ordered non-empty string lists with duplicates preserved, omits empty lists, forwards exact repeated keywords[] and languages[] names, rejects malformed lists by field, removes detected languages from public output, stores no raw audio or decoded list values after auth-before-multipart, and makes no alias catalog, model-discovery, detected-language-output, or full OpenAI Audio parity claim; " <>
@@ -1129,6 +1198,7 @@ defmodule CodexPooler.CompatibilityMatrix do
       current: :openai_shaped_unsupported_route_contract,
       categories: [:route, :auth, :error],
       routes: [
+        %{method: :post, path: "/v1/decisions"},
         %{method: :post, path: "/v1/images/variations"},
         %{method: :post, path: "/v1/content_provenance_checks"},
         %{method: :post, path: "/v1/embeddings"},
@@ -1156,6 +1226,19 @@ defmodule CodexPooler.CompatibilityMatrix do
   ]
 
   @fixtures %{
+    client_output_limit_forwarding: %{
+      client_field: "max_output_tokens",
+      absent: "absent",
+      serving_modes: ["full", "lite"],
+      chat_precedence: ["max_completion_tokens", "max_tokens"],
+      public_validation: "positive_integer",
+      native_validation: "provider",
+      policy_injection: false,
+      compaction: "existing_whitelist_unchanged",
+      terminal: "provider_response.incomplete",
+      usage: "provider_reported",
+      retry_or_cancel: false
+    },
     native_websocket_upstream_close: %{
       topologies: [:owner_forwarding_off, :owner_forwarding_on],
       close: %{code: 1001, reason: "upstream connection closed"},
@@ -1250,6 +1333,33 @@ defmodule CodexPooler.CompatibilityMatrix do
       public_v1_websocket: :refused_unsupported_type,
       observability: %{line: "native websocket response interrupt outcome=", metric: :none}
     },
+    native_websocket_response_steer: %{
+      topologies: [:owner_forwarding_off, :owner_on_this_node, :owner_on_another_node],
+      serving_modes: ~w(full lite),
+      frame_fields: ~w(type previous_response_id input),
+      previous_response_id: :provider_response_on_the_same_connection,
+      input: :list,
+      provider_answers: ~w(response.steer.accepted response.steer.failed),
+      provider_failures: ~w(response_not_found invalid_input),
+      native_lane_error: %{code: "unsupported_native_inflight_message", frame: :relayed_unchanged, close: :relayed_unchanged},
+      accepted: %{synthesized: false, creates_request: false, immediate_successor: :not_guaranteed},
+      predecessor_terminals: [
+        %{type: "response.incomplete", incomplete_reason: "steered", status: "succeeded", retry: false},
+        %{type: "response.completed", status: "succeeded", retry: false}
+      ],
+      successor: %{
+        starts_on: "response.created",
+        explicit_client_create: false,
+        upstream_connection: :preserved,
+        independent: ~w(reservation request attempt usage_settlement downstream_delivery_receipt),
+        settlement: :once_per_observed_response
+      },
+      tool_execution: :client_owned,
+      pending_client_tool: %{explicit_create: :remaining_tool_output_only, accepted_steering_input: :provider_prepends_queue, duplicate_steering_input: false},
+      public_v1_websocket: %{status: 400, code: "invalid_request", param: "type", upstream_dispatch: false},
+      distinct_from: [:native_http_steered_continuation, :response_interrupt],
+      observability: %{content: :never_persisted, metric: :none}
+    },
     responses_access_programs: %{
       surfaces: ~w(http_json http_sse responses_websocket),
       serving_modes: ~w(full lite),
@@ -1257,6 +1367,56 @@ defmodule CodexPooler.CompatibilityMatrix do
       validation_error: %{status: 400, code: "invalid_request", upstream_dispatch: false},
       forwarding: :unchanged,
       entitlement: :upstream_authoritative
+    },
+    responses_configuration_updates: %{
+      surfaces: ~w(http_json http_sse responses_websocket),
+      serving_modes: ~w(full lite),
+      item: %{"type" => "configuration_update", "reasoning" => %{"effort" => "high"}},
+      exact_item_keys: ~w(type reasoning),
+      exact_reasoning_keys: ~w(effort),
+      effort_type: :string,
+      provider_effort_values: ~w(none minimal low medium high xhigh max),
+      forwarding: %{item: :unchanged, order: :preserved, continuation_replay: :preserved},
+      local_validation: %{
+        missing: "missing_required_parameter",
+        wrong_type: "invalid_type",
+        unknown_key: "unknown_parameter",
+        param: :original_client_input_path,
+        upstream_dispatch: false
+      },
+      provider_validation: %{
+        effort_enum: %{code: "invalid_value", param: "input[N].reasoning.effort"},
+        consecutive: %{code: "unsupported_value", param: "input[N].type"},
+        compaction: :provider_authoritative,
+        client_params: %{http: :original_index_when_recoverable, websocket: :input_index_removed_without_a_turn_map},
+        refused_upstream_connection: :not_guaranteed_reusable,
+        relay: :sanitized_existing_validation_rejection
+      },
+      vercel_message_api: %{role: "system", content: "", option: "reasoningEffortUpdate", allow_system_in_messages: true, wire_content: :absent},
+      model_effect: :not_guaranteed,
+      cache_behavior: :not_guaranteed,
+      observability: %{content: :never_persisted, metric: :none}
+    },
+    responses_async_tools: %{
+      surfaces: ~w(http_json http_sse responses_websocket),
+      serving_modes: ~w(full lite),
+      declaration_types: ~w(function custom),
+      namespace_members: :accepted,
+      namespace_wrapper: :refused,
+      call_types: ~w(function_call custom_tool_call),
+      client_manifest_types: ~w(additional_tools tool_search_output),
+      async_values: [true, false],
+      omitted: :remains_absent,
+      forwarding: %{declarations: :preserved, continuation_replay: :preserved, call_output: :preserved},
+      local_validation: %{
+        non_boolean: %{status: 400, code: "invalid_type", param: :indexed_async_path},
+        namespace_wrapper: %{status: 400, code: "unknown_parameter", param: :indexed_async_path},
+        upstream_dispatch: false
+      },
+      lite: %{local_special_case: false, provider_refusal: %{code: "unsupported_value", param: "tools", occurrence: :intermittent}},
+      provider_refusal_relay: :sanitized_existing_validation_rejection,
+      tool_execution: :client_owned,
+      observability: %{content: :never_persisted, metric: :none}
     },
     file_upload: %{
       json: %{"file_name" => "fixture-upload.txt", "file_size" => 24, "use_case" => "codex"}
@@ -1303,7 +1463,7 @@ defmodule CodexPooler.CompatibilityMatrix do
         vary_header: "user-agent",
         client_version_query: :ignored,
         decode_checked: %{
-          window: {"0.154.0", "0.160.1"},
+          window: @decode_window,
           window_version: "whole_version_prereleases_included",
           body: "template_only_minus_entries_the_client_cannot_decode",
           left_out_model: %{advertised: false, routable: true},
@@ -1565,6 +1725,36 @@ defmodule CodexPooler.CompatibilityMatrix do
         persisted_detail_class: "unsupported_parameter",
         observed_for: "previous_response_id_on_http"
       },
+      websocket_frame_reading: %{
+        frame: "wrapped_error_with_no_code_and_no_param_and_the_http_message_as_text",
+        applies_to: "invalid_request_error_object_without_provider_code_or_param",
+        wordings: [
+          "Invalid response.create payload: <http message>",
+          "[<Schema>] [<field path>] [<kind>] <http message>"
+        ],
+        bracket_kind_codes: %{
+          "invalid_enum_value" => "invalid_value",
+          "invalid_type" => "invalid_type",
+          "unknown_parameter" => "unknown_parameter",
+          "missing_required_parameter" => "missing_required_parameter",
+          "string_above_max_length" => "string_above_max_length"
+        },
+        payload_message_codes: %{
+          "Invalid value: '<value>'. Supported values are: ..." => %{code: "invalid_value", param: "null_the_message_names_no_field"},
+          "Invalid type for '<path>': ..." => %{code: "invalid_type", param: "path_from_text"},
+          "Missing required parameter: '<path>'." => %{code: "missing_required_parameter", param: "path_from_text"},
+          "Unknown parameter: '<path>'." => %{code: "unknown_parameter", param: "path_from_text"},
+          "Invalid '<path>': string too long. ..." => %{code: "string_above_max_length", param: "path_from_text"}
+        },
+        detail_texts: %{"Unsupported parameter: <path>" => "unsupported_parameter", "Unsupported tool type: <type>" => "not_relayed"},
+        param: "bounded_field_path_named_by_the_text_else_null",
+        provider_code_or_param_on_frame: "never_replaced",
+        provider_message_forwarded: false,
+        persisted_message_class: "the_code_the_text_reads_as",
+        persisted_provider_code: "absent_when_the_frame_has_none",
+        unsupported_tool_type: %{relayed: false, persisted_message_class: "unsupported_tool_type", persisted_message_value: "bounded_identifier_or_sha256_12_fingerprint"},
+        surfaces: ["public_v1_websocket", "native_websocket", "bridged_v1_http"]
+      },
       unchanged_scopes: [
         :non_400_status,
         :non_allowlisted_code,
@@ -1573,7 +1763,7 @@ defmodule CodexPooler.CompatibilityMatrix do
         :compact_routes,
         :model_unavailable,
         :misalignment_policy_violation,
-        :websocket_frames
+        :websocket_text_outside_the_read_templates
       ],
       accounting_error_code: "upstream_status",
       retry: false,
@@ -1750,9 +1940,9 @@ defmodule CodexPooler.CompatibilityMatrix do
         required: ["type", "name", "description", "tools"],
         namespace_name: "nonblank",
         nested_tool_types: ["function", "custom"],
-        nested_function_optional: ["strict", "defer_loading"],
+        nested_function_optional: ["strict", "defer_loading", "async"],
         nested_custom_required: ["type", "name"],
-        nested_custom_optional: ["description", "defer_loading", "allowed_callers", "format"],
+        nested_custom_optional: ["description", "defer_loading", "allowed_callers", "format", "async"],
         nested_custom_formats: ["omitted", "text", "grammar_lark", "grammar_regex"],
         nested_custom_allowed_callers: ["direct", "programmatic"],
         nested_custom_allowed_callers_null: true,
@@ -1812,8 +2002,9 @@ defmodule CodexPooler.CompatibilityMatrix do
             }
           }
         },
-        hosted_tool: %{type: "programmatic_tool_calling", exact_keys: ["type"]},
-        tool_choice: %{type: "programmatic_tool_calling", exact_keys: ["type"]},
+        # findings#333: the Codex backend refuses the tool type on a Full request and accepts it in a Lite manifest.
+        hosted_tool: %{type: "programmatic_tool_calling", exact_keys: ["type"], serving_modes: %{full: "refused_before_dispatch", lite: "forwarded_in_manifest"}},
+        tool_choice: %{type: "programmatic_tool_calling", refusal: %{status: 400, code: "invalid_request", param: "tool_choice", upstream_dispatch: false}},
         function_options: %{
           scopes: ["flat", "namespace"],
           optional_boolean_keys: ["strict", "defer_loading"],
@@ -1999,6 +2190,17 @@ defmodule CodexPooler.CompatibilityMatrix do
       responses_truncation: %{
         accepted_values: ["auto", "disabled"],
         forwarded_upstream: false
+      },
+      responses_metadata: %{
+        accepted: ["null", "object"],
+        max_properties: 16,
+        max_property_name_length: 64,
+        value: "string",
+        max_value_length: 512,
+        refusal_codes: ["invalid_type", "object_above_max_properties", "property_name_above_max_length", "string_above_max_length"],
+        refusal_param: "metadata",
+        forwarded_upstream: false,
+        native_routes: "stripped"
       },
       compaction_recovery_boundary: %{
         backend_compaction_trigger: %{
@@ -2805,6 +3007,7 @@ defmodule CodexPooler.CompatibilityMatrix do
         "steered_full_history_frame_on_a_new_socket_after_a_websocket_opener",
         "steered_native_http_request_after_a_websocket_opener",
         "steered_request_after_a_mid_turn_compaction_of_an_already_compacted_session",
+        "steered_user_input_after_a_pre_turn_compaction_resume_without_a_bare_opener",
         "resume_after_a_second_local_compaction_in_the_same_turn",
         "resume_after_a_local_compaction_in_a_later_turn_of_the_thread",
         "resume_after_a_local_compaction_that_dropped_older_user_messages",
@@ -2931,6 +3134,7 @@ defmodule CodexPooler.CompatibilityMatrix do
         "model" => "gpt-fixture-text",
         "input" => "synthetic unsupported field request",
         "max_output_tokens" => 128,
+        "metadata" => %{"purpose" => "synthetic"},
         "prompt_cache_retention" => "24h",
         "safety_identifier" => "safe_fixture",
         "temperature" => 0.2,
@@ -3432,12 +3636,7 @@ defmodule CodexPooler.CompatibilityMatrix do
           defer_loading: ["absent", false]
         },
         built_in: %{
-          types: [
-            "programmatic_tool_calling",
-            "web_search_preview",
-            "web_search",
-            "image_generation"
-          ],
+          types: ["web_search", "image_generation"],
           exact_keys: ["type"],
           declaration_scope: "top_level_tools_only",
           resolution: "at_least_one_same_type_declaration",
@@ -3519,7 +3718,7 @@ defmodule CodexPooler.CompatibilityMatrix do
       scope: "direct_public_responses_and_translated_chat",
       transports: ["http", "sse", "websocket_response_create"],
       required_keys: ["type", "name"],
-      optional_keys: ["description", "defer_loading", "allowed_callers", "format"],
+      optional_keys: ["description", "defer_loading", "allowed_callers", "format", "async"],
       allowed_callers: ["direct", "programmatic"],
       allowed_callers_null: true,
       formats: ["omitted", "text", "grammar_lark", "grammar_regex"],
@@ -3624,6 +3823,17 @@ defmodule CodexPooler.CompatibilityMatrix do
         dropped_keys: ["headers", "response.headers"],
         scope: "every_relayed_event",
         native_websocket_with_snapshot: "projected_native_controls_only"
+      },
+      streamed_terminal_output: %{
+        surfaces: [
+          %{method: :post, path: "/v1/responses", transport: "http_sse", upstream: ["http_sse", "websocket_bridge"]},
+          %{method: :get, path: "/v1/responses", transport: "responses_websocket", upstream: ["direct", "owner_forwarded"]}
+        ],
+        serving_modes: ["full", "lite"],
+        terminals: ["response.completed", "response.incomplete"],
+        empty_output: "output_item_done_items_by_output_index",
+        nonempty_output: "relayed_as_sent",
+        native_routes: "relayed_as_sent"
       },
       audio_transcription: %{
         path: "/v1/audio/transcriptions",
@@ -3833,8 +4043,19 @@ defmodule CodexPooler.CompatibilityMatrix do
         accepted_values: ["auto", "disabled"],
         forwarded_upstream: false
       },
+      responses_metadata: %{
+        accepted: ["null", "object"],
+        max_properties: 16,
+        max_property_name_length: 64,
+        value: "string",
+        max_value_length: 512,
+        refusal_codes: ["invalid_type", "object_above_max_properties", "property_name_above_max_length", "string_above_max_length"],
+        refusal_param: "metadata",
+        forwarded_upstream: false,
+        native_routes: "stripped"
+      },
       responses_builtin_tools: %{
-        web_search_preview: %{accepted_shape: "type_only"},
+        web_search_preview: %{accepted: false, serving_modes: ["full", "lite"], refusal: %{status: 400, code: "invalid_request", param: "tools", upstream_dispatch: false}, rewritten: false},
         web_search: %{
           accepted_required: ["type"],
           accepted_optional: [
@@ -3924,6 +4145,13 @@ defmodule CodexPooler.CompatibilityMatrix do
       instruction_lifting: %{
         roles: ["system", "developer"],
         destination: "instructions",
+        chat_top_level_instructions: "preserved_in_messages_and_input_fallback",
+        top_level_instructions: %{
+          presence: "optional",
+          accepted_types: ["string", "null"],
+          validation_timing: "before_lifting",
+          invalid_type: %{status: 400, type: "invalid_request_error", code: "invalid_request", param: "instructions", upstream_dispatch: false}
+        },
         merge_order: ["existing_instructions", "input_order_instruction_text"],
         residual_non_text_role: "user",
         blank_text: "omitted",
@@ -4022,6 +4250,11 @@ defmodule CodexPooler.CompatibilityMatrix do
         input_role: "tool",
         id_fields: ["tool_call_id", "call_id"],
         translated_type: "function_call_output",
+        content_presence: %{
+          missing: "reject_before_dispatch",
+          explicit_null: "empty_string_output",
+          top_level_output_fallback: false
+        },
         requires_previous_response_id: true,
         metadata_only: true
       },
@@ -4031,6 +4264,12 @@ defmodule CodexPooler.CompatibilityMatrix do
         translated_type: "function_call",
         id_fields: ["call_id", "id"],
         reasoning_replay_sequence: ["reasoning", "assistant", "function_call", "tool"],
+        tool_call_content: %{
+          nonempty_text: "assistant_output_text_before_function_calls",
+          empty_tool_calls: "preserve_nonempty_assistant_message",
+          absent_null_or_empty: "omit_assistant_message",
+          malformed: "reject_before_dispatch"
+        },
         empty_assistant_content_type: "output_text",
         tool_content_output_field: "output",
         ordinary_replay_status_values: ["completed", "incomplete", "in_progress"],
@@ -4435,6 +4674,7 @@ defmodule CodexPooler.CompatibilityMatrix do
     },
     v1_unsupported_public_surface: %{
       routes: [
+        %{method: :post, path: "/v1/decisions"},
         %{method: :post, path: "/v1/images/variations"},
         %{method: :post, path: "/v1/content_provenance_checks"},
         %{method: :post, path: "/v1/embeddings"},

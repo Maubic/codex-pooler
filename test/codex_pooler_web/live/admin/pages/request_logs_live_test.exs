@@ -435,68 +435,32 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
     assert has_element?(view, "#request-log-row-#{fast_request.id}", "gpt-5.3-codex-spark")
     refute has_element?(view, "#request-log-#{fast_request.id}-fast-mode")
 
-    assert has_element?(
-             view,
-             "#request-log-#{fast_request.id}-requested-tier",
-             "priority requested"
-           )
+    refute has_element?(view, "#request-log-#{fast_request.id}-requested-tier")
 
     assert has_element?(view, "#request-log-row-#{model_default_request.id}", "gpt-6-sol")
     assert has_element?(view, "#request-log-row-#{model_default_request.id}", "default")
 
-    refute has_element?(
-             view,
-             "#request-log-#{model_default_request.id}-protocol [data-role='fast-mode-indicator']"
-           )
-
-    assert has_element?(
-             view,
-             "#request-log-#{fast_request.id}-protocol [data-role='fast-mode-indicator']"
-           )
+    refute has_element?(view, "#{speed(model_default_request, 2)}")
+    assert has_element?(view, speed(model_default_request, 1))
+    assert has_element?(view, speed(fast_request, 2))
 
     # Requested fast mode that the Codex backend echoes as default is still
     # priced at the priority tier, so the bolt stays on and the row names the
     # requested tier.
-    assert has_element?(
-             view,
-             "#request-log-#{requested_fast_request.id}-protocol [data-role='fast-mode-indicator']"
-           )
+    assert has_element?(view, speed(requested_fast_request, 2))
+    refute has_element?(view, "#request-log-#{requested_fast_request.id}-requested-tier")
 
-    assert has_element?(
-             view,
-             "#request-log-#{requested_fast_request.id}-requested-tier",
-             "priority requested"
-           )
+    assert has_element?(view, speed(actual_priority_request, 2))
 
-    assert has_element?(
-             view,
-             "#request-log-#{actual_priority_request.id}-protocol [data-role='fast-mode-indicator'][data-speed-tier='fast']"
-           )
+    assert has_element?(view, speed(fallback_priority_request, 2))
 
-    assert has_element?(
-             view,
-             "#request-log-#{fallback_priority_request.id}-protocol [data-role='fast-mode-indicator'][data-speed-tier='fast']"
-           )
+    assert has_element?(view, speed(metadata_fast_request, 2))
 
-    assert has_element?(
-             view,
-             "#request-log-#{metadata_fast_request.id}-protocol [data-role='fast-mode-indicator'][data-speed-tier='fast']"
-           )
+    assert has_element?(view, speed(metadata_codex_mode_request, 2))
 
-    assert has_element?(
-             view,
-             "#request-log-#{metadata_codex_mode_request.id}-protocol [data-role='fast-mode-indicator'][data-speed-tier='fast']"
-           )
+    assert has_element?(view, speed(metadata_codex_nested_request, 2))
 
-    assert has_element?(
-             view,
-             "#request-log-#{metadata_codex_nested_request.id}-protocol [data-role='fast-mode-indicator'][data-speed-tier='fast']"
-           )
-
-    assert has_element?(
-             view,
-             "#request-log-#{metadata_request_nested_request.id}-protocol [data-role='fast-mode-indicator'][data-speed-tier='fast']"
-           )
+    assert has_element?(view, speed(metadata_request_nested_request, 2))
 
     assert has_element?(
              view,
@@ -504,10 +468,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
              "gpt-live-metadata-codex-scalar"
            )
 
-    refute has_element?(
-             view,
-             "#request-log-#{metadata_codex_scalar_request.id}-protocol [data-role='fast-mode-indicator']"
-           )
+    refute has_element?(view, speed(metadata_codex_scalar_request, 2))
+    assert has_element?(view, speed(metadata_codex_scalar_request, 1))
 
     assert has_element?(
              view,
@@ -515,16 +477,12 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
              "gpt-live-metadata-request-scalar"
            )
 
-    refute has_element?(
-             view,
-             "#request-log-#{metadata_request_scalar_request.id}-protocol [data-role='fast-mode-indicator']"
-           )
+    refute has_element?(view, speed(metadata_request_scalar_request, 2))
+    assert has_element?(view, speed(metadata_request_scalar_request, 1))
 
     for request <- non_fast_tier_requests do
-      refute has_element?(
-               view,
-               "#request-log-#{request.id}-protocol [data-role='fast-mode-indicator']"
-             )
+      refute has_element?(view, speed(request, 2))
+      assert has_element?(view, speed(request, 1))
     end
 
     refute has_element?(view, "#request-log-#{request.id}-fast-mode")
@@ -1358,11 +1316,9 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
 
     refute has_element?(view, "#request-log-#{full_details_request.id}-model-details", "(")
 
-    assert has_element?(
-             view,
-             "#request-log-#{tier_diff_request.id}-model-details",
-             "gpt-5.1 · low tier default"
-           )
+    assert has_element?(view, "#request-log-#{tier_diff_request.id}-model-details", "gpt-5.1 · low")
+    refute has_element?(view, "#request-log-#{tier_diff_request.id}-model-details [data-role='model-service-tier']")
+    assert has_element?(view, "#request-log-#{tier_diff_request.id}-model-details[title*='tier default']")
 
     assert has_element?(
              view,
@@ -1373,43 +1329,21 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
     refute has_element?(view, "#request-log-#{tier_diff_request.id}-reasoning")
     refute has_element?(view, "#request-log-#{tier_diff_request.id}-service-tier")
 
-    assert has_element?(
-             view,
-             "#request-log-#{tier_diff_request.id}-requested-tier",
-             "flex requested"
-           )
+    refute has_element?(view, "#request-log-#{tier_diff_request.id}-requested-tier")
+    assert has_element?(view, speed(tier_diff_request, 1))
 
     refute has_element?(view, "#request-log-#{full_details_request.id}-requested-tier")
 
-    assert has_element?(
-             view,
-             "#request-log-#{fast_tier_diff_request.id}-requested-tier",
-             "priority requested"
-           )
+    refute has_element?(view, "#request-log-#{fast_tier_diff_request.id}-requested-tier")
+    assert has_element?(view, speed(fast_tier_diff_request, 2))
 
-    assert has_element?(
-             view,
-             "#request-log-#{fast_tier_diff_request.id}-protocol [data-role='fast-mode-indicator']"
-           )
-
-    assert has_element?(
-             view,
-             "#request-log-#{actual_fast_tier_diff_request.id}-requested-tier",
-             "flex requested"
-           )
-
-    assert has_element?(
-             view,
-             "#request-log-#{actual_fast_tier_diff_request.id}-protocol [data-role='fast-mode-indicator']"
-           )
+    refute has_element?(view, "#request-log-#{actual_fast_tier_diff_request.id}-requested-tier")
+    assert has_element?(view, speed(actual_fast_tier_diff_request, 2))
 
     assert has_element?(view, "#request-log-#{no_suffix_request.id}-model-details", "gpt-4o")
 
-    assert has_element?(
-             view,
-             "#request-log-#{in_progress_request.id}-model-details",
-             "gpt-6-sol · high tier —"
-           )
+    assert has_element?(view, "#request-log-#{in_progress_request.id}-model-details", "gpt-6-sol · high")
+    refute has_element?(view, "#request-log-#{in_progress_request.id}-model-details [data-role='model-service-tier']")
   end
 
   test "model line spells out a model-default effort and labels the service tier",
@@ -1474,13 +1408,9 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
            )
 
     refute has_element?(view, "#{default_cell} [data-role='model-reasoning']")
-    assert has_element?(view, "#{default_cell} [data-role='model-context-line'] [data-role='model-service-tier']", "tier default")
+    refute has_element?(view, "#{default_cell} [data-role='model-service-tier']")
+    assert has_element?(view, "#{default_cell} [data-role='model-context-line'] [data-role='model-speed'][data-speed-level='1'][title='Normal speed']")
     refute has_element?(view, "#{default_cell} [data-role='model-context-line'] [data-role='model-effort']")
-
-    assert has_element?(
-             view,
-             "#{default_cell} [data-role='model-service-tier'][title='Service tier']"
-           )
 
     assert has_element?(
              view,
@@ -1492,7 +1422,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
     assert has_element?(view, "#{explicit_cell} [data-role='model-identity-line'] [data-role='model-reasoning']", "xhigh")
     refute has_element?(view, "#{explicit_cell} [data-role='model-reasoning-default']")
     assert has_element?(view, "#{explicit_cell} [data-role='model-identity-line']", "gpt-6-sol · xhigh")
-    assert has_element?(view, "#{explicit_cell} [data-role='model-context-line']", "tier default")
+    assert has_element?(view, "#{explicit_cell} [data-role='model-context-line'] [data-role='model-speed'][data-speed-level='1']")
 
     transcription_cell = "#request-log-#{transcription_request.id}-model-details"
 
@@ -1501,11 +1431,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
     refute has_element?(view, "#{transcription_cell} [data-role='model-reasoning-separator']")
     refute has_element?(view, "#{transcription_cell}", "/")
 
-    assert has_element?(
-             view,
-             "#{transcription_cell} [data-role='model-service-tier']",
-             "tier default"
-           )
+    refute has_element?(view, "#{transcription_cell} [data-role='model-service-tier']")
 
     assert has_element?(view, "#{transcription_cell}[title='gpt-4o-transcribe tier default']")
 
@@ -1514,7 +1440,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
 
       refute has_element?(view, "#{cell} [data-role='model-reasoning-default']")
       refute has_element?(view, cell, "model default")
-      assert has_element?(view, "#{cell} [data-role='model-service-tier']", "tier default")
+      refute has_element?(view, "#{cell} [data-role='model-service-tier']")
+      assert has_element?(view, "#{cell} [data-role='model-speed'][data-speed-level='1']")
       assert has_element?(view, "#request-log-row-#{request.id} [data-role='status-text'].text-error")
     end
   end
@@ -2143,7 +2070,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
 
     expected_headers = [
       "Time · Status",
-      "Model · Effort · Tier",
+      "Model · Effort · Speed",
       "Upstream · Pool · Key",
       "Endpoint · Transport · Client",
       "Tokens · Cached",
@@ -2295,8 +2222,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
              "requested: high"
            )
 
-    assert has_element?(view, "#{row_selector} [data-role='model-service-tier']", "default")
-    refute has_element?(view, "#{row_selector} [data-role='model-service-tier']", "tier:")
+    refute has_element?(view, "#{row_selector} [data-role='model-service-tier']")
+    assert has_element?(view, "#{row_selector} [data-role='model-speed'][data-speed-level='1']")
     refute has_element?(view, "#{row_selector} [data-role='model-details']", "(")
 
     # 6. Transport
@@ -3674,6 +3601,8 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLiveTest do
 
     %{conn: log_in_user(build_conn(), admin, token), user: admin}
   end
+
+  defp speed(request, level), do: "#request-log-#{request.id}-model-details [data-role='model-speed'][data-speed-level='#{level}']"
 
   defp session_token(user) do
     assert {:ok, %{token: token}} =
