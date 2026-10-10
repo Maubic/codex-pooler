@@ -55,6 +55,7 @@ defmodule CodexPooler.Accounts.LegacyTOTPRecovery do
         check_deadline!(deadline)
         result
       end,
+      timeout: @timeout,
       deadline: deadline,
       log: false
     )
@@ -65,7 +66,7 @@ defmodule CodexPooler.Accounts.LegacyTOTPRecovery do
   defp query!(sql, params, deadline) do
     check_deadline!(deadline)
 
-    case Repo.query(sql, params, log: false, deadline: deadline) do
+    case Repo.query(sql, params, log: false, timeout: @timeout, deadline: deadline) do
       {:ok, result} -> result
       {:error, %Postgrex.Error{postgres: %{code: :lock_not_available}}} -> Repo.rollback(:writers_active)
       {:error, _error} -> Repo.rollback(:database_failed)
