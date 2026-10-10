@@ -1614,9 +1614,15 @@ The API-key Limits panel uses a compact tonal key-wide control band, a bordered 
 </AdminComponents.card_fact_strip>
 ```
 
-- **Rules:** never re-declare the band, grid, divider padding, or micro-label
-  classes at a call site; add a fact rather than a second strip; numeric values
-  carry `tabular-nums`.
+- **Rules:** reuse the shared band, labels and values; add a fact rather than a second strip; numeric values carry `tabular-nums`. The Jobs worker variant may adapt footer columns, divider padding and wrapping through its own named card container, so compact cards retain the complete schedule and timestamp instead of squeezing three fixed columns. Other callers keep the default strip geometry.
+
+### Jobs worker overview
+
+The worker overview uses an intrinsic repeating grid, following the `ram-grid` spatial pattern: `repeat(auto-fit, minmax(min(100%, 15.5rem), 1fr))`, with a 12px gap and DOM/source order unchanged. The floor collapses on narrow phones; available content width determines column count, so portrait phones normally have one column, landscape phones and portrait tablets two, and wider tablet/desktop regions three or four. The existing admin main region remains the only scroll owner; the grid adds no scroll container. The pattern reference is [StyleGallery ram-grid](https://github.com/changeroa/StyleGallery/blob/main/patterns/grid-repetition/ram-grid.md); its role is geometry, while this project's theme and type tokens remain authoritative.
+
+Worker cards retain the neutral bordered shell and shared facts/markers/actions. Use 12px header/body padding, a 16px worker icon, 14px semibold title and 12px metadata; titles wrap within their available width instead of clipping, and no invisible action spacer occupies cards without manual actions. Existing action controls remain reachable at their normal touch-target size. Open/failure target markers retain their 32px size, existing labels/tooltips, overflow counts and inline failure expansion. The outer card must not clip action menus; preserve shell corners on header/footer themselves. Header content may wrap without overlapping executing status and the action trigger.
+
+Each worker card owns a named inline-size container. Below 26rem of card width, Next run and Schedule share the first facts row and Last run takes the full second row; timestamps and cadence text wrap rather than ellipsize. Facts use the existing 12px metadata scale with a 16px line height, 8px block padding and 4px row gap. At 26rem and above, the three facts may share one weighted row. Expanded failure details follow the card width rather than the viewport: stack summary and timing metadata in compact cards, split them only when the card itself is wide enough. Preserve complete diagnostic text, close/keyboard behavior, selectors, current URL/filter state and background-job semantics.
 
 ### Record row — the ledger contract
 

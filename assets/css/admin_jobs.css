@@ -1,0 +1,102 @@
+/* Worker cards size to the admin content column, including the narrow rail. */
+.admin-jobs-worker-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 15.5rem), 1fr));
+	align-items: start;
+	gap: 0.75rem;
+}
+
+.admin-jobs-worker-card {
+	container: jobs-worker / inline-size;
+}
+
+.admin-jobs-worker-card:focus-within {
+	z-index: 1;
+}
+
+.admin-jobs-worker-card [data-role="worker-card-header"] {
+	min-height: 3rem;
+}
+
+.admin-jobs-worker-card [data-role="worker-schedule-facts"] {
+	padding-block: 0.5rem;
+	padding-inline: 0.75rem;
+	border-end-start-radius: var(--radius-box);
+	border-end-end-radius: var(--radius-box);
+}
+
+.admin-jobs-worker-card [data-role="worker-schedule-grid"] {
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+	gap: 0.25rem 0.75rem;
+	line-height: 1rem;
+}
+
+.admin-jobs-worker-card [data-role="worker-schedule-grid"] > div {
+	padding-inline: 0;
+	border-inline: 0;
+}
+
+.admin-jobs-worker-card [data-role="worker-schedule-grid"] dd {
+	overflow: visible;
+	white-space: normal;
+	overflow-wrap: anywhere;
+	text-overflow: clip;
+}
+
+.admin-jobs-worker-card [data-role="schedule"] {
+	grid-column: 2;
+	grid-row: 1;
+}
+
+.admin-jobs-worker-card [data-role="last-run"] {
+	display: flex;
+	grid-column: 1 / -1;
+	grid-row: 2;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 0.75rem;
+}
+
+.admin-jobs-worker-card [data-role="last-run"] dt {
+	flex-shrink: 0;
+}
+
+.admin-jobs-worker-card [data-role="last-run"] dd {
+	text-align: end;
+}
+
+@container jobs-worker (min-width: 26rem) {
+	.admin-jobs-worker-card [data-role="worker-schedule-grid"] {
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 1fr);
+		gap: 0;
+	}
+
+	.admin-jobs-worker-card [data-role="worker-schedule-grid"] > div {
+		display: block;
+		grid-column: auto;
+		grid-row: auto;
+		padding-inline: 0.75rem;
+	}
+
+	.admin-jobs-worker-card [data-role="worker-schedule-grid"] > div:first-child {
+		padding-inline-start: 0;
+	}
+
+	.admin-jobs-worker-card [data-role="worker-schedule-grid"] > div:last-child {
+		padding-inline-end: 0;
+	}
+
+	.admin-jobs-worker-card [data-role="worker-schedule-grid"] > div + div {
+		border-inline-start: 1px solid
+			color-mix(in oklab, var(--color-base-300) 70%, transparent);
+	}
+
+	.admin-jobs-worker-card [data-role="last-run"] dd {
+		text-align: start;
+	}
+
+	.admin-jobs-worker-card [data-role="failure-panel-summary"] {
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: start;
+	}
+}
