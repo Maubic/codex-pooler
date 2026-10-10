@@ -77,6 +77,35 @@ That secret must provide the release values needed before Codex Pooler can read 
 
 Don't put upstream access tokens, Pool API keys, MCP tokens, cookies, `auth.json`, SMTP passwords, or raw client payloads into chart values.
 
+### TOTP upgrade safety
+
+Before changing the image or Secret, run the target release checkout's read-only helper against an exact **old running app pod**, using your explicit kubeconfig, context and namespace. The wrapper appends the release RPC call; it does not start the new image or require local Elixir.
+
+```bash
+sh scripts/self-host/totp-upgrade-preflight.sh -- \
+  kubectl --kubeconfig ./private-kubeconfig --context example-context \
+  --namespace codex-pooler exec example-app-pod -c app -- \
+  /app/bin/codex_pooler
+```
+
+Replace the example target with the intended old pod and check every distinct runtime configuration. A 32-byte configured key is used verbatim; otherwise it must be base64 decoding to 32 bytes. Preserve a working private key and its version when every stored record authenticates. The [preflight dispositions and recovery rules](/deployment/docker-compose/#check-totp-before-changing-the-image) apply equally to Kubernetes: an empty TOTP table permits correcting only the TOTP key, while bad or mixed ciphertext requires restoring the correct key or investigation. Do not regenerate the entire Secret, change unrelated encryption roots or weaken the startup check.
+
+Legacy-fallback records require an offline maintenance window, not a rolling key change. Stop all app replicas, job roles and other database writers, and suspend any automation that would restart them. Take a consistent database backup paired with the old Secret/configuration and image. Create a separate private maintenance Secret using the same existing release settings except for a new strong TOTP key and nonempty version. Do not publish or adopt the legacy fallback.
+
+Run a one-shot Job with the target image, database connectivity and that maintenance Secret. It must run only the release eval command, without starting the endpoint or background jobs; mutation refuses a running application and must not use live RPC. Set `CODEX_POOLER_TOTP_OFFLINE_ACK=all-writers-stopped` for the re-encryption invocation:
+
+```bash
+/app/bin/codex_pooler eval 'CodexPooler.Release.reencrypt_legacy_totp()'
+```
+
+Keep every writer stopped and run a second one-shot invocation with the same destination key; verification needs no acknowledgement:
+
+```bash
+/app/bin/codex_pooler eval 'CodexPooler.Release.verify_totp_encryption()'
+```
+
+After successful verification, publish the same key/version to all role Secrets, confirm synchronization of the intended values, then run migrations and resume workloads. A commit acknowledgement lost to process or connection failure is ambiguous: verify with the saved destination key before deciding whether conversion completed. Do not blindly repeat it. Any rollback restores the database and matching prior configuration/image together; see the [offline recovery procedure](/deployment/docker-compose/#recover-legacy-totp-encryption-offline). Chart readiness or a single stopped replica does not establish that all database writers are offline.
+
 ## Host and ingress
 
 Set the public host through chart values:

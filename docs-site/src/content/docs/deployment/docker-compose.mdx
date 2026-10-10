@@ -123,7 +123,38 @@ docker compose logs -f app
 
 ## Upgrade and run migrations
 
-For an existing Compose install, update the release image first: set
+### Check TOTP before changing the image
+
+Use the preflight helper from the target release checkout against the **still-running old application**, before changing its image or encryption configuration. It reads the effective runtime key and every stored TOTP record, including pending and disabled enrollments, without changing records or returning secrets. It needs the existing release RPC connection, not a local Elixir installation or a successfully started new image.
+
+```bash
+docker ps --format 'table {{.ID}}\t{{.Names}}\t{{.Image}}'
+```
+
+Select the exact existing app container from that inventory and replace the value below. Do not obtain it through the new Compose file: its required-key interpolation can fail for the missing-key installation that needs this check.
+
+```bash
+old_container='<existing-app-container-id>'
+sh scripts/self-host/totp-upgrade-preflight.sh -- \
+  docker exec "$old_container" /app/bin/codex_pooler
+```
+
+The production key must be 32 raw bytes or valid base64 that decodes to 32 bytes. A configured string of exactly 32 bytes is used **verbatim first**, even if it looks like base64; other strings are decoded. Do not trim, truncate, hash or reinterpret an existing working key. Keep the same private key and key version when all stored records authenticate with it; changing the version label alone does not select another decryption key.
+
+| Preflight disposition | Action before upgrade |
+| --- | --- |
+| `ready` | Preserve the working private key and version, then continue |
+| `replace_totp_key` | TOTP storage is empty. Set only `CODEX_POOLER_TOTP_ENCRYPTION_KEY` to a securely generated private 32-byte key, preferably base64-encoded. Preserve every unrelated `.env` value; do not rerun environment generation |
+| `offline_reencryption_required` | Existing records authenticate with the legacy fallback. Follow the offline procedure below; never copy or adopt that public fallback as configuration |
+| `restore_key_or_investigate` | Preserve the database and configuration. Restore the correct prior private key or investigate malformed, mixed-key or unauthenticated ciphertext; do not rotate or reset factors to bypass the refusal |
+| `inventory_limit_exceeded` | Stop and arrange a bounded operator review; the inventory is not certified ready |
+| `preflight_failed` or `transport_failed` | Fix the RPC/database/target problem and rerun; absence of a result is not permission to upgrade |
+
+Only `ready` exits 0. Action-required results exit 2; failed checks exit 3. Keep the bounded result and exit code, not keys, ciphertext, authenticator codes or RPC error bodies. A read-only check is a snapshot: prevent concurrent enrollment or key changes between the check and the upgrade, and check every distinct runtime configuration if replicas differ.
+
+### Apply the upgrade after preflight
+
+After preflight and any required recovery succeed, set
 `CODEX_POOLER_IMAGE_TAG` in `.env` to the target tagged stable release. Keep a
 versioned tag to make the selected upgrade reproducible. Then pull and restart
 the stack:
@@ -162,6 +193,40 @@ the blocking sessions while it waits; a table lock held by another session stops
 it after ten seconds. If it fails with a message that names blocking sessions,
 end those sessions or let them finish, then run `docker compose run --rm migrate`
 again. An interrupted index build is rebuilt on the next run.
+
+### Recover legacy TOTP encryption offline
+
+This procedure is only for stored records that the preflight identifies as legacy-fallback encrypted. It is not general key rotation and cannot recover ciphertext encrypted by a missing private key. Keep the strict startup check enabled.
+
+1. Enter a maintenance window. Stop **every** application replica, worker, scheduler and other writer using this database, and prevent automatic restarts. For the standard single-app Compose stack, stop `app`; additional deployments or maintenance processes must also be stopped. Keep Postgres available.
+2. Take a consistent private database backup and retain the exact matching old `.env`, image and secret references as a rollback pair. Never upload that backup or configuration to a ticket.
+3. Prepare a private `.env.totp-maintenance` copy with the target release image, a new strong private TOTP key and a nonempty new `CODEX_POOLER_TOTP_KEY_VERSION`. Preserve the database, upstream encryption key and all other release settings. Before maintenance, privately verify that the database target and unrelated settings match the backed-up installation, and record the old and target image identities. Do not print the resolved Compose configuration: it contains secrets. Save this one destination key securely and reuse it for verification; do not generate a different key after an uncertain result.
+4. Run the new release as a one-shot maintenance container. The acknowledgement asserts that all writers are stopped; it does not stop them for you.
+
+   ```bash
+   env -u CODEX_POOLER_TOTP_ENCRYPTION_KEY -u CODEX_POOLER_TOTP_KEY_VERSION \
+     -u CODEX_POOLER_IMAGE_TAG -u CODEX_POOLER_IMAGE \
+     docker compose --env-file .env.totp-maintenance run --rm --no-deps \
+     --entrypoint /app/bin/codex_pooler \
+     -e CODEX_POOLER_TOTP_OFFLINE_ACK=all-writers-stopped \
+     migrate eval 'CodexPooler.Release.reencrypt_legacy_totp()'
+   ```
+
+5. While writers remain stopped, verify every stored record with the same destination configuration in a separate invocation.
+
+   ```bash
+   env -u CODEX_POOLER_TOTP_ENCRYPTION_KEY -u CODEX_POOLER_TOTP_KEY_VERSION \
+     -u CODEX_POOLER_IMAGE_TAG -u CODEX_POOLER_IMAGE \
+     docker compose --env-file .env.totp-maintenance run --rm --no-deps \
+     --entrypoint /app/bin/codex_pooler \
+     migrate eval 'CodexPooler.Release.verify_totp_encryption()'
+   ```
+
+6. Only after successful verification, publish that same TOTP key and version to the serving `.env` and every other role or replica, run the release migrations, then restart. Check health, readiness and the intended operator login using an owned test account; do not consume real operators' recovery codes merely to prove a rollout.
+
+The `env -u` prefixes prevent a previously exported key, version or image from overriding the private maintenance file. Check other exported release settings against the intended database and configuration as well. Re-encryption authenticates all stored TOTP rows before updating them in one transaction. Malformed, mixed-key or wrong-source records refuse the whole operation. The operation changes only encrypted TOTP secrets and their key-version metadata, preserving enrollments, replay state and recovery-code records; verification is read-only. Mutation refuses a running application, so use the one-shot `eval`, never live RPC. A lock refusal means writers or another transaction still hold the required tables. Keep writers stopped and investigate rather than extending maintenance into a live rolling operation.
+
+If the process or connection is lost around commit, the outcome is **unknown**. Do not blindly rerun conversion or replace the key: run the read-only verification with the saved destination key. If verification fails, keep the system offline and investigate. A rollback restores the database backup **together with** its matching old configuration and compatible image; restoring only the key or only the database breaks decryption. A restored legacy deployment is temporary recovery, not a secure final state.
 
 ## Restore a database backup
 
