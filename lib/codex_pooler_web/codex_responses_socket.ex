@@ -329,6 +329,13 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   @impl WebSock
+  def handle_control(_frame, %{socket_stopped?: true} = state), do: {:ok, state}
+  # Socket-lifetime evidence only: a prior pong does not prove the client was
+  # responsive throughout this attempt or identify why delivery stopped.
+  def handle_control({_payload, [opcode: :pong]}, state), do: {:ok, Map.put(state, :downstream_pong_observed?, true)}
+  def handle_control(_frame, state), do: {:ok, state}
+
+  @impl WebSock
   def handle_info(_message, %{socket_stopped?: true} = state), do: {:ok, state}
 
   def handle_info(message, state) do
@@ -852,6 +859,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     :ok = record_written_error_frame_receipts(state)
     :ok = confirm_written_delivery_evidence(state)
     :ok = log_downstream_idle_timeout(reason, state)
+    state = capture_downstream_idle_timeout(reason, state)
 
     _trace =
       NativeCompactionTrace.emit(:cleanup_finished, %{pid_role: :socket, outcome: :finished})
@@ -884,7 +892,10 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       NativeResponseSteering.cancel(lane, :client_disconnected)
     end
 
-    WebsocketControlPath.cleanup(fn -> cleanup_websocket_session(reason, state) end)
+    WebsocketControlPath.cleanup(fn ->
+      cleanup_websocket_session(reason, state)
+      record_settled_idle_attribution(state)
+    end)
 
     cancel_abandoned_response_tasks(state, remaining_tasks)
 
@@ -940,6 +951,75 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   defp log_downstream_idle_timeout(_reason, _state), do: :ok
+
+  defp capture_downstream_idle_timeout(:timeout, state) do
+    activity = if Map.get(state, :downstream_pong_observed?, false), do: "pong_observed", else: "unknown"
+
+    state = Map.put(state, :idle_interruption_activity, activity)
+
+    state =
+      if is_pid(Map.get(state, :websocket_owner_pid)) do
+        case WebsocketOwnerSession.capture_downstream_idle_timeout(state.websocket_owner_pid, state.websocket_owner_downstream, activity) do
+          {result, %CodexPooler.Gateway.Websocket.OwnerCleanup{} = witness} ->
+            log_idle_attribution_result(result)
+            Map.put(state, :idle_interruption_owner_witness, witness)
+
+          result ->
+            log_idle_attribution_result(result)
+            state
+        end
+      else
+        state
+      end
+
+    if entry = Map.get(state, :native_response_steering_active) do
+      key = {state.native_response_steering, entry.identity.request_id}
+
+      unless pushed_terminal_evidence?(written_delivery_evidence(key, entry.evidence)) do
+        NativeResponseSteering.capture_downstream_idle_timeout(state.native_response_steering, entry.identity, activity)
+        |> log_idle_attribution_result()
+      end
+    end
+
+    receipts =
+      for pid <- Map.get(state, :tasks, MapSet.new()),
+          not pushed_terminal_evidence?(written_delivery_evidence(pid, downstream_delivery_evidence(state, pid))),
+          receipt = get_in(state, [:direct_cleanup_receipts, pid]) do
+        receipt
+      end
+
+    Map.put(state, :idle_interruption_receipts, receipts)
+  rescue
+    _exception ->
+      Logger.warning("websocket downstream idle timeout attribution unavailable")
+      state
+  catch
+    :exit, _reason ->
+      Logger.warning("websocket downstream idle timeout attribution unavailable")
+      state
+  end
+
+  defp capture_downstream_idle_timeout(_reason, state), do: state
+
+  defp record_settled_idle_attribution(%{idle_interruption_activity: activity} = state) do
+    witnesses = Map.get(state, :idle_interruption_receipts, [])
+
+    witnesses =
+      case Map.get(state, :idle_interruption_owner_witness) do
+        nil -> witnesses
+        witness -> [witness | witnesses]
+      end
+
+    Enum.each(witnesses, fn witness ->
+      DirectCleanup.record_settled_downstream_idle_timeout(witness, activity)
+      |> log_idle_attribution_result()
+    end)
+  end
+
+  defp record_settled_idle_attribution(_state), do: :ok
+
+  defp log_idle_attribution_result({:error, _reason}), do: Logger.warning("websocket downstream idle timeout attribution unavailable")
+  defp log_idle_attribution_result(_result), do: :ok
 
   # A client that loses the socket before any output resends the same request
   # on a new socket; Codex 0.156.0 does so after about 200 ms. The owner must

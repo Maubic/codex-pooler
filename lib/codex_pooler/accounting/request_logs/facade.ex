@@ -282,7 +282,7 @@ defmodule CodexPooler.Accounting.RequestLogs do
       transport: request.transport,
       user_agent: request.user_agent,
       status: request.status,
-      display_status: RequestOutcome.display_status(request.status, request.last_error_code),
+      display_status: RequestOutcome.display_status(request),
       usage_status: request.usage_status,
       correlation_id: request.correlation_id,
       response_status_code: request.response_status_code,

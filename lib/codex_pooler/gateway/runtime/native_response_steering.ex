@@ -91,6 +91,13 @@ defmodule CodexPooler.Gateway.Runtime.NativeResponseSteering do
   @spec cancel(pid(), :client_disconnected | :owner_drained) :: :ok
   def cancel(lane, reason), do: GenServer.cast(lane, {:cancel, reason})
 
+  @spec capture_downstream_idle_timeout(pid(), identity(), String.t()) :: term()
+  def capture_downstream_idle_timeout(lane, identity, client_activity) do
+    GenServer.call(lane, {:capture_downstream_idle_timeout, identity, client_activity}, 100)
+  catch
+    :exit, _reason -> {:error, :attribution_unavailable}
+  end
+
   @impl GenServer
   @spec format_status(map()) :: map()
   def format_status(status), do: Status.format(status)
@@ -107,6 +114,25 @@ defmodule CodexPooler.Gateway.Runtime.NativeResponseSteering do
   end
 
   def handle_call({:prepare, _context, _callbacks, _dispatcher}, _from, state), do: {:reply, {:error, :owner_busy}, state}
+
+  def handle_call({:capture_downstream_idle_timeout, identity, client_activity}, {socket, _tag}, %{socket: socket, owner: nil, active: context} = state) when not is_nil(context) do
+    result =
+      if identity(context) == identity do
+        request = context.reserved.request
+        session = context.request_options.continuity.codex_session
+        receipt = Map.merge(identity, %{session_id: session.id, correlation_id: request.correlation_id, api_key_id: request.api_key_id, owner_binding: nil})
+        {{:ok, :ok}, receipt}
+      else
+        {:ok, :stale}
+      end
+
+    case result do
+      {result, receipt} when is_map(receipt) -> {:reply, result, Map.put(state, :idle_interruption, {receipt, client_activity})}
+      result -> {:reply, result, state}
+    end
+  end
+
+  def handle_call({:capture_downstream_idle_timeout, _identity, _client_activity}, _from, state), do: {:reply, {:ok, :stale}, state}
 
   def handle_call({:select_request, key, upstream, owner}, _from, %{active: nil, draining?: false, socket_dead?: false} = state) do
     case Map.fetch(state.prepared, key) do
@@ -146,6 +172,7 @@ defmodule CodexPooler.Gateway.Runtime.NativeResponseSteering do
       state.active && state.active.reserved.request.id == request_id ->
         context = state.active
         result = finalize(context, Map.put(finalization, :native_response_steering_terminal?, true), state.callbacks)
+        complete_idle_attribution(state, context)
         acknowledgement = Finalization.Websocket.native_response_steering_acknowledgement(context, finalization, result)
         result = put_acknowledgement(result, acknowledgement)
         state = retain_settlement(%{state | context: context, active: nil, original_result: result}, result, finalization)
@@ -156,6 +183,7 @@ defmodule CodexPooler.Gateway.Runtime.NativeResponseSteering do
 
       state.context && state.context.reserved.request.id == request_id ->
         result = state.original_result || finalize(state.context, Map.put(finalization, :native_response_steering_terminal?, true), state.callbacks)
+        complete_idle_attribution(state, state.context)
         acknowledgement = Finalization.Websocket.native_response_steering_acknowledgement(state.context, finalization, result)
         result = put_acknowledgement(result, acknowledgement)
         state = retain_settlement(%{state | original_result: result}, result, finalization)
@@ -312,10 +340,27 @@ defmodule CodexPooler.Gateway.Runtime.NativeResponseSteering do
   defp fail_active(state, reason) do
     context = state.active
     result = finalize(context, %{reason: reason, headers: [], body: ""}, state.callbacks)
+
+    complete_idle_attribution(state, context)
     finish_delivery(state, identity(context), result)
     {delivery, state} = await_delivery(%{state | active: nil, context: context, original_result: result}, identity(context))
     state |> complete_activity(delivery) |> fence_delivery(delivery)
   end
+
+  defp complete_idle_attribution(%{idle_interruption: {receipt, activity}}, context) do
+    if Map.take(receipt, [:request_id, :attempt_id, :replay_generation]) == identity(context) do
+      case DirectCleanup.record_settled_downstream_idle_timeout(receipt, activity) do
+        {:error, _reason} -> Logger.warning("websocket downstream idle timeout attribution unavailable")
+        _recorded_or_stale -> :ok
+      end
+    end
+  rescue
+    _error in [DBConnection.ConnectionError, Postgrex.Error] -> Logger.warning("websocket downstream idle timeout attribution unavailable")
+  catch
+    :exit, _reason -> Logger.warning("websocket downstream idle timeout attribution unavailable")
+  end
+
+  defp complete_idle_attribution(_state, _context), do: :ok
 
   defp finish_delivery(%{owner: owner} = state, identity, result) when is_pid(owner) do
     case owner_call(fn -> WebsocketOwnerSession.complete_steering_successor(owner, self(), identity, result) end) do

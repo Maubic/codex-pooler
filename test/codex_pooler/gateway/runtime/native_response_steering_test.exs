@@ -8,7 +8,7 @@ defmodule CodexPooler.Gateway.Runtime.NativeResponseSteeringTest do
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketSupport,
     only: [await_socket_connection_state!: 2, socket_connection_state!: 1, model_serving_scope: 0, set_model_serving_mode!: 3]
 
-  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request}
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestOutcome}
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Gateway.Runtime.NativeResponseSteering
@@ -17,6 +17,8 @@ defmodule CodexPooler.Gateway.Runtime.NativeResponseSteeringTest do
   alias CodexPooler.Platform.ExecutionRegistry
   alias CodexPooler.Platform.InstancePresence.Identity, as: InstanceIdentity
   alias CodexPooler.Repo
+  alias CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport
+  alias CodexPoolerWeb.Runtime.DownstreamKeepaliveScenario
   alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
 
   @moduletag capture_log: true
@@ -25,6 +27,51 @@ defmodule CodexPooler.Gateway.Runtime.NativeResponseSteeringTest do
   @original_usage %{"input_tokens" => 41, "output_tokens" => 23, "total_tokens" => 64}
   @successor_usage %{"input_tokens" => 110, "output_tokens" => 7, "total_tokens" => 117}
   @independent_usage %{"input_tokens" => 19, "output_tokens" => 3, "total_tokens" => 22}
+
+  for row_locked? <- [false, true] do
+    @tag slow: "the real downstream read timeout closes an untracked direct steering successor"
+    test "the server idle timeout attributes only the active direct steering successor with row_locked=#{row_locked?}" do
+      assert_steering_idle_timeout!(unquote(row_locked?))
+    end
+  end
+
+  defp assert_steering_idle_timeout!(row_locked?) do
+    if row_locked?, do: BackendCodexWebsocketOwnerForwardingSupport.enter_peer_owner_topology!()
+    DownstreamKeepaliveScenario.put_settings!([websocket_idle_timeout_ms: 1_000], false)
+    fixture = start_fixture!(:off, :separate)
+    if row_locked?, do: register_unboxed_pool_cleanup!(fixture.setup)
+    client = send_text!(fixture.client, steer(fixture.original_id))
+    {client, _initial} = release_frames!(fixture, client, 0..2)
+    state = await_socket_connection_state!(client.socket, &is_map(Map.get(&1, :native_response_steering_active)))
+    identity = state.native_response_steering_active.identity
+    # The provider holds the successor terminal while the real client keeps answering pings.
+    assert_receive {:fake_upstream_frame_barrier, 3, _handler, _hold}, @detection_timeout_ms
+    lane_monitor = Process.monitor(fixture.lane)
+    lock = if row_locked?, do: DownstreamKeepaliveScenario.hold_session_row!(state.codex_session.id)
+    on_exit(fn -> if lock, do: send(lock.pid, :release) end)
+    turn = DownstreamKeepaliveScenario.read_turn!(Map.put(client, :sent_at, System.monotonic_time(:millisecond)), answer_pings?: true)
+    assert turn.end in [{:close, 1002}, :socket_closed]
+
+    if lock do
+      assert Process.alive?(lock.pid)
+      send(lock.pid, :release)
+      assert Task.await(lock, @detection_timeout_ms) == :ok
+    end
+
+    close_client!(turn.client)
+    assert_receive {:DOWN, ^lane_monitor, :process, _lane, _reason}, @detection_timeout_ms
+    settled = await_rows!(fixture.setup, 2, &Enum.all?(&1, fn row -> row.status in ["succeeded", "failed"] end))
+    successor = Enum.find(settled, &(&1.id == identity.request_id))
+    original = Enum.find(settled, &(&1.id != identity.request_id))
+    assert original.status == "succeeded"
+    refute Map.has_key?(original.request_metadata, "downstream_interruption")
+    assert successor.status == "failed"
+    assert successor.last_error_code == "client_disconnected"
+    assert successor.request_metadata["downstream_interruption"]["cause"] == "idle_timeout"
+    refute RequestOutcome.client_cancelled?(successor)
+    assert Repo.get!(Attempt, identity.attempt_id).response_metadata["downstream_interruption"] == successor.request_metadata["downstream_interruption"]
+    Enum.each(settled, &assert_complete_ledger!/1)
+  end
 
   test "a queued independent prepare does not replace the producing request before grouped provider successor frames" do
     assert_queued_context!(:coalesced)

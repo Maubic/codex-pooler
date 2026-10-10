@@ -28,34 +28,37 @@ defmodule CodexPoolerWeb.CodexResponsesSocketTerminalPushedCleanupTest do
   @moduletag capture_log: true
   @timeout_ms 15_000
 
-  @tag slow: "the socket's 250 ms pre-cleanup drain, its cleanup, then the task's own settlement inside the post-cleanup drain"
-  test "a direct task whose terminal the socket already pushed settles its own turn when the socket closes" do
-    fixture = fixture()
-    {task, state} = cleanup_fixture(fixture)
-    monitor = Process.monitor(task)
-    test_pid = self()
-    handler_id = {__MODULE__, make_ref()}
+  for close_reason <- [:closed, :timeout] do
+    @tag slow: "the socket's 250 ms pre-cleanup drain, its cleanup, then the task's own settlement inside the post-cleanup drain"
+    test "a direct task whose terminal the socket already pushed settles its own turn on #{close_reason}" do
+      fixture = fixture()
+      {task, state} = cleanup_fixture(fixture)
+      monitor = Process.monitor(task)
+      test_pid = self()
+      handler_id = {__MODULE__, make_ref()}
 
-    # The socket's cleanup runs in a supervised task that reports when it is
-    # done; only then does the fake settle, so an interrupt of the cleanup
-    # would have landed first.
-    :ok =
-      :telemetry.attach(
-        handler_id,
-        [:codex_pooler, :gateway, :websocket_control, :cleanup_finished],
-        fn _event, _measurements, %{caller: caller}, _config -> if caller == test_pid, do: send(task, :settle) end,
-        nil
-      )
+      # The socket's cleanup runs in a supervised task that reports when it is
+      # done; only then does the fake settle, so an interrupt of the cleanup
+      # would have landed first.
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:codex_pooler, :gateway, :websocket_control, :cleanup_finished],
+          fn _event, _measurements, %{caller: caller}, _config -> if caller == test_pid, do: send(task, :settle) end,
+          nil
+        )
 
-    on_exit(fn -> :telemetry.detach(handler_id) end)
+      on_exit(fn -> :telemetry.detach(handler_id) end)
 
-    assert :ok = CodexResponsesSocket.terminate(:closed, state)
-    assert_receive {:DOWN, ^monitor, :process, ^task, _reason}, @timeout_ms
+      assert :ok = CodexResponsesSocket.terminate(unquote(close_reason), state)
+      assert_receive {:DOWN, ^monitor, :process, ^task, _reason}, @timeout_ms
 
-    request = Repo.reload!(fixture.request)
-    assert {request.status, request.last_error_code} == {"failed", "owner_task_exception"}
+      request = Repo.reload!(fixture.request)
+      assert {request.status, request.last_error_code} == {"failed", "owner_task_exception"}
+      refute Map.has_key?(request.request_metadata, "downstream_interruption")
 
-    assert Repo.aggregate(from(e in LedgerEntry, where: e.request_id == ^fixture.request.id and e.entry_kind == "settlement" and e.amount_status == "recorded"), :count) == 1
+      assert Repo.aggregate(from(e in LedgerEntry, where: e.request_id == ^fixture.request.id and e.entry_kind == "settlement" and e.amount_status == "recorded"), :count) == 1
+    end
   end
 
   defp cleanup_fixture(fixture) do

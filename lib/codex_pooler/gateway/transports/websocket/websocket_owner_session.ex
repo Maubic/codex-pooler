@@ -290,6 +290,19 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
   @spec owner_status(GenServer.server()) :: {:ok, owner_status()}
   def owner_status(owner), do: GenServer.call(owner, :owner_status, owner_call_timeout())
 
+  @spec capture_downstream_idle_timeout(GenServer.server(), map(), String.t()) :: term()
+  def capture_downstream_idle_timeout(owner, downstream, client_activity) when is_pid(owner) do
+    deadline = System.monotonic_time(:millisecond) + 100
+    # A rolling deployment can still have an older owner. Never send its
+    # GenServer an unknown call merely to add optional diagnostic evidence.
+    if node(owner) == node() or :erpc.call(node(owner), :erlang, :function_exported, [__MODULE__, :capture_downstream_idle_timeout, 3], 100),
+      do: GenServer.call(owner, {:capture_downstream_idle_timeout, downstream, client_activity}, max(deadline - System.monotonic_time(:millisecond), 0)),
+      else: {:error, :unsupported_owner}
+  catch
+    :exit, _reason -> {:error, :attribution_unavailable}
+    :error, {:erpc, _reason} -> {:error, :attribution_unavailable}
+  end
+
   @spec recover_expired_generation(map()) :: {:ok, term()} | {:error, term()}
   def recover_expired_generation(candidate) do
     if Repo.in_transaction?() do
@@ -1958,6 +1971,21 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call({:capture_downstream_idle_timeout, downstream, _client_activity}, {caller, _tag}, state) do
+    result =
+      with %{pid: ^caller} <- downstream,
+           :active <- DownstreamState.downstream_status(state.downstream, downstream),
+           false <- terminal_forwarded_to?(state, downstream),
+           %{cleanup_witness: %OwnerCleanup{} = witness, downstream: active_downstream} <- state.active_turn,
+           :active <- DownstreamState.downstream_status(active_downstream, downstream) do
+        {{:ok, :ok}, witness}
+      else
+        _stale -> {:ok, :stale}
+      end
+
+    {:reply, result, state}
   end
 
   def handle_call({:detach_previsible_downstream, pid, epoch, correlation_id}, _from, state) do

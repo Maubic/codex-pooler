@@ -1183,12 +1183,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
         from(a in Attempt,
           where: a.id == ^attempt_id,
           lock: "FOR UPDATE",
-          select: fragment("?->?", a.response_metadata, ^@downstream_delivery_key)
+          select: a.response_metadata
         )
       )
 
     case recorded do
-      %{} = receipt -> Map.put_new(metadata, @downstream_delivery_key, receipt)
+      %{} = recorded -> Map.merge(Map.take(recorded, [@downstream_delivery_key, "downstream_interruption"]), metadata)
       _none -> metadata
     end
   end
@@ -1469,6 +1469,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   defp attempt_model(_request, _attrs), do: nil
 
   defp insert_attempt!(request, assignment, attrs, timestamp) do
+    request = Metadata.clear_downstream_interruption!(request)
     model = attempt_model(request, attrs)
     pricing_snapshot = attempt_pricing_snapshot(request, model, attrs)
     {owner_instance_id, owner_instance_boot_id} = attempt_owner(attrs)

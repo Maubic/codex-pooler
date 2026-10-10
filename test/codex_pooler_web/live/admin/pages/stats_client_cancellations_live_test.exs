@@ -19,7 +19,7 @@ defmodule CodexPoolerWeb.Admin.StatsClientCancellationsLiveTest do
 
     request_fixture(context, %{status: "succeeded"})
     request_fixture(context, %{status: "failed", last_error_code: "client_disconnected", response_status_code: 499, transport: "websocket"})
-    request_fixture(context, %{status: "failed", last_error_code: "owner_drained", response_status_code: 499, transport: "websocket"})
+    request_fixture(context, %{status: "failed", last_error_code: "client_disconnected", response_status_code: 499, transport: "websocket", request_metadata: %{"downstream_interruption" => %{"origin" => "server", "cause" => "idle_timeout"}}})
 
     {:ok, view, _html} = live(conn, ~p"/admin/stats?pool_id=#{pool.id}")
     _ = await_stats_dashboard(view, System.monotonic_time(:millisecond) + @detection_timeout_ms)

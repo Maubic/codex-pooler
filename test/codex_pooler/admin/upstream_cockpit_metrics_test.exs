@@ -327,9 +327,9 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetricsTest do
         status: "failed",
         admitted_at: DateTime.add(now, -1, :minute),
         correlation_id: "visible-failed-event",
-        request_metadata: %{"prompt" => secret},
+        request_metadata: %{"prompt" => secret, "downstream_interruption" => %{"origin" => "server", "cause" => "idle_timeout"}},
         response_status_code: 502,
-        last_error_code: "upstream_failed"
+        last_error_code: "client_disconnected"
       })
 
     retried =
@@ -349,6 +349,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetricsTest do
     assert %{rows: rows, searched_attempt_limit: nil} = UpstreamCockpitMetrics.recent_request_events(scope, identity, 10)
 
     assert Enum.map(rows, & &1.id) == [failed.id, retried.id]
+    assert Enum.all?(rows, &(&1.client_cancelled? == false))
 
     assert Enum.all?(rows, fn row ->
              MapSet.new(Map.keys(row)) ==
@@ -359,12 +360,13 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetricsTest do
                  :completed_at,
                  :response_status_code,
                  :last_error_code,
+                 :client_cancelled?,
                  :attempt_count
                ])
            end)
 
     assert hd(rows).response_status_code == 502
-    assert hd(rows).last_error_code == "upstream_failed"
+    assert hd(rows).last_error_code == "client_disconnected"
     assert List.last(rows).attempt_count == 2
     refute inspect(rows) =~ secret
     refute inspect(rows) =~ "visible-failed-event"

@@ -16,7 +16,7 @@ defmodule CodexPoolerWeb.Runtime.DownstreamKeepaliveScenario do
   import CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwardingSupport,
     only: [start_shared_peer_window_owner!: 3]
 
-  alias CodexPooler.Accounting.Request
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry, Request, RequestOutcome}
   alias CodexPooler.Events
   alias CodexPooler.FakeUpstream
   alias CodexPooler.Gateway.OperationalSettings
@@ -160,6 +160,54 @@ defmodule CodexPoolerWeb.Runtime.DownstreamKeepaliveScenario do
     assert_receive {Events, %{reason: "request_finalized", payload: %{"status" => ^status}}}, @detection_timeout_ms
     assert [%Request{status: ^status, last_error_code: ^last_error_code, transport: "websocket"} = request] = Repo.all(from(request in Request, where: request.pool_id == ^setup.pool.id))
     request
+  end
+
+  def assert_idle_attribution!(request, activity) do
+    receipt = %{"origin" => "server", "cause" => "idle_timeout", "client_activity" => activity}
+    assert request.request_metadata["downstream_interruption"] == receipt
+    refute RequestOutcome.client_cancelled?(request)
+    assert RequestOutcome.display_status(request) == "failed"
+    assert [attempt] = Repo.all(from a in Attempt, where: a.request_id == ^request.id)
+    assert attempt.response_metadata["downstream_interruption"] == receipt
+    assert attempt.network_error_code == "client_disconnected"
+    assert Repo.aggregate(from(e in LedgerEntry, where: e.request_id == ^request.id and e.entry_kind == "settlement" and e.amount_status == "recorded"), :count) == 1
+    assert Repo.aggregate(from(e in LedgerEntry, where: e.request_id == ^request.id and e.entry_kind == "release"), :count) == 1
+  end
+
+  def hold_session_row!(session_id) do
+    parent = self()
+    {:ok, id} = Ecto.UUID.dump(session_id)
+
+    task =
+      Task.async(fn ->
+        {:ok, connection} = Postgrex.start_link(Keyword.take(CodexPooler.Repo.config(), [:hostname, :port, :username, :password, :database]))
+
+        try do
+          {:ok, :ok} =
+            Postgrex.transaction(
+              connection,
+              fn connection ->
+                Postgrex.query!(connection, "SELECT id FROM codex_sessions WHERE id = $1 FOR UPDATE", [id])
+                send(parent, {:session_row_locked, self()})
+
+                receive do
+                  :release -> :ok
+                after
+                  30_000 -> raise "session lock was not released"
+                end
+              end,
+              timeout: 35_000
+            )
+
+          :ok
+        after
+          GenServer.stop(connection)
+        end
+      end)
+
+    pid = task.pid
+    assert_receive {:session_row_locked, ^pid}, detection_timeout_ms()
+    task
   end
 
   # A message streamed as `deltas` text deltas, as `{type, payload}` events for

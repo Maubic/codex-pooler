@@ -33,6 +33,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDownstreamKeepalivePeerTes
   import CodexPoolerWeb.Runtime.DownstreamKeepaliveScenario
 
   alias CodexPooler.FakeUpstream
+  alias CodexPooler.Gateway.Runtime.NativeResponseSteering
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession
+  alias CodexPoolerWeb.Runtime.BackendCodexTestSupport
+  alias CodexPoolerWeb.Runtime.WebsocketCleanupFence
   alias CodexPoolerWeb.WebsocketConnectionLogger
 
   @moduletag capture_log: true
@@ -49,6 +53,84 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDownstreamKeepalivePeerTes
   setup %{settings: settings} do
     :ok = put_settings!(settings, true)
     enter_peer_owner_topology!()
+  end
+
+  @tag settings: [websocket_idle_timeout_ms: @idle_timeout_ms]
+  test "a busy actor on a real peer cannot add a five-second diagnostic call wait", %{peer_node: peer_node} do
+    {:ok, actor} = :erpc.call(peer_node, GenServer, :start, [NativeResponseSteering, self()])
+    :ok = :sys.suspend(actor)
+
+    try do
+      task = Task.async(fn -> WebsocketOwnerSession.capture_downstream_idle_timeout(actor, %{pid: self(), epoch: 1, correlation_id: Ecto.UUID.generate()}, "unknown") end)
+      assert {:error, :attribution_unavailable} = Task.await(task, 1_000)
+    after
+      :sys.resume(actor)
+      GenServer.stop(actor)
+    end
+  end
+
+  for topology <- [:direct, :local, :peer] do
+    @tag settings: [websocket_idle_timeout_ms: @idle_timeout_ms]
+    @tag slow: "the real idle timer must close while an independent transaction holds the exact session row"
+    test "#{topology}: an attribution row lock does not delay the idle close", %{peer_node: peer_node} do
+      assert_locked_idle_close!(unquote(topology), peer_node)
+    end
+  end
+
+  defp assert_locked_idle_close!(topology, peer_node) do
+    :ok = put_settings!([websocket_idle_timeout_ms: @idle_timeout_ms], topology != :direct)
+    hold = make_ref()
+    upstream = start_upstream(FakeUpstream.strict_sequence([turn_request(FakeUpstream.barrier_websocket_frames(encoded_events("resp_idle_locked", 1), notify: self(), release_ref: hold))]))
+    setup = gateway_setup(upstream)
+    BackendCodexTestSupport.register_unboxed_pool_cleanup!(setup)
+    client = start_turn!(setup, if(topology == :peer, do: [peer_node: peer_node], else: []))
+
+    for ordinal <- 0..1 do
+      assert_receive {:fake_upstream_frame_barrier, ^ordinal, _handler, ^hold}, detection_timeout_ms()
+      :ok = FakeUpstream.release_frame(upstream, hold)
+    end
+
+    assert_receive {:fake_upstream_frame_barrier, 2, _handler, ^hold}, detection_timeout_ms()
+    {conn, websocket, _first} = BackendCodexTestSupport.public_websocket_receive_text!(client.conn, client.websocket, client.ref)
+    {conn, websocket, _second} = BackendCodexTestSupport.public_websocket_receive_text!(conn, websocket, client.ref)
+    client = %{client | conn: conn, websocket: websocket}
+    {_socket, handler} = :sys.get_state(client.socket)
+    state = handler.connection.websock_state
+    upstream_pid = if topology == :direct, do: state.upstream_websocket_session, else: :sys.get_state(state.websocket_owner_pid).upstream_pid
+
+    if topology != :direct do
+      # An inherited owner turn can have no local response task. Keep the
+      # accepted owner witness while avoiding the unrelated task drain budget.
+      :sys.replace_state(client.socket, fn {socket, handler} ->
+        {socket, put_in(handler.connection.websock_state.tasks, MapSet.new())}
+      end)
+    end
+
+    lock = hold_session_row!(state.codex_session.id)
+
+    try do
+      {turn, log} = with_log(fn -> read_turn!(client, answer_pings?: true) end)
+      assert turn.end == {:close, 1002}
+      assert Process.alive?(lock.pid)
+      assert_producer_retired!(upstream_pid)
+      refute log =~ "websocket downstream idle timeout attribution unavailable"
+      send(lock.pid, :release)
+      assert Task.await(lock, detection_timeout_ms()) == :ok
+      WebsocketCleanupFence.await_session_cleanups!()
+      request = assert_request_settled!(setup, "failed", "client_disconnected")
+      assert_idle_attribution!(CodexPooler.Repo.reload!(request), if(turn.pings > 0, do: "pong_observed", else: "unknown"))
+      close_client!(turn.client)
+    after
+      send(lock.pid, :release)
+      FakeUpstream.release_remaining_frames(upstream, hold)
+    end
+  end
+
+  defp assert_producer_retired!(pid) do
+    state = :sys.get_state(pid, 2_000)
+    refute Map.has_key?(state, :conn)
+  catch
+    :exit, {:noproc, _call} -> :ok
   end
 
   @tag settings: [websocket_idle_timeout_ms: @idle_timeout_ms, upstream_receive_timeout_ms: @receive_timeout_ms]
@@ -76,35 +158,56 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketDownstreamKeepalivePeerTes
   # The upstream receive timeout keeps its default here: travelling with the
   # turn to the owner, a shorter one ends the stalled stream first (`502
   # server_error`), and the downstream idle bound would never be reached.
-  @tag settings: [websocket_idle_timeout_ms: @idle_timeout_ms]
-  @tag slow: "the idle bound is a real timer: the close lands one bound after the last pong"
-  test "owner on another VM: a turn that stops delivering frames is still closed by the idle bound", %{peer_node: peer_node} do
-    hold = make_ref()
-    # provenance: synthetic_adversarial
-    upstream = start_upstream(FakeUpstream.strict_sequence([turn_request(FakeUpstream.barrier_websocket_frames(encoded_events("resp_keepalive_remote_stalled", 1), notify: self(), release_ref: hold))]))
-    setup = gateway_setup(upstream)
+  for task_tracking <- [:tracked, :untracked] do
+    @tag settings: [websocket_idle_timeout_ms: @idle_timeout_ms]
+    @tag slow: "the idle bound is a real timer: the close lands one bound after the last pong"
+    test "owner on another VM with #{task_tracking} task: a turn that stops delivering frames is still closed by the idle bound", %{peer_node: peer_node} do
+      hold = make_ref()
+      # provenance: synthetic_adversarial
+      upstream = start_upstream(FakeUpstream.strict_sequence([turn_request(FakeUpstream.barrier_websocket_frames(encoded_events("resp_keepalive_remote_stalled", 1), notify: self(), release_ref: hold))]))
+      setup = gateway_setup(upstream)
 
-    {turn, log} =
-      with_log(fn ->
-        client = start_turn!(setup, peer_node: peer_node)
+      {turn, log} =
+        with_log(fn ->
+          client = start_turn!(setup, peer_node: peer_node)
 
-        # The provider sends its first two frames, then stalls.
-        for pushed <- 0..1 do
-          assert_receive {:fake_upstream_frame_barrier, ^pushed, _handler, ^hold}, detection_timeout_ms()
-          :ok = FakeUpstream.release_frame(upstream, hold)
-        end
+          # The provider sends its first two frames, then stalls.
+          for pushed <- 0..1 do
+            assert_receive {:fake_upstream_frame_barrier, ^pushed, _handler, ^hold}, detection_timeout_ms()
+            :ok = FakeUpstream.release_frame(upstream, hold)
+          end
 
-        assert_receive {:fake_upstream_frame_barrier, 2, _handler, ^hold}, detection_timeout_ms()
-        read_turn!(client, answer_pings?: true)
-      end)
+          assert_receive {:fake_upstream_frame_barrier, 2, _handler, ^hold}, detection_timeout_ms()
 
-    assert node(turn.client.owner) == peer_node
-    assert turn.end in [{:close, 1002}, :socket_closed], "the turn " <> describe_turn(turn)
-    assert Enum.map(turn.events, & &1["type"]) -- ["codex.response.metadata"] == ["response.created", "response.output_item.added"]
-    assert turn.pings <= 2, "the turn " <> describe_turn(turn)
-    assert_request_settled!(setup, "failed", "client_disconnected")
-    assert log =~ "#{WebsocketConnectionLogger.downstream_idle_timeout_message()} tracked_tasks=1"
-    :ok = FakeUpstream.release_remaining_frames(upstream, hold)
-    :ok = close_client!(turn.client)
+          {client, initial} =
+            if unquote(task_tracking) == :untracked do
+              # Read both frames before dropping bookkeeping, proving they
+              # reached this downstream before the synthetic fault.
+              {conn, websocket, first} = BackendCodexTestSupport.public_websocket_receive_text!(client.conn, client.websocket, client.ref)
+              {conn, websocket, second} = BackendCodexTestSupport.public_websocket_receive_text!(conn, websocket, client.ref)
+
+              :sys.replace_state(client.socket, fn {socket, handler} ->
+                {socket, put_in(handler.connection.websock_state.tasks, MapSet.new())}
+              end)
+
+              {%{client | conn: conn, websocket: websocket}, Enum.map([first, second], &CodexPooler.JSON.decode!/1)}
+            else
+              {client, []}
+            end
+
+          turn = read_turn!(client, answer_pings?: true)
+          %{turn | events: initial ++ turn.events}
+        end)
+
+      assert node(turn.client.owner) == peer_node
+      assert turn.end in [{:close, 1002}, :socket_closed], "the turn " <> describe_turn(turn)
+      assert Enum.map(turn.events, & &1["type"]) -- ["codex.response.metadata"] == ["response.created", "response.output_item.added"]
+      assert turn.pings <= 2, "the turn " <> describe_turn(turn)
+      request = assert_request_settled!(setup, "failed", "client_disconnected")
+      assert_idle_attribution!(request, if(turn.pings > 0, do: "pong_observed", else: "unknown"))
+      if unquote(task_tracking) == :tracked, do: assert(log =~ "#{WebsocketConnectionLogger.downstream_idle_timeout_message()} tracked_tasks=1")
+      :ok = FakeUpstream.release_remaining_frames(upstream, hold)
+      :ok = close_client!(turn.client)
+    end
   end
 end
