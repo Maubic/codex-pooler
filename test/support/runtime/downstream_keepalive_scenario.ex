@@ -164,6 +164,7 @@ defmodule CodexPoolerWeb.Runtime.DownstreamKeepaliveScenario do
 
   def assert_idle_attribution!(request, activity) do
     receipt = %{"origin" => "server", "cause" => "idle_timeout", "client_activity" => activity}
+    request = await_idle_attribution!(request, receipt, System.monotonic_time(:millisecond) + @detection_timeout_ms)
     assert request.request_metadata["downstream_interruption"] == receipt
     refute RequestOutcome.client_cancelled?(request)
     assert RequestOutcome.display_status(request) == "failed"
@@ -172,6 +173,23 @@ defmodule CodexPoolerWeb.Runtime.DownstreamKeepaliveScenario do
     assert attempt.network_error_code == "client_disconnected"
     assert Repo.aggregate(from(e in LedgerEntry, where: e.request_id == ^request.id and e.entry_kind == "settlement" and e.amount_status == "recorded"), :count) == 1
     assert Repo.aggregate(from(e in LedgerEntry, where: e.request_id == ^request.id and e.entry_kind == "release"), :count) == 1
+  end
+
+  # Settlement can publish request_finalized before the independent idle
+  # attribution transaction commits. Its post-commit event fences both the
+  # request and attempt metadata; the earlier request struct is a snapshot.
+  defp await_idle_attribution!(request, receipt, deadline) do
+    request = Repo.reload!(request)
+
+    if request.request_metadata["downstream_interruption"] == receipt do
+      request
+    else
+      request_id = request.id
+      remaining = deadline - System.monotonic_time(:millisecond)
+      assert remaining > 0, "idle attribution did not commit for request #{request_id}"
+      assert_receive {Events, %{reason: "request_metadata_updated", payload: %{"request_id" => ^request_id}}}, remaining
+      await_idle_attribution!(request, receipt, deadline)
+    end
   end
 
   def hold_session_row!(session_id) do
