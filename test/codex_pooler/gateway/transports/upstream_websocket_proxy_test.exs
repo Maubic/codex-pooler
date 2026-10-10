@@ -9,6 +9,79 @@ defmodule CodexPooler.Gateway.Transports.UpstreamWebsocketProxyTest do
 
   @timeouts %{connect_timeout_ms: 1_000, receive_timeout_ms: 1_000}
 
+  test "queued tunnel data does not turn an observed destination closure into a task crash" do
+    {downstream, client} = tcp_pair!()
+    {upstream, provider} = tcp_pair!()
+    parent = self()
+
+    task =
+      Task.Supervisor.async_nolink(start_supervised!(Task.Supervisor), fn ->
+        receive do
+          :owned -> :ok
+        end
+
+        try do
+          :ok = :inet.setopts(downstream, active: :once)
+          :ok = :inet.setopts(upstream, active: :once)
+
+          queued =
+            receive do
+              {:tcp, ^upstream, _data} = message -> message
+            after
+              5_000 -> flunk("the provider did not send the owned tunnel data")
+            end
+
+          send(parent, :tunnel_data_held)
+
+          closed =
+            receive do
+              {:tcp_closed, ^downstream} = message -> message
+            after
+              5_000 -> flunk("the destination did not close")
+            end
+
+          # Replay the two real notifications in their legal cross-socket order.
+          send(self(), queued)
+          send(self(), closed)
+          tunnel(downstream, upstream)
+        after
+          :gen_tcp.close(downstream)
+          :gen_tcp.close(upstream)
+        end
+      end)
+
+    monitor = Process.monitor(task.pid)
+    :ok = :gen_tcp.controlling_process(downstream, task.pid)
+    :ok = :gen_tcp.controlling_process(upstream, task.pid)
+    send(task.pid, :owned)
+    :ok = :gen_tcp.send(provider, "synthetic queued data")
+    assert_receive :tunnel_data_held, 5_000
+    :ok = :gen_tcp.close(client)
+    assert :ok = Task.await(task, 5_000)
+    assert_receive {:DOWN, ^monitor, :process, _, :normal}, 5_000
+    assert Port.info(downstream) == nil
+    assert Port.info(upstream) == nil
+  end
+
+  defp tcp_pair! do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+    on_exit(fn -> :gen_tcp.close(listener) end)
+    {:ok, {_, port}} = :inet.sockname(listener)
+    {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 5_000)
+    on_exit(fn -> :gen_tcp.close(client) end)
+    {:ok, server} = :gen_tcp.accept(listener, 5_000)
+    on_exit(fn -> :gen_tcp.close(server) end)
+    :ok = :gen_tcp.close(listener)
+    {server, client}
+  end
+
+  test "the tunnel closure witness refuses a destination that is still open" do
+    {destination, client} = tcp_pair!()
+    assert_raise ExUnit.AssertionError, fn -> await_tunnel_destination_closed!(destination, 0) end
+    assert :ok = :gen_tcp.send(destination, "still open")
+    assert {:ok, "still open"} = :gen_tcp.recv(client, 0, 5_000)
+  end
+
   setup do
     CodexPooler.TestAppEnv.restore_on_exit(OutboundHTTP)
     :ok
@@ -190,17 +263,37 @@ defmodule CodexPooler.Gateway.Transports.UpstreamWebsocketProxyTest do
   defp tunnel(downstream, upstream) do
     receive do
       {:tcp, ^downstream, data} ->
-        :ok = :gen_tcp.send(upstream, data)
-        tunnel(downstream, upstream)
+        forward_tunnel(data, upstream, downstream, upstream)
 
       {:tcp, ^upstream, data} ->
-        :ok = :gen_tcp.send(downstream, data)
-        tunnel(downstream, upstream)
+        forward_tunnel(data, downstream, downstream, upstream)
 
       {:tcp_closed, socket} when socket in [downstream, upstream] ->
         :ok
     after
       15_000 -> raise "test tunnel did not close"
+    end
+  end
+
+  defp forward_tunnel(data, destination, downstream, upstream) do
+    case :gen_tcp.send(destination, data) do
+      :ok -> tunnel(downstream, upstream)
+      {:error, reason} when reason in [:closed, :econnreset, :enotconn, :epipe, :einval] -> await_tunnel_destination_closed!(destination)
+    end
+  end
+
+  defp await_tunnel_destination_closed!(socket, timeout \\ 15_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    monitor = Port.monitor(socket)
+
+    try do
+      assert_receive {:tcp_closed, ^socket}, timeout
+      remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+      assert_receive {:DOWN, ^monitor, :port, ^socket, _reason}, remaining
+      assert Port.info(socket) == nil
+      :ok
+    after
+      Process.demonitor(monitor, [:flush])
     end
   end
 
