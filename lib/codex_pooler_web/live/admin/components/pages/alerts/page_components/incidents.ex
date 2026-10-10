@@ -152,7 +152,7 @@ defmodule CodexPoolerWeb.Admin.AlertsPageComponents.Incidents do
                 data-role="alert-incident-row"
                 data-alert-anchor-id={"alert-incident-#{incident.id}"}
               >
-                <td class="min-w-0 align-middle max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-1">
+                <td class="min-w-0 align-middle max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-1 max-lg:sm:col-span-1">
                   <div class="grid min-w-0 gap-1">
                     <span
                       id={"alert-incident-row-#{incident.id}-reason"}
@@ -181,8 +181,8 @@ defmodule CodexPoolerWeb.Admin.AlertsPageComponents.Incidents do
                     </div>
                   </div>
                 </td>
-                <td class="align-middle max-lg:col-start-3 max-lg:row-start-1 max-lg:justify-self-end">
-                  <div class="flex flex-wrap items-center gap-1 max-lg:justify-end">
+                <td class="align-middle max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-2 max-lg:sm:col-span-1 max-lg:sm:col-start-2 max-lg:sm:row-start-1 max-lg:sm:justify-self-end">
+                  <div class="flex flex-wrap items-center gap-1 max-lg:sm:justify-end">
                     <span
                       id={"alert-incident-row-#{incident.id}-state"}
                       data-role="incident-state"
@@ -201,17 +201,17 @@ defmodule CodexPoolerWeb.Admin.AlertsPageComponents.Incidents do
                 </td>
                 <td
                   id={"alert-incident-row-#{incident.id}-delivery"}
-                  class="min-w-0 align-middle text-xs max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-3 max-lg:mt-1"
+                  class="min-w-0 align-middle text-xs max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-4 max-lg:mt-1 max-lg:sm:col-span-1 max-lg:sm:row-start-3"
                 >
                   <.incident_delivery_summary incident={incident} prefix="alert-incident-row" />
                 </td>
                 <td
                   id={"alert-incident-row-#{incident.id}-last-seen"}
-                  class="whitespace-nowrap align-middle text-xs tabular-nums text-base-content/65 max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-2 max-lg:mt-1"
+                  class="whitespace-nowrap align-middle text-xs tabular-nums text-base-content/65 max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-3 max-lg:mt-1 max-lg:sm:col-span-1 max-lg:sm:row-start-2"
                 >
                   {format_datetime(incident.last_seen_at)}
                 </td>
-                <td class="align-middle max-lg:col-span-3 max-lg:col-start-1 max-lg:row-start-4 max-lg:mt-2">
+                <td class="align-middle max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-5 max-lg:mt-2 max-lg:sm:row-start-4">
                   <.incident_action_controls incident={incident} prefix="alert-incident" />
                 </td>
               </tr>

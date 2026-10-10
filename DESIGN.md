@@ -1698,11 +1698,7 @@ Request user-agent labels use a local normalized brand mark when the client is r
 
 Status icons reuse the shared status mapping: clock for in progress, check-circle for succeeded, x-circle for failed, shield-exclamation for rejected, no-symbol for cancelled and question-mark-circle for unknown. Each 12px icon centers against the status/latency text's cap-to-baseline box using the shared `admin-control-label` primitive on that text group. The icon is decorative (`aria-hidden`) because visible and accessible status text already names the outcome. Preserve the surrounding 16px row rhythm, status colors and 4px horizontal gap.
 
-**Status tick.** Opt in with `admin-status-tick` and put `data-tone` on the row
-(`success` / `warning` / `error` / `info`). A rounded 4px bar is painted inside
-the leading cell's padding, and in ledger mode it becomes a grid item measuring
-the record — the identity and its figures — and stopping before anything that
-follows. Tone is never the only channel: the row spells its status out.
+**Table status.** Follow the request-log table: visible status text and its existing semantic icon/color carry the state; tables have no colored left status band and reserve no empty rail column. The common phone ledger grid has content plus trailing metadata, while dense tablet entries have two content tracks plus figures. Remap cell placement when removing the former rail so Jobs, Lens and incident tables use the available width without overlapping target, attempts or failure content. On portrait phones below `sm`, Alerts incident titles and summaries span the full record width, then status/severity, last seen, delivery and actions follow on separate full-width rows; from `sm` the status group returns beside the identity. Card and navigation treatments remain separate from this table contract.
 
 **The title is the trigger.** A row that opens a drawer makes its headline a
 `<button>` — the worker name in jobs, the timestamp in request logs and audit
@@ -2173,9 +2169,7 @@ and [`Toolbar.toolbar`](lib/codex_pooler_web/live/observatory/components/toolbar
 - **Do** reuse the chip/metric/surface/pill primitives above before inventing
   new ones — chips come from `BadgeComponents`, metric strips from
   `metric_strip`/`metric_card`, and the Observatory explicitly composes them.
-- **Do** paint status stripes from data attributes (`data-routing-tone`,
-  `data-status`) in `app.css` — domain read models never emit CSS class
-  names, and a stripe always reinforces visible status text.
+- **Do** derive semantic status text and icons from the read-model state; tables follow the request-log contract without colored side bands. Domain read models never emit CSS class names; existing card routing accents remain separate from the table treatment.
 - **Do** match the data shape: a table for many homogeneous records, grouped
   cards for a small fixed set of known systems, an inspector or drawer for the
   detail behind one of them.

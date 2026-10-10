@@ -209,7 +209,7 @@ defmodule CodexPoolerWeb.Admin.IncidentsPageComponents do
 
     ~H"""
     <tr id={"#{@id}-row-#{@row.id}"} data-role="openai-incident-row" data-incident-id={@row.id}>
-      <td class="min-w-0 align-middle max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-1">
+      <td class="min-w-0 align-middle max-lg:col-start-1 max-lg:row-start-1">
         <div class="grid min-w-0 gap-1">
           <p data-role="incident-title" class="line-clamp-2 text-[0.82rem] font-semibold leading-tight text-base-content">{@row.title}</p>
           <p :if={@summary} data-role="incident-summary" class="line-clamp-2 text-xs leading-4 text-base-content/55">{@summary}</p>
@@ -220,10 +220,10 @@ defmodule CodexPoolerWeb.Admin.IncidentsPageComponents do
           </div>
         </div>
       </td>
-      <td class="align-middle max-lg:col-start-3 max-lg:row-start-1 max-lg:justify-self-end">
+      <td class="align-middle max-lg:col-start-2 max-lg:row-start-1 max-lg:justify-self-end">
         <.status_badge row={@row} surface={@surface} />
       </td>
-      <td class="align-middle text-xs leading-5 text-base-content/70 max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-2 max-lg:mt-1">
+      <td class="align-middle text-xs leading-5 text-base-content/70 max-lg:col-start-1 max-lg:row-start-2 max-lg:mt-1">
         <div class="grid">
           <span data-role="incident-published-at" class="whitespace-nowrap" title={"First seen #{format_datetime(@row.first_seen_at, @datetime_preferences)}"}>
             {format_datetime(@row.published_at, @datetime_preferences)}
@@ -236,7 +236,7 @@ defmodule CodexPoolerWeb.Admin.IncidentsPageComponents do
           </span>
         </div>
       </td>
-      <td class="align-middle text-xs max-lg:col-start-3 max-lg:row-start-2 max-lg:mt-1 max-lg:justify-self-end">
+      <td class="align-middle text-xs max-lg:col-start-2 max-lg:row-start-2 max-lg:mt-1 max-lg:justify-self-end">
         <a
           :if={@row.link}
           id={"#{@id}-source-#{@row.id}"}

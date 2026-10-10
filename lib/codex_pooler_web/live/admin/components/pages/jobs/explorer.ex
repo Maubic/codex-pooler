@@ -74,7 +74,7 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.Explorer do
       >
         <table
           id="admin-jobs-explorer-table"
-          class="admin-ledger-table admin-status-tick table table-sm admin-log-table lg:min-w-[72rem]"
+          class="admin-ledger-table table table-sm admin-log-table lg:min-w-[72rem]"
         >
           <%!-- Before the columns, which is where the content model puts it:
           a caption written anywhere else is reparented by the parser rather
@@ -126,19 +126,19 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.Explorer do
       phx-value-job-id={@job.id}
       class="group/job cursor-pointer transition-colors hover:bg-base-200/80"
     >
-      <td class="min-w-0 align-middle max-lg:col-start-2 max-lg:row-start-1 max-lg:self-baseline">
+      <td class="min-w-0 align-middle max-lg:col-start-1 max-lg:row-start-1 max-lg:self-baseline">
         <.job_compact_identity job={@job} />
       </td>
-      <td class="min-w-0 align-middle max-lg:col-span-2 max-lg:col-start-2 max-lg:row-start-2">
+      <td class="min-w-0 align-middle max-lg:col-start-1 max-lg:row-start-2">
         <.job_target_summary job={@job} />
       </td>
-      <td class="whitespace-nowrap align-middle text-base-content/70 max-lg:col-start-3 max-lg:row-start-1 max-lg:self-baseline max-lg:text-right">
+      <td class="whitespace-nowrap align-middle text-base-content/70 max-lg:col-start-2 max-lg:row-start-1 max-lg:self-baseline max-lg:text-right">
         <.job_event job={@job} datetime_preferences={@datetime_preferences} />
       </td>
       <td
         class={[
           "align-middle tabular-nums text-base-content/75",
-          "max-lg:col-start-3 max-lg:row-start-2 max-lg:row-end-4 max-lg:self-end",
+          "max-lg:col-start-2 max-lg:row-start-2 max-lg:self-baseline",
           "max-lg:text-right max-lg:text-xs max-lg:leading-tight",
           !attempted?(@job) && "max-lg:hidden"
         ]}
@@ -146,7 +146,7 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.Explorer do
       >
         {format_attempts(@job)}
       </td>
-      <td class="min-w-0 align-middle max-lg:col-span-2 max-lg:col-start-2 max-lg:row-start-3 max-lg:mt-1 max-lg:has-[.job-failure-empty]:hidden">
+      <td class="min-w-0 align-middle max-lg:col-span-2 max-lg:col-start-1 max-lg:row-start-3 max-lg:mt-1 max-lg:has-[.job-failure-empty]:hidden">
         <.job_failure job={@job} />
       </td>
     </tr>
@@ -165,7 +165,7 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.Explorer do
         phx-click="open_job"
         phx-value-job-id={@job.id}
         title={safe_text(@job.worker)}
-        class="block w-full truncate text-left text-[0.82rem] font-semibold leading-tight text-base-content transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary group-hover/job:text-primary"
+        class="block w-full truncate text-left text-xs font-semibold leading-4 text-base-content transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary group-hover/job:text-primary"
       >
         {job_worker_label(@job.worker)}
       </button>
@@ -176,8 +176,9 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.Explorer do
       >
         <span class="shrink-0">#{@job.id}</span>
         <span aria-hidden="true">·</span>
-        <span data-role="state-label" class={job_state_text_class(@job.state)}>
-          {job_state_label(@job.state)}
+        <span data-role="state-label" class={["inline-flex items-center gap-1", job_state_text_class(@job.state)]}>
+          <.icon name={job_state_icon(@job.state)} class="size-3 shrink-0" />
+          <span class="admin-control-label">{job_state_label(@job.state)}</span>
         </span>
       </span>
     </div>
@@ -195,8 +196,9 @@ defmodule CodexPoolerWeb.Admin.JobsPageComponents.Explorer do
         data-role="job-target"
         class="flex min-w-0 items-baseline gap-x-1.5 leading-tight max-lg:text-xs"
       >
-        <span class={["shrink-0 lg:hidden", job_state_text_class(@job.state)]}>
-          {job_state_label(@job.state)}
+        <span class={["inline-flex shrink-0 items-center gap-1 lg:hidden", job_state_text_class(@job.state)]}>
+          <.icon name={job_state_icon(@job.state)} class="size-3 shrink-0" />
+          <span class="admin-control-label">{job_state_label(@job.state)}</span>
         </span>
         <span :if={@target} aria-hidden="true" class="shrink-0 text-base-content/30 lg:hidden">
           ·
