@@ -478,6 +478,13 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLive do
     |> maybe_start_request_logs(generation)
   end
 
+  # Until an initial or navigation load finishes, the rendered rows are empty
+  # or still belong to the previous URL. A refresh must finish loading the
+  # requested window before it can preserve a pinned page.
+  defp request_request_logs_refresh(%{assigns: %{request_logs_loading?: true, request_logs_preparation: %{stage: stage}, current_params: params}} = socket) when stage in [:initial_load, :filter_patch] do
+    request_request_logs(socket, params, stage)
+  end
+
   defp request_request_logs_refresh(socket) do
     preparation = %{
       selected_pool: socket.assigns.selected_pool,
@@ -531,7 +538,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLive do
   defp build_request_logs_result(preparation) do
     request_logs =
       case preparation do
-        %{stage: :event_refresh, snapshot_at: %DateTime{}} ->
+        %{stage: :event_refresh, snapshot_at: {%DateTime{}, _request_id}} ->
           preparation.current_request_logs
 
         _preparation ->
