@@ -14,6 +14,48 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpMailboxPrefixTest do
   @path "/backend-api/codex/responses"
   @budget 15_000
 
+  @tag mailbox_observation_contract: true
+  test "a transport resolved before the peer reset can reject the next send with einval" do
+    parent = self()
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+    on_exit(fn -> :gen_tcp.close(listener) end)
+    {:ok, {_, port}} = :inet.sockname(listener)
+
+    writer =
+      Task.Supervisor.async_nolink(start_supervised!(Task.Supervisor), fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, @budget)
+        {:ok, transport} = :inet_db.lookup_socket(socket)
+        :ok = :gen_tcp.send(socket, "synthetic")
+        :ok = :inet.setopts(socket, active: :once)
+        send(parent, :reset_writer_ready)
+
+        receive do
+          {:tcp_closed, ^socket} -> :ok
+          {:tcp_error, ^socket, reason} -> assert reason in [:closed, :econnreset]
+        after
+          @budget -> flunk("the owned writer did not observe the peer reset")
+        end
+
+        monitor = :erlang.monitor(:port, socket)
+        assert_receive {:DOWN, ^monitor, :port, ^socket, _}, @budget
+        # Exercise the real transport selected by gen_tcp before its port closes.
+        assert {:error, reason} = transport.send(socket, "synthetic")
+        reason
+      end)
+
+    writer_monitor = Process.monitor(writer.pid)
+    {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], @budget)
+    on_exit(fn -> :gen_tcp.close(client) end)
+    assert {:ok, "synthetic"} = :gen_tcp.recv(client, 9, @budget)
+    assert_receive :reset_writer_ready, @budget
+    :ok = :inet.setopts(client, linger: {true, 0})
+    :ok = :gen_tcp.close(client)
+    reason = Task.await(writer, @budget)
+    assert_receive {:DOWN, ^writer_monitor, :process, _, :normal}, @budget
+    assert reason == :einval
+    assert_failed_mailbox_write!(reason)
+  end
+
   # A comprehension expands and compiles a test's body once per generated test, so a loop that generates more than a few tests keeps
   # the scenario in a private function below it and each generated test is one call.
   for mode <- ["full", "lite"], {count, partial_tool?} <- [{1, false}, {2, false}, {1, true}], role <- [:opening, :local_summary, :remote_resume], delivery <- [:cut, :delivered] do
@@ -541,9 +583,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexHttpMailboxPrefixTest do
 
     if failed_item do
       assert_receive {:mailbox_prefix_write, ^ref, :send_error, ^failed_item, reason}, @budget
-      assert reason in [:closed, :econnreset, :enotconn, :epipe]
+      assert_failed_mailbox_write!(reason)
     end
 
     refute_received {:mailbox_prefix_write, ^ref, :send, _item, _error}
   end
+
+  defp assert_failed_mailbox_write!(reason), do: assert(reason in [:closed, :econnreset, :enotconn, :epipe, :einval])
 end
