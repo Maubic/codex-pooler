@@ -106,6 +106,9 @@ defmodule CodexPooler.Accounting do
   @spec native_turn_progress_advances?(CodexPooler.Accounting.NativeTurnProgress.position() | nil, CodexPooler.Accounting.NativeTurnProgress.position() | nil) :: boolean()
   defdelegate native_turn_progress_advances?(recorded, position), to: CodexPooler.Accounting.NativeTurnProgress, as: :advances?
 
+  @spec postcompaction_user_progress?(CodexPooler.Accounting.NativeTurnProgress.progression_scope(), CodexPooler.Accounting.NativeTurnProgress.position() | nil) :: boolean()
+  defdelegate postcompaction_user_progress?(scope, position), to: CodexPooler.Accounting.NativeTurnProgress
+
   @spec replay_provisional_binding_status(RequestReplay.provisional_reference()) ::
           :armed
           | {:consumed, map(), atom(), DateTime.t()}

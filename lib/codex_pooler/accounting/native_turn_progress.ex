@@ -23,7 +23,9 @@ defmodule CodexPooler.Accounting.NativeTurnProgress do
 
   import Ecto.Query
 
-  alias CodexPooler.Accounting.Request
+  alias CodexPooler.Accounting.{Attempt, Request, RequestClientRetryLink, RequestReplayEntitlement}
+  alias CodexPooler.Gateway.Persistence.CodexTurn
+  alias CodexPooler.Gateway.Persistence.SessionContinuity.MailboxAdmissionLocks
   alias CodexPooler.Repo
 
   @native_http_transports ["http_json", "http_sse", "http_compact_json"]
@@ -42,6 +44,18 @@ defmodule CodexPooler.Accounting.NativeTurnProgress do
 
   @typedoc "Where a request stands in its turn: the pivot's digest (or `nil`) and the user messages after it."
   @type position :: {<<_::256>> | nil, non_neg_integer()}
+
+  @type progression_scope :: %{
+          required(:original_request_claim) => String.t(),
+          required(:codex_session_id) => Ecto.UUID.t(),
+          required(:semantic_turn_digest) => <<_::256>>,
+          required(:pool_id) => Ecto.UUID.t(),
+          required(:api_key_id) => Ecto.UUID.t(),
+          required(:api_key_runtime_epoch) => non_neg_integer(),
+          required(:model_id) => Ecto.UUID.t(),
+          required(:requested_model) => String.t(),
+          required(:endpoint) => String.t()
+        }
 
   @doc """
   The position a request row recorded beside its progress digest, or `nil` when
@@ -71,6 +85,65 @@ defmodule CodexPooler.Accounting.NativeTurnProgress do
     )
     |> recorded_position()
   end
+
+  # A pre-turn compaction can be the first request of a logical turn. Its
+  # resume has a codex-resume claim, leaving no bare opener to compare a later
+  # user steer with. The owner preflight calls this only after authorizing the
+  # key/model and excluding active or armed work under the session locks.
+  # Admission remains a fresh bare claim, exactly as on direct websocket/HTTP;
+  # reservation and the owner still fence simultaneous candidates.
+  @spec postcompaction_user_progress?(progression_scope(), position() | nil) :: boolean()
+  def postcompaction_user_progress?(%{original_request_claim: "codex-turn:" <> _} = scope, {<<_::256>> = pivot, count})
+      when is_integer(count) and count > 0 do
+    with true <- MailboxAdmissionLocks.coordinated?(),
+         :ok <- MailboxAdmissionLocks.require_session!(scope.codex_session_id),
+         false <- Repo.exists?(from request in Request, where: request.correlation_id == ^scope.original_request_claim),
+         %CodexTurn{status: status, completed_at: %DateTime{}} = turn when status in ["succeeded", "failed", "interrupted"] <- latest_turn(scope),
+         %Request{} = request <- Repo.one(from request in Request, where: request.id == ^turn.request_id, lock: "FOR UPDATE"),
+         true <- matching_resume?(request, scope),
+         {^pivot, previous_count} when previous_count < count <- recorded_position(request),
+         true <- terminal_attempt?(turn, request),
+         false <- Repo.exists?(from entitlement in RequestReplayEntitlement, where: entitlement.request_id == ^request.id),
+         false <- Repo.exists?(from link in RequestClientRetryLink, where: link.predecessor_request_id == ^request.id or link.successor_request_id == ^request.id) do
+      true
+    else
+      _unproved -> false
+    end
+  end
+
+  def postcompaction_user_progress?(_scope, _position), do: false
+
+  defp latest_turn(scope) do
+    Repo.one(
+      from turn in CodexTurn,
+        where: turn.codex_session_id == ^scope.codex_session_id and turn.semantic_turn_digest == ^scope.semantic_turn_digest,
+        order_by: [desc: turn.turn_sequence],
+        limit: 1,
+        lock: "FOR UPDATE"
+    )
+  end
+
+  defp matching_resume?(%Request{correlation_id: "codex-resume:" <> _, transport: "websocket", status: status, completed_at: %DateTime{}} = request, scope)
+       when status in ["succeeded", "failed"] do
+    request.pool_id == scope.pool_id and request.api_key_id == scope.api_key_id and
+      request.model_id == scope.model_id and request.requested_model == scope.requested_model and
+      request.endpoint == scope.endpoint and request.native_client_retry_auth_epoch == scope.api_key_runtime_epoch and
+      is_nil(request.request_metadata["released_turn_claim"])
+  end
+
+  defp matching_resume?(_request, _scope), do: false
+
+  defp terminal_attempt?(%CodexTurn{final_attempt_id: final_attempt_id}, request) when is_binary(final_attempt_id) do
+    Repo.exists?(
+      from attempt in Attempt,
+        where:
+          attempt.id == ^final_attempt_id and attempt.request_id == ^request.id and
+            attempt.status in ["succeeded", "failed", "cancelled"] and not is_nil(attempt.completed_at) and
+            attempt.replay_generation == 0
+    ) and not Repo.exists?(from attempt in Attempt, where: attempt.request_id == ^request.id and is_nil(attempt.completed_at))
+  end
+
+  defp terminal_attempt?(_turn, _request), do: false
 
   @doc """
   True when a request at `position` is further along its turn than the holder

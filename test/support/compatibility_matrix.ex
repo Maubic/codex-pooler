@@ -3007,6 +3007,7 @@ defmodule CodexPooler.CompatibilityMatrix do
         "steered_full_history_frame_on_a_new_socket_after_a_websocket_opener",
         "steered_native_http_request_after_a_websocket_opener",
         "steered_request_after_a_mid_turn_compaction_of_an_already_compacted_session",
+        "steered_user_input_after_a_pre_turn_compaction_resume_without_a_bare_opener",
         "resume_after_a_second_local_compaction_in_the_same_turn",
         "resume_after_a_local_compaction_in_a_later_turn_of_the_thread",
         "resume_after_a_local_compaction_that_dropped_older_user_messages",
