@@ -571,6 +571,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexWebsocketOwnerForwarding.WindowAdva
 
       :account_paused ->
         assert routing_preference(next_request) == {"previous_window", "candidate_unavailable"}
+        assert next_request.request_metadata["routing"]["session_preference_diagnostics"]["unavailable_reason"] == "candidate_unavailable"
+        assert next_request.request_metadata["routing"]["session_preference_diagnostics"]["unavailable_reason_codes"] == []
+        refute Map.has_key?(next_request.request_metadata["routing"]["session_preference_diagnostics"], "observed_capacity_reason_codes")
     end
 
     assert :ok = FakeUpstream.verify!(upstream)

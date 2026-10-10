@@ -112,7 +112,7 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
     prompt_cache_locality =
       prompt_cache_locality_context(auth, model, request_options, settings, affinity, candidates)
 
-    session_preference = codex_session_preference_context(request_options, candidates)
+    session_preference = codex_session_preference_context(request_options, candidates, route_state)
 
     ordered =
       strategy_order_unless_prompt_cache_locality(
@@ -514,7 +514,7 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
   # candidates at all: `prefer_assignment/2` hoists nothing when it is absent,
   # so without this a preference that found nothing would be indistinguishable
   # from one that was honoured.
-  defp codex_session_preference_context(%RequestOptions{} = request_options, candidates) do
+  defp codex_session_preference_context(%RequestOptions{} = request_options, candidates, route_state) do
     case codex_session_preference(request_options) do
       {kind, assignment_id} ->
         %{
@@ -522,11 +522,17 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
           assignment_id: assignment_id,
           status: preference_status(candidates, assignment_id)
         }
+        |> put_unavailable_reason(route_state)
 
       nil ->
         %{}
     end
   end
+
+  defp put_unavailable_reason(%{status: "candidate_unavailable", assignment_id: assignment_id} = preference, route_state),
+    do: Map.merge(preference, RouteState.filter_exclusion(route_state, assignment_id))
+
+  defp put_unavailable_reason(preference, _route_state), do: preference
 
   defp codex_session_preference(%RequestOptions{
          continuity: %{codex_session: %CodexSession{pool_upstream_assignment_id: assignment_id}}

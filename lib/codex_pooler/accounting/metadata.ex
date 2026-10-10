@@ -418,12 +418,20 @@ defmodule CodexPooler.Accounting.Metadata do
   defp tap_request_log_event(result, _reason), do: result
 
   defp deep_merge(left, right) when is_map(left) and is_map(right) do
-    Map.merge(left, right, fn _key, left_value, right_value ->
+    Map.merge(left, right, fn key, left_value, right_value ->
+      left_value = clear_previous_preference(key, left_value, right_value)
       deep_merge(left_value, right_value)
     end)
   end
 
   defp deep_merge(_left, right), do: right
+
+  # A complete route plan replaces the preference assessment. Partial selected
+  # candidate updates retain the plan, and attempt metadata keeps its history.
+  defp clear_previous_preference("routing", left, %{"strategy" => _strategy}) when is_map(left),
+    do: Map.drop(left, ~w(session_preference_kind session_preference_status session_preference_diagnostics))
+
+  defp clear_previous_preference(_key, left, _right), do: left
 
   defp sanitize_value(value, key)
        when key in [:native_replay_preparation, "native_replay_preparation"],

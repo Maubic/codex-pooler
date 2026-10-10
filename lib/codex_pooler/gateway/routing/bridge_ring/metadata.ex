@@ -4,6 +4,7 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing.Metadata do
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Routing.BridgeRing
   alias CodexPooler.Pools.RoutingSettings
+  alias CodexPooler.Quotas.DiagnosticReasonCodes
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
 
   @default_ring_size 3
@@ -130,11 +131,24 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing.Metadata do
   # preference leaves no trace, and `selected_bridge_candidate_id` names the
   # last candidate dispatched to rather than the planned head, so it cannot
   # stand in for this.
+  defp session_preference_metadata(%{kind: kind, status: "candidate_unavailable", reason: reason, reason_codes: codes} = preference) do
+    diagnostics = %{"unavailable_reason" => reason, "unavailable_reason_codes" => DiagnosticReasonCodes.sanitize(codes)} |> put_observed_capacity_reasons(preference)
+    %{"session_preference_kind" => kind, "session_preference_status" => "candidate_unavailable", "session_preference_diagnostics" => diagnostics}
+  end
+
   defp session_preference_metadata(%{kind: kind, status: status}) do
     %{"session_preference_kind" => kind, "session_preference_status" => status}
   end
 
   defp session_preference_metadata(_preference), do: %{}
+
+  # The full capacity decision is evaluated before choosing the non-credit
+  # band. Preserve its already-observed facts separately from the cause of
+  # exclusion: credit permission does not participate in that band's choice.
+  defp put_observed_capacity_reasons(metadata, %{observed_capacity_reason_codes: codes}),
+    do: Map.put(metadata, "observed_capacity_reason_codes", DiagnosticReasonCodes.sanitize(codes))
+
+  defp put_observed_capacity_reasons(metadata, _preference), do: metadata
 
   defp fallback_reason(%{enabled?: true, status: "miss", row: nil}), do: "affinity_not_found"
   defp fallback_reason(%{enabled?: true, status: "hit"}), do: nil

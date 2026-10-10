@@ -59,10 +59,12 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
   # seconds until that circuit admits a probe (findings#206 row 206-532).
   defp filter_candidates(filter_input, route_state, request_options, quota_mode, saved_reset_scan_at, saved_reset_opts) do
     classified_candidates = filter_input.candidates
+    route_state = RouteState.clear_filter_exclusions(route_state)
 
     with {:ok, candidates} <-
            CandidateEligibility.filter_circuit_eligible_candidates(filter_input, route_state),
          circuit_excluded? = length(candidates) < length(filter_input.candidates),
+         route_state = RouteState.record_filter_exclusions(route_state, filter_input.candidates, candidates, "circuit_unavailable"),
          route_state = RouteState.put_candidates(route_state, candidates),
          filter_input = CandidateEligibility.FilterInput.put_candidates(filter_input, candidates),
          {:ok, candidates, quota_decision, route_state} <-
@@ -74,10 +76,14 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
              saved_reset_opts
            )
            |> retryable_when_circuit_excluded(circuit_excluded?),
+         {quota_exclusions, quota_decision} = pop_quota_exclusions(quota_decision),
+         route_state = RouteState.record_filter_exclusions(route_state, filter_input.candidates, candidates, "quota_unavailable", quota_exclusions),
+         quota_candidates = candidates,
          {:ok, candidates} <-
            filter_input
            |> filter_account_denied_candidates(candidates, quota_decision, route_state, quota_mode)
            |> retryable_when_circuit_excluded(circuit_excluded?),
+         route_state = RouteState.record_filter_exclusions(route_state, quota_candidates, candidates, "account_denied"),
          request_options =
            request_options
            |> put_reset_probe(route_state.reset_probe)
@@ -89,6 +95,8 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
          route_state = RouteState.put_candidates(route_state, candidates),
          {:ok, candidates} <-
            CandidateEligibility.filter_circuit_eligible_candidates(filter_input, route_state),
+         route_state = RouteState.record_filter_exclusions(route_state, filter_input.candidates, candidates, "circuit_unavailable"),
+         circuit_candidates = candidates,
          {:ok, candidates} <-
            CandidateEligibility.prefer_reasoning_effort_candidates(
              filter_input.model,
@@ -100,12 +108,16 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
 
       route_state =
         route_state
+        |> RouteState.record_filter_exclusions(circuit_candidates, candidates, "reasoning_effort_preferred")
         |> RouteState.put_candidates(candidates)
         |> RouteState.put_route_filter_dropped(dropped)
 
       {:ok, candidates, request_options, route_state}
     end
   end
+
+  defp pop_quota_exclusions(nil), do: {%{}, nil}
+  defp pop_quota_exclusions(decision), do: Map.pop(decision, :route_filter_exclusions, %{})
 
   defp filter_quota_eligible_candidates(
          %CandidateEligibility.FilterInput{} = filter_input,
@@ -168,7 +180,7 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
     {:ok, candidates, decision, selected_state} = maybe_allow_missing_quota(admitted, input, quota_mode, state)
 
     case filter_account_denied_candidates(input, candidates, decision, selected_state, quota_mode) do
-      {:ok, servable} -> {:ok, servable, decision, selected_state}
+      {:ok, servable} -> {:ok, servable, decision, RouteState.record_filter_exclusions(selected_state, candidates, servable, "account_denied")}
       {:error, _} = denied -> deferred_capacity(denied, input, selected_state, quota_mode, refresh_attempted?)
     end
   end

@@ -115,6 +115,32 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.RouteState do
   def put_candidates(%__MODULE__{} = route_state, candidates) when is_list(candidates),
     do: %{route_state | candidates: candidates}
 
+  @type filter_exclusion :: %{required(:reason) => String.t(), required(:reason_codes) => [String.t()], optional(:observed_capacity_reason_codes) => [String.t()]}
+
+  @spec clear_filter_exclusions(t()) :: t()
+  def clear_filter_exclusions(%__MODULE__{} = state),
+    do: %{state | extensions: Map.delete(state.extensions, :filter_exclusions)}
+
+  @spec record_filter_exclusions(t(), [candidate()], [candidate()], String.t(), %{optional(Ecto.UUID.t()) => filter_exclusion()}) :: t()
+  def record_filter_exclusions(%__MODULE__{} = state, before, after_candidates, reason, details \\ %{}) do
+    kept = MapSet.new(after_candidates, fn {assignment, _identity} -> assignment.id end)
+
+    dropped =
+      before
+      |> Enum.reject(fn {assignment, _identity} -> MapSet.member?(kept, assignment.id) end)
+      |> Map.new(fn {assignment, _identity} -> {assignment.id, Map.get(details, assignment.id, %{reason: reason, reason_codes: []})} end)
+
+    if map_size(dropped) == 0,
+      do: state,
+      else: %{state | extensions: Map.update(state.extensions, :filter_exclusions, dropped, &Map.merge(dropped, &1))}
+  end
+
+  @spec filter_exclusion(t() | nil, Ecto.UUID.t()) :: filter_exclusion()
+  def filter_exclusion(%__MODULE__{extensions: extensions}, assignment_id),
+    do: extensions |> Map.get(:filter_exclusions, %{}) |> Map.get(assignment_id, %{reason: "candidate_unavailable", reason_codes: []})
+
+  def filter_exclusion(nil, _assignment_id), do: %{reason: "candidate_unavailable", reason_codes: []}
+
   @spec put_saved_reset_auto_cohort(t(), [candidate()]) :: t()
   def put_saved_reset_auto_cohort(%__MODULE__{} = route_state, candidates)
       when is_list(candidates),

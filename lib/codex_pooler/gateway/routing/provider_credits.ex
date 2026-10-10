@@ -23,6 +23,7 @@ defmodule CodexPooler.Gateway.Routing.ProviderCredits do
   @spec eligibility(RoutingQuotaSnapshot.t(), map(), band()) :: map()
   def eligibility(%RoutingQuotaSnapshot{} = snapshot, context, band \\ :all) do
     decision = decision(snapshot, context)
+    observed_capacity_reason_codes = decision.reason_codes
     decision = band_decision(decision, snapshot, context, band)
     physical = decision.eligibility
     denial = runtime_account_denial(snapshot, band, decision)
@@ -43,6 +44,7 @@ defmodule CodexPooler.Gateway.Routing.ProviderCredits do
 
         Map.merge(physical, %{eligible?: false, routing_state: :blocked, exclusions: reasons, capacity_basis: decision.capacity_basis, provider_credits_decision: decision})
     end
+    |> Map.put(:observed_capacity_reason_codes, observed_capacity_reason_codes)
   end
 
   defp band_decision(decision, snapshot, context, :non_credit) do
