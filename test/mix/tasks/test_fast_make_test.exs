@@ -8,6 +8,77 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
   @receipt_detection_timeout_ms 15_000
   @receipt_poll_interval_ms 20
 
+  test "nested make uses fixture commands despite real parent command-line overrides" do
+    fixture = start_fixture!()
+    tripwire = Path.join(fixture.directory, "parent-command")
+    parent_makefile = Path.join(fixture.directory, "parent.mk")
+    flags_path = Path.join(fixture.directory, "parent-flags")
+
+    File.write!(tripwire, """
+    #!/bin/sh
+    printf '%s\\n' "$1" > "${TEST_FAST_ACCEPTANCE_DIR}/parent-tripwire-$1"
+    exit 71
+    """)
+
+    File.chmod!(tripwire, 0o700)
+
+    File.write!(parent_makefile, """
+    .PHONY: flags
+    flags:
+    \t@printf '%s\\n' "$$MAKEFLAGS" "$${MAKEOVERRIDES-}" "$${MFLAGS-}" "$${GNUMAKEFLAGS-}" > "$$PARENT_FLAGS_PATH"
+    """)
+
+    assert {_output, 0} =
+             System.cmd("make", ["--no-print-directory", "-f", parent_makefile, "flags", "N=4", "TEST_FAST_COMMAND=#{tripwire} run", "TEST_FAST_DROP_COMMAND=#{tripwire} drop"],
+               cd: fixture.directory,
+               env: [{"MAKEFLAGS", nil}, {"MAKEOVERRIDES", nil}, {"MFLAGS", nil}, {"GNUMAKEFLAGS", nil}, {"PARENT_FLAGS_PATH", flags_path}],
+               stderr_to_stdout: true
+             )
+
+    [flags, overrides, legacy_flags, gnu_flags, ""] = flags_path |> File.read!() |> String.split("\n")
+    assert flags =~ "TEST_FAST_COMMAND="
+    inherited = [{"MAKEFLAGS", flags}, {"MAKEOVERRIDES", overrides}, {"MFLAGS", legacy_flags}, {"GNUMAKEFLAGS", gnu_flags}]
+    previous = Enum.map(inherited, fn {key, _value} -> {key, System.get_env(key)} end)
+
+    {output, exit_code} = with_environment(inherited, fn -> run_make(fixture, 4, TEST_FAST_RELEASE: "1") end)
+
+    refute File.exists?(Path.join(fixture.directory, "parent-tripwire-run")), "parent command-line override bypassed the synthetic run command"
+    refute File.exists?(Path.join(fixture.directory, "parent-tripwire-drop")), "parent command-line override bypassed the synthetic drop command"
+    assert exit_code == 0, output
+    assert output =~ "test-fast: PASS (4/4 partitions)"
+    assert Enum.map(previous, fn {key, _value} -> {key, System.get_env(key)} end) == previous
+    started = await_receipts!(fixture.directory, "run-", 4)
+    dropped = await_receipts!(fixture.directory, "drop-", 4)
+    assert MapSet.new(dropped) == rename_receipts(started, "run-", "drop-")
+  end
+
+  test "nested make temporary files belong to its fixture and preserve an unrelated canary" do
+    canary_fixture = start_fixture!()
+    canary = Path.join(canary_fixture.directory, "canary")
+    File.write!(canary, "unrelated fixture")
+    ambient_tmpdir = System.get_env("TMPDIR")
+
+    for extra_env <- [[], [TMPDIR: canary_fixture.directory]] do
+      fixture = start_fixture!()
+
+      assert {output, 0} = run_make(fixture, 4, [TEST_FAST_RELEASE: "1", TEST_FAST_WRITE_FILE_DURATIONS: "1 2 3 4"] ++ extra_env)
+      assert output =~ "test-fast: PASS (4/4 partitions)"
+      started = await_receipts!(fixture.directory, "run-", 4)
+      dropped = await_receipts!(fixture.directory, "drop-", 4)
+      assert_owned_temporary_paths(fixture, started)
+
+      Enum.each(dropped, fn receipt ->
+        assert fixture.directory |> Path.join("tmp-audit-#{receipt}") |> File.read!() |> String.split("\n") |> hd() == fixture.directory
+      end)
+
+      assert System.get_env("TMPDIR") == ambient_tmpdir
+      remove_fixture!(fixture)
+      refute File.exists?(fixture.directory)
+      assert File.read!(canary) == "unrelated fixture"
+      assert File.dir?(canary_fixture.directory)
+    end
+  end
+
   test "test-fast starts EPMD before partition processes" do
     fixture = start_fixture!()
     epmd_port = available_tcp_port()
@@ -71,6 +142,7 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
 
     dropped = await_receipts!(fixture.directory, "drop-", 8)
     assert MapSet.new(dropped) == rename_receipts(started, "run-", "drop-")
+    assert_owned_temporary_paths(fixture, started)
   end
 
   test "a failing partition is attributed, propagated, and cleaned" do
@@ -216,6 +288,7 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
       started = await_receipts!(fixture.directory, "run-", 2)
       dropped = await_receipts!(fixture.directory, "drop-", 2)
       assert MapSet.new(dropped) == rename_receipts(started, "run-", "drop-")
+      assert_owned_temporary_paths(fixture, started)
     end
   end
 
@@ -299,6 +372,7 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
 
       dropped = await_receipts!(fixture.directory, "drop-", 2)
       assert MapSet.new(dropped) == rename_receipts(started, "run-", "drop-")
+      assert_owned_temporary_paths(fixture, started)
     end
   end
 
@@ -309,9 +383,11 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
         "codex-pooler-test-fast-acceptance-#{System.unique_integer([:positive])}"
       )
 
-    File.mkdir_p!(directory)
     helper_path = Path.join(directory, "test-fast-child")
     release_path = Path.join(directory, "release")
+    fixture = %{directory: directory, helper_path: helper_path, release_path: release_path}
+    on_exit(fn -> remove_fixture!(fixture) end)
+    File.mkdir_p!(directory)
 
     File.write!(helper_path, """
     #!/bin/bash
@@ -321,6 +397,9 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
     namespace="${CODEX_POOLER_TEST_RUN_NAMESPACE:?missing run namespace}"
     partition="${MIX_TEST_PARTITION:?missing partition}"
     receipt="${TEST_FAST_ACCEPTANCE_DIR}/${phase}-${namespace}-${partition}"
+
+    printf '%s\\n' "${TMPDIR:-}" "${CODEX_POOLER_TEST_DURATION_CANDIDATES:-}" "${CODEX_POOLER_TEST_FILE_DURATIONS:-}" \
+      > "${TEST_FAST_ACCEPTANCE_DIR}/tmp-audit-${phase}-${namespace}-${partition}"
 
     if [ "$phase" = "drop" ]; then
       printf 'namespace=%s partition=%s\n' "$namespace" "$partition" > "$receipt"
@@ -405,12 +484,44 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
 
     File.chmod!(helper_path, 0o700)
 
-    on_exit(fn ->
-      File.touch(release_path)
-      File.rm_rf!(directory)
-    end)
+    fixture
+  end
 
-    %{directory: directory, helper_path: helper_path, release_path: release_path}
+  defp remove_fixture!(fixture) do
+    File.touch(fixture.release_path)
+    File.rm_rf!(fixture.directory)
+    refute File.exists?(fixture.directory)
+  end
+
+  defp assert_owned_temporary_paths(fixture, receipts) do
+    Enum.each(receipts, fn receipt ->
+      [tmpdir, candidates, durations, ""] = fixture.directory |> Path.join("tmp-audit-#{receipt}") |> File.read!() |> String.split("\n")
+      assert tmpdir == fixture.directory
+      log_dir = Path.dirname(candidates)
+      assert Path.dirname(log_dir) == fixture.directory
+      assert Path.basename(log_dir) =~ ~r/^codex-pooler-test-fast\.[A-Za-z0-9]+$/
+      assert Path.dirname(durations) == log_dir
+      refute File.exists?(log_dir)
+    end)
+  end
+
+  defp with_environment(environment, callback) do
+    previous = Enum.map(environment, fn {key, _value} -> {key, System.get_env(key)} end)
+    on_exit(fn -> apply_environment(previous) end)
+
+    try do
+      apply_environment(environment)
+      callback.()
+    after
+      apply_environment(previous)
+    end
+  end
+
+  defp apply_environment(environment) do
+    Enum.each(environment, fn
+      {key, nil} -> System.delete_env(key)
+      {key, value} -> System.put_env(key, value)
+    end)
   end
 
   defp available_tcp_port do
@@ -495,16 +606,23 @@ defmodule CodexPooler.MixTasks.TestFastMakeTest do
   # namespace, which every focused run sets, and when `make test-fast` itself
   # runs this module: a tooling partition has its own export file, and the CI
   # step sets TEST_FAST_PRINT_FILE_DURATIONS for every make it runs.
+  # Parent command-line assignments travel through MAKEFLAGS and override
+  # environment mocks. Each fixture also owns its children's temporary root,
+  # separate from the outer test runner's invocation logs.
   defp make_env(fixture, extra_env) do
-    extra = Enum.map(extra_env, fn {key, value} -> {Atom.to_string(key), value} end)
+    extra =
+      extra_env
+      |> Enum.map(fn {key, value} -> {Atom.to_string(key), value} end)
+      |> Enum.reject(fn {key, _value} -> key in ~w(MAKEFLAGS MAKEOVERRIDES MFLAGS GNUMAKEFLAGS TMPDIR) end)
 
     cleared =
-      for key <- ~w(CODEX_POOLER_TEST_RUN_NAMESPACE MIX_TEST_PARTITION CODEX_POOLER_TEST_DURATION_CANDIDATES CODEX_POOLER_TEST_FILE_DURATIONS TEST_FAST_PRINT_FILE_DURATIONS),
+      for key <- ~w(MAKEFLAGS MAKEOVERRIDES MFLAGS GNUMAKEFLAGS CODEX_POOLER_TEST_RUN_NAMESPACE MIX_TEST_PARTITION CODEX_POOLER_TEST_DURATION_CANDIDATES CODEX_POOLER_TEST_FILE_DURATIONS TEST_FAST_PRINT_FILE_DURATIONS),
           not List.keymember?(extra, key, 0),
           do: {key, nil}
 
     cleared ++
       [
+        {"TMPDIR", fixture.directory},
         {"TEST_FAST_ACCEPTANCE_DIR", fixture.directory},
         {"TEST_FAST_COMMAND", "#{fixture.helper_path} run"},
         {"TEST_FAST_DROP_COMMAND", "#{fixture.helper_path} drop"}
